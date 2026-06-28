@@ -60,6 +60,11 @@ export interface SpecPhase {
    *  phase (provable status) with no `spec_card_state` overlay. */
   pr?: number | null;
   merge_sha?: string | null;
+  /** spec-goal-branch-pm-flow M2: the `claude/build-{slug}` spec-branch commit SHA where this phase BUILT
+   *  (stampPhaseBuilt). Set when the phase builds on the branch — DISTINCT from `merge_sha`/`pr` (the M5
+   *  main-promotion stamp). A phase with `build_sha` but no `pr` is built-on-branch (in_progress), the
+   *  branch-flow's "this phase is done building" signal that the grooming next-phase advance reads. */
+  build_sha?: string | null;
 }
 
 export interface SpecCard {
@@ -117,6 +122,15 @@ export interface SpecCard {
   valeReviewPassed?: boolean;
   adaDisposition?: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade";
   intendedStatus?: "planned" | "deferred";
+  /** spec-goal-branch-pm-flow M6 — the branch-accumulation surface. `goalBranchSha` is the
+   *  `specs.goal_branch_sha` marker M4 stamps when this spec's `claude/build-{slug}` branch merges onto its
+   *  `goal/{goal}` branch; `onGoalBranch` is its boolean (true once stamped). A goal-bound spec that is
+   *  `in_testing` AND `onGoalBranch` has accumulated on the goal branch and is waiting for the goal's atomic
+   *  promotion to main — distinct on the board from an `in_testing` spec still sitting on its own spec branch.
+   *  A one-off (no-goal) spec leaves these undefined/false; it ships straight to main on green (no goal
+   *  branch). Surfaced by the board's `BranchPosition` chip. */
+  goalBranchSha?: string | null;
+  onGoalBranch?: boolean;
 }
 
 export interface RoadmapData {
@@ -488,6 +502,7 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     status: p.status,
     pr: p.pr ?? null,
     merge_sha: p.merge_sha ?? null,
+    build_sha: p.build_sha ?? null, // spec-goal-branch-pm-flow M2 — branch-build provenance (built, not shipped)
   }));
   const counts: Record<Phase, number> = { planned: 0, in_progress: 0, shipped: 0, rejected: 0 };
   for (const p of phases) counts[p.status]++;
@@ -520,6 +535,11 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     valeReviewPassed: row.vale_review_passed_at ? true : undefined,
     adaDisposition: row.ada_disposition ?? undefined,
     intendedStatus: row.intended_status ?? undefined,
+    // spec-goal-branch-pm-flow M6 — surface the goal-branch marker M4 stamps (specs.goal_branch_sha) so the
+    // board can render where the spec sits in the branch flow (on its spec branch vs accumulated on the goal
+    // branch). Null/false on a spec that hasn't merged to its goal branch yet (or a one-off no-goal spec).
+    goalBranchSha: row.goal_branch_sha ?? null,
+    onGoalBranch: !!row.goal_branch_sha,
   };
 }
 
@@ -1188,6 +1208,52 @@ export interface GoalCard {
   milestones: Milestone[];
   pct: number; // 0..100 rollup of milestone completion
   linkedSpecCount: number; // resolvable specs across milestones
+  /** spec-goal-branch-pm-flow M6 — the goal's goal-branch accumulation state (the board's "N of M specs on
+   *  the goal branch" + "ready to promote" surface). Computed from the linked specs' `goal_branch_sha`
+   *  markers (M4) + the parent-goal exemption (M5). Always present (a zero-spec goal reads 0-of-0). */
+  accumulation: GoalBranchAccumulation;
+}
+
+/**
+ * spec-goal-branch-pm-flow M6 — the goal-branch accumulation a goal card surfaces. The branch-flow model
+ * (M4/M5): each finished spec's branch merges onto `goal/{slug}` (stamping `specs.goal_branch_sha`); when
+ * EVERY member spec is on the goal branch (and green), the whole goal atomic-promotes to main in ONE merge.
+ * This is the READ surface of that accumulation — purely derived from the linked SpecCards' `onGoalBranch`
+ * flags + the parent-goal exemption, no extra DB I/O on the hot board path.
+ */
+export interface GoalBranchAccumulation {
+  /** Member specs whose branch has merged onto the goal branch (`goal_branch_sha` set). */
+  onGoalBranch: number;
+  /** Total member specs (the denominator) — the "M" in "N of M on the goal branch". */
+  totalSpecs: number;
+  /** true iff there is ≥1 member spec AND every one is on the goal branch — the goal is fully accumulated
+   *  and (when its goal-branch preview is green) about to atomic-promote to main. The board's "ready to
+   *  promote" indicator. A zero-spec / partially-accumulated goal is false. */
+  allOnGoalBranch: boolean;
+  /** true when this goal is EXEMPT from the atomic goal→main promotion (a PARENT goal — `is_parent`, or it
+   *  has child goals, or it has no buildable member specs). Its sub-goals promote INDEPENDENTLY; the board
+   *  shows the sub-goals accumulating, not a whole-goal promote (mirrors `isGoalParentExempt`'s rule). */
+  exempt: boolean;
+  /** Short human reason for the exemption (surfaced as the chip tooltip); empty when not exempt. */
+  exemptReason: string;
+}
+
+/** spec-goal-branch-pm-flow M6 — derive a goal's branch accumulation from its already-resolved member
+ *  SpecCards (deduped by slug across milestones) + the exemption signal. Pure: the caller passes the specs
+ *  and the exemption (computed once from the loaded GoalRow set so the hot board path makes no extra reads). */
+export function deriveGoalAccumulation(
+  memberSpecs: SpecCard[],
+  exempt: { exempt: boolean; reason: string },
+): GoalBranchAccumulation {
+  const onGoalBranch = memberSpecs.filter((s) => s.onGoalBranch).length;
+  const totalSpecs = memberSpecs.length;
+  return {
+    onGoalBranch,
+    totalSpecs,
+    allOnGoalBranch: totalSpecs > 0 && onGoalBranch === totalSpecs,
+    exempt: exempt.exempt,
+    exemptReason: exempt.exempt ? exempt.reason : "",
+  };
 }
 
 /** How "done" a spec is, 0..1: shipped status ⇒ 1; else shipped phases / non-cut phases. */
@@ -1324,7 +1390,15 @@ function milestoneRowToCard(m: GoalMilestoneRow, linked: SpecCard[]): Milestone 
  * goal's milestones. Status is DERIVED, not read blindly: a goal whose milestones ALL complete is
  * `complete` regardless of the stored value — completion is inferred from children.
  */
-function goalRowToCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>): GoalCard {
+function goalRowToCard(
+  row: GoalRow,
+  specsByMilestone: Map<string, SpecCard[]>,
+  // spec-goal-branch-pm-flow M6 — the loaded goal set, used to derive THIS goal's parent-goal exemption (the
+  // has-sub-goals check) with no extra DB reads. Defaults to `[row]` for callers that don't supply it
+  // (folded-goal archive reads): a goal can't be its own child, so the exemption falls back to is_parent /
+  // no-buildable-specs only.
+  allRows: GoalRow[] = [row],
+): GoalCard {
   let linkedSpecCount = 0;
   const milestones = row.milestones.map((m) => {
     const linked = specsByMilestone.get(m.id) ?? [];
@@ -1339,6 +1413,14 @@ function goalRowToCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>):
   // specs — never invent `complete` for a goal with zero milestones or a milestone with no linked specs.
   const allComplete = milestones.length > 0 && milestones.every((m) => m.completion >= 1);
   const status: GoalStatus = allComplete ? "complete" : dbGoalRowStatus(row.status);
+  // spec-goal-branch-pm-flow M6 — the goal-branch accumulation. Dedupe member specs by slug across the
+  // milestones (a spec can be linked through more than one milestone) so the "N of M on the goal branch"
+  // count matches `goalBranchState`'s unique-spec set, then derive from each card's `onGoalBranch` flag.
+  const memberBySlug = new Map<string, SpecCard>();
+  for (const list of specsByMilestone.values()) for (const s of list) memberBySlug.set(s.slug, s);
+  const members = [...memberBySlug.values()];
+  const exempt = deriveGoalExemption(row, allRows, members.length);
+  const accumulation = deriveGoalAccumulation(members, exempt);
   return {
     slug: row.slug,
     title: row.title,
@@ -1351,7 +1433,22 @@ function goalRowToCard(row: GoalRow, specsByMilestone: Map<string, SpecCard[]>):
     milestones,
     pct,
     linkedSpecCount,
+    accumulation,
   };
+}
+
+/**
+ * spec-goal-branch-pm-flow M6 — the parent-goal exemption for a goal, computed from already-loaded data (no
+ * extra DB reads). Mirrors `goals-table.isGoalParentExempt`'s rule so the board's "ready to promote" UI and
+ * the M5 promoter agree: EXEMPT iff (a) `is_parent`, OR (b) it has child goals (any loaded row points its
+ * `parent_goal_id` here), OR (c) it has zero buildable member specs. `allRows` is the loaded goal set (for
+ * the child-goal check); `linkedSpecCount` is this goal's resolvable member-spec count.
+ */
+function deriveGoalExemption(row: GoalRow, allRows: GoalRow[], linkedSpecCount: number): { exempt: boolean; reason: string } {
+  if (row.is_parent) return { exempt: true, reason: "parent goal (is_parent)" };
+  if (allRows.some((g) => g.parent_goal_id === row.id)) return { exempt: true, reason: "has sub-goals (structural parent)" };
+  if (linkedSpecCount === 0) return { exempt: true, reason: "no buildable member specs" };
+  return { exempt: false, reason: "" };
 }
 
 /** Resolve each milestone of a goal to its linked SpecCards, keyed by milestone id. Reads child specs via
@@ -1448,8 +1545,10 @@ export async function getGoals(workspaceId?: string): Promise<GoalCard[]> {
   const active = rows.filter((g) => g.status !== "folded");
   if (!active.length) return [];
   const specsByMilestone = await specsByMilestoneForGoals(wsId, active, specs);
+  // Pass the loaded `active` set so each card derives its parent-goal exemption (the has-sub-goals check)
+  // with no extra reads (spec-goal-branch-pm-flow M6).
   return active
-    .map((row) => goalRowToCard(row, specsByMilestone))
+    .map((row) => goalRowToCard(row, specsByMilestone, active))
     .sort((a, b) => a.title.localeCompare(b.title));
 }
 
@@ -1464,9 +1563,14 @@ export async function getGoal(slug: string, workspaceId?: string): Promise<{ raw
   if (!wsId) return null;
   const row = await getGoalFromDbRow(wsId, slug);
   if (!row || row.status === "folded") return null;
-  const { specs } = await getRoadmap(wsId);
+  // Load the full goal set so the card's parent-goal exemption can run the has-sub-goals check (M6). The
+  // detail page isn't the hot board path, so the extra list read is fine; failure falls back to [row].
+  const [{ specs }, allRows] = await Promise.all([
+    getRoadmap(wsId),
+    listGoalsFromDb(wsId).catch(() => [row]),
+  ]);
   const specsByMilestone = await specsByMilestoneForGoals(wsId, [row], specs);
-  const card = goalRowToCard(row, specsByMilestone);
+  const card = goalRowToCard(row, specsByMilestone, allRows);
   // The linked specs for THIS goal (across its milestones), keyed by slug — same shape the detail page
   // consumed when it filtered getRoadmap's specs to the goal.
   const bySlug: Record<string, SpecCard> = {};

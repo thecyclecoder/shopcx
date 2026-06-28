@@ -346,6 +346,10 @@ interface Job {
   answers: { id: string; answer: string }[];
   pending_actions: PendingAction[];
   pr_number: number | null;
+  // build-all-phases-chain: this build is part of a "Build all" chain — on completion the worker queues the
+  // spec's next planned phase (spec-goal-branch-pm-flow M2 advances the chain off the BRANCH build, not a
+  // main merge). The claim_agent_job RPC returns the full agent_jobs row, so this column is always present.
+  chain_phases?: boolean | null;
   // spec-test-on-preview-pre-merge Phase 1: the per-build *.vercel.app preview origin a pre-merge
   // spec-test (or future security-test) job runs its non-destructive checks against. Set by
   // enqueuePreMergeSpecTest (src/lib/agent-jobs.ts) for `claude/*` branches; null for the
@@ -2879,6 +2883,37 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
+    // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
+    // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
+    // the github-webhook hook so the promotion runs in both contexts; idempotent + best-effort.
+    const { promoteEligibleSpecsToGoalBranch } = await import("../src/lib/agent-jobs");
+    const promo = await promoteEligibleSpecsToGoalBranch(db);
+    if (promo.promoted.length) notes.push(`goal-promote → merged ${promo.promoted.length} spec(s) onto goal branch(es): ${promo.promoted.join(", ")}`);
+    if (promo.goalBranchesCreated.length) notes.push(`goal-promote → seeded goal branch(es): ${promo.goalBranchesCreated.join(", ")}`);
+    if (promo.conflicts.length) notes.push(`⚠️ goal-promote CONFLICT (surfaced, not dropped): ${promo.conflicts.join(", ")}`);
+  } catch (e) {
+    notes.push(`goal-promote failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing goal-promote failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // spec-goal-branch-pm-flow M5 — ATOMIC goal→main promotion. After the M4 spec→goal-branch integration
+    // above, promote every COMPLETE + GREEN goal branch to main in ONE merge and flip every member phase to
+    // shipped (the ONLY shipped-writer), then trigger the fold pipeline for the now-shipped specs. Parent
+    // goals are SKIPPED (their children promote independently). Mirrors the github-webhook Gate-C hook so the
+    // promotion runs in both contexts; GitHub /merges API (no checkout); idempotent + best-effort.
+    const { promoteCompleteGoalsToMain } = await import("../src/lib/agent-jobs");
+    const g2m = await promoteCompleteGoalsToMain(db);
+    if (g2m.promoted.length) {
+      const stamped = g2m.promoted.map((s) => `${s} (${g2m.effects[s]?.phasesStamped ?? 0} phase(s) shipped)`).join(", ");
+      notes.push(`goal→main → ATOMIC promoted ${g2m.promoted.length} goal(s): ${stamped}`);
+    }
+    if (g2m.conflicts.length) notes.push(`⚠️ goal→main CONFLICT (HELD, not stamped): ${g2m.conflicts.join(", ")}`);
+  } catch (e) {
+    notes.push(`goal→main promote failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing goal→main promote failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // director-escort-inflight-specs Phase 1 — pre-grooming sweep over every in-flight / critical-planned /
     // recently-authored spec this director drives. Dispatches each into one of five mechanical lanes
     // (queued_build · status_drift · failed_retry · failed_repeat · stalled) so the gap between authoring a
@@ -3199,15 +3234,45 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     };
   }
 
-  // ── 3) BLOCKED_BY ALL SHIPPED ── every declared blocker must be DERIVED-shipped (rollup: all phases
-  // shipped, OR archived/folded — exactly card.blockedBy[].cleared). Checked BEFORE the Vale leg so an
-  // out-of-sequence milestone build is held even while its own Vale review is still pending. Stays `queued`
-  // (claimed_at cleared) so the director escort re-releases it the moment its last blocker ships.
-  const uncleared = (card.blockedBy ?? []).filter((b) => !b.cleared);
+  // ── 3) BLOCKED_BY CLEARED (per blocker TYPE) ── every declared blocker must be cleared, BUT the clearance
+  // signal differs by blocker type (spec-goal-branch-pm-flow M4, Part 4 — the load-bearing deadlock fix):
+  //
+  //   • GOAL-MATE blocker (same goal as this spec) — cleared when it's ON THE GOAL BRANCH (has
+  //     `goal_branch_sha` / is promote-eligible+merged), NOT when shipped. A goal-mate NEVER ships to main on
+  //     its own: the whole goal promotes atomically (M5). If we waited for `shipped` here, a dependent
+  //     goal-mate would block FOREVER and the goal could never complete. "On the goal branch" is the correct
+  //     clearance — and the dependent then BUILDS off the goal branch (runBuildJob Part 2), seeing its
+  //     dependency's already-merged code.
+  //
+  //   • EXTERNAL blocker (a one-off spec, or a spec in a DIFFERENT goal) — cleared when SHIPPED (on main),
+  //     exactly as before (card.blockedBy[].cleared = derived-shipped/archived). An external dependency must
+  //     actually be on main before this spec builds off main / a different goal branch.
+  //
+  // Checked BEFORE the Vale leg so an out-of-sequence build is held even while its own Vale review is pending.
+  // Stays `queued` so the director escort re-releases it the moment its last blocker clears (ships OR lands on
+  // the goal branch). Fail CLOSED on the goal-branch read — an unknown goal-branch state holds the build.
+  const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+  const { isSpecOnGoalBranch } = await import("../src/lib/specs-table");
+  const thisGoalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+  const uncleared: { slug: string; status: import("../src/lib/brain-roadmap").Phase; why: string }[] = [];
+  for (const b of card.blockedBy ?? []) {
+    const blockerGoalSlug = thisGoalSlug ? await resolveGoalSlugForSpec(job.workspace_id, b.slug) : null;
+    const isGoalMate = thisGoalSlug !== null && blockerGoalSlug === thisGoalSlug;
+    if (isGoalMate) {
+      // Goal-mate: cleared when on the goal branch (NOT requiring shipped — a goal-mate doesn't ship until
+      // M5's atomic goal promotion). Also clear if it ALREADY shipped (post-M5, or an independently-shipped
+      // edge case) so a shipped goal-mate never falsely deadlocks. Fail closed (held) on the goal-branch read.
+      const onGoalBranch = b.cleared || (await isSpecOnGoalBranch(job.workspace_id, b.slug));
+      if (!onGoalBranch) uncleared.push({ slug: b.slug, status: b.status, why: "goal-mate not yet on the goal branch" });
+    } else {
+      // External (one-off / different goal): cleared when shipped (the existing derived-shipped signal).
+      if (!b.cleared) uncleared.push({ slug: b.slug, status: b.status, why: "external prerequisite not shipped" });
+    }
+  }
   if (uncleared.length) {
     const { phaseEmoji } = await import("../src/lib/brain-roadmap");
-    const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)})`).join(", ");
-    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not shipped: ${list}; left queued for the escort to re-release` };
+    const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)}; ${b.why})`).join(", ");
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not cleared: ${list}; left queued for the escort to re-release` };
   }
 
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
@@ -6962,12 +7027,34 @@ async function runSpecTestJob(job: Job) {
       const { getSpec: getRoadmapSpec } = await import("../src/lib/brain-roadmap");
       const card = await getRoadmapSpec(slug, job.workspace_id);
       const derived = card?.card.status; // phase-rollup; in_review/deferred/folded terminal overrides applied
+      // spec-goal-branch-pm-flow M3 — PRE-MERGE carve-out: a branch-flow spec's phases are all `in_progress`
+      // (build_sha stamped, NOT shipped — shipped is reserved for M5's main promotion), so its derived rollup
+      // reads `in_progress`, which the post-ship `testable` gate below would refuse. But a pre-merge run
+      // (claude/* branch + a preview URL) of a FULLY-ACCUMULATED spec is exactly what M3 wants to test: the
+      // built spec on its branch preview. Allow it — the materializer reads the SAME DB row whose phases M1/M2
+      // stamped from this branch's commits, so the materialized spec IS the branch's spec, not main's.
+      const preMergeBranch = job.spec_branch ?? null;
+      const preMergeHasPreview = !!((job.preview_url ?? "").trim()) || /Preview origin:\s*https?:\/\//i.test(job.instructions ?? "");
+      const isPreMergeJob = !!preMergeBranch && preMergeBranch.startsWith("claude/") && preMergeHasPreview;
+      let preMergeAccumulated = false;
+      if (isPreMergeJob) {
+        const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+        const acc = await isSpecAccumulationComplete(job.workspace_id, slug);
+        preMergeAccumulated = acc.complete;
+        if (!preMergeAccumulated) {
+          const why = `pre-merge spec-test for ${slug} skipped — spec not fully accumulated on branch (${acc.reason})`;
+          await update(job.id, { status: "completed", log_tail: why.slice(-2000) });
+          console.log(`${tag} ${why}`);
+          return;
+        }
+      }
       // Testable = the derived rollup says shipped (spec-test's lane), OR an in_review spec (re-verify path —
-      // Vale's in_review queue stays materializable so a manual/re-test on an in_review spec still works).
-      const testable = derived === "shipped" || derived === "in_review";
+      // Vale's in_review queue stays materializable so a manual/re-test on an in_review spec still works), OR
+      // an accumulation-complete pre-merge run (M3 — built-on-branch, in_progress, tested on its preview).
+      const testable = derived === "shipped" || derived === "in_review" || (isPreMergeJob && preMergeAccumulated);
       if (!testable) {
         const why = card
-          ? `spec ${slug} not testable — derived phase-rollup status='${derived}' (need shipped/in_review)`
+          ? `spec ${slug} not testable — derived phase-rollup status='${derived}' (need shipped/in_review, or a fully-accumulated pre-merge branch run)`
           : `spec ${slug} has no boardable DB row (folded or missing) — nothing to test`;
         await update(job.id, { status: "completed", log_tail: why.slice(-2000) });
         console.log(`${tag} ${why}`);
@@ -11509,15 +11596,58 @@ async function dispatchJob(job: Job) {
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
-    // vercel-skip-non-spec-build-refs: spec-builds carry the `claude/build-` prefix so the Vercel
-    // Ignored-Build-Step whitelist (CLAUDE_PREVIEW_IGNORE_COMMAND) can POSITIVELY match the only lane
-    // that needs a per-build preview — every other foreman lane (fold/goal-fold/plan/spec-chat/…)
-    // skips. (Pre-2026-06-27 this was `claude/${slug}-…`; an arbitrary slug couldn't be told apart
-    // from a fold by name, so the old `^claude/` whitelist built folds too and blocked their merge.)
-    branch = `claude/build-${slug}-${Date.now().toString(36)}`;
+    // ── M1: branch-accumulation model (spec-goal-branch-pm-flow) ──────────────────────────────
+    // A spec's phases accumulate on ONE PERSISTENT per-spec branch — `claude/build-${slug}` (no
+    // per-phase timestamp suffix). Phase N+1 builds on phase N's commit (the spec branch's current
+    // tip), so phases NEVER round-trip through main. Pre-M1 each phase got a fresh
+    // `claude/build-${slug}-${ts}` branch off main, which only saw the prior phase's code AFTER it
+    // merged to main — exactly the "phase N needs phase N-1 on main" deadlock M1 resolves.
+    //
+    // Preview compatibility (vercel-skip-non-spec-build-refs): the bare `claude/build-${slug}` still
+    // matches the Vercel Ignored-Build-Step whitelist (CLAUDE_PREVIEW_IGNORE_COMMAND = `^claude/build-`),
+    // so the spec branch keeps getting its preview with ZERO churn to vercel-project.ts — the
+    // deliberate least-churn name choice (vs introducing `spec/*` + widening the whitelist). Every
+    // other foreman lane (fold/goal-fold/plan/spec-chat/…) still skips. The bare name is also already
+    // recognized by hasActiveBuildForSlug's dedup (`p.head.ref === claude/build-${slug}`).
+    branch = `claude/build-${slug}`;
     removeWorktreeForBranch(branch); // idempotent add — never collide with a prior tree holding this branch
-    const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
-    if (add.code !== 0) throw new Error(`worktree add failed: ${add.err.slice(0, 300)}`);
+    // create-or-extend: if the spec branch already exists on origin (a prior phase built), check it
+    // out and build phase N on top of its current tip; otherwise create it fresh from the right base. The
+    // remote ref is the source of truth (the worktree is wiped every dispatch), so probe origin.
+    const remoteHasBranch =
+      sh("git", ["ls-remote", "--exit-code", "--heads", "origin", branch]).code === 0;
+    // ── spec-goal-branch-pm-flow M4 (Part 2): goal-bound specs build OFF the goal branch ──────────
+    // A FRESH spec branch (no prior phase) for a GOAL-BOUND spec bases on `origin/goal/{goal-slug}` WHEN that
+    // goal branch already exists — so the spec sees its already-merged DEPENDENCIES' code (M4 merges a
+    // promote-eligible dependency onto the goal branch before its dependent builds). A one-off spec, or the
+    // FIRST spec of a goal (goal branch absent — it will SEED the branch on promote), still bases on main.
+    // An EXTENDING branch (prior phase built) always re-bases on its own tip — never re-pick a base.
+    let freshBase = "origin/main";
+    if (!remoteHasBranch) {
+      try {
+        const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+        const goalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+        if (goalSlug) {
+          const goalBranch = `goal/${goalSlug}`;
+          const goalBranchExists =
+            sh("git", ["ls-remote", "--exit-code", "--heads", "origin", goalBranch]).code === 0;
+          if (goalBranchExists) {
+            freshBase = `origin/${goalBranch}`;
+            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}); basing fresh spec branch on the goal branch so it sees merged dependencies`);
+          } else {
+            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}) but the goal branch doesn't exist yet — first spec of the goal; basing on main`);
+          }
+        }
+      } catch (e) {
+        console.warn(`${tag} goal-base resolution failed for ${slug} (falling back to main):`, e instanceof Error ? e.message : e);
+      }
+    }
+    const base = remoteHasBranch ? `origin/${branch}` : freshBase;
+    const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
+    if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
+    console.log(
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : `created fresh from ${base}`}`,
+    );
     await update(job.id, { spec_branch: branch });
   } else {
     removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
@@ -11634,6 +11764,16 @@ async function dispatchJob(job: Job) {
     // next-phase → no injected scope (the pre-flight already no-ops an all-built spec). Best-effort: a
     // getSpec failure leaves the prompt as-is (the pre-flight "first unbuilt one" guidance still applies).
     let nextPhaseScope: string | null = null;
+    // M1 provenance seam: the 1-based position of the phase THIS session builds, used to stamp the
+    // commit's `Phase:` trailer (below) so a later milestone (M2 — phase stamping from spec-branch
+    // commits) can derive phase→commit mapping from the branch's git log without a main merge. Derived
+    // from an explicit `Phase N` in the instructions, else the next-planned-phase index. Null for a
+    // resume (its commit message marks the resumed phase via WIP) or a one-shot/single-phase spec.
+    let phasePosition: number | null = null;
+    {
+      const m = /\bPhase\s+(\d+)\b/i.exec(job.instructions ?? "");
+      if (m) phasePosition = parseInt(m[1], 10);
+    }
     if (!isResume) {
       const instructionsNamePhase = /\bPhase\s+\d+\b/i.test(job.instructions ?? "");
       if (!instructionsNamePhase) {
@@ -11644,6 +11784,7 @@ async function dispatchJob(job: Job) {
           // First phase whose DERIVED status is neither shipped nor rejected = the next planned phase to build.
           const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected");
           if (idx >= 0 && phases.length > 1) {
+            phasePosition = idx + 1; // M1 provenance: stamp the next-planned phase's position on the commit
             // Only scope when there's MORE than one phase — a single-phase spec IS the whole thing in one PR,
             // and a 0-phase one-shot has nothing to scope. The merge hook falls back to this same "first
             // not-yet-shipped phase" when the instructions name none, so the phase the agent builds and the
@@ -11844,7 +11985,17 @@ async function dispatchJob(job: Job) {
       return;
     }
     sh("git", ["add", "-A"], { cwd: wt });
-    const commit = sh("git", ["commit", "-m", `build: ${slug}\n\n${parsed?.summary ?? ""}`], { cwd: wt });
+    // M1 phase provenance (spec-goal-branch-pm-flow): each phase commits ONE (set) onto the persistent
+    // spec branch, marked with git trailers — `Spec: {slug}` and (when known) `Phase: {position}`. This
+    // is the durable phase→commit mapping a later milestone (M2 — phase stamping from spec-branch
+    // commits, replacing the main-merge stamping) reads off the branch's git log, no main round-trip
+    // required. phasePosition is null for a one-shot/single-phase spec or a resume (the WIP commits
+    // already carry the slug); the `Spec:` trailer is always present so every spec-branch commit is
+    // attributable.
+    const commitTrailers =
+      `Spec: ${slug}` + (phasePosition != null ? `\nPhase: ${phasePosition}` : "");
+    const commitMsg = `build: ${slug}${phasePosition != null ? ` (phase ${phasePosition})` : ""}\n\n${parsed?.summary ?? ""}\n\n${commitTrailers}`;
+    const commit = sh("git", ["commit", "-m", commitMsg], { cwd: wt });
     if (commit.code !== 0) {
       await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
       return;
@@ -11862,10 +12013,32 @@ async function dispatchJob(job: Job) {
     void (async () => {
       try {
         const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
-        await pollCapturePreviewUrl(
+        const capture = await pollCapturePreviewUrl(
           { jobId: job.id, branch: branch!, commitSha: headSha },
           { log: (m) => console.log(`${tag} ${m}`) },
         );
+        // spec-goal-branch-pm-flow M3 — once the branch's preview is READY, fire the PRE-MERGE spec-test
+        // IFF the whole spec is now accumulated on the branch (every phase built). When the LAST phase's
+        // preview lands READY, accumulation is complete → enqueue; earlier phases no-op (not yet complete).
+        // Idempotent (dedupes per branch). The spec-test materializes the spec from the DB row (M1/M2
+        // stamped it from this branch's commits) and points its probes at the preview URL — testing the
+        // BUILT spec on its branch preview, not main. Best-effort — never fail the build on a trigger hiccup.
+        if (capture.previewState === "READY" && capture.previewUrl) {
+          try {
+            const { maybeEnqueuePreMergeSpecTestOnAccumulation } = await import("../src/lib/agent-jobs");
+            const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
+              workspaceId: job.workspace_id,
+              slug,
+              branch,
+              previewUrl: capture.previewUrl,
+            });
+            console.log(
+              `${tag} M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
+            );
+          } catch (e) {
+            console.error(`${tag} M3 pre-merge spec-test trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
+          }
+        }
       } catch (e) {
         console.error(`${tag} preview-capture poll failed:`, e instanceof Error ? e.message : e);
       }
@@ -11908,8 +12081,49 @@ async function dispatchJob(job: Job) {
       }
       console.log(`${tag} build gate: next build ✓`);
     }
+    // ── M2: branch-build phase stamping + branch-build chaining (spec-goal-branch-pm-flow) ────────────
+    // The phase just BUILT on the persistent spec branch `claude/build-${slug}` (committed + pushed +
+    // survived the build gate) — but it is NOT on main, so it must NOT be stamped `shipped`. Instead record
+    // its branch-build provenance: stampPhaseBuilt sets `spec_phases.build_sha` = this commit SHA and moves
+    // the phase to `in_progress` (built, not shipped). `merge_sha`/`shipped` stay reserved for the
+    // main-promotion stamp (M5 flips a build_sha'd phase to shipped when the spec/goal branch lands on main).
+    //
+    // Pre-M2 the ONLY phase-stamping writer was the merge hook (applyMergedBuildEffects), which fires on a
+    // real main merge — under M1's no-per-phase-merge model that never fires for a phase that merely built on
+    // the branch, so without this the built phase would read `planned` forever. This is the branch-flow
+    // counterpart. `phasePosition` (M1) is the 1-based position this session built; null for a one-shot/
+    // single-phase spec or a resume — stampPhaseBuilt no-ops on a missing phase, so the call is safe to skip
+    // the guard. Best-effort: a stamp failure must never fail an otherwise-complete build (the spec-test /
+    // backlog crons + the eventual promotion stamp backstop the provenance).
+    if (phasePosition != null && headSha) {
+      try {
+        const { stampPhaseBuilt } = await import("../src/lib/specs-table");
+        await stampPhaseBuilt(job.workspace_id, slug, phasePosition, { build_sha: headSha });
+        console.log(`${tag} stamped phase ${phasePosition} BUILT (build_sha ${headSha.slice(0, 8)}, in_progress — not shipped)`);
+      } catch (e) {
+        console.error(`${tag} stampPhaseBuilt failed (non-fatal):`, e instanceof Error ? e.message : e);
+      }
+    }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
+    // M2: advance a "Build all" chain off THIS branch-build (not a main merge). Pre-M2 the chain advanced
+    // from applyMergedBuildEffects on the phase's main merge — but M1 stopped per-phase main merges (the spec
+    // branch accumulates all phases, promoted once in M4/M5), so the merge hook never fires per phase and the
+    // chain would stall after phase 1. Trigger the next phase here: phase N just built (build_sha recorded +
+    // its commit is the spec-branch tip), so queue phase N+1 to build ON THAT TIP (M1's create-or-extend
+    // checks out the existing branch tip). queueNextChainedPhase reads the spec's DERIVED phases (phase N now
+    // in_progress, phase N+1 still planned → it queues N+1), is idempotency/in-flight-guarded, and no-ops when
+    // no planned phase remains. Best-effort; the merge hook's chain advance still exists for any legacy
+    // per-phase-merge path but is inert under branch-flow.
+    if (job.chain_phases) {
+      try {
+        const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
+        const queued = await queueNextChainedPhase(job.workspace_id, slug);
+        if (queued) console.log(`${tag} chain: queued next phase off branch-build → ${queued}`);
+      } catch (e) {
+        console.error(`${tag} branch-build chain advance failed (non-fatal):`, e instanceof Error ? e.message : e);
+      }
+    }
   } finally {
     chosenAccount.inFlight--; // release the account's round-robin load slot
     // Always tear down the worktree — the branch is pushed, so a resume recreates one.

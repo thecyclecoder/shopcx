@@ -1,6 +1,10 @@
 # libraries/deploy-guardian
 
-**Reva, the Deploy Guardian** ([[../specs/deploy-health-rollback-guardian]]). The supervisor on the auto-merge proxy. Auto-merge ([[github-pr-resolve]] `autoMergeReadyPrs`) optimizes "ship the fix"; its degenerate state is shipping a fix that breaks something else and leaving it live. Reva watches each auto-merged `claude/<slug>` deploy over a bounded **canary window**, stamps a verdict, and — on a clear regression — **restores known-good FAST** (an auto-revert of the offending merge) + escalates, escalating anything ambiguous rather than guess. Phase 1 = watch + stamp; **Phase 2 = act** (auto-rollback + CEO escalation).
+**Reva, the Deploy Guardian** ([[../specs/deploy-health-rollback-guardian]]). The supervisor on the auto-merge proxy. Auto-merge ([[github-pr-resolve]] `autoMergeReadyPrs`) optimizes "ship the fix"; its degenerate state is shipping a fix that breaks something else and leaving it live. Reva watches each merged deploy over a bounded **canary window**, stamps a verdict, and acts. **Two deploy shapes** (spec-goal-branch-pm-flow M5):
+- **Per-spec** — a `claude/<slug>` build branch squash-merged to main (Gate A, one-off specs). A clear regression **restores known-good FAST** (auto-revert of the offending merge) + escalates.
+- **Atomic** — a `goal/<slug>` branch promoted to main in ONE merge (Gate C / M5, carrying many specs). Marked `deploy_watches.is_atomic`. A regression here **ESCALATES, never auto-reverts** — rolling back a whole tested goal on a regression bar tuned for tiny per-phase diffs would be a false-revert of many specs' work; a human decides (revert the goal merge, hotfix-forward, or accept).
+
+Anything ambiguous escalates rather than guesses. Phase 1 = watch + stamp; **Phase 2 = act** (auto-rollback for per-spec / escalate for atomic + CEO escalation).
 
 **File:** `src/lib/deploy-guardian.ts` · state: [[../tables/deploy_watches]] · eval cron: [[../inngest/deploy-guardian-cron]]
 
@@ -32,8 +36,8 @@ Only signals that **FIRST appear AFTER the deploy timestamp** are attributed to 
 
 ## Exports
 
-### `openDeployWatch({ admin, branch, prNumber?, mergeSha?, deployedAt? }): Promise<string | null>`
-Open a watch for a just-auto-merged `claude/<slug>` deploy. Resolves the owning workspace + spec slug from the branch's most recent `kind='build'` [[../tables/agent_jobs]] row (no build job ⇒ not the director's auto-fix path ⇒ no-op), snapshots the baseline, inserts a `pending` watch. Idempotent on `merge_sha` (a `23505` on the partial unique index is a no-op, not an error). **Best-effort + never throws** — a watch that crashes the merge it guards is worse than the gap. Returns the watch id or `null`.
+### `openDeployWatch({ admin, branch, prNumber?, mergeSha?, deployedAt?, workspaceId?, slug?, isAtomic? }): Promise<string | null>`
+Open a watch over a just-merged deploy. **Per-spec path** (default): a `claude/<slug>` branch — resolves the owning workspace + spec slug from the branch's most recent `kind='build'` [[../tables/agent_jobs]] row (no build job ⇒ no-op). **Atomic path** (M5): the caller (`promoteCompleteGoalsToMain`) passes `workspaceId` + `slug` (the goal slug) + `isAtomic:true` for a `goal/<slug>` deploy — the branch has no single build job, so the lookup is skipped and the watch is stamped `is_atomic` (→ escalate-not-revert). Snapshots the baseline, inserts a `pending` watch. Idempotent on `merge_sha` (a `23505` on the partial unique index is a no-op). Tolerates the pre-migration schema: an insert that hits an unknown `is_atomic` column (42703) retries without it. **Best-effort + never throws**. Returns the watch id or `null`.
 
 ### `evaluateDueDeployWatches(admin): Promise<{ due, evaluated }>`
 The cron driver: find every `pending` watch past its `window_ends_at` (bounded to 25/tick) and evaluate each. Never throws.
@@ -80,4 +84,4 @@ Reva is the **supervisor** on the auto-merge proxy: it surfaces a verdict (and i
 
 ## Related
 
-[[../specs/deploy-health-rollback-guardian]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]]
+[[../specs/deploy-health-rollback-guardian]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]] · [[../lifecycles/spec-goal-branch-pm-flow]]

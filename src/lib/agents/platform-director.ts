@@ -74,7 +74,7 @@ import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
   phaseHasProvenance,
-  provenanceShippedCount,
+  branchBuiltCount,
 } from "@/lib/spec-phase-provenance";
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
@@ -771,13 +771,19 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
-    // The gap: an UNSTARTED (no ✅ phase) spec carrying a Repair-signature (an authored fix for a real bug)
-    // that THIS director drives (its owning department-director isn't live yet — owner-agnostic keystone routing,
-    // Phase 2). The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
-    // `phases.length === 0` skipped them; gate on `provenanceShippedCount === 0` instead so a fix spec with 0,
-    // 1, or N ⏳ phases (but nothing landed-WITH-PROVENANCE) is escorted; a tagless ✅ phase doesn't count as
-    // "started." An unstarted spec with NO repair signature is a new feature — the init lane handles it.
-    const isFixSpec = provenanceShippedCount(card) === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
+    // The gap: an UNSTARTED spec carrying a Repair-signature (an authored fix for a real bug) that THIS
+    // director drives (its owning department-director isn't live yet — owner-agnostic keystone routing, Phase 2).
+    // The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
+    // `phases.length === 0` skipped them.
+    //
+    // spec-goal-branch-pm-flow M2: "unstarted" = NO phase has BUILT (branch build_sha OR shipped). Under
+    // branch-flow a phase builds on the spec branch (build_sha, in_progress) long BEFORE it earns a `pr` tag
+    // (only M5 promotion stamps `pr`), so the old `provenanceShippedCount === 0` (pr-gated) read 0 for the
+    // ENTIRE life of a branch-flow fix spec — once phase 1 had built on the branch but no build was active (the
+    // gap between phases), this would re-queue a FRESH build from scratch, duplicating accumulated branch work.
+    // `branchBuiltCount === 0` recognizes the branch-built phase as started (mirrors the init + groom lanes,
+    // both rewired to branchBuiltCount in M2). The per-candidate `state.inFlight` check below also dedups.
+    const isFixSpec = branchBuiltCount(card) === 0 && card.repairSignature && platformDrivesSpec(card.owner, chart, autonomy);
     if (!isFixSpec) continue;
 
     const state = await specBuildState(admin, workspaceId, card.slug);
@@ -3048,16 +3054,27 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   if (target <= 0) return [];
 
   const { specs } = await getRoadmap();
-  // director-trust-phase-pr-provenance Phase 1: a candidate is partially shipped iff ≥1 phase landed WITH
-  // merge-hook provenance AND ≥1 phase is planned. A tagless ✅ phase does NOT count as "landed" — counting
-  // it would let a drift-suspect spec re-fire as a continue candidate every pass instead of being audited.
+  // director-trust-phase-pr-provenance Phase 1 + spec-goal-branch-pm-flow M2: a candidate is partially-BUILT
+  // iff ≥1 phase is BUILT (on the spec branch via build_sha, OR shipped to main) AND ≥1 phase is planned.
+  //
+  // M2 — the gate MUST recognize branch-build, not just main-merge provenance. Under M1's branch-accumulation
+  // model a multi-phase spec's phases build one-by-one onto ONE persistent `claude/build-{slug}` PR and are
+  // NOT merged to main per phase, so NO phase carries a `pr` tag until M5 promotes the whole spec. The old
+  // `provenanceShippedCount(s) >= 1` (pr-tag-gated) therefore reads 0 for the ENTIRE life of a branch-flow
+  // spec → the next-phase advance would never fire. `branchBuiltCount` reads the build_sha (or shipped)
+  // signal instead, so phase N being built on the branch makes the spec a candidate to advance phase N+1.
+  //
+  // The static `counts.in_progress === 0` gate is RETIRED here: under branch-flow a built phase reads
+  // `in_progress` (built, not shipped), so that gate would wrongly exclude every branch-built spec. The
+  // "don't groom a spec mid-build" guard moves to the per-candidate `state.activeBuild` check below (line
+  // ~3068), which is precise — it distinguishes an ACTIVE build job (queued/building) from a landed
+  // (completed/merged) one, where a landed phase SHOULD advance the next ⏳ phase.
   const partial = specs.filter(
     (s) =>
       !isCardFullyShippedWithProvenance(s) &&
       s.status !== "deferred" && // parked — grooming skips a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
-      provenanceShippedCount(s) >= 1 && // at least one phase has landed WITH a pr tag (real shipped)
+      branchBuiltCount(s) >= 1 && // ≥1 phase BUILT on the branch (build_sha) or shipped — M2 branch-flow signal
       s.counts.planned >= 1 && // at least one ⏳ phase remains
-      s.counts.in_progress === 0 && // no 🚧 phase (a phase actively building) — that's an active build
       s.autoBuild !== false, // owner opted out of auto-build → leave it under manual control (mirrors the escort)
   );
 
@@ -3418,7 +3435,12 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
     (s) =>
       !isCardFullyShippedWithProvenance(s) && // really shipped means every phase has its merge PR + SHA
       s.status !== "deferred" && // parked — the initiation lane never starts a deferred spec (director-drives-all-specs-and-deferred-status Phase 1)
-      provenanceShippedCount(s) === 0 && // unstarted — no phase has landed WITH provenance (tagless ✅ doesn't count)
+      // spec-goal-branch-pm-flow M2: "unstarted" = NO phase has BUILT (branch build_sha OR shipped). Under
+      // branch-flow a phase builds on the spec branch (build_sha, in_progress) long before it earns a `pr`
+      // tag (M5 promotion), so `provenanceShippedCount === 0` (pr-gated) would call a half-built branch-flow
+      // spec "unstarted" and risk the init lane re-queuing it. `branchBuiltCount === 0` recognizes the
+      // branch-built phase as started. (The per-candidate `state.inFlight` check below also dedups.)
+      branchBuiltCount(s) === 0 && // unstarted — no phase built on the branch or shipped (tagless ✅ doesn't count)
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
       platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it ("first live boss else up")

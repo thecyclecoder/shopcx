@@ -31,6 +31,8 @@ Every iteration writes the latest known state to the job row (idempotent), so ev
 
 The box worker (`scripts/builder-worker.ts`) calls this **fire-and-forget** (`void pollCapturePreviewUrl(...)`) right after `git push` succeeds — Vercel hasn't picked the branch up yet at push time, but by the time the first 15s tick fires the deployment is usually `QUEUED → BUILDING → READY` within ~5 min.
 
+**M3 trigger hook (spec-goal-branch-pm-flow M3).** When the poll returns `READY` with a `previewUrl`, the worker chains [[agent-jobs]] `maybeEnqueuePreMergeSpecTestOnAccumulation({ workspaceId, slug, branch, previewUrl })` off the same callback — so the pre-merge spec-test fires the moment a fully-accumulated spec's branch preview is live. The helper itself gates on accumulation-complete ([[specs-table]] `isSpecAccumulationComplete`), so earlier-phase previews that go READY before the whole spec is built no-op; the LAST phase's READY is what enqueues. Best-effort + idempotent (dedupes per `(workspace, slug, branch)`).
+
 ## Idempotency + re-polling
 
 The helper is designed to be called repeatedly:

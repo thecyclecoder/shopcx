@@ -52,6 +52,10 @@ export interface GoalRow {
   owner: string;
   proposer_function: string | null;
   parent_goal_id: string | null;
+  /** spec-goal-branch-pm-flow M5 — explicit parent-goal flag. A parent goal contains sub-goals (not direct
+   *  buildable specs) and is EXEMPT from the atomic goal→main promotion (its children promote independently).
+   *  See `isGoalParentExempt`, which also OR's the structural fallbacks (has-children / no-buildable-specs). */
+  is_parent: boolean;
   status: GoalRowStatus;
   created_at: string;
   updated_at: string;
@@ -68,6 +72,9 @@ export interface GoalRowInput {
   owner: string;
   proposer_function?: string | null;
   parent_goal_id?: string | null;
+  /** spec-goal-branch-pm-flow M5 — mark this goal a PARENT (contains sub-goals; exempt from atomic promotion).
+   *  Omit to leave the DB default (false). */
+  is_parent?: boolean;
   /** Optional explicit greenlight status (`proposed` / `greenlit` / `folded`). `complete` is DERIVED by
    *  the reader when every milestone rolls up complete — don't write it here for a still-proposed goal. */
   status?: GoalRowStatus;
@@ -105,13 +112,14 @@ interface GoalRowDb {
   owner: string;
   proposer_function: string | null;
   parent_goal_id: string | null;
+  is_parent: boolean;
   status: GoalRowStatus;
   created_at: string;
   updated_at: string;
 }
 
 const GOAL_COLUMNS =
-  "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, status, created_at, updated_at";
+  "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, is_parent, status, created_at, updated_at";
 const MILESTONE_COLUMNS = "id, goal_id, position, title, body, created_at, updated_at";
 
 function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
@@ -126,6 +134,7 @@ function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
     owner: db.owner,
     proposer_function: db.proposer_function,
     parent_goal_id: db.parent_goal_id,
+    is_parent: db.is_parent,
     status: db.status,
     created_at: db.created_at,
     updated_at: db.updated_at,
@@ -226,6 +235,7 @@ export async function upsertGoal(
     updated_at: new Date().toISOString(),
   };
   if (row.status !== undefined) upsertRow.status = row.status;
+  if (row.is_parent !== undefined) upsertRow.is_parent = row.is_parent;
 
   const { data: upserted, error: upErr } = await admin
     .from("goals")
@@ -380,4 +390,72 @@ export async function reparentGoal(goalId: string, parentGoalId: string | null):
     .update({ parent_goal_id: parentGoalId, updated_at: new Date().toISOString() })
     .eq("id", goalId);
   if (error) throw error;
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — set/clear a goal's explicit PARENT flag (`goals.is_parent`). A parent goal
+ * contains sub-goals (not direct buildable specs) and is EXEMPT from the atomic goal→main promotion. The
+ * sanctioned SDK writer for the column (no raw PM SQL). `getGoal`/`listGoals` already select it; this is the
+ * write side for the (future) "mark CEO Mode a parent" path. A single slug-resolved UPDATE.
+ */
+export async function setGoalIsParent(workspaceId: string, slug: string, isParent: boolean): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("goals")
+    .update({ is_parent: isParent, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/** spec-goal-branch-pm-flow M5 — does this goal HAVE child goals (≥1 other goal names it as parent_goal_id)?
+ *  One of the structural fallbacks `isGoalParentExempt` ORs (a goal with children is a parent even if the
+ *  explicit flag was never set — e.g. CEO Mode today). Read-only; fails CLOSED (treat-as-parent) on error so
+ *  an unknown parent-ness never force-promotes a goal that might be a parent. */
+export async function goalHasChildGoals(goalId: string): Promise<boolean> {
+  try {
+    const admin = createAdminClient();
+    const { count } = await admin
+      .from("goals")
+      .select("id", { count: "exact", head: true })
+      .eq("parent_goal_id", goalId);
+    return (count ?? 0) > 0;
+  } catch {
+    return true; // fail closed — unknown ⇒ treat as a parent (don't force-promote)
+  }
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — is this goal EXEMPT from the atomic goal→main promotion (a PARENT goal)?
+ *
+ * A parent goal CONTAINS sub-goals, not direct buildable specs — there is no `goal/{slug}` branch to merge
+ * and its children promote INDEPENDENTLY on their own completion. `promoteCompleteGoalsToMain` SKIPS an
+ * exempt goal. Exempt iff ANY of:
+ *   (a) `is_parent === true` — the explicit, intentional override (CEO Mode can be marked this going forward); OR
+ *   (b) it HAS child goals (`goalHasChildGoals`) — the structural signal that exempts CEO Mode TODAY before
+ *       anyone sets the flag; OR
+ *   (c) it has NO buildable member specs (no spec linked through any of its milestones) — a goal with nothing
+ *       to ship has no goal branch to promote.
+ *
+ * Reads through the goals/specs SDK only (no raw PM tables). Fails CLOSED on a read error (returns exempt) —
+ * an unknown goal must never be force-promoted to main.
+ */
+export async function isGoalParentExempt(workspaceId: string, slug: string): Promise<{ exempt: boolean; reason: string }> {
+  try {
+    const goal = await getGoal(workspaceId, slug);
+    if (!goal) return { exempt: true, reason: "no goal row — nothing to promote" };
+    if (goal.is_parent) return { exempt: true, reason: "is_parent flag set" };
+    if (await goalHasChildGoals(goal.id)) return { exempt: true, reason: "has child goals (structural parent)" };
+    // (c) no buildable member specs across any milestone.
+    const { specsForMilestone } = await import("@/lib/specs-table");
+    let buildable = 0;
+    for (const m of goal.milestones) {
+      buildable += (await specsForMilestone(workspaceId, m.id)).length;
+      if (buildable > 0) break;
+    }
+    if (buildable === 0) return { exempt: true, reason: "no buildable member specs" };
+    return { exempt: false, reason: "leaf goal with buildable specs — promotable" };
+  } catch (e) {
+    return { exempt: true, reason: `parent-exemption read failed (treated exempt): ${e instanceof Error ? e.message : String(e)}` };
+  }
 }

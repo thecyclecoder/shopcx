@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -551,6 +551,582 @@ export async function enqueuePreMergeSpecTest(
 }
 
 /**
+ * spec-goal-branch-pm-flow M3 — the pre-merge spec-test TRIGGER. Under the branch-accumulation model a
+ * spec's phases build one-by-one onto ONE persistent `claude/build-{slug}` branch, each push firing a
+ * per-build Vercel preview deploy ([[preview-capture]]). We want the spec-test to run ONCE — against the
+ * WHOLE built spec on its branch preview — not per phase. So the trigger is: **the spec is FULLY
+ * accumulated on its branch (every phase carries a `build_sha` / is terminal — [[../libraries/specs-table]]
+ * `isSpecAccumulationComplete`) AND a preview URL exists.**
+ *
+ * The worker calls this from the preview-capture poll's READY callback: when the LAST phase's preview goes
+ * READY, accumulation is complete → enqueue. Earlier phases' previews also go READY, but accumulation is
+ * NOT yet complete then, so this no-ops until the final phase lands. It also re-runs idempotently — a board
+ * refresh / re-poll calls it again, and the underlying [[enqueuePreMergeSpecTest]] dedupes per
+ * `(workspace, slug, branch)`, so at most one pre-merge run is queued per branch.
+ *
+ * The spec-test then materializes the spec from the DB row ([[build-spec-materializer]] reads
+ * `public.specs` + `spec_phases`, which M1/M2 stamped from the BRANCH commits) and points its HTTP probes
+ * at `previewUrl` — so it tests the actual built spec on its branch preview, NOT main.
+ *
+ * Best-effort + never throws: a trigger hiccup must never fail the build it's chained off. Returns the
+ * enqueue outcome (or a skip reason).
+ */
+export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
+  workspaceId: string;
+  slug: string;
+  branch: string | null;
+  previewUrl: string | null;
+}): Promise<{ enqueued: boolean; reason?: string }> {
+  const { workspaceId, slug, branch, previewUrl } = args;
+  try {
+    if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
+    const origin = (previewUrl || "").replace(/\/$/, "");
+    if (!origin) return { enqueued: false, reason: "no preview URL yet" };
+    // Only fire once the WHOLE spec is built on the branch — testing a half-accumulated branch would test a
+    // partial spec. Same predicate the auto-merge accumulation gate + isSpecPromoteEligible read.
+    const acc = await isSpecAccumulationComplete(workspaceId, slug);
+    if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
+    return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin);
+  } catch (e) {
+    return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * spec-goal-branch-pm-flow M3 — the PROMOTE-ELIGIBILITY signal M4 consumes. A branch-flow spec is
+ * promote-eligible (its `claude/build-{slug}` branch is ready to merge spec→goal) iff ALL THREE hold:
+ *
+ *   1. **accumulation-complete** (M2) — every phase is built on the branch ([[../libraries/specs-table]]
+ *      `isSpecAccumulationComplete`).
+ *   2. **spec-test green on the branch preview** (M3) — the latest pre-merge `spec_test_runs` row for
+ *      `(workspace, slug, branch)` is a clean machine pass ([[spec-test-runs]] `isSpecTestGreenForBranch`).
+ *   3. **security green on the branch** — the latest per-branch security-review rollup is `completedClean`
+ *      ([[security-agent]] `isSecurityGreenForBranch`).
+ *
+ * These are the SAME three signals the [[github-pr-resolve]] auto-merge gate already enforces inline (the
+ * accumulation gate + the tests gate), and the SAME spec-test/security predicates the [[brain-roadmap]]
+ * `applyInTestingOverlay` derives `in_testing` from — so the board, the auto-merge gate, and this helper can
+ * never disagree on "is the spec done testing?". This is the clean seam M4 (spec→goal merge) reads to decide
+ * whether to promote; it performs NO action itself (read-only).
+ *
+ * Fails CLOSED on the green signals (a read error / absent run ⇒ not green ⇒ not eligible) but the
+ * accumulation input fails OPEN (a PM-read blip on the phase rollup doesn't wedge an otherwise-green spec;
+ * the green signals still gate the actual promotion). Returns `{ eligible, accumulationComplete,
+ * specTestGreen, securityGreen, reason }` so the caller can surface WHY a spec isn't yet promote-eligible.
+ */
+export interface SpecPromoteEligibility {
+  eligible: boolean;
+  accumulationComplete: boolean;
+  specTestGreen: boolean;
+  securityGreen: boolean;
+  reason: string;
+}
+
+export async function isSpecPromoteEligible(
+  workspaceId: string,
+  slug: string,
+  branch: string,
+): Promise<SpecPromoteEligibility> {
+  const out: SpecPromoteEligibility = {
+    eligible: false,
+    accumulationComplete: false,
+    specTestGreen: false,
+    securityGreen: false,
+    reason: "",
+  };
+  if (!workspaceId || !slug || !branch || !branch.startsWith("claude/")) {
+    out.reason = "missing workspace/slug or not a claude/* branch";
+    return out;
+  }
+  const admin = createAdminClient();
+  // Accumulation (M2) — fail OPEN (a PM blip mustn't wedge a green spec; the green signals still gate).
+  const acc = await isSpecAccumulationComplete(workspaceId, slug);
+  out.accumulationComplete = acc.complete;
+  // Green signals (M3) — fail CLOSED: a read error or an absent per-branch run reads as NOT green.
+  try {
+    const { isSpecTestGreenForBranch } = await import("@/lib/spec-test-runs");
+    out.specTestGreen = await isSpecTestGreenForBranch(workspaceId, slug, branch);
+  } catch (e) {
+    out.specTestGreen = false;
+    out.reason = `spec-test green read failed (treated not-green): ${e instanceof Error ? e.message : String(e)}`;
+  }
+  try {
+    const { isSecurityGreenForBranch } = await import("@/lib/security-agent");
+    out.securityGreen = await isSecurityGreenForBranch(admin, branch);
+  } catch (e) {
+    out.securityGreen = false;
+    out.reason = out.reason || `security green read failed (treated not-green): ${e instanceof Error ? e.message : String(e)}`;
+  }
+  out.eligible = out.accumulationComplete && out.specTestGreen && out.securityGreen;
+  if (!out.reason) {
+    out.reason = out.eligible
+      ? "promote-eligible: accumulation-complete + spec-test green + security green"
+      : [
+          out.accumulationComplete ? null : `not fully accumulated (${acc.reason})`,
+          out.specTestGreen ? null : "spec-test not green on branch preview",
+          out.securityGreen ? null : "security not green on branch",
+        ]
+          .filter(Boolean)
+          .join("; ");
+  }
+  return out;
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — resolve the GOAL SLUG a spec belongs to (or null if it's a one-off / not
+ * goal-bound). A spec is goal-bound via `specs.milestone_id → goal_milestones.goal_id → goals.slug`. Returns
+ * the goal's slug, or null when the spec has no milestone (one-off) or the chain can't be resolved. Read-only,
+ * goals-table-only (no raw PM SQL). Used by the spec→goal promote (which goal branch to merge into) AND the
+ * claim-time gate (are two specs goal-MATES — same goal?).
+ */
+export async function resolveGoalSlugForSpec(workspaceId: string, slug: string): Promise<string | null> {
+  try {
+    const spec = await getSpecFromDb(workspaceId, slug);
+    if (!spec || !spec.milestone_id) return null;
+    const admin = createAdminClient();
+    const { data: ms } = await admin
+      .from("goal_milestones")
+      .select("goal_id")
+      .eq("id", spec.milestone_id)
+      .maybeSingle();
+    const goalId = (ms as { goal_id?: string } | null)?.goal_id;
+    if (!goalId) return null;
+    const { data: goal } = await admin.from("goals").select("slug").eq("id", goalId).maybeSingle();
+    return (goal as { slug?: string } | null)?.slug ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — are two specs GOAL-MATES (members of the SAME goal)? The claim-time
+ * blocked_by gate uses this to pick the right blocker-clearance: a goal-mate blocker is cleared when it's ON
+ * the goal branch (it never ships to main until M5's atomic goal promotion); an EXTERNAL blocker (one-off / a
+ * different goal) is cleared only when shipped. Both specs must resolve to the SAME non-null goal slug.
+ */
+export async function areSpecsGoalMates(workspaceId: string, slugA: string, slugB: string): Promise<boolean> {
+  const [ga, gb] = await Promise.all([
+    resolveGoalSlugForSpec(workspaceId, slugA),
+    resolveGoalSlugForSpec(workspaceId, slugB),
+  ]);
+  return ga !== null && ga === gb;
+}
+
+export interface GoalBranchPromoteResult {
+  /** spec slugs whose `claude/build-{slug}` branch was merged onto their goal branch this pass (+ stamped). */
+  promoted: string[];
+  /** spec slugs that hit a merge CONFLICT — surfaced (NOT dropped), left for the owner / a resolver. */
+  conflicts: string[];
+  /** goal slugs whose `goal/{slug}` branch was seeded from origin/main this pass (the first spec of a goal). */
+  goalBranchesCreated: string[];
+  /** spec slugs that were promote-eligible but skipped (already on the goal branch, or a transient error). */
+  skipped: string[];
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — the spec→goal-branch promotion poll. For every GOAL-BOUND spec that is
+ * `isSpecPromoteEligible` (accumulation-complete ∧ spec-test-green ∧ security-green on its
+ * `claude/build-{slug}` branch — M3's seam) and not yet on its goal branch, merge that branch into
+ * `goal/{goal-slug}` (created from origin/main by the FIRST spec of the goal) and stamp `specs.goal_branch_sha`
+ * with the merge commit (the M5-consumed marker).
+ *
+ * Structured like `autoMergeReadyPrs` / `reconcileMergedJobs` — list the candidate branch-owning build jobs,
+ * gate each, act on the eligible ones — and runs in the SAME two contexts (the box worker standing pass AND
+ * the Vercel github webhook). It uses the GitHub `/merges` API (no local checkout), so it works from either.
+ *
+ * SEQUENCING: merges are ordered by `blocked_by` (a dependency lands on the goal branch before its dependent),
+ * so a dependent spec — which BUILDS off the goal branch (runBuildJob's goal-bound base) — sees its
+ * dependency's code. A spec whose goal-mate blocker is NOT yet on the goal branch is DEFERRED to a later pass
+ * (its blocker promotes first, then it). ONE merge per spec (idempotent — a re-run skips an already-stamped
+ * spec; the `/merges` 204 path is also idempotent).
+ *
+ * Does NOT push the goal branch to main — that's M5's atomic goal→main promotion. M4 only integrates eligible
+ * specs onto their goal branch and records the marker. Conflicts are surfaced (`conflicts[]`), never silently
+ * dropped. Best-effort per spec — one spec's failure never blocks the rest. Never throws.
+ */
+export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Promise<GoalBranchPromoteResult> {
+  const result: GoalBranchPromoteResult = { promoted: [], conflicts: [], goalBranchesCreated: [], skipped: [] };
+  const admin = adminClient || createAdminClient();
+  if (!ghToken()) return result;
+  try {
+    const { mergeSpecBranchIntoGoalBranch } = await import("@/lib/github-pr-resolve");
+    const { isSpecOnGoalBranch, stampSpecGoalBranchSha } = await import("@/lib/specs-table");
+
+    // Candidate set: live build jobs that own a `claude/build-{slug}` branch (the spec-branch flow). One per
+    // slug (the latest), so a re-dispatched build doesn't double-list. We then gate each candidate on
+    // goal-bound + promote-eligible + not-already-on-goal-branch.
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, spec_branch, created_at")
+      .eq("kind", "build")
+      .not("spec_branch", "is", null)
+      .order("created_at", { ascending: false });
+    const seen = new Set<string>();
+    type Cand = { workspaceId: string; slug: string; branch: string; goalSlug: string };
+    const candidates: Cand[] = [];
+    for (const j of (jobs ?? []) as { workspace_id: string; spec_slug: string; spec_branch: string }[]) {
+      const slug = j.spec_slug;
+      const branch = j.spec_branch;
+      if (!slug || !branch || !branch.startsWith("claude/build-")) continue;
+      const key = `${j.workspace_id}:${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const goalSlug = await resolveGoalSlugForSpec(j.workspace_id, slug);
+      if (!goalSlug) continue; // one-off / not goal-bound — M4 is goal-branch integration only
+      // Already on the goal branch? skip (idempotent — one merge per spec).
+      if (await isSpecOnGoalBranch(j.workspace_id, slug)) continue;
+      // Promote-eligible (M3 seam)? accumulation ∧ spec-test green ∧ security green on the branch.
+      const elig = await isSpecPromoteEligible(j.workspace_id, slug, branch);
+      if (!elig.eligible) continue;
+      candidates.push({ workspaceId: j.workspace_id, slug, branch, goalSlug });
+    }
+    if (!candidates.length) return result;
+
+    // Sequence by blocked_by: a candidate whose goal-mate blocker is ALSO a pending candidate must merge AFTER
+    // it (dependency lands on the goal branch first). Topologically order within each (workspace, goal). A
+    // candidate whose goal-mate blocker is NOT yet on the goal branch and is NOT a pending candidate is
+    // DEFERRED (its blocker promotes in a later pass first).
+    const ordered = await sequencePromoteCandidates(admin, candidates);
+
+    for (const c of ordered) {
+      try {
+        const merge = await mergeSpecBranchIntoGoalBranch(c.branch, c.goalSlug);
+        if (merge.created) result.goalBranchesCreated.push(c.goalSlug);
+        if (merge.conflict) {
+          result.conflicts.push(c.slug);
+          console.warn(`[goal-promote] ${c.slug} → goal/${c.goalSlug}: CONFLICT — surfaced, not dropped (${merge.reason})`);
+          continue;
+        }
+        if (!merge.merged || !merge.mergeSha) {
+          result.skipped.push(c.slug);
+          console.warn(`[goal-promote] ${c.slug} → goal/${c.goalSlug}: not merged (${merge.reason ?? "unknown"})`);
+          continue;
+        }
+        await stampSpecGoalBranchSha(c.workspaceId, c.slug, merge.mergeSha);
+        result.promoted.push(c.slug);
+        console.log(
+          `[goal-promote] merged ${c.branch} → goal/${c.goalSlug}${merge.created ? " (seeded from main)" : ""}; stamped goal_branch_sha=${merge.mergeSha.slice(0, 8)}`,
+        );
+      } catch (e) {
+        result.skipped.push(c.slug);
+        console.warn(`[goal-promote] ${c.slug} promote threw (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
+    return result;
+  } catch (e) {
+    console.error("[goal-promote] pass failed:", e instanceof Error ? e.message : e);
+    return result;
+  }
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — order the promote candidates so a dependency lands on its goal branch BEFORE
+ * its dependent. Within each (workspace, goal) the candidates form a DAG over `blocked_by`; we Kahn-sort it.
+ * A candidate whose goal-mate blocker is neither already on the goal branch nor a pending candidate is
+ * DEFERRED out of this pass (its blocker must promote first; a later pass picks it up once the blocker is on
+ * the branch). Cross-goal / one-off blockers are ignored here (they're cleared by shipping, handled by the
+ * claim-time gate — they don't gate goal-branch ordering). Best-effort: a cycle (shouldn't happen) falls back
+ * to the input order so it never wedges.
+ */
+async function sequencePromoteCandidates(
+  admin: Admin,
+  candidates: { workspaceId: string; slug: string; branch: string; goalSlug: string }[],
+): Promise<{ workspaceId: string; slug: string; branch: string; goalSlug: string }[]> {
+  const { isSpecOnGoalBranch } = await import("@/lib/specs-table");
+  const out: typeof candidates = [];
+  const done = new Set<string>(); // keys merged onto the goal branch (already-on-branch ∪ emitted this pass)
+
+  // Pre-seed `done` with goal-mates already on the goal branch + read each candidate's blocked_by.
+  const blockersByKey = new Map<string, string[]>();
+  for (const c of candidates) {
+    const spec = await getSpecFromDb(c.workspaceId, c.slug);
+    blockersByKey.set(`${c.workspaceId}:${c.slug}`, spec?.blocked_by ?? []);
+  }
+
+  // A blocker "satisfied for ordering" = it's a goal-mate of c that is already on the goal branch, OR it is
+  // not a goal-mate at all (external — not our concern here). A goal-mate blocker that's a PENDING candidate
+  // must be emitted first (it stays unsatisfied until we emit it). Iterate to a fixpoint (Kahn).
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const c of candidates) {
+      const key = `${c.workspaceId}:${c.slug}`;
+      if (done.has(key)) continue;
+      const blockers = blockersByKey.get(key) ?? [];
+      let ready = true;
+      for (const bSlug of blockers) {
+        const bKey = `${c.workspaceId}:${bSlug}`;
+        const bGoal = await resolveGoalSlugForSpec(c.workspaceId, bSlug);
+        if (bGoal !== c.goalSlug) continue; // external/cross-goal blocker — not a goal-branch ordering edge
+        // Goal-mate blocker: ready only if it's already on the branch OR we've emitted it this pass.
+        if (done.has(bKey)) continue;
+        if (await isSpecOnGoalBranch(c.workspaceId, bSlug)) {
+          done.add(bKey); // memoize so the inner loop is cheap on the next candidate
+          continue;
+        }
+        // Not on the branch + not yet emitted. If it's a pending candidate, wait for it; otherwise DEFER c
+        // this pass (its blocker isn't even a candidate — it'll promote in a future pass first).
+        ready = false;
+        break;
+      }
+      if (ready && !out.some((o) => `${o.workspaceId}:${o.slug}` === key)) {
+        out.push(c);
+        done.add(key);
+        progressed = true;
+      }
+    }
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// spec-goal-branch-pm-flow M5 — the ATOMIC promotion (goal branch → main + the shipped stamp).
+//
+// M1–M4 built: per-spec branch accumulation (build_sha) → per-spec promote-eligibility (accumulation ∧
+// spec-test-green ∧ security-green) → integration onto a per-goal branch `goal/{goal-slug}` (goal_branch_sha).
+// M5 is the last hop: when a goal is COMPLETE on its goal branch (every member spec on the branch) AND GREEN,
+// merge the goal branch → main in ONE atomic merge and flip EVERY member phase to `shipped` (M5 is the ONLY
+// shipped-writer), then trigger the fold pipeline for the now-shipped specs.
+//
+// A PARENT goal (contains sub-goals, no direct buildable specs — e.g. CEO Mode) is EXEMPT: it has no goal
+// branch to merge; its children promote independently. `isGoalParentExempt` skips it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface GoalPromotionEffects {
+  /** spec slugs whose phases were all flipped to `shipped` (stamped with the goal→main merge SHA). */
+  stampedSpecs: string[];
+  /** total phases flipped to shipped across all member specs this promotion. */
+  phasesStamped: number;
+  /** spec slugs whose post-ship fold pipeline was triggered (enqueueSpecTestIfDue → fold gate). */
+  foldsTriggered: string[];
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — the PROMOTION EFFECTS of an atomic goal→main merge: flip EVERY phase of
+ * EVERY member spec of `goalSlug` to `shipped`, tagged with `merge_sha = mergeSha` (the main merge commit),
+ * then trigger the existing fold pipeline for the now-shipped specs.
+ *
+ * This is the ONLY shipped-writer in the flow (M2–M4 reserved `status='shipped'` + `merge_sha` for exactly
+ * this moment — build_sha'd / in_progress phases stay in_progress until HERE). It reuses `stampPhaseShipped`
+ * per phase (SDK-only — no raw PM SQL). After stamping, the read-time rollup makes each spec derive `shipped`
+ * and the goal derive `complete` (no rollup trigger — status is read-derived since 20260725160000).
+ *
+ * Then it mirrors `applyMergedBuildEffects`'s post-ship hook: `enqueueSpecTestIfDue(ws, slug, "shipped")` per
+ * shipped spec — the entry to the fold pipeline (the spec-test runs against the now-on-main code; on green the
+ * fold gate archives the spec into the brain). Best-effort per spec — one spec's stamp/fold failure never
+ * blocks the rest. Idempotent: a phase already `shipped`/`rejected` is left as-is (stampPhaseShipped is a
+ * targeted update; re-stamping shipped is inert), so a re-run after a partial promotion converges.
+ */
+export async function applyGoalPromotionEffects(
+  workspaceId: string,
+  goalSlug: string,
+  mergeSha: string,
+): Promise<GoalPromotionEffects> {
+  const out: GoalPromotionEffects = { stampedSpecs: [], phasesStamped: 0, foldsTriggered: [] };
+  const { goalBranchState } = await import("@/lib/specs-table");
+  // The member specs of the goal (via goal → milestones → specs). goalBranchState already resolves them.
+  const state = await goalBranchState(workspaceId, goalSlug);
+  for (const memberSpec of state.specs) {
+    const slug = memberSpec.slug;
+    try {
+      const spec = await getSpecFromDb(workspaceId, slug);
+      if (!spec) continue;
+      const phases = spec.phases ?? []; // 1-indexed by position
+      // Flip every NON-terminal phase to shipped with the main merge SHA (the only shipped-writer). A phase
+      // already shipped/rejected is left untouched (idempotent). A one-shot spec (zero phases) records its
+      // card-level provenance instead — there's no phase slot to carry merge_sha.
+      const toStamp = phases.filter((p) => p.status !== "shipped" && p.status !== "rejected");
+      if (toStamp.length) {
+        await Promise.all(
+          toStamp.map((p) => stampPhaseShipped(workspaceId, slug, p.position, { merge_sha: mergeSha, pr: null })),
+        );
+        out.phasesStamped += toStamp.length;
+      } else if (!phases.length) {
+        await stampSpecMergeProvenance(workspaceId, slug, { pr: null, merge_sha: mergeSha });
+      }
+      out.stampedSpecs.push(slug);
+      // Trigger the fold pipeline for the now-shipped spec (mirror applyMergedBuildEffects' post-ship hook).
+      try {
+        const r = await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
+        if (r.enqueued) out.foldsTriggered.push(slug);
+      } catch (e) {
+        console.warn(`[goal-promote-effects] ${slug} fold-trigger failed (continuing):`, e instanceof Error ? e.message : e);
+      }
+      // A just-shipped spec may be the last blocker of a dependent — release any newly-unblocked dependents.
+      try {
+        await autoQueueUnblockedBy(workspaceId, slug);
+      } catch (e) {
+        console.warn(`[goal-promote-effects] ${slug} unblock sweep failed (continuing):`, e instanceof Error ? e.message : e);
+      }
+    } catch (e) {
+      console.warn(`[goal-promote-effects] ${goalSlug}/${slug} stamp failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+  }
+  return out;
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — the build-console workspace (the one that runs builds = owns the goals/specs
+ * we promote). Mirrors github-pr-resolve.resolveBuildWorkspaceId: the newest agent_jobs row's workspace,
+ * falling back to the first workspace. M4 never needed this (it iterates build jobs, each carrying its own
+ * workspace_id); M5 iterates GOALS, which need a workspace to resolve.
+ */
+async function resolveBuildConsoleWorkspace(admin: Admin): Promise<string | null> {
+  const { data: jobRow } = await admin
+    .from("agent_jobs")
+    .select("workspace_id")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if ((jobRow as { workspace_id?: string } | null)?.workspace_id) return (jobRow as { workspace_id: string }).workspace_id;
+  const { data: ws } = await admin.from("workspaces").select("id").limit(1).maybeSingle();
+  return (ws as { id?: string } | null)?.id ?? null;
+}
+
+export interface PromoteGoalsToMainResult {
+  /** goal slugs atomically merged to main this pass + had all member phases stamped shipped. */
+  promoted: string[];
+  /** goal slugs that were complete+green but hit a goal→main CONFLICT — surfaced, promotion HELD (not stamped). */
+  conflicts: string[];
+  /** goal slugs SKIPPED as parent-goal-exempt (contain sub-goals / no buildable specs — children promote alone). */
+  parentExempt: string[];
+  /** goal slugs evaluated but NOT promoted (not all specs on the goal branch yet, or a member not promote-eligible). */
+  notReady: string[];
+  /** per promoted goal, the shipped-stamp summary. */
+  effects: Record<string, GoalPromotionEffects>;
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — the standing pass that ATOMICALLY promotes COMPLETE goals to main. The
+ * mirror of M4's `promoteEligibleSpecsToGoalBranch`, one hop further: M4 integrates eligible spec branches
+ * onto their goal branch; M5 promotes a COMPLETE goal branch to main and stamps shipped.
+ *
+ * For each GREENLIT goal in the build-console workspace:
+ *   1. PARENT-GOAL EXEMPTION — skip a parent goal (`isGoalParentExempt`: is_parent flag OR has child goals OR
+ *      no buildable specs). It has no goal branch to merge; its child goals promote independently. (Part 4.)
+ *   2. GOAL-COMPLETE — require `goalBranchState(goalSlug).allOnGoalBranch` (every member spec on the goal
+ *      branch). Otherwise NOT ready (a member is still building / not yet integrated). (Part 1.)
+ *   3. GREEN (option b — combination-verified, no extra preview deploys) — additionally require EVERY member
+ *      spec to be individually `isSpecPromoteEligible` on its own branch (accumulation ∧ spec-test-green ∧
+ *      security-green — already tested), and the ATOMIC `mergeGoalBranchIntoMain` itself is the final
+ *      combination check (it only lands on a clean merge to main; a 409 HOLDS the promotion). Since each
+ *      dependent spec BUILDS off the goal branch (M4 ordering), the integrated whole was compiled together by
+ *      the worker's per-build tsc gate — so the COMBINATION is verified, not only the parts.
+ *   4. PROMOTE — merge `goal/{slug}` → main in ONE merge; on success run `applyGoalPromotionEffects` (flip
+ *      every member phase to shipped with the main merge SHA + trigger the fold pipeline). (Parts 1+2.)
+ *
+ * Runs from the SAME seams M4 uses (the box worker standing pass + the Gate-B github webhook). GitHub
+ * `/merges` API only (no local checkout) so it works in both. SERIALIZED-friendly + idempotent: a goal whose
+ * branch is already on main merges as a 204 (no-op) and re-stamps inertly. Best-effort per goal — one goal's
+ * failure never blocks the rest. Never throws. Does NOT promote a parent goal, a not-yet-complete goal, or a
+ * goal with any not-promote-eligible member.
+ */
+export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<PromoteGoalsToMainResult> {
+  const result: PromoteGoalsToMainResult = { promoted: [], conflicts: [], parentExempt: [], notReady: [], effects: {} };
+  const admin = adminClient || createAdminClient();
+  if (!ghToken()) return result;
+  try {
+    const { listGoals, isGoalParentExempt } = await import("@/lib/goals-table");
+    const { goalBranchState } = await import("@/lib/specs-table");
+    const { mergeGoalBranchIntoMain } = await import("@/lib/github-pr-resolve");
+
+    // Resolve the build-console workspace (the one that runs builds = owns the goals/specs we promote). One
+    // workspace per build console; the newest agent_jobs row's workspace, falling back to the first workspace
+    // (mirrors github-pr-resolve.resolveBuildWorkspaceId — the same system-level resolution the webhook uses).
+    const workspaceId = await resolveBuildConsoleWorkspace(admin);
+    if (!workspaceId) return result;
+
+    // Candidate goals: GREENLIT (CEO-approved) goals in the workspace. A `complete`-derived goal is also fine
+    // to re-evaluate (idempotent), but `proposed`/`folded` goals are never promoted.
+    const goals = await listGoals(workspaceId, {});
+    for (const goal of goals) {
+      if (goal.status === "proposed" || goal.status === "folded") continue;
+      const goalSlug = goal.slug;
+      try {
+        // (1) Parent-goal exemption — never atomic-promote a parent (its children promote independently).
+        const exempt = await isGoalParentExempt(workspaceId, goalSlug);
+        if (exempt.exempt) {
+          result.parentExempt.push(goalSlug);
+          continue;
+        }
+        // (2) Goal-complete on the branch — every member spec integrated onto the goal branch.
+        const state = await goalBranchState(workspaceId, goalSlug);
+        if (!state.allOnGoalBranch) {
+          result.notReady.push(goalSlug);
+          continue;
+        }
+        // (3) GREEN (option b) — every member spec individually promote-eligible on its own branch. (The atomic
+        //     merge below is the final combination check.) A member that isn't promote-eligible HOLDS the goal.
+        let allEligible = true;
+        for (const memberSpec of state.specs) {
+          const branch = `claude/build-${memberSpec.slug}`;
+          const elig = await isSpecPromoteEligible(workspaceId, memberSpec.slug, branch);
+          if (!elig.eligible) {
+            allEligible = false;
+            console.warn(`[goal-main-promote] ${goalSlug}: member ${memberSpec.slug} not promote-eligible (${elig.reason}) — holding goal`);
+            break;
+          }
+        }
+        if (!allEligible) {
+          result.notReady.push(goalSlug);
+          continue;
+        }
+        // (4) ATOMIC promote: merge goal/{slug} → main in ONE merge.
+        const merge = await mergeGoalBranchIntoMain(goalSlug);
+        if (merge.conflict) {
+          result.conflicts.push(goalSlug);
+          console.warn(`[goal-main-promote] ${goalSlug}: goal→main CONFLICT — promotion HELD, NOT stamped (${merge.reason})`);
+          continue;
+        }
+        if (merge.missingBranch) {
+          // No goal branch (shouldn't reach here — allOnGoalBranch implies a branch — but be safe).
+          result.notReady.push(goalSlug);
+          continue;
+        }
+        if (!merge.merged || !merge.mergeSha) {
+          result.notReady.push(goalSlug);
+          console.warn(`[goal-main-promote] ${goalSlug}: not merged (${merge.reason ?? "unknown"})`);
+          continue;
+        }
+        // Reva (deploy-guardian) — open an ATOMIC deploy-watch over the goal→main deploy BEFORE the shipped
+        // stamp/fold (the watch snapshots the pre-deploy baseline; do it as close to the merge as possible).
+        // This is the highest-blast-radius deploy in the system (a whole goal's many specs in one merge), and
+        // it was previously UNWATCHED — Gate A's watch only covers per-spec `claude/*` merges, which goal-bound
+        // specs no longer take. An atomic watch ESCALATES a regression instead of auto-reverting a whole goal
+        // (the regression bar is tuned for tiny per-phase diffs). Best-effort — never blocks the promotion.
+        try {
+          const { openDeployWatch } = await import("@/lib/deploy-guardian");
+          await openDeployWatch({
+            admin,
+            branch: `goal/${goalSlug}`,
+            mergeSha: merge.mergeSha,
+            workspaceId,
+            slug: goalSlug,
+            isAtomic: true,
+          });
+        } catch (e) {
+          console.warn(`[goal-main-promote] ${goalSlug} deploy-watch open failed (continuing):`, e instanceof Error ? e.message : e);
+        }
+        // Promotion effects — the SHIPPED stamp (the only shipped-writer) + fold trigger.
+        const effects = await applyGoalPromotionEffects(workspaceId, goalSlug, merge.mergeSha);
+        result.promoted.push(goalSlug);
+        result.effects[goalSlug] = effects;
+        console.log(
+          `[goal-main-promote] ATOMIC promoted ${goalSlug} → main (${merge.mergeSha.slice(0, 8)}); stamped ${effects.phasesStamped} phase(s) across ${effects.stampedSpecs.length} spec(s) shipped; folds: ${effects.foldsTriggered.join(", ") || "—"}`,
+        );
+      } catch (e) {
+        result.notReady.push(goalSlug);
+        console.warn(`[goal-main-promote] ${goalSlug} promote threw (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
+    return result;
+  } catch (e) {
+    console.error("[goal-main-promote] pass failed:", e instanceof Error ? e.message : e);
+    return result;
+  }
+}
+
+/**
  * spec-blockers Phase 2 — auto-queue on unblock. A blocking spec `shippedSlug` just shipped (its build
  * PR merged + phases flipped ✅). Find every live spec that named it as a `Blocked-by` prerequisite and,
  * if that was its LAST uncleared blocker (every other blocker is now cleared too), auto-enqueue its build —
@@ -783,7 +1359,31 @@ export async function applyMergedBuildEffects(
         const p = phases[i];
         if (p) shippedPositions.add(p.position);
       }
+    } else if (!opts.chainPhases && phases.length > 1) {
+      // spec-goal-branch-pm-flow M5 (Part 3 — one-off WHOLE-SPEC merge): under M1's branch-accumulation model a
+      // one-off (no-goal) spec accumulates ALL its phases onto ONE `claude/build-{slug}` branch, and the
+      // auto-merge accumulation gate only merges that branch once EVERY phase is built. So a NON-chain build
+      // whose instructions name no specific phase = a whole-spec branch landing on main in ONE merge → stamp
+      // EVERY non-terminal phase shipped, not just the first. (A chain build — chainPhases:true — still ships
+      // phase-by-phase; it always names its phase, so it never reaches here.) Guarded by isSpecAccumulationComplete
+      // so a partial/legacy branch that somehow merged early still only advances the next phase (fail-safe).
+      let stampAll = true;
+      try {
+        const acc = await isSpecAccumulationComplete(workspaceId, slug);
+        stampAll = acc.complete;
+      } catch {
+        stampAll = true; // accumulation read failed open — a fully-built whole-spec merge is the common case
+      }
+      if (stampAll) {
+        for (const p of phases) {
+          if (p.status !== "shipped" && p.status !== "rejected") shippedPositions.add(p.position);
+        }
+      } else {
+        const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected");
+        if (next) shippedPositions.add(next.position);
+      }
     } else {
+      // Single-phase spec, or a chain build with no named phase — advance the first not-yet-shipped phase.
       const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected");
       if (next) shippedPositions.add(next.position);
     }

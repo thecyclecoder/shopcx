@@ -41,6 +41,10 @@ export interface SpecPhaseRow {
   status: Phase;
   pr: number | null;
   merge_sha: string | null;
+  /** spec-goal-branch-pm-flow M2 — the `claude/build-{slug}` spec-branch commit SHA where this phase BUILT
+   *  (stampPhaseBuilt). Set when the phase builds on the branch; distinct from `merge_sha` (the M5
+   *  main-promotion stamp). A phase with `build_sha` set but `status !== 'shipped'` is built-on-branch. */
+  build_sha: string | null;
   verification: string | null;
   created_at: string;
   updated_at: string;
@@ -88,6 +92,12 @@ export interface SpecRow {
   /** spec-status-phase-pr-provenance Phase 1 — the merge SHA paired with `merged_pr` (one-shot specs).
    *  Also the deploy-aware UI slot the board compares against `VERCEL_GIT_COMMIT_SHA`. */
   last_merge_sha: string | null;
+  /** spec-goal-branch-pm-flow M4 — the `goal/{goal-slug}` merge commit SHA where this spec's
+   *  `claude/build-{slug}` branch was merged onto its goal branch ([[stampSpecGoalBranchSha]]). The durable
+   *  "on the goal branch" marker: the claim-time blocked_by gate clears a GOAL-MATE blocker when this is set
+   *  (a goal-mate never ships to main until M5's atomic goal promotion), and M5 reads "every spec in the goal
+   *  has goal_branch_sha" to detect goal-complete. Null = not yet on the goal branch. */
+  goal_branch_sha: string | null;
   created_at: string;
   updated_at: string;
   phases: SpecPhaseRow[];
@@ -167,14 +177,15 @@ interface SpecRowDb {
   milestone_id: string | null;
   merged_pr: number | null;
   last_merge_sha: string | null;
+  goal_branch_sha: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, milestone_id, merged_pr, last_merge_sha, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, created_at, updated_at";
 const PHASE_COLUMNS =
-  "id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at";
+  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, created_at, updated_at";
 
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   return {
@@ -201,6 +212,7 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     milestone_id: db.milestone_id,
     merged_pr: db.merged_pr,
     last_merge_sha: db.last_merge_sha,
+    goal_branch_sha: db.goal_branch_sha,
     created_at: db.created_at,
     updated_at: db.updated_at,
     phases,
@@ -432,6 +444,114 @@ export async function stampPhaseShipped(
 }
 
 /**
+ * Stamp a phase's BRANCH-BUILD provenance — spec-goal-branch-pm-flow M2. Records the `build_sha` (the
+ * `claude/build-{slug}` spec-branch commit where this phase was built) WITHOUT shipping it. This is the
+ * branch-flow counterpart to `stampPhaseShipped`: M1 made phases accumulate on a persistent spec branch
+ * (one commit per phase, no per-phase main merge), so "built on the branch" is now an earlier, distinct
+ * state from "shipped to main".
+ *
+ * Sets `build_sha` and moves the phase to `in_progress` (built — NOT shipped). It NEVER writes
+ * `status='shipped'` or `merge_sha`: those stay reserved for the main-promotion stamp (M5 flips a
+ * build_sha'd phase to shipped when the spec/goal branch lands on main). A no-op-on-shipped guard keeps it
+ * from regressing a phase that already promoted (M5 ran first / a re-dispatch raced) — never overwrite a
+ * `shipped`/`rejected` phase. The `build_sha` itself is always refreshed to the latest spec-branch commit
+ * (a re-build of the same phase advances the tip), so the chaining trigger reads the current "built" SHA.
+ *
+ * No raw PM SQL — this is the only writer for `spec_phases.build_sha` (the pm-db-agent-toolkit invariant /
+ * `_check-pm-sdk-compliance` guard). The post-2026-07-25 readers derive status purely (the rollup triggers
+ * are gone), so this leaf write is inert to status derivation beyond the `in_progress` it sets.
+ */
+export async function stampPhaseBuilt(
+  workspaceId: string,
+  slug: string,
+  position: number,
+  provenance: { build_sha: string | null },
+): Promise<void> {
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) throw new Error(`stampPhaseBuilt: no spec '${slug}' in workspace ${workspaceId}`);
+  const specId = (spec as { id: string }).id;
+  // Read the current phase status so we never regress a promoted phase back to in_progress. A phase that's
+  // already shipped/rejected keeps its terminal status — we don't even refresh build_sha there (it's done).
+  const { data: phase, error: pErr } = await admin
+    .from("spec_phases")
+    .select("status")
+    .eq("spec_id", specId)
+    .eq("position", position)
+    .maybeSingle();
+  if (pErr) throw pErr;
+  if (!phase) return; // no such phase (one-shot/single-phase spec with a mismatched position) — no-op
+  const status = (phase as { status: string }).status;
+  if (status === "shipped" || status === "rejected") return; // terminal — never regress
+  const { error } = await admin
+    .from("spec_phases")
+    .update({
+      status: "in_progress", // built on the branch — NOT shipped (merge_sha/shipped stay for M5 promotion)
+      build_sha: provenance.build_sha,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("spec_id", specId)
+    .eq("position", position);
+  if (error) throw error;
+}
+
+/**
+ * spec-goal-branch-pm-flow M2/M3 — "is this spec FULLY accumulated on its `claude/build-{slug}` branch?"
+ *
+ * Under M1's branch-accumulation model a spec's phases build one-by-one onto ONE persistent branch (no
+ * per-phase main merge). A phase is "built on the branch" when it carries a `build_sha` ([[stampPhaseBuilt]])
+ * OR is already terminal (shipped / rejected). A phase still `planned` — or `in_progress` WITHOUT a
+ * `build_sha` (queued/building, not yet committed) — is NOT yet accumulated.
+ *
+ * Returns `{ complete, reason }`:
+ *  - 0–1 phases ⇒ trivially complete (a one-shot/single-phase spec ships in one PR — nothing to accumulate).
+ *  - every phase built-or-terminal ⇒ complete.
+ *  - any un-built phase remains ⇒ NOT complete (with the offending positions in `reason`).
+ *
+ * Fails OPEN on a read error / missing spec row (returns complete:true) — a transient PM-read blip must
+ * never wedge a legitimately-complete one-off spec, and the downstream tests/build gates still guard any
+ * actual promotion.
+ *
+ * This is the M3 trigger gate (enqueue the pre-merge spec-test only once the WHOLE spec is on the branch),
+ * the M4/M2 auto-merge accumulation gate, AND one of the three [[isSpecPromoteEligible]] inputs — all three
+ * read the SAME predicate so they can never disagree on "is the spec fully built on its branch?".
+ */
+export async function isSpecAccumulationComplete(
+  workspaceId: string | null,
+  slug: string | null,
+): Promise<{ complete: boolean; reason: string }> {
+  if (!workspaceId || !slug) return { complete: true, reason: "no spec context — fail open" };
+  try {
+    const spec = await getSpec(workspaceId, slug);
+    if (!spec) return { complete: true, reason: "no spec row — fail open (one-off/untracked)" };
+    const phases = spec.phases ?? [];
+    // 0–1 phases = one-shot / single-phase spec — it ships in one PR; nothing to accumulate.
+    if (phases.length <= 1) return { complete: true, reason: `${phases.length} phase(s) — trivially complete` };
+    // A phase is "built on the branch" if it carries a build_sha OR is already terminal (shipped/rejected).
+    // Any phase still `planned` (or in_progress WITHOUT a build_sha — queued/building, not yet committed) is
+    // un-accumulated → not complete.
+    const unbuilt = phases.filter((p) => {
+      if (p.status === "shipped" || p.status === "rejected") return false; // terminal — done
+      return !p.build_sha; // not built on the branch yet
+    });
+    if (unbuilt.length === 0) {
+      return { complete: true, reason: `all ${phases.length} phases built on branch` };
+    }
+    const positions = unbuilt.map((p) => p.position).join(",");
+    return { complete: false, reason: `${unbuilt.length}/${phases.length} phase(s) not yet built on branch (positions ${positions})` };
+  } catch (e) {
+    // Fail OPEN — a PM-read blip must not wedge a complete one-off spec; the tests/build gates still apply.
+    return { complete: true, reason: `accumulation read failed — fail open: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
+/**
  * derive-rollup-status: mark the LEAF phase being built `in_progress` at BUILD START. Now that a spec's
  * board status is the phase rollup (never a stored card-status read), a build that's underway must move a
  * PHASE — not the card — to in_progress, or the spec would read `planned` until its first phase ships. Flips
@@ -636,6 +756,100 @@ export async function stampSpecMergeProvenance(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — stamp a spec's "on the goal branch" marker. Records `specs.goal_branch_sha`,
+ * the `goal/{goal-slug}` merge commit SHA the moment this spec's `claude/build-{slug}` branch merged onto its
+ * goal branch ([[../specs/spec-goal-branch-pm-flow]] §M4, `promoteEligibleSpecsToGoalBranch`). This is the
+ * durable, M5-consumed seam: M5 (atomic goal→main promotion) reads "every spec in the goal has a
+ * goal_branch_sha" to detect goal-complete; the claim-time blocked_by gate reads it to clear a GOAL-MATE
+ * blocker (which never ships to main until M5). Pass `null` to CLEAR (e.g. a goal branch was rebuilt).
+ *
+ * The ONLY sanctioned writer for `specs.goal_branch_sha` — no raw PM SQL (the `_check-pm-sdk-compliance`
+ * guard). Sibling to `stampSpecMergeProvenance`: a slug-resolved single UPDATE. It writes NEITHER status NOR
+ * merge_sha — being on the goal branch is NOT shipped; the build_sha'd phases stay `in_progress` until M5
+ * flips them on the atomic main promotion.
+ */
+export async function stampSpecGoalBranchSha(
+  workspaceId: string,
+  slug: string,
+  goalBranchSha: string | null,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update({ goal_branch_sha: goalBranchSha, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — "is this spec ON its goal branch?" Read helper over `specs.goal_branch_sha`:
+ * true once [[stampSpecGoalBranchSha]] has stamped it (its `claude/build-{slug}` branch merged onto
+ * `goal/{goal-slug}`). The claim-time blocked_by gate reads this to clear a GOAL-MATE blocker (a goal-mate
+ * never ships to main until M5's atomic promotion, so "shipped" is the wrong clearance signal for it — "on
+ * the goal branch" is). Returns false for a missing spec / unstamped row. Fails CLOSED on a read error (an
+ * unknown goal-branch state must NOT release a dependent — better to hold than to build on absent code).
+ */
+export async function isSpecOnGoalBranch(workspaceId: string, slug: string): Promise<boolean> {
+  try {
+    const spec = await getSpec(workspaceId, slug);
+    return !!spec?.goal_branch_sha;
+  } catch {
+    return false; // fail closed — unknown goal-branch state must not clear a blocker
+  }
+}
+
+/** spec-goal-branch-pm-flow M4 — one spec's goal-branch membership state (the unit `goalBranchState` returns
+ *  per spec). `onGoalBranch` is true iff `goalBranchSha` is set. */
+export interface GoalBranchSpecState {
+  slug: string;
+  /** Derived board status from the phase rollup — `shipped` | `in_progress` | `planned` | … (not the stored
+   *  override column). M5 cares about onGoalBranch, not this; surfaced for diagnostics. */
+  status: SpecStatus;
+  goalBranchSha: string | null;
+  onGoalBranch: boolean;
+}
+
+/** spec-goal-branch-pm-flow M4 — the whole-goal goal-branch state. `allOnGoalBranch` is the M5 trigger
+ *  signal: every linked spec is on the goal branch ⇒ the goal is ready for the atomic goal→main promotion. */
+export interface GoalBranchState {
+  goalSlug: string;
+  specs: GoalBranchSpecState[];
+  /** true iff there is ≥1 spec AND every spec has a `goal_branch_sha`. An empty goal is NOT complete. */
+  allOnGoalBranch: boolean;
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — the goal-branch state for a whole goal: every spec linked to `goalSlug`'s
+ * milestones, each tagged with whether it's `onGoalBranch` (its branch merged onto `goal/{goal-slug}`). This
+ * is the clean seam M5 (atomic-goal-promotion-to-main) consumes: `allOnGoalBranch === true` means every spec
+ * in the goal is integrated on the goal branch, so the goal is ready for its atomic goal→main merge + the
+ * build_sha→shipped flip.
+ *
+ * Resolves goal → milestones → specs through `goals-table` + `specsForMilestone` (no raw PM tables). M4
+ * exposes this read-only helper; it performs NO promotion itself. Returns `allOnGoalBranch:false` for an
+ * unknown/empty goal (nothing to promote).
+ */
+export async function goalBranchState(workspaceId: string, goalSlug: string): Promise<GoalBranchState> {
+  const { getGoal } = await import("@/lib/goals-table");
+  const goal = await getGoal(workspaceId, goalSlug);
+  if (!goal) return { goalSlug, specs: [], allOnGoalBranch: false };
+  const milestoneIds = goal.milestones.map((m) => m.id);
+  const seen = new Map<string, SpecRow>();
+  for (const mId of milestoneIds) {
+    for (const s of await specsForMilestone(workspaceId, mId)) seen.set(s.slug, s);
+  }
+  const specs: GoalBranchSpecState[] = Array.from(seen.values()).map((s) => ({
+    slug: s.slug,
+    status: s.status,
+    goalBranchSha: s.goal_branch_sha,
+    onGoalBranch: !!s.goal_branch_sha,
+  }));
+  const allOnGoalBranch = specs.length > 0 && specs.every((s) => s.onGoalBranch);
+  return { goalSlug, specs, allOnGoalBranch };
 }
 
 /** One orphan `spec_phases` row — a child whose parent `specs` row is gone (FK cascade should have killed

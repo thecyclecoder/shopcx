@@ -6,6 +6,7 @@ import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSucc
 import { openDeployWatch } from "@/lib/deploy-guardian";
 import { isSpecTestGreenForBranch } from "@/lib/spec-test-runs";
 import { isSecurityGreenForBranch } from "@/lib/security-agent";
+import { isSpecAccumulationComplete } from "@/lib/specs-table";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -511,6 +512,188 @@ async function squashMergeAndDelete(
   return { merged: true, mergeSha: typeof mergeSha === "string" ? mergeSha : null };
 }
 
+/**
+ * spec-goal-branch-pm-flow M4 — the result of merging one spec branch into a goal branch.
+ *  - `merged` — the spec branch's commits are now on the goal branch (`mergeSha` = the merge commit, or the
+ *    goal-branch tip when nothing was new to merge — already-merged is idempotent success).
+ *  - `conflict` — GitHub returned 409 (the merge has conflicts). NOT merged; surfaced so the caller escalates
+ *    rather than silently dropping the spec. (Goal-branch conflicts shouldn't normally happen — specs build
+ *    in blocked_by order OFF the goal branch — but a concurrent author can still produce one.)
+ *  - `created` — the goal branch `goal/{goalSlug}` did not exist and was seeded from `origin/main` first.
+ */
+export interface GoalBranchMergeResult {
+  merged: boolean;
+  conflict: boolean;
+  created: boolean;
+  mergeSha: string | null;
+  reason?: string;
+}
+
+/** Resolve a branch ref's tip SHA (`refs/heads/{branch}`). Null if the ref doesn't exist. */
+async function branchHeadSha(branch: string): Promise<string | null> {
+  const r = await gh("GET", `/repos/${GH_REPO}/git/ref/heads/${branch}`);
+  if (!r.ok) return null;
+  const obj = (r.json as Record<string, unknown>)?.object as { sha?: string } | undefined;
+  return typeof obj?.sha === "string" ? obj.sha : null;
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — merge a spec's `claude/build-{slug}` branch INTO its goal branch
+ * `goal/{goalSlug}`, creating the goal branch from `origin/main` if it doesn't exist yet (the FIRST spec of a
+ * goal seeds it). A real (non-squash) merge commit so the goal branch carries each spec's full history, ready
+ * for M5's atomic goal→main promotion.
+ *
+ * Uses the GitHub API only (POST /merges, POST /git/refs) — no local checkout — so it runs identically from
+ * the box worker standing pass AND the Vercel github webhook, mirroring `autoMergeReadyPrs`'s API-driven
+ * style. Idempotent: a 204 (nothing to merge — head already in base) is `merged:true` with the goal-branch
+ * tip as `mergeSha`. A 409 is surfaced as `conflict:true` (NOT dropped) so the caller escalates. The caller
+ * stamps `specs.goal_branch_sha = mergeSha` on success (the M5 seam).
+ */
+export async function mergeSpecBranchIntoGoalBranch(
+  specBranch: string,
+  goalSlug: string,
+): Promise<GoalBranchMergeResult> {
+  const out: GoalBranchMergeResult = { merged: false, conflict: false, created: false, mergeSha: null };
+  if (!ghToken()) return { ...out, reason: "no GitHub token" };
+  const goalBranch = `goal/${goalSlug}`;
+
+  // Seed the goal branch from origin/main if it doesn't exist yet (first spec of the goal).
+  let goalHead = await branchHeadSha(goalBranch);
+  if (goalHead === null) {
+    const mainHead = await branchHeadSha("main");
+    if (!mainHead) return { ...out, reason: "could not resolve origin/main HEAD to seed the goal branch" };
+    const create = await gh("POST", `/repos/${GH_REPO}/git/refs`, {
+      ref: `refs/heads/${goalBranch}`,
+      sha: mainHead,
+    });
+    if (!create.ok) {
+      // 422 = ref already exists (a concurrent seed won the race) → re-read its head and continue.
+      goalHead = await branchHeadSha(goalBranch);
+      if (goalHead === null) {
+        const msg = (create.json as Record<string, unknown>)?.message;
+        return { ...out, reason: `seed ${goalBranch} from main failed (${create.status}${msg ? `: ${msg}` : ""})` };
+      }
+    } else {
+      out.created = true;
+      goalHead = mainHead;
+    }
+  }
+
+  // Merge the spec branch into the goal branch (real merge commit).
+  const r = await gh("POST", `/repos/${GH_REPO}/merges`, {
+    base: goalBranch,
+    head: specBranch,
+    commit_message: `goal-branch integration: merge ${specBranch} into ${goalBranch} (spec-goal-branch-pm-flow M4)`,
+  });
+  if (r.status === 201) {
+    const sha = (r.json as Record<string, unknown>)?.sha;
+    out.merged = true;
+    out.mergeSha = typeof sha === "string" ? sha : null;
+    return out;
+  }
+  if (r.status === 204) {
+    // Nothing to merge — head already contained in base (already integrated). Idempotent success; the
+    // goal-branch tip is the effective integration SHA.
+    out.merged = true;
+    out.mergeSha = goalHead;
+    out.reason = "already integrated (nothing to merge)";
+    return out;
+  }
+  if (r.status === 409) {
+    out.conflict = true;
+    out.reason = "merge conflict (409) — left for the owner; NOT dropped";
+    return out;
+  }
+  const msg = (r.json as Record<string, unknown>)?.message;
+  return { ...out, reason: `merge ${specBranch} → ${goalBranch} failed (${r.status}${msg ? `: ${msg}` : ""})` };
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — the result of the atomic goal→main merge.
+ *  - `merged` — `goal/{goalSlug}`'s commits are now on `main` in ONE merge (`mergeSha` = the merge commit, or
+ *    the main tip when nothing was new to merge — already-merged is idempotent success).
+ *  - `conflict` — GitHub returned 409 (the goal branch conflicts with main). NOT merged; surfaced so the caller
+ *    HOLDS the promotion (does NOT stamp shipped) and leaves it for the owner / a resolver.
+ *  - `missingBranch` — `goal/{goalSlug}` does not exist (nothing to promote — e.g. a parent goal, or a goal
+ *    whose specs never reached the goal branch). NOT a failure; the caller skips it.
+ */
+export interface GoalToMainMergeResult {
+  merged: boolean;
+  conflict: boolean;
+  missingBranch: boolean;
+  mergeSha: string | null;
+  reason?: string;
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — merge a goal's `goal/{goalSlug}` branch INTO `main`, ATOMICALLY (one merge
+ * commit carrying every member spec's integrated history). Mirrors `mergeSpecBranchIntoGoalBranch`'s
+ * API-only style (POST /merges, no local checkout) so it runs identically from the box worker standing pass
+ * AND the Vercel github webhook.
+ *
+ * GREEN signal (the spec's option b — combination-verified WITHOUT extra preview deploys): the CALLER
+ * (`promoteCompleteGoalsToMain`) only invokes this once (1) every member spec is individually
+ * `isSpecPromoteEligible` (accumulation + spec-test-green + security-green on its branch) AND (2) every member
+ * spec is ON the goal branch (`goalBranchState.allOnGoalBranch`) — and because each dependent spec BUILDS off
+ * the goal branch (M4 ordering), the integrated WHOLE was compiled together by the worker's per-build tsc
+ * gate. This merge is then the final combination check: it is ATOMIC — a 201/204 means the integrated goal
+ * branch merges cleanly onto main (no main drift); a 409 means a conflict with main → the promotion is HELD
+ * (nothing is stamped shipped), never force-pushed. So the COMBINATION (not just the parts) is verified: the
+ * parts on their branches + the integrated whole on the goal branch + a clean atomic land on main.
+ *
+ * Idempotent: a 204 (nothing to merge — goal branch already contained in main) is `merged:true` with the main
+ * tip as `mergeSha`. A missing goal branch is `missingBranch:true` (skip, not fail). Uses a real (non-squash)
+ * merge commit so main carries the goal's full per-spec history. Deletes the goal branch on success
+ * (best-effort) — the goal is shipped, the branch is spent.
+ */
+export async function mergeGoalBranchIntoMain(goalSlug: string): Promise<GoalToMainMergeResult> {
+  const out: GoalToMainMergeResult = { merged: false, conflict: false, missingBranch: false, mergeSha: null };
+  if (!ghToken()) return { ...out, reason: "no GitHub token" };
+  const goalBranch = `goal/${goalSlug}`;
+
+  const goalHead = await branchHeadSha(goalBranch);
+  if (goalHead === null) {
+    return { ...out, missingBranch: true, reason: `goal branch ${goalBranch} does not exist — nothing to promote` };
+  }
+
+  const r = await gh("POST", `/repos/${GH_REPO}/merges`, {
+    base: "main",
+    head: goalBranch,
+    commit_message: `atomic goal promotion: merge ${goalBranch} into main (spec-goal-branch-pm-flow M5)`,
+  });
+  if (r.status === 201) {
+    const sha = (r.json as Record<string, unknown>)?.sha;
+    out.merged = true;
+    out.mergeSha = typeof sha === "string" ? sha : null;
+    // Goal shipped — delete the spent goal branch (best-effort; a 404/422 is fine).
+    try {
+      await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${goalBranch}`);
+    } catch {
+      /* best-effort branch cleanup */
+    }
+    return out;
+  }
+  if (r.status === 204) {
+    // Already on main (goal branch fully contained) — idempotent success; main tip is the effective SHA.
+    out.merged = true;
+    out.mergeSha = await branchHeadSha("main");
+    out.reason = "already integrated (nothing to merge)";
+    try {
+      await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${goalBranch}`);
+    } catch {
+      /* best-effort */
+    }
+    return out;
+  }
+  if (r.status === 409) {
+    out.conflict = true;
+    out.reason = "goal→main merge conflict (409) — promotion HELD, NOT stamped shipped; left for the owner";
+    return out;
+  }
+  const msg = (r.json as Record<string, unknown>)?.message;
+  return { ...out, reason: `merge ${goalBranch} → main failed (${r.status}${msg ? `: ${msg}` : ""})` };
+}
+
 export interface AutoMergeResult {
   enabled: boolean;
   syncActive: boolean;
@@ -523,6 +706,16 @@ export interface AutoMergeResult {
    *  spec-test green AND security green signals weren't BOTH true for the branch — left `in_testing` for
    *  the next pass (the per-branch signals settle as the box completes the M2 pre-merge runs). */
   testsGateBlocked: number;
+  /** spec-goal-branch-pm-flow M2: PRs for a MULTI-PHASE spec branch that is only PARTIALLY accumulated — a
+   *  phase is still `planned` (not yet built on the branch). Promoting now would ship a partial spec to main
+   *  and stamp only some phases. Deferred until every phase is built on the branch (build_sha recorded /
+   *  shipped). M5 owns the actual atomic promotion; this guard just keeps the existing auto-merge from
+   *  promoting a half-accumulated branch. */
+  accumulationBlocked: number;
+  /** spec-goal-branch-pm-flow M4/M5: PRs for a GOAL-BOUND spec — NOT merged to main by Gate A (a goal-bound
+   *  spec promotes spec→goal branch via Gate B and the whole goal lands on main atomically via Gate C). Gate A
+   *  merges ONE-OFF specs only; a goal-bound branch is handed off, never jumped to main here. */
+  goalBoundBlocked: number;
   /** 0 or 1 — SERIALIZED: at most one merge per pass (the resulting push-to-main webhook handles the next). */
   merged: number;
   mergedPr?: number;
@@ -567,10 +760,15 @@ export interface AutoMergeResult {
  *
  * Reva is preserved post-promote: [[openDeployWatch]] still fires on every promote-merge (defense-in-depth
  * — a regression real traffic exposes that the pre-merge tests missed is still caught + rolled back).
+ *
+ * The M2 accumulation gate (`isSpecAccumulationComplete`) now lives in [[specs-table]] (M3 promoted it to
+ * the SDK so the M3 pre-merge-test trigger + [[../libraries/agent-jobs]] `isSpecPromoteEligible` share the
+ * SAME predicate as this gate). Imported above; called inline below.
  */
+
 export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
   const db = admin || createAdminClient();
-  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, merged: 0, prs: [] };
+  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, goalBoundBlocked: 0, merged: 0, prs: [] };
   let ok = true;
   try {
     if (!ghToken()) return result;
@@ -623,6 +821,49 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
             result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
             continue;
           }
+          const wsId = gate.workspaceId;
+          const slug = gate.specSlug;
+          // spec-goal-branch-pm-flow M4/M5 — GOAL-BOUND GUARD: Gate A merges a spec branch straight to `main`,
+          // which is correct ONLY for a ONE-OFF spec (no goal). A GOAL-BOUND spec must NEVER reach main via
+          // Gate A: it promotes spec-branch → its `goal/{slug}` branch (M4, `promoteEligibleSpecsToGoalBranch`)
+          // and the WHOLE goal lands on main atomically (M5, `promoteCompleteGoalsToMain` → the only shipped-
+          // writer for goal-bound specs, `applyGoalPromotionEffects`). If Gate A jumped it to main here it would
+          // (a) ship a goal-bound spec OUTSIDE the atomic goal promotion, and (b) double-stamp — the per-build
+          // `applyMergedBuildEffects` would flip its phases shipped, then M5's `applyGoalPromotionEffects` would
+          // try to ship the goal's phases again. So: a spec that `resolveGoalSlugForSpec` resolves to a goal is
+          // HANDED OFF to Gate B/C (skipped here). Fail OPEN — a resolve error reads as one-off (the accumulation
+          // + tests gates below still protect any actual main merge). Sits BEFORE the accumulation/tests gates
+          // (cheap PM read; no point evaluating those for a branch Gate A won't merge anyway).
+          if (wsId && slug) {
+            let goalSlug: string | null = null;
+            try {
+              const { resolveGoalSlugForSpec } = await import("@/lib/agent-jobs");
+              goalSlug = await resolveGoalSlugForSpec(wsId, slug);
+            } catch (e) {
+              goalSlug = null; // fail open — treat as one-off (the gates below still guard the merge)
+              console.warn(`[auto-merge] PR #${prNumber} (${branch}) goal-bound check threw — treating as one-off:`, e instanceof Error ? e.message : e);
+            }
+            if (goalSlug) {
+              result.goalBoundBlocked++;
+              console.warn(`[auto-merge] PR #${prNumber} (${branch}) is goal-bound (goal/${goalSlug}) — NOT merging to main; handed off to Gate B (spec→goal) + Gate C (atomic goal→main)`);
+              result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+              continue;
+            }
+          }
+          // spec-goal-branch-pm-flow M2 — ACCUMULATION GATE: under M1's branch-accumulation model the spec's
+          // phases build one-by-one onto this single PR; promoting it now (after only some phases are built)
+          // would ship a PARTIAL spec to main. Refuse until EVERY phase is built on the branch (build_sha set
+          // or terminal) — i.e. no phase is still `planned`. A one-shot/single-phase spec passes trivially.
+          // M5 owns the eventual atomic promotion + the build_sha→shipped flip; this only stops the existing
+          // auto-merge from jumping a half-accumulated branch. Sits BEFORE the tests gate (cheap PM read; no
+          // point evaluating per-branch test green for a branch that isn't even fully built yet).
+          const accumulation = await isSpecAccumulationComplete(wsId, slug);
+          if (!accumulation.complete) {
+            result.accumulationBlocked++;
+            console.warn(`[auto-merge] PR #${prNumber} (${branch}) is built+clean but the spec is not fully accumulated on the branch (${accumulation.reason}) — deferring promotion (M5 promotes the whole spec)`);
+            result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
+            continue;
+          }
           // promote-on-green-merge-gate Phase 1 (M4) — TESTS GATE: require BOTH pre-merge signals green
           // for the branch. spec-test green mirrors the post-ship fold gate's Rail 2 (approved/needs_human
           // + auto_pass>=1 + 0 unresolved auto-`fail`); security green mirrors `completedClean` (a
@@ -630,8 +871,6 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           // from the SAME signals (applyInTestingOverlay) so the gate and the board can never disagree.
           // Absence ≠ clean — a branch with no pre-merge run yet is NOT green ⇒ defer. The build job's
           // workspace_id + spec_slug come from the SAME row the build gate just read (no extra query).
-          const wsId = gate.workspaceId;
-          const slug = gate.specSlug;
           let specGreen = false;
           let secGreen = false;
           try {
@@ -709,6 +948,8 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         ready: result.ready,
         buildGateBlocked: result.buildGateBlocked,
         testsGateBlocked: result.testsGateBlocked,
+        accumulationBlocked: result.accumulationBlocked,
+        goalBoundBlocked: result.goalBoundBlocked,
         merged: result.merged,
         mergedPr: result.mergedPr ?? null,
       },

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyGithubWebhook, detectAndEnqueueDirtyPrs, autoMergeReadyPrs } from "@/lib/github-pr-resolve";
+import { promoteEligibleSpecsToGoalBranch, promoteCompleteGoalsToMain } from "@/lib/agent-jobs";
 
 /**
  * GitHub webhook → Dirty-PR Resolver Agent trigger (docs/brain/specs/dirty-pr-resolver-agent.md).
@@ -79,14 +80,52 @@ export async function POST(request: Request) {
       try {
         autoMerge = await autoMergeReadyPrs();
         console.log(
-          `[github-webhook] ${event}: auto-merge ${autoMerge.enabled ? (autoMerge.syncActive ? "deferred (sync active)" : `checked ${autoMerge.checked}, ${autoMerge.ready} ready, ${autoMerge.buildGateBlocked} build-gate-blocked, ${autoMerge.testsGateBlocked} tests-gate-blocked, merged ${autoMerge.merged}${autoMerge.mergedPr ? ` (PR #${autoMerge.mergedPr})` : ""}`) : "disabled (kill-switch)"}`,
+          `[github-webhook] ${event}: auto-merge ${autoMerge.enabled ? (autoMerge.syncActive ? "deferred (sync active)" : `checked ${autoMerge.checked}, ${autoMerge.ready} ready, ${autoMerge.buildGateBlocked} build-gate-blocked, ${autoMerge.accumulationBlocked} accumulation-blocked, ${autoMerge.goalBoundBlocked} goal-bound-handed-off, ${autoMerge.testsGateBlocked} tests-gate-blocked, merged ${autoMerge.merged}${autoMerge.mergedPr ? ` (PR #${autoMerge.mergedPr})` : ""}`) : "disabled (kill-switch)"}`,
         );
       } catch (err) {
         console.error("[github-webhook] auto-merge gate failed:", err);
       }
     }
 
-    return NextResponse.json({ ok: true, ...dirty, autoMerge });
+    // Gate B — spec-goal-branch-pm-flow M4: promote every goal-bound, promote-eligible spec branch onto its
+    // goal branch (`goal/{goal-slug}`), sequenced by blocked_by. Independent of the auto-merge gate; a failure
+    // in one must not block the other. Uses the GitHub /merges API (no local checkout) so it runs here AND in
+    // the box worker standing pass. Does NOT push the goal branch to main (M5 owns that).
+    let goalPromote: Awaited<ReturnType<typeof promoteEligibleSpecsToGoalBranch>> | undefined;
+    if (mergeRelevant) {
+      try {
+        goalPromote = await promoteEligibleSpecsToGoalBranch();
+        if (goalPromote.promoted.length || goalPromote.conflicts.length || goalPromote.goalBranchesCreated.length) {
+          console.log(
+            `[github-webhook] ${event}: goal-promote merged ${goalPromote.promoted.length} (${goalPromote.promoted.join(", ") || "—"}), seeded ${goalPromote.goalBranchesCreated.length} goal branch(es), ${goalPromote.conflicts.length} conflict(s)${goalPromote.conflicts.length ? ` (${goalPromote.conflicts.join(", ")})` : ""}`,
+          );
+        }
+      } catch (err) {
+        console.error("[github-webhook] goal-branch promote failed:", err);
+      }
+    }
+
+    // Gate C — spec-goal-branch-pm-flow M5: ATOMIC goal→main promotion. After Gate B integrates eligible spec
+    // branches onto their goal branches, promote every COMPLETE + GREEN goal branch to main in ONE merge and
+    // stamp every member phase shipped (the only shipped-writer), then trigger the fold pipeline. Parent goals
+    // are skipped (their children promote independently). One-off specs ship via the auto-merge gate (Gate A),
+    // not here. Independent of the other gates; a failure in one must not block the others. GitHub /merges API
+    // (no checkout) so it runs here AND in the box worker standing pass.
+    let goalToMain: Awaited<ReturnType<typeof promoteCompleteGoalsToMain>> | undefined;
+    if (mergeRelevant) {
+      try {
+        goalToMain = await promoteCompleteGoalsToMain();
+        if (goalToMain.promoted.length || goalToMain.conflicts.length) {
+          console.log(
+            `[github-webhook] ${event}: goal→main promoted ${goalToMain.promoted.length} (${goalToMain.promoted.join(", ") || "—"}), ${goalToMain.conflicts.length} conflict(s)${goalToMain.conflicts.length ? ` (${goalToMain.conflicts.join(", ")})` : ""}, ${goalToMain.parentExempt.length} parent-exempt`,
+          );
+        }
+      } catch (err) {
+        console.error("[github-webhook] goal→main atomic promote failed:", err);
+      }
+    }
+
+    return NextResponse.json({ ok: true, ...dirty, autoMerge, goalPromote, goalToMain });
   } catch (err) {
     console.error("[github-webhook] dirty-PR detection failed:", err);
     return NextResponse.json({ error: "Processing failed" }, { status: 500 });

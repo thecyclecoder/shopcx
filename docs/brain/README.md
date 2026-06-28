@@ -10,7 +10,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 86 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 316 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 33 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 34 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 36 + README |
@@ -20,7 +20,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 1 |
 | (root) | Cross-cutting reference: [customer-voice.md](customer-voice.md), [operational-rules.md](operational-rules.md), [ui-conventions.md](ui-conventions.md), [orchestrator-tools.md](orchestrator-tools.md), [project-management.md](project-management.md), [archive.md](archive.md) (verified/retired specs) | 6 |
 
-**How project management works in the brain** → see [project-management.md](project-management.md). The work hierarchy is **Function → (Mandate | Goal) → Spec → Phase → Build** — no orphan specs. Specs go in `specs/`, phases use ⏳ 🚧 ✅ emoji, lifecycle pages carry "Status / open work" blocks for shipped state. Spawn a session: `/goal do everything in docs/brain/specs/{slug}.md`.
+**How project management works in the brain** → see [project-management.md](project-management.md). The work hierarchy is **Function → (Mandate | Goal) → Spec → Phase → Build** — no orphan specs. Specs + phases live in `public.specs` / `public.spec_phases` (DB-driven status, not markdown emoji); the build flow accumulates phases on a `claude/build-{slug}` branch and promotes atomically (one-off spec → main, or a whole goal → main) — see [lifecycles/spec-goal-branch-pm-flow.md](lifecycles/spec-goal-branch-pm-flow.md). Lifecycle pages carry "Status / open work" blocks for shipped state. Spawn a session: `/goal do everything in docs/brain/specs/{slug}.md`.
 
 ## Tables (`tables/`)
 
@@ -378,6 +378,8 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 - [[lifecycles/chargeback-pipeline]] — Shopify dispute → `chargeback_events` → fraud classification → auto-cancel subs → `chargeback_subscription_actions`.
 - [[lifecycles/demographic-enrichment]] — New customer → name→Haiku, ZIP→Census, orders→buyer_type → `customer_demographics` → snapshots → dashboard.
 - [[lifecycles/product-intelligence]] — Product → ingredients → research → review analysis → benefit selections → page content → publish. The Product Intelligence Engine.
+- [[lifecycles/roadmap-build-console]] — Describe a feature → spec → autonomous box build (Max) → answer/approve → merge → fold. The self-driving roadmap.
+- [[lifecycles/spec-goal-branch-pm-flow]] — Authored spec → phases accumulate on `claude/build-{slug}` → branch-preview spec-test → `in_testing` → one-off spec → main (Gate A) OR spec → `goal/{goal}` (Gate B) → atomic goal → main (Gate C). Branch-accumulation + atomic promotion + Reva's escalate-not-revert.
 
 ## Journeys (`journeys/`)
 
