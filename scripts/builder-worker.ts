@@ -2908,6 +2908,22 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing auto-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // MERGED-PHASE reconcile (ship-all-phases-on-squash-merge / post-merge-ships-only-one-phase fix). A
+    // squash-merge ships the WHOLE accumulated spec atomically, but the merge hook only runs on the
+    // completed→merged transition — a spec that ALREADY merged under the old one-phase-only hook stays stuck
+    // with un-shipped phases (noop-pipeline-test-4 / #837: P1 in_progress, merge_sha=NULL while P2 shipped).
+    // This re-runnable standing pass back-fills any such spec's remaining phases to shipped (stamped with the
+    // recovered merge SHA), so an already-merged 2-phase spec reaches fully-shipped → fold. Idempotent.
+    const { reconcileMergedSpecPhases } = await import("../src/lib/agent-jobs");
+    const mp = await reconcileMergedSpecPhases(db);
+    if (mp.reconciled.length) {
+      notes.push(`merged-phase reconcile → back-filled ${mp.phasesStamped} phase(s) across ${mp.reconciled.length} spec(s): ${mp.reconciled.join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`merged-phase reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing merged-phase reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // PRE-MERGE checks backstop (security-test-on-preview-pre-merge + spec-goal-branch-pm-flow M3). WHY a
     // standing-pass backstop is REQUIRED, not just nice-to-have: BOTH pre-merge enqueues (spec-test +
     // security) fire ONLY from the build's fire-and-forget preview-capture READY callback. The security leg

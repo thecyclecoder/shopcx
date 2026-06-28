@@ -284,6 +284,24 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
   if (!branch) return { enqueued: false, reason: "no branch" };
   if (!input.specSlug) return { enqueued: false, reason: "no spec slug" };
 
+  // ⭐ (0) MERGED-BRANCH GUARD (post-merge backstop security-loop fix). A pre-merge branch review is meaningless
+  // once the branch's PR has MERGED — the `claude/build-*` branch is DELETED, so the box would "review an
+  // unmerged branch" that no longer exists, burning a Max session every standing pass (noop-pipeline-test-4 /
+  // #837). The build job's post-merge state-advance flips it to `merged` and BUMPS its `updated_at`, which the
+  // step-(2) "branch changed since clean review" test below mistook for a new push → re-enqueued forever. So
+  // before any dedup: if the latest build job for this branch is `merged`, the branch is gone — never enqueue.
+  const { data: lastBuildJob } = await admin
+    .from("agent_jobs")
+    .select("status, updated_at")
+    .eq("kind", "build")
+    .eq("spec_branch", branch)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if ((lastBuildJob as { status?: string } | null)?.status === "merged") {
+    return { enqueued: false, reason: "branch's PR already merged (branch gone) — no pre-merge security review" };
+  }
+
   // (1) Dedup by branch (one OPEN review per branch). `spec_branch` is the column the agent_jobs row carries
   // (set on insert below). The `securitySha12`/`depFindingSignature` signatures still converge same-finding
   // recurrences inside the box's review of the branch's diff.
@@ -299,10 +317,12 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
   }
 
   // (2) Dedup by branch state (one CLEAN review per UNCHANGED branch — the loop fix). If the branch already
-  // has a `completed` review, only re-review when the branch advanced SINCE that review: compare the latest
-  // completed review's `created_at` against the latest build-job push (`updated_at`) on the branch. Review
-  // newer-or-equal ⇒ same diff already cleared ⇒ skip (this is what stopped the per-pass loop). Build push
-  // newer ⇒ a new commit landed ⇒ re-review.
+  // has a `completed` review, only re-review when the branch advanced SINCE that review with a NEW CODE PUSH —
+  // NOT a status-only `updated_at` bump (a completed→merged flip is not a push; the (0) guard above already
+  // dropped merged branches, but we also exclude `merged`/`completed` non-push bumps here so the comparison
+  // keys on a genuine build push). Compare the latest completed review's `created_at` against the latest
+  // NON-terminal build job's `updated_at`. Review newer-or-equal ⇒ same diff already cleared ⇒ skip (this is
+  // what stopped the per-pass loop). A genuinely newer build push ⇒ re-review.
   const { data: lastClean } = await admin
     .from("agent_jobs")
     .select("created_at")
@@ -314,15 +334,9 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     .maybeSingle();
   const lastCleanAt = (lastClean as { created_at?: string } | null)?.created_at;
   if (lastCleanAt) {
-    const { data: lastBuild } = await admin
-      .from("agent_jobs")
-      .select("updated_at")
-      .eq("kind", "build")
-      .eq("spec_branch", branch)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const lastBuildAt = (lastBuild as { updated_at?: string } | null)?.updated_at;
+    const lastBuildAt = (lastBuildJob as { status?: string; updated_at?: string } | null)?.status === "merged"
+      ? null // a merged flip's bump is not a push (already returned above, but keep the comparison honest)
+      : (lastBuildJob as { updated_at?: string } | null)?.updated_at;
     // No newer build push than the clean review ⇒ the reviewed diff is current ⇒ don't re-review.
     if (!lastBuildAt || Date.parse(lastBuildAt) <= Date.parse(lastCleanAt)) {
       return { enqueued: false, reason: "branch already has a clean security-review and has not changed since" };

@@ -667,7 +667,7 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
     const archivedSlugs = new Set(await listArchivedSlugs());
     const { data: jobs } = await admin
       .from("agent_jobs")
-      .select("id, workspace_id, spec_slug, spec_branch, preview_url, preview_state, pr_number, pr_url, created_at")
+      .select("id, workspace_id, spec_slug, spec_branch, status, preview_url, preview_state, pr_number, pr_url, created_at")
       .eq("kind", "build")
       .not("spec_branch", "is", null)
       .order("created_at", { ascending: false });
@@ -677,6 +677,7 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
       workspace_id: string;
       spec_slug: string;
       spec_branch: string;
+      status: JobStatus;
       preview_url: string | null;
       preview_state: string | null;
       pr_number: number | null;
@@ -693,6 +694,16 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
       // already merged/folded — so don't (re-)enqueue spec-test or security for it. (Checked BEFORE the
       // preview-state branch so the no-preview RECOVERY path below also honours it.)
       if (archivedSlugs.has(slug)) continue;
+      // ⭐ vault-security-review-loop-fix (MERGED-SPEC SKIP — post-merge backstop loop fix): a build whose PR is
+      // already MERGED has its `claude/build-*` branch DELETED, so a pre-merge spec-test / security review of it
+      // is meaningless — it reviews a gone branch ("[security] reviewing unmerged branch …" for a deleted ref,
+      // wasting Max sessions every pass). The `spec.status === shipped/folded` guard below is NOT enough: a spec
+      // whose merge stamped only ONE phase (the BUG 1 case) still reads `in_progress`/`planned` even though its
+      // PR merged, so the security loop ran forever (noop-pipeline-test-4 / #837). Skip on the actual MERGE
+      // signal: the latest build job for the slug is `merged`, OR a merged sibling build exists for the slug.
+      if (j.status === "merged") continue;
+      const mergedSibling = await findMergedSiblingBuild(j.workspace_id, slug, { admin });
+      if (mergedSibling) continue;
       const specRow = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
       if (specRow && (specRow.status === "shipped" || specRow.status === "folded")) continue;
 
@@ -1520,44 +1531,49 @@ export async function applyMergedBuildEffects(
     const spec = await getSpecFromDb(workspaceId, slug);
     if (!spec) return; // no DB spec row → nothing to advance (the daily backlog cron backstops)
     const phases = spec.phases; // 1-indexed by `position`, ordered ASC
-    // TRUST THE MERGE + TAG ITS PROVENANCE (phase-pr-provenance). A single PR/merge can ship SEVERAL phases at
-    // once, but builds ship a spec phase-by-phase — so never blanket-ship. Which phase(s) did THIS merge ship?
-    //   (1) the phase(s) the build's instructions NAME ("Phase N", possibly several) — mapped to positions;
-    //   (2) else the FIRST not-yet-shipped phase (lowest position whose status isn't shipped/rejected).
-    // Tag EACH shipped phase with this PR # + merge SHA so "shipped" is provable, not inferred.
+    // TRUST THE MERGE + TAG ITS PROVENANCE (phase-pr-provenance). Which phase(s) did THIS merge ship?
+    //
+    // ⭐ ship-all-phases-on-squash-merge (post-merge-ships-only-one-phase fix): under M1's branch-accumulation
+    // model ALL of a spec's phases accumulate onto ONE `claude/build-{slug}` branch, and the auto-merge
+    // ACCUMULATION GATE only squash-merges that branch once EVERY phase is built (no phase still `planned`).
+    // A squash-merge collapses the whole branch into ONE commit on main — so it ships the WHOLE spec
+    // ATOMICALLY, regardless of how many phases its diff spans or which phase the merged build job's
+    // `instructions` happen to NAME. The old code keyed on the named-phase shortcut FIRST: a director-initiated /
+    // chain build whose `instructions` said "Phase 2" stamped ONLY P2 and left P1 `in_progress` forever
+    // (noop-pipeline-test-4 / #837 — P1 in_progress, merge_sha=NULL while P2 shipped). So: when the spec is
+    // FULLY ACCUMULATED, stamp EVERY non-terminal phase shipped with this merge SHA — the named-phase parse is
+    // a fallback for the (now-rare) case a single PR merged a partial branch. This makes the post-merge advance
+    // idempotent + re-runnable: a re-run over an already-merged spec whose P1 stayed `in_progress` RECONCILES
+    // it (stampPhaseShipped on a shipped phase is inert; the in_progress phase flips shipped + carries the SHA).
+    //
+    //   (1) accumulation-complete (the normal squash-merge) → stamp ALL non-terminal phases (whole-spec atomic);
+    //   (2) else the phase(s) the build's instructions NAME ("Phase N") — mapped to positions (partial merge);
+    //   (3) else the FIRST not-yet-shipped phase (lowest position whose status isn't shipped/rejected).
     const shippedPositions = new Set<number>();
+    let accumulationComplete = false;
+    if (phases.length > 1) {
+      try {
+        const acc = await isSpecAccumulationComplete(workspaceId, slug);
+        accumulationComplete = acc.complete;
+      } catch {
+        // Accumulation read failed → fall through to the named/next heuristics (don't blanket-ship on an unknown).
+        accumulationComplete = false;
+      }
+    }
     const named = parsePhaseIndices(opts.instructions, phases.length); // 0-based indices
-    if (named.length) {
+    if (accumulationComplete) {
+      // ⭐ A squash-merge of a fully-accumulated branch ships the WHOLE spec — stamp every non-terminal phase.
+      for (const p of phases) {
+        if (p.status !== "shipped" && p.status !== "rejected") shippedPositions.add(p.position);
+      }
+    } else if (named.length) {
       // map named 0-based indices → phase positions (1-indexed `position`, ordered ASC)
       for (const i of named) {
         const p = phases[i];
         if (p) shippedPositions.add(p.position);
       }
-    } else if (!opts.chainPhases && phases.length > 1) {
-      // spec-goal-branch-pm-flow M5 (Part 3 — one-off WHOLE-SPEC merge): under M1's branch-accumulation model a
-      // one-off (no-goal) spec accumulates ALL its phases onto ONE `claude/build-{slug}` branch, and the
-      // auto-merge accumulation gate only merges that branch once EVERY phase is built. So a NON-chain build
-      // whose instructions name no specific phase = a whole-spec branch landing on main in ONE merge → stamp
-      // EVERY non-terminal phase shipped, not just the first. (A chain build — chainPhases:true — still ships
-      // phase-by-phase; it always names its phase, so it never reaches here.) Guarded by isSpecAccumulationComplete
-      // so a partial/legacy branch that somehow merged early still only advances the next phase (fail-safe).
-      let stampAll = true;
-      try {
-        const acc = await isSpecAccumulationComplete(workspaceId, slug);
-        stampAll = acc.complete;
-      } catch {
-        stampAll = true; // accumulation read failed open — a fully-built whole-spec merge is the common case
-      }
-      if (stampAll) {
-        for (const p of phases) {
-          if (p.status !== "shipped" && p.status !== "rejected") shippedPositions.add(p.position);
-        }
-      } else {
-        const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected");
-        if (next) shippedPositions.add(next.position);
-      }
     } else {
-      // Single-phase spec, or a chain build with no named phase — advance the first not-yet-shipped phase.
+      // Single-phase spec, or a build with no named phase — advance the first not-yet-shipped phase.
       const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected");
       if (next) shippedPositions.add(next.position);
     }
@@ -1670,6 +1686,88 @@ export async function handleAutoMergedBuildBranch(branch: string, mergeSha: stri
   } catch {
     return null; // best-effort — reconcileMergedJobs is the board-render backstop for this branch
   }
+}
+
+export interface MergedSpecPhaseReconcileResult {
+  /** spec slugs whose un-shipped phases were back-filled to shipped this pass (+ stamped with the merge SHA). */
+  reconciled: string[];
+  /** total phases flipped to shipped across all reconciled specs this pass. */
+  phasesStamped: number;
+}
+
+/**
+ * STANDING-PASS RECOVERY for ship-all-phases-on-squash-merge (post-merge-ships-only-one-phase fix). The
+ * merge hook ([[applyMergedBuildEffects]]) now stamps EVERY phase of a fully-accumulated squash-merge, but it
+ * only runs on the `completed→merged` TRANSITION — it never re-fires for a job that already flipped `merged`.
+ * So a spec that ALREADY merged under the old (one-phase-only) hook is STUCK: e.g. noop-pipeline-test-4 / #837
+ * had P1 left `in_progress` (merge_sha=NULL) while P2 shipped. This is the re-runnable reconcile that recovers
+ * those: every standing pass, find a `merged` build job whose spec still has a NON-terminal phase, and stamp
+ * each remaining phase shipped with the merge SHA (recovered from an already-shipped sibling phase — the
+ * squash-merge commit — falling back to the job's `last_merge_sha`/build SHA if the spec_phases row carries it).
+ *
+ * Strictly idempotent + safe to run forever: a spec whose every phase is already shipped/rejected is skipped
+ * (no un-shipped phase), and stampPhaseShipped on an already-shipped phase is inert. Only a `merged`-job spec
+ * with a resolvable merge SHA is touched — a merged spec we can't prove a SHA for is LEFT for the audit path
+ * (we never blanket-ship without provenance). Best-effort per spec; never throws.
+ */
+export async function reconcileMergedSpecPhases(adminClient?: Admin): Promise<MergedSpecPhaseReconcileResult> {
+  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0 };
+  const admin = adminClient || createAdminClient();
+  try {
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, created_at")
+      .eq("kind", "build")
+      .eq("status", "merged")
+      .order("created_at", { ascending: false })
+      .limit(200);
+    const seen = new Set<string>();
+    for (const j of (jobs ?? []) as Array<{ workspace_id: string; spec_slug: string }>) {
+      const slug = j.spec_slug;
+      if (!slug) continue;
+      const key = `${j.workspace_id}:${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        const spec = await getSpecFromDb(j.workspace_id, slug);
+        if (!spec) continue;
+        const phases = spec.phases ?? [];
+        if (!phases.length) continue; // a one-shot spec carries its provenance at the card, not per-phase
+        const unshipped = phases.filter((p) => p.status !== "shipped" && p.status !== "rejected");
+        if (!unshipped.length) continue; // fully shipped already — nothing to recover (the common case)
+        // Recover the squash-merge SHA from an already-shipped sibling phase (the merge that landed the branch).
+        // If NO phase is shipped yet we have no merge provenance to copy → leave it for the audit path.
+        const shippedSibling = phases.find((p) => p.status === "shipped" && p.merge_sha);
+        const mergeSha = shippedSibling?.merge_sha ?? null;
+        const pr = shippedSibling?.pr ?? null;
+        if (!mergeSha) continue; // can't prove a merge SHA → don't blanket-ship (audit-spec-shipped-state owns that)
+        await Promise.all(
+          unshipped.map((p) => stampPhaseShipped(j.workspace_id, slug, p.position, { merge_sha: mergeSha, pr })),
+        );
+        out.phasesStamped += unshipped.length;
+        out.reconciled.push(slug);
+        console.log(
+          `[merged-phase-reconcile] ${slug}: back-filled ${unshipped.length} un-shipped phase(s) → shipped (merge ${mergeSha.slice(0, 8)})`,
+        );
+        // The spec now rolls up to shipped — fire the post-ship hooks the original merge would have (deduped).
+        try {
+          await enqueueSpecTestIfDue(j.workspace_id, slug, "shipped");
+        } catch {
+          /* best-effort — the daily spec-test backlog cron backstops */
+        }
+        try {
+          await autoQueueUnblockedBy(j.workspace_id, slug);
+        } catch {
+          /* best-effort */
+        }
+      } catch (e) {
+        console.warn(`[merged-phase-reconcile] ${slug} reconcile threw (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
+  } catch (e) {
+    console.warn("[merged-phase-reconcile] pass failed (continuing):", e instanceof Error ? e.message : e);
+  }
+  return out;
 }
 
 /**
