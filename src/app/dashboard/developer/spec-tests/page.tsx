@@ -2,11 +2,51 @@ import Link from "next/link";
 import { getRoadmap, listArchivedSlugs, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestSpecTestRuns, signSpecTestScreenshot, type SpecTestRun } from "@/lib/spec-test-runs";
+import { getFixSpecForOrigin } from "@/lib/specs-table";
+import { createAdminClient } from "@/lib/supabase/admin";
+import type { AgentJob } from "@/lib/agent-jobs";
 import { AgentTestedStamp, TestChip, CheckList, type Check } from "./SpecTestView";
 import TestNowButton from "./TestNowButton";
 import ProposeFixButton from "./ProposeFixButton";
+import FixCard, { type FixCardState } from "./FixCard";
 
 // Reads docs/brain/specs at request time + the latest spec_test_runs — always live.
+
+/**
+ * spec-test-request-fix-inline-author-and-approve Phase 2 — translate the fix build's `agent_jobs` row
+ * into the FixCard display state + the gated-action handle the inline Approve button posts to
+ * /api/roadmap/approve. A build with no row yet (the request-fix authoring path's insert hadn't landed at
+ * read time) reads as `building` so the card never blanks out.
+ */
+function deriveFixCardState(
+  job: Pick<AgentJob, "id" | "status" | "pending_actions"> | null,
+): { state: FixCardState; approval?: { jobId: string; actionId: string } } {
+  if (!job) return { state: "building" };
+  switch (job.status) {
+    case "queued":
+    case "claimed":
+    case "building":
+    case "queued_resume":
+    case "blocked_on_usage":
+      return { state: "building" };
+    case "needs_input":
+      return { state: "needs_input" };
+    case "needs_approval": {
+      const pending = (job.pending_actions ?? []).find((a) => a.status === "pending");
+      if (!pending) return { state: "building" }; // every gate decided → resuming; show neutral state
+      return { state: "needs_approval", approval: { jobId: job.id, actionId: pending.id } };
+    }
+    case "completed":
+      return { state: "ready_to_merge" };
+    case "merged":
+      return { state: "merged" };
+    case "failed":
+    case "needs_attention":
+      return { state: "failed" };
+    default:
+      return { state: "building" };
+  }
+}
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -48,6 +88,41 @@ export default async function SpecTestsPage() {
     }),
   );
 
+  // spec-test-request-fix-inline-author-and-approve Phase 2 — for every regressed origin whose latest run
+  // is `agent_verdict='issues'`, resolve the inline-authored fix by typed linkage (`regression_of_slug =
+  // origin`), then read its latest build `agent_jobs` row + any pending gated action so the card renders
+  // the fix's state + an inline Approve button in place of the legacy "open it under Resume a recent chat"
+  // copy. Linkage-driven (not a hand-typed deterministic slug) so a renamed fix slug still surfaces.
+  const fixStateBySlug: Record<
+    string,
+    { fixSlug: string; state: FixCardState; approval?: { jobId: string; actionId: string } } | null
+  > = {};
+  if (workspaceId) {
+    const issuesSpecs = shipped.filter((s) => runs[s.slug]?.agent_verdict === "issues");
+    await Promise.all(
+      issuesSpecs.map(async (s) => {
+        const fix = await getFixSpecForOrigin(workspaceId, s.slug).catch(() => null);
+        if (!fix) {
+          fixStateBySlug[s.slug] = null;
+          return;
+        }
+        // Latest `kind='build'` job for the fix — the build whose state the card mirrors.
+        const admin = createAdminClient();
+        const { data: jobRow } = await admin
+          .from("agent_jobs")
+          .select("id, status, pending_actions")
+          .eq("workspace_id", workspaceId)
+          .eq("spec_slug", fix.slug)
+          .eq("kind", "build")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const job = (jobRow as Pick<AgentJob, "id" | "status" | "pending_actions"> | null) ?? null;
+        fixStateBySlug[s.slug] = { fixSlug: fix.slug, ...deriveFixCardState(job) };
+      }),
+    );
+  }
+
   return (
     <div className="mx-auto w-full max-w-5xl p-6">
       <div className="flex items-center justify-between gap-3">
@@ -88,7 +163,17 @@ export default async function SpecTestsPage() {
                     {run && run.agent_verdict !== "error" && <TestChip summary={run.summary} />}
                   </div>
                   <div className="flex items-center gap-2">
-                    {run?.agent_verdict === "issues" && <ProposeFixButton slug={s.slug} compact />}
+                    {run?.agent_verdict === "issues" &&
+                      (fixStateBySlug[s.slug] ? (
+                        <FixCard
+                          fixSlug={fixStateBySlug[s.slug]!.fixSlug}
+                          state={fixStateBySlug[s.slug]!.state}
+                          approval={fixStateBySlug[s.slug]!.approval}
+                          compact
+                        />
+                      ) : (
+                        <ProposeFixButton slug={s.slug} compact />
+                      ))}
                     {run && <span className="text-[11px] text-zinc-400">{timeAgo(run.run_at)}</span>}
                     <TestNowButton slug={s.slug} />
                   </div>

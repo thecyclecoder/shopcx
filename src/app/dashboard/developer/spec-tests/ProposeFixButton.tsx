@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 /**
  * Request a fix on a regressed spec. Two delivery modes:
@@ -27,6 +28,7 @@ export default function ProposeFixButton({
   /** "inline" → authors the fix spec + queues the build directly. "chat" → legacy box-spec-chat round-trip. */
   mode?: "inline" | "chat";
 }) {
+  const router = useRouter();
   const [state, setState] = useState<"idle" | "queuing" | "queued" | "error">("idle");
   const [fixSlug, setFixSlug] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +57,10 @@ export default function ProposeFixButton({
         if (!res.ok) throw new Error(d.error || "could not propose a fix");
       }
       setState("queued");
+      // spec-test-request-fix-inline-author-and-approve Phase 2 — the page server-side resolves the fix by
+      // `regression_of_slug = origin` and renders FixCard in this slot; refresh so it takes over from this
+      // button's transient "Fix queued" copy as soon as the authoring write lands.
+      if (mode === "inline") router.refresh();
     } catch (e) {
       setState("error");
       setError(e instanceof Error ? e.message : "could not request a fix");
