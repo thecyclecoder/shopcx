@@ -2897,6 +2897,23 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing goal-promote failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // spec-goal-branch-pm-flow M5 — ATOMIC goal→main promotion. After the M4 spec→goal-branch integration
+    // above, promote every COMPLETE + GREEN goal branch to main in ONE merge and flip every member phase to
+    // shipped (the ONLY shipped-writer), then trigger the fold pipeline for the now-shipped specs. Parent
+    // goals are SKIPPED (their children promote independently). Mirrors the github-webhook Gate-C hook so the
+    // promotion runs in both contexts; GitHub /merges API (no checkout); idempotent + best-effort.
+    const { promoteCompleteGoalsToMain } = await import("../src/lib/agent-jobs");
+    const g2m = await promoteCompleteGoalsToMain(db);
+    if (g2m.promoted.length) {
+      const stamped = g2m.promoted.map((s) => `${s} (${g2m.effects[s]?.phasesStamped ?? 0} phase(s) shipped)`).join(", ");
+      notes.push(`goal→main → ATOMIC promoted ${g2m.promoted.length} goal(s): ${stamped}`);
+    }
+    if (g2m.conflicts.length) notes.push(`⚠️ goal→main CONFLICT (HELD, not stamped): ${g2m.conflicts.join(", ")}`);
+  } catch (e) {
+    notes.push(`goal→main promote failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing goal→main promote failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // director-escort-inflight-specs Phase 1 — pre-grooming sweep over every in-flight / critical-planned /
     // recently-authored spec this director drives. Dispatches each into one of five mechanical lanes
     // (queued_build · status_drift · failed_retry · failed_repeat · stalled) so the gap between authoring a

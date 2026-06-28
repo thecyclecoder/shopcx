@@ -608,6 +608,92 @@ export async function mergeSpecBranchIntoGoalBranch(
   return { ...out, reason: `merge ${specBranch} → ${goalBranch} failed (${r.status}${msg ? `: ${msg}` : ""})` };
 }
 
+/**
+ * spec-goal-branch-pm-flow M5 — the result of the atomic goal→main merge.
+ *  - `merged` — `goal/{goalSlug}`'s commits are now on `main` in ONE merge (`mergeSha` = the merge commit, or
+ *    the main tip when nothing was new to merge — already-merged is idempotent success).
+ *  - `conflict` — GitHub returned 409 (the goal branch conflicts with main). NOT merged; surfaced so the caller
+ *    HOLDS the promotion (does NOT stamp shipped) and leaves it for the owner / a resolver.
+ *  - `missingBranch` — `goal/{goalSlug}` does not exist (nothing to promote — e.g. a parent goal, or a goal
+ *    whose specs never reached the goal branch). NOT a failure; the caller skips it.
+ */
+export interface GoalToMainMergeResult {
+  merged: boolean;
+  conflict: boolean;
+  missingBranch: boolean;
+  mergeSha: string | null;
+  reason?: string;
+}
+
+/**
+ * spec-goal-branch-pm-flow M5 — merge a goal's `goal/{goalSlug}` branch INTO `main`, ATOMICALLY (one merge
+ * commit carrying every member spec's integrated history). Mirrors `mergeSpecBranchIntoGoalBranch`'s
+ * API-only style (POST /merges, no local checkout) so it runs identically from the box worker standing pass
+ * AND the Vercel github webhook.
+ *
+ * GREEN signal (the spec's option b — combination-verified WITHOUT extra preview deploys): the CALLER
+ * (`promoteCompleteGoalsToMain`) only invokes this once (1) every member spec is individually
+ * `isSpecPromoteEligible` (accumulation + spec-test-green + security-green on its branch) AND (2) every member
+ * spec is ON the goal branch (`goalBranchState.allOnGoalBranch`) — and because each dependent spec BUILDS off
+ * the goal branch (M4 ordering), the integrated WHOLE was compiled together by the worker's per-build tsc
+ * gate. This merge is then the final combination check: it is ATOMIC — a 201/204 means the integrated goal
+ * branch merges cleanly onto main (no main drift); a 409 means a conflict with main → the promotion is HELD
+ * (nothing is stamped shipped), never force-pushed. So the COMBINATION (not just the parts) is verified: the
+ * parts on their branches + the integrated whole on the goal branch + a clean atomic land on main.
+ *
+ * Idempotent: a 204 (nothing to merge — goal branch already contained in main) is `merged:true` with the main
+ * tip as `mergeSha`. A missing goal branch is `missingBranch:true` (skip, not fail). Uses a real (non-squash)
+ * merge commit so main carries the goal's full per-spec history. Deletes the goal branch on success
+ * (best-effort) — the goal is shipped, the branch is spent.
+ */
+export async function mergeGoalBranchIntoMain(goalSlug: string): Promise<GoalToMainMergeResult> {
+  const out: GoalToMainMergeResult = { merged: false, conflict: false, missingBranch: false, mergeSha: null };
+  if (!ghToken()) return { ...out, reason: "no GitHub token" };
+  const goalBranch = `goal/${goalSlug}`;
+
+  const goalHead = await branchHeadSha(goalBranch);
+  if (goalHead === null) {
+    return { ...out, missingBranch: true, reason: `goal branch ${goalBranch} does not exist — nothing to promote` };
+  }
+
+  const r = await gh("POST", `/repos/${GH_REPO}/merges`, {
+    base: "main",
+    head: goalBranch,
+    commit_message: `atomic goal promotion: merge ${goalBranch} into main (spec-goal-branch-pm-flow M5)`,
+  });
+  if (r.status === 201) {
+    const sha = (r.json as Record<string, unknown>)?.sha;
+    out.merged = true;
+    out.mergeSha = typeof sha === "string" ? sha : null;
+    // Goal shipped — delete the spent goal branch (best-effort; a 404/422 is fine).
+    try {
+      await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${goalBranch}`);
+    } catch {
+      /* best-effort branch cleanup */
+    }
+    return out;
+  }
+  if (r.status === 204) {
+    // Already on main (goal branch fully contained) — idempotent success; main tip is the effective SHA.
+    out.merged = true;
+    out.mergeSha = await branchHeadSha("main");
+    out.reason = "already integrated (nothing to merge)";
+    try {
+      await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${goalBranch}`);
+    } catch {
+      /* best-effort */
+    }
+    return out;
+  }
+  if (r.status === 409) {
+    out.conflict = true;
+    out.reason = "goal→main merge conflict (409) — promotion HELD, NOT stamped shipped; left for the owner";
+    return out;
+  }
+  const msg = (r.json as Record<string, unknown>)?.message;
+  return { ...out, reason: `merge ${goalBranch} → main failed (${r.status}${msg ? `: ${msg}` : ""})` };
+}
+
 export interface AutoMergeResult {
   enabled: boolean;
   syncActive: boolean;
