@@ -460,7 +460,13 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
 
   const { data: jobsData, error: jobsError } = await admin
     .from("agent_jobs")
-    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail, spec_missing")
+    // spec_missing is a COMPUTED field (specMissing(kind,slug) in the box route — "the spec page would
+    // 404 because it's folded/archived"), NOT an agent_jobs column. Selecting it threw "column
+    // agent_jobs.spec_missing does not exist", which failed this read EVERY tick — and the bail-on-error
+    // guard below then returned early forever, so approved jobs never advanced (the first real approval,
+    // a migration script-approval, wedged on this). It's left off the select; the deep-link defaults to a
+    // live spec (correct for an open needs_approval job, whose spec is by definition not archived).
+    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail")
     .eq("status", "needs_approval")
     .limit(500);
   // SAFETY: never act on a FAILED read. A null/errored job query would otherwise look like "0 open jobs"
