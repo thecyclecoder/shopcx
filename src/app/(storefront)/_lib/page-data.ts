@@ -1264,8 +1264,16 @@ async function loadLinkGroup(
 
 /**
  * List every (workspace_slug, product_handle) pair that should be
- * statically generated. Returns an empty array if nothing is ready yet
- * — Next build will still succeed.
+ * statically generated.
+ *
+ * Cache Components (Next 16) makes an empty `generateStaticParams` a hard
+ * build error (EmptyGenerateStaticParamsError), so when the build-time query
+ * returns no published products (a fresh/empty workspace, or a transient
+ * query failure on a preview build) we fall back to a single sentinel param.
+ * The sentinel doesn't resolve to a real product, so the PDP renders
+ * `notFound()` at build time (a valid prerender); real product paths render
+ * on first request via ISR (`dynamicParams` defaults to true). Keeps preview
+ * builds green AND functional for spec-testing.
  */
 export async function listPublishedProducts(): Promise<
   Array<{ workspace: string; slug: string }>
@@ -1289,7 +1297,12 @@ export async function listPublishedProducts(): Promise<
       params.push({ workspace: ws.storefront_slug, slug: p.handle });
     }
   }
-  return params;
+  // Never return empty under Cache Components — the sentinel renders notFound()
+  // at build time while real paths render via ISR. Mirrors
+  // STOREFRONT_PARAM_PLACEHOLDER in (storefront)/_lib/blog-data.ts.
+  return params.length > 0
+    ? params
+    : [{ workspace: "__placeholder__", slug: "__placeholder__" }];
 }
 
 /**
