@@ -2928,6 +2928,41 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // SPEC-REVIEW backstop (spec-review-agent) — the reliable heartbeat that gets a newly-authored `in_review`
+    // spec its Vale review + Ada disposition. WHY a standing-pass backstop is REQUIRED, not just nice-to-have:
+    // before this, the ONLY enqueuers were (a) the Inngest `spec-review-cron` (`*/15`) and (b) the build
+    // claim-gate. (a) is an OUTSIDE-the-box trigger that can silently miss (an Inngest sync/deploy reaps the
+    // cron, a workspace with no agent_jobs row is filtered out, a transient run drops a tick) — exactly the
+    // same event-only fragility Gate-A and the pre-merge legs had; (b) only fires when a BUILD job for that
+    // spec is actually dispatched, so an `in_review` spec with `auto_build=false` (or one whose build hasn't
+    // been queued yet) never trips the claim-gate and can sit un-reviewed indefinitely (the 2026-06-28
+    // `noop-pipeline-test-1` stall: 16h between cron-driven passes while a malformed in_review spec sat there).
+    // This re-evaluates the FULL in_review pool every standing pass and (idempotently) drives BOTH hops:
+    //   1. enqueue ONE Vale pass if ≥1 in_review spec lacks a live spec-review job (deduped by
+    //      enqueueSpecReviewIfDue — no pile-up; never double-enqueues a spec that already has a live job);
+    //   2. run Ada's disposition sweep so a Vale-PASSED-but-undisposed spec advances in_review→planned even
+    //      when the spec-review job that set vale_pass crashed before reaching its inline dispose tail.
+    // Preserves the Vale quality gate + Ada disposition semantics — it never auto-passes; it just makes sure
+    // the review actually RUNS. Best-effort; both helpers are idempotent.
+    const { enqueueSpecReviewIfDue, selectInReviewSpecs } = await import("../src/lib/agents/spec-review");
+    const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
+    const inReview = await selectInReviewSpecs(db, job.workspace_id);
+    if (inReview.length) {
+      const enq = await enqueueSpecReviewIfDue(job.workspace_id);
+      if (enq.enqueued) notes.push(`spec-review backstop → enqueued Vale over ${enq.pending} in_review spec(s)`);
+      else if (enq.reason === "in-flight") notes.push(`spec-review backstop → Vale already in flight (${enq.pending} in_review)`);
+    }
+    // Always run the disposition sweep — it self-selects only Vale-passed, un-disposed candidates, so it's a
+    // no-op when there's nothing to advance and recovers a spec whose inline dispose tail never ran.
+    const dispo = await runAdaDispositionSweep(db, job.workspace_id);
+    if (dispo.same || dispo.downgraded || dispo.upgrade_proposed) {
+      notes.push(`spec-review backstop → disposed ${dispo.scanned}: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`);
+    }
+  } catch (e) {
+    notes.push(`spec-review backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing spec-review backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
     // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
     // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
@@ -3126,7 +3161,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // "all X" scan heartbeats (all triaged / all ordered / all covered / …) mean "I checked, nothing
     // NEW to do" — the actionable cases have their own meaningful notes ("re-ran N" / "escalated N").
     // A genuine park stays surfaced in the CEO's Approvals inbox, not re-announced on the board every pass.
-    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|all triaged|all ordered|drift: none|flipped 0|reverse-drift 0/i;
+    const QUIET = /nothing to advance|all covered|no board post|posted board watch|all healthy|: nothing|^🎯 active directive|^backlog: \d+ open|all fresh|all triaged|all ordered|drift: none|flipped 0|reverse-drift 0|Vale already in flight/i;
     const meaningful = notes.filter((n) => n && !QUIET.test(n));
     if (meaningful.length) {
       const directiveLine = notes.find((n) => /^🎯 active directive/.test(n));

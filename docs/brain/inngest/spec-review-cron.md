@@ -25,9 +25,21 @@ The cron does **not** dedupe itself — it delegates to `enqueueSpecReviewIfDue`
 
 _None._ The box polls [[../tables/agent_jobs]] and claims the row; there is no HTTP call into the box (it only reaches out — [[../recipes/build-box-setup]]).
 
+## Not the only trigger — the standing-pass backstop (2026-06-28)
+
+This cron is **no longer the single point of failure** for getting an `in_review` spec reviewed. Three enqueuers now feed `runSpecReviewJob`, in increasing reliability:
+
+1. **This Inngest cron** (`*/15`) — the original trigger. But it's an OUTSIDE-the-box signal that can silently miss (an Inngest sync/deploy reaps the function mid-tick, a transient run drops a beat, a workspace with no `agent_jobs` row is filtered out of its workspace scan).
+2. **The build claim-gate** (`scripts/builder-worker.ts`) — when a build job for an unreviewed spec is dispatched, the gate `enqueueSpecReviewIfDue` + holds the build until Vale passes. But it only fires when a BUILD job for that spec is actually queued — an `in_review` spec with `auto_build=false` (or one whose build hasn't been queued yet) never trips it.
+3. **The platform-director standing-pass backstop** ([[../libraries/platform-director]] `runPlatformDirectorStandingPass`) — the reliable heartbeat. Each pass, if ≥1 `in_review` spec lacks a live spec-review job it calls the SAME `enqueueSpecReviewIfDue` (deduped — no double-enqueue), then always runs `runAdaDispositionSweep` so a Vale-passed-but-undisposed spec advances `in_review→planned`. This is what guarantees a newly-authored spec gets reviewed even when (1) misses and (2) never applies (the 2026-06-28 `noop-pipeline-test-1` stall: 16h between cron-driven passes while a malformed in_review spec sat un-reviewed). Same standing-pass-heartbeat pattern as the Gate-A / pre-merge backstops.
+
+All three converge on `enqueueSpecReviewIfDue`'s one-in-flight dedupe, so they never pile up.
+
 ## Status / open work
 
 **✅ Shipped** (2026-06-25): registered in [[../libraries/control-tower]] `MONITORED_LOOPS` (id: `spec-review-cron`, kind: `cron`, owner: `platform`, window: 1h). Emits `loop_heartbeats` beats; the dashboard shows a tile in the every-15-min crons group; the Control Tower monitor watches for staleness.
+
+**✅ Standing-pass backstop** (2026-06-28): the spec-review enqueue + Ada disposition sweep now also run as a best-effort step of the platform-director standing pass — so a missed cron tick can no longer strand an `in_review` spec. See [[../libraries/platform-director]].
 
 ## Tables written
 
