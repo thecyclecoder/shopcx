@@ -2883,6 +2883,30 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // Gate A backstop — auto-merge ready ONE-OFF spec PRs straight to main. Mirrors the github-webhook's
+    // Gate-A hook so it runs in BOTH contexts (the webhook + this standing pass). WHY a standing-pass
+    // backstop is REQUIRED, not just nice-to-have: the GitHub webhook is only subscribed to `push` +
+    // `pull_request` events — NOT `check_suite`/`check_run`/`status`. A freshly-opened/synced build PR is
+    // usually still `mergeable_state: unknown/unstable` in the ~5s window `fetchReadyPr` polls during its
+    // open/sync event, so Gate A skips it; the event that LATER flips it to `clean` never arrives (those
+    // events aren't subscribed), so a one-off ready PR would otherwise sit forever (the 2026-06-28 #826/#827
+    // stall). Gates B/C already run here for the same reason; Gate A was the missing leg. Same guarded path
+    // as the webhook — kill-switched, sync-aware, SERIALIZED (≤1 merge/pass), build+tests+mergeable gated —
+    // so running it every standing pass is idempotent + best-effort. A goal-bound spec is handed off to B/C.
+    const { autoMergeReadyPrs } = await import("../src/lib/github-pr-resolve");
+    const am = await autoMergeReadyPrs(db);
+    if (am.merged && am.mergedPr) {
+      notes.push(`auto-merge → squash-merged 1 ready one-off PR (#${am.mergedPr})`);
+    } else if (am.ready > 0 && (am.buildGateBlocked || am.testsGateBlocked || am.accumulationBlocked || am.goalBoundBlocked)) {
+      notes.push(
+        `auto-merge → ${am.ready} ready, none merged (build-gate ${am.buildGateBlocked}, tests-gate ${am.testsGateBlocked}, accumulation ${am.accumulationBlocked}, goal-bound ${am.goalBoundBlocked})`,
+      );
+    }
+  } catch (e) {
+    notes.push(`auto-merge backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing auto-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
     // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
     // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
