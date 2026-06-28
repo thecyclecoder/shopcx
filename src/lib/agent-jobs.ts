@@ -657,6 +657,14 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
   const out: PreMergeBackstopResult = { specTestEnqueued: [], securityEnqueued: [], scanned: 0 };
   const admin = adminClient || createAdminClient();
   try {
+    // vault-security-review-loop-fix: pre-merge checks are an IN-FLIGHT-ONLY concern. A spec that has
+    // SHIPPED (its branch merged to main) or FOLDED (archived into the brain) no longer needs a pre-merge
+    // gate — its `claude/build-*` branch may still carry a READY preview, but re-running spec-test /
+    // security on it every standing pass is pure waste. This was the Vault re-review loop: a folded/shipped
+    // spec's stale READY-preview branch got a fresh security-review enqueued each pass, forever (observed on
+    // spec-test-request-fix-inline-author-and-approve + in-testing-board-and-lifecycle-timeline). The
+    // archived-slug set is built once up front so the per-branch test is a cheap lookup.
+    const archivedSlugs = new Set(await listArchivedSlugs());
     const { data: jobs } = await admin
       .from("agent_jobs")
       .select("workspace_id, spec_slug, spec_branch, preview_url, preview_state, pr_number, created_at")
@@ -681,6 +689,12 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
       // Only branches with a READY preview are testable. A null/BUILDING/ERROR preview defers (the spec-test
       // + security runners both probe the preview origin — no origin, nothing to test).
       if (j.preview_state !== "READY" || !j.preview_url) continue;
+      // vault-security-review-loop-fix: skip a spec that is no longer in-flight. Archived (folded) drops out
+      // by slug; shipped/folded drop out by DB status. Either way pre-merge gating is meaningless — the spec
+      // already merged/folded — so don't (re-)enqueue spec-test or security for it.
+      if (archivedSlugs.has(slug)) continue;
+      const specRow = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
+      if (specRow && (specRow.status === "shipped" || specRow.status === "folded")) continue;
       out.scanned++;
       try {
         const st = await maybeEnqueuePreMergeSpecTestOnAccumulation({
