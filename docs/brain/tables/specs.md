@@ -49,9 +49,10 @@ The card row for every spec — title, summary, owner, parent, blocked_by, prior
 
 - `in_review` and `folded` are terminal: the deriver returns them as-is (the disposition + the fold worker set them explicitly).
 - `deferred=true` wins over phase progress.
-- Otherwise: any phase `in_progress` or any `shipped` (but not all) → `in_progress`; all (ignoring `rejected`) `shipped` → `shipped`; no phases → `planned`.
+- Multi-phase: any phase `in_progress` or any `shipped` (but not all) → `in_progress`; all (ignoring `rejected`) `shipped` → `shipped`.
+- **Zero-phase (one-shot spec): the status derives from MERGE PROVENANCE, never the stored column.** `merged_pr` OR `last_merge_sha` set → `shipped`; both null → `planned`. The one-shot merge hook (`stampSpecMergeProvenance`) stamps `merged_pr`/`last_merge_sha` but NEVER advances `specs.status`, so reading the stored column here would leak a stale `planned` for a truly-shipped one-shot spec — the deriver reads provenance instead.
 
-Because the deriver always prefers the phase rollup, a stale `shipped` written while a phase is still `planned` is never displayed — closing the [[../specs/spec-review-agent]] "shipped with 1 phase" class at READ time rather than via a DB write constraint.
+Because the deriver always prefers the phase rollup (or, for a one-shot, the merge-provenance derivation), a stale `shipped`/`planned` on the stored column is never displayed — closing the [[../specs/spec-review-agent]] "shipped with 1 phase" class AND the one-shot "shipped-but-reads-planned" leak at READ time rather than via a DB write constraint.
 
 ## Reads / writes
 
