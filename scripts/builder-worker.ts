@@ -6640,9 +6640,25 @@ async function runTicketImproveJob(job: Job) {
       return;
     }
 
-    // No recognizable status → surface as an error turn the UI can retry.
-    await setSession({ turn_status: "error", last_error: "The box turn ended without a reply or plan. Try again." });
-    await update(job.id, { status: isError ? "failed" : "needs_attention", error: "improve turn produced no reply/plan", log_tail: raw.slice(-2000) });
+    // No recognizable verdict. If the agent actually produced output (prose, not a hard run error), it
+    // over-ran the single-turn envelope on a complex ticket (the Jill pricing+refund+coupon+import case,
+    // 2026-06-28) — surface a helpful reply so the turn never dead-ends with a bare error, and complete the
+    // job (not a park). A genuine run error stays retryable.
+    if (!isError) {
+      const fallback =
+        "This ticket is more complex than can be handled in a single-turn session — please have the owner review and action it directly.";
+      await setSession({
+        messages: [...messages, { role: "assistant", content: fallback }],
+        turn_status: "idle",
+        pending_plan: null,
+        last_error: null,
+      });
+      await update(job.id, { status: "completed", log_tail: improveLogTail.slice(-2000) });
+      return;
+    }
+    // Hard run error → keep it retryable, but with a clearer (non-bare) message.
+    await setSession({ turn_status: "error", last_error: "The session hit an error before finishing. Try again, or have the owner action this ticket directly." });
+    await update(job.id, { status: "failed", error: "improve turn errored with no reply/plan", log_tail: raw.slice(-2000) });
   } catch (e) {
     await setSession({ turn_status: "error", last_error: e instanceof Error ? e.message : String(e) });
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });

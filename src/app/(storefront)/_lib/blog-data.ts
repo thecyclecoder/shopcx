@@ -19,6 +19,20 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 
+/**
+ * Cache Components (Next 16) requires every `generateStaticParams` to return
+ * at least one param — an empty array is a hard build error
+ * (EmptyGenerateStaticParamsError). The build-time DB query can legitimately
+ * return zero rows (a fresh/empty workspace, or a transient query failure on a
+ * preview build), which would fail the build even though the route is a valid
+ * ISR route. So we fall back to a single sentinel param: it doesn't resolve to
+ * a real workspace/post, so the page renders `notFound()` at build time (a
+ * valid prerender), while real paths render on first request via ISR
+ * (`dynamicParams` defaults to true). Keeps the build green AND the running
+ * preview fully functional for spec-testing.
+ */
+export const STOREFRONT_PARAM_PLACEHOLDER = "__placeholder__";
+
 /** Fixed grouping vocabulary (mirrors the AI classifier) → display label.
  *  Order here is the order topics appear in the blog nav + index tabs. */
 export const BLOG_GROUPINGS: { key: string; label: string }[] = [
@@ -252,7 +266,10 @@ export async function listBlogWorkspaceParams(): Promise<
       .eq("published", true);
     if ((count || 0) > 0) params.push({ workspace: ws.storefront_slug });
   }
-  return params;
+  // Never return empty under Cache Components — see STOREFRONT_PARAM_PLACEHOLDER.
+  return params.length > 0
+    ? params
+    : [{ workspace: STOREFRONT_PARAM_PLACEHOLDER }];
 }
 
 /**
@@ -282,5 +299,13 @@ export async function listBlogPostParams(): Promise<
       params.push({ workspace: ws.storefront_slug, handle: p.handle });
     }
   }
-  return params;
+  // Never return empty under Cache Components — see STOREFRONT_PARAM_PLACEHOLDER.
+  return params.length > 0
+    ? params
+    : [
+        {
+          workspace: STOREFRONT_PARAM_PLACEHOLDER,
+          handle: STOREFRONT_PARAM_PLACEHOLDER,
+        },
+      ];
 }
