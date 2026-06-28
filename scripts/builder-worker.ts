@@ -12015,6 +12015,60 @@ async function dispatchJob(job: Job) {
       });
       console.log(`${tag} ✓ completed → ${pr.url}`);
       await chain();
+      // ⭐ PRE-MERGE TESTS AT ACCUMULATION-COMPLETE (fix: spec-test/security never fire on the resume-after-
+      // approval finalize path). The M3 spec-test + M2 security triggers fire from the success-PUSH path's
+      // preview-capture-READY callback — but a needs_approval phase commits its WIP DURING the pause and the
+      // approved RESUME only applies the migration (no new edits → the `!dirty` branch → finalizeBuiltPhase),
+      // so that push-path callback NEVER runs for the accumulation-completing phase. The branch tip didn't
+      // change at finalize, so the prior phase's poll doesn't re-fire either. Result: a fully-accumulated PR
+      // (e.g. noop-pipeline-test-4 / #837) sat `in_testing` forever with `spec_test_runs` EMPTY and no
+      // branch-mode security review — the auto-merge tests gate could never go green.
+      //
+      // So the MOMENT accumulation completes + the real PR is open, capture the branch tip's preview onto THIS
+      // job row and (on READY) enqueue BOTH pre-merge triggers against it. Fire-and-forget (the preview may
+      // still be BUILDING — a worker-lived poll outlives this runJob, matching the push-path poll); the
+      // standing-pass backstop is the safety net if this worker restarts before READY. Idempotent end-to-end:
+      // capturePreviewUrlForJob only advances the row forward, and the enqueue helpers dedupe per
+      // (workspace, slug, branch). Best-effort — a trigger hiccup must never fail an otherwise-good build.
+      if (branch && branch.startsWith("claude/") && opts.headSha) {
+        const finalizeBranch = branch;
+        const finalizeSha = opts.headSha;
+        const finalizePr = pr.number;
+        void (async () => {
+          try {
+            const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
+            const capture = await pollCapturePreviewUrl(
+              { jobId: job.id, branch: finalizeBranch, commitSha: finalizeSha },
+              { log: (m) => console.log(`${tag} [finalize] ${m}`) },
+            );
+            if (capture.previewState === "READY" && capture.previewUrl) {
+              const { maybeEnqueuePreMergeSpecTestOnAccumulation, maybeEnqueuePreMergeSecurityOnAccumulation } =
+                await import("../src/lib/agent-jobs");
+              const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
+                workspaceId: job.workspace_id,
+                slug,
+                branch: finalizeBranch,
+                previewUrl: capture.previewUrl,
+              });
+              console.log(
+                `${tag} [finalize] M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
+              );
+              const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
+                workspaceId: job.workspace_id,
+                slug,
+                branch: finalizeBranch,
+                previewUrl: capture.previewUrl,
+                prNumber: finalizePr,
+              });
+              console.log(
+                `${tag} [finalize] M2 pre-merge security trigger: ${sec.enqueued ? "enqueued" : "skipped"}${sec.reason ? ` (${sec.reason})` : ""}`,
+              );
+            }
+          } catch (e) {
+            console.error(`${tag} [finalize] pre-merge trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
+          }
+        })();
+      }
     };
 
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.

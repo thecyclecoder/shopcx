@@ -667,18 +667,20 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
     const archivedSlugs = new Set(await listArchivedSlugs());
     const { data: jobs } = await admin
       .from("agent_jobs")
-      .select("workspace_id, spec_slug, spec_branch, preview_url, preview_state, pr_number, created_at")
+      .select("id, workspace_id, spec_slug, spec_branch, preview_url, preview_state, pr_number, pr_url, created_at")
       .eq("kind", "build")
       .not("spec_branch", "is", null)
       .order("created_at", { ascending: false });
     const seen = new Set<string>();
     for (const j of (jobs ?? []) as Array<{
+      id: string;
       workspace_id: string;
       spec_slug: string;
       spec_branch: string;
       preview_url: string | null;
       preview_state: string | null;
       pr_number: number | null;
+      pr_url: string | null;
     }>) {
       const slug = j.spec_slug;
       const branch = j.spec_branch;
@@ -686,22 +688,55 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
       const key = `${j.workspace_id}:${slug}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      // Only branches with a READY preview are testable. A null/BUILDING/ERROR preview defers (the spec-test
-      // + security runners both probe the preview origin — no origin, nothing to test).
-      if (j.preview_state !== "READY" || !j.preview_url) continue;
       // vault-security-review-loop-fix: skip a spec that is no longer in-flight. Archived (folded) drops out
       // by slug; shipped/folded drop out by DB status. Either way pre-merge gating is meaningless — the spec
-      // already merged/folded — so don't (re-)enqueue spec-test or security for it.
+      // already merged/folded — so don't (re-)enqueue spec-test or security for it. (Checked BEFORE the
+      // preview-state branch so the no-preview RECOVERY path below also honours it.)
       if (archivedSlugs.has(slug)) continue;
       const specRow = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
       if (specRow && (specRow.status === "shipped" || specRow.status === "folded")) continue;
+
+      let previewUrl = j.preview_url;
+      // ⭐ NO-CAPTURED-PREVIEW RECOVERY (fix: a resume-after-approval finalize never captures the branch tip's
+      // preview, so its build row carries no READY preview and the READY-only scan below skips it forever —
+      // the noop-pipeline-test-4 / #837 stall). When the LATEST build row for an in-flight spec has no READY
+      // preview, this is the case the push-path poll missed: capture the branch tip's preview onto THIS row
+      // ON DEMAND, then fall through to the normal trigger. Gated tight so we don't hammer Vercel every pass:
+      // only when the spec is FULLY ACCUMULATED, has an OPEN PR, and has NO spec-test run yet for this branch
+      // (and no in-flight spec-test job — enqueuePreMergeSpecTest dedupes that, but we also skip the Vercel
+      // call when a run already exists). Idempotent: capturePreviewUrlForJob only advances the row forward.
+      if (j.preview_state !== "READY" || !previewUrl) {
+        try {
+          if (!j.pr_url && !j.pr_number) continue; // no open PR → not yet at the accumulation-complete gate
+          const acc = await isSpecAccumulationComplete(j.workspace_id, slug);
+          if (!acc.complete) continue; // still accumulating → the push-path poll will fire when the last phase lands
+          // Already have a spec-test run for this branch? Then a preview was captured at least once and the
+          // normal lane is handling it — no need to re-poll Vercel. (A missing run is the #837 signature.)
+          const { data: existingRun } = await admin
+            .from("spec_test_runs")
+            .select("id")
+            .eq("workspace_id", j.workspace_id)
+            .eq("spec_slug", slug)
+            .eq("spec_branch", branch)
+            .limit(1);
+          if (existingRun && existingRun.length) continue;
+          const { capturePreviewUrlForJob } = await import("@/lib/preview-capture");
+          const cap = await capturePreviewUrlForJob({ jobId: j.id, branch, commitSha: null });
+          if (cap.previewState !== "READY" || !cap.previewUrl) continue; // preview not READY yet → next pass
+          previewUrl = cap.previewUrl;
+          console.log(`[pre-merge-backstop] captured missing preview for ${branch} → ${cap.previewUrl}`);
+        } catch (e) {
+          console.warn(`[pre-merge-backstop] preview recovery for ${branch} failed (skipping):`, e instanceof Error ? e.message : e);
+          continue;
+        }
+      }
       out.scanned++;
       try {
         const st = await maybeEnqueuePreMergeSpecTestOnAccumulation({
           workspaceId: j.workspace_id,
           slug,
           branch,
-          previewUrl: j.preview_url,
+          previewUrl,
         });
         if (st.enqueued) out.specTestEnqueued.push(branch);
       } catch {
@@ -712,7 +747,7 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
           workspaceId: j.workspace_id,
           slug,
           branch,
-          previewUrl: j.preview_url,
+          previewUrl,
           prNumber: j.pr_number,
         });
         if (sec.enqueued) out.securityEnqueued.push(branch);
