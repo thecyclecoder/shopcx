@@ -12,6 +12,16 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Short-circuit no-op frequency changes before they hit Appstle** · verified 2026-06-27 · → [[../libraries/appstle]]
+- **createFullReturn: guard null Shopify mirror** · verified 2026-06-27 · → [[../libraries/control-tower]]
+- **`in_testing` derived PM status** · verified 2026-06-27 · → [[../libraries/brain-roadmap]]
+- **Per-build Vercel preview deploys** · verified 2026-06-27 · → [[../libraries/vercel-project]]
+- **Portal route: don't console.error expected 401 auth-misses** · verified 2026-06-27 · → [[../libraries/control-tower]]
+- **Extend proxy bot-UA neutralization to DOM bots** · verified 2026-06-27 · → [[../libraries/control-tower]]
+- **Pre-merge security-test against the per-build preview** · verified 2026-06-27 · → [[../libraries/security-agent]]
+- **Swap spec-audit's phase roster read to the SDK** · verified 2026-06-27 · → [[../libraries/specs-table]]
+- **Pre-merge spec-test against the per-build preview** · verified 2026-06-27 · → [[../libraries/spec-test-runs]]
+- **Auto-heal Vercel Ignored-Build-Step override drift on box-worker tick** · verified 2026-06-27 · → [[../integrations/vercel]]
 - **Acquisition Research Hub — one surface for sets + findings + gap queue** · verified 2026-06-26 · → [[libraries/acquisition-hub]]
 - **Acquisition Research — continuous loop + grading** · verified 2026-06-26 · → [[libraries/acquisition-gap-grader]]
 - **Ad Creative Scout — DB-fed sweep + capture EVERYTHING + ad-gap layer** · verified 2026-06-26 · → [[libraries/ad-gap]]
