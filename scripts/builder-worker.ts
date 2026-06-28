@@ -2963,6 +2963,29 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing spec-review backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // PHASE-PROGRESSION backstop (Ada's spec-shepherding heartbeat) — advance a multi-phase spec P1→P2→…→Pn
+    // so a spec never stalls mid-accumulation. WHY a standing-pass backstop is REQUIRED, not just nice-to-have:
+    // after phase N branch-builds, the PRIMARY trigger for phase N+1 is the REACTIVE chain
+    // (`queueNextChainedPhase`, fired from runBuildJob the instant the build completes) — but that's EVENT-ONLY
+    // (the same Gate-A / pre-merge / spec-review fragility): a worker crash between build-complete and the chain
+    // insert, a director-initiated single build with the chain off, or a transient DB hiccup leaves the spec
+    // half-accumulated. The only other advancer is the GROOM lane's CONTINUE verdict — but grooming is a Max
+    // `claude -p` JUDGMENT lane (capacity-gated, `alreadyGroomed`-deduped, can decline to continue), so it's
+    // not a reliable heartbeat. This is the cheap, un-gated, always-runs mechanical advance: scan every
+    // partially-built spec Ada drives whose NEXT planned phase has no live build, and REUSE
+    // `queueNextChainedPhase` (workspace-correct; picks the lowest planned phase = accumulation order; dedupes
+    // on scoped-instruction + in-flight build) to queue it onto `claude/build-{slug}`. Respects the spec-review
+    // gate (never advances an un-Vale-passed spec), one-phase-per-session, and the active-build dedupe.
+    // Idempotent + best-effort; never throws.
+    const prog = await lib.backstopPhaseProgression(db);
+    if (prog.advanced.length) {
+      notes.push(`phase-progression backstop → advanced next phase for ${prog.advanced.length} spec(s): ${prog.advanced.join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`phase-progression backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing phase-progression backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
     // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
     // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
