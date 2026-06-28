@@ -1329,10 +1329,15 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
  * Returns the queued phase title, or null (chain done / nothing to queue). Best-effort; never throws.
  */
 export async function queueNextChainedPhase(workspaceId: string, slug: string): Promise<string | null> {
-  const spec = await getSpec(slug);
+  // Read the spec IN THE JOB'S workspace (not the default-workspace fallback): a built phase carries a
+  // build_sha and reads `in_progress` in the DB, so the next ⏳ is the first phase that is still `planned`.
+  // Passing workspaceId is load-bearing — the branch-build chain advance (E3) fires for a spec in a
+  // non-default workspace (e.g. the noop-pipeline test in fdc11e10-…), where getSpec(slug) alone would
+  // resolve the WRONG workspace and find no/incorrect phases.
+  const spec = await getSpec(slug, workspaceId);
   if (!spec) return null;
   const next = spec.card.phases.find((p) => p.status === "planned");
-  if (!next) return null; // no ⏳ phase left → the chain is complete (all phases ✅)
+  if (!next) return null; // no ⏳ phase left → the chain is complete (all phases ✅/built)
   const scoped = phaseScopedInstructions(next.title);
 
   const admin = createAdminClient();
