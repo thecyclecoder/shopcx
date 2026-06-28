@@ -52,3 +52,26 @@ export function isCardFullyShippedWithProvenance(
 export function provenanceShippedCount(card: Pick<SpecCard, "phases">): number {
   return card.phases.filter(phaseHasProvenance).length;
 }
+
+/**
+ * spec-goal-branch-pm-flow M2 — true iff this phase has BUILT on the spec branch: it carries a `build_sha`
+ * (stampPhaseBuilt recorded the `claude/build-{slug}` commit) OR it already shipped to main (which subsumes
+ * "built"). Under M1's branch-accumulation model a phase reaches "built" LONG before it gets the main-merge
+ * `pr` tag (M5 stamps `pr`/shipped only on promotion), so the "is this phase done building?" question can no
+ * longer be answered by `phaseHasProvenance` (which keys off `pr`) alone — it would read 0 for an entire
+ * branch-flow spec and stall the next-phase advance. This is the branch-flow counterpart.
+ */
+export function phaseBuiltOnBranch(p: Pick<SpecPhase, "status" | "build_sha">): boolean {
+  if (p.status === "shipped") return true; // shipped subsumes built (a shipped phase was built first)
+  return (p.build_sha ?? null) !== null;
+}
+
+/**
+ * spec-goal-branch-pm-flow M2 — how many phases have BUILT (on the branch or shipped to main). The
+ * branch-flow counterpart to {@link provenanceShippedCount}: use it where the answer means "≥1 phase is done
+ * building so the spec is STARTED/partially-built" (e.g. the grooming next-phase candidate filter), which
+ * must now trigger off branch-build, not the main-merge `pr` tag.
+ */
+export function branchBuiltCount(card: Pick<SpecCard, "phases">): number {
+  return card.phases.filter(phaseBuiltOnBranch).length;
+}

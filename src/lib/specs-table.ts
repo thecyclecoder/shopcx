@@ -41,6 +41,10 @@ export interface SpecPhaseRow {
   status: Phase;
   pr: number | null;
   merge_sha: string | null;
+  /** spec-goal-branch-pm-flow M2 — the `claude/build-{slug}` spec-branch commit SHA where this phase BUILT
+   *  (stampPhaseBuilt). Set when the phase builds on the branch; distinct from `merge_sha` (the M5
+   *  main-promotion stamp). A phase with `build_sha` set but `status !== 'shipped'` is built-on-branch. */
+  build_sha: string | null;
   verification: string | null;
   created_at: string;
   updated_at: string;
@@ -174,7 +178,7 @@ interface SpecRowDb {
 const SPEC_COLUMNS =
   "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, milestone_id, merged_pr, last_merge_sha, created_at, updated_at";
 const PHASE_COLUMNS =
-  "id, spec_id, position, title, body, status, pr, merge_sha, verification, created_at, updated_at";
+  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, created_at, updated_at";
 
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   return {
@@ -427,6 +431,64 @@ export async function stampPhaseShipped(
       updated_at: new Date().toISOString(),
     })
     .eq("spec_id", (spec as { id: string }).id)
+    .eq("position", position);
+  if (error) throw error;
+}
+
+/**
+ * Stamp a phase's BRANCH-BUILD provenance — spec-goal-branch-pm-flow M2. Records the `build_sha` (the
+ * `claude/build-{slug}` spec-branch commit where this phase was built) WITHOUT shipping it. This is the
+ * branch-flow counterpart to `stampPhaseShipped`: M1 made phases accumulate on a persistent spec branch
+ * (one commit per phase, no per-phase main merge), so "built on the branch" is now an earlier, distinct
+ * state from "shipped to main".
+ *
+ * Sets `build_sha` and moves the phase to `in_progress` (built — NOT shipped). It NEVER writes
+ * `status='shipped'` or `merge_sha`: those stay reserved for the main-promotion stamp (M5 flips a
+ * build_sha'd phase to shipped when the spec/goal branch lands on main). A no-op-on-shipped guard keeps it
+ * from regressing a phase that already promoted (M5 ran first / a re-dispatch raced) — never overwrite a
+ * `shipped`/`rejected` phase. The `build_sha` itself is always refreshed to the latest spec-branch commit
+ * (a re-build of the same phase advances the tip), so the chaining trigger reads the current "built" SHA.
+ *
+ * No raw PM SQL — this is the only writer for `spec_phases.build_sha` (the pm-db-agent-toolkit invariant /
+ * `_check-pm-sdk-compliance` guard). The post-2026-07-25 readers derive status purely (the rollup triggers
+ * are gone), so this leaf write is inert to status derivation beyond the `in_progress` it sets.
+ */
+export async function stampPhaseBuilt(
+  workspaceId: string,
+  slug: string,
+  position: number,
+  provenance: { build_sha: string | null },
+): Promise<void> {
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) throw new Error(`stampPhaseBuilt: no spec '${slug}' in workspace ${workspaceId}`);
+  const specId = (spec as { id: string }).id;
+  // Read the current phase status so we never regress a promoted phase back to in_progress. A phase that's
+  // already shipped/rejected keeps its terminal status — we don't even refresh build_sha there (it's done).
+  const { data: phase, error: pErr } = await admin
+    .from("spec_phases")
+    .select("status")
+    .eq("spec_id", specId)
+    .eq("position", position)
+    .maybeSingle();
+  if (pErr) throw pErr;
+  if (!phase) return; // no such phase (one-shot/single-phase spec with a mismatched position) — no-op
+  const status = (phase as { status: string }).status;
+  if (status === "shipped" || status === "rejected") return; // terminal — never regress
+  const { error } = await admin
+    .from("spec_phases")
+    .update({
+      status: "in_progress", // built on the branch — NOT shipped (merge_sha/shipped stay for M5 promotion)
+      build_sha: provenance.build_sha,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("spec_id", specId)
     .eq("position", position);
   if (error) throw error;
 }
