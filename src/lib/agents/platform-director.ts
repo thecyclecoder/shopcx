@@ -166,6 +166,19 @@ export function platformDrivesSpec(owner: string | null | undefined, chart: OrgC
 }
 
 /**
+ * no-max-on-unreviewed-specs (PRIMARY): true iff a spec has PASSED Vale spec-review and is therefore safe to
+ * QUEUE A BUILD for. The same durable signal the claim-time build gate tests (`card.valeReviewPassed`, read
+ * off `specs.vale_review_passed_at` — NOT the transient `valePass` Ada's disposition consumes). An already
+ * SHIPPED spec is past review by construction. Every Ada build-enqueue lane (the escorts + the init lane) gates
+ * on this BEFORE it inserts a `kind:"build"` row — so an `in_review` / never-Vale-passed spec never gets a build
+ * job created, and Bo never claims it + burns a Max session on the after-the-fact claim-gate bounce. The
+ * claim-time gate stays the backstop; this is the front door that stops the job from ever existing.
+ */
+export function specReviewDone(card: Pick<SpecCard, "valeReviewPassed" | "status">): boolean {
+  return card.valeReviewPassed === true || card.status === "shipped";
+}
+
+/**
  * The director's AUTHORITATIVE live-state, rendered as a prompt block — sourced from `public.function_autonomy`
  * (the SAME DB row the lanes' runtime guards gate on), NOT brain prose (brain-platform-live-autonomous-status
  * Phase 2 — the recurrence guard). Every read-only `claude -p` investigation (approval / groom / init /
@@ -618,6 +631,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
         continue;
       }
       if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
+      if (!specReviewDone(card)) continue; // no-max-on-unreviewed-specs (PRIMARY): never queue a build for an in_review / un-vale-passed spec — Vale must pass it first or the claim-gate just bounces it after a Max session was already spun up
       if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
@@ -767,6 +781,7 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
       continue;
     }
     if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
+    if (!specReviewDone(card)) continue; // no-max-on-unreviewed-specs (PRIMARY): a fix spec authored straight to planned still needs Vale's pass before a build is queued — else the claim-gate bounces it after a Max session was already spun up
     if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
@@ -1087,6 +1102,14 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
       continue;
     }
     if (card.status === "deferred") {
+      result.skipped++;
+      continue;
+    }
+    if (!specReviewDone(card)) {
+      // no-max-on-unreviewed-specs (PRIMARY): the escort sweep's queued_build / failed_retry lanes insert a
+      // build job. Never queue one for an in_review / un-vale-passed spec — Vale must pass it first, else the
+      // claim-gate just bounces the build after Bo already spun up a Max session. (Bo's claim-selection hard-skip
+      // is the backstop.)
       result.skipped++;
       continue;
     }
@@ -3441,6 +3464,7 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
       // spec "unstarted" and risk the init lane re-queuing it. `branchBuiltCount === 0` recognizes the
       // branch-built phase as started. (The per-candidate `state.inFlight` check below also dedups.)
       branchBuiltCount(s) === 0 && // unstarted — no phase built on the branch or shipped (tagless ✅ doesn't count)
+      specReviewDone(s) && // no-max-on-unreviewed-specs (PRIMARY): NEVER init a spec that hasn't passed Vale spec-review — an in_review / un-vale-passed spec would queue a build (and run a Max soundness investigation) only to be bounced at the claim-gate, burning a Max session each pass. Vale must pass it first.
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
       platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it ("first live boss else up")
