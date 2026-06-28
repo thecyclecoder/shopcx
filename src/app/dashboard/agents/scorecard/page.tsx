@@ -78,7 +78,7 @@ const SECTIONS: Array<{ cadence: Cadence; title: string; subtitle: string; defs:
   {
     cadence: "daily",
     title: "Daily pulse",
-    subtitle: "Current-state KPIs + today's flow",
+    subtitle: "KPIs over the last full UTC day.",
     defs: DAILY_DISPLAY,
   },
   {
