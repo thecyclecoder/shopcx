@@ -3127,6 +3127,130 @@ export async function findGroomCandidates(admin: Admin): Promise<GroomCandidate[
   return out;
 }
 
+/** What the phase-progression backstop did this pass (per-spec advance outcomes). */
+export interface PhaseProgressionResult {
+  /** spec slugs whose NEXT planned phase was queued onto `claude/build-{slug}` this pass. */
+  advanced: string[];
+  /** spec slugs that were candidates (≥1 phase built, ≥1 planned, no active build) but `queueNextChainedPhase`
+   *  no-op'd — already in-flight / dedup hit / nothing planned (the common idempotent case). */
+  skipped: string[];
+  /** candidate specs scanned (partially-built + driver-scoped). */
+  scanned: number;
+}
+
+/**
+ * PHASE-PROGRESSION BACKSTOP — Ada's mechanical heartbeat that shepherds a multi-phase spec P1→P2→…→Pn to
+ * completion. This is the reliable-heartbeat half of Ada's spec-shepherding role (the brain doc): the
+ * REACTIVE chain (`queueNextChainedPhase`, fired from runBuildJob the instant phase N's branch-build
+ * completes) is the PRIMARY trigger; this standing-pass backstop guarantees the spec never stalls
+ * mid-accumulation if that reactive chain MISSES (a worker crash between build-complete and the chain
+ * insert, a director-initiated single build with the chain off, a transient DB hiccup).
+ *
+ * WHY a standing-pass backstop is REQUIRED, not just nice-to-have — the SAME event-only fragility Gate-A,
+ * the pre-merge legs, and the spec-review backstop each had: the only other thing that advances P_{N+1}
+ * after P_N builds is (a) the reactive chain (event-only — misses on a crash/transient) and (b) the GROOM
+ * lane (`findGroomCandidates` → CONTINUE) — but grooming is a Max `claude -p` JUDGMENT lane: it's
+ * capacity-gated (`idleBuildCapacity`), deduped by `alreadyGroomed` (a prior split/escalate verdict
+ * suppresses it from re-firing), and can legitimately decline to continue. So a spec whose reactive chain
+ * missed AND whose groom verdict wasn't "continue" would sit half-accumulated forever. This is the cheap,
+ * un-gated, always-runs heartbeat that closes that gap — no Max investigation, pure mechanical advance.
+ *
+ * The advance itself REUSES `queueNextChainedPhase` (the existing, workspace-correct chain helper) — it does
+ * NOT reinvent the queueing. That helper:
+ *   - reads the spec's DERIVED phases via `getSpec(slug, workspaceId)` and picks the FIRST `planned` phase
+ *     → ACCUMULATION ORDER (the lowest un-built planned phase) is structurally guaranteed;
+ *   - DEDUPES on the scoped-instruction match (never re-queues a phase already queued) AND on any in-flight
+ *     build for the spec (never stacks on a concurrent build) → never double-queues a phase in flight;
+ *   - inserts the next phase as a `chain_phases:true` queued build on the spec's `claude/build-{slug}` branch
+ *     (create-or-extend checks out the existing branch tip), and no-ops when no planned phase remains.
+ *
+ * RESPECTS, in addition to the helper's own guards:
+ *   - the spec-review gate — `specReviewDone(card)` is the SAME `vale_review_passed_at`-backed durable signal
+ *     every other Ada build-enqueue lane gates on; an `in_review` / un-Vale-passed spec is NEVER advanced;
+ *   - one-phase-per-session scoping — we advance exactly ONE next phase per spec (`queueNextChainedPhase`
+ *     queues a single `phaseScopedInstructions` phase, which the worker builds and then chains the next);
+ *   - the driver keystone — only specs THIS director drives (`platformDrivesSpec`), the same scope as every
+ *     other lane; another live department-director's spec is left to that director;
+ *   - blocked / opted-out / deferred / fully-shipped specs are skipped (mirrors the escort + groom filters).
+ *
+ * Idempotent + best-effort: a no-op when there's nothing to advance, swallows per-spec errors, never throws.
+ * Dormant until Platform is live+autonomous (like every other lane). Runs every standing pass — cheap (one
+ * roadmap read + a per-candidate build-state probe), so re-running it each pass is safe.
+ */
+export async function backstopPhaseProgression(admin: Admin): Promise<PhaseProgressionResult> {
+  const empty: PhaseProgressionResult = { advanced: [], skipped: [], scanned: 0 };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+  const chart = await buildOrgChartGraph();
+
+  const { queueNextChainedPhase } = await import("@/lib/agent-jobs");
+  const result: PhaseProgressionResult = { ...empty };
+
+  let specs: SpecCard[];
+  try {
+    ({ specs } = await getRoadmap());
+  } catch {
+    return result; // a PM-read blip — the reactive chain + groom lane backstop us; never throw
+  }
+
+  // Candidate = a multi-phase spec the director drives that is PARTIALLY accumulated: ≥1 phase BUILT on the
+  // branch (build_sha or shipped — branchBuiltCount, the M2 branch-flow signal) AND ≥1 phase still planned
+  // (a next phase to advance). Same partial-built predicate the groom candidate filter uses, minus the
+  // capacity/Max gates — this is the mechanical heartbeat, so it has none.
+  const partial = specs.filter(
+    (s) =>
+      !isCardFullyShippedWithProvenance(s) && // already done — nothing to advance
+      s.status !== "deferred" && // parked — never advance a deferred spec (mirrors groom/init)
+      s.status !== "shipped" && // a tagless-but-shipped rollup: the drift lanes handle it, not us
+      specReviewDone(s) && // spec-review gate — NEVER advance an un-Vale-passed / in_review spec
+      s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
+      !s.blockedBy.some((b) => !b.cleared) && // still blocked → its auto-queue fires when the last blocker ships
+      platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it
+      branchBuiltCount(s) >= 1 && // ≥1 phase BUILT on the branch (build_sha) or shipped — the spec is STARTED
+      s.counts.planned >= 1, // ≥1 planned phase remains → there is a next phase to advance
+  );
+  result.scanned = partial.length;
+
+  for (const s of partial) {
+    try {
+      // DEDUPE (precise): never advance a spec with an ACTIVE build job — a queued/building/needs_* build is
+      // already carrying the next phase. A LANDED (completed/merged) build does NOT block: that's exactly the
+      // case the reactive chain may have missed (its post-complete `queueNextChainedPhase` never ran), so we
+      // advance. `queueNextChainedPhase` ALSO re-checks in-flight + scoped-instruction dedup internally, so
+      // this is the first of two dedup gates (cheap pre-filter + the helper's authoritative check).
+      const bs = await specBuildState(admin, workspaceId, s.slug);
+      if (bs.activeBuild) {
+        result.skipped.push(s.slug);
+        continue;
+      }
+      // REUSE the existing chain helper — it picks the FIRST planned phase (accumulation order), dedupes, and
+      // queues exactly one `chain_phases` phase onto `claude/build-{slug}`. Returns the queued phase title, or
+      // null (already in-flight / nothing planned → the idempotent no-op).
+      const queued = await queueNextChainedPhase(workspaceId, s.slug);
+      if (queued) {
+        result.advanced.push(s.slug);
+        // Log the autonomous advance so the board + recap reflect that Ada shepherded this phase.
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: PLATFORM,
+          actionKind: "escorted",
+          specSlug: s.slug,
+          reason: `phase-progression backstop: reactive chain missed — advanced next phase "${queued}" to keep ${s.slug} accumulating to completion.`,
+          metadata: { lane: "phase_progression_backstop", phase: queued, autonomous: true },
+        }).catch(() => {});
+      } else {
+        result.skipped.push(s.slug);
+      }
+    } catch {
+      // best-effort per spec — one spec's failure never blocks the rest (the reactive chain + groom backstop)
+      result.skipped.push(s.slug);
+    }
+  }
+  return result;
+}
+
 /** The Max `claude -p` grooming prompt — read-only assess one partially-shipped spec → one JSON verdict. */
 export function groomInvestigationPrompt(c: GroomCandidate): string {
   return [
