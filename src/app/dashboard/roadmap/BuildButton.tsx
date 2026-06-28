@@ -249,7 +249,11 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   // The server re-checks branch-exists-on-origin; this is the cheap card-side gate to offer Create PR.
   const recoverable =
     job?.kind === "build" && job.status === "needs_attention" && job.error === PR_CREATE_FAILED_ERROR && !!job.spec_branch;
-  const canMerge = !!job?.pr_number && job.status === "completed" && !merged;
+  // spec-goal-branch-pm-flow fix: the manual squash-merge only surfaces once the spec is in_testing — i.e.
+  // ALL phases have accumulated on the branch (gated in applyInTestingOverlay). A single built phase (P1)
+  // whose build completed + opened the PR must NOT surface the merge action while later phases are still
+  // planned/building. (Auto-merge additionally requires spec-test + security green via isSpecPromoteEligible.)
+  const canMerge = !!job?.pr_number && job.status === "completed" && !merged && specStatus === "in_testing";
   // Verify is the owner-only "I tested it in prod" gate, offered only on shipped specs with no live build
   // and not already in a fold batch.
   const canVerify = specStatus === "shipped" && !active && !merged && !folding;
