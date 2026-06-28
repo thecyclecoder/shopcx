@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyGithubWebhook, detectAndEnqueueDirtyPrs, autoMergeReadyPrs } from "@/lib/github-pr-resolve";
+import { promoteEligibleSpecsToGoalBranch } from "@/lib/agent-jobs";
 
 /**
  * GitHub webhook → Dirty-PR Resolver Agent trigger (docs/brain/specs/dirty-pr-resolver-agent.md).
@@ -86,7 +87,25 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({ ok: true, ...dirty, autoMerge });
+    // Gate B — spec-goal-branch-pm-flow M4: promote every goal-bound, promote-eligible spec branch onto its
+    // goal branch (`goal/{goal-slug}`), sequenced by blocked_by. Independent of the auto-merge gate; a failure
+    // in one must not block the other. Uses the GitHub /merges API (no local checkout) so it runs here AND in
+    // the box worker standing pass. Does NOT push the goal branch to main (M5 owns that).
+    let goalPromote: Awaited<ReturnType<typeof promoteEligibleSpecsToGoalBranch>> | undefined;
+    if (mergeRelevant) {
+      try {
+        goalPromote = await promoteEligibleSpecsToGoalBranch();
+        if (goalPromote.promoted.length || goalPromote.conflicts.length || goalPromote.goalBranchesCreated.length) {
+          console.log(
+            `[github-webhook] ${event}: goal-promote merged ${goalPromote.promoted.length} (${goalPromote.promoted.join(", ") || "—"}), seeded ${goalPromote.goalBranchesCreated.length} goal branch(es), ${goalPromote.conflicts.length} conflict(s)${goalPromote.conflicts.length ? ` (${goalPromote.conflicts.join(", ")})` : ""}`,
+          );
+        }
+      } catch (err) {
+        console.error("[github-webhook] goal-branch promote failed:", err);
+      }
+    }
+
+    return NextResponse.json({ ok: true, ...dirty, autoMerge, goalPromote });
   } catch (err) {
     console.error("[github-webhook] dirty-PR detection failed:", err);
     return NextResponse.json({ error: "Processing failed" }, { status: 500 });

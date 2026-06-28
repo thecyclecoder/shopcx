@@ -55,6 +55,24 @@ async function isSpecPromoteEligible(workspaceId, slug, branch): Promise<SpecPro
 
 The **promote-eligibility signal M4 (spec→goal merge) consumes** — read-only, performs NO action. A branch-flow spec's `claude/build-{slug}` branch is promote-eligible iff ALL THREE hold: **(1) accumulation-complete** (M2 — [[specs-table]] `isSpecAccumulationComplete`), **(2) spec-test green on the branch preview** (M3 — [[spec-test-runs]] `isSpecTestGreenForBranch`, the latest pre-merge `spec_test_runs` row for `(workspace, slug, branch)` is a clean machine pass), **(3) security green on the branch** ([[security-agent]] `isSecurityGreenForBranch` — `completedClean`). These are the SAME three signals the [[github-pr-resolve]] auto-merge gate enforces inline AND the SAME spec-test/security predicates [[brain-roadmap]] `applyInTestingOverlay` derives `in_testing` from — so the board, the auto-merge gate, and this helper can never disagree on "is the spec done testing?". **Fails CLOSED on the green signals** (read error / absent run ⇒ not-green ⇒ not eligible); the accumulation input fails OPEN (a PM-read blip doesn't wedge an otherwise-green spec — the green signals still gate the actual promotion). `reason` explains WHY a spec isn't yet eligible.
 
+### `promoteEligibleSpecsToGoalBranch` — function  *(spec-goal-branch-pm-flow M4 — the spec→goal merge)*
+
+```ts
+interface GoalBranchPromoteResult { promoted: string[]; conflicts: string[]; goalBranchesCreated: string[]; skipped: string[]; }
+async function promoteEligibleSpecsToGoalBranch(adminClient?): Promise<GoalBranchPromoteResult>
+```
+
+The **spec→goal-branch promotion poll** — the M4 integration. For every GOAL-BOUND spec that is `isSpecPromoteEligible` (M3 seam — accumulation ∧ spec-test-green ∧ security-green on its `claude/build-{slug}` branch) and not yet on its goal branch (`goal_branch_sha` unset), it merges that branch into **`goal/{goal-slug}`** (created from `origin/main` by the FIRST spec of the goal — that spec SEEDS it) and stamps `specs.goal_branch_sha` with the merge commit (via [[specs-table]] `stampSpecGoalBranchSha` — the M5 seam). Uses the GitHub `/merges` API ([[github-pr-resolve]] `mergeSpecBranchIntoGoalBranch`) — **no local checkout** — so it runs identically from the box worker standing pass AND the [[../integrations/github]] webhook (mirroring `autoMergeReadyPrs`). **Merges are sequenced by `blocked_by`** (`sequencePromoteCandidates`, a Kahn topo-sort over goal-mate edges) so a dependency lands on the goal branch before its dependent — which then BUILDS off the goal branch (`runBuildJob` Part 2), seeing the dependency's code. ONE merge per spec (idempotent — already-stamped specs skip; the `/merges` 204 path is idempotent). **Does NOT push the goal branch to main** (that's M5's atomic goal→main promotion). **Conflicts are surfaced** (`conflicts[]`), never silently dropped. Best-effort per spec; never throws.
+
+### `resolveGoalSlugForSpec` / `areSpecsGoalMates` — functions  *(spec-goal-branch-pm-flow M4)*
+
+```ts
+async function resolveGoalSlugForSpec(workspaceId, slug): Promise<string | null>
+async function areSpecsGoalMates(workspaceId, slugA, slugB): Promise<boolean>
+```
+
+`resolveGoalSlugForSpec` resolves the GOAL a spec belongs to via `specs.milestone_id → goal_milestones.goal_id → goals.slug` (null = one-off / not goal-bound). `areSpecsGoalMates` = both resolve to the SAME non-null goal slug. The claim-time blocked_by gate ([[../recipes/build-box-setup|builder-worker]] `evaluateClaimTimeBuildGate`) uses these to pick the right blocker-clearance: a **goal-mate** blocker is cleared when ON THE GOAL BRANCH ([[specs-table]] `isSpecOnGoalBranch` — a goal-mate never ships to main until M5's atomic promotion), an **external** blocker (one-off / different goal) is cleared when SHIPPED. This is the load-bearing fix that stops a goal-mate dependent deadlocking forever (its blocker can't ship until the whole goal promotes). The spec-branch base in `runBuildJob` also calls `resolveGoalSlugForSpec` to base a goal-bound fresh spec branch on `origin/goal/{goal-slug}` when that branch exists.
+
 ### `reconcileMergedJobs` — function
 
 ```ts

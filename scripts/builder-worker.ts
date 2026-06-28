@@ -2883,6 +2883,20 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
+    // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
+    // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
+    // the github-webhook hook so the promotion runs in both contexts; idempotent + best-effort.
+    const { promoteEligibleSpecsToGoalBranch } = await import("../src/lib/agent-jobs");
+    const promo = await promoteEligibleSpecsToGoalBranch(db);
+    if (promo.promoted.length) notes.push(`goal-promote → merged ${promo.promoted.length} spec(s) onto goal branch(es): ${promo.promoted.join(", ")}`);
+    if (promo.goalBranchesCreated.length) notes.push(`goal-promote → seeded goal branch(es): ${promo.goalBranchesCreated.join(", ")}`);
+    if (promo.conflicts.length) notes.push(`⚠️ goal-promote CONFLICT (surfaced, not dropped): ${promo.conflicts.join(", ")}`);
+  } catch (e) {
+    notes.push(`goal-promote failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing goal-promote failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // director-escort-inflight-specs Phase 1 — pre-grooming sweep over every in-flight / critical-planned /
     // recently-authored spec this director drives. Dispatches each into one of five mechanical lanes
     // (queued_build · status_drift · failed_retry · failed_repeat · stalled) so the gap between authoring a
@@ -3203,15 +3217,45 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     };
   }
 
-  // ── 3) BLOCKED_BY ALL SHIPPED ── every declared blocker must be DERIVED-shipped (rollup: all phases
-  // shipped, OR archived/folded — exactly card.blockedBy[].cleared). Checked BEFORE the Vale leg so an
-  // out-of-sequence milestone build is held even while its own Vale review is still pending. Stays `queued`
-  // (claimed_at cleared) so the director escort re-releases it the moment its last blocker ships.
-  const uncleared = (card.blockedBy ?? []).filter((b) => !b.cleared);
+  // ── 3) BLOCKED_BY CLEARED (per blocker TYPE) ── every declared blocker must be cleared, BUT the clearance
+  // signal differs by blocker type (spec-goal-branch-pm-flow M4, Part 4 — the load-bearing deadlock fix):
+  //
+  //   • GOAL-MATE blocker (same goal as this spec) — cleared when it's ON THE GOAL BRANCH (has
+  //     `goal_branch_sha` / is promote-eligible+merged), NOT when shipped. A goal-mate NEVER ships to main on
+  //     its own: the whole goal promotes atomically (M5). If we waited for `shipped` here, a dependent
+  //     goal-mate would block FOREVER and the goal could never complete. "On the goal branch" is the correct
+  //     clearance — and the dependent then BUILDS off the goal branch (runBuildJob Part 2), seeing its
+  //     dependency's already-merged code.
+  //
+  //   • EXTERNAL blocker (a one-off spec, or a spec in a DIFFERENT goal) — cleared when SHIPPED (on main),
+  //     exactly as before (card.blockedBy[].cleared = derived-shipped/archived). An external dependency must
+  //     actually be on main before this spec builds off main / a different goal branch.
+  //
+  // Checked BEFORE the Vale leg so an out-of-sequence build is held even while its own Vale review is pending.
+  // Stays `queued` so the director escort re-releases it the moment its last blocker clears (ships OR lands on
+  // the goal branch). Fail CLOSED on the goal-branch read — an unknown goal-branch state holds the build.
+  const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+  const { isSpecOnGoalBranch } = await import("../src/lib/specs-table");
+  const thisGoalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+  const uncleared: { slug: string; status: import("../src/lib/brain-roadmap").Phase; why: string }[] = [];
+  for (const b of card.blockedBy ?? []) {
+    const blockerGoalSlug = thisGoalSlug ? await resolveGoalSlugForSpec(job.workspace_id, b.slug) : null;
+    const isGoalMate = thisGoalSlug !== null && blockerGoalSlug === thisGoalSlug;
+    if (isGoalMate) {
+      // Goal-mate: cleared when on the goal branch (NOT requiring shipped — a goal-mate doesn't ship until
+      // M5's atomic goal promotion). Also clear if it ALREADY shipped (post-M5, or an independently-shipped
+      // edge case) so a shipped goal-mate never falsely deadlocks. Fail closed (held) on the goal-branch read.
+      const onGoalBranch = b.cleared || (await isSpecOnGoalBranch(job.workspace_id, b.slug));
+      if (!onGoalBranch) uncleared.push({ slug: b.slug, status: b.status, why: "goal-mate not yet on the goal branch" });
+    } else {
+      // External (one-off / different goal): cleared when shipped (the existing derived-shipped signal).
+      if (!b.cleared) uncleared.push({ slug: b.slug, status: b.status, why: "external prerequisite not shipped" });
+    }
+  }
   if (uncleared.length) {
     const { phaseEmoji } = await import("../src/lib/brain-roadmap");
-    const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)})`).join(", ");
-    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not shipped: ${list}; left queued for the escort to re-release` };
+    const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)}; ${b.why})`).join(", ");
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not cleared: ${list}; left queued for the escort to re-release` };
   }
 
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
@@ -11551,15 +11595,41 @@ async function dispatchJob(job: Job) {
     branch = `claude/build-${slug}`;
     removeWorktreeForBranch(branch); // idempotent add — never collide with a prior tree holding this branch
     // create-or-extend: if the spec branch already exists on origin (a prior phase built), check it
-    // out and build phase N on top of its current tip; otherwise create it fresh from main. The
+    // out and build phase N on top of its current tip; otherwise create it fresh from the right base. The
     // remote ref is the source of truth (the worktree is wiped every dispatch), so probe origin.
     const remoteHasBranch =
       sh("git", ["ls-remote", "--exit-code", "--heads", "origin", branch]).code === 0;
-    const base = remoteHasBranch ? `origin/${branch}` : "origin/main";
+    // ── spec-goal-branch-pm-flow M4 (Part 2): goal-bound specs build OFF the goal branch ──────────
+    // A FRESH spec branch (no prior phase) for a GOAL-BOUND spec bases on `origin/goal/{goal-slug}` WHEN that
+    // goal branch already exists — so the spec sees its already-merged DEPENDENCIES' code (M4 merges a
+    // promote-eligible dependency onto the goal branch before its dependent builds). A one-off spec, or the
+    // FIRST spec of a goal (goal branch absent — it will SEED the branch on promote), still bases on main.
+    // An EXTENDING branch (prior phase built) always re-bases on its own tip — never re-pick a base.
+    let freshBase = "origin/main";
+    if (!remoteHasBranch) {
+      try {
+        const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+        const goalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+        if (goalSlug) {
+          const goalBranch = `goal/${goalSlug}`;
+          const goalBranchExists =
+            sh("git", ["ls-remote", "--exit-code", "--heads", "origin", goalBranch]).code === 0;
+          if (goalBranchExists) {
+            freshBase = `origin/${goalBranch}`;
+            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}); basing fresh spec branch on the goal branch so it sees merged dependencies`);
+          } else {
+            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}) but the goal branch doesn't exist yet — first spec of the goal; basing on main`);
+          }
+        }
+      } catch (e) {
+        console.warn(`${tag} goal-base resolution failed for ${slug} (falling back to main):`, e instanceof Error ? e.message : e);
+      }
+    }
+    const base = remoteHasBranch ? `origin/${branch}` : freshBase;
     const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
     if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
     console.log(
-      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : "created fresh from main"}`,
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : `created fresh from ${base}`}`,
     );
     await update(job.id, { spec_branch: branch });
   } else {
