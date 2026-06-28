@@ -145,7 +145,7 @@ export default function RegressionsPage() {
                   </Link>
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] tabular-nums text-zinc-400">{relativeTime(r.run_at)}</span>
-                    <ProposeFixButton slug={r.slug} compact />
+                    <ProposeFixButton slug={r.slug} compact mode="chat" />
                   </div>
                 </div>
                 {r.failing.length > 0 && (
