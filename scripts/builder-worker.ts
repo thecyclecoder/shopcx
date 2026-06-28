@@ -7239,6 +7239,52 @@ async function runSpecTestJob(job: Job) {
         console.error(`${tag} regression detector failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    // promote-on-green-merge-gate Phase 2 — Hold-or-fix on red + loop-guard. The auto-merge gate's
+    // Phase-1 tests-gate already HOLDS the PR `in_testing` on a RED pre-merge run (a clean+built PR
+    // without BOTH green signals is NOT promoted); this branch is the "spawns a fix" half — author a
+    // deterministic fix-spec carrying `regression_of_slug = origin` so post-merge `retestOriginIfFixMerged`
+    // re-runs the origin's spec-test once the fix lands, AND apply a loop-guard so a stuck branch
+    // ESCALATES (a `director_activity` `escalated` row) instead of churning tokens. The shipped-spec
+    // regression branch above misses pre-merge red because `getHumanTestQueue` is shipped-only — this
+    // branch covers the pre-merge claude/* path on an in-progress slug. Best-effort — never fail the run.
+    if (agent_verdict === "issues" && isPreMerge && branch) {
+      try {
+        const { spawnPreMergeFix, PRE_MERGE_FIX_LOOP_GUARD_MAX } = await import("../src/lib/pre-merge-fix");
+        const { checkKey } = await import("../src/lib/spec-test-runs");
+        const failingChecks = checks
+          .filter((c) => c.verdict === "fail" && c.text)
+          .map((c) => ({ text: c.text, evidence: c.evidence ?? null, check_key: checkKey(c.text) }));
+        if (failingChecks.length === 0) {
+          console.log(`${tag} pre-merge RED on ${slug} (${branch}) — no evidence-backed failing checks, nothing to spawn`);
+        } else {
+          // Origin title (best-effort; degrade to slug). The fix-spec embeds this in its title.
+          let originTitle = slug;
+          try {
+            const { getSpec } = await import("../src/lib/specs-table");
+            const s = await getSpec(job.workspace_id, slug);
+            if (s?.title) originTitle = s.title;
+          } catch {
+            /* best-effort */
+          }
+          const out = await spawnPreMergeFix(db, {
+            workspaceId: job.workspace_id,
+            originSlug: slug,
+            originTitle,
+            branch,
+            failing: failingChecks,
+          });
+          if (out.escalated) {
+            console.log(`${tag} pre-merge RED on ${slug} (${branch}) → LOOP-GUARD ESCALATED (${out.attempts}/${PRE_MERGE_FIX_LOOP_GUARD_MAX} prior attempts): ${out.reason}`);
+          } else if (out.spawned) {
+            console.log(`${tag} pre-merge RED on ${slug} (${branch}) → fix [[${out.fixSlug}]] (attempt ${out.attempts + 1}/${PRE_MERGE_FIX_LOOP_GUARD_MAX}); build ${out.buildQueued ? "queued" : "already-queued"}`);
+          } else {
+            console.log(`${tag} pre-merge RED on ${slug} (${branch}) → no fix spawned: ${out.reason}`);
+          }
+        }
+      } catch (e) {
+        console.error(`${tag} pre-merge fix-spawn failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     console.log(`${tag} ✓ ${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
