@@ -2,7 +2,9 @@
 
 The **inbound GitHub webhook** that fires the two **PR mirror gates** ([[../libraries/github-pr-resolve]]). GitHub POSTs to `POST /api/webhooks/github` on the events that can change an open build PR's state; the handler runs:
 1. **Dirty-PR Resolver** ([[../specs/dirty-pr-resolver-agent]]) — detect newly-`CONFLICTING` `claude/*` PRs → enqueue a [[../tables/agent_jobs]] `kind='pr-resolve'` job each.
-2. **Auto-merge gate** ([[../specs/auto-ship-pipeline]] Phase 1 / Gate A) — squash-merge + delete branch ONE READY (mergeable + all-checks-green) `claude/*` PR.
+2. **Auto-merge gate** ([[../specs/auto-ship-pipeline]] Phase 1 / Gate A) — squash-merge + delete branch ONE READY (mergeable + all-checks-green) `claude/*` PR. (A one-off promote-eligible spec's whole-spec branch ships here; all its phases stamp shipped — spec-goal-branch-pm-flow M5 Part 3.)
+3. **Gate B — spec→goal-branch integration** ([[../specs/spec-goal-branch-pm-flow]] M4, [[../libraries/agent-jobs]] `promoteEligibleSpecsToGoalBranch`) — merge every goal-bound promote-eligible spec branch onto its `goal/{slug}` branch (does NOT touch main).
+4. **Gate C — atomic goal→main promotion** ([[../specs/spec-goal-branch-pm-flow]] M5, [[../libraries/agent-jobs]] `promoteCompleteGoalsToMain`) — for every COMPLETE + GREEN goal branch, merge `goal/{slug}` → main in ONE merge and flip every member phase shipped (the only shipped-writer), then trigger the fold pipeline. **Parent goals are SKIPPED** (their children promote independently). Each gate is independent; a failure in one never blocks the others; all run identically in the box worker standing pass.
 
 **Event-driven, not a cron** — it fires the moment a merge to `main` dirties something or a PR's checks go green.
 
