@@ -1021,7 +1021,10 @@ export const directActionHandlers: Record<
       workspaceId: ctx.workspaceId,
       orderId: order.id,
       orderNumber: order.order_number,
-      shopifyOrderGid: `gid://shopify/Order/${order.shopify_order_id}`,
+      // Internal orders (SHOPCX*) have no Shopify order → pass null so createFullReturn takes its
+      // internal path (build the return from line_items, refund via Braintree) instead of fabricating
+      // a `gid://shopify/Order/null` that fails the Shopify lookup.
+      shopifyOrderGid: order.shopify_order_id ? `gid://shopify/Order/${order.shopify_order_id}` : null,
       customerId: ctx.customerId!,
       ticketId: ctx.ticketId,
       customerName: `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "Customer",

@@ -185,26 +185,34 @@ export const returnsIssueRefund = inngest.createFunction(
     } else {
       const refundResult = await step.run("issue-refund", async () => {
         const { data: order } = await admin.from("orders")
-          .select("shopify_order_id").eq("id", ret.order_id).single();
-        if (!order?.shopify_order_id) return { success: false, error: "Order not found" };
+          .select("shopify_order_id, braintree_transaction_id").eq("id", ret.order_id).single();
+        // Internal order (SHOPCX*, no Shopify order) → refund the Braintree transaction directly,
+        // same path that refunds an internal renewal overcharge. Shopify orders keep refundCreate.
+        if (!order?.shopify_order_id) {
+          if (!order?.braintree_transaction_id) return { success: false, error: "Order has no Shopify order or Braintree transaction to refund" };
+          const { refundBraintreeTransaction } = await import("@/lib/integrations/braintree");
+          const r = await refundBraintreeTransaction(workspace_id, order.braintree_transaction_id, amountCents);
+          return { success: r.success, error: r.error, via: "braintree" as const };
+        }
         const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
-        return partialRefundByAmount(
+        const r = await partialRefundByAmount(
           workspace_id,
           order.shopify_order_id,
           amountCents,
           `Return ${ret.order_number} delivered`,
         );
+        return { ...r, via: "shopify" as const };
       });
       if (refundResult.success) {
         valueIssued = true;
-        issuedSummary = `Refund $${(amountCents / 100).toFixed(2)} issued via Shopify`;
+        issuedSummary = `Refund $${(amountCents / 100).toFixed(2)} issued via ${"via" in refundResult && refundResult.via === "braintree" ? "Braintree" : "Shopify"}`;
       } else {
         await step.run("notify-refund-failed", async () => {
           await admin.from("dashboard_notifications").insert({
             workspace_id,
             type: "system",
             title: `Return refund failed — manual action needed`,
-            body: `Return ${return_id} (${ret.order_number}) was delivered but Shopify refundCreate failed: ${refundResult.error}`,
+            body: `Return ${return_id} (${ret.order_number}) was delivered but the refund failed: ${refundResult.error}`,
             metadata: { type: "return_refund_failed", return_id, error: refundResult.error },
           });
         });
