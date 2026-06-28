@@ -34,20 +34,24 @@ This hierarchy is operationalized by the [[specs/goal-decomposition-engine|goal-
 ## The five states
 
 ```
-   ┌──────────┐   ┌──────────┐   ┌─────────────┐   ┌──────────┐   ┌──────────┐
-   │  IDEA    │ → │ PLANNED  │ → │ IN PROGRESS │ → │ SHIPPED  │ → │ VERIFIED │
-   │ (memory) │   │  spec/   │   │   spec/     │   │ built +  │   │ folded + │
-   │          │   │  all ⏳  │   │ phases 🚧   │   │ deployed │   │ archived │
-   │          │   │          │   │             │   │  (✅)    │   │ spec rm  │
-   └──────────┘   └──────────┘   └─────────────┘   └──────────┘   └──────────┘
+   ┌──────────┐   ┌──────────┐   ┌──────────────┐   ┌──────────┐   ┌──────────┐
+   │  IDEA    │ → │ PLANNED  │ → │  IN TESTING  │ → │ SHIPPED  │ → │  FOLDED  │
+   │ (memory) │   │ authored │   │ built+green  │   │ on main  │   │ folded + │
+   │          │   │ +Vale    │   │ ON A BRANCH  │   │ (atomic) │   │ archived │
+   │          │   │  all ⏳  │   │ phases build │   │  (✅)    │   │ spec rm  │
+   │          │   │          │   │ _sha'd, not  │   │          │   │          │
+   │          │   │          │   │ yet promoted │   │          │   │          │
+   └──────────┘   └──────────┘   └──────────────┘   └──────────┘   └──────────┘
 ```
+
+Status flow: `planned → in_testing → shipped → folded`. `in_testing` is the branch-accumulation state — built + tested on a branch, **not yet on `main`** ([[lifecycles/spec-goal-branch-pm-flow]]). "In progress" is the *phase*-level mid-state (some phases built, some still ⏳); the *whole-spec* board status reads `in_testing` once every phase is built + the branch preview is green.
 
 | State | Where it lives | How you change it |
 |---|---|---|
-| **Idea** | An informal note in agent memory or a chat — not yet committed | Write a spec to promote it |
-| **Planned** | `docs/brain/specs/{slug}.md` exists; the [[tables/spec_card_state]] row's `status='planned'`, every phase `planned` | git add + commit the spec |
-| **In progress** | Same spec file; the DB row's phase status flips → `in_progress` as work lands. *Markdown is content-only.* | Build pipeline + drift reconciler update the DB row instantly |
-| **Shipped** | Every phase in [[tables/spec_card_state]] is `shipped` — **built + deployed**. The spec **stays** unfolded (the board's "Shipped — awaiting fold" column) until its machine spec-test passes. | Build merges flip the DB row; [[tables/spec_status_history]] audits who/when/why |
+| **Idea** | An informal note in agent memory or a chat — not yet committed | Author a spec to `public.specs` to promote it |
+| **Planned** | A `public.specs` row, `status='planned'` (or `in_review` until Vale passes), every phase `planned` | Author the spec; Vale stamps `vale_pass`; the build pipeline picks it up |
+| **In testing** | Every phase carries a `spec_phases.build_sha` (built on its `claude/build-{slug}` branch) and the branch preview's spec-test + security are green — **built but NOT on `main`**. Derived ([[libraries/brain-roadmap]] `applyInTestingOverlay`), gated by [[libraries/agent-jobs]] `isSpecPromoteEligible`. *Markdown is content-only.* | The build pipeline accumulates phases on the spec branch + runs the pre-merge tests; no status writer needed (derived) |
+| **Shipped** | Promoted to `main` and live. A **one-off spec** auto-merges its branch (Gate A); a **goal-bound spec** ships only when its whole goal lands atomically (Gate C). Stays unfolded (the "Shipped — awaiting fold" column) until its machine spec-test passes. | The promotion stamps the phases `shipped` (`applyMergedBuildEffects` one-off / `applyGoalPromotionEffects` goal); [[tables/spec_status_history]] audits who/when/why |
 | **Folded** | Spec content folded into the relevant `lifecycles/`/`tables/`/`libraries/`/`inngest/`/`integrations/`/`recipes/`/`dashboard/` pages, a one-line entry appended to [[archive]], the spec row **preserved** with `status='folded'`. The "Status / open work" block on the lifecycle reads `Shipped:`. | **MACHINE spec-test pass** (agent-verdict `approved`, no open regression) → auto fold-build → merge. Human QA is advisory and never gates this. |
 
 ### Where status lives — DB, not markdown
@@ -105,7 +109,7 @@ Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. Th
 - **One-off spec** (no goal) → its `claude/build-{slug}` branch merges to `main` directly (Gate A, [[libraries/github-pr-resolve]] `autoMergeReadyPrs` — but ONLY for one-off specs; a goal-bound branch is handed off). `applyMergedBuildEffects` stamps every phase `shipped` with the merge PR # + SHA.
 - **Goal-bound spec** (has a `milestone_id → goal`) → its branch merges into the goal branch `goal/{goal-slug}` (Gate B / M4, `promoteEligibleSpecsToGoalBranch`, sequenced by `blocked_by`), and the WHOLE goal lands on `main` in ONE atomic merge (Gate C / M5, `promoteCompleteGoalsToMain`) once every member spec is on the goal branch and green. `applyGoalPromotionEffects` is the **only shipped-writer** for goal-bound specs — it stamps every member phase `shipped` with the single goal→main merge SHA.
 
-Provenance is tagged per-phase on `spec_phases.{pr,merge_sha}` ([[specs/spec-status-phase-pr-provenance]]) so "shipped" is provable/auditable; the board renders a `P2 ✓` link per shipped phase. Promote-eligibility = accumulation-complete ∧ spec-test-green (on the branch preview) ∧ security-green ([[libraries/agent-jobs]] `isSpecPromoteEligible`). Ada (director, grooming/escort) treats a spec with ≥1 **branch-built** phase (`build_sha`, NOT a `pr` tag) as **started** and sequences the next phase's build off the branch — branch-build, never main-merge.
+Provenance is tagged per-phase on `spec_phases.{pr,merge_sha}` ([[specs/spec-status-phase-pr-provenance]]) at the PROMOTION (a built-but-unpromoted phase carries only `build_sha` and reads `in_progress`), so "shipped" is provable/auditable; the board renders a `P2 ✓` link per shipped phase. Promote-eligibility = accumulation-complete ∧ spec-test-green (on the branch preview) ∧ security-green ([[libraries/agent-jobs]] `isSpecPromoteEligible`). Ada (director, grooming/escort) treats a spec with ≥1 **branch-built** phase (`build_sha`, NOT a `pr` tag) as **started** and sequences the next phase's build off the branch — branch-build, never main-merge. The full end-to-end trace — spec branch → goal branch → atomic main promotion, the three gates, and Reva's escalate-not-revert atomic deploy-watch — is in [[lifecycles/spec-goal-branch-pm-flow]].
 
 The **`## Verification` section** is the "how do I test this?" checklist ([[specs/verification-guides]]). The build that ships a spec **writes it** from the routes/tables/actions it actually touched, so a shipped spec arrives test-ready — and it's exactly what the **machine spec-test** grades: an `approved` run over these bullets auto-folds the spec. The spec detail page renders it as a prominent card with the per-bullet agent verdicts + the advisory **Fold to brain now** override. A shipped spec missing the section offers an owner-only **Generate test plan** button (Opus drafts one, brain-grounded). It folds into the brain with the rest of the spec on fold.
 
@@ -117,7 +121,7 @@ Once the spec is in `specs/`, start a new Claude Code session and fire:
 /goal do everything in docs/brain/specs/{slug}.md
 ```
 
-The session reads the spec, executes the phases, and stops when the completion criteria are met. As phases land, the agent commits AND updates the spec's phase emojis from ⏳ → 🚧 → ✅. Each commit is its own PR-equivalent so progress is visible in git history too.
+The session reads the spec and executes ONE phase per session, committing it onto the spec's persistent `claude/build-{slug}` branch ([[lifecycles/spec-goal-branch-pm-flow]]). It does NOT edit phase emojis — status is DB-driven ([[tables/spec_phases]]): a committed phase is stamped `build_sha` (`stampPhaseBuilt`) and reads `in_progress` (built, not shipped) until the spec is promoted to `main`. The next phase builds atop the prior phase's commit on the same branch — no per-phase PR to `main`, no `main` round-trip between phases. (In the autonomous box, "Build all" chains the phases automatically.)
 
 ## Folding a shipped spec into the brain (on machine spec-test pass)
 
@@ -190,4 +194,4 @@ That triplet answers "what's done, what's next, what's blocked" without Dylan ha
 
 ## Related
 
-[[README]] · [[archive]] · [[dashboard/roadmap]] · [[lifecycles/roadmap-build-console]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec)
+[[README]] · [[archive]] · [[dashboard/roadmap]] · [[lifecycles/roadmap-build-console]] · [[lifecycles/spec-goal-branch-pm-flow]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec)

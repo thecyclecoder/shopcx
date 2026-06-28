@@ -84,4 +84,4 @@ Reva is the **supervisor** on the auto-merge proxy: it surfaces a verdict (and i
 
 ## Related
 
-[[../specs/deploy-health-rollback-guardian]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]]
+[[../specs/deploy-health-rollback-guardian]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]] · [[../lifecycles/spec-goal-branch-pm-flow]]
