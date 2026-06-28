@@ -512,6 +512,102 @@ async function squashMergeAndDelete(
   return { merged: true, mergeSha: typeof mergeSha === "string" ? mergeSha : null };
 }
 
+/**
+ * spec-goal-branch-pm-flow M4 — the result of merging one spec branch into a goal branch.
+ *  - `merged` — the spec branch's commits are now on the goal branch (`mergeSha` = the merge commit, or the
+ *    goal-branch tip when nothing was new to merge — already-merged is idempotent success).
+ *  - `conflict` — GitHub returned 409 (the merge has conflicts). NOT merged; surfaced so the caller escalates
+ *    rather than silently dropping the spec. (Goal-branch conflicts shouldn't normally happen — specs build
+ *    in blocked_by order OFF the goal branch — but a concurrent author can still produce one.)
+ *  - `created` — the goal branch `goal/{goalSlug}` did not exist and was seeded from `origin/main` first.
+ */
+export interface GoalBranchMergeResult {
+  merged: boolean;
+  conflict: boolean;
+  created: boolean;
+  mergeSha: string | null;
+  reason?: string;
+}
+
+/** Resolve a branch ref's tip SHA (`refs/heads/{branch}`). Null if the ref doesn't exist. */
+async function branchHeadSha(branch: string): Promise<string | null> {
+  const r = await gh("GET", `/repos/${GH_REPO}/git/ref/heads/${branch}`);
+  if (!r.ok) return null;
+  const obj = (r.json as Record<string, unknown>)?.object as { sha?: string } | undefined;
+  return typeof obj?.sha === "string" ? obj.sha : null;
+}
+
+/**
+ * spec-goal-branch-pm-flow M4 — merge a spec's `claude/build-{slug}` branch INTO its goal branch
+ * `goal/{goalSlug}`, creating the goal branch from `origin/main` if it doesn't exist yet (the FIRST spec of a
+ * goal seeds it). A real (non-squash) merge commit so the goal branch carries each spec's full history, ready
+ * for M5's atomic goal→main promotion.
+ *
+ * Uses the GitHub API only (POST /merges, POST /git/refs) — no local checkout — so it runs identically from
+ * the box worker standing pass AND the Vercel github webhook, mirroring `autoMergeReadyPrs`'s API-driven
+ * style. Idempotent: a 204 (nothing to merge — head already in base) is `merged:true` with the goal-branch
+ * tip as `mergeSha`. A 409 is surfaced as `conflict:true` (NOT dropped) so the caller escalates. The caller
+ * stamps `specs.goal_branch_sha = mergeSha` on success (the M5 seam).
+ */
+export async function mergeSpecBranchIntoGoalBranch(
+  specBranch: string,
+  goalSlug: string,
+): Promise<GoalBranchMergeResult> {
+  const out: GoalBranchMergeResult = { merged: false, conflict: false, created: false, mergeSha: null };
+  if (!ghToken()) return { ...out, reason: "no GitHub token" };
+  const goalBranch = `goal/${goalSlug}`;
+
+  // Seed the goal branch from origin/main if it doesn't exist yet (first spec of the goal).
+  let goalHead = await branchHeadSha(goalBranch);
+  if (goalHead === null) {
+    const mainHead = await branchHeadSha("main");
+    if (!mainHead) return { ...out, reason: "could not resolve origin/main HEAD to seed the goal branch" };
+    const create = await gh("POST", `/repos/${GH_REPO}/git/refs`, {
+      ref: `refs/heads/${goalBranch}`,
+      sha: mainHead,
+    });
+    if (!create.ok) {
+      // 422 = ref already exists (a concurrent seed won the race) → re-read its head and continue.
+      goalHead = await branchHeadSha(goalBranch);
+      if (goalHead === null) {
+        const msg = (create.json as Record<string, unknown>)?.message;
+        return { ...out, reason: `seed ${goalBranch} from main failed (${create.status}${msg ? `: ${msg}` : ""})` };
+      }
+    } else {
+      out.created = true;
+      goalHead = mainHead;
+    }
+  }
+
+  // Merge the spec branch into the goal branch (real merge commit).
+  const r = await gh("POST", `/repos/${GH_REPO}/merges`, {
+    base: goalBranch,
+    head: specBranch,
+    commit_message: `goal-branch integration: merge ${specBranch} into ${goalBranch} (spec-goal-branch-pm-flow M4)`,
+  });
+  if (r.status === 201) {
+    const sha = (r.json as Record<string, unknown>)?.sha;
+    out.merged = true;
+    out.mergeSha = typeof sha === "string" ? sha : null;
+    return out;
+  }
+  if (r.status === 204) {
+    // Nothing to merge — head already contained in base (already integrated). Idempotent success; the
+    // goal-branch tip is the effective integration SHA.
+    out.merged = true;
+    out.mergeSha = goalHead;
+    out.reason = "already integrated (nothing to merge)";
+    return out;
+  }
+  if (r.status === 409) {
+    out.conflict = true;
+    out.reason = "merge conflict (409) — left for the owner; NOT dropped";
+    return out;
+  }
+  const msg = (r.json as Record<string, unknown>)?.message;
+  return { ...out, reason: `merge ${specBranch} → ${goalBranch} failed (${r.status}${msg ? `: ${msg}` : ""})` };
+}
+
 export interface AutoMergeResult {
   enabled: boolean;
   syncActive: boolean;
