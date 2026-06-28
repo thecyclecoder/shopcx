@@ -1,1 +1,1 @@
-- **Security dependency upgrades** · verified 2026-06-26 · → [[functions/platform]]
+- **Security dependency upgrades** · verified 2026-06-26 · → [[libraries/security-agent]]
