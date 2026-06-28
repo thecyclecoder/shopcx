@@ -31,6 +31,10 @@ A single default tolerance (`0.5%`) with per-metric overrides keyed by `metric_k
 
 A metric is `withinTolerance` when `driftPct ≤` its tolerance, or — when `driftPct` is null (`snapshotValue === 0`) — when the absolute `drift` itself is 0.
 
+## In-flight daily window
+
+`auditKpi` / `auditAllKpis` audit **closed** daily snapshots only — when called without an explicit `snapshotDate`, the daily-cadence read filters `snapshot_date < today UTC`. The daily cron writes its snapshot mid-day; a later same-UTC-day audit re-runs the SAME `[today T00:00, today T23:59]` window math against a row count that has **grown** since the snapshot froze (legitimate intra-day enqueues, completions, escalations), surfacing as "drift" that isn't drift. Skipping today eliminates the false positive — Repair Agent verdict on signature `kpi_drift:build_enqueue_rate:daily` (the canonical case: every new `agent_jobs kind='build'` enqueue inflates the ground-truth count against the frozen snapshot). Weekly/monthly cadences have the same SHAPE in-flight (one in-flight day inside a 7- or 30-day window) but a far smaller relative-drift amplitude; they're left as-is until a signature surfaces. Callers that explicitly pass `snapshotDate` bypass the guard (the caller knows which window they want).
+
 ## CLI
 
 ```

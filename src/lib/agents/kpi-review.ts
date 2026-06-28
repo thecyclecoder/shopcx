@@ -93,9 +93,18 @@ function toleranceFor(metricKey: string): number {
   return TOLERANCE_OVERRIDES[metricKey] ?? DEFAULT_TOLERANCE;
 }
 
+/** Today UTC as YYYY-MM-DD — the day the in-flight daily window is still accumulating into. */
+const todayUtc = (): string => new Date().toISOString().slice(0, 10);
+
 /**
  * Read the persisted snapshot row for `(workspace_id, metric_key, cadence)` — either at the exact
- * `snapshotDate` (when given) or the latest. Returns null when there's nothing persisted yet.
+ * `snapshotDate` (when given) or the latest **closed** snapshot.
+ *
+ * **In-flight daily window guard:** for `cadence='daily'` with no explicit `snapshotDate`, we
+ * exclude today UTC. The daily cron writes the snapshot mid-day; a later same-day audit re-runs the
+ * SAME `[today T00:00, today T23:59]` window math against a row-count that has GROWN since the
+ * snapshot froze, surfacing legitimate intra-day enqueues as "drift" (signature
+ * `kpi_drift:build_enqueue_rate:daily`). Auditing only closed days eliminates the false positive.
  */
 async function readPersistedSnapshot(
   admin: ReturnType<typeof createAdminClient>,
@@ -111,6 +120,7 @@ async function readPersistedSnapshot(
     .eq("metric_key", metric)
     .eq("cadence", cadence);
   if (snapshotDate) q = q.eq("snapshot_date", snapshotDate);
+  else if (cadence === "daily") q = q.lt("snapshot_date", todayUtc());
   const { data } = await q.order("snapshot_date", { ascending: false }).limit(1).maybeSingle();
   return (data as ScorecardSnapshotRow | null) ?? null;
 }
@@ -206,6 +216,10 @@ export async function auditAllKpis(
     .order("snapshot_date", { ascending: false })
     .limit(1000);
   if (snapshotDate) q = q.eq("snapshot_date", snapshotDate);
+  // In-flight daily window guard — see `readPersistedSnapshot` for the rationale. The daily
+  // snapshot is taken mid-day; a same-UTC-day audit re-runs the SAME window math against a growing
+  // row-count and reads it as drift. Audit only closed days when caller didn't pin a date.
+  else if (cadence === "daily") q = q.lt("snapshot_date", todayUtc());
   const { data } = await q;
   const rows = (data ?? []) as ScorecardSnapshotRow[];
 
