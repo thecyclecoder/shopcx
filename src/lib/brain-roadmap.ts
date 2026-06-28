@@ -463,6 +463,9 @@ export interface InTestingSignals {
   specTestGreen: boolean;
   securityGreen: boolean;
   merged: boolean;
+  /** All phases accumulated on the spec branch (every phase build_sha'd or terminal), or a zero-phase
+   *  one-shot. A spec is NOT in_testing until ALL phases are built — not just because P1 made a preview. */
+  accumulationComplete: boolean;
 }
 
 /**
@@ -484,7 +487,10 @@ export interface InTestingSignals {
 export function applyInTestingOverlay(base: SpecStatus, signals: InTestingSignals): SpecStatus {
   // Explicit lifecycle overrides + the rejected phase-only state win — never replace them with in_testing.
   if (base === "deferred" || base === "in_review" || base === "rejected") return base;
-  if (!signals.hasPreview) return base; // no preview yet → unchanged (in_progress/planned/shipped).
+  // A spec is in_testing only with a preview AND all phases accumulated on the branch — a single built
+  // phase (P1) that produced a preview must NOT flip the whole spec to in_testing while P2+ are still
+  // planned/building. The spec stays in_progress until accumulation completes.
+  if (!signals.hasPreview || !signals.accumulationComplete) return base;
   const bothGreen = signals.specTestGreen && signals.securityGreen;
   // Only "both green AND merged" allows the shipped derivation through; otherwise the card is in_testing.
   if (bothGreen && signals.merged) return base;
@@ -666,7 +672,13 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
       }
       // Security green — same `completedClean` rollup the fold gate reads.
       const securityGreen = !!securityBySlug[card.slug]?.completedClean;
-      out.set(card.slug, { hasPreview, specTestGreen, securityGreen, merged });
+      // spec-goal-branch-pm-flow fix: a spec is in_testing only once ALL phases have accumulated on the
+      // branch (every phase build_sha'd or terminal), or it's a zero-phase one-shot. A single built phase
+      // (P1) producing a preview does NOT make the whole spec in_testing — it stays in_progress until P2+ build.
+      const accumulationComplete =
+        card.phases.length === 0 ||
+        card.phases.every((p) => !!p.build_sha || p.status === "shipped" || p.status === "rejected");
+      out.set(card.slug, { hasPreview, specTestGreen, securityGreen, merged, accumulationComplete });
     }
   } catch {
     /* best-effort — the deriver short-circuits to base rollup when signals can't be loaded. */
