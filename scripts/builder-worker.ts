@@ -4034,36 +4034,65 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
         return;
       }
 
-      // ── DISMISS_CANDIDATE — malformed / duplicate / superseded / not actionable today → write a
-      //    dedup ledger row so the candidate is skipped next pass; no spec mutation, no build queued. ──
+      // ── DISMISS_CANDIDATE — a dismissed spec must DISPOSE, never linger as a stale "planned" phantom
+      //    (director-dismissal-disposes-by-reason). The dismissal's `disposition` decides where it goes:
+      //      • fold_superseded → AUTO-FOLD the spec off the board (work already shipped elsewhere — cite the
+      //        superseder); the init_dismissed ledger row is still written (carrying the superseding ref), and
+      //        a folded spec is excluded from the board so the dedup is moot (it never re-fires).
+      //      • escalate_rework → ESCALATE to the CEO ("dismissed — fix or cut"); the spec stays as-is but lands
+      //        in the inbox, AND the init_dismissed ledger row is written so the standing pass stops
+      //        re-investigating it while the CEO decides (no silent re-loop). DEFAULT when the disposition is
+      //        malformed/absent (north star: a judgment call escalates, never silently folds). ──
       if (verdict === "dismiss_candidate") {
-        const valid = lib.validateDismissCandidate(parsed);
+        const valid = lib.validateInitDismissDisposition(parsed);
+        // Malformed reason/disposition (incl. a fold_superseded with no cited superseder) → ESCALATE, never
+        // a silent fold. We still write the init_dismissed ledger row so the next pass skips re-investigating.
         if (!valid.ok) {
           const r = await lib.escalateDiagnosisToCeo(db, {
             workspaceId: job.workspace_id,
             specSlug: c.slug,
-            title: `Initiation needs a look: ${c.slug}`,
-            diagnosis: `I assessed ${c.slug} as a candidate to dismiss, but the verdict was malformed (${valid.error}). Holding off — please take a look.`,
+            title: `Spec dismissed — needs your decision: ${c.slug}`,
+            diagnosis: `I dismissed ${c.slug} from initiation but couldn't safely dispose of it (${valid.error}). It's not superseded I can confirm, so it needs your call — fix the spec or cut it. Reason given: ${reasoning || "(none)"}.`,
             dedupeKey: `init-unsure:${c.slug}`,
             deepLink: `/dashboard/roadmap/${c.slug}`,
-            escalationKind: "init_dismiss_invalid",
+            escalationKind: "init_dismiss_rework",
             metadata: { init_key: lib.initKey(c.slug), error: valid.error },
           });
           if (r.emitted) escalated++;
-          else if (r.error) console.error(`${tag} init ${c.slug} → dismiss-invalid escalation FAILED to surface to CEO: ${r.error.message}`);
-          console.warn(`${tag} init ${c.slug} → dismiss_candidate INVALID (${valid.error}) → escalated to CEO`);
+          else if (r.error) console.error(`${tag} init ${c.slug} → dismiss-rework escalation FAILED to surface to CEO: ${r.error.message}`);
+          await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug, owner: c.owner ?? null }, reasoning || "dismissed — escalated to CEO for fix-or-cut", { disposition: "escalate_rework" });
+          console.warn(`${tag} init ${c.slug} → dismiss_candidate (no safe disposition: ${valid.error}) → escalated to CEO + ledger written`);
           return;
         }
-        // Pass the candidate's OWNING function so the dismiss ledger row carries `owner_function` for
-        // the daily watch's cross-dept rollup (director-drives-all-specs-and-deferred-status-board-
-        // reflects-cross-dept-drive Phase 1).
-        const r = await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug, owner: c.owner ?? null }, reasoning);
-        if (r.ok) {
-          dismissed++;
-          console.log(`${tag} init ${c.slug} → dismiss_candidate → ledger row written; will skip next pass`);
-        } else {
-          console.warn(`${tag} init ${c.slug} → dismiss_candidate ledger write failed: ${r.error}`);
+
+        // fold_superseded — the work is genuinely already shipped elsewhere → auto-fold off the board.
+        if (valid.disposition === "fold_superseded") {
+          const r = await lib.applyDirectorFoldSuperseded(db, job.workspace_id, { slug: c.slug, owner: c.owner ?? null }, valid.supersedingRef ?? "", reasoning);
+          if (r.ok) {
+            dismissed++;
+            console.log(`${tag} init ${c.slug} → dismiss_candidate/fold_superseded → folded off the board (superseded by ${valid.supersedingRef})`);
+          } else {
+            console.warn(`${tag} init ${c.slug} → dismiss_candidate/fold_superseded FAILED to fold: ${r.error}`);
+          }
+          return;
         }
+
+        // escalate_rework — malformed / premise-wrong / owner must fix-or-cut → CEO inbox (spec stays as-is),
+        // plus the init_dismissed ledger row so the standing pass stops re-investigating while the CEO decides.
+        const r = await lib.escalateDiagnosisToCeo(db, {
+          workspaceId: job.workspace_id,
+          specSlug: c.slug,
+          title: `Spec dismissed — needs your decision: ${c.slug}`,
+          diagnosis: `I dismissed ${c.slug} from initiation — it shouldn't be auto-built as-is, and I can't confirm it's superseded. Your call: fix the spec or cut it. Why: ${reasoning}`,
+          dedupeKey: `init-unsure:${c.slug}`,
+          deepLink: `/dashboard/roadmap/${c.slug}`,
+          escalationKind: "init_dismiss_rework",
+          metadata: { init_key: lib.initKey(c.slug), reason: reasoning },
+        });
+        if (r.emitted) escalated++;
+        else if (r.error) console.error(`${tag} init ${c.slug} → dismiss-rework escalation FAILED to surface to CEO: ${r.error.message}`);
+        await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug: c.slug, owner: c.owner ?? null }, reasoning, { disposition: "escalate_rework" });
+        console.log(`${tag} init ${c.slug} → dismiss_candidate/escalate_rework → escalated to CEO (fix or cut) + ledger written`);
         return;
       }
 
@@ -4729,14 +4758,19 @@ async function runDirectorBounceBackJob(job: Job) {
         return;
       }
       if (verdict === "dismiss_candidate") {
-        const valid = lib.validateDismissCandidate(parsed);
-        if (!valid.ok) {
-          await emitDepthCapEscalation(`Tried dismiss_candidate on bounce-back; invalid: ${valid.error}`);
-          await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → dismiss INVALID → depth-cap escalation`.slice(-2000) });
+        // This is the CEO's bounce-back re-investigation, so the CEO is already looking — fold off the board
+        // when superseded (clear the phantom), otherwise just write the init_dismissed ledger row (do NOT
+        // re-escalate into the same inbox the bounce came from). director-dismissal-disposes-by-reason.
+        const valid = lib.validateInitDismissDisposition(parsed);
+        if (valid.ok && valid.disposition === "fold_superseded") {
+          const r = await lib.applyDirectorFoldSuperseded(db, job.workspace_id, { slug }, valid.supersedingRef ?? "", reasoning || `Bounce-back dismissed candidate.`);
+          await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → dismiss/fold_superseded (${r.ok ? `folded, superseded by ${valid.supersedingRef}` : `fold failed: ${r.error}`})`.slice(-2000) });
           return;
         }
-        await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug }, reasoning || `Bounce-back dismissed candidate.`);
-        await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → dismiss_candidate`.slice(-2000) });
+        // escalate_rework / malformed disposition on a bounce-back → ledger only (the CEO is the one who
+        // bounced it; leaving the spec as-is + the dismiss ledger row is the resolution, no new escalation).
+        await lib.applyDirectorDismissCandidate(db, job.workspace_id, "init", { slug }, reasoning || `Bounce-back dismissed candidate.`, { disposition: "escalate_rework", bounce_back: true });
+        await update(job.id, { status: "completed", log_tail: `init bounce-back ${slug} → dismiss_candidate (ledger; left for CEO)`.slice(-2000) });
         return;
       }
       if (verdict === "initiate") {
