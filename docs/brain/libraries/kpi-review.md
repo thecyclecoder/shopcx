@@ -30,7 +30,11 @@ A single default tolerance (`0.5%`) with per-metric overrides keyed by `metric_k
 
 (Current-state point-read metrics — e.g. `lane_utilization` — are SKIPPED entirely below, so they don't need a tolerance entry.)
 
-A metric is `withinTolerance` when `driftPct ≤` its tolerance, or — when `driftPct` is null (`snapshotValue === 0`) — when the absolute `drift` itself is 0.
+A metric is `withinTolerance` when `driftPct ≤` its tolerance. When `driftPct` is null (`snapshotValue === 0`): **count-unit** metrics tolerate `|drift| ≤ 2` (the count-metric zero-snapshot boundary-race floor — see below); every other unit requires `drift === 0` strictly.
+
+### Count-metric zero-snapshot boundary-race floor
+
+When a `unit: 'count'` metric snapshots to 0, the percentage tolerance is undefined and strict `drift === 0` alarms on a single row that moved across the window boundary between snapshot write and audit re-read — the canonical case is [[../tables/error_events]] (`error_backlog:daily`) where `last_seen_at` is bumped to "now" each time the same error re-occurs, so a row whose `last_seen_at` lived in yesterday's window at snapshot time can have `last_seen_at = today` by the next audit pass (or vice versa), surfacing as drift of ±1 that isn't engine drift. The floor (`|drift| ≤ 2`) absorbs that boundary noise without masking real engine drift. Repair Agent verdict on signature `kpi_drift:error_backlog:daily` (verdict: monitor-false-positive). Non-count units (`ratio`, `hours`, `grade`) keep the strict `drift === 0` rule — a ratio drifting from 0 to even 0.0001 is meaningful in a way ±1 row in a count is not.
 
 ## Current-state point-read skip
 
