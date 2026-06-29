@@ -1,4 +1,8 @@
 import { updateSession } from "@/lib/supabase/middleware";
+import {
+  SHOWCASE_COOKIE_NAME,
+  verifyShowcaseToken,
+} from "@/lib/showcase/auth";
 import { type NextRequest, NextResponse } from "next/server";
 
 // HTML-limited bots — mirrors Next 16's internal list
@@ -28,6 +32,37 @@ function isBotForPPR(userAgent: string): boolean {
 const NEUTRAL_BOT_UA = "Mozilla/5.0 (compatible; ShopCXSEO/1.0; +https://shopcx.ai)";
 
 export async function proxy(request: NextRequest) {
+  // ── Showcase gate (password-gated investor/friend section) ──
+  // Self-contained, surgically scoped: this branch ONLY runs for /showcase/*
+  // and /api/showcase/unlock, and returns early so NO other route's behavior
+  // (storefront rewrites, supabase auth, bot-UA neutralization) is affected.
+  // Everything under /showcase requires a valid signed cookie EXCEPT the unlock
+  // page (/showcase/unlock) and the unlock API (/api/showcase/unlock), which
+  // must stay reachable so a visitor can authenticate. See src/lib/showcase/auth.ts.
+  {
+    const p = request.nextUrl.pathname;
+    const isShowcasePage = p === "/showcase" || p.startsWith("/showcase/");
+    const isUnlockApi = p === "/api/showcase/unlock";
+    if (isUnlockApi) {
+      // The unlock route handler validates the password + sets the cookie.
+      // Let it through untouched (it's under /api/, which the supabase flow
+      // would otherwise auth-gate to /login).
+      return NextResponse.next();
+    }
+    if (isShowcasePage) {
+      const isUnlockPage = p === "/showcase/unlock";
+      if (isUnlockPage) return NextResponse.next();
+      const token = request.cookies.get(SHOWCASE_COOKIE_NAME)?.value;
+      if (verifyShowcaseToken(token)) return NextResponse.next();
+      const url = request.nextUrl.clone();
+      url.pathname = "/showcase/unlock";
+      // Preserve the intended destination so we can bounce back post-unlock.
+      url.search = "";
+      if (p !== "/showcase") url.searchParams.set("from", p);
+      return NextResponse.redirect(url);
+    }
+  }
+
   // ── Next 16 metadata-boundary resume-mismatch root-cause fix ──
   // With cacheComponents on, every prerendered app route is PPR and its build-time
   // static shell bakes the STREAMING metadata wrapper: <div hidden><MetadataBoundary/></div>
