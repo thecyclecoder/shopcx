@@ -882,3 +882,61 @@ export async function autoFoldVerifiedSpecs(workspaceId: string, adminClient?: A
     });
   }
 }
+
+/**
+ * reactive-fold-on-gate-complete — the EVENT-DRIVEN primary trigger for Gate B (auto-fold).
+ *
+ * Gate B's eligibility flips the MOMENT the LAST gate clears for a spec — and which gate is last depends on
+ * the spec's shape. For a one-off spec the usual order is: the build PR merges → its phase(s) ship
+ * ([[agent-jobs]] `applyMergedBuildEffects` / `reconcileMergedSpecPhases`) → the post-merge SECURITY review
+ * completes clean ([[../scripts/builder-worker]] `runSecurityReviewJob`) → NOW the spec is fold-eligible. The
+ * spec-test job completion already fires its own auto-fold (it's the last gate when security cleared first).
+ * But the OTHER two completions — a security-review reaching clean on an already-spec-test-passed spec, and a
+ * post-merge phase-ship advance on a spec whose security + spec-test already cleared — had NO reactive trigger,
+ * so a spec that became fold-eligible there just sat in "Awaiting fold" until the daily `spec-test-cron`
+ * backstop happened to fire (observed live: `noop-pipeline-test-4` shipped + eligible but unfolded for a long
+ * time). This is the SAME reactive-primary + cron-backstop pattern already applied to Gate-A merge, the
+ * pre-merge spec-test/security legs, and the phase chain — the fold is the last step that was missing it.
+ *
+ * Call this at EVERY completion that can flip THIS spec's eligibility. It:
+ *   1. Re-checks fold-eligibility for the workspace via the SAME `getAutoFoldEligibleSlugs` the cron + the
+ *      manual verify path use (one source of truth — the reactive trigger and the backstop can never disagree
+ *      on what "eligible" means). If `slug` isn't in the eligible set, NO-OP (a cheap read; nothing enqueued).
+ *   2. If eligible, enqueues the fold through the SAME path the cron uses — `autoFoldVerifiedSpecs` — which is
+ *      already idempotent (kill-switch · skips a spec a fold job already owns in `pending_folds` · `enqueue_fold`
+ *      coalesces every eligible spec into ONE queued batch fold-build) and emits the Control Tower heartbeat.
+ *      It folds the whole eligible set (not just `slug`) — coalesced into the one batch — so a sibling that
+ *      also just became eligible rides along; the per-`slug` guard is purely to skip the enqueue when nothing
+ *      is foldable yet.
+ *
+ * Idempotent + best-effort: `autoFoldVerifiedSpecs` never double-enqueues (a spec already pending/folding is
+ * skipped; `enqueue_fold` is advisory-locked per workspace), an already-folded/archived spec is no longer
+ * derived-`shipped` / is in the archived set so it's not eligible (mirrors the fold-guard-live-build guard),
+ * and any throw is swallowed (the cron backstop still mops up). Returns the underlying AutoFoldResult, or null
+ * on a guard short-circuit / error.
+ */
+export async function reactiveFoldOnGateComplete(
+  workspaceId: string,
+  slug: string,
+  opts?: { reason?: string; admin?: Admin },
+): Promise<AutoFoldResult | null> {
+  if (!workspaceId || !slug) return null;
+  try {
+    // Per-slug eligibility re-check (reuse the canonical gate). Cheap short-circuit: if THIS spec isn't
+    // foldable yet (a gate still open — security live/surfaced, a live build, no machine pass, an open
+    // regression, already archived/folded), do nothing. The fold defers to whichever completion clears the
+    // remaining gate — never dropped.
+    const eligible = await getAutoFoldEligibleSlugs(workspaceId);
+    if (!eligible.includes(slug)) return null;
+    const result = await autoFoldVerifiedSpecs(workspaceId, opts?.admin);
+    if (result.folded > 0) {
+      console.log(
+        `[reactive-fold] ${opts?.reason ? `${opts.reason} → ` : ""}folded ${result.folded} eligible spec(s) (triggered by ${slug}): ${result.foldedSlugs.join(", ")}`,
+      );
+    }
+    return result;
+  } catch (e) {
+    console.error(`[reactive-fold] gate trigger for ${slug} failed (non-fatal):`, e instanceof Error ? e.message : e);
+    return null;
+  }
+}

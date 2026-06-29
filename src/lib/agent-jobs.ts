@@ -1606,6 +1606,18 @@ export async function applyMergedBuildEffects(
     if (rolled === "shipped") {
       await enqueueSpecTestIfDue(workspaceId, slug, "shipped");
       await autoQueueUnblockedBy(workspaceId, slug);
+      // reactive-fold-on-gate-complete: a post-merge phase-ship that flips the spec derived-`shipped` is the
+      // LAST gate when its spec-test + security already cleared (e.g. a re-merge / late phase-ship reconcile
+      // of a spec already machine-tested + security-clean). Fire the reactive Gate-B trigger so it folds the
+      // instant it ships instead of waiting for the daily backstop. The common fresh-merge case no-ops (the
+      // post-merge security review the security-dependency hook just enqueued hasn't completed yet, so the spec
+      // isn't eligible) and defers to the security-clean trigger. Idempotent + best-effort.
+      try {
+        const { reactiveFoldOnGateComplete } = await import("@/lib/spec-test-runs");
+        await reactiveFoldOnGateComplete(workspaceId, slug, { reason: "post-merge ship" });
+      } catch {
+        /* best-effort — the security-clean trigger + the daily backstop still fold it */
+      }
     }
   } catch {
     /* event missed → the daily backlog + spec-test crons mop it up */
@@ -1759,6 +1771,17 @@ export async function reconcileMergedSpecPhases(adminClient?: Admin): Promise<Me
           await autoQueueUnblockedBy(j.workspace_id, slug);
         } catch {
           /* best-effort */
+        }
+        // reactive-fold-on-gate-complete: this back-fill just flipped a stuck-merged spec derived-`shipped`
+        // (the noop-pipeline-test-4 recovery case). If its spec-test + security already cleared (they often
+        // have by the time this reconcile catches a stale merge), it is now fold-eligible — fire the reactive
+        // Gate-B trigger so it folds on this reconcile pass instead of waiting for the daily backstop.
+        // Idempotent + no-ops when a gate is still open. Best-effort.
+        try {
+          const { reactiveFoldOnGateComplete } = await import("@/lib/spec-test-runs");
+          await reactiveFoldOnGateComplete(j.workspace_id, slug, { reason: "merged-phase reconcile", admin });
+        } catch {
+          /* best-effort — the daily spec-test-cron backstop still folds it */
         }
       } catch (e) {
         console.warn(`[merged-phase-reconcile] ${slug} reconcile threw (continuing):`, e instanceof Error ? e.message : e);
