@@ -72,7 +72,8 @@ export interface KpiAuditReport {
 /**
  * Per-metric tolerance overrides — keyed by `metric_key`. A derived median (`error_mttr_hours`)
  * tolerates a wider band than a strict count (`build_throughput`). Anything not listed falls back to
- * `DEFAULT_TOLERANCE`.
+ * `DEFAULT_TOLERANCE`. Current-state point-read metrics (`MetricDef.currentState`) are SKIPPED by the
+ * audit entirely (see `auditKpi` / `auditAllKpis` below) and don't need a tolerance entry here.
  */
 const DEFAULT_TOLERANCE = 0.005; // 0.5%
 const TOLERANCE_OVERRIDES: Record<string, number> = {
@@ -85,8 +86,6 @@ const TOLERANCE_OVERRIDES: Record<string, number> = {
   // Per-worker grade aggregates pick up grading writes between snapshots.
   worker_grade_rollup: 0.05,
   director_call_grade: 0.05,
-  // Lane utilization is a CURRENT-STATE point read — the pool churns in the seconds between writes.
-  lane_utilization: 0.05,
   // Loop health is a CURRENT-STATE point read — open loop_alerts and the latest-beat-per-loop set
   // churn in the seconds between the snapshot write and the audit re-run.
   loop_health: 0.05,
@@ -168,7 +167,16 @@ function displayFor(cadence: Cadence, metricKey: string): { label: string; polar
  * Audit one `(metric_key, cadence)` — loads the latest persisted snapshot row (or the row at
  * `snapshotDate` when given), re-runs the SAME `MetricDef.compute` from [[platform-scorecard]]
  * against the raw tables, and reports drift. Returns null when nothing has been persisted yet
- * (nothing to compare to). NO writes.
+ * (nothing to compare to), or when the metric is a current-state point read (see guard below).
+ * NO writes.
+ *
+ * **Current-state guard:** metrics flagged `MetricDef.currentState` (e.g. `lane_utilization`) are
+ * point reads of a CURRENTLY-OCCUPIED pool/counter — the snapshotted value freezes the moment-in-time
+ * read, and a ground-truth re-run reads the pool AGAIN at the moment-of-audit, so any movement in
+ * the seconds between the two reads surfaces as "drift" that isn't drift. Paired with the in-flight
+ * daily window guard (`readPersistedSnapshot` above): same false-positive class — comparing a frozen
+ * snapshot against a moving target — applied to a different axis (point-read vs in-flight window).
+ * Repair Agent verdict on signature `loop:kpi_drift:lane_utilization:daily`.
  */
 export async function auditKpi(
   workspaceId: string,
@@ -176,6 +184,9 @@ export async function auditKpi(
   cadence: Cadence,
   snapshotDate?: string,
 ): Promise<KpiAuditReport | null> {
+  const registryEntry = getRegisteredMetrics(cadence).find((m) => m.key === metric);
+  if (registryEntry?.currentState) return null;
+
   const admin = createAdminClient();
   const snapshot = await readPersistedSnapshot(admin, workspaceId, metric, cadence, snapshotDate);
   if (!snapshot) return null;
@@ -243,6 +254,11 @@ export async function auditAllKpis(
 
   const reports: KpiAuditReport[] = [];
   for (const m of registry) {
+    // Current-state guard — skip point-read metrics. See `auditKpi` above for the full rationale; the
+    // short version: a CURRENTLY-OCCUPIED pool/counter (lane_utilization) churns in the seconds
+    // between the snapshot write and the ground-truth re-read, so the diff is moving-target noise,
+    // not drift. Same false-positive class as the in-flight daily window guard (different axis).
+    if (m.currentState) continue;
     const snap = latestByMetric.get(m.key);
     if (!snap) continue; // no data yet — nothing to compare to
     const gt = (groundTruthByDate.get(snap.snapshot_date) ?? []).find((r) => r.metric_key === m.key);
