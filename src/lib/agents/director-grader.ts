@@ -40,8 +40,18 @@ type Admin = ReturnType<typeof createAdminClient>;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GRADER_MODEL = SONNET_MODEL;
 
-/** agent_jobs statuses that mean a build CONCLUDED — only then is an auto-approval gradeable. */
-const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "needs_attention"]);
+/**
+ * agent_jobs statuses that mean a build CONCLUDED — only then is an auto-approval gradeable.
+ *
+ * `merged` is the build's TERMINAL SUCCESS state, not an in-flight one: a build goes
+ * building → completed (pre-push `tsc` passed, PR opened cleanly) → merged (the PR landed on `main`).
+ * `merged` is `SUCCESSFUL_BUILD_STATUSES` in agent-jobs.ts — the work EXECUTED and SHIPPED. A post-merge
+ * finalization step that doesn't re-flip the job to `completed` (it stays `merged`) must NOT starve grading:
+ * the director's APPROVAL call already concluded the moment the work landed, so it is fully gradeable.
+ * (Historically only {completed, failed, needs_attention} were here, so every `merged` build silently
+ * no-op'd grading for days — the STARVED-grading root cause. See docs/brain/libraries/director-grader.md.)
+ */
+const TERMINAL_JOB_STATUSES = new Set(["completed", "merged", "failed", "needs_attention"]);
 
 export type GradeDimension = "auto-approval" | "goal-escort";
 

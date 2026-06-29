@@ -68,8 +68,17 @@ type Admin = ReturnType<typeof createAdminClient>;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GRADER_MODEL = SONNET_MODEL;
 
-/** agent_jobs statuses that mean a worker action CONCLUDED — only then is it gradeable. */
-const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "needs_attention"]);
+/**
+ * agent_jobs statuses that mean a worker action CONCLUDED — only then is it gradeable.
+ *
+ * `merged` is the build's TERMINAL SUCCESS state (building → completed → merged = PR landed on `main`;
+ * `SUCCESSFUL_BUILD_STATUSES` in agent-jobs.ts), not in-flight. The `build` rubric below literally scores
+ * "PR merged clean", so a `merged` build is the canonical thing to grade. A post-merge finalization step
+ * that leaves the job at `merged` (never re-flipping it to `completed`) must NOT starve worker grading —
+ * the worker's atomic action already concluded. (Omitting `merged` here silently no-op'd every merged
+ * build for days — the same STARVED-grading root cause as the director grader.)
+ */
+const TERMINAL_JOB_STATUSES = new Set(["completed", "merged", "failed", "needs_attention"]);
 
 /** The standing performance window — last N graded jobs per worker (the spec's locked config). */
 export const ROLLUP_WINDOW = 10;

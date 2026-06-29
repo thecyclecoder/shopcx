@@ -395,6 +395,86 @@ export const platformDirectorCron = inngest.createFunction(
       return { audited, alertsOpened, alertsResolved };
     });
 
+    // GRADING LIVENESS (fix-starved-grading): the director/worker grade sweeps above can SILENTLY STARVE
+    // — the cron heartbeats fine while `graded:0` sweep after sweep (e.g. every concluded build sat in
+    // `merged`, which the grader's terminal-status set used to omit → considered>0, graded=0 for days, and
+    // nobody saw it). So emit a DEDICATED grading beat (`loop_id='director-decision-grading'`) carrying
+    // {considered, graded} for BOTH layers, and open a warn-level `loop_alerts` row when grading is
+    // STARVED for ≥2 consecutive sweeps (considered>0 but graded==0 across both layers) — auto-resolving
+    // the moment grading flows again. This closes the silent-starvation gap (the CEO's "make sure grading
+    // actually happens + is observable" ask) without rebuilding the cadence. Best-effort + idempotent.
+    await step.run("emit-grading-liveness", async () => {
+      const consideredTotal = grading.considered + workerGrading.considered;
+      const gradedTotal = grading.graded + workerGrading.graded;
+      const starved = consideredTotal > 0 && gradedTotal === 0; // work to grade, but nothing graded
+      try {
+        await emitCronHeartbeat("director-decision-grading", {
+          ok: !starved,
+          detail: starved ? "grading starved — considered>0 but graded=0" : undefined,
+          produced: {
+            director: { considered: grading.considered, graded: grading.graded },
+            worker: { considered: workerGrading.considered, graded: workerGrading.graded, coached: workerGrading.coached },
+            starved,
+          },
+        });
+      } catch (e) {
+        console.error("[platform-director-cron] grading-liveness heartbeat failed:", e instanceof Error ? e.message : e);
+      }
+
+      // Consecutive-starvation alert: page only when the PRIOR grading beat was also starved (≥2 in a
+      // row) — a lone starved sweep (a transient between-merge gap) self-heals on the next beat and must
+      // not page. A healthy sweep (graded>0, or nothing to grade) auto-resolves any open alert.
+      const signature = "grading_starved:director-decision-grading";
+      try {
+        if (starved) {
+          const { data: prevBeats } = await admin
+            .from("loop_heartbeats")
+            .select("ok, produced, ran_at")
+            .eq("loop_id", "director-decision-grading")
+            .order("ran_at", { ascending: false })
+            .limit(2);
+          // prevBeats[0] is the beat we just wrote; [1] is the immediately-previous sweep.
+          const prev = (prevBeats as Array<{ ok: boolean; produced: { starved?: boolean } | null }> | null)?.[1];
+          const prevStarved = prev ? prev.ok === false || prev.produced?.starved === true : false;
+          if (prevStarved) {
+            const detail = `Director/worker grading STARVED for ≥2 consecutive sweeps — considered ${consideredTotal} (director ${grading.considered} + worker ${workerGrading.considered}) but graded 0. A concluded-but-ungradeable status (e.g. a build stuck \`merged\` outside the grader's terminal set) is the usual cause.`;
+            const { data: open } = await admin
+              .from("loop_alerts")
+              .select("id")
+              .eq("status", "open")
+              .eq("loop_id", signature)
+              .maybeSingle();
+            if (open) {
+              await admin.from("loop_alerts").update({ detail, last_seen_at: new Date().toISOString() }).eq("id", (open as { id: string }).id);
+            } else {
+              const { error: insErr } = await admin
+                .from("loop_alerts")
+                .insert({ loop_id: signature, kind: "grading-starved", owner: "platform", signature, reason: "grading_starved", detail });
+              if (insErr && (insErr as { code?: string }).code !== "23505") {
+                console.error("[platform-director-cron] grading-starved alert open failed:", insErr.message);
+              }
+            }
+          }
+        } else if (consideredTotal === 0 || gradedTotal > 0) {
+          // Grading flowed (or there was nothing to grade) — recovery: resolve any open starvation alert.
+          const { data: open } = await admin
+            .from("loop_alerts")
+            .select("id")
+            .eq("status", "open")
+            .eq("loop_id", signature)
+            .maybeSingle();
+          if (open) {
+            await admin
+              .from("loop_alerts")
+              .update({ status: "resolved", resolved_at: new Date().toISOString() })
+              .eq("id", (open as { id: string }).id);
+          }
+        }
+      } catch (e) {
+        console.error("[platform-director-cron] grading-starved alert sweep failed:", e instanceof Error ? e.message : e);
+      }
+    });
+
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) — keeps a DEAD cadence visible
     // so the standing pass can't silently die (MONITORED_LOOPS / coverage-auto-register contract).
     await step.run("emit-heartbeat", async () => {
