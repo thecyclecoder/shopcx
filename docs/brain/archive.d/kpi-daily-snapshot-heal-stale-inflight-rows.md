@@ -1,0 +1,1 @@
+- **Heal stale pre-lagged-fix daily KPI snapshot rows by tightening the snapshot-platform-scorecard done guard** · verified 2026-06-29 · → [[../inngest/platform-director-cron]]
