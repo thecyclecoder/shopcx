@@ -27,7 +27,7 @@ A single default tolerance (`0.5%`) with per-metric overrides keyed by `metric_k
 
 - `error_mttr_hours` · `idea_to_merge_hours` · `time_to_approve_hours` — medians of distributions
 - `worker_grade_rollup` · `director_call_grade` — per-worker / per-dimension grade aggregates picking up writes between snapshots
-- `lane_utilization` — a current-state point read that churns in the seconds between writes
+- `lane_utilization` · `loop_health` — current-state point reads that churn in the seconds between writes (`loop_health` re-reads open `loop_alerts` + the latest-beat-per-loop set live against a frozen snapshot)
 
 A metric is `withinTolerance` when `driftPct ≤` its tolerance, or — when `driftPct` is null (`snapshotValue === 0`) — when the absolute `drift` itself is 0.
 

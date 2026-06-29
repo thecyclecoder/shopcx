@@ -87,6 +87,9 @@ const TOLERANCE_OVERRIDES: Record<string, number> = {
   director_call_grade: 0.05,
   // Lane utilization is a CURRENT-STATE point read — the pool churns in the seconds between writes.
   lane_utilization: 0.05,
+  // Loop health is a CURRENT-STATE point read — open loop_alerts and the latest-beat-per-loop set
+  // churn in the seconds between the snapshot write and the audit re-run.
+  loop_health: 0.05,
 };
 
 function toleranceFor(metricKey: string): number {
