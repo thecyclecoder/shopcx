@@ -1,0 +1,1 @@
+- **KPI tolerance: loop_health is a current-state point read — widen to 5% like lane_utilization** · verified 2026-06-29 · → [[libraries/kpi-review]]
