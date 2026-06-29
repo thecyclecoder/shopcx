@@ -1,0 +1,1 @@
+- **KPI audit pass skips current-state point-read metrics** · verified 2026-06-29 · → [[libraries/kpi-review]]
