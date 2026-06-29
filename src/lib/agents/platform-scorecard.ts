@@ -822,6 +822,7 @@ const regressionsCaught: MetricDef = {
 const regressionCoveragePct: MetricDef = {
   key: "regression_coverage_pct",
   unit: "pct",
+  currentState: true,
   compute: async (ctx) => {
     const { admin, workspaceId, curr, prev } = ctx;
 
