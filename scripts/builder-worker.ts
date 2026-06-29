@@ -1523,7 +1523,7 @@ async function gh(method: string, path: string, body?: unknown) {
   return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
 }
 
-async function ensurePr(branch: string, title: string, draft: boolean, body?: string): Promise<{ url: string; number: number } | null> {
+async function ensurePr(branch: string, title: string, draft: boolean, body?: string, base = "main"): Promise<{ url: string; number: number } | null> {
   const owner = REPO.split("/")[0];
   const prBody = body ?? `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`;
   // Retry `gh pr create` a few times with backoff — most failures are transient (GitHub 5xx / secondary
@@ -1531,13 +1531,25 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
   // norm. Before each retry adopt an already-open PR for the branch (idempotent: a prior attempt may have
   // actually created one despite a flaky response). Only after the retries are exhausted do we return
   // null → the caller flags `needs_attention` "branch pushed but PR creation failed" (recoverable).
+  // `base` defaults to main (one-off specs + fold flows); a GOAL-BOUND spec passes `goal/{goalSlug}` so its PR
+  // accumulates onto the goal branch (Gate B), NEVER main (spec-goal-branch-pm-flow M4 — see the build path).
   const backoffs = [1000, 3000, 8000];
   for (let attempt = 0; attempt <= backoffs.length; attempt++) {
-    const created = await gh("POST", `/repos/${REPO}/pulls`, { title, head: branch, base: "main", body: prBody, draft });
+    const created = await gh("POST", `/repos/${REPO}/pulls`, { title, head: branch, base, body: prBody, draft });
     if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
     const existing = await gh("GET", `/repos/${REPO}/pulls?head=${owner}:${branch}&state=open`);
     if (existing.ok && Array.isArray(existing.json) && existing.json.length) {
-      return { url: existing.json[0].html_url as string, number: existing.json[0].number as number };
+      const open = existing.json[0] as { html_url: string; number: number; base?: { ref?: string } };
+      // Re-target a stale/mismatched base (e.g. a goal-bound spec whose PR was opened to main before the
+      // goal-branch fix, or an idempotent re-open with a different base): PATCH the PR's base so a goal-bound
+      // spec's PR is NEVER left pointing at main. Best-effort — a failed retarget still returns the PR.
+      if (open.base?.ref && open.base.ref !== base) {
+        const patched = await gh("PATCH", `/repos/${REPO}/pulls/${open.number}`, { base });
+        console.error(
+          `[ensurePr] adopted existing PR #${open.number} (${branch}) had base ${open.base.ref}; retargeted → ${base} (${patched.ok ? "ok" : `failed ${patched.status}`})`,
+        );
+      }
+      return { url: open.html_url, number: open.number };
     }
     if (attempt < backoffs.length) {
       console.error(
@@ -11976,29 +11988,64 @@ async function dispatchJob(job: Job) {
     const remoteHasBranch =
       sh("git", ["ls-remote", "--exit-code", "--heads", "origin", branch]).code === 0;
     // ── spec-goal-branch-pm-flow M4 (Part 2): goal-bound specs build OFF the goal branch ──────────
-    // A FRESH spec branch (no prior phase) for a GOAL-BOUND spec bases on `origin/goal/{goal-slug}` WHEN that
-    // goal branch already exists — so the spec sees its already-merged DEPENDENCIES' code (M4 merges a
-    // promote-eligible dependency onto the goal branch before its dependent builds). A one-off spec, or the
-    // FIRST spec of a goal (goal branch absent — it will SEED the branch on promote), still bases on main.
-    // An EXTENDING branch (prior phase built) always re-bases on its own tip — never re-pick a base.
+    // A FRESH spec branch (no prior phase) for a GOAL-BOUND spec bases on `origin/goal/{goal-slug}` so it sees
+    // its already-merged DEPENDENCIES' code (M4 merges a promote-eligible dependency onto the goal branch
+    // before its dependent builds). The goal branch is created from `origin/main` RACE-SAFELY the FIRST time
+    // any of a goal's specs builds — so two parallel first-builds coordinate: exactly one creates it, the other
+    // observes it; NEITHER bases on (or PRs to) main. A one-off spec (no goal) still bases on main.
+    //
+    // ⚠️ THE RACE THIS FIXES (observed live: noop-goal-test-a / -b, PRs #859/#860 BOTH baseRefName=main): the
+    // pre-fix code, when the goal branch was absent, logged "first spec of the goal; basing on main" and built
+    // off main — so two parallel first-builds BOTH based on main, BOTH opened PRs to main, and the goal branch
+    // was NEVER created. The atomic goal→main promotion (Gate C) was unreachable. Fix: a goal-bound spec NEVER
+    // bases on main; it creates-or-observes the goal branch and bases on THAT. Creation is a `git push
+    // origin origin/main:refs/heads/goal/{slug}` (create-from-main, no checkout) and "already exists /
+    // non-fast-forward / rejected" reads as SUCCESS (the concurrent first-build won the create) → we fetch and
+    // base on the now-extant goal branch. So exactly-once creation under concurrency, both end up on the goal
+    // branch. (Gate B's `mergeSpecBranchIntoGoalBranch` ALSO seeds the goal branch idempotently on promote —
+    // these two seeders are mutually idempotent: same `refs/heads/goal/{slug}` from `main`, "already exists" is
+    // success on both sides.)
     let freshBase = "origin/main";
     if (!remoteHasBranch) {
+      let goalSlug: string | null = null;
       try {
         const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
-        const goalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
-        if (goalSlug) {
-          const goalBranch = `goal/${goalSlug}`;
-          const goalBranchExists =
+        goalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+      } catch (e) {
+        // Could not even DETERMINE goal membership (a PM-read blip): fall back to one-off behavior (base main).
+        // This is the only goal-related fallback to main — once we KNOW a spec is goal-bound, basing on main is
+        // forbidden (it re-introduces the race). A one-off spec reads goalSlug=null and bases on main correctly.
+        console.warn(`${tag} goal membership resolution failed for ${slug} (treating as one-off → main):`, e instanceof Error ? e.message : e);
+      }
+      if (goalSlug) {
+        const goalBranch = `goal/${goalSlug}`;
+        let goalBranchExists =
+          sh("git", ["ls-remote", "--exit-code", "--heads", "origin", goalBranch]).code === 0;
+        if (!goalBranchExists) {
+          // RACE-SAFE CREATE: push main → refs/heads/goal/{slug}. A concurrent first-build may win; "already
+          // exists" / non-fast-forward / rejected all mean the branch is now present → treat as success.
+          // `git fetch origin main` first so origin/main is the freshest tip we seed from.
+          sh("git", ["fetch", "origin", "main"]);
+          const create = sh("git", ["push", "origin", `origin/main:refs/heads/${goalBranch}`]);
+          // Re-probe AFTER the push regardless of its exit code — a non-fast-forward/exists rejection is the
+          // concurrent-create winning, which is exactly the success we want (the branch now exists).
+          goalBranchExists =
             sh("git", ["ls-remote", "--exit-code", "--heads", "origin", goalBranch]).code === 0;
-          if (goalBranchExists) {
-            freshBase = `origin/${goalBranch}`;
-            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}); basing fresh spec branch on the goal branch so it sees merged dependencies`);
+          if (create.code === 0 && goalBranchExists) {
+            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}) — SEEDED the goal branch from main (race-safe create; this build won the create)`);
+          } else if (goalBranchExists) {
+            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}) — goal branch already created by a concurrent first-build (race-safe create; observed it)`);
           } else {
-            console.log(`${tag} ${slug} is goal-bound (goal/${goalSlug}) but the goal branch doesn't exist yet — first spec of the goal; basing on main`);
+            // The push failed AND the branch still isn't there (e.g. no push perms / GH outage). Do NOT fall
+            // back to main for a goal-bound spec — that would re-introduce the bug. Fail the build loudly so the
+            // owner sees it, rather than silently base/PR a goal-bound spec on main.
+            throw new Error(`could not create goal branch ${goalBranch} for goal-bound spec ${slug} (push: ${create.err.slice(0, 200)}) — refusing to base a goal-bound spec on main`);
           }
         }
-      } catch (e) {
-        console.warn(`${tag} goal-base resolution failed for ${slug} (falling back to main):`, e instanceof Error ? e.message : e);
+        // Fetch the goal branch tip so origin/{goalBranch} is a valid local ref to base the worktree on.
+        sh("git", ["fetch", "origin", goalBranch]);
+        freshBase = `origin/${goalBranch}`;
+        console.log(`${tag} ${slug} basing fresh spec branch on the goal branch (${freshBase}) so it sees merged dependencies — NEVER main`);
       }
     }
     const base = remoteHasBranch ? `origin/${branch}` : freshBase;
@@ -12164,8 +12211,34 @@ async function dispatchJob(job: Job) {
       }
       // ACCUMULATION COMPLETE (last phase / one-shot) → open the (non-draft) PR; the PR + squash-merge action
       // surface together at in_testing. Un-draft if an earlier needs_input/needs_approval pause left a draft.
-      console.log(`${tag} accumulation complete (${acc.reason}) → opening PR`);
-      const pr = await ensurePr(branch!, slug, false);
+      //
+      // PR BASE (spec-goal-branch-pm-flow M4): a GOAL-BOUND spec's PR targets the GOAL branch `goal/{goalSlug}`,
+      // NEVER main — so the per-spec PR accumulates onto the goal branch (Gate B) and the whole goal lands on
+      // main atomically (Gate C). A ONE-OFF spec (no goal) targets main directly (Gate A) — unchanged. The goal
+      // branch is guaranteed to exist here: this spec built OFF it (the race-safe create above ran on the fresh
+      // branch). Fail OPEN to main only on a goal-resolve blip (the same one-off fallback the base used).
+      let prBase = "main";
+      try {
+        const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+        const prGoalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+        if (prGoalSlug) {
+          prBase = `goal/${prGoalSlug}`;
+          // Belt-and-suspenders: ensure the goal branch exists before opening a PR against it (a resume whose
+          // fresh-branch create path didn't run, or a goal newly bound after the branch was first cut). Same
+          // race-safe create as the build base.
+          const goalBranchExists =
+            sh("git", ["ls-remote", "--exit-code", "--heads", "origin", prBase]).code === 0;
+          if (!goalBranchExists) {
+            sh("git", ["fetch", "origin", "main"]);
+            sh("git", ["push", "origin", `origin/main:refs/heads/${prBase}`]);
+            console.log(`${tag} ${slug} goal branch ${prBase} absent at PR time — race-safe seeded from main before opening PR`);
+          }
+        }
+      } catch (e) {
+        console.warn(`${tag} PR-base goal resolution failed for ${slug} (PR → main):`, e instanceof Error ? e.message : e);
+      }
+      console.log(`${tag} accumulation complete (${acc.reason}) → opening PR (base ${prBase})`);
+      const pr = await ensurePr(branch!, slug, false, undefined, prBase);
       if (!pr) {
         await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: opts.finalLogTail });
         return;
