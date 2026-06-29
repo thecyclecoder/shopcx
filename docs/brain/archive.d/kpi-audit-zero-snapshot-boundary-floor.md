@@ -1,0 +1,1 @@
+- **KPI audit: count-metric zero-snapshot boundary-race floor** · verified 2026-06-29 · → [[libraries/kpi-review]]
