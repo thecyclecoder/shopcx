@@ -40,7 +40,7 @@ Apply ONE disposition end-to-end:
 - **downgrade** → `applyAdaDisposition` (flip to deferred) + a CEO notification (override → planned).
 - **upgrade** → `markSpecCardPendingUpgrade` (park the spec) + a CEO Approval Request (Planned / Deferred).
 
-Records one `director_activity` row per action (`spec_dispose_same` / `spec_dispose_downgrade` / `spec_dispose_upgrade_proposed`). Idempotent + best-effort.
+Records one `director_activity` row per action (`spec_dispose_same` / `spec_dispose_downgrade` / `spec_dispose_upgrade_proposed`). Idempotent + best-effort. The downgrade CEO notification (`emitDowngradeNotification`) now delegates to the shared [[spec-defer-audit]] `emitDeferNotification` — the SAME CEO-notification surface every programmatic defer reuses (the no-silent-spec-defer invariant) — passing Ada's own `ada-downgrade:{slug}` dedupe key + her director voice so her lane's surface stays distinct.
 
 ### `runAdaDispositionSweep(admin, workspaceId): Promise<DispositionSweepResult>`
 
@@ -62,4 +62,4 @@ Full sweep — selects every candidate and applies the decision to each. Returns
 
 ## Brain links
 
-[[../specs/spec-review-agent]] · [[agents-spec-review]] · [[platform-director]] · [[../tables/director_activity]] · [[spec-card-state]] · [[../tables/dashboard_notifications]] · [[../dashboard/agents]]
+[[../specs/spec-review-agent]] · [[agents-spec-review]] · [[platform-director]] · [[spec-defer-audit]] · [[../tables/director_activity]] · [[spec-card-state]] · [[../tables/dashboard_notifications]] · [[../dashboard/agents]]

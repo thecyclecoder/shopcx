@@ -70,7 +70,13 @@ export type DirectorActionKind =
   // re-author-re-opens-dismissed — `clearDirectorSpecDismissals` writes one row when a RE-AUTHORED spec's
   // standing init/groom `*_dismissed` ledger rows are cleared (the corrected content must be re-investigated,
   // not carried under the stale verdict). metadata: { cleared_dismissals, cleared_keys, autonomous:true }.
-  | "spec_reopened_after_reauthor";
+  | "spec_reopened_after_reauthor"
+  // no-silent-spec-defer invariant — EVERY programmatic (non-human) flip of a spec to `deferred` writes one
+  // of these via `auditedProgrammaticDefer` ([[spec-defer-audit]]). The row records WHO parked it (`actor`)
+  // and a CONCRETE reason (for a loop-repair defer: which loop/signature + WHY — resolved/superseded/
+  // pending-deploy), and the same helper emits a CEO "Spec deferred — <why>" notification with one-click
+  // un-defer. No silent parks: a programmatic defer with no audit row + no surface is the gap this closes.
+  | "spec_deferred_programmatic";
 
 export interface DirectorActivityInput {
   workspaceId: string;
