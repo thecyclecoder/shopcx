@@ -9642,29 +9642,98 @@ function repairPrompt(brief: string): string {
     ``,
     `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if an EXISTING spec you'd extend (a parent, a Blocked-by: link, a sibling root-cause spec you'd group onto) is malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; should be flipped back to in_review via markSpecCardBackToReview before this fix can hang off it"). Never silently patch a malformed spec inline; the in_review flip is what gets it back into Vale's queue.`,
     ``,
+    `The spec you author is reviewed by the FOUNDER on the Roadmap board BEFORE any build — so its prose must be HUMAN-READABLE, not machine shorthand. A reviewer who never saw this error must understand, in plain language: (a) what is failing + the user-facing/system impact, (b) what you propose to change, concretely, (c) why that's the right fix. Write \`problem\`, \`proposedChange\`, and \`why\` as PROSE a non-engineer can follow — never a bare code-path string. (The \`target\` file is a machine hint, NOT the proposal.)`,
+    ``,
     `Final message = ONLY one JSON object:`,
-    `  {"status":"real-bug"|"monitor-false-positive"|"foreign-app-noise","diagnosis":"<plain text: the root cause + what the fix does>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"...","intent":"<one paragraph>","problem":"<concrete, grounded in the signature + the code you traced>","target":"src/lib/<the file/fn to fix>"}}`,
+    `  {"status":"real-bug"|"monitor-false-positive"|"foreign-app-noise","diagnosis":"<plain text: the root cause + what the fix does>","spec":{"slug":"<stable-kebab-slug>","title":"<plain, specific — what this fixes>","owner":"[[../functions/platform]]","parent":"...","intent":"<one-paragraph summary of the fix>","problem":"<PROSE: what is failing + who/what it affects (the user-facing or system impact), grounded in the signature + the code you traced — 2-4 sentences, no bare code-path strings>","proposedChange":"<PROSE: concretely what you will change and how it fixes the problem — name the file/function but explain the change in words — 2-4 sentences>","why":"<PROSE: why this is the right fix (the root cause it addresses; why not an alternative) — 1-3 sentences>","phase":"<the SPECIFIC one-phase build step for THIS fix — e.g. 'In src/lib/X.ts, guard Y against null and add the missing Z fallback', NOT a generic 'land the fix'>","target":"src/lib/<the file/fn to fix>"}}`,
     `  {"status":"transient","reason":"<why this is a genuine wait/transient with no code fix>"}`,
     `  {"status":"needs-human","diagnosis":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
   ].join("\n");
 }
 
-function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; target?: string }, signature: string, verdict: string, rootCause: string): string {
+// Strip a leading "Phase N —/-/:" prefix the LLM may have prepended to a phase NAME, so the serializer's
+// own `## Phase {position} — {title}` numbering never double-prefixes ("Phase 1 — Phase 1 — close it").
+// The serializer ([[brain-roadmap]] serializeSpecRowToMarkdown) owns the "Phase N — " prefix; the stored
+// phase TITLE must be the bare name only.
+function stripPhasePrefix(name: string): string {
+  return String(name || "").replace(/^\s*phase\s*\d+\s*[—\-:]\s*/i, "").trim();
+}
+
+// Author a HUMAN-READABLE repair spec the FOUNDER can review on the Roadmap board before any build.
+//
+// Two halves, deliberately separated:
+//  - READABLE prose (Problem / Proposed change / Why) so a non-author can tell exactly what the repair
+//    proposes — no machine shorthand, no bare code-path string masquerading as the proposal.
+//  - MACHINE MARKERS (Repair-root-cause / Repair-signature) kept INTACT for grouping/dedup
+//    ([[repair-agent]] parseRepairSpecMeta).
+//
+// THE ROUND-TRIP CONSTRAINT — why everything readable lives in the Phase 1 BODY:
+//   The detail page renders `getSpec().raw`, which is REBUILT by [[brain-roadmap]]
+//   serializeSpecRowToMarkdown from the DB row. That serializer only re-emits the H1, the column-backed
+//   header bits (Owner/Parent/Repair-signature/…), the SUMMARY (firstParagraph), the per-phase
+//   `## Phase N — {title}` + BODY (verbatim), and a `## Verification` block. Arbitrary top-level
+//   `## Problem` / `## Proposed change` / `## Why` H2s are NOT phases, NOT the summary → they'd be DROPPED
+//   on the round-trip and the founder would see nothing. So the readable sections + the machine markers
+//   are authored as `###` subsections INSIDE the Phase 1 body, which the serializer preserves byte-for-byte
+//   (and `**Repair-root-cause:**`/`**Repair-signature:**` still match parseRepairSpecMeta there).
+//
+// Rendering-bug fixes baked in here:
+//  (a) the phase NAME is fed bare (stripPhasePrefix) — the serializer prepends "Phase 1 — " itself, so a
+//      stored title that already said "Phase 1 — close it" used to render "Phase 1 — Phase 1 — close it".
+//  (b) the `intent` paragraph is the FIRST content under the H1 and is the ONLY thing firstParagraph
+//      captures as the summary; the Owner/Parent/Verdict meta line sits BELOW it (after a blank), so the
+//      meta no longer gets swallowed into the summary — and thus no longer DUPLICATED against the header
+//      the serializer regenerates from the Owner/Parent columns.
+function repairSpecMarkdown(
+  spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; proposedChange?: string; why?: string; phase?: string; target?: string },
+  signature: string,
+  verdict: string,
+  rootCause: string,
+): string {
+  const phaseName = stripPhasePrefix(spec.phase || "") ||
+    (spec.target ? `Fix ${spec.target}` : "Land the fix");
+  const problem = (spec.problem || "").trim() || "(see the repair diagnosis on the Control Tower repair feed)";
+  const proposed = (spec.proposedChange || "").trim();
+  const why = (spec.why || "").trim();
+  const buildStep = proposed
+    ? `Make the change described under **Proposed change** above${spec.target ? ` (in \`${spec.target}\`)` : ""}, add/update its brain page, and gate on \`npx tsc --noEmit\`.`
+    : `Scope the fix from the Problem above${spec.target ? ` (likely in \`${spec.target}\`)` : ""}; land it + its brain page; gate on \`npx tsc --noEmit\`.`;
+
+  // The Phase 1 BODY — preserved verbatim on the round-trip, so ALL the human-readable review content
+  // lives here (NOT in stripped-on-serialize top-level H2s), alongside the intact machine markers.
+  const phaseBody = [
+    `### Problem`,
+    problem,
+    ``,
+    `### Proposed change`,
+    proposed || "(the fix scoped from the Problem above — see the repair diagnosis on the Control Tower repair feed)",
+    ...(spec.target ? [``, `**Target file:** \`${spec.target}\``] : []),
+    ``,
+    `### Why`,
+    why || "Addresses the root cause traced above rather than papering over the symptom.",
+    ``,
+    `### Build step`,
+    buildStep,
+    ``,
+    `**Repair-root-cause:** \`${rootCause}\``,
+    `**Repair-signature:** \`${signature}\``,
+  ].join("\n");
+
   return [
     `# ${spec.title}`,
     ``,
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"} · **Verdict:** ${verdict}`,
-    `**Repair-root-cause:** \`${rootCause}\``,
-    `**Repair-signature:** \`${signature}\``,
+    // intent FIRST → it (and only it) becomes the summary; the meta lines below can't be swallowed.
+    (spec.intent || "Close the issue behind this Control Tower signature.").trim(),
     ``,
-    spec.intent.trim(),
+    // Owner/Parent on their OWN line — NO trailing `· **Verdict:**`. parseSpec's Parent regex is greedy to
+    // end-of-line, so an appended `· **Verdict:**` corrupted the stored `parent` column (it became
+    // "extends … · Verdict: real-bug"). The verdict is carried losslessly in the footer's `(verdict: …)`
+    // instead (a standalone `**Verdict:**` line here isn't column-backed and would vanish on the round-trip).
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"}`,
     ``,
-    `## Problem (from Control Tower signature \`${signature}\`)`,
-    spec.problem.trim(),
-    spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
+    `## Phase 1 — ${phaseName}`,
     ``,
-    `## Phase 1 — close it`,
-    `Scope from the problem above; land the fix + its brain page; gate on \`npx tsc --noEmit\`.`,
+    phaseBody,
     ``,
     `## Verification`,
     `- Re-trigger the originating condition (signature \`${signature}\`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.`,
@@ -9674,7 +9743,7 @@ function repairSpecMarkdown(spec: { slug: string; title: string; owner: string; 
   ].join("\n");
 }
 
-interface RepairSpecProposal { slug: string; title: string; owner?: string; parent?: string; intent?: string; problem?: string; target?: string }
+interface RepairSpecProposal { slug: string; title: string; owner?: string; parent?: string; intent?: string; problem?: string; proposedChange?: string; why?: string; phase?: string; target?: string }
 
 // Build-job statuses that mean a build for a slug is still live (mirror of src/lib/agent-jobs
 // ACTIVE_STATUSES; inlined so the worker never loads that module at startup just for the array).
@@ -9827,6 +9896,9 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
         parent: String(s.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"),
         intent: String(s.intent || "Close the issue behind this Control Tower signature."),
         problem: String(s.problem || "(see the repair diagnosis above)"),
+        proposedChange: typeof s.proposedChange === "string" ? s.proposedChange : undefined,
+        why: typeof s.why === "string" ? s.why : undefined,
+        phase: typeof s.phase === "string" ? s.phase : undefined,
         target: typeof s.target === "string" ? s.target : undefined,
       },
       signature,
