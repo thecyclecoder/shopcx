@@ -1139,6 +1139,8 @@ export interface GoalPromotionEffects {
   phasesStamped: number;
   /** spec slugs whose post-ship fold pipeline was triggered (enqueueSpecTestIfDue → fold gate). */
   foldsTriggered: string[];
+  /** spec slugs the reactive fold lane actually folded this pass (post-M5-goal-finalization). */
+  foldedNow: string[];
 }
 
 /**
@@ -1151,18 +1153,29 @@ export interface GoalPromotionEffects {
  * per phase (SDK-only — no raw PM SQL). After stamping, the read-time rollup makes each spec derive `shipped`
  * and the goal derive `complete` (no rollup trigger — status is read-derived since 20260725160000).
  *
- * Then it mirrors `applyMergedBuildEffects`'s post-ship hook: `enqueueSpecTestIfDue(ws, slug, "shipped")` per
- * shipped spec — the entry to the fold pipeline (the spec-test runs against the now-on-main code; on green the
- * fold gate archives the spec into the brain). Best-effort per spec — one spec's stamp/fold failure never
- * blocks the rest. Idempotent: a phase already `shipped`/`rejected` is left as-is (stampPhaseShipped is a
- * targeted update; re-stamping shipped is inert), so a re-run after a partial promotion converges.
+ * Then it mirrors `applyMergedBuildEffects`'s post-ship hook in FULL (post-M5-goal-finalization — closing the
+ * gap where a goal-bound spec shipped to main but never folded the way a one-off does):
+ *   1. CARD-LEVEL provenance — `stampSpecMergeProvenance(slug, { pr: null, merge_sha })` for EVERY member
+ *      spec (not just zero-phase one-shots). A goal-bound spec lands via the atomic goal→main merge with no
+ *      per-spec PR, so `specs.merged_pr` stays null but `specs.last_merge_sha` must carry the M5 merge SHA —
+ *      otherwise the card reads "shipped with no merge provenance" (drift-suspect) on the board.
+ *   2. `enqueueSpecTestIfDue(ws, slug, "shipped")` — the spec-test entry (no-ops if a fresh run already exists,
+ *      e.g. the pre-merge run; the existing green run carries the fold).
+ *   3. `reactiveFoldOnGateComplete(ws, slug)` — the SAME reactive fold a one-off spec uses post-merge
+ *      ([[applyMergedBuildEffects]]). This is the missing leg: M5 stamped shipped but never invoked the fold
+ *      lane, so the goal-bound specs sat derived-shipped forever (a one-off folds because IT calls this). Now
+ *      that the spec is genuinely derived-shipped (the in_testing deriver treats phase merge_sha as "on main")
+ *      with a green spec-test + clean security, the fold gate folds it the instant M5 runs.
+ * Best-effort per spec — one spec's stamp/fold failure never blocks the rest. Idempotent: a phase already
+ * `shipped`/`rejected` is left as-is (stampPhaseShipped is a targeted update; re-stamping shipped is inert),
+ * the reactive fold no-ops a spec already folded/ineligible, so a re-run after a partial promotion converges.
  */
 export async function applyGoalPromotionEffects(
   workspaceId: string,
   goalSlug: string,
   mergeSha: string,
 ): Promise<GoalPromotionEffects> {
-  const out: GoalPromotionEffects = { stampedSpecs: [], phasesStamped: 0, foldsTriggered: [] };
+  const out: GoalPromotionEffects = { stampedSpecs: [], phasesStamped: 0, foldsTriggered: [], foldedNow: [] };
   const { goalBranchState } = await import("@/lib/specs-table");
   // The member specs of the goal (via goal → milestones → specs). goalBranchState already resolves them.
   const state = await goalBranchState(workspaceId, goalSlug);
@@ -1181,9 +1194,11 @@ export async function applyGoalPromotionEffects(
           toStamp.map((p) => stampPhaseShipped(workspaceId, slug, p.position, { merge_sha: mergeSha, pr: null })),
         );
         out.phasesStamped += toStamp.length;
-      } else if (!phases.length) {
-        await stampSpecMergeProvenance(workspaceId, slug, { pr: null, merge_sha: mergeSha });
       }
+      // CARD-LEVEL provenance for EVERY member spec (post-M5-goal-finalization), not just the zero-phase
+      // one-shot. The atomic goal→main merge has no per-spec PR, so `merged_pr` stays null — but
+      // `last_merge_sha` MUST carry the M5 SHA so the card reads "shipped + merge-stamped", not drift-suspect.
+      await stampSpecMergeProvenance(workspaceId, slug, { pr: null, merge_sha: mergeSha });
       out.stampedSpecs.push(slug);
       // Trigger the fold pipeline for the now-shipped spec (mirror applyMergedBuildEffects' post-ship hook).
       try {
@@ -1191,6 +1206,18 @@ export async function applyGoalPromotionEffects(
         if (r.enqueued) out.foldsTriggered.push(slug);
       } catch (e) {
         console.warn(`[goal-promote-effects] ${slug} fold-trigger failed (continuing):`, e instanceof Error ? e.message : e);
+      }
+      // REACTIVE FOLD — the leg the one-off path has and M5 was missing. Route the now-derived-shipped spec
+      // through the SAME fold lane a one-off spec uses after merge ([[reactiveFoldOnGateComplete]] →
+      // getAutoFoldEligibleSlugs → autoFoldVerifiedSpecs). No-ops unless the spec is genuinely fold-eligible
+      // (derived-shipped ∧ machine spec-test pass ∧ clean security); when it is, it folds the instant M5 runs
+      // instead of lingering on the active board. Idempotent + best-effort.
+      try {
+        const { reactiveFoldOnGateComplete } = await import("@/lib/spec-test-runs");
+        const fold = await reactiveFoldOnGateComplete(workspaceId, slug, { reason: "goal→main M5 ship" });
+        if (fold && fold.foldedSlugs.includes(slug)) out.foldedNow.push(slug);
+      } catch (e) {
+        console.warn(`[goal-promote-effects] ${slug} reactive fold failed (continuing):`, e instanceof Error ? e.message : e);
       }
       // A just-shipped spec may be the last blocker of a dependent — release any newly-unblocked dependents.
       try {
@@ -1203,6 +1230,82 @@ export async function applyGoalPromotionEffects(
     }
   }
   return out;
+}
+
+export interface GoalFinalizeResult {
+  /** the goal's status was flipped greenlit → complete (the explicit lifecycle override). */
+  completed: boolean;
+  /** a kind='goal-fold' job was enqueued (or already in-flight) to fold the goal into the brain + retire it. */
+  foldQueued: boolean;
+  /** an existing in-flight/terminal goal-fold or already-folded goal short-circuited the enqueue. */
+  reason?: string;
+}
+
+/**
+ * post-M5-goal-finalization — RETIRE a goal that just promoted to main. A goal that completed the full path
+ * (every member spec on the goal branch, then the atomic goal→main merge) was previously left lingering as
+ * `greenlit`: M5 stamped the SPECS shipped but never touched the GOAL row, and nothing enqueued a goal-fold.
+ * A promoted goal stuck `greenlit` would re-evaluate every standing pass (harmless but never settling) and
+ * sit forever on the active board — the gap this closes so the Growth path retires cleanly.
+ *
+ * Two steps, both through the sanctioned SDK / lane (no raw PM SQL, no raw goal-status poke):
+ *   1. `setGoalStatus(goalId, 'complete')` — the EXPLICIT lifecycle override the SDK doc sanctions for
+ *      `greenlit → complete`. The board normally DERIVES `complete` (goalRowToCard, when every milestone
+ *      rolls up), but the stored column stays `greenlit` after M5 — and the goal-fold lane's guard reads the
+ *      STORED status (`getGoal().status === 'complete'`). So we make the derived truth explicit on the row so
+ *      the fold lane accepts it. Idempotent: a goal already `complete`/`folded` skips the flip.
+ *   2. Enqueue ONE `kind='goal-fold'` job (the existing goal-fold lane — `runGoalFoldJob` folds the goal's
+ *      durable knowledge into the permanent brain pages, then flips the row to `folded`). Deduped: skips if a
+ *      goal-fold job is already in-flight for the slug, or the goal is already `folded`.
+ *
+ * Best-effort + idempotent; never throws (a failure here never un-ships the promoted code). `agent_jobs` is
+ * not a PM table, so the goal-fold enqueue is a plain insert (the goal-status write is the only PM write, via
+ * the SDK).
+ */
+export async function finalizePromotedGoal(
+  workspaceId: string,
+  goalSlug: string,
+  adminClient?: Admin,
+): Promise<GoalFinalizeResult> {
+  const out: GoalFinalizeResult = { completed: false, foldQueued: false };
+  const admin = adminClient || createAdminClient();
+  try {
+    const { getGoal, setGoalStatus } = await import("@/lib/goals-table");
+    const goal = await getGoal(workspaceId, goalSlug);
+    if (!goal) return { ...out, reason: "no-goal-row" };
+    if (goal.status === "folded") return { ...out, reason: "already-folded" };
+
+    // (1) Explicit greenlit → complete override so the goal-fold lane's stored-status guard accepts it.
+    if (goal.status !== "complete") {
+      await setGoalStatus(goal.id, "complete", `goal-finalize:m5-promote:${goalSlug}`);
+      out.completed = true;
+    }
+
+    // (2) Enqueue the goal-fold (deduped on an in-flight goal-fold for this slug). The lane flips → folded.
+    const { data: inflight } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", goalSlug)
+      .eq("kind", "goal-fold")
+      .in("status", ["queued", "queued_resume", "building", "claimed", "needs_input"])
+      .limit(1);
+    if (inflight && inflight.length) return { ...out, reason: "goal-fold-in-flight" };
+
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: goalSlug, // the goal-fold lane carries the GOAL slug on spec_slug
+      kind: "goal-fold",
+      status: "queued",
+      created_by: null,
+    });
+    if (error) return { ...out, reason: `goal-fold-insert-failed: ${error.message}` };
+    out.foldQueued = true;
+    return out;
+  } catch (e) {
+    console.warn(`[goal-finalize] ${goalSlug} finalize failed (continuing):`, e instanceof Error ? e.message : e);
+    return { ...out, reason: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**
@@ -1234,6 +1337,8 @@ export interface PromoteGoalsToMainResult {
   notReady: string[];
   /** per promoted goal, the shipped-stamp summary. */
   effects: Record<string, GoalPromotionEffects>;
+  /** per promoted goal, the post-M5 finalize outcome (greenlit→complete + goal-fold enqueue). */
+  finalized: Record<string, GoalFinalizeResult>;
 }
 
 /**
@@ -1262,7 +1367,7 @@ export interface PromoteGoalsToMainResult {
  * goal with any not-promote-eligible member.
  */
 export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<PromoteGoalsToMainResult> {
-  const result: PromoteGoalsToMainResult = { promoted: [], conflicts: [], parentExempt: [], notReady: [], effects: {} };
+  const result: PromoteGoalsToMainResult = { promoted: [], conflicts: [], parentExempt: [], notReady: [], effects: {}, finalized: {} };
   const admin = adminClient || createAdminClient();
   if (!ghToken()) return result;
   try {
@@ -1347,12 +1452,17 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         } catch (e) {
           console.warn(`[goal-main-promote] ${goalSlug} deploy-watch open failed (continuing):`, e instanceof Error ? e.message : e);
         }
-        // Promotion effects — the SHIPPED stamp (the only shipped-writer) + fold trigger.
+        // Promotion effects — the SHIPPED stamp (the only shipped-writer) + per-spec fold trigger + reactive fold.
         const effects = await applyGoalPromotionEffects(workspaceId, goalSlug, merge.mergeSha);
         result.promoted.push(goalSlug);
         result.effects[goalSlug] = effects;
+        // post-M5-goal-finalization — RETIRE the goal itself: greenlit → complete (explicit override) + enqueue
+        // the goal-fold lane (folds into the brain + flips → folded). Without this the promoted goal lingers as
+        // `greenlit` on the active board forever (the gap observed live on noop-goal-v2).
+        const finalize = await finalizePromotedGoal(workspaceId, goalSlug, admin);
+        result.finalized[goalSlug] = finalize;
         console.log(
-          `[goal-main-promote] ATOMIC promoted ${goalSlug} → main (${merge.mergeSha.slice(0, 8)}); stamped ${effects.phasesStamped} phase(s) across ${effects.stampedSpecs.length} spec(s) shipped; folds: ${effects.foldsTriggered.join(", ") || "—"}`,
+          `[goal-main-promote] ATOMIC promoted ${goalSlug} → main (${merge.mergeSha.slice(0, 8)}); stamped ${effects.phasesStamped} phase(s) across ${effects.stampedSpecs.length} spec(s) shipped; folded-now: ${effects.foldedNow.join(", ") || "—"}; goal-finalize: complete=${finalize.completed} fold-queued=${finalize.foldQueued}${finalize.reason ? ` (${finalize.reason})` : ""}`,
         );
       } catch (e) {
         result.notReady.push(goalSlug);

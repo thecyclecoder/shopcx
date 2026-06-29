@@ -455,7 +455,9 @@ function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
  *                         + no unresolved auto-`fail` regressions).
  *  - `securityGreen`    — the latest per-slug security-review rollup is `completedClean` (matches the
  *                         fold gate's security rail).
- *  - `merged`           — the preview branch promoted to main (all phases of the card are shipped).
+ *  - `merged`           — the branch promoted to main: the build job is terminal `merged` (per-spec PR
+ *                         merge) OR every non-rejected phase carries an M5 `merge_sha` (the atomic
+ *                         goal→main promotion of a goal-bound spec, which never takes a per-spec PR).
  *                         Together with both-green this is the only path to a shipped derivation.
  */
 export interface InTestingSignals {
@@ -654,9 +656,21 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
       const jobStatus = job ? String(job["status"] || "") : "";
       const hasPreview = typeof previewUrl === "string" && previewUrl.length > 0;
       // Per the spec: "Only when both are green AND the branch promoted (merged to main) does it derive
-      // shipped." Treat the build job's terminal `merged` status as the promotion signal — the only
-      // canonical "the PR is now on main" state agent_jobs carries.
-      const merged = jobStatus === "merged";
+      // shipped." Treat the build job's terminal `merged` status as the promotion signal — the canonical
+      // "the PR is now on main" state agent_jobs carries for a PER-SPEC PR merge.
+      //
+      // post-M5-goal-finalization: a GOAL-BOUND spec NEVER takes a per-spec PR merge — its whole goal branch
+      // lands on main in ONE atomic `/merges` call (spec-goal-branch-pm-flow M5), and its build job stays
+      // `completed`, never `merged`. So keying solely on the build-job status left every goal-promoted spec
+      // stuck `in_testing` forever (never derived-shipped ⇒ never fold-eligible — the exact post-M5 lingering
+      // this fixes). The M5 stamp lands on the PHASES: `applyGoalPromotionEffects` flips every phase shipped
+      // with the atomic merge_sha. So a card whose every non-rejected phase carries a `merge_sha` IS on main —
+      // treat that as the promotion signal too (a phase merge_sha is the actual main commit, a stronger proof
+      // than a build-job status flag).
+      const phasesOnMain =
+        card.phases.length > 0 &&
+        card.phases.every((p) => p.status === "rejected" || (p.merge_sha ?? null) !== null);
+      const merged = jobStatus === "merged" || phasesOnMain;
       // Spec-test green — mirror of the fold gate's MACHINE-PASS rail (approved/needs_human verdict +
       // auto_pass>=1 + no unresolved auto-`fail` regressions). Same rule as `getAutoFoldEligibleSlugs`.
       const run = runs[card.slug];

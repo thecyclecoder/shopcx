@@ -3341,7 +3341,7 @@ export function groomInvestigationPrompt(c: GroomCandidate): string {
     // RIGHT verdict is `escalate` (the CEO can audit via the request-audit lane) UNLESS the leftover ⏳
     // phases are genuinely phantom AND you can name which merge shipped each suspect phase.
     c.driftSuspectPhases.length
-      ? `Drift-suspect phases (✅ but no merge PR — provenance missing): ${c.driftSuspectPhases.join(" · ")}`
+      ? `Drift-suspect phases (✅ but no merge PR AND no merge SHA — provenance missing): ${c.driftSuspectPhases.join(" · ")}`
       : "",
     `Remaining phases (⏳): ${c.remainingPhases.join(" · ") || "—"}`,
     c.failedBuilds ? `Note: ${c.failedBuilds} prior build attempt(s) failed${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}.` : "",

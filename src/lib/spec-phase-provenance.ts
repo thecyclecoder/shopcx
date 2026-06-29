@@ -15,14 +15,23 @@
  */
 import type { SpecCard, SpecPhase } from "@/lib/brain-roadmap";
 
-/** True iff this phase's `shipped` status is backed by a merge-hook stamp (a PR # tag). */
-export function phaseHasProvenance(p: Pick<SpecPhase, "status" | "pr">): boolean {
-  return p.status === "shipped" && (p.pr ?? null) !== null;
+/**
+ * True iff this phase's `shipped` status is backed by a merge-hook stamp. The stamp is EITHER a `pr` # (the
+ * per-spec PR-merge path, [[applyMergedBuildEffects]]) OR a `merge_sha` (the ATOMIC goal→main promotion,
+ * [[applyGoalPromotionEffects]] — spec-goal-branch-pm-flow M5). A goal-bound spec NEVER takes a per-spec PR:
+ * its whole goal branch lands on main in ONE `/merges` call with no PR, so the only provenance it can carry
+ * is the M5 `merge_sha` (the actual main commit — a STRONGER landing proof than a PR #). Keying solely on
+ * `pr` falsely flagged every goal-promoted phase as drift-suspect (post-M5-goal-finalization). Either stamp
+ * proves the phase landed on main.
+ */
+export function phaseHasProvenance(p: Pick<SpecPhase, "status" | "pr" | "merge_sha">): boolean {
+  return p.status === "shipped" && ((p.pr ?? null) !== null || (p.merge_sha ?? null) !== null);
 }
 
-/** Phases the card carries that are tagged `shipped` but lack a `pr` — drift suspects. */
+/** Phases the card carries that are tagged `shipped` but lack BOTH a `pr` and a `merge_sha` — drift suspects
+ *  (a status flip with no merge-hook stamp of either kind). */
 export function driftSuspectPhases(card: Pick<SpecCard, "phases">): SpecPhase[] {
-  return card.phases.filter((p) => p.status === "shipped" && (p.pr ?? null) === null);
+  return card.phases.filter((p) => p.status === "shipped" && (p.pr ?? null) === null && (p.merge_sha ?? null) === null);
 }
 
 /** Any shipped phase missing its merge-hook provenance? — the "this card looks shipped but isn't proved" gate. */
@@ -47,8 +56,9 @@ export function isCardFullyShippedWithProvenance(
   return relevant.every((p) => phaseHasProvenance(p));
 }
 
-/** How many of the card's phases ACTUALLY landed (status='shipped' AND pr set). Use this in place of
- *  `counts.shipped` whenever the answer drives an autonomous "this phase is done" decision. */
+/** How many of the card's phases ACTUALLY landed (status='shipped' AND a merge-hook stamp — `pr` OR
+ *  `merge_sha`). Use this in place of `counts.shipped` whenever the answer drives an autonomous "this phase
+ *  is done" decision. */
 export function provenanceShippedCount(card: Pick<SpecCard, "phases">): number {
   return card.phases.filter(phaseHasProvenance).length;
 }

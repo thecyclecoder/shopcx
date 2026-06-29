@@ -3074,7 +3074,13 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const { promoteCompleteGoalsToMain } = await import("../src/lib/agent-jobs");
     const g2m = await promoteCompleteGoalsToMain(db);
     if (g2m.promoted.length) {
-      const stamped = g2m.promoted.map((s) => `${s} (${g2m.effects[s]?.phasesStamped ?? 0} phase(s) shipped)`).join(", ");
+      const stamped = g2m.promoted
+        .map((s) => {
+          const f = g2m.finalized[s];
+          const fin = f ? ` → finalize: complete=${f.completed} fold-queued=${f.foldQueued}` : "";
+          return `${s} (${g2m.effects[s]?.phasesStamped ?? 0} phase(s) shipped)${fin}`;
+        })
+        .join(", ");
       notes.push(`goal→main → ATOMIC promoted ${g2m.promoted.length} goal(s): ${stamped}`);
     }
     if (g2m.conflicts.length) notes.push(`⚠️ goal→main CONFLICT (HELD, not stamped): ${g2m.conflicts.join(", ")}`);
