@@ -122,6 +122,18 @@ sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a wa
   machine-pass mirror of `autoMergeReadyPrs` ([[github-pr-resolve]]), one rung up the pipeline. Triggered reactively by
   the worker after a spec-test run (the primary fold trigger), as a best-effort backstop by the advisory human-queue POST,
   and periodically by [[../inngest/spec-test-cron]].
+- `reactiveFoldOnGateComplete(workspaceId, slug, opts?)` → `AutoFoldResult | null` — the **EVENT-DRIVEN primary trigger**
+  for Gate B (reactive-fold). Call it at every completion that can flip THIS spec's fold-eligibility — the LAST gate to
+  clear: the **post-merge SECURITY review clean** (`runSecurityReviewJob` `diff`-mode, the usual last gate for a one-off:
+  PR merges → phases ship → post-merge security clears → eligible), and the **post-merge phase-ship advance**
+  (`applyMergedBuildEffects` / `reconcileMergedSpecPhases` in [[agent-jobs]], for a spec whose spec-test + security already
+  cleared). Re-checks `slug`'s eligibility via the canonical `getAutoFoldEligibleSlugs` (one source of truth — the reactive
+  trigger + the cron backstop can never disagree); if eligible, enqueues through the SAME path the cron uses
+  (`autoFoldVerifiedSpecs` → `enqueue_fold`). **Idempotent** (no-ops when the spec isn't eligible yet; `autoFoldVerifiedSpecs`
+  skips a spec a fold job already owns + `enqueue_fold` advisory-locks per workspace) + best-effort (swallows throws — the
+  cron backstop still mops up). This is the SAME reactive-primary + cron-backstop pattern on Gate-A merge, the pre-merge legs,
+  and the phase chain. The spec-test-completion auto-fold (`runSpecTestJob`) is the third trigger and already fires its own
+  `autoFoldVerifiedSpecs`. See [[../lifecycles/roadmap-build-console]] § reactive-fold.
 
 ## Classification policy — "if a machine can test it, the machine does it"
 
@@ -151,6 +163,8 @@ classification prompt in `runSpecTestJob` (`scripts/builder-worker.ts`); this is
 ## Callers
 
 - `scripts/builder-worker.ts` → `runSpecTestJob` — writes runs; calls `reflectSpecGreenChecks` then `autoFoldVerifiedSpecs` after.
+- `scripts/builder-worker.ts` → `runSecurityReviewJob` — on a `diff`-mode `clean`/`false-positive` completion (the post-merge last gate), calls `reactiveFoldOnGateComplete` (reactive Gate B).
+- `src/lib/agent-jobs.ts` → `applyMergedBuildEffects` + `reconcileMergedSpecPhases` — on a post-merge shipped rollup / back-fill, calls `reactiveFoldOnGateComplete` (reactive Gate B).
 - `src/app/dashboard/developer/spec-tests/**` + `VerificationCard` + the roadmap board cards — read via `getLatestSpecTestRuns` / `getHumanTestQueue` / `signSpecTestScreenshot`.
 - `src/app/api/developer/spec-test/human-queue/route.ts` — `getHumanTestQueue` (GET) + the upsert/clear helpers (POST, owner-only); POST also fires `autoFoldVerifiedSpecs` (Gate B).
 - `src/lib/inngest/spec-test-cron.ts` — daily periodic backstop sweep calling `autoFoldVerifiedSpecs` per workspace.

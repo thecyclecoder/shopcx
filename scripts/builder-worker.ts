@@ -10991,6 +10991,20 @@ async function runSecurityReviewJob(job: Job) {
       const ledger = JSON.stringify({ ...instr, verdict });
       await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `${verdict}: ${review}`.slice(-2000) });
       console.log(`${tag} ${verdict} → no action`);
+      // reactive-fold-on-gate-complete: a POST-MERGE (diff-mode) security review reaching clean is the LAST gate
+      // for a one-off / already-spec-test-passed spec — `getSecurityStateBySlug` now reports `completedClean`, so
+      // the spec may have just become fold-eligible. Fire the reactive Gate-B trigger the moment it clears instead
+      // of waiting for the daily spec-test-cron backstop (the noop-pipeline-test-4 gap). Re-checks eligibility +
+      // idempotently coalesces into the batch fold-build; no-ops if a gate is still open. Best-effort. (branch-mode
+      // pre-merge reviews don't feed the per-slug security gate, so we only fire on diff mode.)
+      if (mode === "diff" && parentSlug) {
+        try {
+          const { reactiveFoldOnGateComplete } = await import("../src/lib/spec-test-runs");
+          await reactiveFoldOnGateComplete(job.workspace_id, parentSlug, { reason: `security ${verdict}`, admin: db });
+        } catch (e) {
+          console.error(`${tag} reactive fold trigger failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       return;
     }
 
