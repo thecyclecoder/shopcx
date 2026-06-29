@@ -34,6 +34,10 @@ The org chart is the `functions/*.md` tree, which today is **FLAT**: every direc
 - **`OrgChartGraph`** = `{ parentOf: Record<slug, parentSlug> }` — a function reporting to the CEO maps to `CEO` (or is absent — both mean the parent is the CEO).
 - **`FunctionAutonomyRow`** — one [[../tables/function_autonomy]] row.
 
+## NOT for build-driving — that is decoupled (CEO directive 2026-06-29)
+
+`resolveApprover` is the **operational** approval router (who signs off when a tool needs sign-off). It is **NOT** the **build driver**. Per the CEO directive, **Ada / Platform / DevOps is the sole builder for EVERY spec, ALL departments, permanently**; a spec's `owner` is the requesting/operating department (attribution), not the build driver. The build-driver predicates `specDriver` / `platformDrivesSpec` (in [[platform-director]]) therefore **do not walk the org chart** — they return `platform` whenever Platform is live+autonomous (for any owner), else the CEO (fail-safe). A department director going live+autonomous gives it **operational** autonomy (it OPERATES its software + AUTHORS specs) — it never moves build-driving off Ada. `resolveApprover` stays correct for its operational callers below; only build-driving was decoupled from the owner's org-chart seat.
+
 ## Callers
 
 - [[../dashboard/agents|org-chart.ts]] `getOrgChart` — `loadAutonomyMap` + `isAutoApprover` derive each director's `offline ｜ live ｜ autonomous` status badge on the Agents hub.

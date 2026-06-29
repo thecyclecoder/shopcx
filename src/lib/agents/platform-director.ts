@@ -145,22 +145,34 @@ export function routesToPlatform(kind: string, chart: OrgChartGraph, autonomy: A
 }
 
 /**
- * Which director DRIVES a spec, given its OWNING function — the keystone routing for the auto-build lanes
- * (director-drives-all-specs-and-deferred-status Phase 2: "first live boss else up"). Reuses the approval-router
- * keystone: `resolveApprover` walks UP from the owner to the first live+autonomous ancestor (the owner ITSELF if
- * its director is live+autonomous), else falls through to the CEO. A spec whose own department-director is
- * live+autonomous is driven by that director; anything that falls through to the CEO is covered by the Platform
- * director — the keystone covering for not-yet-live departments. An owner-less spec defaults to Platform.
+ * Which seat DRIVES a spec's BUILD — the keystone routing for the auto-build lanes (CEO directive
+ * 2026-06-29: Ada/Platform is the SOLE builder, for EVERY department, PERMANENTLY).
  *
- * Today only Platform is live, so Platform drives every non-deferred spec; as a Growth/CS/CMO director goes
- * live+autonomous, `resolveApprover` starts returning that owner and its specs rebalance OFF Platform — no re-spec.
+ * Build-driving is DECOUPLED from the spec's owner and from the org-chart walk. The two authorities are
+ * permanently separate:
+ *   - BUILD/execution authority = Ada / Platform / DevOps, for ALL specs, ALL departments — she is the
+ *     sole CTO/builder. A spec's `owner` is the REQUESTING/OPERATING department (attribution + where the
+ *     finished tool's operation lives); it does NOT pick the build driver.
+ *   - Department directors (retention, growth, …) OPERATE their own software + AUTHOR specs for the tools
+ *     they need. Their `function_autonomy` is OPERATIONAL autonomy, not build-driving. They are the
+ *     requester/operator, NEVER the builder.
+ *
+ * So: whenever Platform is live+autonomous, PLATFORM drives EVERY spec regardless of owner (including a
+ * null owner and any named department). A department going live+autonomous does NOT move build-driving off
+ * Ada. The ONLY fail-safe: if Platform itself is NOT live+autonomous, build-driving falls through to the
+ * CEO (the unchanged dormant behavior — nothing auto-builds until Ada is activated).
+ *
+ * NOTE: this is the BUILD driver only. `resolveApprover` stays correct for its OTHER (operational, non-build)
+ * callers — it still walks the owner's org-chart seat up to the first live+autonomous supervisor. Build-driving
+ * no longer rides that walk.
  */
-export function specDriver(owner: string | null | undefined, chart: OrgChartGraph, autonomy: AutonomyMap): string {
-  const approver = resolveApprover(owner ?? PLATFORM, chart, autonomy);
-  return approver === CEO ? PLATFORM : approver; // CEO fallthrough ⇒ the Platform keystone drives it
+export function specDriver(_owner: string | null | undefined, _chart: OrgChartGraph, autonomy: AutonomyMap): string {
+  // Owner-agnostic by design: Ada builds everything. The owner is attribution, not the build driver.
+  return platformIsAutoApprover(autonomy) ? PLATFORM : CEO; // fail-safe: Platform dormant ⇒ builds wait on the CEO
 }
 
-/** True iff the Platform director (this keystone) drives the spec owned by `owner` — its own, or any not-yet-live dept's. */
+/** True iff the Platform director (Ada — the sole builder) drives this spec's build. True for ANY owner
+ *  whenever Platform is live+autonomous; false (⇒ CEO) ONLY when Platform's own flag is off (fail-safe). */
 export function platformDrivesSpec(owner: string | null | undefined, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
   return specDriver(owner, chart, autonomy) === PLATFORM;
 }
@@ -749,11 +761,11 @@ export interface FixEscortResult {
  * greenlit, so it's inside the leash — we don't blind-queue an unstarted FEATURE spec (a new product
  * capability, which has no Repair-signature and still escalates).
  *
- * The gate is the **Repair-signature** (`SpecCard.repairSignature`) + **the keystone routing** — the Platform
- * director drives a fix spec whose owning department-director isn't live yet (director-drives-all-specs-and-
- * deferred-status Phase 2: owner-agnostic, "first live boss else up" via `platformDrivesSpec`). A repair-signed
- * fix builds straight through (the already-greenlit mandate) regardless of owner; once a department's director is
- * live+autonomous, its fix specs route to IT, not here. Same guards as the other escorts: dormant until
+ * The gate is the **Repair-signature** (`SpecCard.repairSignature`) + **the build-driver keystone** — Ada/Platform
+ * is the SOLE builder, so the Platform director drives EVERY fix spec regardless of owner (CEO directive 2026-06-29:
+ * build-driving is owner-agnostic via `platformDrivesSpec`). A repair-signed fix builds straight through (the
+ * already-greenlit mandate) for any owner; a department going live+autonomous OPERATES + AUTHORS its specs but never
+ * builds, so its fix specs stay with Ada. Same guards as the other escorts: dormant until
  * live+autonomous, skips blocked / opted-out / in-flight specs, and a build that failed ≥ the loop-guard cap
  * escalates to the CEO instead of re-queuing forever. On each queue it writes the P6 PM-companion mirror + an
  * `escorted_fix` activity row.
@@ -786,8 +798,8 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
 
-    // The gap: an UNSTARTED spec carrying a Repair-signature (an authored fix for a real bug) that THIS
-    // director drives (its owning department-director isn't live yet — owner-agnostic keystone routing, Phase 2).
+    // The gap: an UNSTARTED spec carrying a Repair-signature (an authored fix for a real bug). Ada drives
+    // EVERY spec's build (owner-agnostic keystone routing — the owner is attribution, not the build driver).
     // The box Repair agent now authors fix specs with a `## Phase 1 — close it ⏳` section, so gating on
     // `phases.length === 0` skipped them.
     //
@@ -3169,8 +3181,8 @@ export interface PhaseProgressionResult {
  *     every other Ada build-enqueue lane gates on; an `in_review` / un-Vale-passed spec is NEVER advanced;
  *   - one-phase-per-session scoping — we advance exactly ONE next phase per spec (`queueNextChainedPhase`
  *     queues a single `phaseScopedInstructions` phase, which the worker builds and then chains the next);
- *   - the driver keystone — only specs THIS director drives (`platformDrivesSpec`), the same scope as every
- *     other lane; another live department-director's spec is left to that director;
+ *   - the build-driver keystone — only specs Ada drives (`platformDrivesSpec`), the same scope as every
+ *     other lane; that is EVERY spec while Platform is live+autonomous (owner-agnostic — Ada is the sole builder);
  *   - blocked / opted-out / deferred / fully-shipped specs are skipped (mirrors the escort + groom filters).
  *
  * Idempotent + best-effort: a no-op when there's nothing to advance, swallows per-spec errors, never throws.
@@ -3489,11 +3501,12 @@ export function validateGroomSplit(
 // unfamiliar cross-domain specs) before any build is queued; a failed/ambiguous verdict ESCALATES to the CEO and
 // queues nothing (CEO decision 2026-06-24: the investigation step is mandatory, same soundness rail as approval/groom).
 //
-// Owner-agnostic drive (director-drives-all-specs-and-deferred-status Phase 2): the lane no longer gates on
-// `owner === platform`. ANY unblocked, non-deferred, unstarted spec is a candidate, ROUTED via the keystone —
-// `platformDrivesSpec` ("first live boss else up"): a department whose own director is live+autonomous keeps its
-// specs (they route to IT); everything else flows up to the Platform director, who covers for the not-yet-live
-// departments. Today only Platform is live, so it drives every non-deferred unstarted spec.
+// Owner-agnostic drive (CEO directive 2026-06-29 — Ada is the SOLE builder): the lane never gates on owner.
+// ANY unblocked, non-deferred, unstarted spec is a candidate, ROUTED via the build-driver keystone —
+// `platformDrivesSpec`: while Platform is live+autonomous, Ada drives EVERY spec regardless of owner (the owner
+// is the requesting/operating department, not the build driver). A department going live+autonomous OPERATES its
+// software + AUTHORS specs but never builds — its specs stay with Ada. Fail-safe: Platform dormant ⇒ builds wait
+// on the CEO.
 //
 // Hard rails (unchanged): a spec that is part of an unstarted (0%) GOAL is NOT touched here — escortApprovedGoals
 // already surfaces a zero-progress owned goal to the CEO as a new-goal call; a deferred spec is skipped (Phase 1);
@@ -3559,9 +3572,9 @@ export async function alreadyInitiated(admin: Admin, slug: string): Promise<bool
  * Find the unblocked, UNSTARTED (0 ✅) specs the director DRIVES and may initiate this pass — the gap no
  * other lane covers: NOT Repair-signed (escortFixSpecs owns those), NOT goal-linked (the goal-walk / new-goal
  * escalation owns those), not opted out (`**Auto-build:** off`), no in-flight build, and not already
- * terminally escalated by this lane. Owner-agnostic (Phase 2): any owner's spec qualifies, routed via the
- * keystone `platformDrivesSpec` — Platform drives a spec whose owning department-director isn't live+autonomous,
- * else that director drives it (the spec is filtered out here). A NO-OP until Platform is live+autonomous (like
+ * terminally escalated by this lane. Owner-agnostic (CEO directive 2026-06-29): any owner's spec qualifies, routed
+ * via the build-driver keystone `platformDrivesSpec` — while Platform is live+autonomous Ada drives EVERY spec
+ * regardless of owner (the owner is attribution, not the build driver). A NO-OP until Platform is live+autonomous (like
  * the escort). Capped at INIT_CAP per pass. Each candidate is still SOUNDNESS-investigated by the box lane before
  * any build — this only assembles the unblinded gap; it never queues.
  */
@@ -3591,7 +3604,7 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
       specReviewDone(s) && // no-max-on-unreviewed-specs (PRIMARY): NEVER init a spec that hasn't passed Vale spec-review — an in_review / un-vale-passed spec would queue a build (and run a Max soundness investigation) only to be bounced at the claim-gate, burning a Max session each pass. Vale must pass it first.
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
-      platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it ("first live boss else up")
+      platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic: Ada is the sole builder, she drives every spec (CEO directive 2026-06-29)
       !s.blockedBy.some((b) => !b.cleared) && // still blocked → its auto-queue fires when its last blocker ships
       (filters.goalsBySpec[s.slug] ?? []).length === 0, // goal-linked → the goal-walk / new-goal escalation owns it
   );

@@ -2,6 +2,8 @@
 
 The permanent owner of **subscriptions and everything that keeps people subscribed** — billing continuity, dunning recovery, the cancel-flow, pause/resume, win-back, and the flows/journeys that reduce churn. One of the org-chart functions ([[../goals/ceo-mode]]); this doc is both the **Retention director-agent's CEO-mode charter** and the **home that owns every Retention mandate + spec** on the roadmap.
 
+> **Operate + author, never build (CEO directive 2026-06-29).** The Retention director OPERATES its own software (its `function_autonomy` is *operational* autonomy) and AUTHORS specs for the tools it needs — it is the requester/operator. It NEVER drives a build: **Ada / Platform / DevOps is the sole builder for every spec, all departments, permanently** ([[platform]]). A Retention-owned spec's `owner` is attribution + where the finished tool's operation lives; the build is always Ada's. Retention going live+autonomous does not move build-driving onto it.
+
 ## Scope + owned metrics
 
 - **Owns:** active-subscription base, the subscription billing engine (Appstle → in-house migration), dunning/payment recovery, cancel-flow + remedies, pause/resume/reactivate, win-back, churn-prevention journeys.
