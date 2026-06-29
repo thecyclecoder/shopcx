@@ -296,15 +296,17 @@ export const platformDirectorCron = inngest.createFunction(
           }
           audited += reports.length;
 
-          // Stale-alert sweep for current-state metrics: `auditAllKpis` SKIPS
+          // Stale-alert sweep for audit-skipped metrics: `auditAllKpis` SKIPS
           // `MetricDef.currentState` metrics (lane_utilization etc. — point reads churn between
-          // snapshot write and ground-truth re-read, so the diff is moving-target noise, not drift).
-          // The within-tolerance auto-resolve branch below never fires for them — they don't appear
-          // in `reports` at all — so an alert opened before the metric was flagged would sit open
-          // forever. Resolve any open `kpi_drift:<currentState>:<cadence>` here once, on the same
-          // standing beat, so the Control Tower tile clears.
+          // snapshot write and ground-truth re-read) AND `MetricDef.liveSpecSetDependent` metrics
+          // (specs_per_week, regression_coverage_pct — the live brain-roadmap spec set churns
+          // between snapshot write and audit re-read). The within-tolerance auto-resolve branch
+          // below never fires for either class — they don't appear in `reports` at all — so an
+          // alert opened before the metric was flagged would sit open forever. Resolve any open
+          // `kpi_drift:<skipped-metric>:<cadence>` here once, on the same standing beat, so the
+          // Control Tower tile clears.
           for (const m of getRegisteredMetrics(cadence)) {
-            if (!m.currentState) continue;
+            if (!m.currentState && !m.liveSpecSetDependent) continue;
             const signature = `kpi_drift:${m.key}:${cadence}`;
             const { data: openRow } = await admin
               .from("loop_alerts")
