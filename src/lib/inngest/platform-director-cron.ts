@@ -31,7 +31,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
 import { agentGradingBatchReady, gradeConcludedAgentActions, detectGradeDropCoaching } from "@/lib/agents/agent-grader";
-import { computePlatformScorecard } from "@/lib/agents/platform-scorecard";
+import { computePlatformScorecard, getRegisteredMetrics } from "@/lib/agents/platform-scorecard";
 import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
 
 export const platformDirectorCron = inngest.createFunction(
@@ -286,6 +286,31 @@ export const platformDirectorCron = inngest.createFunction(
             continue;
           }
           audited += reports.length;
+
+          // Stale-alert sweep for current-state metrics: `auditAllKpis` SKIPS
+          // `MetricDef.currentState` metrics (lane_utilization etc. — point reads churn between
+          // snapshot write and ground-truth re-read, so the diff is moving-target noise, not drift).
+          // The within-tolerance auto-resolve branch below never fires for them — they don't appear
+          // in `reports` at all — so an alert opened before the metric was flagged would sit open
+          // forever. Resolve any open `kpi_drift:<currentState>:<cadence>` here once, on the same
+          // standing beat, so the Control Tower tile clears.
+          for (const m of getRegisteredMetrics(cadence)) {
+            if (!m.currentState) continue;
+            const signature = `kpi_drift:${m.key}:${cadence}`;
+            const { data: openRow } = await admin
+              .from("loop_alerts")
+              .select("id")
+              .eq("status", "open")
+              .eq("loop_id", signature)
+              .maybeSingle();
+            if (openRow) {
+              await admin
+                .from("loop_alerts")
+                .update({ status: "resolved", resolved_at: new Date().toISOString() })
+                .eq("id", (openRow as { id: string }).id);
+              alertsResolved++;
+            }
+          }
 
           for (const r of reports) {
             const signature = `kpi_drift:${r.metric}:${r.cadence}`;

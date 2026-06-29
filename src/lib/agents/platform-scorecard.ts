@@ -141,6 +141,15 @@ interface MetricDef {
   key: string;
   unit: MetricUnit;
   compute: (ctx: MetricContext) => Promise<MetricResult>;
+  /**
+   * Marks a CURRENT-STATE point-read metric: the value is "right now" (snapshot of a churning pool /
+   * counter), not a windowed aggregate. [[kpi-review]] `auditAllKpis` / `auditKpi` skip these — the
+   * snapshotted value freezes the moment-in-time read, and a later ground-truth re-run reads the pool
+   * AGAIN at the moment-of-audit, so any movement in the seconds/minutes between the two reads
+   * surfaces as "drift" that isn't drift (Repair Agent verdict on signature
+   * `loop:kpi_drift:lane_utilization:daily`).
+   */
+  currentState?: true;
 }
 
 // ── Daily pulse metric derivations (all from existing truth) ─────────────────────
@@ -342,6 +351,7 @@ const OCCUPYING_LANE_STATUSES = ["claimed", "building", "needs_input", "needs_ap
 const laneUtilization: MetricDef = {
   key: "lane_utilization",
   unit: "ratio",
+  currentState: true,
   compute: async (ctx) => {
     const { admin, workspaceId } = ctx;
     const { count } = await admin
@@ -1292,11 +1302,19 @@ export async function computePlatformScorecard(
 }
 
 /**
- * The (metric_key, unit) tuples for every metric in the cadence's registry — the surface [[kpi-review]]
- * needs to enumerate the advertised KPI set without re-importing the private `MetricDef` shape.
+ * The (metric_key, unit, currentState) tuples for every metric in the cadence's registry — the surface
+ * [[kpi-review]] needs to enumerate the advertised KPI set (and skip current-state point-read metrics)
+ * without re-importing the private `MetricDef` shape. `currentState` is omitted (not `false`) for the
+ * common windowed-aggregate case so the tuple shape matches `MetricDef`.
  */
-export function getRegisteredMetrics(cadence: Cadence): ReadonlyArray<{ key: string; unit: MetricUnit }> {
-  return REGISTRY[cadence].map((m) => ({ key: m.key, unit: m.unit }));
+export function getRegisteredMetrics(
+  cadence: Cadence,
+): ReadonlyArray<{ key: string; unit: MetricUnit; currentState?: true }> {
+  return REGISTRY[cadence].map((m) => ({
+    key: m.key,
+    unit: m.unit,
+    ...(m.currentState ? { currentState: true as const } : {}),
+  }));
 }
 
 /**
