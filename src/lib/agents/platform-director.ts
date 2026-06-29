@@ -52,6 +52,7 @@ import {
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
+import { setSpecStatus } from "@/lib/specs-table";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
@@ -3489,6 +3490,30 @@ export function validateDismissCandidate(v: GroomVerdict): { ok: true } | { ok: 
 }
 
 /**
+ * Validate the INIT-lane `dismiss_candidate` DISPOSITION (director-dismissal-disposes-by-reason). On top of
+ * the base `validateDismissCandidate` reason check, the init lane requires the dismissal to also DISPOSE of
+ * the spec so it never lingers as a stale "planned" phantom: either `fold_superseded` (auto-fold off the
+ * board — must CITE a `superseding_ref`) or `escalate_rework` (route to the CEO inbox). A `fold_superseded`
+ * with no concrete superseding reference is rejected — an unconfirmable supersede is NOT a fold (north star:
+ * a judgment call escalates, it does not silently execute), so the lane treats a malformed disposition as an
+ * escalate (it never silently folds). Returns the normalized disposition on success.
+ */
+export function validateInitDismissDisposition(
+  v: InitVerdict,
+): { ok: true; disposition: "fold_superseded" | "escalate_rework"; supersedingRef?: string } | { ok: false; error: string } {
+  const base = validateDismissCandidate(v);
+  if (!base.ok) return base;
+  const disposition = String(v.disposition ?? "").trim();
+  if (disposition === "fold_superseded") {
+    const ref = String(v.superseding_ref ?? "").trim();
+    if (ref.length < 3) return { ok: false, error: "fold_superseded requires a `superseding_ref` (the spec slug / code that already does this work)" };
+    return { ok: true, disposition: "fold_superseded", supersedingRef: ref };
+  }
+  if (disposition === "escalate_rework") return { ok: true, disposition: "escalate_rework" };
+  return { ok: false, error: `dismiss_candidate disposition must be "fold_superseded" or "escalate_rework" (got "${disposition || "—"}")` };
+}
+
+/**
  * Validate a SPLIT verdict before the box commits anything to `main` — the leash is hard, so a malformed
  * split NEVER lands (a broken board is worse than an un-groomed card). Checks: at least one split; each
  * split has a `{parentSlug}-…` slug, an H1, a ⏳, a Deferred note, and an Owner + Parent line;
@@ -3691,6 +3716,23 @@ export interface InitVerdict {
   reasoning?: string;
   /** `author_followup_spec` — the NEW root-cause/correct-scope spec to commit (Phase 2). */
   followup?: FollowupSpec;
+  /**
+   * `dismiss_candidate` disposition (director-dismissal-disposes-by-reason) — a dismissed spec must CLEAR the
+   * pipeline, never linger as a stale "planned" board artifact. The dismissal is an LLM judgment, so it also
+   * decides WHERE the spec goes:
+   *   - `"fold_superseded"` — the spec's work is GENUINELY already implemented/shipped elsewhere (redundant /
+   *      done). → the lane auto-FOLDS the spec off the board (`setSpecStatus(..., "folded")`), recording the
+   *      superseding spec/code in `superseding_ref`. Choose this ONLY when confident + able to cite the
+   *      superseder.
+   *   - `"escalate_rework"` — malformed / premise-wrong / scope-ambiguous / needs the owner to fix-or-cut /
+   *      anything you can't confidently call superseded. → the lane ESCALATES to the CEO ("dismissed — fix or
+   *      cut"); the spec stays as-is but now sits in the inbox, not a silent phantom. THE DEFAULT when unsure
+   *      (north star: a judgment call escalates, it does not silently execute).
+   */
+  disposition?: "fold_superseded" | "escalate_rework";
+  /** `fold_superseded` only — the superseding spec slug / code reference that already does this spec's work
+   *  (cited so the fold note + dismissal ledger record WHY it's redundant). Required for `fold_superseded`. */
+  superseding_ref?: string;
 }
 
 /**
@@ -3721,8 +3763,17 @@ export function initInvestigationPrompt(c: InitCandidate): string {
     "   its own planned card AND dismiss THIS candidate so it doesn't re-fire. The followup is a NEW spec; the",
     `   ${ownedByOther ? "current candidate's owner must be platform for me to author (chat-surface spec-status owner rule)" : "owner gate is satisfied"}.`,
     "4. DISMISS_CANDIDATE — the spec shouldn't have been initiated (malformed, duplicate, superseded, or not",
-    "   actionable today). → I write a `init_dismissed` ledger row so the dedup keeps it out of the next pass;",
-    "   no spec mutation, no build queued.",
+    "   actionable today). I write a `init_dismissed` ledger row so the dedup keeps it out of the next pass, AND",
+    "   a dismissed spec must CLEAR the pipeline (never linger on the board as a phantom \"planned\" artifact), so",
+    "   you ALSO pick a `disposition` that decides where it goes:",
+    "     • `fold_superseded` — the spec's work is GENUINELY already implemented / shipped elsewhere (redundant /",
+    "       done). → I auto-FOLD the spec off the board and record the superseder. Pick this ONLY when you are",
+    "       confident the work truly already exists AND you can CITE the superseding spec slug or code (set",
+    "       `superseding_ref`). Don't fold on a hunch.",
+    "     • `escalate_rework` — malformed / premise-wrong / scope-ambiguous / the owner must fix-or-cut it / you",
+    "       can't confidently call it superseded. → I escalate to the CEO (\"dismissed — fix or cut\"); the spec",
+    "       stays put but lands in the inbox, not a silent phantom. This is the DEFAULT whenever you're unsure",
+    "       (north-star: a judgment call escalates, it does not silently execute).",
     "",
     `Spec: ${c.slug} — ${c.title}`,
     `Owner: ${c.owner ?? "—"} · Parent: ${c.parent ?? "—"}`,
@@ -3742,13 +3793,17 @@ export function initInvestigationPrompt(c: InitCandidate): string {
     "  must NOT equal " + c.slug + "; content MUST contain an H1 ending in ⏳, **Owner:** and **Parent:** lines,",
     "  and at least one `## Phase N — … ⏳` section.",
     "If you choose DISMISS_CANDIDATE: your `reasoning` MUST be ≥20 chars and explain why this candidate",
-    "shouldn't have been initiated (malformed / duplicate / superseded / not actionable today).",
+    "shouldn't have been initiated (malformed / duplicate / superseded / not actionable today), AND you MUST set",
+    "`disposition` to either \"fold_superseded\" or \"escalate_rework\". For \"fold_superseded\" you MUST ALSO set",
+    "`superseding_ref` to the spec slug or code reference that already does this spec's work — an unconfirmable",
+    "supersede (no concrete reference) is an \"escalate_rework\", not a fold. When in doubt, choose \"escalate_rework\".",
     "",
     "Final message = ONLY one JSON object (no markdown):",
     '{"verdict":"initiate","reasoning":"<why the spec is sound, in-scope, and safe to build now>"}',
     '{"verdict":"escalate","reasoning":"<why this needs the CEO — ambiguous / out of scope / a new goal / destructive / a choice>"}',
     '{"verdict":"author_followup_spec","reasoning":"<why the right scope is a different spec>","followup":{"slug":"<correctly-scoped-spec-slug>","title":"<title ending with ⏳>","owner":"platform","parent":"<parent wikilink>","content":"<full spec markdown>"}}',
-    '{"verdict":"dismiss_candidate","reasoning":"<≥20 chars: why this candidate shouldn\'t have been initiated — malformed / duplicate / superseded / not actionable today>"}',
+    '{"verdict":"dismiss_candidate","disposition":"fold_superseded","superseding_ref":"<spec-slug-or-code-reference that already does this work>","reasoning":"<≥20 chars: why this candidate is genuinely already shipped elsewhere>"}',
+    '{"verdict":"dismiss_candidate","disposition":"escalate_rework","reasoning":"<≥20 chars: why this candidate shouldn\'t have been initiated — malformed / premise-wrong / scope-ambiguous / owner must fix-or-cut>"}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -4153,10 +4208,11 @@ export async function applyDirectorDismissCandidate(
   lane: DirectorLane,
   candidate: { slug: string | null; signature?: string; owner?: string | null },
   reason: string,
+  extraMetadata?: Record<string, unknown>,
 ): Promise<{ ok: boolean; error?: string }> {
   const ledger = laneLedgerKey(lane, candidate.slug, candidate.signature);
   const actionKind = lane === "groom" ? "groomed_dismissed" : lane === "init" ? "init_dismissed" : "repair_dismissed";
-  const metadata: Record<string, unknown> = { [ledger.name]: ledger.value, autonomous: true };
+  const metadata: Record<string, unknown> = { [ledger.name]: ledger.value, autonomous: true, ...(extraMetadata ?? {}) };
   // director-drives-all-specs-and-deferred-status-board-reflects-cross-dept-drive Phase 1: stamp the
   // OWNING function when the lane knows it (groom/init pass it) so the daily watch's cross-dept count
   // covers the dismiss disposition too — every drive of a cross-dept spec leaves an owner-stamped row.
@@ -4170,4 +4226,38 @@ export async function applyDirectorDismissCandidate(
     metadata,
   });
   return { ok: r.recorded, error: r.reason };
+}
+
+/**
+ * director-dismissal-disposes-by-reason — the `fold_superseded` disposition of an init-lane dismissal: a spec
+ * whose work is GENUINELY already shipped elsewhere is DISPOSED of, not left as a stale "planned" phantom. We
+ * (1) FOLD the spec off the board via the specs-table SDK (`setSpecStatus(..., "folded")` — the override-only
+ * status column; a folded spec is excluded from the board by `isBoardableStatus`, so `findInitCandidates`
+ * never sees it again — the fold supersedes the dedup ledger rather than fighting it), and (2) write the SAME
+ * `init_dismissed` ledger row the plain dismiss writes (so the existing dedup + audit are intact) — now ALSO
+ * carrying `disposition: "fold_superseded"` + the cited `superseding_ref` in metadata + the fold note baked
+ * into the reason. The fold is attempted FIRST and gates `ok`: if the SDK fold fails we do NOT write a ledger
+ * row claiming the spec was cleared (so the next pass re-investigates rather than silently stranding it).
+ *
+ * Pre-condition: `validateInitDismissDisposition(v)` returned `{ disposition: "fold_superseded", supersedingRef }`.
+ */
+export async function applyDirectorFoldSuperseded(
+  admin: Admin,
+  workspaceId: string,
+  candidate: { slug: string; owner?: string | null },
+  supersedingRef: string,
+  reason: string,
+): Promise<{ ok: boolean; error?: string }> {
+  // Fold FIRST (the board-clearing mutation). If it throws, surface the error and write no ledger row.
+  try {
+    await setSpecStatus(workspaceId, candidate.slug, "folded", `director:${PLATFORM}`);
+  } catch (e) {
+    return { ok: false, error: `fold_superseded setSpecStatus failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const foldNote = `Superseded by ${supersedingRef} — work already shipped elsewhere; folded off the board. ${reason}`.slice(0, 4000);
+  return applyDirectorDismissCandidate(admin, workspaceId, "init", { slug: candidate.slug, owner: candidate.owner ?? null }, foldNote, {
+    disposition: "fold_superseded",
+    superseding_ref: supersedingRef,
+    folded: true,
+  });
 }
