@@ -27,6 +27,7 @@ A single default tolerance (`0.5%`) with per-metric overrides keyed by `metric_k
 
 - `error_mttr_hours` · `idea_to_merge_hours` · `time_to_approve_hours` — medians of distributions
 - `worker_grade_rollup` · `director_call_grade` — per-worker / per-dimension grade aggregates picking up writes between snapshots
+- `loop_health` — current-state point read: open `loop_alerts` and the latest-beat-per-loop set churn in the seconds between the snapshot write and the audit re-run
 
 (Current-state point-read metrics — `lane_utilization` · `loop_health` — are SKIPPED entirely below, so they don't need a tolerance entry.)
 
