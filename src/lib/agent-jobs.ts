@@ -353,6 +353,22 @@ export const SUCCESSFUL_BUILD_STATUSES: JobStatus[] = ["completed", "merged"];
 /** The job kinds that OWN a claude/* PR branch (each sets `spec_branch` to the branch). */
 const BRANCH_OWNING_KINDS: JobKind[] = ["build", "fold", "pr-resolve"];
 
+/** The branch-owning kinds whose `spec_slug` is the REAL spec slug (the spec-building kinds). A `build`
+ * job stamps `spec_branch = claude/build-{slug}` and carries the actual spec slug. The other owning
+ * kinds do NOT: a `fold` job's branch is `claude/fold-…`, and a `pr-resolve` job stamps a PSEUDO-slug
+ * `pr-<number>` (it runs against a PR, not a spec). So the SLUG/workspace returned by the build-success
+ * gate must be resolved from a `build` job, never from a `fold`/`pr-resolve` owning job whose slug would
+ * misdirect the per-branch spec-test lookup. (plan jobs are excluded too: their `spec_slug` holds the
+ * GOAL slug and they don't own a `claude/build-*` branch — see the JobKind doc above.) */
+const REAL_SLUG_BUILD_KINDS: JobKind[] = ["build"];
+
+/** Derive the real spec slug from a `claude/build-<slug>` branch name. Returns null for any other ref
+ * (e.g. `claude/fold-…`) — the caller then has no slug and the per-branch tests gate stays closed. */
+function slugFromBuildBranch(branch: string): string | null {
+  const prefix = "claude/build-";
+  return branch.startsWith(prefix) ? branch.slice(prefix.length) || null : null;
+}
+
 /**
  * optimizer-launch-hardening Phase 2 — the auto-merge SUCCESS GATE. The repo has no CI workflows and
  * no branch protection, so GitHub reports `mergeable_state==="clean"` for ANY non-conflicting claude/*
@@ -368,6 +384,16 @@ const BRANCH_OWNING_KINDS: JobKind[] = ["build", "fold", "pr-resolve"];
  * `spec_branch` to the PR branch; a stale dirty-PR resolve that just cleaned the branch is its newest
  * job and reads `completed` correctly). `ok:false` ⇒ leave the PR for the owner. Fails CLOSED: a read
  * error or a missing job returns `ok:false` (never auto-merge on an unknown).
+ *
+ * SLUG-RESOLUTION DISCIPLINE (the M4 tests-gate fix): the build-STATUS verdict legitimately uses the
+ * newest owning job — a `pr-resolve` that just cleaned the branch reading `completed` is the branch in a
+ * good state. BUT the returned `specSlug`/`workspaceId` (which the M4 auto-merge tests-gate feeds to
+ * `isSpecTestGreenForBranch`) MUST be the REAL spec slug — and a `pr-resolve` owning job carries a PSEUDO
+ * slug `pr-<number>`, a `fold` job an unrelated fold slug. Returning that pseudo-slug wedged the gate:
+ * there is no `spec_test_runs` row for `pr-<n>`, so a CLEAN, spec-test-approved PR read `spec-test=pending`
+ * and never auto-merged. So the slug/workspace are resolved SEPARATELY from the newest `build` job for the
+ * branch (REAL_SLUG_BUILD_KINDS), falling back to deriving the slug from the `claude/build-<slug>` branch
+ * name. We NEVER return a `pr-<n>` pseudo-slug.
  */
 export async function getBranchBuildSuccess(
   branch: string,
@@ -400,15 +426,49 @@ export async function getBranchBuildSuccess(
     if (!job) {
       return { ok: false, status: null, reason: "no build job owns this branch (manual/untracked push)", workspaceId: null, specSlug: null };
     }
+
+    // Resolve the REAL spec slug + workspace from the newest `build` job for the branch — NOT from the
+    // newest owning job (which may be a `pr-resolve` carrying a `pr-<n>` pseudo-slug, or a `fold` job).
+    // If the newest owning job IS itself a build, that's already the right source. Otherwise look up the
+    // latest build job; fall back to deriving the slug from the branch name. The status verdict still
+    // comes from `job` (the newest owning job) above.
+    let realSlug: string | null = null;
+    let realWorkspaceId: string | null = null;
+    if (REAL_SLUG_BUILD_KINDS.includes(job.kind)) {
+      realSlug = job.spec_slug;
+      realWorkspaceId = job.workspace_id;
+    } else {
+      const { data: buildData } = await admin
+        .from("agent_jobs")
+        .select("workspace_id, spec_slug")
+        .eq("spec_branch", branch)
+        .in("kind", REAL_SLUG_BUILD_KINDS)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const buildJob = buildData as { workspace_id: string; spec_slug: string } | null;
+      if (buildJob) {
+        realSlug = buildJob.spec_slug;
+        realWorkspaceId = buildJob.workspace_id;
+      } else {
+        // No build job (e.g. a manually-pushed `claude/build-*` branch the resolver later adopted) —
+        // derive the slug from the branch name. workspace_id stays the owning job's (best available).
+        realSlug = slugFromBuildBranch(branch);
+        realWorkspaceId = job.workspace_id;
+      }
+    }
+    // Defensive belt-and-suspenders: a `pr-<n>` pseudo-slug must NEVER escape this function.
+    if (realSlug && /^pr-\d+$/.test(realSlug)) realSlug = slugFromBuildBranch(branch);
+
     if (SUCCESSFUL_BUILD_STATUSES.includes(job.status)) {
-      return { ok: true, status: job.status, reason: `${job.kind} job ${job.status}`, workspaceId: job.workspace_id, specSlug: job.spec_slug };
+      return { ok: true, status: job.status, reason: `${job.kind} job ${job.status}`, workspaceId: realWorkspaceId, specSlug: realSlug };
     }
     return {
       ok: false,
       status: job.status,
       reason: `${job.kind} job is ${job.status} (not completed/merged)`,
-      workspaceId: job.workspace_id,
-      specSlug: job.spec_slug,
+      workspaceId: realWorkspaceId,
+      specSlug: realSlug,
     };
   } catch (e) {
     return { ok: false, status: null, reason: `build-job lookup failed: ${e instanceof Error ? e.message : e}`, workspaceId: null, specSlug: null };
