@@ -1,0 +1,1 @@
+- **KPI review: widen loop_health tolerance — current-state metric, not windowed** · verified 2026-06-29 · → [[libraries/kpi-review]]
