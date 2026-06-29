@@ -346,6 +346,15 @@ export async function appstleAttemptBilling(
   workspaceId: string,
   billingAttemptId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // Internal subs (Braintree-billed) never have an Appstle billing attempt — the
+  // upstream callers stamp a synthetic `internal-*` id into the cycle. Hitting
+  // Appstle with that id 400s and noises the error feed. Short-circuit cleanly
+  // (signature vercel:cdfbac68e30a91f9) so callers see a success while the real
+  // renewal is driven by the internal daily renewal cron.
+  if (billingAttemptId.startsWith("internal-")) {
+    console.warn(`[appstleAttemptBilling] skipped internal billing-attempt id ${billingAttemptId} — Braintree-billed sub, no Appstle attempt to charge`);
+    return { success: true };
+  }
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 

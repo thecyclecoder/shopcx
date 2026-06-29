@@ -860,12 +860,18 @@ export const dunningPaydayRetryCron = inngest.createFunction(
   async ({ step }) => {
     const admin = createAdminClient();
 
-    // Find cycles ready to retry
+    // Find cycles ready to retry. Exclude internal-* contracts — Braintree-billed
+    // subs don't go through the Appstle card-rotation path (their initial failure
+    // is routed to handleInternalDunningFailure above), but the legacy retrying
+    // rows that still carry an internal-* shopify_contract_id would otherwise be
+    // fed back into appstleAttemptBilling with a synthetic billing-attempt id and
+    // 400 against Appstle. Signature vercel:cdfbac68e30a91f9.
     const cycles = await step.run("find-retryable-cycles", async () => {
       const { data } = await admin
         .from("dunning_cycles")
         .select("id, workspace_id, shopify_contract_id, subscription_id, customer_id, cycle_number, cards_tried, billing_attempt_id")
         .eq("status", "retrying")
+        .not("shopify_contract_id", "ilike", "internal-%")
         .lte("next_retry_at", new Date().toISOString());
 
       return data || [];
