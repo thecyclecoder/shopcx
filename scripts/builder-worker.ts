@@ -1595,6 +1595,35 @@ async function markReady(prNumber: number): Promise<boolean> {
 let db: Awaited<ReturnType<typeof admin>>;
 
 async function update(id: string, patch: Record<string, unknown>) {
+  // needs-input-must-carry-a-question — reject an EMPTY needs_input park at the single chokepoint.
+  // A `needs_input` park is an answerable pause: the owner inbox / build card / /dashboard/migrations
+  // renders the open `questions` (and the build console its `pending_actions`) so they can reply.
+  // Park with NEITHER and you produce an unanswerable, lane-blocking orphan: status="awaiting owner
+  // answer" to a question that was never recorded — it sits forever, blocking its single-flight lane,
+  // and no UI can surface anything to act on (observed live on a migration-fix job). So: if ANY caller
+  // (migration-fix, planner, author, fold, product-seed, build, …) tries to set needs_input with no
+  // renderable question, DON'T park it — repair to a terminal status so the lane frees and the outcome
+  // is visible. A LEGITIMATE needs_input (real questions/pending_actions recorded) is untouched.
+  if (patch.status === "needs_input") {
+    const qs = patch.questions;
+    const pa = patch.pending_actions;
+    const hasQuestion = Array.isArray(qs) && qs.length > 0;
+    const hasPendingAction = Array.isArray(pa) && pa.length > 0;
+    if (!hasQuestion && !hasPendingAction) {
+      const existingErr = typeof patch.error === "string" && patch.error.trim() ? `${patch.error} ` : "";
+      const existingTail = typeof patch.log_tail === "string" && patch.log_tail.trim()
+        ? patch.log_tail
+        : "agent wanted owner input but recorded no question — terminated instead of parking an empty needs_input orphan";
+      console.warn(`[needs-input-guard] ${id}: refused empty needs_input park (no questions/pending_actions) → needs_attention`);
+      patch = {
+        ...patch,
+        status: "needs_attention",
+        questions: [],
+        error: `${existingErr}empty needs_input park rejected: agent requested input with no question recorded`.slice(-500),
+        log_tail: String(existingTail).slice(-2000),
+      };
+    }
+  }
   await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
   // no-parked-specs-auto-route-needs-attention Phase 0 — classify every park at the single chokepoint.
   // Every needs_attention write goes through this helper, so stamping here covers every caller (build,
@@ -7993,6 +8022,19 @@ async function runMigrationFixJob(job: Job) {
       // (POST /api/roadmap/answer → queued_resume) and we resume via the answer path above.
       const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
       const diagnosis = String(parsed.diagnosis || "");
+      // needs-input-must-carry-a-question — the agent asked for input but recorded NO question.
+      // /dashboard/migrations renders `fix.questions`; an empty array = an unanswerable orphan that
+      // sits forever blocking the single migration-fix lane (observed live, 9h, on a non-broken audit).
+      // Don't park an empty needs_input — terminate visibly so the lane frees and the outcome shows.
+      if (!questions.length) {
+        await update(job.id, {
+          status: "needs_attention",
+          error: "migration-fix asked for owner input but recorded no question",
+          log_tail: (diagnosis || "agent returned needs_input with empty questions — terminated instead of parking an unanswerable orphan").slice(-2000),
+        });
+        console.warn(`${tag} needs_input with NO question — terminated (needs_attention), lane freed`);
+        return;
+      }
       await update(job.id, { status: "needs_input", questions, log_tail: diagnosis.slice(-2000) || "(awaiting owner answer)" });
       console.log(`${tag} needs_input — asked ${questions.length} plain question(s), awaiting owner answer`);
       return;
