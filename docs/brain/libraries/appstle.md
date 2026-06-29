@@ -52,6 +52,18 @@ On a non-2xx/204 response (real Appstle attempts only) it returns the Appstle **
 
 It also downgrades a second benign-body class: Appstle `UserGeneratedError` responses that carry an "out of stock" message are upstream **business-condition rejections** (a line item ran out of stock between when dunning queued the attempt and when Appstle tried to charge), not server faults. The helper still returns `{ success: false, error: text }` so dunning rotation accounting is unchanged, but logs at `console.warn` so the Vercel error feed / Control Tower stop surfacing them as foreign-app noise.
 
+### `orderNowByContract` — function
+
+```ts
+async function orderNowByContract(workspaceId: string, contractId: string,) : Promise<{ success: boolean; error?: string; summary?: string; internal?: boolean }>
+```
+
+**Flavor-aware "order now" / bill_now — the single entry point every *immediate* (on-demand) order-now path must use.** Resolves the sub by `shopify_contract_id`, then branches:
+- **Internal sub** (`is_internal=true`): requires `status === "active"`, then fires `internal-subscription/renewal-attempt` ([[internal-subscription-renewals]]) via `inngest.send` → real Braintree charge → order → Avalara → Amplifier → advance `next_billing_date`. Returns `{ success: true, internal: true }`. Mirrors the portal handler ([[portal__handlers__order-now]]).
+- **Appstle sub:** `appstleGetUpcomingOrders` → `appstleAttemptBilling`.
+
+**Why it exists:** `appstleAttemptBilling`'s `internal-*` guard (above) is a NO-OP success — fine for the dunning cron (which drives the real internal renewal separately), but for on-demand order-now there's no cron follow-up, so calling appstle directly **silently drops the charge** (the bug that left an internal sub's "Order Now" reporting success while never billing — escalated ticket `dd67f3c7`, customer Angel). Callers funnelled through here: the ticket-UI bill-now route (`/api/workspaces/[id]/subscriptions/[subId]/bill-now`) and the AI executor's `bill_now` + `change_next_date` ASAP-fallback ([[action-executor]]). The appstle `internal-*` short-circuit stays in place as defense-in-depth for the dunning path.
+
 ### `appstleSkipUpcomingOrder` — function
 
 ```ts
