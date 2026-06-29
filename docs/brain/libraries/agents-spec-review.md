@@ -66,6 +66,14 @@ The mandate applies to:
 
 Every back-to-review write records a `director_activity` row with `action_kind='spec_sent_back_to_review'` so the CEO sees who sent it back and why.
 
+## Gotchas
+
+- **Empty-queue NO-OP — never park on nothing.** The sweep (sentinel job `spec_slug='spec-review-sweep'`) must NO-OP gracefully when there are ZERO `in_review` specs — it must NOT launch Vale and must NOT park a `needs_attention` job on empty input. Three gates enforce this:
+  1. `enqueueSpecReviewIfDue` returns `{enqueued:false, reason:"no-in-review-specs"}` when `selectInReviewSpecs` is empty (enqueue-side gate), and the standing backstop in `runSpecReviewJob`'s poll loop only enqueues `if (inReview.length)`.
+  2. `runSpecReviewJob` re-reads `selectInReviewSpecs` at run start; an empty pool early-returns `status='completed'` (runs only Ada's disposition sweep) — never launches the agent.
+  3. **Defensive:** if Vale DOES run and returns "no parseable decisions", `runSpecReviewJob` re-reads the in_review pool — if it has DRAINED to 0 since enqueue (every spec shipped/deferred/sent-back while the job sat queued), the job completes as a benign no-op instead of parking. Only a parse failure over a STILL-POPULATED queue parks (a genuine malformed-output failure on real input).
+  - **Why this matters (the phantom-park bug, 2026-06-27):** before gate 3, a sweep launched with an empty/drained queue produced "spec-review produced no parseable decisions", parked `needs_attention`, retried to the 3-attempt cap, then Ada (platform-director) re-escalated the dead park on EVERY standing pass — pure noise (no work to do). 3 such phantoms in workspace `fdc11e10-…` were dismissed (`status='dismissed'`, `needs_attention_class='dismissed_by_director'`) + 9 matching `dashboard_notifications` ("Park needs eyes / Parked spec-review: spec-review-sweep") cleared via the one-off `scripts/_clear-phantom-spec-review-parks.ts`.
+
 ## Brain links
 
 [[../specs/spec-review-agent]] · [[agents-spec-dispose]] · [[agent-grader]] (Vale's rubric in `AGENT_RUBRICS["spec-review"]`) · [[../inngest/spec-review-cron]] · [[../tables/director_activity]] · [[spec-card-state]] (the source of truth this library writes to) · [[../recipes/build-box-setup]]
