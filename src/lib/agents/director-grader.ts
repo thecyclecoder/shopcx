@@ -409,6 +409,29 @@ export async function gradeDirectorCall(opts: {
 // ── The standing-cadence sweep (fired from platform-director-cron, M1) ───────────────────────────────
 
 /**
+ * `considered` represents work that SHOULD be graded right now — not work that's still in flight.
+ * These reasons mean the grader correctly deferred (the target hasn't concluded yet, or the row
+ * has gone missing); they MUST NOT inflate `considered`, or the grading-starved monitor pages
+ * whenever the director has open auto-approvals (which is basically always). An LLM/parse/HTTP
+ * error path is NOT in this set — that's genuine starvation and should page.
+ */
+export const INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "no_target", "decision_not_found"]);
+export function isInflightSkip(r: DirectorGradeResult): boolean {
+  return !r.ok && !!r.reason && INFLIGHT_SKIP_REASONS.has(r.reason);
+}
+
+/**
+ * Per-result counter update for the sweep — extracted so the tally semantics are a pure function
+ * the test can drive directly without stubbing Supabase + the LLM. In-flight skips bump neither
+ * counter; a real grade bumps both; an LLM/parse/HTTP error bumps `considered` (genuine starvation).
+ */
+export function tallySweepResult(state: { considered: number; graded: number }, r: DirectorGradeResult): void {
+  if (isInflightSkip(r)) return;
+  state.considered++;
+  if (r.ok && !r.idempotent_update) state.graded++;
+}
+
+/**
  * Resolve the escorted milestones the director OWNS that have CONCLUDED (every spec shipped) and that
  * the director actually escorted (an `escorted_goal` activity row for the goal). Each is one gradeable
  * goal-escort call. Best-effort.
@@ -467,9 +490,8 @@ async function concludedEscortedMilestones(admin: Admin, workspaceId: string): P
  */
 export async function gradeConcludedDirectorCalls(opts: { workspaceId: string; admin?: Admin }): Promise<{ considered: number; graded: number }> {
   const admin = opts.admin ?? createAdminClient();
-  let considered = 0;
-  let graded = 0;
-  if (!ANTHROPIC_API_KEY) return { considered, graded };
+  const state = { considered: 0, graded: 0 };
+  if (!ANTHROPIC_API_KEY) return state;
 
   try {
     // Already-graded keys → skip (don't re-spend the LLM on a settled grade).
@@ -497,20 +519,22 @@ export async function gradeConcludedDirectorCalls(opts: { workspaceId: string; a
       .limit(500);
     for (const d of (decisions as Array<{ id: string }>) || []) {
       if (gradedApprovals.has(d.id)) continue;
-      considered++;
-      const r = await gradeAutoApproval({ approvalDecisionId: d.id, admin });
-      if (r.ok && !r.idempotent_update) graded++;
+      // Grade FIRST, then count — `considered` must reflect work that should be graded NOW.
+      // An in-flight target (the grader correctly deferred) is NOT starvation; an LLM/parse error IS.
+      tallySweepResult(state, await gradeAutoApproval({ approvalDecisionId: d.id, admin }));
     }
 
     // ── goal-escort — every concluded escorted milestone ────────────────────────────────────────
+    // Mirror the auto-approval gate for symmetry: a milestone that isn't truly concluded must not
+    // tick `considered`. `concludedEscortedMilestones` already pre-filters to `status='shipped'`,
+    // so in practice every row here is gradeable; the gate stays in place defensively in case
+    // `gradeGoalEscort` ever grows an in-flight skip reason of its own.
     for (const ctx of await concludedEscortedMilestones(admin, opts.workspaceId)) {
       if (gradedEscorts.has(`${ctx.goalSlug}:${ctx.milestoneId}`)) continue;
-      considered++;
-      const r = await gradeGoalEscort({ context: ctx, workspaceId: opts.workspaceId, admin });
-      if (r.ok && !r.idempotent_update) graded++;
+      tallySweepResult(state, await gradeGoalEscort({ context: ctx, workspaceId: opts.workspaceId, admin }));
     }
   } catch (e) {
     console.warn(`[director-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return { considered, graded };
+  return state;
 }
