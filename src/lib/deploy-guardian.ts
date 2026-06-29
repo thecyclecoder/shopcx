@@ -40,6 +40,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { buildControlTowerSnapshot } from "@/lib/control-tower/monitor";
+import { isAuditSkippedKpiDriftLoop } from "@/lib/agents/platform-scorecard";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
@@ -99,6 +100,28 @@ function isUserGeneratedError(title: string | null): boolean {
 /** Is this new-error signature a foreign infra / user-state signal a code deploy can't have caused? */
 export function isExcludedFromDeployRegression(r: { source: string; title: string | null }): boolean {
   return DEPLOY_REGRESSION_EXCLUDED_SOURCES.has(r.source) || isUserGeneratedError(r.title);
+}
+
+/**
+ * Is this newly-opened `loop_alerts` row a signal a Vercel CODE deploy has NO causal path to — the
+ * loop-side twin of {@link isExcludedFromDeployRegression}? The third blast-radius filter:
+ *
+ *  - `kpi_drift:<metric>:<cadence>` loops for an AUDIT-SKIPPED metric — the `liveSpecSetDependent`
+ *    weekly-aggregate / live-spec-set meta-metrics (`specs_per_week`, `regression_coverage_pct`, …)
+ *    and the `currentState` point-reads (kpi-audit-skip-live-spec-set-dependent-metrics, #848). These
+ *    reflect PM VOLUME / a moving-population membership delta (how many specs shipped this week + their
+ *    regression coverage), NOT the deployed code — a no-op spec's deploy cannot move them. Reusing the
+ *    SAME `liveSpecSetDependent`/`currentState` registry flags #848 introduced ([[platform-scorecard]]
+ *    `isAuditSkippedKpiDriftLoop` — single source of truth) keeps the audit skip and the deploy-
+ *    attribution gate from drifting apart. (Real per-deploy loops — a genuine kpi_drift on a windowed
+ *    aggregate, an error-rate loop, a test/regression loop — are NOT excluded and still auto-revert.)
+ *
+ * False-positive class fixed: Reva auto-reverted `noop-pipeline-test-6` (a no-op spec) because the two
+ * weekly-aggregate kpi_drift loops (`specs_per_week`, `regression_coverage_pct`) flipped red in its
+ * canary window from a high-volume PM night — drift that had nothing to do with the deploy.
+ */
+export function isExcludedFromDeployRegressionLoop(r: { loop_id: string }): boolean {
+  return isAuditSkippedKpiDriftLoop(r.loop_id);
 }
 
 /** Cap the watches evaluated per cron tick so a backlog can't run the tick unbounded. */
@@ -323,7 +346,13 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
     .filter((r) => r.signature && !baselineSignatures.has(r.signature) && !isExcludedFromDeployRegression(r))
     .map((r) => ({ signature: r.signature, source: r.source, title: r.title, count: r.count ?? 1 }));
 
-  // NEW red loops: an alert that OPENED after the deploy + isn't one that was already open at deploy time.
+  // NEW red loops: an alert that OPENED after the deploy + isn't one that was already open at deploy time,
+  // AND is a signal a code deploy can actually have caused. A `kpi_drift` loop for an audit-skipped metric
+  // (the `liveSpecSetDependent` weekly-aggregate / `currentState` point-read meta-metrics, #848) reflects PM
+  // VOLUME / a moving-population membership delta, NOT the deployed code — excluded here exactly as
+  // outage-correlated errors + foreign infra/user-state sources are (isExcludedFromDeployRegressionLoop,
+  // reusing #848's registry flags as the single source of truth). A genuine windowed-aggregate kpi_drift,
+  // an error-rate loop, or a test/regression loop is NOT excluded and still trips `regressed`.
   const { data: alertRows } = await admin
     .from("loop_alerts")
     .select("loop_id, reason, detail, opened_at, status")
@@ -331,7 +360,7 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
     .gte("opened_at", deployedAt)
     .lte("opened_at", watch.window_ends_at);
   const newRedLoops = ((alertRows as Array<{ loop_id: string; reason: string; detail: string }> | null) || [])
-    .filter((r) => r.loop_id && !baselineLoopIds.has(r.loop_id))
+    .filter((r) => r.loop_id && !baselineLoopIds.has(r.loop_id) && !isExcludedFromDeployRegressionLoop(r))
     .map((r) => ({ loop_id: r.loop_id, reason: r.reason, detail: r.detail }));
 
   // Live Control-Tower snapshot — a cross-check on the current red-loop count (Tao's signals reused).
@@ -709,12 +738,73 @@ async function recordRollbackOutcome(admin: Admin, watch: DeployWatch, base: Rec
 }
 
 /**
+ * Paths a Vercel deploy ships that DON'T enter the runtime: brain docs, markdown/spec text, the SQL
+ * migration LEDGER (already applied out-of-band — shipping the file doesn't re-run it), config/lockfiles
+ * that don't change behavior on their own. A deploy whose ENTIRE diff is these can't introduce a runtime
+ * regression, so a correlated red signal is foreign noise, not this deploy. Conservative: any path NOT
+ * matched here (a `.ts`/`.tsx`/`.js` source file, an env/route change) counts as runtime-bearing.
+ */
+function isRuntimeInertPath(path: string): boolean {
+  const p = path.toLowerCase();
+  if (p.startsWith("docs/")) return true; // brain pages + docs
+  if (/\.(md|mdx|txt)$/.test(p)) return true; // markdown / spec text
+  if (p.startsWith("supabase/migrations/")) return true; // migration ledger — applied out-of-band, not at deploy
+  if (/\.(json|lock|ya?ml|toml)$/.test(p) && !/^(vercel|next\.config|middleware)/.test(p)) return true; // non-behavioral config
+  return false;
+}
+
+/**
+ * Diff-plausibility gate: fetch the deploy's changed files and decide whether the diff could plausibly cause
+ * a RUNTIME regression. A no-op / docs-only / migration-ledger-only / test-marker-only diff (every changed
+ * path {@link isRuntimeInertPath}) is incapable of a functional/runtime regression — so a red signal in its
+ * canary window is foreign, and auto-reverting it is a false positive (the `noop-pipeline-test-6` incident).
+ * Returns `{ inert: true }` for such a diff (caller escalates instead of reverting), `{ inert: false }`
+ * otherwise. On any GitHub error / unreadable diff we return `{ inert: false, unknown: true }` — fail OPEN to
+ * the existing revert path (never SUPPRESS a real rollback because we couldn't read the diff).
+ */
+async function classifyDeployDiff(mergeSha: string | null): Promise<{ inert: boolean; unknown?: boolean; runtimeFiles?: string[]; totalFiles?: number }> {
+  try {
+    if (!ghToken() || !mergeSha) return { inert: false, unknown: true };
+    const cRes = await gh("GET", `/repos/${GH_REPO}/commits/${mergeSha}`);
+    if (!cRes.ok) return { inert: false, unknown: true };
+    const files = ((cRes.json.files as ChangedFile[] | undefined) || []).map((f) => String(f.filename || "")).filter(Boolean);
+    if (files.length === 0) return { inert: false, unknown: true }; // can't read the diff — fail open
+    const runtimeFiles = files.filter((f) => !isRuntimeInertPath(f));
+    return { inert: runtimeFiles.length === 0, runtimeFiles, totalFiles: files.length };
+  } catch {
+    return { inert: false, unknown: true };
+  }
+}
+
+/**
  * Phase 2 action on a `regressed` deploy: loop-guard → STOP+escalate; else restore known-good (revert) +
  * escalate the diagnosis carrying the revert; a revert that can't run cleanly escalates for a manual rollback.
  * Records the matching director_activity row (deploy_rolled_back | deploy_regressed) + the rollback findings.
  */
 async function actOnRegression(admin: Admin, watch: DeployWatch, findings: DeployWatchFindings, baseFindings: Record<string, unknown>): Promise<void> {
   const what = describeRegression(findings);
+
+  // Diff-plausibility gate: a runtime-inert diff (docs/markdown/migration-ledger/config only — no source
+  // code) CANNOT cause a runtime regression, so the correlated red signal is foreign noise, not this deploy.
+  // Escalate for human eyes instead of auto-reverting (the `noop-pipeline-test-6` false-revert class). Fails
+  // OPEN: a diff we can't read, or one that touches any runtime file, falls through to the revert path.
+  const diff = await classifyDeployDiff(watch.merge_sha);
+  if (diff.inert) {
+    const diagnosis = `Deploy of "${watch.slug}" (${watch.branch}) shows a post-deploy red signal (${what}) over its canary window, but its ENTIRE diff is runtime-INERT (${diff.totalFiles} file(s): docs / markdown / migration-ledger / non-behavioral config — no source code). A runtime-inert deploy cannot introduce a functional regression, so Reva did NOT auto-revert — the signal is almost certainly foreign (e.g. a weekly-aggregate KPI drift or an unrelated incident sharing the window). Please confirm the signal's real cause; re-arm by editing the diff classifier if this WAS the cause.`;
+    await safeEscalate(admin, watch, { title: `Red signal on a no-op deploy: ${watch.slug} — NOT auto-reverted (runtime-inert diff)`, diagnosis, dedupeKey: `deploy-inert-noregress:${watch.id}`, escalationKind: "deploy_inert_noregress", metadata: { total_files: diff.totalFiles } });
+    await recordDirectorActivity(admin, {
+      workspaceId: watch.workspace_id,
+      directorFunction: GUARDIAN_FUNCTION,
+      actionKind: "deploy_unsure",
+      specSlug: watch.slug,
+      reason: diagnosis,
+      metadata: deployActivityMeta(watch, "unsure", findings, { runtime_inert_diff: true, total_files: diff.totalFiles }),
+    });
+    await recordRollbackOutcome(admin, watch, baseFindings, { status: "no_revert_inert_diff", total_files: diff.totalFiles });
+    console.log(`[deploy-guardian] ${watch.branch} → regressed signal but RUNTIME-INERT diff (${diff.totalFiles} files) — escalated, NO revert`);
+    return;
+  }
+
   const priorRollbacks = await priorRollbacksForSlug(admin, watch.workspace_id, watch.slug);
 
   // Loop-guard: the same slug already auto-rolled-back ≥ MAX times and regressed AGAIN — a rollback-then-reland
