@@ -8653,8 +8653,44 @@ async function applySpecStatusActionInline(
       did.push(`critical=${critical}`);
     }
     if (typeof deferred === "boolean") {
-      await cs.markSpecCardDeferred(workspaceId, slug, deferred, audit);
-      did.push(`deferred=${deferred}`);
+      if (deferred) {
+        // no-silent-spec-defer invariant — a programmatic (director chat-flip) defer goes through the ONE
+        // audited+surfaced path: markSpecCardDeferred + a `spec_deferred_programmatic` director_activity
+        // row (who + why) + a CEO "Spec deferred — <why>" notification with one-click un-defer. NEVER a
+        // bare markSpecCardDeferred (the silent-park gap the CEO observed on the kpi-drift loop-repair spec).
+        const { auditedProgrammaticDefer } = await import("../src/lib/agents/spec-defer-audit");
+        // Concrete-reason enrichment for a LOOP/REPAIR defer: a repair-signed spec carries its
+        // `Repair-signature:` marker(s) (the exact loop/signature, e.g. `loop:kpi_drift:regression_coverage_pct:weekly`).
+        // Stamp them onto the audit row so the ledger names WHICH loop/signature was parked even when the
+        // director's prose is terse — the CEO can tell it was a loop-repair park + which loop, + WHY (the reason).
+        let repairSignatures: string[] = [];
+        try {
+          const { getSpec } = await import("../src/lib/brain-roadmap");
+          const got = await getSpec(slug);
+          if (got?.card.repairSignature) {
+            const { parseRepairSpecMeta } = await import("../src/lib/repair-agent");
+            repairSignatures = parseRepairSpecMeta(got.raw).signatures;
+          }
+        } catch { /* enrichment is best-effort — the reason prose still carries the why */ }
+        const r = await auditedProgrammaticDefer({
+          admin: db,
+          workspaceId,
+          slug,
+          actor,
+          directorFunction,
+          reason,
+          metadata: {
+            source: "director_chat_flip",
+            summary,
+            ...(repairSignatures.length ? { repair_defer: true, repair_signatures: repairSignatures } : {}),
+          },
+        });
+        did.push(`deferred=true (audited=${r.audited}, surfaced=${r.surfaced})`);
+      } else {
+        // Un-defer (make active again) — not a park, no surface needed; the writer's history row records it.
+        await cs.markSpecCardDeferred(workspaceId, slug, false, audit);
+        did.push(`deferred=false`);
+      }
     }
     // director-dismiss-park-and-short-circuit-spec Phase 2: stamp the short-circuit marker on the card's
     // flags so the board renders the shipped card distinctly ("short-circuited — $reason"). The fold-build
@@ -9029,7 +9065,7 @@ const DIRECTOR_COACH_OUTPUT = [
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
   `  — when an agent's MODEL should change (box-agent-model-tiers): its grade rollup slipped on a small model, or a mechanical high-volume agent is burning the 5-hour usage window. You PROPOSE the tier; on the CEO's approval the worker routes it to the agent's SUPERVISOR (a worker's change → its director, a director's → the CEO), and on that approval the registry updates instantly (reversible — flip it back). A live+autonomous director may auto-apply a one-tier bump for a worker whose rollup is <7. Cite the rollup as the evidence.`,
   `{"status":"replied","reply":"<acknowledge the flip in chat — no approval card is rendered>","pending_actions":[{"type":"spec-status","summary":"<one-line why>","slug":"<existing-spec-slug>","status":"<planned|in_progress|shipped|rejected|in_review>","phases":[{"index":0,"status":"shipped"}],"critical":true,"deferred":false,"shortCircuit":false,"reason":"<written to spec_status_history>"}]}`,
-  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:** / shortCircuit). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred/shortCircuit). \`phases[].index\` is 0-based and validated against the markdown's phase count. **shortCircuit:true** closes a spec CLEANLY without all phases shipping ("we changed our mind, this isn't needed anymore") — required \`reason\`, must be paired with \`status:'shipped'\` (or omitted — it auto-forces shipped), SKIPS the fold-build, and the roadmap renders the card as "shipped + short-circuited — <reason>". **status:'in_review'** is the spec-review-agent Phase 4 SEND-BACK: a malformed/off spec (mangled phases, missing Owner/Parent, missing Verification, a customer_id table with no DB-companion) goes back to Vale's queue (the build pipeline refuses an in_review spec, which is the whole point — don't build around a broken spec). The writer clears the prior \`vale_pass\`/\`ada_disposition\`/\`intended_status\` flags so the next Vale + dispose pass start clean; pair with a one-line reason naming the defect. The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
+  `  — when a spec YOU OWN needs to FLIP on the board (status / a single phase / **Priority:** critical / **Deferred:** / shortCircuit). **AUTO-APPLIED — no CEO approval, no inbox card.** Status moved from markdown to spec_card_state ([[spec-status-db-driven]]) — NEVER emit a 'spec-edit' for status; use 'spec-status'. Omit any field you're not changing (only \`slug\` + \`reason\` are required, plus at least one of status/phases/critical/deferred/shortCircuit). \`phases[].index\` is 0-based and validated against the markdown's phase count. **shortCircuit:true** closes a spec CLEANLY without all phases shipping ("we changed our mind, this isn't needed anymore") — required \`reason\`, must be paired with \`status:'shipped'\` (or omitted — it auto-forces shipped), SKIPS the fold-build, and the roadmap renders the card as "shipped + short-circuited — <reason>". **status:'in_review'** is the spec-review-agent Phase 4 SEND-BACK: a malformed/off spec (mangled phases, missing Owner/Parent, missing Verification, a customer_id table with no DB-companion) goes back to Vale's queue (the build pipeline refuses an in_review spec, which is the whole point — don't build around a broken spec). The writer clears the prior \`vale_pass\`/\`ada_disposition\`/\`intended_status\` flags so the next Vale + dispose pass start clean; pair with a one-line reason naming the defect. The worker calls the existing markSpecCard* writers + appends a spec_status_history row per field with actor=director:{your-function} the moment your reply is persisted. **`deferred:true` is NEVER a silent park (no-silent-spec-defer invariant)**: the worker routes it through the audited+surfaced defer path — a `spec_deferred_programmatic` director_activity row (you + your reason) AND a CEO \"Spec deferred — <why>\" notification with one-click un-defer. So your `reason` MUST be CONCRETE: for a LOOP/REPAIR-signed spec name WHICH loop/signature you're parking AND WHY (the loop resolved / a fix superseded it / it's pending deploy) — never a generic \"deferring this.\" Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function; a flip on someone else's spec is rejected and logged. State the flip in your reply text so the CEO sees it in chat (do NOT ask for approval — there is no button).`,
   `{"status":"replied","reply":"<acknowledge the dismiss in chat — no approval card is rendered>","pending_actions":[{"type":"dismiss-park","summary":"<one-line why>","jobId":"<agent_jobs.id of the parked row>","reason":"<written to director_activity>"}]}`,
   `  — when a PARKED \`agent_jobs\` row (status=\`needs_attention\`) you own is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable). **AUTO-APPLIED — no CEO approval, no inbox card.** Flips \`agent_jobs.status='dismissed'\`, stamps \`needs_attention_class='dismissed_by_director'\`, and writes a \`dismissed_park\` director_activity row carrying your reason + the original park's class + the underlying spec slug. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner: [[../functions/{fn}]]\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Reversible: the CEO clicks Re-open from the activity feed and the job flips back to \`needs_attention\` (a wrongly-dismissed park is one tap away from re-routing). Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router can't help with (no shipped target to fold to, no real_blocker to spec around — the blocker is "we changed our mind").`,
   `{"status":"replied","reply":"<acknowledge the audit request in chat — no approval card is rendered>","pending_actions":[{"type":"request-audit","summary":"<one-line why>","slug":"<existing-spec-slug>","reason":"<drift suspect | hand-flip cleanup | missing provenance — written to director_activity>"}]}`,

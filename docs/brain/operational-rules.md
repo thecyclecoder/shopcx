@@ -19,6 +19,17 @@ A tool hitting a rail is **not an outcome — it's the trigger for the supervisi
 
 Full treatment: [[goals/ceo-mode]] § "Role agents own the objective"; worked example: [[functions/growth]].
 
+### No silent spec defers
+
+A direct corollary of "surface its reasoning": **every PROGRAMMATIC (non-human) flip of a spec to `deferred` is audited + surfaced — never a silent park.** A spec parked to `deferred` by an autonomous flow with no audit row and no CEO notification is a supervisability gap — the CEO can't tell WHO parked it or WHY, and can't one-click un-defer it. (Observed live: the weekly kpi-drift loop-repair spec `kpi-audit-regression-coverage-current-state` — `repair_sig: loop:kpi_drift:regression_coverage_pct:weekly` — was flipped to `deferred` by the loop/repair flow with no `director_activity` row and no notification; the CEO assumed his director had done it, but couldn't tell.)
+
+The invariant — every non-human defer goes through the ONE helper [[libraries/spec-defer-audit]] `auditedProgrammaticDefer`, which:
+1. flips `flags.deferred` via [[libraries/spec-card-state]] `markSpecCardDeferred` (appends a `spec_status_history` row: actor + reason),
+2. records a `director_activity(spec_deferred_programmatic)` row — WHO + a CONCRETE why (for a loop/repair defer: WHICH loop/signature + WHY — resolved / superseded / pending-deploy), and
+3. emits a CEO **"Spec deferred — <why>"** notification with a one-click un-defer deep-link (`emitDeferNotification`).
+
+Ada's dispose-downgrade ([[libraries/agents-spec-dispose]]) was the original good shape and now reuses the same `emitDeferNotification` surface. The **only exempt** defer is the CEO's own dashboard action (`POST /api/roadmap/priority` → actor `owner:{user.id}`) — a deliberate human action already provenanced via `spec_status_history`. No bare `markSpecCardDeferred` / `setSpecStatus(…, "deferred")` may remain on a programmatic path without both the audit row and the surface.
+
 ## Database join discipline
 
 - **Internal joins use the UUID.** Every `shopify_*_id`, `appstle_*_id`, etc. is a boundary field — only for crossing into the external API, never for joining between our tables. Shopify is being sunset; every `shopify_contract_id`, `shopify_customer_id`, `shopify_order_id` will be deprecated.

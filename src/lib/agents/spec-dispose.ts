@@ -32,6 +32,7 @@ import {
 } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
+import { emitDeferNotification } from "@/lib/agents/spec-defer-audit";
 import { listSpecs } from "@/lib/specs-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -185,10 +186,9 @@ export async function applyAdaDispositionDecision(
 
 /**
  * Emit ONE CEO notification on a downgrade: "I moved {slug} to deferred — want it built now?"
- * Reuses the agent inbox `agent_approval_request` envelope so the CEO sees it in the standard Approval
- * Requests tab; the deep-link routes them to the spec card where the existing un-defer / Build affordances
- * live (no inline approve needed — the autonomous flip already landed). Deduped on
- * `metadata.dedupe_key=ada-downgrade:{slug}`.
+ * Delegates to the shared `emitDeferNotification` ([[spec-defer-audit]]) — the SAME CEO-notification
+ * surface every programmatic defer reuses (the no-silent-spec-defer invariant) — passing Ada's own
+ * `ada-downgrade:{slug}` dedupe key + her director voice so this lane's surface stays distinct.
  */
 async function emitDowngradeNotification(
   admin: Admin,
@@ -196,41 +196,11 @@ async function emitDowngradeNotification(
   slug: string,
   reason: string,
 ): Promise<{ ok: boolean; reason?: string }> {
-  const dedupeKey = `ada-downgrade:${slug}`;
-  const { data: prior } = await admin
-    .from("dashboard_notifications")
-    .select("id")
-    .eq("workspace_id", workspaceId)
-    .eq("type", APPROVAL_REQUEST_TYPE)
-    .eq("metadata->>dedupe_key", dedupeKey)
-    .limit(1);
-  if ((prior ?? []).length > 0) return { ok: true, reason: "deduped" };
-
-  const body = `🛠️ Ada (Platform/DevOps Director): I moved this to deferred for now — want it built now? Override on the spec card.\n${reason}`.slice(0, 4000);
-  const { error } = await admin.from("dashboard_notifications").insert({
-    workspace_id: workspaceId,
-    type: APPROVAL_REQUEST_TYPE,
-    title: `Deferred ${slug} — override?`,
-    body,
-    link: `/dashboard/roadmap/${slug}`,
-    metadata: {
-      routed_to_function: CEO,
-      escalated_by_director: PLATFORM,
-      escalation_kind: "spec_dispose_downgrade",
-      escalation_reason: reason.slice(0, 2000),
-      dedupe_key: dedupeKey,
-      spec_slug: slug,
-      deep_link: `/dashboard/roadmap/${slug}`,
-      approve_action_id: null,
-    },
-    read: false,
-    dismissed: false,
+  return emitDeferNotification(admin, workspaceId, slug, `director:${PLATFORM}`, reason, {
+    dedupeKey: `ada-downgrade:${slug}`,
+    escalationKind: "spec_dispose_downgrade",
+    bodyPrefix: "🛠️ Ada (Platform/DevOps Director): I moved this to deferred for now — want it built now? Override on the spec card.",
   });
-  if (error) {
-    console.warn(`[spec-dispose] downgrade notification insert failed for ${slug}:`, error.message);
-    return { ok: false, reason: error.message };
-  }
-  return { ok: true };
 }
 
 /**
