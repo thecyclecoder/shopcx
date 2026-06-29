@@ -7589,8 +7589,21 @@ async function runSpecReviewJob(job: Job) {
       return;
     }
     if (!parsed || !Array.isArray(parsed.decisions)) {
+      // Defensive (spec-review-sweep phantom-park fix): a "no parseable decisions" verdict is only a GENUINE
+      // failure when there was real input to decide on. Re-read the in_review pool: if it has DRAINED to zero
+      // since this job was enqueued (every spec shipped/deferred/sent back while the job sat queued, or the
+      // agent was handed nothing to decide), there is nothing to review — complete as a benign no-op instead
+      // of parking a needs_attention job that Ada would then re-escalate forever on every standing pass. Only
+      // a parse failure over a STILL-POPULATED queue parks (a real malformed-output failure on real input).
+      const stillInReview = await selectInReviewSpecs(a, job.workspace_id);
+      if (!stillInReview.length) {
+        const tail = `spec-review no-op — in_review pool drained to 0 by run time (no parseable decisions over empty input; not parking)`;
+        await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+        console.log(`${tag} ${tail}`);
+        return;
+      }
       await update(job.id, { status: isError ? "failed" : "needs_attention", error: "spec-review produced no parseable decisions", log_tail: raw.slice(-2000) });
-      console.error(`${tag} no parseable decisions`);
+      console.error(`${tag} no parseable decisions (${stillInReview.length} spec(s) still in_review)`);
       return;
     }
 
