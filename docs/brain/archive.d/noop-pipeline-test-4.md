@@ -1,0 +1,1 @@
+- **[TEST] No-op pipeline validation v4 (one-off path)** · verified 2026-06-29 · → [[recipes/pipeline-validation-tests]]
