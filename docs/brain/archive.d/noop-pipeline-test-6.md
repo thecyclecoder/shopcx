@@ -1,0 +1,1 @@
+- **[TEST] No-op pipeline validation v6 (zero-assistance run)** · verified 2026-06-29 · → [[recipes/pipeline-validation-tests]]
