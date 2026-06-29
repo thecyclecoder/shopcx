@@ -567,12 +567,18 @@ const regressions: MetricDef = {
  * Phase 3): agent_jobs in status='needs_attention' EXCLUDING the kinds another lane already owns (build →
  * the build loop-guard; repair → the repair-dismissal lane). The count is the headline value; detail carries
  * the OLDEST open item's age in hours + a by-kind breakdown, so a rotting parked item is a tracked, trending
- * KPI (not just a transient board line). A current-state metric — prior comes from the prior snapshot.
+ * KPI (not just a transient board line). Current-state metric (`currentState: true` — point read of the NOW
+ * state of `agent_jobs` in `needs_attention`, not a windowed aggregate): prior comes from the prior stored
+ * snapshot, and [[kpi-review]] `auditAllKpis` / `auditKpi` SKIP it — between the snapshot write and the
+ * ground-truth re-read, a parked item routes/resolves or a new park lands, and the diff surfaces as
+ * moving-target noise, not engine drift. Repair Agent verdict on signature
+ * `loop:kpi_drift:needs_attention:daily` (same false-positive class as `lane_utilization` / `loop_health`).
  */
 const TRIAGED_NA_SKIP_KINDS = new Set(["build", "repair", "platform-director"]);
 const needsAttention: MetricDef = {
   key: "needs_attention",
   unit: "count",
+  currentState: true,
   compute: async (ctx) => {
     const { admin, workspaceId } = ctx;
     const now = Date.now();

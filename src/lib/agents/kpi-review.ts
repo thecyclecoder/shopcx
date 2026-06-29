@@ -191,13 +191,15 @@ function displayFor(cadence: Cadence, metricKey: string): { label: string; polar
  * (nothing to compare to), or when the metric is a current-state point read or live-spec-set
  * dependent (see guards below). NO writes.
  *
- * **Current-state guard:** metrics flagged `MetricDef.currentState` (e.g. `lane_utilization`) are
- * point reads of a CURRENTLY-OCCUPIED pool/counter — the snapshotted value freezes the moment-in-time
- * read, and a ground-truth re-run reads the pool AGAIN at the moment-of-audit, so any movement in
- * the seconds between the two reads surfaces as "drift" that isn't drift. Paired with the in-flight
- * daily window guard (`readPersistedSnapshot` above): same false-positive class — comparing a frozen
- * snapshot against a moving target — applied to a different axis (point-read vs in-flight window).
- * Repair Agent verdict on signature `loop:kpi_drift:lane_utilization:daily`.
+ * **Current-state guard:** metrics flagged `MetricDef.currentState` (e.g. `lane_utilization`,
+ * `loop_health`, `needs_attention`) are point reads of a CURRENTLY-OCCUPIED pool/counter — the
+ * snapshotted value freezes the moment-in-time read, and a ground-truth re-run reads the pool AGAIN
+ * at the moment-of-audit, so any movement in the seconds between the two reads surfaces as "drift"
+ * that isn't drift. Paired with the in-flight daily window guard (`readPersistedSnapshot` above):
+ * same false-positive class — comparing a frozen snapshot against a moving target — applied to a
+ * different axis (point-read vs in-flight window). Repair Agent verdicts on signatures
+ * `loop:kpi_drift:lane_utilization:daily`, `loop:kpi_drift:loop_health:daily`, and
+ * `loop:kpi_drift:needs_attention:daily`.
  *
  * **Live-spec-set guard:** metrics flagged `MetricDef.liveSpecSetDependent` (today: `specs_per_week`,
  * `regression_coverage_pct`) derive ground truth from the LIVE brain-roadmap spec set
