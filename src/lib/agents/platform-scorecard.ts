@@ -170,11 +170,17 @@ interface MetricDef {
  * loop_health — share of monitored loops green. A loop is green when it has NO open loop_alert AND
  * (for a cron) a heartbeat within its livenessWindowMs. Worker / agent-kind / reactive / inline-agent
  * loops are idle-green (the Control Tower monitor opens an alert if one genuinely dies), so they're
- * judged on the open-alert signal alone. Current-state metric — prior comes from the prior snapshot.
+ * judged on the open-alert signal alone. Current-state metric (`currentState: true` — point read of the
+ * NOW state of `loop_alerts` + latest heartbeat per loop, not a windowed aggregate): prior comes from
+ * the prior stored snapshot, and [[kpi-review]] `auditAllKpis` / `auditKpi` SKIP it — between the
+ * snapshot write and the ground-truth re-read, a heartbeat lands or an alert opens/closes and the diff
+ * surfaces as moving-target noise, not engine drift. Repair Agent verdict on signature
+ * `loop:kpi_drift:loop_health:daily` (same false-positive class as `lane_utilization`).
  */
 const loopHealth: MetricDef = {
   key: "loop_health",
   unit: "ratio",
+  currentState: true,
   compute: async (ctx) => {
     const { admin } = ctx;
     const now = Date.now();
