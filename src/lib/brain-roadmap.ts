@@ -817,10 +817,14 @@ function serializeSpecRowToMarkdown(row: SpecRow): string {
     out.push("");
   }
   // Phases (the DB orders them ASC by position via the join). Stored body is markdown-as-text; emit a
-  // `## Phase N — {title}` heading and the body verbatim.
+  // `## Phase N — {title}` heading and the body verbatim. The serializer OWNS the `Phase N — ` prefix, so a
+  // stored title that ALREADY carries a leading `Phase N —/-/:` (parseSpec keeps the whole `Phase 1 — close
+  // it` as the title; repair/box authors sometimes store it too) is normalized off here — otherwise it
+  // double-prefixes ("## Phase 1 — Phase 1 — close it"). Anchored to the line start, case-insensitive.
   const phases = row.phases.slice().sort((a, b) => a.position - b.position);
   for (const p of phases) {
-    out.push(`## Phase ${p.position} — ${p.title}`);
+    const bareTitle = String(p.title || "").replace(/^\s*phase\s*\d+\s*[—\-:]\s*/i, "").trim();
+    out.push(`## Phase ${p.position} — ${bareTitle}`);
     out.push("");
     if (p.body && p.body.trim()) {
       out.push(p.body.trim());
