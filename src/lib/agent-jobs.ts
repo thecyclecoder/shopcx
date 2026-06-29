@@ -101,8 +101,12 @@ export interface PendingAction {
  * | 'pr-resolve' (dirty-pr-resolver-agent — webhook-fired: merge main into a dirty claude/* PR, resolve
  *   conflicts, tsc-gate + push, or rebuild-on-main / surface to the owner)
  * | 'platform-director' (platform-director-agent — the first live director: investigate a Platform-routed
- *   Approval Request → auto-approve within the leash, else escalate to the CEO). */
-export type JobKind = "build" | "plan" | "fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "spec-review";
+ *   Approval Request → auto-approve within the leash, else escalate to the CEO)
+ * | 'goal-fold' (goal-fold-from-db-row — the post-M5 finalize lane: fold ONE complete goal into the
+ *   permanent brain + retire its row. The SIBLING of 'fold' for goals; owns a `claude/goal-fold-*`
+ *   branch and, like 'fold', authors brain-doc-only changes the system itself produced — so it counts
+ *   as a legitimate branch owner for the auto-merge success gate). */
+export type JobKind = "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "spec-review";
 
 export interface AgentJob {
   id: string;
@@ -346,20 +350,24 @@ export async function findMergedSiblingBuild(
 }
 
 /** The job statuses that prove a branch was BUILT SUCCESSFULLY: the worker only flips a build/fold/
- * pr-resolve job to `completed` after its pre-push `tsc --noEmit` passed and the PR opened cleanly,
- * and to `merged` once that PR landed. Every other status is a partial/errored/paused/parked build. */
+ * goal-fold/pr-resolve job to `completed` after its pre-push `tsc --noEmit` passed and the PR opened
+ * cleanly, and to `merged` once that PR landed. Every other status is a partial/errored/paused build. */
 export const SUCCESSFUL_BUILD_STATUSES: JobStatus[] = ["completed", "merged"];
 
-/** The job kinds that OWN a claude/* PR branch (each sets `spec_branch` to the branch). */
-const BRANCH_OWNING_KINDS: JobKind[] = ["build", "fold", "pr-resolve"];
+/** The job kinds that OWN a claude/* PR branch (each sets `spec_branch` to the branch). `goal-fold` is
+ *  here for the SAME reason as `fold`: it stamps `spec_branch = claude/goal-fold-…` and authors
+ *  system-produced brain-doc changes — so a completed goal-fold legitimately OWNS its branch and clears
+ *  the auto-merge success gate (without it, a goal-fold PR read "no build job owns this branch" forever). */
+const BRANCH_OWNING_KINDS: JobKind[] = ["build", "fold", "goal-fold", "pr-resolve"];
 
 /** The branch-owning kinds whose `spec_slug` is the REAL spec slug (the spec-building kinds). A `build`
  * job stamps `spec_branch = claude/build-{slug}` and carries the actual spec slug. The other owning
- * kinds do NOT: a `fold` job's branch is `claude/fold-…`, and a `pr-resolve` job stamps a PSEUDO-slug
+ * kinds do NOT: a `fold` job's branch is `claude/fold-…`, a `goal-fold` job's branch is
+ * `claude/goal-fold-…` and its `spec_slug` is the GOAL slug, and a `pr-resolve` job stamps a PSEUDO-slug
  * `pr-<number>` (it runs against a PR, not a spec). So the SLUG/workspace returned by the build-success
- * gate must be resolved from a `build` job, never from a `fold`/`pr-resolve` owning job whose slug would
- * misdirect the per-branch spec-test lookup. (plan jobs are excluded too: their `spec_slug` holds the
- * GOAL slug and they don't own a `claude/build-*` branch — see the JobKind doc above.) */
+ * gate must be resolved from a `build` job, never from a `fold`/`goal-fold`/`pr-resolve` owning job whose
+ * slug would misdirect the per-branch spec-test lookup. (plan jobs are excluded too: their `spec_slug`
+ * holds the GOAL slug and they don't own a `claude/build-*` branch — see the JobKind doc above.) */
 const REAL_SLUG_BUILD_KINDS: JobKind[] = ["build"];
 
 /** Derive the real spec slug from a `claude/build-<slug>` branch name. Returns null for any other ref

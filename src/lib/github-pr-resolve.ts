@@ -815,23 +815,26 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         // SERIALIZE: only attempt the first ready PR — the post-merge push webhook drives the next one.
         // (A gate-blocked PR leaves result.merged at 0, so the scan continues to the next ready PR.)
         if (result.merged === 0) {
-          // fold-pr-auto-merge — FOLD GATE (the build gates DO NOT apply to a fold PR): a claude/fold-* PR
-          // is a brain-doc merge of ALREADY-shipped specs (runFoldJob batches every owner-verified spec into
-          // ONE branch). There is no spec accumulation to wait on, no pre-merge spec-test/security to run, and
-          // no goal-bound promotion — those gates are all about a NOT-yet-shipped feature build reaching main.
-          // So a fold PR is promoted on a SINGLE condition: mergeable+clean (the isPrReady above) AND its
-          // OWNING fold job (kind='fold', same spec_branch) is in a completed/succeeded status. The fold branch
-          // → its fold job match is the `spec_branch` column (runFoldJob stamps `spec_branch = claude/fold-…`
-          // and getBranchBuildSuccess already resolves the latest BRANCH_OWNING_KINDS job — which includes
-          // 'fold' — for that ref). We then fall through to the SAME shared merge path the build PRs use.
-          // Still SERIALIZED: this sits inside `result.merged === 0`, so a fold merge counts as the one merge
-          // for the pass and the post-merge push webhook drives the next.
-          if (branch.startsWith("claude/fold-")) {
+          // fold-pr-auto-merge — FOLD GATE (the build gates DO NOT apply to a fold PR): a claude/fold-* OR
+          // claude/goal-fold-* PR is a brain-doc merge of ALREADY-shipped work the SYSTEM authored — runFoldJob
+          // batches every owner-verified spec into ONE `claude/fold-…` branch; runGoalFoldJob folds ONE complete
+          // goal into `claude/goal-fold-…`. There is no spec accumulation to wait on, no pre-merge spec-test/
+          // security to run, and no goal-bound promotion — those gates are all about a NOT-yet-shipped feature
+          // build reaching main. So a (goal-)fold PR is promoted on a SINGLE condition: mergeable+clean (the
+          // isPrReady above) AND its OWNING fold/goal-fold job (same spec_branch) is in a completed/succeeded
+          // status. The branch → owning-job match is the `spec_branch` column (the worker stamps it = the
+          // claude/(goal-)fold-… ref), and getBranchBuildSuccess resolves the latest BRANCH_OWNING_KINDS job —
+          // which now includes BOTH 'fold' and 'goal-fold' — for that ref. A branch owned by NOTHING (a manual/
+          // untracked push, no agent_jobs row) still reads `ok:false` here and is left for the owner — only a
+          // COMPLETED system fold/goal-fold job clears this gate. We then fall through to the SAME shared merge
+          // path the build PRs use. Still SERIALIZED: this sits inside `result.merged === 0`, so a (goal-)fold
+          // merge counts as the one merge for the pass and the post-merge push webhook drives the next.
+          if (branch.startsWith("claude/fold-") || branch.startsWith("claude/goal-fold-")) {
             const foldGate = await getBranchBuildSuccess(branch, db);
             buildGateOk = foldGate.ok;
             if (!foldGate.ok) {
               result.foldGateBlocked++;
-              console.warn(`[auto-merge] fold PR #${prNumber} (${branch}) is GitHub-clean but its owning fold job hasn't completed: ${foldGate.reason} — left for the next pass`);
+              console.warn(`[auto-merge] fold PR #${prNumber} (${branch}) is GitHub-clean but its owning fold/goal-fold job hasn't completed: ${foldGate.reason} — left for the next pass`);
               result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
               continue;
             }
