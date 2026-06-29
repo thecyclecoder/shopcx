@@ -49,7 +49,16 @@ Signed httpOnly cookie `showcase_session`, value `<issuedAtMs>.<hmac-sha256>`. S
 
 ## Theming
 
-The app forces light globally (`globals.css` makes Tailwind's `dark:` class-based and never adds `.dark`). The showcase ships its **own** token set under `.showcase-root` and toggles dark via a `.showcase-dark` class on that root — set pre-paint by an inline script (saved choice → else OS preference), flipped by the client `ThemeToggle`. This is fully isolated from the rest of the app. Mobile-friendly (responsive grid + TOC collapses under 960px).
+The app forces light globally (`globals.css` makes Tailwind's `dark:` class-based and never adds `.dark`). The showcase ships its **own** token set under `.showcase-root` and toggles dark via a `.showcase-dark` class on that root — set pre-paint by an inline script (saved choice → else OS preference), flipped by the client `ThemeToggle`. This is fully isolated from the rest of the app. Mobile-friendly (responsive grid + TOC reflows under 960px).
+
+### Responsive layout (the `.sc-doc-layout` grid)
+
+The flagship CTO page uses a two-row/two-column doc layout that switches at **960px**:
+
+- **Desktop (≥960px):** `220px` sticky side-rail `.sc-toc` (vertical numbered list with a left rule + active indicator) next to the `.sc-prose` article.
+- **Mobile (<960px):** the grid collapses to one column and `.sc-toc` becomes a **horizontal, scrollable, non-sticky bar in its own grid row above the article** — so the nav never overlays the prose. The `position: sticky` / vertical / left-rule styling lives *only* inside the `@media (min-width: 960px)` block; the mobile base style is the horizontal bar. This avoids the earlier bug where a sticky side-rail overlapped the section heading + `.sc-section-index` marker on narrow viewports.
+
+Inline SVG diagrams (`diagrams.tsx`) scale via `width:100%` + `height:auto` on a correct `viewBox` and explicit `preserveAspectRatio="xMidYMid meet"`. Long single-line labels are wrapped across `<tspan>` lines (and viewBoxes carry horizontal/vertical padding) so no label clips at desktop or mobile width.
 
 ## Status / open work
 

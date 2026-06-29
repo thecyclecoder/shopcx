@@ -241,21 +241,29 @@ a.sc-card:hover {
   color: var(--sc-fg-muted);
 }
 
-/* In-page section nav */
+/* In-page section nav.
+   Mobile default: a horizontal, scrollable, non-sticky bar that sits ABOVE the
+   article — it lives in its own grid row and can never overlap the prose.
+   Desktop (>=960px): the intentional sticky vertical side rail with a left rule. */
 .sc-toc {
-  position: sticky;
-  top: 74px;
-  align-self: start;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 13.5px;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 4px;
+  font-size: 13px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--sc-border);
+  scrollbar-width: thin;
 }
 .sc-toc a {
   color: var(--sc-fg-muted);
   text-decoration: none;
   padding: 7px 12px;
-  border-left: 2px solid var(--sc-border);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
 }
 .sc-toc a:hover {
@@ -271,12 +279,32 @@ a.sc-card:hover {
 .sc-doc-layout {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 40px;
+  gap: 28px;
 }
 @media (min-width: 960px) {
   .sc-doc-layout {
     grid-template-columns: 220px minmax(0, 1fr);
     gap: 56px;
+  }
+  /* Desktop: the side rail — sticky vertical list with a left rule. */
+  .sc-toc {
+    position: sticky;
+    top: 74px;
+    align-self: start;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 13.5px;
+    overflow-x: visible;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+  .sc-toc a {
+    border-bottom: none;
+    border-left: 2px solid var(--sc-border);
+  }
+  .sc-toc a:hover {
+    border-bottom: none;
+    border-left-color: var(--sc-border-strong);
   }
 }
 
@@ -290,10 +318,12 @@ a.sc-card:hover {
   padding-top: 48px;
 }
 .sc-section-index {
+  display: block;
   font-family: var(--sc-mono);
   font-size: 13px;
   color: var(--sc-accent);
   font-weight: 600;
+  margin-bottom: 6px;
 }
 
 /* Diagram primitives (all inline SVG/CSS, no image deps) */
