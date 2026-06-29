@@ -1,0 +1,1 @@
+- **KPI audit: flag needs_attention as a current-state point read so the audit skips it** · verified 2026-06-29 · → [[../libraries/kpi-review]]
