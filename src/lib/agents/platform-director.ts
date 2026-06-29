@@ -571,11 +571,42 @@ function isApprovedInProgress(goal: GoalCard): boolean {
   return goal.status === "greenlit" && goal.pct > 0 && goal.pct < 100;
 }
 
+/**
+ * The STATIC buildable-spec predicate — the goal-admission gate for a greenlit-at-0% goal (and the loop's own
+ * static skips, kept DRY). A spec is buildable when it's: NOT really-shipped, NOT a tagless-shipped drift
+ * suspect (status=shipped), NOT deferred (parked), Vale-reviewed (specReviewDone), NOT opted out of auto-build,
+ * and NOT still blocked. This is exactly the set of unconditional `continue` guards at the top of the escort
+ * loop — but WITHOUT the DB/stateful guards (in-flight, loop-guard, build-gate), which decide what to do with
+ * a buildable spec, not whether it's buildable at all. Used to admit a ready-at-0% goal INTO the escort.
+ */
+function isBuildableSpec(card: SpecCard): boolean {
+  if (isCardFullyShippedWithProvenance(card)) return false; // really landed
+  if (card.status === "shipped") return false; // tagless-shipped drift suspect — the loop surfaces it, never builds it
+  if (card.status === "deferred") return false; // parked until the CEO un-defers it
+  if (!specReviewDone(card)) return false; // in_review / un-Vale-passed — Vale must pass it first
+  if (card.autoBuild === false) return false; // owner opted this spec out of auto-build
+  if (card.blockedBy.some((b) => !b.cleared)) return false; // still blocked → its auto-queue fires on unblock
+  return true;
+}
+
 /** Every distinct spec linked across a goal's milestones, resolved to its live SpecCard. */
 function goalSpecs(goal: GoalCard, specBySlug: Map<string, SpecCard>): SpecCard[] {
   const slugs = new Set<string>();
   for (const m of goal.milestones) for (const s of m.specSlugs) slugs.add(s);
   return [...slugs].map((s) => specBySlug.get(s)).filter((c): c is SpecCard => !!c);
+}
+
+/**
+ * goal-escort-ready-at-0pct: a greenlit goal the escort SHOULD enter. Either it's already in-progress (the
+ * original leash, `isApprovedInProgress`) OR it's greenlit-but-unstarted (0%) yet ALREADY HAS ≥1 buildable
+ * spec (authored directly, or after Pia decomposed it). A greenlit 0% goal with NO buildable spec stays
+ * deferred to the human-gated planner (Pia) — the escort never auto-starts a goal that has nothing to build.
+ */
+function isEscortableGoal(goal: GoalCard, specBySlug: Map<string, SpecCard>): boolean {
+  if (goal.status !== "greenlit" || goal.pct >= 100) return false;
+  if (isApprovedInProgress(goal)) return true; // 0 < pct < 100 — in-flight, escort as before
+  // greenlit at 0% — only enter if it has at least one genuinely-buildable spec ready for the queue
+  return goalSpecs(goal, specBySlug).some(isBuildableSpec);
 }
 
 /** Per-goal outcome of one escort pass. */
@@ -607,23 +638,30 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
   const mine = goals.filter((g) => g.owner === PLATFORM);
 
-  // director-proposed-goals (Phase 1): the goal's lifecycle state — not `pct > 0` — now decides escortability.
+  const specBySlug = new Map(specs.map((s) => [s.slug, s]));
+
+  // director-proposed-goals (Phase 1) + goal-escort-ready-at-0pct: the goal's lifecycle state — not `pct > 0` —
+  // decides escortability.
   //   - `proposed` → awaits the CEO via its OWN Approval Request (the proposed-goal job). The escort does NOT
   //     touch it and does NOT re-escalate it: surfacing it is the proposed-goal flow's job, not the escort's.
-  //   - `greenlit` at 0% → greenlit-but-unstarted, READY FOR DECOMPOSITION (Pia, Phase 2). The escort never
-  //     auto-starts a goal, so it's left for the human-gated planner — no escalation, no auto-queue.
+  //   - `greenlit` at 0% with NO buildable spec → greenlit-but-unstarted, READY FOR DECOMPOSITION (Pia,
+  //     Phase 2). The escort never auto-starts a goal that has nothing to build, so it's left for the
+  //     human-gated planner — no escalation, no auto-queue.
+  //   - `greenlit` at 0% WITH ≥1 buildable spec (authored directly, or after Pia decomposed) → genuinely
+  //     ready to build: the escort ENTERS it and queues those specs. (Without this it sat forever, since the
+  //     old `pct > 0` gate excluded an at-0% goal whose specs were already reviewed + planned.)
   //   - `greenlit` in-progress (0 < pct < 100) → escorted toward its milestones, exactly as before.
   // This replaces the old "every 0% owned goal escalates as a new-goal greenlight request": a proposed goal
-  // is now an explicit, self-surfacing artifact and a greenlit 0% goal is genuinely approved-and-awaiting-Pia.
+  // is now an explicit, self-surfacing artifact and a greenlit 0% goal is either awaiting-Pia (no specs yet)
+  // or ready-to-build (decomposed) — the escort distinguishes the two by whether ≥1 spec is buildable.
 
-  const owned = mine.filter((g) => isApprovedInProgress(g));
+  const owned = mine.filter((g) => isEscortableGoal(g, specBySlug));
   if (!owned.length) return { goals: [], queued: [], escalated: [] };
 
   // Build-gate (director-executable-plans-and-priority): if an active directive gates builds until a spec
   // ships, this lane queues NOTHING but the gate spec itself until then. Computed once per pass.
   const gate = await buildGate(admin, workspaceId, PLATFORM);
 
-  const specBySlug = new Map(specs.map((s) => [s.slug, s]));
   const results: GoalEscortResult[] = [];
   const queuedAll: string[] = [];
   const escalatedAll: string[] = [];

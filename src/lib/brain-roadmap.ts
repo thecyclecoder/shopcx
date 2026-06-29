@@ -1382,7 +1382,14 @@ function milestoneRowToCard(m: GoalMilestoneRow, linked: SpecCard[]): Milestone 
   const status: Phase = completion >= 1 ? "shipped" : completion > 0 ? "in_progress" : "planned";
   // Milestone title carries the human label (and any `M1 — ` prefix) — surface it as the card name. Its
   // body may contain a `**Metric:**` line + spec wikilinks (used by getRoadmapFilters membership).
-  const specSlugs = [...new Set(specWikilinks(`${m.title}\n${m.body ?? ""}`))];
+  //
+  // specSlugs is the RELATIONAL linkage (`specs.milestone_id` → the `linked` SpecCards), UNIONed with any
+  // legacy body wikilinks. The relational join is the canonical PM-flow source now (Pia's decomposition +
+  // the structured author bind `milestone_id`; milestone bodies are prose like "Holds spec X." with NO
+  // wikilink). Reading only wikilinks left `specSlugs` empty for every relationally-linked goal — so the
+  // escort's `goalSpecs` (and the dashboard's per-milestone spec list) saw NO specs, and a greenlit goal's
+  // decomposed specs never built. Union so both old wikilink goals and new relational goals resolve.
+  const specSlugs = [...new Set([...linked.map((s) => s.slug), ...specWikilinks(`${m.title}\n${m.body ?? ""}`)])];
   const metricm = (m.body ?? "").match(/\*\*Metric:\*\*\s*([^\n]+)/i);
   return {
     id: (m.title.match(/^\s*\*{0,2}\s*(M\d+)\b/) || [])[1] ?? "",

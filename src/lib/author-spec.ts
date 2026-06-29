@@ -458,7 +458,12 @@ export async function authorSpecRowStructured(
         repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : null,
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : null,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : null,
-        auto_build: spec.autoBuild === true,
+        // auto-build-default-on: an autonomously-authored spec auto-builds by DEFAULT — only an EXPLICIT
+        // `autoBuild: false` parks it (request-fix + pre-merge-fix opt out deliberately; Pia's planner
+        // decomposition + spec-chat + director-authored specs pass nothing → on). Omitting it used to default
+        // to `false`, silently parking every authored spec — which broke hands-off autonomy (a greenlit goal's
+        // decomposed specs sat forever). `!== false` so `undefined`/`true` → on, only `false` → off.
+        auto_build: spec.autoBuild !== false,
         milestone_id: opts.milestoneId ?? null,
       },
       phases,
@@ -550,7 +555,12 @@ export async function authorSpecRowFromMarkdown(
         repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : extractRepairSignature(markdown),
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : regressionHeaders.ofSlug,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : regressionHeaders.signature,
-        auto_build: card.autoBuild === true,
+        // auto-build-default-on: HONOR the markdown parser's documented contract — "**Auto-build:** absent = on;
+        // only off/no/false/manual/disabled flips it false" (brain-roadmap.ts ~307). `card.autoBuild` is
+        // `undefined` when no line is present, which the parser MEANS as "on" — so `!== false` (undefined → on,
+        // explicit off → off). The old `=== true` inverted this: a spec with no Auto-build line (the common case)
+        // landed `auto_build=false`, silently parking every markdown-authored spec (spec-chat / repair / director).
+        auto_build: card.autoBuild !== false,
         milestone_id: opts.milestoneId ?? null,
       },
       phases,
