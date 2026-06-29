@@ -144,11 +144,20 @@ export const platformDirectorCron = inngest.createFunction(
       const snapshotDate = new Date(new Date(`${today}T00:00:00Z`).getTime() - 86_400_000)
         .toISOString()
         .slice(0, 10);
+      // The done guard accepts a row only when its updated_at is at/after endIso(snapshotDate) — i.e.,
+      // the row was written AFTER the snapshot day's UTC midnight cutoff. Post-lagged-fix rows always
+      // satisfy this (snapshotDate = yesterday UTC, written today); pre-lagged-fix rows (kpi-daily-
+      // snapshot-date-lag-fix #819) were written during their own snapshot_date and so updated_at <
+      // endIso(snapshot_date) — they fall OUT of the done set and get re-snapshotted by the next beat,
+      // healing in place via the idempotent upsert on (workspace_id, metric_key, cadence, snapshot_date).
+      // Stops the loop:kpi_drift:build_throughput:daily Control Tower signature at its root.
+      const endIso = `${snapshotDate}T23:59:59.999Z`;
       const { data: existing } = await admin
         .from("platform_scorecard_snapshots")
-        .select("workspace_id")
+        .select("workspace_id, updated_at")
         .eq("cadence", "daily")
-        .eq("snapshot_date", snapshotDate);
+        .eq("snapshot_date", snapshotDate)
+        .gte("updated_at", endIso);
       const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
       let snapshotted = 0;
       let metricsWritten = 0;
