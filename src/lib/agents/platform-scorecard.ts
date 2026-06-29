@@ -1333,6 +1333,28 @@ export function getRegisteredMetrics(
   }));
 }
 
+/** Every advertised cadence — the single source of truth for callers that enumerate the registry. */
+export const CADENCES: readonly Cadence[] = ["daily", "weekly", "monthly"] as const;
+
+/**
+ * Is this `loop_alerts.loop_id` a `kpi_drift:<metric>:<cadence>` alert for a metric whose audit is SKIPPED
+ * as a false-positive class — i.e. a `currentState` point-read OR a `liveSpecSetDependent` meta-metric
+ * (kpi-audit-skip-live-spec-set-dependent-metrics, #848)? These loops reflect the snapshot-vs-moving-target
+ * MEMBERSHIP delta (specs fold/archive, pools drain), NOT engine drift — and crucially NOT the deployed
+ * code. They are the SAME class [[kpi-review]] `auditAllKpis` skips; this is the single predicate behind
+ * both the audit skip and the deploy-guardian non-attribution gate ([[deploy-guardian]] `verdictFor`).
+ *
+ * A non-`kpi_drift` loop_id, an unparseable one, or a `kpi_drift` loop for a genuine windowed-aggregate
+ * metric returns `false` — those still page / still attribute to a deploy.
+ */
+export function isAuditSkippedKpiDriftLoop(loopId: string): boolean {
+  const m = /^kpi_drift:(.+):(daily|weekly|monthly)$/.exec(loopId || "");
+  if (!m) return false;
+  const [, metricKey, cadence] = m;
+  const reg = getRegisteredMetrics(cadence as Cadence).find((r) => r.key === metricKey);
+  return !!(reg?.currentState || reg?.liveSpecSetDependent);
+}
+
 /**
  * The default trailing-window length the engine uses for a cadence — exposed so [[kpi-review]] can
  * read it without duplicating the table.
