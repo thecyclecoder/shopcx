@@ -66,7 +66,11 @@ export type DirectorActionKind =
   // clusters (unique index missing/dropped), or shipped phases with no pr + no merge_sha (provenance
   // gap). One row per spec/kind; metadata carries { kind:'orphan'|'duplicate_position'|'provenance_gap',
   // actor:'reconciler:spec-drift', … }.
-  | "spec_phases_anomaly";
+  | "spec_phases_anomaly"
+  // re-author-re-opens-dismissed — `clearDirectorSpecDismissals` writes one row when a RE-AUTHORED spec's
+  // standing init/groom `*_dismissed` ledger rows are cleared (the corrected content must be re-investigated,
+  // not carried under the stale verdict). metadata: { cleared_dismissals, cleared_keys, autonomous:true }.
+  | "spec_reopened_after_reauthor";
 
 export interface DirectorActivityInput {
   workspaceId: string;
@@ -79,6 +83,76 @@ export interface DirectorActivityInput {
   reason: string;
   /** structured per-action context: { job_id?, signature?, failing?, attempt?, verdict?, ... }. */
   metadata?: Record<string, unknown>;
+}
+
+/** The function slug whose init/groom lanes own the dismissal ledger (mirrors `PLATFORM` in platform-director). */
+const PLATFORM_FUNCTION = "platform";
+
+/**
+ * re-author-re-opens-dismissed invariant — clear a spec's STANDING init/groom dismissal ledger rows so a
+ * corrected-after-rejection spec re-enters the build pipeline instead of sitting dead under the stale verdict.
+ *
+ * Ada's `dismiss_candidate` (and the groom-lane equivalent) is PERSISTED as a `director_activity` row whose
+ * `metadata.init_key` / `metadata.groom_key` the dedup readers (`alreadyInitiated` / `alreadyGroomed` in
+ * [[platform-director]]) scan for to SKIP the spec on the next pass — the row IS the dedup, there is no
+ * separate skip-flag. So once a spec is dismissed it is silently excluded forever. When the spec is
+ * RE-AUTHORED with changed content the prior dismissal applied to the OLD (premise-wrong) content and is
+ * stale; this DELETES those consumed dedup rows for the slug so the init/groom lanes re-investigate the new
+ * content, and writes ONE `spec_reopened_after_reauthor` audit row recording the re-open + the keys cleared.
+ *
+ * Scope: only the `*_dismissed` dedup rows (`init_dismissed` / `groomed_dismissed`). We deliberately do NOT
+ * touch `escalated` / `*_authored_spec` rows — those are not "this spec was rejected" dispositions and their
+ * audit value outweighs the dedup cost. `director_activity` is NOT a PM table (specs/spec_phases/goals/
+ * goal_milestones), so this delete is OUTSIDE the PM-SDK guard — it's ledger hygiene, not a spec mutation.
+ *
+ * Best-effort + never throws (mirrors `recordDirectorActivity`). Returns the count of dismissal rows cleared.
+ */
+export async function clearDirectorSpecDismissals(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+  reason: string,
+): Promise<{ cleared: number }> {
+  try {
+    const { data, error: readErr } = await admin
+      .from("director_activity")
+      .select("id, action_kind, metadata")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .in("action_kind", ["init_dismissed", "groomed_dismissed"]);
+    if (readErr) {
+      console.warn(`[director-activity] clearDirectorSpecDismissals read failed (${slug}):`, readErr.message);
+      return { cleared: 0 };
+    }
+    const rows = (data ?? []) as { id: string; action_kind: string; metadata: Record<string, unknown> | null }[];
+    if (!rows.length) return { cleared: 0 };
+
+    const ids = rows.map((r) => r.id);
+    const clearedKeys = rows
+      .map((r) => (r.metadata?.["init_key"] ?? r.metadata?.["groom_key"]) as string | undefined)
+      .filter((k): k is string => !!k);
+
+    const { error: delErr } = await admin.from("director_activity").delete().in("id", ids);
+    if (delErr) {
+      console.warn(`[director-activity] clearDirectorSpecDismissals delete failed (${slug}):`, delErr.message);
+      return { cleared: 0 };
+    }
+
+    // One audit row records the re-open + which dedup keys it superseded (the deleted rows are gone, this row
+    // is now the trail). It carries NO init_key/groom_key of its own, so it never re-triggers a dedup skip.
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: PLATFORM_FUNCTION,
+      actionKind: "spec_reopened_after_reauthor",
+      specSlug: slug,
+      reason,
+      metadata: { cleared_dismissals: rows.length, cleared_keys: clearedKeys, autonomous: true },
+    });
+    return { cleared: rows.length };
+  } catch (err) {
+    console.warn("[director-activity] clearDirectorSpecDismissals threw:", err instanceof Error ? err.message : err);
+    return { cleared: 0 };
+  }
 }
 
 /**

@@ -799,6 +799,28 @@ export async function setSpecBlockers(
 }
 
 /**
+ * Set the spec's `auto_build` flag — the owner's "auto-build is on/off for this spec" toggle (the init/groom
+ * lanes skip a spec with `auto_build=false`; the CEO commissioning a build flips it on). The only narrow SDK
+ * writer for this column outside a full `upsertSpec` re-author, so a one-off (the CEO re-opening a stuck
+ * spec) can flip it without round-tripping the whole body. A slug-resolved single UPDATE within a workspace —
+ * sibling to `setSpecBlockers` / `setSpecStatus`. No raw PM SQL outside the SDK (the `_check-pm-sdk-compliance`
+ * guard).
+ */
+export async function setSpecAutoBuild(
+  workspaceId: string,
+  slug: string,
+  autoBuild: boolean,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update({ auto_build: autoBuild, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/**
  * Stamp a ONE-SHOT spec's card-level merge provenance on `specs.merged_pr` + `specs.last_merge_sha` — the
  * spec-status-phase-pr-provenance Phase 1 chain for a zero-phase spec (the single merge ships the whole
  * spec, and there's no `spec_phases` slot to carry the PR/SHA, so it lands on the parent row). For a
