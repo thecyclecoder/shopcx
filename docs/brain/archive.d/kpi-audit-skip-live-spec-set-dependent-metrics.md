@@ -1,0 +1,1 @@
+- **KPI audit — skip metrics whose ground truth depends on the live spec set** · verified 2026-06-29 · → [[libraries/kpi-review]]
