@@ -2114,13 +2114,21 @@ async function resolveDbHealthSpecBody(
 // Build resume. The spec body was pre-authored deterministically at detection time (carried on the job's
 // db_health_build action). Post spec-pm-markdown-purge the spec lands ONLY in public.specs +
 // public.spec_phases (via the caller's markNewSpecInReview → authorSpecRowFromMarkdown); this guard just
-// refuses an empty/phaseless body so we never author a 0-byte spec row. No file write.
+// refuses a CONTENTLESS body so we never author a 0-content spec row. No file write.
 function validateSpecBody(specSlug: string, specBody: string, signature: string): boolean {
-  // Final backstop (db-health-spec-body-robust): NEVER author an empty/phaseless spec. The caller already
+  // Final backstop (db-health-spec-body-robust): NEVER author a CONTENTLESS spec. The caller already
   // resolves + re-derives a non-empty body, so this should be unreachable — but an empty spec row is
   // exactly the failure this guard exists to stop.
-  if (!specBody || !specBody.trim() || !/^#{2,3}\s+Phase/m.test(specBody)) {
-    console.warn(`[db-health] refusing to author empty/phaseless spec ${specSlug} (signature ${signature})`);
+  //
+  // "The database is the spec" — refuse only a CONTENTLESS body (empty / whitespace), NOT a magic-phrase
+  // `## Phase` regex. A valid fix spec whose phase heading doesn't literally start with "Phase", or a
+  // one-shot spec with no `## Phase` section at all, is no longer wrongly refused here. The AUTHORITATIVE
+  // buildability check runs AFTER this on the actual DB row (`specHasBuildableContent` in the build gate),
+  // which keys on real row content (phases/summary) — so this is a cheap pre-author non-empty guard and the
+  // row-level gate is the backstop. (Don't `parseSpec` here — the PM-md-reads guard reserves markdown
+  // parsing for the sanctioned author/serialize sites; this lane just authors via markNewSpecInReview.)
+  if (!specBody || !specBody.trim()) {
+    console.warn(`[db-health] refusing to author empty spec ${specSlug} (signature ${signature})`);
     return false;
   }
   return true;
@@ -2423,8 +2431,8 @@ async function runDbHealthJob(job: Job) {
         return;
       }
       if (!validateSpecBody(buildAction.spec_slug, bodyResult.body, signature)) {
-        await update(job.id, { status: "needs_attention", error: "empty/phaseless spec body", log_tail: `owner Build → refused to author empty/phaseless spec ${buildAction.spec_slug} to public.specs`.slice(-2000) });
-        console.warn(`${tag} owner Build → empty/phaseless spec body`);
+        await update(job.id, { status: "needs_attention", error: "empty spec body", log_tail: `owner Build → refused to author empty spec ${buildAction.spec_slug} to public.specs`.slice(-2000) });
+        console.warn(`${tag} owner Build → empty spec body`);
         return;
       }
       await markNewSpecInReview(job.workspace_id, buildAction.spec_slug, "planned", "db_health", `db-health fix spec authored (signature ${signature})`, bodyResult.body);
@@ -2498,8 +2506,8 @@ async function runCoverageRegisterJob(job: Job) {
         return;
       }
       if (!validateSpecBody(specSlug, specBody, signature)) {
-        await update(job.id, { status: "needs_attention", error: "empty/phaseless spec body", pending_actions: job.pending_actions, log_tail: `owner ${what} → refused to author empty/phaseless spec ${specSlug} to public.specs`.slice(-2000) });
-        console.warn(`${tag} owner ${what} → empty/phaseless spec body`);
+        await update(job.id, { status: "needs_attention", error: "empty spec body", pending_actions: job.pending_actions, log_tail: `owner ${what} → refused to author empty spec ${specSlug} to public.specs`.slice(-2000) });
+        console.warn(`${tag} owner ${what} → empty spec body`);
         return;
       }
       await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
@@ -11944,16 +11952,22 @@ async function dispatchJob(job: Job) {
   // top of every dispatch, and the row may have been edited between rounds. The .box/ directory is gitignored
   // so `git add -A` skips it.
   //
-  // db-health-spec-body-robust (Phase 1): refuse to build a 0-byte / phaseless materialized body —
-  // belt-and-suspenders against ANY empty spec reaching the builder (db-health or otherwise). It must FAIL
-  // loudly, never run claude on an empty file and silently merge an empty PR.
+  // db-health-spec-body-robust (Phase 1): refuse to build a CONTENTLESS spec — belt-and-suspenders against
+  // ANY empty spec reaching the builder (db-health or otherwise). It must FAIL loudly, never run claude on
+  // an empty spec and silently merge an empty PR.
+  //
+  // "The database is the spec." This gate trusts the DB ROW (`specHasBuildableContent`), NOT a magic-phrase
+  // regex over the materialized markdown. The existence of a `spec_phases` row (with a title/body) OR a
+  // non-empty summary means the spec exists — no `## Phase` heading required. The materialized `.md` is a
+  // render for Bo to READ, never the validation source. (Previously this gated on `/^#{2,3}\s+Phase/m` over
+  // `specText`, which wrongly refused valid specs whose phase titles didn't literally start with "Phase".)
   const materializedRelPath = `.box/spec-${slug}.md`;
   {
-    const { materializeSpec } = await import("../src/lib/build-spec-materializer");
-    let specText = "";
+    const { materializeSpec, unbuildableReason } = await import("../src/lib/build-spec-materializer");
+    let specRow: import("../src/lib/specs-table").SpecRow;
     try {
-      const written = await materializeSpec(job.workspace_id, slug, join(wt, ".box"));
-      specText = readFileSync(written, "utf8");
+      const { row } = await materializeSpec(job.workspace_id, slug, join(wt, ".box"));
+      specRow = row;
     } catch (e) {
       // planner-gates-build-queue-on-authored-specs Phase 2 — if the public.specs row is missing the
       // failure is the silent author-write fallout (an in-flight pre-gate plan, or a row deleted
@@ -11982,14 +11996,14 @@ async function dispatchJob(job: Job) {
       sh("git", ["worktree", "remove", "--force", wt]);
       return;
     }
-    if (!specText.trim() || !/^#{2,3}\s+Phase/m.test(specText)) {
-      const why = !specText.trim() ? "is empty / 0-byte" : 'has no "## Phase" / "### Phase" section';
+    const why = unbuildableReason(specRow); // "" = the DB row carries buildable content (phases or summary)
+    if (why) {
       await update(job.id, {
         status: "failed",
-        error: `materialized spec ${slug} ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
-        log_tail: `build aborted — materialized ${slug} ${why}; no PR opened`,
+        error: `spec ${slug} ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
+        log_tail: `build aborted — spec row ${slug} ${why}; no PR opened`,
       });
-      console.error(`${tag} materialized ${why} spec → failed (no silent empty merge)`);
+      console.error(`${tag} spec row ${why} → failed (no silent empty merge)`);
       chosenAccount.inFlight--;
       sh("git", ["worktree", "remove", "--force", wt]);
       return;

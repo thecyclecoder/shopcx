@@ -10,8 +10,10 @@ Phase 1 of [[../specs/spec-authoring-writes-db-and-worker-materialize]] dual-wro
 
 ## Exports
 
-- **`materializeSpec(workspaceId, slug, dir)`** → `Promise<string>` — joins `specs` + `spec_phases` (ordered by `position`) via [[specs-table]] `getSpec`, renders the brain-spec markdown shape, writes to `${dir}/spec-${slug}.md`, returns the absolute path. Creates `dir` if missing. Throws when no `specs` row exists for `(workspaceId, slug)` — the caller is responsible for upstream existence (the build dispatch gate refuses an unknown spec).
+- **`materializeSpec(workspaceId, slug, dir)`** → `Promise<{ path: string; row: SpecRow }>` — joins `specs` + `spec_phases` (ordered by `position`) via [[specs-table]] `getSpec`, renders the brain-spec markdown shape, writes to `${dir}/spec-${slug}.md`, and returns BOTH the absolute path AND the `SpecRow` it rendered from. The row is returned so the build gate validates on the DB ROW, not a regex over the rendered markdown ("the database is the spec"). Creates `dir` if missing. Throws when no `specs` row exists for `(workspaceId, slug)` — the caller is responsible for upstream existence (the build dispatch gate refuses an unknown spec).
 - **`renderSpecRow(row)`** → `string` — pure renderer over a `SpecRow`. Exported so tests + the brain page show the exact shape without disk I/O.
+- **`specHasBuildableContent(row)`** → `boolean` — the DB-row buildability check. `true` iff the row carries real content: ≥1 `spec_phases` row with a non-empty title OR body (multi-phase), OR a non-empty `summary` (one-shot). The build gate keys on THIS, not a `## Phase` markdown match — so a valid spec whose phase titles don't literally start with "Phase", and a one-shot spec with no `## Phase` heading at all, both build.
+- **`unbuildableReason(row)`** → `string` — human-readable reason a row is NOT buildable, or `""` when it is. Used for the gate's `failed` job message.
 
 ## Rendered shape
 
@@ -19,9 +21,11 @@ Phase 1 of [[../specs/spec-authoring-writes-db-and-worker-materialize]] dual-wro
 - `**Owner:** [[../functions/{owner}]] · **Parent:** {parent}` — metadata line (only the parts that exist).
 - `**Blocked-by:** [[slug-a]], [[slug-b]]` — when `blocked_by` is non-empty.
 - The `summary` paragraph as a single block.
-- `## {phase.title}` per phase (1..N, ordered by `position`), followed by `phase.body`. When `phase.verification` is set the renderer emits `### Verification` under the phase.
+- `## Phase {N} — {phase.title}` per phase (1..N, ordered by `position`), followed by `phase.body`. When `phase.verification` is set the renderer emits `### Verification` under the phase. The `Phase N — ` prefix is added unless the stored title already leads with "Phase" (don't double it).
 
 The H1 + per-phase headings carry NO status emoji — `spec-status-db-driven` made status DB-driven, and this file is the BUILD-FACING body (not the board surface).
+
+**The canonical `## Phase N — title` heading is for READABILITY + the markdown-mirror `parseSpec` reader, NOT for validation.** The build gate trusts the DB ROW (`specHasBuildableContent`), so the heading is no longer load-bearing — the existence of a `spec_phases` row (with a title/body) or a non-empty summary is what makes a spec buildable. The materialized markdown is a render Bo READS, never the gate. (Before: the gate ran `/^#{2,3}\s+Phase/m` over the materialized text, which wrongly refused valid specs whose phase titles didn't literally start with "Phase".)
 
 ### What is NOT rendered
 
@@ -32,13 +36,14 @@ The `## Safety / invariants` and `## Completion criteria` sections are NOT captu
 - **Build path:** `scripts/builder-worker.ts` `runBuildJob` calls `materializeSpec(job.workspace_id, slug, "${wt}/.box")` before dispatching the [[../skills/build-spec]] skill. The temp `.box/` directory is gitignored, so `git add -A` skips it.
 - **Fold path:** `scripts/builder-worker.ts` `runFoldJob` calls the same `materializeSpec` for each shipped spec (guarded by `status='shipped'`), then dispatches the [[../skills/fold-to-brain]] skill with the materialized path. After fold commits, the worker updates the DB row to `status='folded'` (preserved, not deleted).
 - The materialized file is regenerated on EVERY dispatch (fresh + resume) — the worktree is wiped at the top of every run, and the spec row may have been edited between rounds.
-- The db-health-spec-body-robust check (0-byte / phaseless refusal) runs over the MATERIALIZED file, so an empty row produces a clean `failed` job instead of a silent empty PR.
+- The db-health-spec-body-robust check (contentless-spec refusal) runs over the DB ROW via `specHasBuildableContent` — NOT a regex over the materialized markdown. A genuinely-empty row (no phases with title/body AND no summary) produces a clean `failed` job ("refusing to build an empty spec") instead of a silent empty PR; everything with real row content builds. `materializeSpec` returns the `row` to the gate so it never re-reads the file to validate.
 
 ## Gotchas
 
 - **No emoji on H1 / phase headings.** Status is DB-driven; emojis would mislead the agent into trusting a stale marker over the row.
 - **Throws when the row is missing.** Bo can't build a spec that doesn't exist as a DB row — the worker treats this as a build failure, not a fallback to disk.
 - **Single source of truth for content.** Bo MUST NOT read `docs/brain/specs/{slug}.md` directly; the row is canonical for the build path even though the .md remains for parser readers.
+- **Markdown is a render, not a gate.** The build's buildability check keys on the DB row (`specHasBuildableContent`), never a magic markdown heading/phrase. A spec exists because its rows exist — "phases are a db row, specs are a db row; the existence of the row means it exists, no magic phrases or markdown needed." Don't reintroduce a `/## Phase/`-style regex gate over the materialized text.
 
 ## Related
 
