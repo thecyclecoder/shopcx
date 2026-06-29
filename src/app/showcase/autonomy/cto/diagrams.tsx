@@ -87,7 +87,7 @@ function ArrowDefs() {
 /* ── Section 1 — DB (in-flight) → ship → fold → brain (permanent) ── */
 export function DiagramFold() {
   return (
-    <svg viewBox="0 0 720 230" role="img" aria-label="In-flight work in the database folds into the permanent brain when it ships">
+    <svg viewBox="0 0 720 230" role="img" aria-label="In-flight work in the database folds into the permanent brain when it ships" preserveAspectRatio="xMidYMid meet">
       <ArrowDefs />
       {/* DB cluster */}
       <text x={130} y={28} textAnchor="middle" className="sc-svg-text-accent sc-svg-mono" fontSize={11} letterSpacing="1.5">
@@ -126,7 +126,7 @@ export function DiagramFold() {
 /* ── Section 2 — phase commits → spec branch → PR + gates → merge → fold ── */
 export function DiagramPipeline() {
   return (
-    <svg viewBox="0 0 760 300" role="img" aria-label="Phases accumulate on a spec branch, then a PR runs spec-test and security before an atomic merge to main">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Phases accumulate on a spec branch, then a PR runs spec-test and security before an atomic merge to main" preserveAspectRatio="xMidYMid meet">
       <ArrowDefs />
       {/* commits */}
       <text x={90} y={26} textAnchor="middle" className="sc-svg-text-muted sc-svg-mono" fontSize={10}>
@@ -192,7 +192,7 @@ export function DiagramPipeline() {
 /* ── Section 3 — CEO → Director → Tool, escalate up / grade down ── */
 export function DiagramSupervision() {
   return (
-    <svg viewBox="0 0 620 300" role="img" aria-label="CEO supervises Director supervises Tool, with escalate-up and grade-down arrows">
+    <svg viewBox="0 0 620 300" role="img" aria-label="CEO supervises Director supervises Tool, with escalate-up and grade-down arrows" preserveAspectRatio="xMidYMid meet">
       <ArrowDefs />
       <Box x={210} y={20} w={200} h={52} title="CEO (human)" sub="owns company objectives" stroke="accent" />
       <Box x={210} y={124} w={200} h={52} title="Director (role agent)" sub="owns the objective · ~99% autonomous" stroke="accent" />
@@ -224,7 +224,7 @@ export function DiagramSupervision() {
 /* ── Section 4 — the agent fleet around the pipeline with checkpoints ── */
 export function DiagramFleet() {
   return (
-    <svg viewBox="0 0 760 320" role="img" aria-label="The autonomous CTO coordinates a fleet of agents around the build pipeline with approval and gate checkpoints">
+    <svg viewBox="0 0 760 360" role="img" aria-label="The autonomous CTO coordinates a fleet of agents around the build pipeline with approval and gate checkpoints" preserveAspectRatio="xMidYMid meet">
       <ArrowDefs />
       <Box x={280} y={16} w={200} h={48} title="Autonomous CTO" sub="Platform / DevOps Director" stroke="accent" />
 
@@ -254,12 +254,14 @@ export function DiagramFleet() {
       <line x1={316} y1={231} x2={258} y2={231} className="sc-svg-stroke" strokeWidth={1.4} markerEnd="url(#sc-arrow)" />
       <Box x={130} y={208} w={124} h={46} title="Deploy guardian" sub="auto-rollback" stroke="warn" />
 
-      {/* checkpoints */}
+      {/* checkpoints — wrapped onto multiple lines so nothing clips the viewBox */}
       <text x={40} y={290} className="sc-svg-text-accent sc-svg-mono" fontSize={10.5} letterSpacing="1">
         CHECKPOINTS
       </text>
-      <text x={40} y={308} className="sc-svg-text-muted" fontSize={11}>
-        review-before-build · spec-test + security before merge · migrations need explicit approval · bad deploy reverts itself · every approval &amp; grade audited
+      <text className="sc-svg-text-muted" fontSize={11}>
+        <tspan x={40} y={308}>review-before-build · spec-test + security before merge</tspan>
+        <tspan x={40} y={324}>migrations need explicit approval · bad deploy reverts itself</tspan>
+        <tspan x={40} y={340}>every approval &amp; grade audited</tspan>
       </text>
     </svg>
   );
@@ -269,7 +271,7 @@ export function DiagramFleet() {
       the 3 Max accounts feeding the lanes, and the self-update loop ── */
 export function DiagramEngine() {
   return (
-    <svg viewBox="0 0 760 360" role="img" aria-label="One server runs a foreman supervising a pool of worker lanes that claim jobs from a queue fed by specs, drawing on three Claude Max accounts, with a self-update loop">
+    <svg viewBox="0 0 776 360" role="img" aria-label="One server runs a foreman supervising a pool of worker lanes that claim jobs from a queue fed by specs, drawing on three Claude Max accounts, with a self-update loop" preserveAspectRatio="xMidYMid meet">
       <ArrowDefs />
 
       {/* specs → queue */}
