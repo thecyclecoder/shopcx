@@ -1,0 +1,1 @@
+- **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
