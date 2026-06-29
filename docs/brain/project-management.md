@@ -194,4 +194,4 @@ That triplet answers "what's done, what's next, what's blocked" without Dylan ha
 
 ## Related
 
-[[README]] · [[archive]] · [[dashboard/roadmap]] · [[lifecycles/roadmap-build-console]] · [[lifecycles/spec-goal-branch-pm-flow]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec)
+[[README]] · [[archive]] · [[dashboard/roadmap]] · [[lifecycles/roadmap-build-console]] · [[lifecycles/spec-goal-branch-pm-flow]] · [[customer-voice]] · [[operational-rules]] · [[lifecycles/ai-learning]] (example of a shipped + folded spec) · [[recipes/pipeline-validation-tests]] (no-op specs for pipeline validation)
