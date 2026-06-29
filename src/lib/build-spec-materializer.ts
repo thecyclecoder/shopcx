@@ -57,14 +57,20 @@ export function renderSpecRow(row: SpecRow): string {
     parts.push(row.summary.trim(), "");
   }
 
-  for (const phase of row.phases) {
-    parts.push(`## ${phase.title}`);
+  row.phases.forEach((phase, i) => {
+    const title = (phase.title || "").trim();
+    // Canonical phase heading. The build's db-health gate (builder-worker `db-health-spec-body-robust`)
+    // and `parseSpec` recognize a phase by a heading that BEGINS with "Phase" (`/^#{2,3}\s+Phase/`).
+    // `spec_phases.title` stores a BARE title (e.g. "Add unused marker constant A"), so emit
+    // "## Phase N — <title>" unless the stored title already leads with "Phase" (don't double the prefix).
+    const heading = /^phase\b/i.test(title) ? title : `Phase ${i + 1} — ${title}`;
+    parts.push(`## ${heading}`);
     if (phase.body && phase.body.trim()) parts.push(phase.body.trim());
     parts.push("");
     if (phase.verification && phase.verification.trim()) {
       parts.push("### Verification", phase.verification.trim(), "");
     }
-  }
+  });
 
   return parts.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
