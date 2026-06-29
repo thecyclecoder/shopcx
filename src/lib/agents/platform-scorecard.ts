@@ -150,6 +150,18 @@ interface MetricDef {
    * `loop:kpi_drift:lane_utilization:daily`).
    */
   currentState?: true;
+  /**
+   * Marks a metric whose ground truth depends on the LIVE brain-roadmap spec set (via
+   * `getRoadmap()` — `specs_per_week` uses it for the live spec→owner map; `regression_coverage_pct`
+   * uses it for the live shipped-spec denominator). [[kpi-review]] `auditAllKpis` / `auditKpi` skip
+   * these — the live set changes between snapshot write and audit re-read (specs fold/archive on
+   * their own cadence), so the re-run sees a different population than the snapshot did and surfaces
+   * the membership delta as "drift" that isn't engine drift. Same false-positive class as
+   * `currentState` (comparing a frozen snapshot against a moving target) — different axis (the
+   * population definition moved, not the underlying counter). Repair Agent verdict on signature
+   * `loop:kpi_drift:specs_per_week:weekly`.
+   */
+  liveSpecSetDependent?: true;
 }
 
 // ── Daily pulse metric derivations (all from existing truth) ─────────────────────
@@ -588,6 +600,7 @@ const needsAttention: MetricDef = {
 const specsPerWeek: MetricDef = {
   key: "specs_per_week",
   unit: "count",
+  liveSpecSetDependent: true,
   compute: async (ctx) => {
     const { admin, workspaceId, curr, prev } = ctx;
     // Live spec slug → owner function (live specs only — a folded spec leaves specs/; display proxy).
@@ -822,6 +835,7 @@ const regressionsCaught: MetricDef = {
 const regressionCoveragePct: MetricDef = {
   key: "regression_coverage_pct",
   unit: "pct",
+  liveSpecSetDependent: true,
   compute: async (ctx) => {
     const { admin, workspaceId, curr, prev } = ctx;
 
@@ -1302,18 +1316,20 @@ export async function computePlatformScorecard(
 }
 
 /**
- * The (metric_key, unit, currentState) tuples for every metric in the cadence's registry — the surface
- * [[kpi-review]] needs to enumerate the advertised KPI set (and skip current-state point-read metrics)
- * without re-importing the private `MetricDef` shape. `currentState` is omitted (not `false`) for the
- * common windowed-aggregate case so the tuple shape matches `MetricDef`.
+ * The (metric_key, unit, currentState, liveSpecSetDependent) tuples for every metric in the cadence's
+ * registry — the surface [[kpi-review]] needs to enumerate the advertised KPI set (and skip
+ * current-state point-read metrics + live-spec-set-dependent metrics) without re-importing the
+ * private `MetricDef` shape. The optional flags are omitted (not `false`) for the common
+ * windowed-aggregate case so the tuple shape matches `MetricDef`.
  */
 export function getRegisteredMetrics(
   cadence: Cadence,
-): ReadonlyArray<{ key: string; unit: MetricUnit; currentState?: true }> {
+): ReadonlyArray<{ key: string; unit: MetricUnit; currentState?: true; liveSpecSetDependent?: true }> {
   return REGISTRY[cadence].map((m) => ({
     key: m.key,
     unit: m.unit,
     ...(m.currentState ? { currentState: true as const } : {}),
+    ...(m.liveSpecSetDependent ? { liveSpecSetDependent: true as const } : {}),
   }));
 }
 

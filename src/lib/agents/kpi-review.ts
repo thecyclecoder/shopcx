@@ -185,8 +185,8 @@ function displayFor(cadence: Cadence, metricKey: string): { label: string; polar
  * Audit one `(metric_key, cadence)` — loads the latest persisted snapshot row (or the row at
  * `snapshotDate` when given), re-runs the SAME `MetricDef.compute` from [[platform-scorecard]]
  * against the raw tables, and reports drift. Returns null when nothing has been persisted yet
- * (nothing to compare to), or when the metric is a current-state point read (see guard below).
- * NO writes.
+ * (nothing to compare to), or when the metric is a current-state point read or live-spec-set
+ * dependent (see guards below). NO writes.
  *
  * **Current-state guard:** metrics flagged `MetricDef.currentState` (e.g. `lane_utilization`) are
  * point reads of a CURRENTLY-OCCUPIED pool/counter — the snapshotted value freezes the moment-in-time
@@ -195,6 +195,15 @@ function displayFor(cadence: Cadence, metricKey: string): { label: string; polar
  * daily window guard (`readPersistedSnapshot` above): same false-positive class — comparing a frozen
  * snapshot against a moving target — applied to a different axis (point-read vs in-flight window).
  * Repair Agent verdict on signature `loop:kpi_drift:lane_utilization:daily`.
+ *
+ * **Live-spec-set guard:** metrics flagged `MetricDef.liveSpecSetDependent` (today: `specs_per_week`,
+ * `regression_coverage_pct`) derive ground truth from the LIVE brain-roadmap spec set
+ * (`getRoadmap()`). The live set churns between snapshot write and audit re-read — specs fold or
+ * archive on their own cadence — so the re-run sees a different population than the snapshot did and
+ * the membership delta surfaces as "drift" that isn't engine drift. Same false-positive class as
+ * `currentState` (frozen snapshot vs moving target) — different axis (the population definition
+ * moved, not the underlying counter). Repair Agent verdict on signature
+ * `loop:kpi_drift:specs_per_week:weekly`.
  */
 export async function auditKpi(
   workspaceId: string,
@@ -204,6 +213,7 @@ export async function auditKpi(
 ): Promise<KpiAuditReport | null> {
   const registryEntry = getRegisteredMetrics(cadence).find((m) => m.key === metric);
   if (registryEntry?.currentState) return null;
+  if (registryEntry?.liveSpecSetDependent) return null;
 
   const admin = createAdminClient();
   const snapshot = await readPersistedSnapshot(admin, workspaceId, metric, cadence, snapshotDate);
@@ -277,6 +287,12 @@ export async function auditAllKpis(
     // between the snapshot write and the ground-truth re-read, so the diff is moving-target noise,
     // not drift. Same false-positive class as the in-flight daily window guard (different axis).
     if (m.currentState) continue;
+    // Live-spec-set guard — skip metrics whose ground truth depends on the live brain-roadmap spec
+    // set (specs_per_week, regression_coverage_pct). The live set churns between snapshot write and
+    // audit re-read (specs fold/archive), so the re-run sees a different population than the
+    // snapshot did and the membership delta surfaces as "drift" that isn't engine drift. See
+    // `auditKpi` above for the full rationale.
+    if (m.liveSpecSetDependent) continue;
     const snap = latestByMetric.get(m.key);
     if (!snap) continue; // no data yet — nothing to compare to
     const gt = (groundTruthByDate.get(snap.snapshot_date) ?? []).find((r) => r.metric_key === m.key);

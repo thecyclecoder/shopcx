@@ -38,7 +38,15 @@ When a `unit: 'count'` metric snapshots to 0, the percentage tolerance is undefi
 
 ## Current-state point-read skip
 
-`auditKpi` / `auditAllKpis` SKIP every metric flagged `MetricDef.currentState` (today: [[platform-scorecard]] `lane_utilization`). A point read of a CURRENTLY-OCCUPIED pool/counter is "right now": the snapshotted value freezes the moment-in-time read, and a ground-truth re-run reads the pool AGAIN at the moment-of-audit — any movement in the seconds between the two reads surfaces as "drift" that isn't drift. Repair Agent verdict on signature `loop:kpi_drift:lane_utilization:daily`. Same false-positive class as the in-flight daily window guard below — comparing a frozen snapshot against a moving target — applied to a different axis (point-read vs in-flight window). The [[../inngest/platform-director-cron]] `audit-platform-scorecard` step also runs a sister sweep that auto-resolves any open `kpi_drift:<currentState>:<cadence>` `loop_alerts` row, so an alert opened BEFORE a metric was flagged clears on the next standing beat (the within-tolerance auto-resolve branch can't fire for a metric that no longer appears in `reports`).
+`auditKpi` / `auditAllKpis` SKIP every metric flagged `MetricDef.currentState` (today: [[platform-scorecard]] `lane_utilization`). A point read of a CURRENTLY-OCCUPIED pool/counter is "right now": the snapshotted value freezes the moment-in-time read, and a ground-truth re-run reads the pool AGAIN at the moment-of-audit — any movement in the seconds between the two reads surfaces as "drift" that isn't drift. Repair Agent verdict on signature `loop:kpi_drift:lane_utilization:daily`. Same false-positive class as the in-flight daily window guard below — comparing a frozen snapshot against a moving target — applied to a different axis (point-read vs in-flight window).
+
+## Live-spec-set-dependent skip
+
+`auditKpi` / `auditAllKpis` also SKIP every metric flagged `MetricDef.liveSpecSetDependent` (today: [[platform-scorecard]] `specs_per_week`, `regression_coverage_pct`). These metrics derive ground truth from the LIVE brain-roadmap spec set (`getRoadmap()` — `specs_per_week` uses it for the live spec→owner map; `regression_coverage_pct` uses it for the live shipped-spec denominator). The live set churns between snapshot write and audit re-read — a spec that was live when the engine wrote the snapshot can fold/archive on its own cadence before the audit re-runs, so the re-run sees a different population than the snapshot did and the membership delta surfaces as "drift" that isn't engine drift. Same false-positive class as the current-state skip (frozen snapshot vs moving target) — different axis (the population definition moved, not the underlying counter). Repair Agent verdict on signature `loop:kpi_drift:specs_per_week:weekly`.
+
+## Skipped-metric stale-alert sweep
+
+The [[../inngest/platform-director-cron]] `audit-platform-scorecard` step runs a sister sweep that auto-resolves any open `kpi_drift:<skipped-metric>:<cadence>` `loop_alerts` row for BOTH skip classes (`currentState` and `liveSpecSetDependent`) — an alert opened BEFORE a metric was flagged clears on the next standing beat (the within-tolerance auto-resolve branch can't fire for a metric that no longer appears in `reports`).
 
 ## In-flight daily window
 
