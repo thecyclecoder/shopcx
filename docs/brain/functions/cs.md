@@ -2,6 +2,8 @@
 
 The permanent owner of **customer support quality and ticket-derived product work** — the AI ticket handling, the quality analyzer + grader, escalation triage, and the **code specs that originate from real tickets**. Introduced by [[../specs/box-ticket-improve]] so the **CX manager** (the new `cs_manager` workspace role, [[../tables/workspace_members]]) has a first-class seat: she drives the ticket Improve agent, approves customer fixes, and owns the ticket-sourced specs surfaced on [[../dashboard/roadmap]].
 
+> **Operate + author, never build (CEO directive 2026-06-29).** The CS director OPERATES its own software (its `function_autonomy` is *operational* autonomy) and AUTHORS specs for the tools it needs — it is the requester/operator. It NEVER drives a build: **Ada / Platform / DevOps is the sole builder for every spec, all departments, permanently** ([[platform]]). A CS-owned spec's `owner` is attribution + where the finished tool's operation lives; the build is always Ada's. CS going live+autonomous does not move build-driving onto it.
+
 ## Scope + owned metrics
 
 - **Owns:** the ticket Improve agent ([[../specs/box-ticket-improve]]), escalation triage ([[../specs/box-escalation-triage]]), the AI quality analyzer + grader rules ([[../lifecycles/ai-analysis]]), the conversation-rule library proposers ([[../tables/sonnet_prompts]] + `grader_prompts`), and **ticket-derived code specs** (`owner = cs`, `Derived-from-ticket:` ref).

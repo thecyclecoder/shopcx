@@ -2,6 +2,8 @@
 
 The permanent owner of **paid acquisition + landing-page conversion**. One of the org-chart functions ([[../goals/ceo-mode]]); this doc is both the **Growth director-agent's CEO-mode charter** and the **home that owns every Growth mandate + spec** on the roadmap. A function is never "done" — it carries perpetual mandates and contributes to finite goals.
 
+> **Operate + author, never build (CEO directive 2026-06-29).** The Growth director OPERATES its own software (its `function_autonomy` is *operational* autonomy) and AUTHORS specs for the tools it needs — it is the requester/operator. It NEVER drives a build: **Ada / Platform / DevOps is the sole builder for every spec, all departments, permanently** ([[platform]]). A Growth-owned spec's `owner` is attribution + where the finished tool's operation lives; the build is always Ada's. Growth going live+autonomous does not move build-driving onto it.
+
 ## Scope + owned metrics
 
 - **Owns:** paid ads (Meta + Google), landing-page CRO, the creative pipeline, funnel conversion.
