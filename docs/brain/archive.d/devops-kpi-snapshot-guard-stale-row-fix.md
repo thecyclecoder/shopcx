@@ -1,0 +1,1 @@
+- **Re-snapshot stranded pre-lag-fix daily KPI rows (autonomy_ratio drift cleanup)** · verified 2026-06-29 · → [[../libraries/platform-scorecard]]
