@@ -27,9 +27,14 @@ A single default tolerance (`0.5%`) with per-metric overrides keyed by `metric_k
 
 - `error_mttr_hours` · `idea_to_merge_hours` · `time_to_approve_hours` — medians of distributions
 - `worker_grade_rollup` · `director_call_grade` — per-worker / per-dimension grade aggregates picking up writes between snapshots
-- `lane_utilization` — a current-state point read that churns in the seconds between writes
+
+(Current-state point-read metrics — e.g. `lane_utilization` — are SKIPPED entirely below, so they don't need a tolerance entry.)
 
 A metric is `withinTolerance` when `driftPct ≤` its tolerance, or — when `driftPct` is null (`snapshotValue === 0`) — when the absolute `drift` itself is 0.
+
+## Current-state point-read skip
+
+`auditKpi` / `auditAllKpis` SKIP every metric flagged `MetricDef.currentState` (today: [[platform-scorecard]] `lane_utilization`). A point read of a CURRENTLY-OCCUPIED pool/counter is "right now": the snapshotted value freezes the moment-in-time read, and a ground-truth re-run reads the pool AGAIN at the moment-of-audit — any movement in the seconds between the two reads surfaces as "drift" that isn't drift. Repair Agent verdict on signature `loop:kpi_drift:lane_utilization:daily`. Same false-positive class as the in-flight daily window guard below — comparing a frozen snapshot against a moving target — applied to a different axis (point-read vs in-flight window). The [[../inngest/platform-director-cron]] `audit-platform-scorecard` step also runs a sister sweep that auto-resolves any open `kpi_drift:<currentState>:<cadence>` `loop_alerts` row, so an alert opened BEFORE a metric was flagged clears on the next standing beat (the within-tolerance auto-resolve branch can't fire for a metric that no longer appears in `reports`).
 
 ## In-flight daily window
 
