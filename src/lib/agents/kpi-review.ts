@@ -55,7 +55,11 @@ export interface KpiAuditReport {
   drift: number;
   /** `|drift / snapshotValue|`; null when `snapshotValue` is 0 (division by zero — drift is reported but the percentage is undefined). */
   driftPct: number | null;
-  /** true when `driftPct ≤` the metric's tolerance (or — when `driftPct` is null — when `drift` itself is 0). */
+  /**
+   * true when `driftPct ≤` the metric's tolerance. When `driftPct` is null (`snapshotValue === 0`):
+   * count-unit metrics tolerate `|drift| ≤ COUNT_ZERO_SNAPSHOT_ABS_FLOOR` (the boundary-race floor —
+   * see the constant for why); every other unit requires `drift === 0` strictly.
+   */
   withinTolerance: boolean;
   /** the persisted `detail` blob (the engine's per-metric breakdown). */
   snapshotDetail: Record<string, unknown>;
@@ -88,6 +92,18 @@ const TOLERANCE_OVERRIDES: Record<string, number> = {
   // Lane utilization is a CURRENT-STATE point read — the pool churns in the seconds between writes.
   lane_utilization: 0.05,
 };
+
+/**
+ * Count-metric zero-snapshot boundary-race floor. When a count-unit metric's snapshot value is 0
+ * the percentage tolerance is undefined (divide-by-zero) and strict `drift === 0` alarms on a
+ * single row that moved across the window boundary between snapshot write and audit re-read —
+ * e.g. `error_backlog:daily` where `error_events.last_seen_at` updates to "now" each time the
+ * same error re-occurs, so a row whose last_seen_at lived in yesterday's window at snapshot time
+ * can have last_seen_at = today by the next audit pass (or vice versa), surfacing as drift of ±1
+ * that isn't engine drift. Tolerate small absolute drifts (≤ `COUNT_ZERO_SNAPSHOT_ABS_FLOOR`) in
+ * this case — Repair Agent verdict on signature `kpi_drift:error_backlog:daily`.
+ */
+const COUNT_ZERO_SNAPSHOT_ABS_FLOOR = 2;
 
 function toleranceFor(metricKey: string): number {
   return TOLERANCE_OVERRIDES[metricKey] ?? DEFAULT_TOLERANCE;
@@ -135,7 +151,12 @@ function buildReport(
   const drift = groundTruthValue - snapshotValue;
   const driftPct = snapshotValue !== 0 ? Math.abs(drift / snapshotValue) : null;
   const tolerance = toleranceFor(snapshot.metric_key);
-  const withinTolerance = driftPct == null ? drift === 0 : driftPct <= tolerance;
+  const withinTolerance =
+    driftPct == null
+      ? snapshot.unit === "count"
+        ? Math.abs(drift) <= COUNT_ZERO_SNAPSHOT_ABS_FLOOR
+        : drift === 0
+      : driftPct <= tolerance;
   return {
     metric: snapshot.metric_key,
     cadence: snapshot.cadence,
