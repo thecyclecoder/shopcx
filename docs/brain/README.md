@@ -380,6 +380,7 @@ Long-form narrative pages tracing key flows end-to-end. Each wikilinks 5+ refere
 - [[lifecycles/product-intelligence]] — Product → ingredients → research → review analysis → benefit selections → page content → publish. The Product Intelligence Engine.
 - [[lifecycles/roadmap-build-console]] — Describe a feature → spec → autonomous box build (Max) → answer/approve → merge → fold. The self-driving roadmap.
 - [[lifecycles/spec-goal-branch-pm-flow]] — Authored spec → phases accumulate on `claude/build-{slug}` → branch-preview spec-test → `in_testing` → one-off spec → main (Gate A) OR spec → `goal/{goal}` (Gate B) → atomic goal → main (Gate C). Branch-accumulation + atomic promotion + Reva's escalate-not-revert.
+- [[lifecycles/showcase]] — Password-gated `/showcase/*` investor/friend narrative section (gate in `src/proxy.ts`, signed cookie). Flagship: the Autonomous CTO DevOps explainer. Read-only static prose, no live data. Needs `SHOWCASE_PASSWORD` in Vercel (dev fallback `superfoods`).
 
 ## Journeys (`journeys/`)
 
