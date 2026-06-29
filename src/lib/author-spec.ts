@@ -21,7 +21,7 @@
  * returns false) per the historical defensive posture.
  */
 import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
-import { upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus } from "@/lib/specs-table";
+import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
 function isPhaseHeading(l: string): boolean {
@@ -313,6 +313,88 @@ export interface StructuredSpecInput {
   phases: StructuredPhaseInput[];
 }
 
+/** The content shape a re-author compares against the existing row to decide "did the content change?" —
+ *  title + summary + the per-position (title, body, verification) tuples. Owner/parent/blockers are
+ *  metadata, not the spec's reviewable CONTENT; a change there alone doesn't warrant a Vale re-review. */
+interface ReauthorContent {
+  title: string;
+  summary: string | null;
+  phases: { title: string; body: string; verification: string | null }[];
+}
+
+/** Normalize a string for content comparison — trim + collapse inner whitespace so a cosmetic reflow
+ *  (re-wrapped line, trailing space) is NOT counted as a content change. */
+function normForCompare(s: string | null | undefined): string {
+  return (s ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** Did the re-authored content materially DIFFER from the stored row? Compares title, summary, and each
+ *  phase's (title, body, verification) after whitespace-normalization. A different phase COUNT is a change.
+ *  Conservative: when in doubt (a field genuinely differs) it returns true so the spec re-opens. */
+function contentChanged(existing: SpecRow, next: ReauthorContent): boolean {
+  if (normForCompare(existing.title) !== normForCompare(next.title)) return true;
+  if (normForCompare(existing.summary) !== normForCompare(next.summary)) return true;
+  const ex = [...existing.phases].sort((a, b) => a.position - b.position);
+  if (ex.length !== next.phases.length) return true;
+  for (let i = 0; i < next.phases.length; i++) {
+    if (normForCompare(ex[i].title) !== normForCompare(next.phases[i].title)) return true;
+    if (normForCompare(ex[i].body) !== normForCompare(next.phases[i].body)) return true;
+    if (normForCompare(ex[i].verification) !== normForCompare(next.phases[i].verification)) return true;
+  }
+  return false;
+}
+
+/**
+ * re-author-re-opens-dismissed invariant — the single root patch. When an EXISTING spec is re-authored AND
+ * its content CHANGED, RE-OPEN it so the corrected content is re-evaluated rather than carried under the
+ * stale verdict:
+ *   1. reset the review signals + flip to `in_review` (`markSpecCardBackToReview` clears `vale_pass`,
+ *      `vale_review_passed_at`, `ada_disposition`, `intended_status` and sets `specs.status='in_review'`),
+ *      so Vale re-reviews the NEW content and Ada re-disposes from scratch; AND
+ *   2. clear the standing init/groom DISMISSAL ledger (`clearDirectorSpecDismissals`) so the init/groom
+ *      lanes' dedup (`alreadyInitiated`/`alreadyGroomed`) no longer skips the corrected spec.
+ *
+ * This is the gap behind `migration-pricing-preserved-base-above-msrp`: a spec dismissed for a WRONG premise,
+ * then corrected, sat dead under the old rejection (status derived planned, stale Vale stamp, dismissal still
+ * in effect). Same class as the orphan-park fixes — a corrected-after-rejection spec must never silently stay
+ * dead.
+ *
+ * Called AFTER the upsert with the pre-upsert `existing` row + the new content. A no-op when: the spec is
+ * brand-new (no existing row — nothing to re-open, the upsert's default in_review already holds it), the
+ * content is identical (an idempotent re-author / a metadata-only touch — don't churn Vale), or the spec is
+ * already `in_review` AND carries no dismissal (already open). Best-effort + never throws — a re-open hiccup
+ * must never fail the authoring write that already landed.
+ */
+async function reopenIfReauthoredAndChanged(
+  workspaceId: string,
+  slug: string,
+  existing: SpecRow | null,
+  next: ReauthorContent,
+): Promise<void> {
+  try {
+    if (!existing) return; // brand-new spec — the upsert default (`in_review`) already holds it for Vale.
+    if (existing.status === "folded") return; // a folded spec is archived; re-author shouldn't resurrect it here.
+    if (!contentChanged(existing, next)) return; // identical / metadata-only re-author — leave the verdict.
+
+    const reason =
+      `re-authored with changed content → re-opening: reset review signals (vale_pass / vale_review_passed_at / ` +
+      `ada_disposition) + status=in_review so Vale re-reviews the NEW content, and cleared any standing ` +
+      `init/groom dismissal so the corrected spec re-enters the build pipeline.`;
+
+    // 1) Reset the review signals + flip to in_review (the SHARED send-back writer — it already clears
+    //    vale_pass / vale_review_passed_at / ada_disposition / intended_status and sets status='in_review').
+    const { markSpecCardBackToReview } = await import("@/lib/spec-card-state");
+    await markSpecCardBackToReview(workspaceId, slug, { actor: "author-spec:reauthor-reopen", reason });
+
+    // 2) Clear the standing init/groom dismissal ledger so the dedup no longer skips the corrected spec.
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const { clearDirectorSpecDismissals } = await import("@/lib/director-activity");
+    await clearDirectorSpecDismissals(createAdminClient(), workspaceId, slug, reason);
+  } catch (e) {
+    console.warn(`[author-spec] reopenIfReauthoredAndChanged ${slug} (best-effort) failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 /**
  * Author / re-author a spec to the DB from already-typed fields + phases — NO markdown parse. The DB-driven
  * entry point for surfaces (the goal planner) that hold the proposed spec as structured data and must never
@@ -339,6 +421,15 @@ export async function authorSpecRowStructured(
   assertEveryPhaseHasVerification(slug, phaseBodies);
 
   try {
+    // re-author-re-opens-dismissed: snapshot the PRE-upsert row so we can tell a content-changing re-author
+    // from a brand-new spec or a no-op re-author (the re-open decision compares old vs new content). Read is
+    // best-effort — a read blip just skips the re-open (the spec still authors).
+    let existing: SpecRow | null = null;
+    try {
+      existing = await getSpec(workspaceId, slug);
+    } catch {
+      existing = null;
+    }
     const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
       position: i + 1,
       title: p.title,
@@ -372,6 +463,14 @@ export async function authorSpecRowStructured(
       },
       phases,
     );
+    // re-author-re-opens-dismissed: if this was a content-changing re-author of an existing spec, re-open it
+    // (reset review signals + status=in_review, clear the standing init/groom dismissal) so the corrected
+    // content is re-evaluated, never carried under a stale verdict. No-op for a brand-new / no-op re-author.
+    await reopenIfReauthoredAndChanged(workspaceId, slug, existing, {
+      title: spec.title,
+      summary: spec.summary,
+      phases: phaseBodies,
+    });
     return true;
   } catch (e) {
     console.warn(
@@ -408,6 +507,14 @@ export async function authorSpecRowFromMarkdown(
   try {
     const card = parseSpec(slug, markdown);
     const regressionHeaders = extractRegressionHeaders(markdown);
+
+    // re-author-re-opens-dismissed: snapshot the PRE-upsert row (best-effort) for the content-changed compare.
+    let existing: SpecRow | null = null;
+    try {
+      existing = await getSpec(workspaceId, slug);
+    } catch {
+      existing = null;
+    }
 
     const phases: SpecPhaseInput[] = card.phases.map((p, i) => ({
       position: i + 1,
@@ -448,6 +555,18 @@ export async function authorSpecRowFromMarkdown(
       },
       phases,
     );
+    // re-author-re-opens-dismissed: content-changing re-author of an existing spec → re-open (reset review
+    // signals + status=in_review, clear standing init/groom dismissal). `phaseBodies` is the same
+    // {title,body,verification} shape the structured path compares; map the parsed phase titles in.
+    await reopenIfReauthoredAndChanged(workspaceId, slug, existing, {
+      title: card.title,
+      summary: card.summary || null,
+      phases: card.phases.map((p, i) => ({
+        title: p.title,
+        body: phaseBodies[i]?.body ?? "",
+        verification: phaseBodies[i]?.verification ?? null,
+      })),
+    });
     return true;
   } catch (e) {
     console.warn(
