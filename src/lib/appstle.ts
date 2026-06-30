@@ -395,6 +395,61 @@ export async function appstleAttemptBilling(
   }
 }
 
+/**
+ * Flavor-aware "order now" (a.k.a. bill_now) for a sub identified by contract id.
+ *
+ * Internal (Braintree) subs: fire the SAME renewal pipeline a scheduled charge
+ * uses (`internal-subscription/renewal-attempt`) — charge → order → Avalara →
+ * Amplifier → advance next_billing_date. Async via Inngest, so this returns
+ * immediately and the order lands shortly. Mirrors the portal order-now handler
+ * ([[portal/handlers/order-now]]).
+ *
+ * Appstle subs: attempt the upcoming Appstle billing (get-upcoming → attempt).
+ *
+ * WHY this exists: `appstleAttemptBilling` short-circuits a synthetic `internal-*`
+ * billing-attempt id to a NO-OP success (the dunning path drives the real internal
+ * renewal via its own cron). On-demand order-now has no such cron follow-up, so a
+ * caller that hits appstleGetUpcomingOrders + appstleAttemptBilling directly on an
+ * internal sub silently drops the charge — the bug that left an internal sub
+ * "order now" reporting success while never charging. EVERY immediate order-now
+ * entry point (ticket-UI bill-now route, AI action-executor bill_now /
+ * change_next_date ASAP fallback) MUST funnel through here.
+ */
+export async function orderNowByContract(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; error?: string; summary?: string; internal?: boolean }> {
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, is_internal, status")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub) return { success: false, error: "subscription_not_found" };
+
+  // Internal sub: fire the real Braintree renewal pipeline.
+  if (sub.is_internal) {
+    if (sub.status !== "active") {
+      return { success: false, error: `not_active (${sub.status})` };
+    }
+    const { inngest } = await import("@/lib/inngest/client");
+    await inngest.send({
+      name: "internal-subscription/renewal-attempt",
+      data: { subscription_id: sub.id, workspace_id: workspaceId },
+    });
+    return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };
+  }
+
+  // Appstle sub: attempt the upcoming Appstle billing.
+  const upcoming = await appstleGetUpcomingOrders(workspaceId, contractId);
+  if (!upcoming.success || !upcoming.orders?.length) {
+    return { success: false, error: `No upcoming order to bill: ${upcoming.error || "(empty)"}` };
+  }
+  const billed = await appstleAttemptBilling(workspaceId, upcoming.orders[0].id);
+  return { ...billed, summary: "Triggered bill_now" };
+}
+
 export async function appstleSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,

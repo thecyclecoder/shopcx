@@ -50,6 +50,8 @@ const directActionHandlers: Record<
 
 ## Gotchas
 
+- **`bill_now` (and `change_next_date`'s ASAP/today fallback) route by sub source via `orderNowByContract` ([[appstle]]).** Internal (Braintree) subs fire `internal-subscription/renewal-attempt` ([[../inngest/internal-subscription-renewals]]); Appstle subs hit attempt-billing. Do NOT call `appstleAttemptBilling` directly for an immediate order-now — it's a NO-OP success on internal subs (synthesizes a double-prefixed `internal-internal-…` id and short-circuits), so the AI would falsely confirm a shipment that never charged. (Escalated ticket `dd67f3c7`, customer Angel — a two-bag rush order that reported success but never billed.)
+
 - **`executeSonnetDecision` returns `{ messageSent, escalated, closed, statusManaged }`.** The `workflow` case returns `statusManaged: true` (via `handleWorkflow`, which returns `true` only when a workflow actually ran) because the workflow executor sets the authoritative final status itself in `sendReply` ([[workflow-executor]]: `account_login` → closed, `return_to_sender` → open). The post-execute block in [[../inngest/unified-ticket-handler]] (`postExecuteStatusAction`) must leave a status-managed ticket untouched — do NOT copy the journey case's `messageSent = true`, which routes through `setStatus` and always forces `closed`, wrongly closing an intentionally-open workflow. (Ticket `a89dcf76` Mindy Freeman: `account_login` magic-link close was being reopened as "no customer message sent".) See [[../lifecycles/ticket-lifecycle]] Phase 5.
 
 ---
