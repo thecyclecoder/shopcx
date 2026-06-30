@@ -26,12 +26,16 @@ import {
   archetypeForVariant,
   detectWinners,
   groupAttributionRows,
+  landerTypeForAmplifiedWinner,
+  pairAmplifiedWinnerWithLander,
+  patchFromWinnerAngle,
   planAmplificationVariants,
   scoreCell,
   type AmplifyWinnerDeps,
   type DetectedWinner,
   type WinnerAttributionRow,
 } from "./winning-creative-detect";
+import { PAIRED_WINNER_LANDER_ACTION_KIND } from "@/lib/storefront/optimizer-agent";
 
 // ── Fake admin client — supports the chained `.select/.eq/.in/.gte/.lte` SELECT shape that the
 // detector uses. Reads are answered out of a small per-table store. No writes. ──────────────────
@@ -554,5 +558,246 @@ test("topK trims to the requested cap, keeping the highest-ROAS rows", async () 
     winners.map((w) => w.metaAdId),
     ["AD-A", "AD-B"],
   );
+});
+
+// ── Phase 3 — Matched-lander experiment (forward direction) ──────────────────────
+
+test("landerTypeForAmplifiedWinner maps advertorial-family variants → lander_type and skips PDP", () => {
+  assert.equal(landerTypeForAmplifiedWinner("advertorial"), "advertorial");
+  assert.equal(landerTypeForAmplifiedWinner("beforeafter"), "beforeafter");
+  assert.equal(landerTypeForAmplifiedWinner("before-after"), "beforeafter");
+  assert.equal(landerTypeForAmplifiedWinner("before_after"), "beforeafter");
+  assert.equal(landerTypeForAmplifiedWinner("listicle"), "listicle");
+  assert.equal(landerTypeForAmplifiedWinner("reasons"), "listicle");
+  // Non-advertorial-family variants skip the matched-lander pair.
+  assert.equal(landerTypeForAmplifiedWinner("pdp"), null);
+  assert.equal(landerTypeForAmplifiedWinner("testimonial"), null);
+  assert.equal(landerTypeForAmplifiedWinner(""), null);
+});
+
+test("patchFromWinnerAngle packs the winner's hook/mechanism into a reversible VariantPatch", () => {
+  const patch = patchFromWinnerAngle({
+    id: "ANG-A",
+    hook_slug: "problem_now",
+    lf8_slot: 1,
+    lead_benefit_anchor: "sleep deeper",
+    hook_one_liner: "still tired at 3pm?",
+    meta_headline: "Sleep deeper in 2 weeks",
+    meta_primary_text: "The breakdown 12,000 women trust",
+    meta_description: null,
+  });
+  assert.equal(patch.headline, "Sleep deeper in 2 weeks");
+  assert.equal(patch.dek, "The breakdown 12,000 women trust");
+  assert.equal(patch.chapterHeading, "still tired at 3pm?");
+});
+
+test("patchFromWinnerAngle falls back to hook_one_liner when meta_headline is missing", () => {
+  const patch = patchFromWinnerAngle({
+    id: "ANG-B",
+    hook_slug: "results_first",
+    lf8_slot: 2,
+    lead_benefit_anchor: "less bloating",
+    hook_one_liner: "flatter in a week",
+    meta_headline: null,
+    meta_primary_text: null,
+    meta_description: null,
+  });
+  assert.equal(patch.headline, "flatter in a week");
+  assert.equal(patch.dek, undefined);
+  // headline and chapterHeading are the same string → chapterHeading is omitted to avoid a no-op patch.
+  assert.equal(patch.chapterHeading, undefined);
+});
+
+test("patchFromWinnerAngle returns {} for a null angle", () => {
+  assert.deepEqual(patchFromWinnerAngle(null), {});
+});
+
+function makePairFixtureWinner(over: Partial<DetectedWinner> = {}): DetectedWinner {
+  return {
+    workspaceId: "ws-1",
+    metaAdId: "AD-WIN-A",
+    variant: "advertorial",
+    spendCents: 20_000,
+    onsiteCents: 100_000,
+    haloAdjustedRevenueCents: 100_000,
+    roas: 5,
+    sessions: 800,
+    windowStart: "2026-06-16",
+    windowEnd: "2026-06-30",
+    campaign: {
+      id: "C-A",
+      name: "winning advertorial",
+      product_id: "P-1",
+      variant_id: "V-1",
+      avatar_id: "AV-1",
+      angle_id: "ANG-A",
+      script_text: null,
+      hero_image_url: null,
+      landing_url: "https://shop.example.com/x",
+      composition: null,
+      length_sec: 15,
+      scene_style: "outdoor_selfie",
+      caption_style: "hormozi_yellow",
+    },
+    angle: {
+      id: "ANG-A",
+      hook_slug: "problem_now",
+      lf8_slot: 1,
+      lead_benefit_anchor: "sleep deeper",
+      hook_one_liner: "still tired at 3pm?",
+      meta_headline: "Sleep deeper in 2 weeks",
+      meta_primary_text: "The breakdown 12,000 women trust",
+      meta_description: null,
+    },
+    ...over,
+  };
+}
+
+test("pairAmplifiedWinnerWithLander opens a status='draft' storefront experiment + stamps paired_winner_lander", async () => {
+  const materializeCalls: Array<Record<string, unknown>> = [];
+  const recordedActivity: Array<Record<string, unknown>> = [];
+  const deps: AmplifyWinnerDeps = {
+    sendInngest: async () => undefined,
+    recordActivity: async (_admin, row) => { recordedActivity.push(row as unknown as Record<string, unknown>); return undefined; },
+    materializeOptimizerCampaign: async (o) => {
+      materializeCalls.push(o as unknown as Record<string, unknown>);
+      return { ok: true, experiment_id: "exp-paired-1", lever_key: "winner_lander_match", detail: "stood up (draft)" };
+    },
+  };
+
+  const res = await pairAmplifiedWinnerWithLander({} as never, {
+    workspaceId: "ws-1",
+    winner: makePairFixtureWinner(),
+    newAdCampaignIds: ["camp-1", "camp-2"],
+    specSlug: "growth-winning-creative-amplifier",
+    deps,
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.experiment_id, "exp-paired-1");
+  assert.equal(res.lander_type, "advertorial");
+  // The materialize call must request status='draft' (owner-approved before serving).
+  assert.equal(materializeCalls.length, 1);
+  assert.equal(materializeCalls[0].initialStatus, "draft");
+  assert.equal(materializeCalls[0].productId, "P-1");
+  const proposal = materializeCalls[0].proposal as Record<string, unknown>;
+  assert.equal(proposal.lander_type, "advertorial");
+  assert.equal(proposal.lever_class, "reversible");
+  const variant = proposal.variant as Record<string, unknown>;
+  const patch = variant.patch as Record<string, string>;
+  assert.equal(patch.headline, "Sleep deeper in 2 weeks");
+  assert.equal(patch.dek, "The breakdown 12,000 women trust");
+  // ONE paired_winner_lander director_activity row stamped.
+  assert.equal(recordedActivity.length, 1);
+  const row = recordedActivity[0] as { actionKind: string; metadata: Record<string, unknown> };
+  assert.equal(row.actionKind, PAIRED_WINNER_LANDER_ACTION_KIND);
+  assert.equal(row.metadata.direction, "ad_to_lander");
+  assert.equal(row.metadata.source_meta_ad_id, "AD-WIN-A");
+  assert.equal(row.metadata.lander_type, "advertorial");
+  assert.equal(row.metadata.experiment_id, "exp-paired-1");
+  assert.deepEqual(row.metadata.new_ad_campaign_ids, ["camp-1", "camp-2"]);
+});
+
+test("pairAmplifiedWinnerWithLander maps before-after winner to lander_type='beforeafter'", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const deps: AmplifyWinnerDeps = {
+    sendInngest: async () => undefined,
+    recordActivity: async () => undefined,
+    materializeOptimizerCampaign: async (o) => {
+      calls.push(o as unknown as Record<string, unknown>);
+      return { ok: true, experiment_id: "exp-ba", lever_key: "winner_lander_match", detail: "ok" };
+    },
+  };
+  const res = await pairAmplifiedWinnerWithLander({} as never, {
+    workspaceId: "ws-1",
+    winner: makePairFixtureWinner({ variant: "beforeafter" }),
+    newAdCampaignIds: [],
+    deps,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.lander_type, "beforeafter");
+  const proposal = calls[0].proposal as Record<string, unknown>;
+  assert.equal(proposal.lander_type, "beforeafter");
+});
+
+test("pairAmplifiedWinnerWithLander skips a PDP / non-advertorial-family variant", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const recordedActivity: Array<Record<string, unknown>> = [];
+  const deps: AmplifyWinnerDeps = {
+    sendInngest: async () => undefined,
+    recordActivity: async (_admin, row) => { recordedActivity.push(row as unknown as Record<string, unknown>); return undefined; },
+    materializeOptimizerCampaign: async (o) => {
+      calls.push(o as unknown as Record<string, unknown>);
+      return { ok: true, experiment_id: "exp-x", lever_key: "winner_lander_match", detail: "ok" };
+    },
+  };
+  const res = await pairAmplifiedWinnerWithLander({} as never, {
+    workspaceId: "ws-1",
+    winner: makePairFixtureWinner({ variant: "pdp" }),
+    newAdCampaignIds: [],
+    deps,
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "variant_not_advertorial_family");
+  // No materialize, no activity row.
+  assert.equal(calls.length, 0);
+  assert.equal(recordedActivity.length, 0);
+});
+
+test("pairAmplifiedWinnerWithLander reports the optimizer's refusal (e.g. surface already has an active campaign)", async () => {
+  const recordedActivity: Array<Record<string, unknown>> = [];
+  const deps: AmplifyWinnerDeps = {
+    sendInngest: async () => undefined,
+    recordActivity: async (_admin, row) => { recordedActivity.push(row as unknown as Record<string, unknown>); return undefined; },
+    materializeOptimizerCampaign: async () =>
+      ({ ok: false, detail: "a campaign is already active on P-1:advertorial:all — not standing up a second" }),
+  };
+  const res = await pairAmplifiedWinnerWithLander({} as never, {
+    workspaceId: "ws-1",
+    winner: makePairFixtureWinner(),
+    newAdCampaignIds: ["camp-1"],
+    deps,
+  });
+  assert.equal(res.ok, false);
+  assert.ok(res.reason?.startsWith("materialize_refused:"));
+  // No paired_winner_lander row when the materialize refused.
+  assert.equal(recordedActivity.length, 0);
+});
+
+test("amplifyWinner end-to-end opens the matched-lander draft experiment for an advertorial winner", async () => {
+  const stores: AmplifyFakeStores = { director_activity_today: [], inserted_ad_campaigns: [] };
+  const { admin } = makeAmplifyAdmin(stores);
+  const { deps, recordedActivity } = makeAmplifySpyDeps();
+  // Wire the materialize spy alongside the existing inngest+activity spies.
+  const materializeCalls: Array<Record<string, unknown>> = [];
+  const fullDeps: AmplifyWinnerDeps = {
+    ...deps,
+    materializeOptimizerCampaign: async (o) => {
+      materializeCalls.push(o as unknown as Record<string, unknown>);
+      return { ok: true, experiment_id: "exp-end-to-end", lever_key: "winner_lander_match", detail: "ok" };
+    },
+  };
+
+  const res = await amplifyWinner(admin, {
+    workspaceId: "ws-1",
+    winner: makePairFixtureWinner(),
+    n: 2,
+    specSlug: "growth-winning-creative-amplifier",
+    nowMs: Date.parse("2026-06-30T12:00:00Z"),
+    deps: fullDeps,
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.variants_spawned, 2);
+  // ONE matched-lander draft experiment was opened on the advertorial surface.
+  assert.equal(materializeCalls.length, 1);
+  assert.equal(materializeCalls[0].initialStatus, "draft");
+  // Activity stamps: amplified_winner + paired_winner_lander (one of each).
+  const kinds = recordedActivity.map((r) => (r as { actionKind: string }).actionKind);
+  assert.ok(kinds.includes(AMPLIFIED_WINNER_ACTION_KIND));
+  assert.ok(kinds.includes(PAIRED_WINNER_LANDER_ACTION_KIND));
+  // The pair result is surfaced on the AmplifyWinnerResult so the caller can inspect it.
+  assert.equal(res.pair?.ok, true);
+  assert.equal(res.pair?.experiment_id, "exp-end-to-end");
 });
 

@@ -28,6 +28,7 @@
     "test:ready-to-test": "tsx --test src/lib/ads/ready-to-test.test.ts",
     "test:creative-outcome-attribution": "tsx --test src/lib/ads/creative-outcome-attribution.test.ts",
     "test:winning-creative-detect": "tsx --test src/lib/ads/winning-creative-detect.test.ts",
+    "test:pair-promoted-lander": "tsx --test src/lib/storefront/pair-promoted-lander.test.ts",
     "test:customer-voice-mining": "tsx --test src/lib/ads/customer-voice-mining.test.ts",
     "test:voice-angle-approve": "tsx --test src/lib/ads/voice-angle-approve.test.ts",
     "test:blended-cac-ltv": "tsx --test src/lib/blended-cac-ltv.test.ts",

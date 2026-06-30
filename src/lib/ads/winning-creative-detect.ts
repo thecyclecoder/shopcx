@@ -1,5 +1,5 @@
 /**
- * Winning-creative detection + amplification — growth-winning-creative-amplifier Phases 1-2.
+ * Winning-creative detection + amplification — growth-winning-creative-amplifier Phases 1-3.
  *
  * Phase 1 (`detectWinners`): reads our own [[../../tables/meta_attribution_daily]] grouped by
  * `(meta_ad_id, variant)` over a trailing window, scores per-row attributed ROAS =
@@ -19,6 +19,17 @@
  * [[../../tables/director_activity]] row of `action_kind='amplified_winner'` carrying
  * `{source_meta_ad_id, new_ad_campaign_ids, angle_id}` so the lineage is traceable.
  *
+ * Phase 3 (`pairAmplifiedWinnerWithLander`): the forward direction of the matched-lander
+ * experiment loop. After `amplifyWinner` succeeds, for an advertorial-family winner
+ * (variant ∈ {advertorial, before_after, beforeafter, listicle, reasons}), opens a
+ * [[../../libraries/storefront-experiments]] hypothesis on the matching lander variant via
+ * [[../../libraries/optimizer-agent|materializeOptimizerCampaign]] at `status='draft'` (owner-
+ * approved before serving), with the winner's hook / mechanism (meta_headline, meta_primary_text,
+ * hook_one_liner) packed into the variant patch. Stamps ONE [[../../tables/director_activity]] row
+ * of `action_kind='paired_winner_lander'` so the perf↔creative loop is traceable end-to-end. The
+ * REVERSE direction (a promoted lander variant → fresh static via `pairPromotedLanderWithAd`) lives
+ * in [[../../libraries/optimizer-agent]] and fires from the experiment-refresh promote path.
+ *
  * STRICTLY OUR DATA — Phase 1 reads only `meta_attribution_daily` + the two joined source tables.
  * No external ad-intelligence integrations are read here (the audit-mandated assumption check
  * encoded in the spec's verification grep).
@@ -27,6 +38,12 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { DEFAULT_BLENDED_CAC_LTV_TARGET } from "@/lib/blended-cac-ltv";
 import { inngest } from "@/lib/inngest/client";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import {
+  materializeOptimizerCampaign,
+  PAIRED_WINNER_LANDER_ACTION_KIND,
+} from "@/lib/storefront/optimizer-agent";
+import type { VariantPatch } from "@/lib/storefront/experiments";
+import type { LanderType } from "@/lib/storefront/lever-memory";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -433,11 +450,16 @@ export interface AmplifyWinnerDeps {
     admin: Admin,
     row: Parameters<typeof recordDirectorActivity>[1],
   ) => Promise<unknown>;
+  /** Phase 3 — inject the matched-lander materializer so the cross-side pairing is testable
+   *  without the optimizer's full materialize stack. Defaults to the real
+   *  `materializeOptimizerCampaign` from [[../storefront/optimizer-agent]]. */
+  materializeOptimizerCampaign?: typeof materializeOptimizerCampaign;
 }
 
 const defaultAmplifyDeps: Required<AmplifyWinnerDeps> = {
   sendInngest: (event) => inngest.send(event) as Promise<unknown>,
   recordActivity: (admin, row) => recordDirectorActivity(admin, row),
+  materializeOptimizerCampaign: (o) => materializeOptimizerCampaign(o),
 };
 
 export interface AmplifyWinnerOptions {
@@ -467,6 +489,9 @@ export interface AmplifyWinnerResult {
   day_count_before: number;
   /** Pure plan of what was queued. Useful for tests + observability. */
   plan: AmplificationVariantPlan[];
+  /** Phase 3 — the forward matched-lander pair result. Null when the amplification didn't
+   *  succeed enough to attempt a pair (e.g. zero inserts). */
+  pair?: PairAmplifiedWinnerResult | null;
 }
 
 /** UTC day start as an ISO string (`YYYY-MM-DDT00:00:00.000Z`) — matches `director_activity.created_at`. */
@@ -652,11 +677,190 @@ export async function amplifyWinner(
     },
   });
 
+  // Phase 3 forward direction — open a matched-lander draft experiment for advertorial-family
+  // winners. Best-effort: a pairing failure NEVER undoes the amplification (the new ad_campaigns
+  // rows are already at status='ready' and the maker events are already queued); the pair row
+  // would be the cross-side audit trail, but its absence is a soft loss, not a state corruption.
+  let pairResult: PairAmplifiedWinnerResult | null = null;
+  try {
+    pairResult = await pairAmplifiedWinnerWithLander(admin, {
+      workspaceId: opts.workspaceId,
+      winner: opts.winner,
+      newAdCampaignIds: inserted,
+      specSlug: opts.specSlug ?? null,
+      directorFunction: opts.directorFunction ?? "growth",
+      deps,
+    });
+  } catch (e) {
+    pairResult = { ok: false, reason: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200) };
+  }
+
   return {
     ok: true,
     new_ad_campaign_ids: inserted,
     variants_spawned: inserted.length,
     day_count_before: dayCountBefore,
     plan,
+    pair: pairResult,
   };
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 3 — Matched-lander experiment (forward direction)
+// ────────────────────────────────────────────────────────────────────────────────
+
+/** Lander variants the spec treats as "advertorial-family" for Phase 3 — only these open a
+ *  matched-lander experiment. PDP / unknown variants skip (the ad side already exists, and
+ *  the bare PDP has no `VariantPatch` shape for headline/dek). */
+const ADVERTORIAL_FAMILY_VARIANTS: ReadonlySet<string> = new Set([
+  "advertorial",
+  "before_after",
+  "beforeafter",
+  "before-after",
+  "listicle",
+  "reasons",
+]);
+
+/** Map a winner's lander variant (the `meta_attribution_daily.variant` slug) to the
+ *  storefront experiment `lander_type` enum. Returns null for non-advertorial-family
+ *  variants — those are skipped by the Phase 3 forward pair. */
+export function landerTypeForAmplifiedWinner(variant: string): LanderType | null {
+  const norm = variant.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  if (!ADVERTORIAL_FAMILY_VARIANTS.has(norm) && !ADVERTORIAL_FAMILY_VARIANTS.has(variant.trim().toLowerCase())) {
+    return null;
+  }
+  if (norm === "advertorial") return "advertorial";
+  if (norm === "before_after" || norm === "beforeafter") return "beforeafter";
+  if (norm === "listicle" || norm === "reasons") return "listicle";
+  return null;
+}
+
+/** Pure — derive the variant patch from the winner's angle (the winning hook + mechanism). */
+export function patchFromWinnerAngle(angle: WinnerAngle | null): VariantPatch {
+  const patch: VariantPatch = {};
+  if (!angle) return patch;
+  const headline = angle.meta_headline?.trim() || angle.hook_one_liner?.trim();
+  if (headline) patch.headline = headline;
+  const dek = angle.meta_primary_text?.trim();
+  if (dek) patch.dek = dek;
+  const chapterHeading = angle.hook_one_liner?.trim();
+  if (chapterHeading && chapterHeading !== headline) patch.chapterHeading = chapterHeading;
+  return patch;
+}
+
+export interface PairAmplifiedWinnerOptions {
+  workspaceId: string;
+  winner: DetectedWinner;
+  newAdCampaignIds: string[];
+  specSlug?: string | null;
+  directorFunction?: string;
+  deps?: AmplifyWinnerDeps;
+}
+
+export interface PairAmplifiedWinnerResult {
+  ok: boolean;
+  reason?: string;
+  /** The storefront_experiments.id that was opened at status='draft' (when ok=true). */
+  experiment_id?: string;
+  /** The lander_type the experiment targets. */
+  lander_type?: LanderType;
+  /** The variant patch the matched-lander arm carries. */
+  patch?: VariantPatch;
+}
+
+/**
+ * Forward direction of growth-winning-creative-amplifier Phase 3 — for an advertorial-family
+ * amplified winner, open a storefront_experiments hypothesis on the matching lander variant
+ * via [[../storefront/optimizer-agent|materializeOptimizerCampaign]] at `status='draft'`
+ * (owner-approved before serving) with the winner's hook / mechanism as the variant patch.
+ * Then stamp ONE [[../../tables/director_activity]] row of
+ * action_kind=[[PAIRED_WINNER_LANDER_ACTION_KIND]] (`paired_winner_lander`) so the perf↔creative
+ * loop is traceable end-to-end.
+ *
+ * Skips with `{ok:false, reason}` (no throw) when:
+ *  - `winner.campaign` is null (no source product to scope the experiment to)
+ *  - the winner's variant isn't advertorial-family (PDP / unknown — Phase 3 only opens
+ *    matched-lander experiments for the three lander types that take a content patch)
+ *  - the resolved patch is empty (no angle copy to test)
+ *  - `materializeOptimizerCampaign` refuses (typically: a campaign is already active on
+ *    the surface — ≤1 active campaign per surface per the optimizer's discipline)
+ */
+export async function pairAmplifiedWinnerWithLander(
+  admin: Admin,
+  opts: PairAmplifiedWinnerOptions,
+): Promise<PairAmplifiedWinnerResult> {
+  const deps = { ...defaultAmplifyDeps, ...(opts.deps ?? {}) };
+  try {
+    const campaign = opts.winner.campaign;
+    if (!campaign?.product_id) return { ok: false, reason: "no_source_product" };
+
+    const landerType = landerTypeForAmplifiedWinner(opts.winner.variant);
+    if (!landerType) return { ok: false, reason: "variant_not_advertorial_family" };
+
+    const patch = patchFromWinnerAngle(opts.winner.angle);
+    if (Object.keys(patch).length === 0) return { ok: false, reason: "empty_patch_from_angle" };
+
+    const angleLabel =
+      (opts.winner.angle?.hook_slug ? `${opts.winner.angle.hook_slug}-${opts.winner.metaAdId.slice(0, 6)}` : null) ||
+      `winner-${opts.winner.metaAdId.slice(0, 8)}`;
+    const reasoning =
+      `Matched-lander hypothesis from amplified winner ${opts.winner.metaAdId} ` +
+      `(variant=${opts.winner.variant}, ROAS=${opts.winner.roas}). Anchored to angle ` +
+      `${opts.winner.angle?.id ?? "none"} (${opts.winner.angle?.hook_slug ?? "unknown_hook"}, ` +
+      `LF8 slot ${opts.winner.angle?.lf8_slot ?? "?"}).`;
+
+    const materialize = await deps.materializeOptimizerCampaign({
+      workspaceId: opts.workspaceId,
+      productId: campaign.product_id,
+      proposal: {
+        hypothesis:
+          `Hook/mechanism that won the ad ("${opts.winner.angle?.hook_one_liner ?? opts.winner.angle?.meta_headline ?? opts.winner.variant}") ` +
+          `also wins the matched ${landerType} lander.`,
+        reasoning,
+        lever_key: "winner_lander_match",
+        lever_class: "reversible",
+        lander_type: landerType,
+        audience: "all",
+        variant: {
+          label: angleLabel,
+          kind: "content",
+          patch,
+        },
+      },
+      conservative: true,
+      initialStatus: "draft",
+    });
+
+    if (!materialize.ok || !materialize.experiment_id) {
+      return { ok: false, reason: `materialize_refused:${materialize.detail.slice(0, 160)}` };
+    }
+
+    await deps.recordActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: opts.directorFunction ?? "growth",
+      actionKind: PAIRED_WINNER_LANDER_ACTION_KIND,
+      specSlug: opts.specSlug ?? null,
+      reason:
+        `Opened matched-lander draft experiment ${materialize.experiment_id.slice(0, 8)} on ${landerType} ` +
+        `for product ${campaign.product_id.slice(0, 8)} from amplified winner ${opts.winner.metaAdId} ` +
+        `(ROAS=${opts.winner.roas}, angle=${opts.winner.angle?.hook_slug ?? "unknown"}). Awaiting owner approval.`,
+      metadata: {
+        direction: "ad_to_lander",
+        source_meta_ad_id: opts.winner.metaAdId,
+        source_ad_campaign_id: campaign.id,
+        new_ad_campaign_ids: opts.newAdCampaignIds,
+        angle_id: opts.winner.angle?.id ?? null,
+        variant: opts.winner.variant,
+        roas: opts.winner.roas,
+        lander_type: landerType,
+        experiment_id: materialize.experiment_id,
+        patch,
+        autonomous: true,
+      },
+    });
+
+    return { ok: true, experiment_id: materialize.experiment_id, lander_type: landerType, patch };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+  }
 }
