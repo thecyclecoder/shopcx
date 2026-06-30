@@ -27,8 +27,8 @@ When no product slice is applied the top level is a **forest** of product nodes;
 
 ## Exports
 
-### `computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle?, utmSource? })` → `FunnelTreeResult`
-`utmSource` is an optional **traffic-source slice** (a `utm_source` value, or `DIRECT_UTM` = `"(direct)"` for sessions with no source). It **composes** with `productHandle` — a session must pass both. Omit/null = All sources.
+### `computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle?, utmSource?, referrer? })` → `FunnelTreeResult`
+`utmSource` (a `utm_source` value, or `DIRECT_UTM` = `"(direct)"`) and `referrer` (a `referrerGroup()` key — Facebook / Instagram / Google Search / Blog / Direct-in-app / …) are optional slices that **compose** with `productHandle` and each other — a session must pass all set slices. Omit/null = All.
 1. Pull **ALL** events in `[startIso,endIso]`, paginated → the **visit universe** (every session that fired any event = the page loaded) + the per-session reached-step set (engaged/pack/checkout/order/atc).
 2. Fetch the visit-universe sessions (chunked `.in("id")`, 300/page); drop `is_internal`, `is_bot`, internal-customer-stitched — same real-traffic exclusion as the legacy funnel.
 3. Bucket each session into one leaf via the keys above; **force `visit`** for every universe session, accumulate deeper-step counts from the events it fired.
@@ -43,6 +43,12 @@ The product slice-dropdown source: products with real sessions in the window (re
 ### `listUtmSources({ admin, workspaceId, startIso, endIso })` → `{ source, label, sessions }[]`
 The traffic-source slice-dropdown source: distinct `utm_source` values present in real sessions, ordered by volume. Sessions with no source collapse into one `DIRECT_UTM` row (label "Direct / none"). Dynamic — a new or stray source (e.g. `facebook` alongside `meta`) appears on its own, never hidden.
 
+### `listReferrers({ admin, workspaceId, startIso, endIso })` → `{ referrer, label, sessions }[]`
+The referrer slice-dropdown source: real sessions grouped by `referrerGroup()`. The group key IS the slice value. Dynamic + self-pruning.
+
+### `referrerGroup(referrer)` → group key
+Exported helper. Normalizes a raw `referrer` to a platform/origin: in-app webview app ids + hosts → Facebook / Instagram / Google Search / Bing / TikTok; **the Blog is on the STORE host (`shop.superfoodscompany.com/blog`)** so it's keyed on the `/blog` PATH, with same-host non-blog referrers → "Internal / on-site"; empty → "Direct / in-app"; unknown → bare host. The referrer slice adds resolution `utm_source` lacks — it splits `utm_source=meta` into Facebook vs Instagram.
+
 ### `parseLanding(landingUrl)` → `{ segments, variant, angle }`
 Exported helper — tolerant URL parse (absolute / relative / malformed).
 
@@ -53,7 +59,7 @@ Exported helper — tolerant URL parse (absolute / relative / malformed).
 - **Caller owns Central-time boundary math** (`centralBoundary`) — the SDK takes UTC instants so it stays presentation-agnostic.
 
 ## Consumers
-- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal slice filters (**Product × Source**, composing) — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns `productOptions` + `utmSourceOptions` (from `listFunnelProducts` / `listUtmSources`) computed over a wide launch→today window so the slice dropdowns stay stable across date ranges.
+- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal slice filters (**Product × Source × Referrer**, all composing) — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns `productOptions` + `utmSourceOptions` (from `listFunnelProducts` / `listUtmSources`) computed over a wide launch→today window so the slice dropdowns stay stable across date ranges.
 - (planned) Max's performance-data assembly — the Growth Director reads the same tree he directs agents on.
 
 ## Related

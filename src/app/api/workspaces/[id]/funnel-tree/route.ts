@@ -12,7 +12,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeFunnelTree, listFunnelProducts, listUtmSources } from "@/lib/storefront/funnel-tree";
+import { computeFunnelTree, listFunnelProducts, listUtmSources, listReferrers } from "@/lib/storefront/funnel-tree";
 
 function todayCentral(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
@@ -59,6 +59,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   }
   const productHandle = url.searchParams.get("product") || null;
   const utmSource = url.searchParams.get("utm_source") || null;
+  const referrer = url.searchParams.get("referrer") || null;
 
   const startIso = centralBoundary(start, false);
   const endIso = centralBoundary(end, true);
@@ -71,20 +72,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     : daysAgoCentral(90);
 
   const dropdownStartIso = centralBoundary(dropdownStart, false);
-  const [tree, productOptions, utmSourceOptions] = await Promise.all([
-    computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle, utmSource }),
+  const [tree, productOptions, utmSourceOptions, referrerOptions] = await Promise.all([
+    computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle, utmSource, referrer }),
     listFunnelProducts({ admin, workspaceId, startIso: dropdownStartIso, endIso }),
     listUtmSources({ admin, workspaceId, startIso: dropdownStartIso, endIso }),
+    listReferrers({ admin, workspaceId, startIso: dropdownStartIso, endIso }),
   ]);
 
   return NextResponse.json({
     range: { start, end },
     productHandle: tree.productHandle,
     utmSource: tree.utmSource,
+    referrer: tree.referrer,
     products: tree.products,
     unattributedEntry: tree.unattributedEntry,
     grandTotal: tree.grandTotal,
     productOptions,
     utmSourceOptions,
+    referrerOptions,
   });
 }

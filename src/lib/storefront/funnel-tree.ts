@@ -78,6 +78,47 @@ const VARIANT_LABEL: Record<string, string> = {
  *  Round-trips through the route + dropdown so "Direct / none" is selectable. */
 export const DIRECT_UTM = "(direct)";
 
+/**
+ * Normalize a raw `referrer` into a stable PLATFORM/ORIGIN group — the referrer
+ * slice key (the key IS the slice value; it round-trips through the dropdown).
+ *
+ * The blog lives on the STORE host (`shop.superfoodscompany.com/blog`), so it's
+ * detected by the `/blog` PATH, not a host — and same-host non-blog referrers
+ * are internal navigation, surfaced separately so they don't read as a source.
+ */
+export function referrerGroup(referrer: string | null): string {
+  if (!referrer || !referrer.trim()) return "Direct / in-app";
+  const raw = referrer.trim();
+  // In-app webviews report the source app (com.facebook.katana, com.instagram.android, …)
+  if (/^android-app:/i.test(raw) || /^ios-app:/i.test(raw)) {
+    const a = raw.toLowerCase();
+    if (a.includes("facebook")) return "Facebook";
+    if (a.includes("instagram")) return "Instagram";
+    if (a.includes("google")) return "Google Search";
+    return "In-app";
+  }
+  let host = "";
+  let path = "";
+  try {
+    const u = new URL(raw);
+    host = u.hostname.toLowerCase();
+    path = u.pathname.toLowerCase();
+  } catch {
+    const m = raw.replace(/^https?:\/\//i, "");
+    host = m.split("/")[0].toLowerCase();
+    path = "/" + m.split("/").slice(1).join("/").toLowerCase();
+  }
+  if (host.endsWith("superfoodscompany.com")) {
+    return path.startsWith("/blog") ? "Blog" : "Internal / on-site";
+  }
+  if (host.includes("facebook")) return "Facebook";
+  if (host.includes("instagram")) return "Instagram";
+  if (host.includes("google")) return "Google Search";
+  if (host.includes("bing")) return "Bing";
+  if (host.includes("tiktok")) return "TikTok";
+  return host || "Direct / in-app";
+}
+
 export interface FunnelStepCounts {
   visit: number;
   engaged: number;
@@ -121,6 +162,8 @@ export interface FunnelTreeResult {
   productHandle: string | null;
   /** The traffic-source slice applied (null = all sources; DIRECT_UTM = direct). */
   utmSource: string | null;
+  /** The referrer slice applied (null = all referrers; else a referrerGroup key). */
+  referrer: string | null;
   /** Forest of product nodes (one when sliced). */
   products: FunnelNode[];
   /** Sessions whose landing path matched no known product handle (e.g. landed
@@ -219,6 +262,10 @@ export interface FunnelTreeArgs {
    *  sessions with no utm_source. Omit/null for All sources. Composes with
    *  productHandle (a session must pass both). */
   utmSource?: string | null;
+  /** Optional referrer slice — a `referrerGroup()` key (Facebook | Instagram |
+   *  Google Search | Blog | Direct / in-app | …). Omit/null for All referrers.
+   *  Composes with the other slices. */
+  referrer?: string | null;
 }
 
 /**
@@ -230,6 +277,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
   const { admin, workspaceId, startIso, endIso } = args;
   const slice = args.productHandle ? args.productHandle.toLowerCase() : null;
   const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
 
   // ── reference data ──────────────────────────────────────────────────────
   const [{ data: productRows }, { data: internalCustomerRows }, { data: pageRows }] = await Promise.all([
@@ -274,12 +322,12 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
 
   // ── fetch the visit-universe sessions (batched) ───────────────────────────
   const sessionIds = [...visitSessions];
-  const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null; utm_source: string | null }>();
+  const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null; utm_source: string | null; referrer: string | null }>();
   for (let i = 0; i < sessionIds.length; i += 300) {
     const chunk = sessionIds.slice(i, i + 300);
     const { data } = await admin
       .from("storefront_sessions")
-      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer")
       .in("id", chunk);
     for (const s of data || []) {
       sessionById.set(s.id as string, {
@@ -288,6 +336,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
         is_bot: !!s.is_bot,
         customer_id: (s.customer_id as string) ?? null,
         utm_source: (s.utm_source as string) ?? null,
+        referrer: (s.referrer as string) ?? null,
       });
     }
   }
@@ -311,6 +360,8 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
       if (utmWanted === DIRECT_UTM) { if (s.utm_source) continue; }
       else if ((s.utm_source || "").toLowerCase() !== utmWanted) continue;
     }
+    // Referrer slice (composes with the others).
+    if (refWanted && referrerGroup(s.referrer) !== refWanted) continue;
 
     // Every session in the universe loaded the page → always a visit. The deeper
     // steps come from the events it actually fired in the window.
@@ -436,6 +487,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     endIso,
     productHandle: slice,
     utmSource: utmWanted,
+    referrer: refWanted,
     products: productNodes,
     unattributedEntry,
     grandTotal: metricsOf(grand),
@@ -513,5 +565,39 @@ export async function listUtmSources(args: {
   }
   return [...counts.entries()]
     .map(([source, sessions]) => ({ source, label: source === DIRECT_UTM ? "Direct / none" : source, sessions }))
+    .sort((a, b) => b.sessions - a.sessions);
+}
+
+/**
+ * Referrer list for the funnel-page referrer slice dropdown: real sessions in
+ * the window grouped by `referrerGroup()` (Facebook / Instagram / Google Search
+ * / Blog / Direct-in-app / …), ordered by volume. The group key IS the slice
+ * value. Dynamic + self-pruning.
+ */
+export async function listReferrers(args: {
+  admin: Admin;
+  workspaceId: string;
+  startIso: string;
+  endIso: string;
+}): Promise<Array<{ referrer: string; label: string; sessions: number }>> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const rows = await fetchAllRows<{ referrer: string | null }>(() =>
+    admin
+      .from("storefront_sessions")
+      .select("referrer, last_seen_at")
+      .eq("workspace_id", workspaceId)
+      .eq("is_internal", false)
+      .eq("is_bot", false)
+      .gte("last_seen_at", startIso)
+      .lte("last_seen_at", endIso)
+      .order("last_seen_at", { ascending: true }),
+  );
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = referrerGroup(r.referrer);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([referrer, sessions]) => ({ referrer, label: referrer, sessions }))
     .sort((a, b) => b.sessions - a.sessions);
 }

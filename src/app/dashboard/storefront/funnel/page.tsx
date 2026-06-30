@@ -36,11 +36,13 @@ interface FunnelTreeResponse {
   range: { start: string; end: string };
   productHandle: string | null;
   utmSource: string | null;
+  referrer: string | null;
   products: TreeNode[];
   unattributedEntry: TreeNode | null;
   grandTotal: TreeMetrics;
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
+  referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
 }
 
 /** The badge pair marking a card as rebuilt onto the SDK + slice. */
@@ -62,11 +64,13 @@ const selectClass =
 
 /** Page-level universal slices (product × traffic source). They compose, and
  *  drive every reworked card below. */
-function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource, onUtmSource }: {
+function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource, onUtmSource, referrerOptions, referrer, onReferrer }: {
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   product: string; onProduct: (v: string) => void;
   utmOptions: Array<{ source: string; label: string; sessions: number }>;
   utmSource: string; onUtmSource: (v: string) => void;
+  referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
+  referrer: string; onReferrer: (v: string) => void;
 }) {
   return (
     <div className="mb-6 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
@@ -85,6 +89,15 @@ function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource
           <option value="">All sources</option>
           {utmOptions.map((o) => (
             <option key={o.source} value={o.source}>{o.label} ({o.sessions.toLocaleString()})</option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Referrer</span>
+        <select value={referrer} onChange={(e) => onReferrer(e.target.value)} className={selectClass}>
+          <option value="">All referrers</option>
+          {referrerOptions.map((o) => (
+            <option key={o.referrer} value={o.referrer}>{o.label} ({o.sessions.toLocaleString()})</option>
           ))}
         </select>
       </div>
@@ -399,6 +412,7 @@ export default function StorefrontFunnelPage() {
   // Page-level slices ("" = all) + the SDK-powered tree they drive.
   const [product, setProduct] = useState("");
   const [utmSource, setUtmSource] = useState("");
+  const [referrer, setReferrer] = useState("");
   const [tree, setTree] = useState<FunnelTreeResponse | null>(null);
   const [treeLoading, setTreeLoading] = useState(true);
 
@@ -428,10 +442,11 @@ export default function StorefrontFunnelPage() {
     const q = new URLSearchParams({ start, end });
     if (product) q.set("product", product);
     if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
     const res = await fetch(`/api/workspaces/${workspace.id}/funnel-tree?${q.toString()}`);
     if (res.ok) setTree(await res.json());
     setTreeLoading(false);
-  }, [workspace.id, start, end, product, utmSource]);
+  }, [workspace.id, start, end, product, utmSource, referrer]);
 
   useEffect(() => { loadTree(); }, [loadTree]);
 
@@ -461,6 +476,7 @@ export default function StorefrontFunnelPage() {
       <SliceFilter
         productOptions={tree?.productOptions ?? []} product={product} onProduct={setProduct}
         utmOptions={tree?.utmSourceOptions ?? []} utmSource={utmSource} onUtmSource={setUtmSource}
+        referrerOptions={tree?.referrerOptions ?? []} referrer={referrer} onReferrer={setReferrer}
       />
 
       <FunnelTreeCard tree={tree} loading={treeLoading} />
