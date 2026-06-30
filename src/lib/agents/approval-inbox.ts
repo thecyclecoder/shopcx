@@ -105,6 +105,50 @@ export function routingOwnerForJob(job: { kind: string; pending_actions?: Pendin
 }
 
 /**
+ * plan-approval-routes-by-goal-owner: a `plan` (goal-decomposition) job is RAISED by the planner (Pia,
+ * a PLATFORM-supervised tool), but the approval it parks is ABOUT the GOAL it decomposed — the proposed
+ * specs are owned by the goal's owner function, not the planner's. Routing it by the planner's function
+ * (platform) lands it in Ada's inbox, where a goal owned by another department (e.g. growth) is out of
+ * her leash AND the CEO's card has no Approve button (it's routed to Ada). That's the deadlock.
+ *
+ * So a plan job routes by its GOAL's owner function (`goals.owner` keyed by `job.spec_slug` — the plan
+ * job's spec_slug IS the goal slug, per /api/roadmap/plan). `resolveApprover(goalOwner, …)` then walks
+ * UP: a live+autonomous owner-director approves its own plan; otherwise the keystone fail-safe routes it
+ * to the CEO (matching the goal page's "await YOUR approval"). Every OTHER kind routes unchanged.
+ *
+ * Async because it reads `public.goals`. Delegates to the sync `routingOwnerForJob` for non-plan kinds
+ * and when the goal owner can't be resolved (a missing owner ⇒ the platform default ⇒ CEO via fail-safe —
+ * never a silent auto-approve by the wrong director).
+ */
+export async function routingOwnerForJobAsync(
+  admin: Admin,
+  job: { kind: string; spec_slug?: string | null; workspace_id?: string; pending_actions?: PendingActionLike[] | null },
+): Promise<string | null> {
+  if (job.kind === "plan" && job.spec_slug) {
+    const goalOwner = await resolveGoalOwnerFunction(admin, job.workspace_id ?? null, job.spec_slug);
+    if (goalOwner) return goalOwner;
+    // No goal row / no owner resolved → fall through to the kind default (platform), which the fail-safe
+    // walk then sends to the CEO unless platform is live+autonomous. A plan must never silently auto-route
+    // to a director on a missing goal — better the CEO sees it.
+  }
+  return routingOwnerForJob(job);
+}
+
+/** Resolve a goal's owner FUNCTION slug from `public.goals` (keyed by goal slug). Null on miss/error. */
+export async function resolveGoalOwnerFunction(
+  admin: Admin,
+  workspaceId: string | null | undefined,
+  goalSlug: string,
+): Promise<string | null> {
+  let q = admin.from("goals").select("owner").eq("slug", goalSlug);
+  if (workspaceId) q = q.eq("workspace_id", workspaceId);
+  const { data, error } = await q.limit(1).maybeSingle();
+  if (error || !data) return null;
+  const owner = (data as { owner?: unknown }).owner;
+  return typeof owner === "string" && owner.trim() ? owner.trim() : null;
+}
+
+/**
  * Where to DECIDE a genuinely multi-CHOICE action that the inbox's inline Approve/Decline can't express
  * (coverage register-vs-exempt, hero reject-with-notes). Phase 4 made the inbox the single source for
  * plain approve/decline (incl. multi-action/multi-branch), so this deep-link now only carries multi-choice
@@ -225,13 +269,20 @@ interface ApprovalMeta {
   coach_thread_id?: string;
 }
 
-/** Resolve + shape the notification fields for one job (pure given the chart + autonomy snapshot). */
+/**
+ * Resolve + shape the notification fields for one job (pure given the chart + autonomy snapshot).
+ *
+ * `ownerFnOverride` (plan-approval-routes-by-goal-owner): the async-resolved routing owner the reconciler
+ * passes in for a `plan` job (its GOAL's owner, not the planner's platform default). When absent, the sync
+ * `routingOwnerForJob` is used — correct for every non-plan kind, which is owner-derivable without a DB read.
+ */
 export function buildApprovalNotification(
   job: ApprovalJobRow,
   chart: OrgChartGraph,
   autonomy: AutonomyMap,
+  ownerFnOverride?: string | null,
 ): { workspace_id: string; type: string; title: string; body: string | null; link: string; metadata: ApprovalMeta; read: boolean; dismissed: boolean } {
-  const ownerFn = routingOwnerForJob(job);
+  const ownerFn = ownerFnOverride !== undefined ? ownerFnOverride : routingOwnerForJob(job);
   const routedTo = resolveApprover(ownerFn, chart, autonomy);
   const { title, body } = buildApprovalContent(job);
   const link = approvalDeepLink(job.kind, job.spec_slug, job.spec_missing);
@@ -499,7 +550,10 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
   const slackAdaCache = new Map<string, { channelId: string | null; token: string | null }>();
   for (const job of jobs) {
     if (emittedJobIds.has(job.id)) continue; // already surfaced — idempotent across re-parks
-    const row = buildApprovalNotification(job, chart, autonomy);
+    // plan-approval-routes-by-goal-owner: a plan job's routing owner is its GOAL's owner (DB read), not the
+    // planner's platform default. routingOwnerForJobAsync resolves it; every other kind stays sync-derivable.
+    const ownerFn = await routingOwnerForJobAsync(admin, job);
+    const row = buildApprovalNotification(job, chart, autonomy, ownerFn);
     // .select() so we know the new row's id — the routed-inbox Slack card (below) needs to embed it in
     // each button's `value`, and the chat.update path (Phase 2/4) needs it to find the message ts.
     const { data: inserted, error } = await admin

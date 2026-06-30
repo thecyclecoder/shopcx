@@ -46,6 +46,7 @@ import {
 } from "@/lib/agents/approval-router";
 import {
   ownerFunctionForKind,
+  routingOwnerForJobAsync,
   inlineApproveActionId,
   buildApprovalContent,
   approvalDeepLink,
@@ -143,6 +144,23 @@ export function platformIsAutoApprover(autonomy: AutonomyMap): boolean {
 /** Does an approval raised by `kind` route to the Platform director, given the live chart + flags? */
 export function routesToPlatform(kind: string, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
   return resolveApprover(ownerFunctionForKind(kind), chart, autonomy) === PLATFORM;
+}
+
+/**
+ * Job-aware variant (plan-approval-routes-by-goal-owner): for a `plan` job the routing owner is its
+ * GOAL's owner (DB read via routingOwnerForJobAsync), NOT the planner's platform default — so Ada's
+ * auto-approve sweep never picks up a plan whose goal is owned by another department (it routes to the
+ * CEO, or that department's director once live+autonomous). Every other kind resolves exactly as
+ * `routesToPlatform` would. Use this wherever an actual job row is in hand.
+ */
+export async function routesToPlatformForJob(
+  admin: Admin,
+  job: { kind: string; spec_slug?: string | null; workspace_id?: string; pending_actions?: DirectorActionLike[] | null },
+  chart: OrgChartGraph,
+  autonomy: AutonomyMap,
+): Promise<boolean> {
+  const ownerFn = await routingOwnerForJobAsync(admin, job);
+  return resolveApprover(ownerFn, chart, autonomy) === PLATFORM;
 }
 
 /**
@@ -438,7 +456,15 @@ export async function enqueuePlatformDirectorJobs(admin: Admin): Promise<{ enque
     .select("id, workspace_id, kind, spec_slug, status, pending_actions")
     .eq("status", "needs_approval")
     .limit(200);
-  const targets = (jobs || []).filter((j) => routesToPlatform(String(j.kind), chart, autonomy));
+  // plan-approval-routes-by-goal-owner: route by the JOB (a plan resolves to its goal's owner, not the
+  // planner's platform default) so Ada never auto-decides another department's plan decomposition.
+  type EnqueueJob = NonNullable<typeof jobs>[number];
+  const targets: EnqueueJob[] = [];
+  for (const j of (jobs || []) as EnqueueJob[]) {
+    if (await routesToPlatformForJob(admin, j as Parameters<typeof routesToPlatformForJob>[1], chart, autonomy)) {
+      targets.push(j);
+    }
+  }
   if (!targets.length) return { enqueued: 0, slugs: [] };
 
   // Dedup: never queue a second director job for a target that already has one (any status). A

@@ -4491,8 +4491,7 @@ async function runPlatformDirectorJob(job: Job) {
   }
 
   const lib = await import("../src/lib/agents/platform-director");
-  const { ownerFunctionForKind } = await import("../src/lib/agents/approval-inbox");
-  const { resolveApprover, buildOrgChartGraph, loadAutonomyMap } = await import("../src/lib/agents/approval-router");
+  const { buildOrgChartGraph, loadAutonomyMap } = await import("../src/lib/agents/approval-router");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
 
   // Load the target approval job.
@@ -4513,10 +4512,12 @@ async function runPlatformDirectorJob(job: Job) {
     return;
   }
 
-  // Re-confirm routing — Platform must STILL be the live+autonomous approver for this kind. (Fail-safe:
+  // Re-confirm routing — Platform must STILL be the live+autonomous approver for this job. (Fail-safe:
   // if the flag was cleared after the job was queued, do nothing — it routes to the CEO.)
+  // plan-approval-routes-by-goal-owner: route by the JOB (a plan resolves to its goal's owner, not the
+  // planner's platform default), so a plan whose goal is owned by another department never auto-decides here.
   const [chart, autonomy] = await Promise.all([buildOrgChartGraph(), loadAutonomyMap()]);
-  if (resolveApprover(ownerFunctionForKind(t.kind), chart, autonomy) !== "platform") {
+  if (!(await lib.routesToPlatformForJob(db, t, chart, autonomy))) {
     await update(job.id, { status: "completed", log_tail: `target no longer routes to platform — no-op`.slice(-2000) });
     console.log(`${tag} no longer routes to platform — no-op`);
     return;
