@@ -1009,7 +1009,9 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
       .eq("kind", "build")
       .not("spec_branch", "is", null)
       .order("created_at", { ascending: false });
+    const { isGoalParentExempt } = await import("@/lib/goals-table");
     const seen = new Set<string>();
+    const exemptByGoal = new Map<string, boolean>(); // memoize parent-exemption per (workspace:goalSlug)
     type Cand = { workspaceId: string; slug: string; branch: string; goalSlug: string };
     const candidates: Cand[] = [];
     for (const j of (jobs ?? []) as { workspace_id: string; spec_slug: string; spec_branch: string }[]) {
@@ -1021,6 +1023,26 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
       seen.add(key);
       const goalSlug = await resolveGoalSlugForSpec(j.workspace_id, slug);
       if (!goalSlug) continue; // one-off / not goal-bound — M4 is goal-branch integration only
+      // PARENT-GOAL SKIP (parent-goal-not-goal-branch-promotable): a PARENT goal (`is_parent`, or structurally
+      // — has child goals / no buildable specs) is EXEMPT from the atomic goal-branch promotion flow (its
+      // sub-goals promote independently). Never seed a `goal/{slug}` branch or promote a spec under it. This
+      // mirrors `promoteCompleteGoalsToMain`'s parent exemption — M4 (seed/integrate) lacked it, so re-linking
+      // a parent goal's already-shipped specs (the growth-director milestone restore) spuriously seeded a goal
+      // branch for a goal that has nothing to accumulate. Memoized per goal.
+      const exKey = `${j.workspace_id}:${goalSlug}`;
+      let exempt = exemptByGoal.get(exKey);
+      if (exempt === undefined) {
+        exempt = (await isGoalParentExempt(j.workspace_id, goalSlug)).exempt;
+        exemptByGoal.set(exKey, exempt);
+      }
+      if (exempt) { result.skipped.push(slug); continue; }
+      // TERMINAL-SPEC SKIP (all-shipped goal seeds nothing): a spec already `shipped`/`folded` landed one-off on
+      // main — it bypassed the goal-branch flow entirely, so promoting it now would spuriously seed a goal
+      // branch for a done goal. A goal whose member specs are ALL terminal yields zero candidates ⇒ no branch
+      // seeded (the requested "skip an all-shipped goal" guard, applied at spec granularity so a goal with SOME
+      // in-flight specs still promotes those).
+      const specRow = await getSpecFromDb(j.workspace_id, slug);
+      if (specRow && (specRow.status === "shipped" || specRow.status === "folded")) { result.skipped.push(slug); continue; }
       // Already on the goal branch? skip (idempotent — one merge per spec).
       if (await isSpecOnGoalBranch(j.workspace_id, slug)) continue;
       // Promote-eligible (M3 seam)? accumulation ∧ spec-test green ∧ security green on the branch.
