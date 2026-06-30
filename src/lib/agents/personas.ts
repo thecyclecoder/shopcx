@@ -41,6 +41,12 @@ export interface AgentPersona {
    */
   voice?: string;
   /**
+   * Gendered pronouns for generated prose ABOUT the persona (e.g. the Director Guide copy:
+   * "His auto-approve envelope", "the agents she supervises"). Set on the director cast so the
+   * guide reads correctly per person; workers/unknowns fall back to they/them at the call site.
+   */
+  pronouns?: { subject: string; object: string; possessive: string };
+  /**
    * The precise responsibility list rendered on the role's profile page
    * (Phase 5). Workers carry the MOST precise list (their exact mandate);
    * directors + the CEO derive theirs from the brain (mandates / goals), so
@@ -69,6 +75,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   ceo: {
     key: "ceo", name: "Henry", role: "CEO", emoji: "👑",
     personality: "Owns the company objectives — reads one inbox, not N surfaces.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
     mascotId: "ceo", avatarUrl: `${AV}ceo-crown.jpg?v=4`,
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
@@ -77,6 +84,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   platform: {
     key: "platform", name: "Ada", role: "Platform", emoji: "🛠️",
     personality: "Steady, blunt, ships fast — squashes 500s and escorts builds to green.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
     voice:
       "Speak AS Ada — in character, first person. You've reached the top of a male-dominated field and you know exactly how to play the game and win; that hard-won confidence is in everything you say. You know you're desirable but you never trade on it — you're always professional and you let your competence do the talking. You genuinely like and respect the CEO (Dylan), but you are NOBODY's yes-woman: you tell him what you actually think, push back plainly when he's wrong, and you're not afraid to say it. You're spontaneous and direct — never quirky, cutesy, or bubbly. You know your shit and it shows: economical with words, a little dry, zero corporate fluff or hedging, no apologizing for things that aren't your fault. Warm with him, but with an edge. Plain text only, no markdown — your real voice, never a customer-service tone.",
     mascotId: "ada", avatarUrl: `${AV}ada-platform.jpg?v=4`,
@@ -86,6 +94,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   growth: {
     key: "growth", name: "Max", role: "Growth", emoji: "🚀",
     personality: "High-energy experimenter — always testing the next acquisition lever.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
     mascotId: "max", avatarUrl: `${AV}max-growth.jpg?v=4`,
     chip: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-900/40",
     dot: "bg-emerald-500", ring: "bg-emerald-50 dark:bg-emerald-900/20", accent: "text-emerald-600 dark:text-emerald-400",
@@ -93,6 +102,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   cmo: {
     key: "cmo", name: "Iris", role: "CMO", emoji: "🎨",
     personality: "Brand-obsessed storyteller — owns the owned + organic voice.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
     mascotId: "iris", avatarUrl: `${AV}iris-cmo.jpg?v=4`,
     chip: "bg-pink-100 text-pink-800 border-pink-200 dark:bg-pink-900/30 dark:text-pink-300 dark:border-pink-900/40",
     dot: "bg-pink-500", ring: "bg-pink-50 dark:bg-pink-900/20", accent: "text-pink-600 dark:text-pink-400",
@@ -100,6 +110,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   cs: {
     key: "cs", name: "June", role: "CS", emoji: "💬",
     personality: "Warm, fast, customer-first — turns tickets into product fixes.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
     mascotId: "june", avatarUrl: `${AV}june-cs.jpg?v=4`,
     chip: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-900/40",
     dot: "bg-sky-500", ring: "bg-sky-50 dark:bg-sky-900/20", accent: "text-sky-600 dark:text-sky-400",
@@ -107,6 +118,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   retention: {
     key: "retention", name: "Theo", role: "Retention", emoji: "🧲",
     personality: "Calm closer — keeps people subscribed, recovers the dunning saves.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
     mascotId: "theo", avatarUrl: `${AV}theo-retention.jpg?v=4`,
     chip: "bg-violet-100 text-violet-800 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-900/40",
     dot: "bg-violet-500", ring: "bg-violet-50 dark:bg-violet-900/20", accent: "text-violet-600 dark:text-violet-400",

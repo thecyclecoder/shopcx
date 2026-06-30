@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getPersona } from "@/lib/agents/personas";
-import { PersonaAvatar, StatusBadge, WorkerStatusBadge, type WorkerLiveness } from "@/components/agents/persona-chip";
+import { PersonaAvatar, WorkerStatusBadge, type WorkerLiveness } from "@/components/agents/persona-chip";
 
 // Director Guide (director-guide-tab spec) — a SUPER human-readable, self-updating intro to one director,
 // written for a non-technical founder skimming it. Everything is runtime-derived from the live system
@@ -110,41 +110,29 @@ export function DirectorGuide({ slug }: { slug: string }) {
   if (!data) return null;
 
   const persona = getPersona(data.slug, data.title);
+  // Resolve the persona's pronouns so the guide prose reads correctly per director
+  // (Ada → she/her, Max → he/him); unknown/worker personas fall back to they/them.
+  const pn = persona.pronouns ?? { subject: "they", object: "them", possessive: "their" };
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
   return (
     <div className="space-y-10">
-      {/* 1 ─ Who this is */}
-      <section className="rounded-2xl border border-zinc-200 bg-gradient-to-br from-white to-zinc-50 p-6 dark:border-zinc-800 dark:from-zinc-900 dark:to-zinc-950">
-        <div className="flex flex-wrap items-start gap-4">
-          <PersonaAvatar persona={persona} size={64} />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{persona.name}</h1>
-              <span className="text-base font-normal text-zinc-400">· {persona.role} Director</span>
-              <StatusBadge status={data.status} />
-            </div>
-            <p className="mt-2 max-w-2xl text-[15px] leading-relaxed text-zinc-700 dark:text-zinc-300">
-              {persona.personality}
-            </p>
-            {data.summary && data.summary !== persona.personality && (
-              <p className="mt-2 max-w-2xl text-[14px] leading-relaxed text-zinc-500 dark:text-zinc-400">{data.summary}</p>
-            )}
-          </div>
-        </div>
-        {/* Status, in plain words */}
-        <div className="mt-5 flex items-start gap-2.5 rounded-xl bg-white/70 px-4 py-3 text-[13px] text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-900/60 dark:text-zinc-300 dark:ring-zinc-800">
-          <span
-            className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
-              data.status === "autonomous" ? "bg-emerald-500" : data.status === "live" ? "bg-sky-500" : "bg-zinc-400"
-            }`}
-          />
-          <span>{data.statusPlain}</span>
-        </div>
+      {/* 1 ─ Status, in plain words. Identity (avatar · name · role · personality) is already
+          rendered by the profile-page header directly above this guide, so we DON'T repeat it
+          here — the guide opens with this status callout (not shown by the header) and flows
+          straight into the leash · team · working-on sections. */}
+      <section className="flex items-start gap-2.5 rounded-xl bg-white/70 px-4 py-3 text-[13px] text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-900/60 dark:text-zinc-300 dark:ring-zinc-800">
+        <span
+          className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+            data.status === "autonomous" ? "bg-emerald-500" : data.status === "live" ? "bg-sky-500" : "bg-zinc-400"
+          }`}
+        />
+        <span>{data.statusPlain}</span>
       </section>
 
       {/* 2 ─ What I do on my own vs. bring to you */}
       <section>
-        <SectionHeading hint="Her auto-approve envelope, in plain English — kept in sync with the code that enforces it.">
+        <SectionHeading hint={`${cap(pn.possessive)} auto-approve envelope, in plain English — kept in sync with the code that enforces it.`}>
           What {persona.name} handles vs. what comes to you
         </SectionHeading>
         {data.leash.defined ? (
@@ -169,20 +157,20 @@ export function DirectorGuide({ slug }: { slug: string }) {
         ) : (
           <p className="rounded-xl border border-dashed border-zinc-200 px-4 py-5 text-[13px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
             Leash not yet defined — {persona.name} doesn&apos;t have an auto-approve envelope yet, so for now
-            everything she would touch routes to you.
+            everything {pn.subject} would touch routes to you.
           </p>
         )}
         {!data.autonomous && data.leash.defined && (
           <p className="mt-3 text-[13px] text-zinc-400">
-            She isn&apos;t live + autonomous yet, so until you flip her on, even the &quot;I handle these myself&quot;
-            calls come to you for approval.
+            {cap(pn.subject)} isn&apos;t live + autonomous yet, so until you flip {pn.object} on, even the &quot;I handle
+            these myself&quot; calls come to you for approval.
           </p>
         )}
       </section>
 
       {/* 3 ─ My team */}
       <section>
-        <SectionHeading hint="The agents she supervises. This list updates itself as new agents come online.">
+        <SectionHeading hint={`The agents ${pn.subject} supervises. This list updates itself as new agents come online.`}>
           {persona.name}&apos;s team · {data.team.length} agent{data.team.length === 1 ? "" : "s"}
         </SectionHeading>
         {data.team.length ? (
@@ -211,14 +199,14 @@ export function DirectorGuide({ slug }: { slug: string }) {
           </div>
         ) : (
           <p className="rounded-xl border border-dashed border-zinc-200 px-4 py-5 text-[13px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-            No agents on her team yet — they&apos;ll appear here automatically as soon as one is registered.
+            No agents on {pn.possessive} team yet — they&apos;ll appear here automatically as soon as one is registered.
           </p>
         )}
       </section>
 
       {/* 4 ─ What I'm working on */}
       <section>
-        <SectionHeading hint="The company goals she owns or contributes to.">
+        <SectionHeading hint={`The company goals ${pn.subject} owns or contributes to.`}>
           What {persona.name} is working on
         </SectionHeading>
         {data.goals.length ? (
@@ -242,13 +230,13 @@ export function DirectorGuide({ slug }: { slug: string }) {
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-zinc-500 dark:text-zinc-400">
           <span>
             <span className="font-semibold text-zinc-700 dark:text-zinc-300">{data.specCount}</span> spec
-            {data.specCount === 1 ? "" : "s"} on her plate
+            {data.specCount === 1 ? "" : "s"} on {pn.possessive} plate
           </span>
           <Link
             href={`/dashboard/agents/${encodeURIComponent(data.slug)}?s=activity`}
             className="text-indigo-600 hover:underline dark:text-indigo-400"
           >
-            See her live activity →
+            See {pn.possessive} live activity →
           </Link>
         </div>
       </section>
