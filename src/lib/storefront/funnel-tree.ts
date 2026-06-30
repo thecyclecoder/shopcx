@@ -51,6 +51,7 @@
  * so it runs unchanged in a Next.js route handler AND in Max's agent runtime.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { getMonthlyChurn, type ChurnBasis } from "@/lib/ltv";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -139,6 +140,10 @@ export interface FunnelStepCounts {
   checkout_started: number;
   order_placed: number;
   add_to_cart: number;
+  /** Σ order total_cents from this node's sessions (immediate revenue). */
+  revenue_cents: number;
+  /** Σ order total_cents × (sub ? 1/churn : 1) — predicted lifetime value. */
+  ltv_cents: number;
 }
 
 export interface FunnelNodeMetrics extends FunnelStepCounts {
@@ -148,6 +153,10 @@ export interface FunnelNodeMetrics extends FunnelStepCounts {
   conversion_rate: number;
   /** add_to_cart / visit */
   atc_rate: number;
+  /** revenue_cents / visit — immediate $ per visit */
+  revenue_per_visit_cents: number;
+  /** ltv_cents / visit — predicted LTV per visit (Max's north-star metric) */
+  ltv_per_visit_cents: number;
 }
 
 export type FunnelNodeLevel = "product" | "pdp" | "all_landers" | "variant" | "angle";
@@ -186,14 +195,17 @@ export interface FunnelTreeResult {
   /** All included sessions combined (products + unattributed). Reconciles with
    *  the legacy funnel route's top line for the same window. */
   grandTotal: FunnelNodeMetrics;
+  /** The churn basis used for the LTV multiplier — surfaced for auditability
+   *  (which window, what churn, the 1/churn sub multiplier applied). */
+  ltvBasis: ChurnBasis;
 }
 
 // ── internal mutable accumulators ──────────────────────────────────────────
 function zero(): FunnelStepCounts {
-  return { visit: 0, engaged: 0, pack_selected: 0, checkout_started: 0, order_placed: 0, add_to_cart: 0 };
+  return { visit: 0, engaged: 0, pack_selected: 0, checkout_started: 0, order_placed: 0, add_to_cart: 0, revenue_cents: 0, ltv_cents: 0 };
 }
 function addInto(target: FunnelStepCounts, reached: Set<keyof FunnelStepCounts>) {
-  for (const step of reached) target[step] += 1;
+  for (const step of reached) target[step] += 1; // reached only ever holds step keys
 }
 function sumInto(target: FunnelStepCounts, src: FunnelStepCounts) {
   target.visit += src.visit;
@@ -202,6 +214,8 @@ function sumInto(target: FunnelStepCounts, src: FunnelStepCounts) {
   target.checkout_started += src.checkout_started;
   target.order_placed += src.order_placed;
   target.add_to_cart += src.add_to_cart;
+  target.revenue_cents += src.revenue_cents;
+  target.ltv_cents += src.ltv_cents;
 }
 function rate(n: number, d: number): number {
   return d > 0 ? Math.round((n / d) * 1000) / 1000 : 0;
@@ -212,6 +226,8 @@ function metricsOf(c: FunnelStepCounts): FunnelNodeMetrics {
     engagement_rate: rate(c.engaged, c.visit),
     conversion_rate: rate(c.order_placed, c.visit),
     atc_rate: rate(c.add_to_cart, c.visit),
+    revenue_per_visit_cents: c.visit > 0 ? Math.round(c.revenue_cents / c.visit) : 0,
+    ltv_per_visit_cents: c.visit > 0 ? Math.round(c.ltv_cents / c.visit) : 0,
   };
 }
 
@@ -271,6 +287,9 @@ export interface FunnelTreeArgs {
   endIso: string;
   /** Optional product slice — a `products.handle`. Omit/null for All products. */
   productHandle?: string | null;
+  /** Churn window for the LTV sub-multiplier. Default 6 (trailing 6mo, responsive
+   *  to retention). Pass null for all-history (ROAS margin-calc parity). */
+  churnTrailingMonths?: number | null;
   /** Optional traffic-source slice — a `utm_source` value, or DIRECT_UTM for
    *  sessions with no utm_source. Omit/null for All sources. Composes with
    *  productHandle (a session must pass both). */
@@ -333,8 +352,31 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     set.add(step);
   }
 
+  // ── LTV basis (churn) + per-session order revenue/ltv ─────────────────────
+  // Sub multiplier = 1/churn (trailing window by default — responsive to
+  // retention). orders.session_id links the storefront order to its session.
+  const ltvBasis = await getMonthlyChurn({ admin, workspaceId, trailingMonths: args.churnTrailingMonths });
+  const subLO = ltvBasis.sub_lifetime_orders;
+
   // ── fetch the visit-universe sessions (batched) ───────────────────────────
   const sessionIds = [...visitSessions];
+  const orderBySession = new Map<string, { rev: number; ltv: number }>();
+  for (let i = 0; i < sessionIds.length; i += 300) {
+    const { data } = await admin
+      .from("orders")
+      .select("session_id, total_cents, subscription_id")
+      .eq("workspace_id", workspaceId)
+      .in("session_id", sessionIds.slice(i, i + 300));
+    for (const o of data || []) {
+      const sid = o.session_id as string;
+      const cents = Number(o.total_cents) || 0;
+      const isSub = !!o.subscription_id;
+      const cur = orderBySession.get(sid) || { rev: 0, ltv: 0 };
+      cur.rev += cents;
+      cur.ltv += cents * (isSub ? subLO : 1);
+      orderBySession.set(sid, cur);
+    }
+  }
   const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null; utm_source: string | null; referrer: string | null }>();
   for (let i = 0; i < sessionIds.length; i += 300) {
     const chunk = sessionIds.slice(i, i + 300);
@@ -380,8 +422,12 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     const { segments, variant, angle } = parseLanding(s.landing_url);
     const handle = resolveHandle(segments, handleSet);
 
+    const ov = orderBySession.get(sid);
+    const addRevLtv = (t: FunnelStepCounts) => { if (ov) { t.revenue_cents += ov.rev; t.ltv_cents += Math.round(ov.ltv); } };
+
     if (!handle) {
       addInto(unattributed, reached);
+      addRevLtv(unattributed);
       unattributedHasAny = true;
       continue;
     }
@@ -393,6 +439,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     if (!variant) {
       // no variant param → bare PDP leaf
       addInto(acc.pdp, reached);
+      addRevLtv(acc.pdp);
     } else {
       let variantMap = acc.variants.get(variant);
       if (!variantMap) { variantMap = new Map(); acc.variants.set(variant, variantMap); }
@@ -400,6 +447,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
       let leaf = variantMap.get(angleKey);
       if (!leaf) { leaf = zero(); variantMap.set(angleKey, leaf); }
       addInto(leaf, reached);
+      addRevLtv(leaf);
     }
   }
 
@@ -500,6 +548,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     products: productNodes,
     unattributedEntry,
     grandTotal: metricsOf(grand),
+    ltvBasis,
   };
 }
 

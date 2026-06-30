@@ -86,6 +86,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     products: tree.products,
     unattributedEntry: tree.unattributedEntry,
     grandTotal: tree.grandTotal,
+    ltvBasis: tree.ltvBasis,
     productOptions: sliceOptions.productOptions,
     utmSourceOptions: sliceOptions.utmSourceOptions,
     referrerOptions: sliceOptions.referrerOptions,

@@ -26,6 +26,8 @@ interface TreeMetrics {
   visit: number; engaged: number; pack_selected: number; checkout_started: number;
   order_placed: number; add_to_cart: number;
   engagement_rate: number; conversion_rate: number; atc_rate: number;
+  revenue_cents: number; ltv_cents: number;
+  revenue_per_visit_cents: number; ltv_per_visit_cents: number;
 }
 interface TreeNode {
   level: "product" | "pdp" | "all_landers" | "variant" | "angle";
@@ -40,6 +42,7 @@ interface FunnelTreeResponse {
   products: TreeNode[];
   unattributedEntry: TreeNode | null;
   grandTotal: TreeMetrics;
+  ltvBasis: { monthly_churn: number; sub_lifetime_orders: number; months_used: number; window: string };
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
   referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
@@ -121,6 +124,7 @@ function flattenTree(nodes: TreeNode[], expanded: Set<string>, depth = 0, parent
   return rows;
 }
 function pctStr(x: number) { return (x * 100).toFixed(1) + "%"; }
+function money(cents: number) { return "$" + (cents / 100).toFixed(2); }
 
 // ── Chapter diagnostics (the "why") — per-destination chapter sequence ──────
 interface ChapterDiagRow {
@@ -250,7 +254,8 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
           <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Funnel by product &amp; concept</h2>
           {tree && (
             <p className="mt-1 text-xs text-zinc-400">
-              Bare PDP vs targeted landers, rolled up per product. {tree.grandTotal.visit.toLocaleString()} visits · {pctStr(tree.grandTotal.conversion_rate)} CVR · {tree.range.start} → {tree.range.end}
+              Bare PDP vs targeted landers, rolled up per product. {tree.grandTotal.visit.toLocaleString()} visits · {pctStr(tree.grandTotal.conversion_rate)} CVR · <strong className="text-zinc-500 dark:text-zinc-300">{money(tree.grandTotal.ltv_per_visit_cents)} LTV/visit</strong> · {tree.range.start} → {tree.range.end}
+              <span className="ml-1 text-zinc-400">· LTV: subs ×{tree.ltvBasis.sub_lifetime_orders.toFixed(1)} ({(tree.ltvBasis.monthly_churn * 100).toFixed(1)}% churn, {tree.ltvBasis.window})</span>
             </p>
           )}
         </div>
@@ -272,11 +277,13 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                 <th className="py-2 text-right font-medium">Orders</th>
                 <th className="py-2 text-right font-medium">Eng %</th>
                 <th className="py-2 text-right font-medium">CVR</th>
+                <th className="py-2 text-right font-medium">Rev/visit</th>
+                <th className="py-2 text-right font-medium">LTV/visit</th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={8} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
+                <tr><td colSpan={10} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
               )}
               {rows.map(({ node, depth, path, hasChildren, isOpen }) => {
                 const m = node.metrics;
@@ -309,6 +316,8 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                     <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.order_placed.toLocaleString()}</td>
                     <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{pctStr(m.engagement_rate)}</td>
                     <td className={"py-1.5 text-right tabular-nums font-medium " + (m.conversion_rate > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{pctStr(m.conversion_rate)}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{money(m.revenue_per_visit_cents)}</td>
+                    <td className={"py-1.5 text-right tabular-nums font-semibold " + (m.ltv_per_visit_cents > 0 ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-400")}>{money(m.ltv_per_visit_cents)}</td>
                   </tr>
                 );
               })}
