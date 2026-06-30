@@ -399,3 +399,324 @@ export async function readStorefrontMarginalLeverage(params: {
   const scored = scoreStorefrontMarginalLeverage({ experiments });
   return { ...scored, flags: [...flags, ...scored.flags] };
 }
+
+// ── Phase 2 — Allocation decision composer ───────────────────────────────────────
+//
+// Pure composer that maps the M2 blended objective + each tool's marginal-leverage
+// signal + the current ad-spend ceiling state into ONE typed AllocationDecision.
+// No DB calls — the caller fans out [[./blended-cac-ltv]] + the Phase-1 readers
+// + [[./ad-spend-governor]] `getEffectiveAdSpendBudget`/`rollupAdSpendActual` and
+// hands the assembled snapshot in. Phase 3 stamps `director_activity` per kind
+// (`allocated_spend` / `escalated_ceiling_raise` / `allocation_no_useful_lever`)
+// and routes `escalate_*` to `escalateDiagnosisToCeo`.
+//
+// Decision rules — the supervisable-autonomy spine (operational-rules § north star:
+// hit a rail → escalate, never execute):
+//   1. No useful lever on either side → `no_useful_lever`; UNLESS the ceiling is
+//      tapped AND blended is healthy → `escalate_new_platform` (we'd love to spend
+//      more but neither tool can absorb it — that's the CEO's "open a new channel"
+//      call, never the director's).
+//   2. Meta is the candidate AND its marginal ROAS would DEGRADE the blended target
+//      (estimated_marginal_roas < blended.targetCacLtv) → `hold`. This is the
+//      explicit Goodhart guard from M2 — a tool's local win that hurts the
+//      single TOP-LINE is rejected, not executed.
+//   3. Meta is the candidate AND the proposed scale-up step would EXCEED the
+//      effective `ad_spend_budgets` ceiling → `escalate_ceiling_raise`. Within-
+//      ceiling is the director's leash; raising it is the CEO's call (mirrors
+//      [[./ad-spend-governor]]).
+//   4. Meta candidate, accretive to blended, within ceiling → `reallocate_within_ceiling`
+//      typed for the [[../tables/iteration_policies]] path (a scale_up of the cited
+//      scorecard/recommendation object).
+//   5. Storefront candidate (no ad-spend ceiling involved) → `reallocate_within_ceiling`
+//      typed for the [[../tables/storefront_optimizer_policy]] path (promote the
+//      winning bandit variant).
+
+/** Default scale-up step (10% of the current rolling-window spend) when the caller
+ *  doesn't pass a `proposedDeltaCents` override. Mirrors the spirit of
+ *  [[../tables/iteration_policies]] `scale_up_step_pct` without coupling the pure
+ *  composer to that table — Phase 3's wiring may pass the active policy's value. */
+export const DEFAULT_ALLOCATION_SCALE_UP_STEP_PCT = 0.1;
+
+/** The slice of [[./blended-cac-ltv]] `BlendedCacLtvResult` the composer reads — the
+ *  ratio + its target. Defined here so the composer's input type stays decoupled from
+ *  the M2 helper's full result shape. */
+export interface AllocationBlendedSnapshot {
+  /** blendedLtvCents / blendedCAC; `null` when no new customers / no spend in window. */
+  cacLtvRatio: number | null;
+  /** The target setpoint from `assumptions.targetCacLtv` (default 3 from M2 — healthy DTC). */
+  targetCacLtv: number;
+}
+
+/** Ceiling-side snapshot for the workspace × ad-account axis the composer is deciding on.
+ *  Caller assembles this from [[./ad-spend-governor]] `getEffectiveAdSpendBudget` +
+ *  `rollupAdSpendActual`. `ceilingCents=null` ⇒ no budget row set (the composer treats
+ *  any Meta scale-up as in-leash but flags the missing ceiling). */
+export interface AllocationCeilingState {
+  platform: "meta" | "google" | "amazon";
+  metaAdAccountId: string | null;
+  windowDays: number;
+  /** Effective rolling-window ceiling for the platform/account. `null` when unset. */
+  ceilingCents: number | null;
+  /** Sum of actual spend over the same window (today, UTC). */
+  currentSpendCents: number;
+  /** Override for the proposed Meta scale-up delta in cents. When omitted the composer
+   *  derives it as `round(currentSpendCents * DEFAULT_ALLOCATION_SCALE_UP_STEP_PCT)`,
+   *  floored at 1 cent so a from-zero spend can still propose a $X test budget. */
+  proposedDeltaCents?: number;
+}
+
+export type AllocationDecisionKind =
+  | "reallocate_within_ceiling"
+  | "hold"
+  | "no_useful_lever"
+  | "escalate_ceiling_raise"
+  | "escalate_new_platform";
+
+/** Typed Meta side-lever for the [[../tables/iteration_policies]] path. */
+export interface AllocationMetaLever {
+  tool: "meta";
+  action: "scale_up";
+  /** The scorecard row the decision cites (when sourced from `scorecard_scale_up`). */
+  scorecard_id?: string;
+  /** The pending recommendation row (when sourced from `pending_recommendation`). */
+  recommendation_id?: string;
+  meta_ad_account_id: string | null;
+  object_id?: string;
+  label?: string | null;
+}
+
+/** Typed Storefront side-lever for the [[../tables/storefront_optimizer_policy]] path. */
+export interface AllocationStorefrontLever {
+  tool: "storefront";
+  action: "promote";
+  experiment_id: string;
+  variant_id: string;
+  lever: string;
+  lander_type: string;
+}
+
+export type AllocationLever = AllocationMetaLever | AllocationStorefrontLever;
+
+/** The evidence the composer is leaning on — a flat ledger of every signal the input
+ *  carried, plus a `tool` tag so a downstream board can render per-side. */
+export interface AllocationDecisionEvidence {
+  tool: "meta" | "storefront" | "ceiling" | "blended";
+  rationale: string;
+  /** A primitive numeric the decision was leaning on (marginal ROAS, expected_lift cents, etc). */
+  value?: number;
+  /** Cite-back identifiers (scorecard_id / recommendation_id / experiment_id / variant_id, etc). */
+  source_ids?: Record<string, string | null>;
+}
+
+export interface AllocationDecision {
+  kind: AllocationDecisionKind;
+  rationale: string;
+  /** Set when `kind='reallocate_within_ceiling'`. */
+  toLever?: AllocationLever;
+  /** Cents moved (Meta scale-up) — set with `toLever.tool='meta'`. Storefront promotes carry no spend. */
+  amountCents?: number;
+  /** The Meta ad-account the move is sourced from (for an account-scoped Meta move). */
+  fromAccountId?: string;
+  evidence: AllocationDecisionEvidence[];
+  /** Non-blocking caveats (no ceiling row set, mixed assumptions, etc). */
+  flags: string[];
+}
+
+export interface ComposeAllocationDecisionParams {
+  workspaceId: string;
+  blended: AllocationBlendedSnapshot;
+  metaSignal: MetaMarginalLeverageResult;
+  storefrontSignal: StorefrontMarginalLeverageResult;
+  ceilingState: AllocationCeilingState;
+  /** Override the default 10% scale-up step. */
+  scaleUpStepPct?: number;
+}
+
+function bestMetaEvidence(metaSignal: MetaMarginalLeverageResult): MetaLeverageEvidence | null {
+  if (!metaSignal.evidence.length) return null;
+  return metaSignal.evidence.reduce((best, e) =>
+    e.estimated_marginal_roas > best.estimated_marginal_roas ? e : best,
+  );
+}
+
+function bestStorefrontEvidence(s: StorefrontMarginalLeverageResult): StorefrontLeverageEvidence | null {
+  if (!s.evidence.length) return null;
+  return s.evidence.reduce((best, e) => (e.expected_lift_cents > best.expected_lift_cents ? e : best));
+}
+
+function deriveProposedDelta(ceiling: AllocationCeilingState, stepPct: number): number {
+  if (ceiling.proposedDeltaCents != null) return Math.max(0, Math.round(ceiling.proposedDeltaCents));
+  return Math.max(1, Math.round(ceiling.currentSpendCents * stepPct));
+}
+
+function blendedHealthy(blended: AllocationBlendedSnapshot): boolean {
+  return blended.cacLtvRatio != null && blended.cacLtvRatio >= blended.targetCacLtv;
+}
+
+/**
+ * Compose ONE typed `AllocationDecision` from the M2 blended objective + each tool's
+ * marginal-leverage signal + the current ad-spend ceiling state. Pure — see file
+ * header for the decision rules. Phase 3 wires this into `runGrowthDirectorJob` and
+ * stamps `director_activity` per kind.
+ */
+export function composeAllocationDecision(params: ComposeAllocationDecisionParams): AllocationDecision {
+  const { blended, metaSignal, storefrontSignal, ceilingState } = params;
+  const stepPct = params.scaleUpStepPct ?? DEFAULT_ALLOCATION_SCALE_UP_STEP_PCT;
+  const evidence: AllocationDecisionEvidence[] = [];
+  const flags: string[] = [];
+
+  // Surface the blended snapshot up front — every decision's first cite is the top-line ratio.
+  evidence.push({
+    tool: "blended",
+    rationale:
+      blended.cacLtvRatio == null
+        ? `blended CAC:LTV ratio undefined this window (target ${blended.targetCacLtv.toFixed(2)}×)`
+        : `blended CAC:LTV ratio ${blended.cacLtvRatio.toFixed(2)}× vs ${blended.targetCacLtv.toFixed(2)}× target`,
+    value: blended.cacLtvRatio ?? undefined,
+  });
+
+  // Ceiling snapshot — every Meta-side branch reads it.
+  evidence.push({
+    tool: "ceiling",
+    rationale:
+      ceilingState.ceilingCents == null
+        ? `no ad_spend_budgets ceiling set for ${ceilingState.platform}${ceilingState.metaAdAccountId ? `/${ceilingState.metaAdAccountId}` : ""}`
+        : `${ceilingState.platform}${ceilingState.metaAdAccountId ? `/${ceilingState.metaAdAccountId}` : ""} ${ceilingState.windowDays}d window: $${(ceilingState.currentSpendCents / 100).toFixed(2)} actual vs $${(ceilingState.ceilingCents / 100).toFixed(2)} ceiling`,
+    value: ceilingState.ceilingCents ?? undefined,
+  });
+  if (ceilingState.ceilingCents == null) {
+    flags.push("no_ceiling_set");
+  }
+
+  const meta = bestMetaEvidence(metaSignal);
+  const sf = bestStorefrontEvidence(storefrontSignal);
+  const metaHasSignal = meta != null && (metaSignal.metaScore ?? 0) > 0;
+  const storefrontHasSignal = sf != null;
+
+  // Roll the per-side signal flags up so the activity ledger sees them.
+  for (const f of metaSignal.flags) flags.push(`meta: ${f}`);
+  for (const f of storefrontSignal.flags) flags.push(`storefront: ${f}`);
+
+  // ── 1. No useful lever ─────────────────────────────────────────────────────────
+  if (!metaHasSignal && !storefrontHasSignal) {
+    const ceilingTapped =
+      ceilingState.ceilingCents != null && ceilingState.currentSpendCents >= ceilingState.ceilingCents;
+    if (ceilingTapped && blendedHealthy(blended)) {
+      return {
+        kind: "escalate_new_platform",
+        rationale:
+          `Neither Meta nor Storefront has a useful next-dollar lever, blended CAC:LTV is healthy (${blended.cacLtvRatio?.toFixed(2)}× ≥ ${blended.targetCacLtv.toFixed(2)}×), and the ${ceilingState.platform} ceiling is fully tapped — escalating to the CEO to open a new acquisition channel.`,
+        evidence,
+        flags,
+      };
+    }
+    return {
+      kind: "no_useful_lever",
+      rationale:
+        `Neither Meta nor Storefront surfaced a marginal-leverage signal this pass — holding without action${ceilingTapped ? " (ceiling tapped)" : ""}.`,
+      evidence,
+      flags,
+    };
+  }
+
+  // ── 2. Goodhart guard — a Meta scale-up that DEGRADES the blended is rejected ──
+  // Only relevant when Meta is the candidate; if storefront also has a usable lever,
+  // we fall through and prefer storefront below.
+  const metaDegradesBlended =
+    metaHasSignal && meta != null && meta.estimated_marginal_roas < blended.targetCacLtv;
+
+  if (metaHasSignal && meta != null) {
+    evidence.push({
+      tool: "meta",
+      rationale: `Meta marginal lever: ${meta.rationale}`,
+      value: meta.estimated_marginal_roas,
+      source_ids: {
+        scorecard_id: meta.scorecard_id ?? null,
+        recommendation_id: meta.recommendation_id ?? null,
+        object_id: meta.object_id ?? null,
+      },
+    });
+  }
+  if (storefrontHasSignal && sf != null) {
+    evidence.push({
+      tool: "storefront",
+      rationale: `Storefront marginal lever: ${sf.rationale}`,
+      value: sf.expected_lift_cents,
+      source_ids: { experiment_id: sf.experiment_id, variant_id: sf.winning_variant_id },
+    });
+  }
+
+  // ── 3 + 4. Meta candidate path ─────────────────────────────────────────────────
+  // Prefer Meta unless it would degrade blended (and storefront has nothing). If meta
+  // degrades AND storefront has a useful lever, we fall through to storefront.
+  if (metaHasSignal && meta != null && !metaDegradesBlended) {
+    const proposedDeltaCents = deriveProposedDelta(ceilingState, stepPct);
+    const wouldBreachCeiling =
+      ceilingState.ceilingCents != null &&
+      ceilingState.currentSpendCents + proposedDeltaCents > ceilingState.ceilingCents;
+
+    if (wouldBreachCeiling) {
+      const overshootCents =
+        ceilingState.currentSpendCents + proposedDeltaCents - (ceilingState.ceilingCents ?? 0);
+      return {
+        kind: "escalate_ceiling_raise",
+        rationale:
+          `Meta has a high-leverage scale-up (${meta.rationale}), but the proposed +$${(proposedDeltaCents / 100).toFixed(2)} step would push the ${ceilingState.windowDays}d window $${(overshootCents / 100).toFixed(2)} over the $${((ceilingState.ceilingCents ?? 0) / 100).toFixed(2)} ceiling. Director's leash: raising the ceiling is the CEO's call.`,
+        fromAccountId: ceilingState.metaAdAccountId ?? undefined,
+        amountCents: proposedDeltaCents,
+        evidence,
+        flags,
+      };
+    }
+
+    return {
+      kind: "reallocate_within_ceiling",
+      rationale:
+        `Meta scale-up is accretive to the blended target (marginal ${meta.estimated_marginal_roas.toFixed(2)}× ≥ ${blended.targetCacLtv.toFixed(2)}× target) and within the ${ceilingState.windowDays}d ceiling — moving +$${(proposedDeltaCents / 100).toFixed(2)} via iteration_policies (scale_up).`,
+      toLever: {
+        tool: "meta",
+        action: "scale_up",
+        scorecard_id: meta.scorecard_id,
+        recommendation_id: meta.recommendation_id,
+        meta_ad_account_id: ceilingState.metaAdAccountId,
+        object_id: meta.object_id,
+        label: meta.label,
+      },
+      fromAccountId: ceilingState.metaAdAccountId ?? undefined,
+      amountCents: proposedDeltaCents,
+      evidence,
+      flags,
+    };
+  }
+
+  // ── 5. Storefront candidate path ───────────────────────────────────────────────
+  if (storefrontHasSignal && sf != null) {
+    return {
+      kind: "reallocate_within_ceiling",
+      rationale:
+        `Storefront has the strongest within-ceiling lever today (${sf.rationale}) — promoting via storefront_optimizer_policy.` +
+        (metaDegradesBlended
+          ? ` Meta's surfaced lever (marginal ${meta?.estimated_marginal_roas.toFixed(2)}×) was rejected as a Goodhart move — it would degrade the ${blended.targetCacLtv.toFixed(2)}× blended target.`
+          : ""),
+      toLever: {
+        tool: "storefront",
+        action: "promote",
+        experiment_id: sf.experiment_id,
+        variant_id: sf.winning_variant_id,
+        lever: sf.lever,
+        lander_type: sf.lander_type,
+      },
+      evidence,
+      flags,
+    };
+  }
+
+  // Meta had signal but it degrades blended; storefront has nothing usable → hold.
+  return {
+    kind: "hold",
+    rationale:
+      `Meta's only candidate lever (marginal ${meta?.estimated_marginal_roas.toFixed(2)}×) is below the ${blended.targetCacLtv.toFixed(2)}× blended target — scaling it would DEGRADE the top-line, so holding rather than executing the proxy win (Goodhart guard).`,
+    evidence,
+    flags,
+  };
+}
