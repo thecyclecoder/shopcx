@@ -1,0 +1,15 @@
+# Fires the box crash-loop watchdog every 60s. This timer is what you `enable --now`.
+# See docs/brain/recipes/build-box-setup.md § Box crash-loop watchdog for install steps.
+[Unit]
+Description=Run the ShopCX box crash-loop watchdog every minute
+
+[Timer]
+# First run 30s after boot, then every 60s. Persistent so a missed window (box asleep) fires on resume.
+OnBootSec=30
+OnUnitActiveSec=60
+AccuracySec=5s
+Persistent=true
+Unit=shopcx-box-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -122,6 +122,48 @@ RestartSec=5
 
 **Bootstrapping:** self-update ships in `builder-worker.ts` itself, so the **one last manual redeploy** (the command above) activates it; every redeploy after that is automatic.
 
+## Box crash-loop watchdog (box-crash-loop-watchdog)
+
+**The incident this exists for:** the worker crash-looped for **~5 HOURS** on a syntax error, **completely unnoticed**. `systemctl restart` returns success when it *issues* the restart, **not** when the worker comes up healthy — so every restart looked fine while the service `activating → failed → auto-restart` looped (restart counter climbed to **11**). The worker's OWN crash-loop guard (`recordStartupAttempt`, § Worker self-update) **can't catch a parse error**: a syntax/esbuild error kills the module *before* `main()` runs, so the per-SHA counter never increments and nothing parks it. A bad commit to `main` reaches the box via the idle self-update (`git reset --hard origin/main`), so any merge can crash-loop the box.
+
+The watchdog is a **separate, dead-simple monitor that runs from OUTSIDE the worker** (its own systemd timer, **every 60s**) so it **survives a worker crash**. It does NOT modify the worker (monitors it from outside). Entrypoint: **`scripts/box-watchdog.ts`** (parse-gated in [scripts/_check-box-parses.ts](../../../scripts/_check-box-parses.ts), like every box tsx entrypoint). State persists in **`/home/builder/.box-watchdog.json`**.
+
+**1. Detect — crash-loop vs. a normal self-update restart.** Each tick reads `systemctl is-active shopcx-builder` + the last **6 min** of `journalctl -u shopcx-builder` and counts **FAILURE exits** (`Main process exited, code=exited, status=N/FAILURE`, N≠0) + the max `restart counter is at N` + the latest `builder-worker up — … @ <sha>` line + a captured Node/esbuild **error line** (the cause). The discriminator:
+- A **self-update restart** is a CLEAN `exit(0)` → systemd logs "Deactivated successfully"/"Stopped", **never** `status=1/FAILURE`, then a fresh `up —` line + `is-active=active`. So `failureCount` stays **0** and the tick reads **healthy** — never acted on.
+- A **crash-loop** is repeated `status=1/FAILURE` + a climbing restart counter with **no** `up —` line after the failures (it dies before booting). **Confirmed** = `≥ CRASH_FAILURES (3)` FAILURE exits within 6 min, OR `≥ UNHEALTHY_CONSEC (3)` consecutive unhealthy watchdog ticks, OR the box is back on the quarantined bad SHA. A **single** clean restart / transient blip is "unhealthy but UNCONFIRMED" → it waits, does not alert/roll back.
+
+**2. Alert the CEO LOUDLY (fires even if the worker is down — own process + DB).** On a confirmed crash-loop it opens ONE critical **`loop_alerts`** row (`loop_id='box-crash-loop'`, `owner='platform'`, `kind='worker'`, `reason='crash_loop'`, `signature='box_crash_loop:<sha>'` — distinct `loop_id` from the registry `'box'` loop, so the [[../inngest/control-tower-monitor]] never fights it, same self-managed pattern as kpi-drift) carrying the **failing SHA + the esbuild/Node error**, AND a CEO-routed **`dashboard_notifications`** row (`type='system'`, de-duped per failing SHA via `metadata.dedupe_key`, workspace resolved from the latest `agent_jobs` row — the build-console workspace). The alert refreshes while open and **auto-resolves** when the box is healthy again.
+
+**3. Auto-roll-back to last-known-good.** **Known-good** = the SHA from the most recent `builder-worker up — … @ <sha>` line (fallback: live `HEAD`), persisted **only** on a tick the box is confirmed healthy — so even a 5h crash-loop window with no `up —` line still has a durable rollback target. On a confirmed crash-loop the watchdog does `git reset --hard <good-sha>` (in `/home/builder/shopcx`, as the `builder` user via `runuser`) + `systemctl restart shopcx-builder`, then **VERIFIES** it came up healthy (`is-active=active` + a fresh `up —` line within ~15s). It does **NOT revert `main`** — only the box's checkout — so the CEO still sees + fixes the bad commit. The rollback runs **before** the DB alert (survival first; a Supabase outage never blocks it).
+- **Self-update race (important).** The worker self-updates its checkout back to `origin/main` when idle (`maybeSelfUpdate`) and there is **no hold/pin switch** (the worker is out of scope to edit). So after a rollback the worker re-pulls the bad SHA within one idle cycle and crashes again. The watchdog therefore **QUARANTINES** the bad SHA: every subsequent tick, if `HEAD` is back on the quarantined SHA it **immediately re-rolls** to known-good. Net: the box runs good code the vast majority of the time (oscillating only for the seconds between a worker re-pull and the next 60s tick) and stays loudly alerted, until the CEO fixes `main` — then the box self-updates to the new good SHA, and the watchdog **clears quarantine + resolves the alert**. The clean permanent fix is a worker-side `WORKER_PIN_SHA` env that `maybeSelfUpdate` respects (a follow-up; the watchdog must not edit the worker).
+
+**4. Verify-after-restart helper (the discipline gap that hid the 5h outage).** `npx tsx scripts/box-watchdog.ts --verify` confirms the worker actually came up healthy (`is-active=active` + the `up —` heartbeat within ~15s) and exits `0`/`1` (prints `HEALTHY`/`UNHEALTHY`). Run it after ANY manual restart/redeploy so a deploy can't "succeed" while the worker is dead:
+```bash
+sudo -u builder git -C /home/builder/shopcx fetch origin && sudo -u builder git -C /home/builder/shopcx reset --hard origin/main && systemctl restart shopcx-builder && \
+  tsx /home/builder/shopcx/scripts/box-watchdog.ts --verify   # ← exits non-zero if the worker didn't come up healthy
+```
+
+### Install on the box (deploy step — owner op, run once as root over the tailnet)
+
+The watchdog ships in-repo (`scripts/box-watchdog.ts` + the units under `ops/systemd/`) but the systemd **timer must be installed on the box** — it is NOT auto-deployed by the worker self-update. One-time:
+```bash
+# tsx + the repo are already present (the worker uses them). Install the unit + timer:
+cp /home/builder/shopcx/ops/systemd/shopcx-box-watchdog.service /etc/systemd/system/
+cp /home/builder/shopcx/ops/systemd/shopcx-box-watchdog.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now shopcx-box-watchdog.timer    # enable the TIMER (the .service is Type=oneshot — never enable it directly)
+# Verify it fires + reads healthy:
+systemctl start shopcx-box-watchdog.service && journalctl -u shopcx-box-watchdog -n 20 --no-pager   # expect "[watchdog] healthy — active, 0 failures…"
+systemctl list-timers shopcx-box-watchdog.timer
+```
+The `.service` uses the **same `EnvironmentFile=/root/shopcx-worker.env`** as the worker (it needs the Supabase service role to write `loop_alerts`/`dashboard_notifications`). It runs as **root** (for `systemctl restart` + `journalctl`); the repo `git reset` drops to the `builder` user via `runuser` (correct git ownership). Code changes to `scripts/box-watchdog.ts` reach the box via the worker's normal self-update of the repo, so only a change to the **unit files themselves** needs a re-`cp` + `daemon-reload`.
+
+### How it's verified (detect / known-good / no-false-positive)
+
+- **Healthy worker / single clean restart → no action.** A self-update is a clean `exit(0)` (no FAILURE line) so the tick reads healthy; a lone transient failure is "UNCONFIRMED" (1 < 3 failures, consec < 3) and only waits. Neither alerts nor rolls back.
+- **Simulated crash-loop → alert + rollback fire.** ≥3 FAILURE exits in 6 min (or 3 consecutive unhealthy ticks) → confirmed → it opens the critical `loop_alerts` row + the CEO notification with the failing SHA + error, rolls the checkout to the persisted known-good SHA, restarts, and verifies. A safe simulation: temporarily point the watchdog at a throwaway unit (`WATCHDOG_SERVICE`/`WATCHDOG_REPO_DIR` envs) that runs a script which `exit 1`s on boot, or merge a known-bad commit to a test branch the box tracks — never test against live `main`.
+- **Known-good is durable + correct.** It's only ever recorded on a *confirmed-healthy* tick (active + 0 failures), parsed from the `up —` line the worker logs at boot, so it can't be poisoned by the crash-looping SHA (which never logs `up —`).
+
 ## Startup orphan-reaper (worker-orphan-reaper, shipped 2026-06)
 
 A restart — self-update (`git reset --hard origin/main` + `exit(0)`), deploy, or crash — abandons any job the old instance had **in flight** (`building`/`claimed`/`queued_resume`). The new worker only claims `queued`, so those rows sit in `building` **forever**, never completing and tripping the Control Tower's "N jobs stuck in building past 60m" alert (observed live: 7 spec-test jobs piled up across several deploys in one session). So **`reapOrphans()` runs in `main()` before the poll loop** — best-effort (wrapped so a reaper failure never blocks startup), idempotent (a clean boot with nothing orphaned is a no-op), and **cutoff-gated**: it only touches jobs `claimed_at < WORKER_STARTED_AT` (the heartbeat `started_at`), so nothing the *current* instance owns is ever mid-build-killed.
