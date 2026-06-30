@@ -24,6 +24,7 @@ import { gradeCampaign } from "@/lib/storefront/campaign-grader";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 import { isEdgeConfigWriteConfigured } from "@/lib/storefront/experiment-manifest";
 import { expireRenewalOffers, rollbackRenewalOffersForExperiment } from "@/lib/storefront/optimizer-agent";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
  *  regression window. */
@@ -188,14 +189,32 @@ export async function refreshStorefrontExperiments(opts: {
       // rollups exist (variant rows are present) but the delivery signals are silent,
       // so the bandit would be acting on suspect data. Hold + leave `last_decision`
       // untouched so the flag persists for the Director brief + downstream consumers.
+      // Spec Phase 3 (growth-adopt-storefront-optimizer) — record a
+      // `blocked_promote_undelivered` director_activity row so the refusal surfaces on
+      // the brief instead of being silent.
       if ((exp.last_decision as { delivery_flag?: string } | null)?.delivery_flag === "failed_to_deliver") {
         counts.held++;
         decisions.push({
           experiment_id: experimentId,
           action: "hold",
           win_prob: null,
-          rule: "failed_to_deliver",
+          rule: "blocked_promote_undelivered",
           posteriors: null,
+        });
+        await recordDirectorActivity(admin, {
+          workspaceId: opts.workspaceId,
+          directorFunction: "growth",
+          actionKind: "blocked_promote_undelivered",
+          specSlug: null,
+          reason: `storefront experiment ${experimentId} (${exp.lander_type}) carries last_decision.delivery_flag='failed_to_deliver' — refresh refused promote/kill until the delivery audit clears`,
+          metadata: {
+            experiment_id: experimentId,
+            lander_type: exp.lander_type,
+            audience: exp.audience,
+            lever: exp.lever,
+            product_id: exp.product_id,
+            run_id: runId,
+          },
         });
         continue;
       }
