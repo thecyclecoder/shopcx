@@ -26,6 +26,10 @@
  * See docs/brain/specs/growth-allocation-brain.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { recordDirectorActivity } from "@/lib/director-activity";
+import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
+import { getEffectiveAdSpendBudget, rollupAdSpendActual } from "@/lib/ad-spend-governor";
+import { computeBlendedCacLtv } from "@/lib/blended-cac-ltv";
 
 // ── Shared types ─────────────────────────────────────────────────────────────────
 
@@ -718,5 +722,246 @@ export function composeAllocationDecision(params: ComposeAllocationDecisionParam
       `Meta's only candidate lever (marginal ${meta?.estimated_marginal_roas.toFixed(2)}×) is below the ${blended.targetCacLtv.toFixed(2)}× blended target — scaling it would DEGRADE the top-line, so holding rather than executing the proxy win (Goodhart guard).`,
     evidence,
     flags,
+  };
+}
+
+// ── Phase 3 — director_activity stamp + box-lane wiring ──────────────────────────
+//
+// One end-to-end "daily Growth Director allocation pass" per (workspace, ad-account).
+// Composes the cross-tool decision and stamps the supervisable-autonomy ledger so the
+// share of autonomous reallocations is auditable — the success metric the M2 goal names.
+//
+// Steps:
+//   1. Resolve the active `ad_spend_budgets` row for the (workspace, ad-account) →
+//      window length, ceiling cents.
+//   2. Snapshot the blended CAC:LTV objective ([[./blended-cac-ltv]]) for the same
+//      rolling window ending on `snapshotDate`.
+//   3. Read both marginal-leverage signals (Phase 1 readers) and the current rolling
+//      Meta spend ([[./ad-spend-governor]] `rollupAdSpendActual`) for the same window.
+//   4. Compose ONE typed `AllocationDecision` (Phase 2 composer).
+//   5. Write a [[../tables/director_activity]] row (`director_function='growth'`) with
+//      the per-decision `action_kind` (see `allocationDecisionToActionKind`) and the
+//      full `{ decision, evidence, ceiling_state, blended, flags }` metadata.
+//   6. For an `escalate_*` decision, fire `escalateDiagnosisToCeo` so the CEO inbox
+//      lights up (`escalationKind='budget_raise'|'new_platform'`). The platform-director
+//      helper is notification-first + dedupes on `dashboard_notifications.metadata->>dedupe_key`,
+//      so a surfaced escalation pings the CEO exactly once until dismissed.
+//
+// Wired into the existing `meta-iteration-run` Inngest chain as the post-stage-7 step
+// so the allocation decision lands AFTER the iteration engine settles its same-day
+// actions (Phase 6a → 6b → 7 → 8 = this pass).
+
+/** The director_function slug this writer stamps on every activity row. */
+const GROWTH_DIRECTOR_FUNCTION = "growth";
+
+/** Fallback window when no `ad_spend_budgets` row is configured for the account. Mirrors the
+ *  governor's default 7-day rolling window so the blended snapshot + the ceiling state agree. */
+export const ALLOCATION_DEFAULT_WINDOW_DAYS = 7;
+
+/** Deep-link the CEO escalation drops into — mirrors [[./ad-spend-governor]] `AD_SPEND_DEEP_LINK`
+ *  so the same Marketing → Ads surface owns both ceiling-breach + ceiling-raise + new-platform asks. */
+const GROWTH_ALLOCATION_DEEP_LINK = "/dashboard/marketing/ads";
+
+/**
+ * The discriminated `director_activity.action_kind` vocabulary this lane emits. Open vocabulary
+ * (no CHECK on the column) — declared in code so callers + the brain page stay in sync.
+ *
+ * Map AllocationDecisionKind → director_activity row:
+ *   reallocate_within_ceiling  → action_kind: "allocated_spend"
+ *   hold                        → action_kind: "allocation_no_useful_lever" (Goodhart-guarded — same audit
+ *                                  bucket as no_useful_lever; the rationale + flags carry the why)
+ *   no_useful_lever             → action_kind: "allocation_no_useful_lever"
+ *   escalate_ceiling_raise      → action_kind: "escalated_ceiling_raise"  (+ escalationKind 'budget_raise')
+ *   escalate_new_platform       → action_kind: "escalated_new_platform"   (+ escalationKind 'new_platform')
+ */
+export type GrowthAllocationActionKind =
+  | "allocated_spend"
+  | "allocation_no_useful_lever"
+  | "escalated_ceiling_raise"
+  | "escalated_new_platform";
+
+/** The escalation kind the CEO notification carries. Both routes share the Marketing → Ads deep-link;
+ *  only the kind distinguishes "raise an existing ceiling" from "open a new acquisition channel." */
+export type GrowthAllocationEscalationKind = "budget_raise" | "new_platform";
+
+/** Pure: AllocationDecisionKind → the audit-ledger action_kind. */
+export function allocationDecisionToActionKind(kind: AllocationDecisionKind): GrowthAllocationActionKind {
+  switch (kind) {
+    case "reallocate_within_ceiling":
+      return "allocated_spend";
+    case "escalate_ceiling_raise":
+      return "escalated_ceiling_raise";
+    case "escalate_new_platform":
+      return "escalated_new_platform";
+    case "hold":
+    case "no_useful_lever":
+      return "allocation_no_useful_lever";
+  }
+}
+
+/** Pure: AllocationDecisionKind → the CEO `escalationKind` (null when the decision is not an escalation). */
+export function allocationDecisionToEscalationKind(kind: AllocationDecisionKind): GrowthAllocationEscalationKind | null {
+  if (kind === "escalate_ceiling_raise") return "budget_raise";
+  if (kind === "escalate_new_platform") return "new_platform";
+  return null;
+}
+
+export interface RunGrowthAllocationPassParams {
+  workspaceId: string;
+  adAccountId: string;
+  /** The UTC day the iteration engine just settled on — the window endpoint for the blended
+   *  snapshot + the marginal-leverage reads. */
+  snapshotDate: string;
+}
+
+export interface RunGrowthAllocationPassResult {
+  decision: AllocationDecision;
+  /** The action_kind stamped on the director_activity row. */
+  actionKind: GrowthAllocationActionKind;
+  /** Whether the director_activity insert landed (best-effort writer, never throws). */
+  activityRecorded: boolean;
+  /** Set on `escalate_*` kinds — whether the CEO notification was emitted (dedup may swallow). */
+  escalation?: { emitted: boolean; escalationKind: GrowthAllocationEscalationKind };
+  /** The ceiling state the composer reasoned over — handy for callers that log a stage summary. */
+  ceilingState: AllocationCeilingState;
+  /** The blended snapshot the composer reasoned over. */
+  blended: AllocationBlendedSnapshot;
+}
+
+function computeWindowStartDate(snapshotDate: string, windowDays: number): string {
+  const d = new Date(`${snapshotDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - (windowDays - 1));
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * One Growth-Director allocation pass for ONE (workspace, ad-account) snapshot. Composes the
+ * cross-tool decision, stamps the audit ledger, and routes escalations. Best-effort against
+ * transient read errors — every input source has a documented degrade-safely path (no ceiling
+ * row → null + `no_ceiling_set` flag; no signal on either side → `no_useful_lever`).
+ */
+export async function runGrowthAllocationPass(
+  params: RunGrowthAllocationPassParams,
+): Promise<RunGrowthAllocationPassResult> {
+  const admin = createAdminClient();
+  const { workspaceId, adAccountId, snapshotDate } = params;
+
+  // 1. Active Meta ceiling for this (workspace, ad-account) — windowDays + ceilingCents.
+  let ceilingCents: number | null = null;
+  let windowDays = ALLOCATION_DEFAULT_WINDOW_DAYS;
+  try {
+    const budget = await getEffectiveAdSpendBudget(admin, workspaceId, {
+      platform: "meta",
+      metaAdAccountId: adAccountId,
+    });
+    if (budget) {
+      ceilingCents = budget.usdCeilingCents;
+      windowDays = budget.windowDays;
+    }
+  } catch {
+    /* degrade-safely: composer will flag `no_ceiling_set` */
+  }
+
+  // 2-3. Parallel reads — blended snapshot, both marginal-leverage readers, current rolling spend.
+  const startDate = computeWindowStartDate(snapshotDate, windowDays);
+  const [blendedResult, metaSignal, storefrontSignal, currentSpend] = await Promise.all([
+    computeBlendedCacLtv({ workspaceId, startDate, endDate: snapshotDate }).catch(() => null),
+    readMetaMarginalLeverage({ workspaceId, adAccountId, snapshotDate }),
+    readStorefrontMarginalLeverage({ workspaceId }),
+    rollupAdSpendActual(admin, {
+      workspaceId,
+      platform: "meta",
+      metaAdAccountId: adAccountId,
+      windowDays,
+      asOfDate: snapshotDate,
+    }).catch(() => ({ actualCents: 0, toDate: snapshotDate, sinceDate: startDate, windowDays })),
+  ]);
+
+  const blended: AllocationBlendedSnapshot = blendedResult
+    ? { cacLtvRatio: blendedResult.cacLtvRatio, targetCacLtv: blendedResult.assumptions.targetCacLtv }
+    : { cacLtvRatio: null, targetCacLtv: 3 };
+
+  const ceilingState: AllocationCeilingState = {
+    platform: "meta",
+    metaAdAccountId: adAccountId,
+    windowDays,
+    ceilingCents,
+    currentSpendCents: currentSpend.actualCents,
+  };
+
+  // 4. Compose ONE typed AllocationDecision.
+  const decision = composeAllocationDecision({
+    workspaceId,
+    blended,
+    metaSignal,
+    storefrontSignal,
+    ceilingState,
+  });
+
+  // 5. Stamp director_activity (open vocabulary; map decision.kind → action_kind).
+  const actionKind = allocationDecisionToActionKind(decision.kind);
+  const activityMetadata = {
+    decision: {
+      kind: decision.kind,
+      rationale: decision.rationale,
+      toLever: decision.toLever ?? null,
+      amountCents: decision.amountCents ?? null,
+      fromAccountId: decision.fromAccountId ?? null,
+    },
+    evidence: decision.evidence,
+    ceiling_state: ceilingState,
+    blended,
+    flags: decision.flags,
+    snapshot_date: snapshotDate,
+    autonomous: true,
+  };
+  const activity = await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: GROWTH_DIRECTOR_FUNCTION,
+    actionKind,
+    specSlug: null,
+    reason: decision.rationale,
+    metadata: activityMetadata,
+  });
+
+  // 6. Escalations route to the CEO inbox via the shared platform-director helper. Dedupe-keyed
+  //    per (escalationKind, workspace, ad-account) so a still-tapped ceiling pings the CEO once
+  //    until dismissed.
+  let escalation: RunGrowthAllocationPassResult["escalation"];
+  const escalationKind = allocationDecisionToEscalationKind(decision.kind);
+  if (escalationKind) {
+    const dedupeKey = `growth_allocation:${escalationKind}:${workspaceId}:${adAccountId}`;
+    const title =
+      escalationKind === "budget_raise"
+        ? `Growth: ad-spend ceiling raise needed (${adAccountId.slice(0, 8)})`
+        : "Growth: open a new acquisition channel";
+    const r = await escalateDiagnosisToCeo(admin, {
+      workspaceId,
+      specSlug: null,
+      title,
+      diagnosis: decision.rationale,
+      dedupeKey,
+      deepLink: GROWTH_ALLOCATION_DEEP_LINK,
+      escalationKind,
+      metadata: {
+        ad_account_id: adAccountId,
+        snapshot_date: snapshotDate,
+        decision_kind: decision.kind,
+        amount_cents: decision.amountCents ?? null,
+        ceiling_cents: ceilingState.ceilingCents,
+        current_spend_cents: ceilingState.currentSpendCents,
+        window_days: windowDays,
+      },
+    });
+    escalation = { emitted: r.emitted, escalationKind };
+  }
+
+  return {
+    decision,
+    actionKind,
+    activityRecorded: activity.recorded,
+    escalation,
+    ceilingState,
+    blended,
   };
 }

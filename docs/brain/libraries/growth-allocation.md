@@ -1,8 +1,8 @@
 # libraries/growth-allocation
 
-Cross-tool allocation brain (Meta vs Storefront) — Phase 1: pure-ish marginal-leverage readers per tool. The Growth Director's decide-layer (Phase 2 composer + Phase 3 `director_activity` stamp) consumes these to emit ONE typed allocation decision per day.
+Cross-tool allocation brain (Meta vs Storefront). Phase 1 readers + Phase 2 composer + Phase 3 director-activity stamp + box-lane wiring. The Growth Director's decide-layer: one typed allocation decision per (workspace, ad-account) per day, audited via [[../tables/director_activity]].
 
-**File:** `src/lib/growth-allocation.ts` · Driven by `runGrowthDirectorJob` (Phase 3, hung off `meta-iteration-run`) · See `docs/brain/specs/growth-allocation-brain.md`.
+**File:** `src/lib/growth-allocation.ts` · Wired into the [[meta-performance]] `meta-iteration-run` chain as stage 8 (post-`execute`) so the allocation decision lands AFTER the iteration engine settles its same-day Meta actions.
 
 ## Exports
 
@@ -23,6 +23,20 @@ Surveys the storefront tool's marginal-leverage signal. For every `running` [[..
 
 ### `scoreMetaMarginalLeverage({...})`, `scoreStorefrontMarginalLeverage({...})`
 Pure scorers — DB-free, take the already-fetched inputs (scorecards/recommendations/scaleUpRoasTrigger; experiments). The data-layer readers above are thin wrappers that fetch then call these. Unit-tested in `src/lib/growth-allocation.test.ts` (`npm run test:growth-allocation`).
+
+### `composeAllocationDecision({workspaceId, blended, metaSignal, storefrontSignal, ceilingState})` → `AllocationDecision`
+Pure composer (Phase 2). Maps the M2 blended-CAC↔LTV objective + each tool's marginal-leverage signal + the active ad-spend ceiling state into ONE typed `AllocationDecision` (`reallocate_within_ceiling | hold | no_useful_lever | escalate_ceiling_raise | escalate_new_platform`). The Goodhart guard: a Meta scale-up whose estimated marginal ROAS would DEGRADE the blended target is rejected (`hold`) instead of executed.
+
+### `runGrowthAllocationPass({workspaceId, adAccountId, snapshotDate})` → `RunGrowthAllocationPassResult`
+Phase 3 — the end-to-end daily allocation pass per (workspace, ad-account). Resolves the active `ad_spend_budgets` ceiling (window + cents), snapshots the blended objective ([[blended-cac-ltv]]) + the current rolling spend ([[ad-spend-governor]] `rollupAdSpendActual`) for the same window, runs both Phase-1 readers, calls `composeAllocationDecision`, then:
+- writes a [[../tables/director_activity]] row (`director_function='growth'`) with the per-decision `action_kind` and the full `{ decision, evidence, ceiling_state, blended, flags, snapshot_date, autonomous:true }` metadata.
+- For `escalate_*` kinds, fires [[platform-director]] `escalateDiagnosisToCeo` so the CEO inbox lights up (`escalationKind='budget_raise'|'new_platform'`), deduped per (escalationKind, workspace, ad-account).
+
+Action-kind vocabulary (open vocabulary on [[../tables/director_activity]]):
+- `allocated_spend` — `reallocate_within_ceiling` (Meta scale_up or Storefront promote).
+- `allocation_no_useful_lever` — `hold` (Goodhart-rejected Meta lever) or `no_useful_lever` (neither tool has signal).
+- `escalated_ceiling_raise` — `escalate_ceiling_raise` (Meta wants to scale, would breach the ceiling — CEO's call).
+- `escalated_new_platform` — `escalate_new_platform` (ceiling tapped, blended healthy, no useful lever — open a new channel).
 
 ## Gotchas
 - **Engine outputs only.** Meta-side reads the persisted scorecards + recommendations — never raw `meta_insights_daily` / `meta_attribution_daily`. Same trace-by-id invariant the rest of the iteration engine respects.
