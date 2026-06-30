@@ -1,0 +1,1 @@
+- **Lag weekly platform-scorecard snapshot_date to the previous closed ISO week** · verified 2026-06-30 · → [[../inngest/platform-director-cron]]
