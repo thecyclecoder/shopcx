@@ -21,6 +21,7 @@ Continuously find, test, and scale **winning static creative**, and kill losers 
 - **Specs under this mandate:**
   - [[../specs/winning-static-creative-finder]] ⏳ — ingest winning static ads (competitor/library/our own top performers) into the ideas bin so we can make more killer statics.
   - [[../specs/killer-statics]] ✅ — cold-50+ static archetypes, both formats.
+  - [[../specs/growth-adopt-creative-makers]] ✅ — Director-visible ready-to-test queue for creatives + Director-approved publish with PAUSED ads + outcome lineage (archived → [[../lifecycles/ad-publish]]).
   - _(future: auto-pause underperformers; variant generator; creative-performance scoring)_
 
 ### Ad-matched landing pages

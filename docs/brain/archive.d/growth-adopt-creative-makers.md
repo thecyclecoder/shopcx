@@ -1,0 +1,1 @@
+- **Adopt creative makers under the Director (ready-to-test surface)** · verified 2026-06-30 · → [[../lifecycles/ad-publish]]
