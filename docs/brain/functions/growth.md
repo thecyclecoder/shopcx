@@ -52,6 +52,12 @@ So the tool's degenerate state is the **trigger** for the agent's highest-value 
 
 - Contributes to [[../goals/ceo-mode]] › **M2 — Growth Director** (first director prototype: ROAS/CAC analyst → CEO).
 
+## Autonomy (cutover + rollback)
+
+The Growth director's `function_autonomy('growth')` flag is the one switch that flips Growth from CEO-routed approvals to Growth-director auto-approval (mirrors [[platform]]'s 2026-06-23 20:35 cutover via `scripts/apply-platform-live-autonomous.ts`). The activation pipeline is the [[../specs/growth-director-live-autonomous-cutover]] spec — pre-flight gate (`scripts/check-growth-cutover-ready.ts`), then the flip (`scripts/apply-growth-live-autonomous.ts` or the Agents-hub toggle `POST /api/developer/agents/autonomy {function_slug:'growth', live:true, autonomous:true}`), then the post-flip surfaces verification. Activation timestamp lands here when the flip happens (Phase 3 of the spec).
+
+**Rollback** — turning Growth back to CEO-routed is the same toggle in reverse, from the same Agents-hub surface: `POST /api/developer/agents/autonomy {function_slug:'growth', autonomous:false}`. The route's `if (!live) autonomous = false` invariant means clearing `live` also clears `autonomous`. Once `autonomous=false`, [[../libraries/approval-router]] `resolveApprover` walks past Growth and routes growth-owned approvals up to the CEO again; the dormant guards on the box-worker `growth-director` job, the daily Growth recap, and the grade rollup re-engage on the next poll. Idempotent + reversible: no DB cleanup, no replay — flip on, flip off.
+
 ## Status
 
 Charter doc — planned. Specs under it appear on the roadmap board grouped under Growth. First spec: [[../specs/winning-static-creative-finder]].
