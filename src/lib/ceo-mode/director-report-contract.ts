@@ -23,6 +23,9 @@ export type RiskSeverity = "low" | "medium" | "high";
 
 /** One tracked metric against its setpoint, with the week-over-week move. */
 export interface MetricVsTarget {
+  /** Stable machine-readable identifier (e.g. "blended_cac_ltv") so downstream consumers can pick a
+   *  specific row without parsing the human label. Optional for backwards-compat with per-line rows. */
+  key?: string;
   /** Human label, e.g. "AcqROAS — Amazing Coffee". */
   metric: string;
   /** Current value over the report window; null when undefined (e.g. no spend). */

@@ -69,9 +69,12 @@ optional setpoints.
 
 ## Callers
 
-- *(Phase 2 — pending)* [[growth-report-contract]] `buildGrowthReportContract` will emit a top-line
-  `blended_cac_ltv` `MetricVsTarget` row (with `blended_payback_days` secondary) before the
-  per-product AcqROAS rows.
+- [[growth-report-contract]] `buildGrowthReportContract` — top-line `blended_cac_ltv` MetricVsTarget
+  row (with `blended_payback_days` secondary) **before** the per-product AcqROAS rows; the
+  contract's `proxy` is `blended_cac_ltv` and `health_score` reflects blended target attainment
+  (`cacLtvRatio / target` clamped to 100). Assumptions (`marginRoasBlockedOnCogs`,
+  `ltvProxyUncalibrated`, `paybackUsesWindowRateExtrapolation`) surface verbatim on
+  `contract.assumptions`.
 
 ## Tests
 
