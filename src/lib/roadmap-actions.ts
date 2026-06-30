@@ -12,7 +12,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { ACTIVE_STATUSES, getLiveJobForSlug, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
-import { ownerFunctionForKind, routingOwnerForJob, mirrorWebDecisionToAdaSlack } from "@/lib/agents/approval-inbox";
+import { routingOwnerForJobAsync, mirrorWebDecisionToAdaSlack } from "@/lib/agents/approval-inbox";
 import { resolveApproverLive, CEO } from "@/lib/agents/approval-router";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 
@@ -409,7 +409,9 @@ export async function approveRoadmapAction(
     try {
       // box-agent-model-tiers P3: a proposed-model-tier job routes by its TARGET agent kind, not the
       // proposal kind, so the ledger's raised/routed functions match the inbox routing it was decided in.
-      const ownerFn = routingOwnerForJob(job);
+      // plan-approval-routes-by-goal-owner: a plan job routes by its GOAL's owner (DB read), not the planner's
+      // platform default — routingOwnerForJobAsync keeps the ledger's raised/routed in lockstep with the inbox.
+      const ownerFn = await routingOwnerForJobAsync(admin, job);
       const raisedBy = ownerFn ?? CEO;
       const routedTo = await resolveApproverLive(ownerFn);
       await recordApprovalDecision(admin, {
