@@ -304,7 +304,14 @@ export interface DriftSweepResult {
  * seeded it `planned`). We only trust THIS message — never the looser "no changes" outcome (which matched a
  * genuinely-empty-phase spec, agents-hub-role-inboxes), so an incomplete spec is never over-stamped.
  */
-const ALREADY_MERGED_VIA_RE = /already merged via #(\d+)/i;
+// Matches the whole-spec "this spec's work already shipped via PR #N" signal in EITHER of Bo's wordings:
+//   "already merged via #826"  — the original auto-merge / dedup phrasing, and
+//   "already built — PR #891 (commit 6cafd65d) implemented both phases of this spec"  — Bo's pre-flight
+//      no-delta finding when the code merged via a SIBLING/duplicate PR (the live appstle-attempt-billing-
+//      coerce-string-id wedge: a healthy-box build found both phases already on main via #891, made zero
+//      edits, and the no-change reconcile marked the job completed without ever stamping the phases).
+// Captures the PR number so the heal can resolve that PR's merge SHA and stamp the spec's phases shipped.
+const ALREADY_MERGED_VIA_RE = /already (?:merged via|built|shipped|on main)[^\n]*?(?:PR\s*)?#(\d+)/i;
 
 /**
  * The SECOND built-unstamped signal — the RE-QUEUE case. When an owner re-queues an ALREADY-BUILT phase,
