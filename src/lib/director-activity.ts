@@ -81,7 +81,13 @@ export type DirectorActionKind =
   // authored + activated a new `iteration_policies` version, ending Meta's dormant mode for the workspace
   // (or re-tuning an already-live one). One row per successful activation, emitted by the worker after
   // `activateIterationPolicy` returns. metadata: { policy_id, version, rationale, superseded_policy_id }.
-  | "activated_iteration_policy";
+  | "activated_iteration_policy"
+  // growth-adopt-meta-iteration-engine Phase 3 — the spend-rail guard REFUSED to activate a policy whose
+  // expected daily budget motion would breach the active `ad_spend_budgets` ceiling. Written by
+  // `authorIterationPolicyWithSpendGuard` BEFORE activation runs; the Director then routes the diagnosis
+  // to the CEO via `escalateDiagnosisToCeo` (escalationKind='ad_spend_ceiling'). One row per refusal;
+  // metadata: { policy_id?, draft_step_pct, projected_delta_cents, ceiling_cents, meta_ad_account_id }.
+  | "refused_iteration_policy";
 
 export interface DirectorActivityInput {
   workspaceId: string;

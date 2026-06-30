@@ -4717,6 +4717,68 @@ async function runGrowthDirectorJob(job: Job) {
     const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
 
     if (verdict === "auto-approve") {
+      // growth-adopt-meta-iteration-engine Phase 3 — spend-rail guard at activation time. BEFORE we
+      // mark anything approved + executed, project the daily budget motion each propose_policy_activation
+      // would authorize against the workspace's effective `ad_spend_budgets` ceiling for the same
+      // (workspace_id, meta_ad_account_id). If ANY action would breach the rail, refuse the WHOLE
+      // bundle in-leash: write one `refused_iteration_policy` activity row per refused action and
+      // route the diagnosis to the CEO via `escalateDiagnosisToCeo` (escalationKind='ad_spend_ceiling').
+      // The Director's leash boundary — raising the ceiling is the CEO's call; the loop never widens
+      // its own envelope (operational-rules § North star).
+      const proposeForGuard = (t.pending_actions ?? []).filter((a) => a.type === "propose_policy_activation" && a.id);
+      if (proposeForGuard.length) {
+        const { validateActivationAgainstSpendRail } = await import("../src/lib/iteration-policy-authoring");
+        type ProposeGuardPayload = {
+          draft?: { per_account_daily_budget_delta_ceiling_cents?: number; scale_up_step_pct?: number };
+          meta_ad_account_id?: string | null;
+        };
+        const refusals: { actionId: string; diagnosis: string; metadata: Record<string, unknown> }[] = [];
+        for (const a of proposeForGuard) {
+          const payload = a.payload as ProposeGuardPayload | undefined;
+          if (!payload?.draft) continue; // Phase 1's existing missing-payload branch handles this below
+          const guard = await validateActivationAgainstSpendRail(db, {
+            workspaceId: t.workspace_id,
+            draft: {
+              per_account_daily_budget_delta_ceiling_cents: Number(payload.draft.per_account_daily_budget_delta_ceiling_cents ?? 0),
+              scale_up_step_pct: Number(payload.draft.scale_up_step_pct ?? 0),
+            },
+            metaAdAccountId: payload.meta_ad_account_id ?? null,
+          });
+          if (!guard.allow) {
+            refusals.push({ actionId: a.id as string, diagnosis: guard.diagnosis, metadata: { ...guard.metadata, action_id: a.id, job_id: t.id, target_kind: t.kind } });
+          }
+        }
+        if (refusals.length) {
+          const firstRefusal = refusals[0]; // one CEO escalation is enough — the guard's diagnosis covers the bundle's worst breach.
+          for (const r of refusals) {
+            await recordDirectorActivity(db, {
+              workspaceId: t.workspace_id,
+              directorFunction: "growth",
+              actionKind: "refused_iteration_policy",
+              specSlug: t.spec_slug,
+              reason: r.diagnosis,
+              metadata: { ...r.metadata, refusal_reason: "ad_spend_ceiling_would_breach", autonomous: true },
+            });
+          }
+          await pdLib.escalateDiagnosisToCeo(db, {
+            workspaceId: t.workspace_id,
+            specSlug: t.spec_slug,
+            title: "Ad spend ceiling would breach — policy activation refused",
+            diagnosis: firstRefusal.diagnosis,
+            dedupeKey: `ad_spend_ceiling:${t.workspace_id}:policy:${t.id}`,
+            deepLink: "/dashboard/marketing/ads",
+            escalationKind: "ad_spend_ceiling",
+            metadata: firstRefusal.metadata,
+          });
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approve REFUSED by spend-rail guard (${refusals.length}/${proposeForGuard.length} actions would breach the ad_spend_budgets ceiling) → routed to CEO inbox`.slice(-2000),
+          });
+          console.log(`${tag} spend-rail refusal: ${refusals.length}/${proposeForGuard.length} would breach → CEO escalation emitted`);
+          return;
+        }
+      }
+
       const res = await lib.applyDirectorApproval(db, t, leashActions.map((a) => a.actionId), reasoning || `auto-approved (${bundleLabel}) within the leash`);
       if (!res.ok) {
         await update(job.id, { status: "needs_attention", error: `director approve failed: ${res.error}`, log_tail: `auto-approve FAILED: ${res.error}`.slice(-2000) });

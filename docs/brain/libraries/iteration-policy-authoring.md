@@ -33,22 +33,53 @@ ordering would collide on the index. Idempotent on `already active`; throws on
 path) has no uid to write, so the column stays null and the actor lives on the
 audit row.
 
+### `validateActivationAgainstSpendRail(admin, { workspaceId, draft, metaAdAccountId?, policyId? })` → `Promise<SpendRailGuardDecision>`
+**Phase 3 — Spend-rail guard at activation time.** Before `activateIterationPolicy`
+writes `status='active'`, project the policy's expected daily budget motion
+(`per_account_daily_budget_delta_ceiling_cents × ad_spend_budgets.window_days`)
+on top of the current rolling actual and refuse if the result would breach the
+workspace's effective [[../tables/ad_spend_budgets]] ceiling for the same
+`(workspace_id, platform='meta', meta_ad_account_id)` — the more-specific
+per-account row beats the platform-wide row.
+
+Returns `{ allow:true, observation }` (allow) — `observation` is null when no
+rail row exists (no ceiling to breach), populated otherwise — OR `{ allow:false,
+reason:'ad_spend_ceiling_would_breach', observation, diagnosis, metadata }`
+(refuse). The worker writes ONE `refused_iteration_policy`
+[[director-activity]] row per refused action and routes the diagnosis to the CEO
+via [[platform-director]] `escalateDiagnosisToCeo` (`escalationKind='ad_spend_ceiling'`,
+deep-link `/dashboard/marketing/ads`). NEVER mutates — the worker owns the
+escalation; the guard is a pure read.
+
+The check is conservative (assumes the engine moves the max daily delta every
+day across the window) but defensible — the leash boundary is the projected
+worst case, not the historical average. Raising the ceiling stays the CEO's
+call (operational-rules § supervisable autonomy; the loop never widens its own
+envelope).
+
 ### Types
 `IterationPolicyDraft` (the typed thresholds, one-to-one with the non-id/non-status
 columns), `PolicyActor` (`director | human`),
-`AuthorIterationPolicyInput | Result`, `ActivateIterationPolicyInput | Result`.
+`AuthorIterationPolicyInput | Result`, `ActivateIterationPolicyInput | Result`,
+`SpendRailGuardDecision` (the `allow|refuse` discriminated union),
+`SpendRailObservation`, `SpendRailRefusalMetadata`.
 
 ## How it's wired
 
 The Growth Director box session emits a `propose_policy_activation` pending
-action carrying `{ draft, rationale }` in its payload. The
+action carrying `{ draft, rationale, meta_ad_account_id? }` in its payload. The
 [[growth-director]] leash classes this as `iteration_policy_activation` (a Phase-2
 leash category); on Director auto-approve the worker `runGrowthDirectorJob`
-runs `authorIterationPolicy` then `activateIterationPolicy` and writes a
-[[director-activity]] row (`action_kind='activated_iteration_policy'`,
-metadata = `{ policy_id, version, rationale, superseded_policy_id }`). Failures
-park the growth-director job `needs_attention` so the CEO sees the gap; the
-already-recorded `approved_approval` row stays for audit.
+runs `validateActivationAgainstSpendRail` for each action — on **allow**, the
+worker proceeds with `authorIterationPolicy` then `activateIterationPolicy` and
+writes a [[director-activity]] row (`action_kind='activated_iteration_policy'`,
+metadata = `{ policy_id, version, rationale, superseded_policy_id }`); on
+**refuse**, the worker writes one `refused_iteration_policy` activity row per
+refused action and calls `escalateDiagnosisToCeo`
+(`escalationKind='ad_spend_ceiling'`) instead of authoring + activating.
+Activation failures (post-guard) park the growth-director job `needs_attention`
+so the CEO sees the gap; the already-recorded `approved_approval` row stays for
+audit.
 
 ## Gotchas
 
