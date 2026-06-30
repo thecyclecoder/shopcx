@@ -4638,12 +4638,111 @@ async function runPlatformDirectorJob(job: Job) {
 // reachable only via a synthetic enqueue (the dormant-rehearsal verification path in the spec).
 async function runGrowthDirectorJob(job: Job) {
   const tag = `[growth-director:${job.id.slice(0, 8)}]`;
-  let instr: { target_job_id?: string; target_kind?: string } = {};
+  let instr: {
+    target_job_id?: string;
+    target_kind?: string;
+    // growth-adopt-storefront-optimizer Phase 1 — the self-contained activation payload the Director's
+    // box session emits. When present, this short-circuits the target-job leash flow: the Director
+    // authors the workspace's storefront_optimizer_policy row (active=false) AND activates it
+    // (active=true), then writes ONE director_activity action_kind='activated_optimizer_policy'.
+    // Auto-approves iff Growth is live+autonomous (the same gate the target-flow re-confirms below).
+    propose_optimizer_activation?: {
+      workspace_id?: string;
+      product_scope?: string[];
+      thresholds?: import("../src/lib/storefront/optimizer-policy-authoring").OptimizerPolicyThresholds;
+      rationale?: string;
+      created_by?: string | null;
+      activated_by?: string | null;
+    };
+  } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
-    /* not JSON — no target */
+    /* not JSON — no target / no payload */
   }
+
+  // growth-adopt-storefront-optimizer Phase 1 — self-contained activation lane. The Director's box
+  // session emits `propose_optimizer_activation` with the typed payload (workspace, product_scope,
+  // thresholds, rationale, createdBy); the worker upserts (authorOptimizerPolicy) + flips active=true
+  // (activateOptimizerPolicy) on auto-approve, and writes one director_activity row. This runs in
+  // place of the target-job leash flow when no target_job_id is set — the activation IS the request.
+  if (instr.propose_optimizer_activation) {
+    const payload = instr.propose_optimizer_activation;
+    const workspaceId = payload.workspace_id || job.workspace_id;
+    const productScope = Array.isArray(payload.product_scope) ? payload.product_scope : null;
+    const rationale = typeof payload.rationale === "string" ? payload.rationale.trim() : "";
+    if (!workspaceId || !productScope || productScope.length === 0 || !rationale) {
+      await update(job.id, {
+        status: "failed",
+        error: "propose_optimizer_activation missing workspace_id / product_scope / rationale",
+        log_tail: `propose_optimizer_activation invalid payload: workspace_id=${workspaceId ? "ok" : "missing"}, product_scope=${productScope ? `${productScope.length} item(s)` : "missing"}, rationale=${rationale ? "ok" : "missing"}`.slice(-2000),
+      });
+      console.warn(`${tag} propose_optimizer_activation invalid payload`);
+      return;
+    }
+
+    const { loadAutonomyMap } = await import("../src/lib/agents/approval-router");
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+    const authoring = await import("../src/lib/storefront/optimizer-policy-authoring");
+
+    // Re-confirm Growth is live+autonomous (fail-safe — never auto-act when the flag was cleared).
+    const autonomy = await loadAutonomyMap();
+    const growthRow = autonomy["growth"];
+    if (!growthRow || !growthRow.live || !growthRow.autonomous) {
+      await update(job.id, {
+        status: "completed",
+        log_tail: `growth not live+autonomous (live=${growthRow?.live ?? false} autonomous=${growthRow?.autonomous ?? false}) — refusing to auto-activate; payload preserved`.slice(-2000),
+      });
+      console.log(`${tag} growth not live+autonomous — refusing auto-activation`);
+      return;
+    }
+
+    const authored = await authoring.authorOptimizerPolicy(db, {
+      workspaceId,
+      productScope,
+      thresholds: payload.thresholds,
+      rationale,
+      createdBy: payload.created_by ?? null,
+    });
+    if (!authored.ok) {
+      await update(job.id, { status: "failed", error: authored.detail, log_tail: `authorOptimizerPolicy failed: ${authored.detail}`.slice(-2000) });
+      console.warn(`${tag} authorOptimizerPolicy failed: ${authored.detail}`);
+      return;
+    }
+
+    const activated = await authoring.activateOptimizerPolicy(db, {
+      workspaceId,
+      activatedBy: payload.activated_by ?? payload.created_by ?? null,
+    });
+    if (!activated.ok) {
+      await update(job.id, { status: "failed", error: activated.detail, log_tail: `activateOptimizerPolicy failed: ${activated.detail}`.slice(-2000) });
+      console.warn(`${tag} activateOptimizerPolicy failed: ${activated.detail}`);
+      return;
+    }
+
+    await recordDirectorActivity(db, {
+      workspaceId,
+      directorFunction: "growth",
+      actionKind: "activated_optimizer_policy",
+      specSlug: job.spec_slug,
+      reason: rationale,
+      metadata: {
+        job_id: job.id,
+        policy_id: authored.policyId,
+        product_scope: productScope,
+        thresholds: payload.thresholds ?? null,
+        flipped: activated.flipped,
+        autonomous: true,
+      },
+    });
+    await update(job.id, {
+      status: "completed",
+      log_tail: `activated storefront_optimizer_policy for ${workspaceId} (scope=[${productScope.join(",")}]${activated.flipped ? " — flipped active=true" : " — already active"})`.slice(-2000),
+    });
+    console.log(`${tag} activated storefront_optimizer_policy for ${workspaceId} (flipped=${activated.flipped})`);
+    return;
+  }
+
   const targetId = instr.target_job_id;
   if (!targetId) {
     // No standing pass for Growth — build-driving stays with Ada, and goal-escort/grooming/init are
