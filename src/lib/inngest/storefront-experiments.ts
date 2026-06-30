@@ -16,6 +16,8 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { refreshStorefrontExperiments } from "@/lib/storefront/experiment-refresh";
+import { auditExperimentDelivery } from "@/lib/storefront/experiment-delivery-audit";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 export const storefrontExperimentsRefreshCron = inngest.createFunction(
   { id: "storefront-experiments-refresh-cron", retries: 1, triggers: [{ cron: "*/5 * * * *" }] },
@@ -59,6 +61,52 @@ export const storefrontExperimentsRefresh = inngest.createFunction(
       trigger?: "cron" | "manual";
       window_days?: number;
     };
+
+    // Phase-2 delivery audit — runs BEFORE the bandit-refresh decision so a
+    // `failed_to_deliver` experiment (status='running'/'promoted' with zero session
+    // assignments + zero pixel exposures past the age floor) is surfaced + stamped
+    // before the bandit can act on its (necessarily empty) rollups. Two-stage so
+    // each per-experiment write is its own memoized step — Inngest retries replay
+    // only the steps that did not complete, giving idempotency per refresh pass.
+    const failedList = await step.run("audit-delivery", async () => {
+      const admin = createAdminClient();
+      const rows = await auditExperimentDelivery(admin, { workspaceId: workspace_id });
+      return rows
+        .filter((r) => r.delivered === false && r.flags.includes("failed_to_deliver"))
+        .map((r) => ({ experiment_id: r.experiment_id, lander_type: r.lander_type }));
+    });
+    for (const f of failedList) {
+      await step.run(`audit-failed-${f.experiment_id}`, async () => {
+        const admin = createAdminClient();
+        const { data: row } = await admin
+          .from("storefront_experiments")
+          .select("last_decision, started_at, created_at")
+          .eq("id", f.experiment_id)
+          .single();
+        const startedAt = (row?.started_at as string | null) ?? (row?.created_at as string | null);
+        const hoursSinceStart = startedAt
+          ? Math.round((Date.now() - new Date(startedAt).getTime()) / 3_600_000)
+          : null;
+        const prior = (row?.last_decision as Record<string, unknown> | null) ?? {};
+        const merged = { ...prior, delivery_flag: "failed_to_deliver" as const };
+        await admin.from("storefront_experiments").update({ last_decision: merged }).eq("id", f.experiment_id);
+        await recordDirectorActivity(admin, {
+          workspaceId: workspace_id,
+          directorFunction: "growth",
+          actionKind: "detected_undelivered_experiment",
+          specSlug: null,
+          reason: `storefront experiment ${f.experiment_id} (${f.lander_type}) reported running/promoted but the audit found zero session assignments + zero pixel exposures past the age floor — refresh holds it until delivery resumes`,
+          metadata: {
+            experiment_id: f.experiment_id,
+            lander_type: f.lander_type,
+            hours_since_start: hoursSinceStart,
+            sessions_count: 0,
+            exposures_count: 0,
+          },
+        });
+      });
+    }
+
     const result = await step.run("refresh", () =>
       refreshStorefrontExperiments({
         workspaceId: workspace_id,

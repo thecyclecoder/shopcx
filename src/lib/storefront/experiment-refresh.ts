@@ -46,6 +46,10 @@ interface ExperimentRowLite {
   product_id: string;
   lander_type: string;
   audience: string;
+  /** Phase-2 delivery audit may have stamped `delivery_flag='failed_to_deliver'` here
+   *  ([[experiment-delivery-audit]]) before this refresh ran; the bandit refuses to
+   *  act on the suspect rollups in that case. */
+  last_decision: Record<string, unknown> | null;
 }
 
 export interface ExperimentDecisionRecord {
@@ -170,7 +174,7 @@ export async function refreshStorefrontExperiments(opts: {
     const { data: expData } = expIds.length
       ? await admin
           .from("storefront_experiments")
-          .select("id, status, promoted_variant_id, regression_windows, lever, product_id, lander_type, audience")
+          .select("id, status, promoted_variant_id, regression_windows, lever, product_id, lander_type, audience, last_decision")
           .in("id", expIds)
       : { data: [] as ExperimentRowLite[] };
     const expById = new Map((expData as ExperimentRowLite[]).map((e) => [e.id, e]));
@@ -178,6 +182,24 @@ export async function refreshStorefrontExperiments(opts: {
     for (const [experimentId, rollups] of byExperiment) {
       const exp = expById.get(experimentId);
       if (!exp) continue;
+
+      // Phase-2 delivery audit ([[experiment-delivery-audit]]) — refuse to act on an
+      // experiment whose `last_decision.delivery_flag` is `failed_to_deliver`. The
+      // rollups exist (variant rows are present) but the delivery signals are silent,
+      // so the bandit would be acting on suspect data. Hold + leave `last_decision`
+      // untouched so the flag persists for the Director brief + downstream consumers.
+      if ((exp.last_decision as { delivery_flag?: string } | null)?.delivery_flag === "failed_to_deliver") {
+        counts.held++;
+        decisions.push({
+          experiment_id: experimentId,
+          action: "hold",
+          win_prob: null,
+          rule: "failed_to_deliver",
+          posteriors: null,
+        });
+        continue;
+      }
+
       const control = rollups.find((r) => r.is_control);
       const arms = rollups.filter((r) => !r.is_control);
       if (!control || arms.length === 0) {
