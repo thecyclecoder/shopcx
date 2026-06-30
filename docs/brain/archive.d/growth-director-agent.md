@@ -1,0 +1,1 @@
+- **Growth Director agent — supervision shell + leash** · verified 2026-06-30 · → [[libraries/growth-director]]

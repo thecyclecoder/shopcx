@@ -80,6 +80,16 @@ const GRADER_MODEL = SONNET_MODEL;
  */
 const TERMINAL_JOB_STATUSES = new Set(["completed", "merged", "failed", "needs_attention"]);
 
+/**
+ * Grader-result `reason`s that mean a benign in-flight race, NOT a grader defect — mirrors the
+ * director-grader's INFLIGHT_SKIP_REASONS. `not_concluded` happens when director triage re-queues a
+ * job (needs_attention → queued) between the sweep snapshot and gradeAgentAction's re-fetch;
+ * `job_not_found` is the same shape one step further (the row was already finalized + collected).
+ * Both are expected during normal director churn and must stay silent — only true grader errors
+ * (grader_http_429, parse_failed, …) should hit console.error and surface in the Vercel error feed.
+ */
+const AGENT_INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "job_not_found"]);
+
 /** The standing performance window — last N graded jobs per worker (the spec's locked config). */
 export const ROLLUP_WINDOW = 10;
 
@@ -527,10 +537,12 @@ export async function gradeConcludedAgentActions(opts: { workspaceId: string; ad
       if (r.ok && !r.idempotent_update) {
         graded++;
         if (r.agent_kind) gradedKinds.add(r.agent_kind);
-      } else if (!r.ok) {
-        // LOUD: a grade attempt that FAILED (grader_http_429 / parse_failed / not_concluded) must not
-        // silently vanish into considered>0,graded==0. Log it so a rate-limited/erroring grader is
-        // diagnosable from the runtime logs, not just inferred from the starvation heartbeat.
+      } else if (!r.ok && !AGENT_INFLIGHT_SKIP_REASONS.has(r.reason ?? "")) {
+        // LOUD: a grade attempt that FAILED for a TRUE grader error (grader_http_429 / parse_failed /
+        // not_a_gradeable_worker / no_api_key) must not silently vanish into considered>0,graded==0.
+        // Log it so a rate-limited/erroring grader is diagnosable from the runtime logs. In-flight
+        // skips (not_concluded / job_not_found) are benign TOCTOU races with director triage and
+        // stay silent — mirrors director-grader.ts INFLIGHT_SKIP_REASONS.
         console.error(`[worker-grader] grade attempt failed job=${j.id} kind=${j.kind}: ${r.reason}`);
       }
     }
