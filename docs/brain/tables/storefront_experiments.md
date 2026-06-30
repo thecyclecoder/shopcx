@@ -17,7 +17,7 @@ One row per hypothesis under test on the storefront: a `(product × lander_type 
 | `promoted_variant_id` | uuid → [[storefront_experiment_variants]] | set when the bandit promotes a winner; render serves it to non-holdout traffic. FK `on delete set null` |
 | `regression_windows` | int | Phase 5 — consecutive windows a running/promoted arm has sat below control on the LTV proxy; auto-rollback at `>=2` |
 | `rollback_reason` | text | why the guardrail rolled it back (set with `status='rolled_back'`) |
-| `last_decision` | jsonb | last decision snapshot — posterior win-probs + the rule invoked (supervisability) |
+| `last_decision` | jsonb | last decision snapshot — posterior win-probs + the rule invoked (supervisability). `delivery_flag='failed_to_deliver'` ([[../libraries/storefront-experiment-delivery-audit]]) blocks promote/kill pending Director review. |
 | `created_by` | uuid | who created the experiment (nullable) |
 | `started_at` / `stopped_at` / `rolled_back_at` | timestamptz | lifecycle stamps |
 | `created_at` / `updated_at` | timestamptz | |
