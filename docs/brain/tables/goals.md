@@ -47,6 +47,8 @@ Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` 
 - A `greenlit` goal whose milestones ALL roll up complete (each linked-spec completion ≥ 1) → surfaced as `complete`.
 - Otherwise the stored status (`proposed` / `greenlit`). A goal with zero milestones is never `complete`.
 
+**Self-archive of a completed goal** (`completed-goal-self-archive`): a goal that DERIVES `complete` does not flip its STORED status on its own — the M5 atomic-promote path ([[../libraries/agent-jobs]] `finalizePromotedGoal`) retires only goals that shipped through a goal branch. So [[../libraries/agent-jobs]] `reconcileCompletedGoalsToFolded` runs every platform-director standing pass and folds any **NON-PARENT** goal whose rollup is 100% (`complete` + `linkedSpecCount ≥ 1`) via `finalizePromotedGoal` (greenlit/complete → complete + `goal-fold` enqueue → `status='folded'`). A **PARENT** goal (`is_parent` OR has child goals incl. folded children — `isGoalParentExempt` — OR no buildable specs) stays active at 100% and is NEVER auto-folded. This closed the gap where legacy one-off-shipped goals lingered as `greenlit` forever (the 8 goals hand-backfilled to `folded`).
+
 ## Parent cycle protection
 
 `goals_parent_cycle` (BEFORE INSERT/UPDATE OF `parent_goal_id, id`) calls `public.goals_parent_cycle_guard()` — walks the parent chain on every write and rejects any move that closes a loop (`id = ancestor.id`). The chain walker bails after 64 hops as a backstop against runaway state.

@@ -127,6 +127,14 @@ async function finalizePromotedGoal(workspaceId, goalSlug, adminClient?): Promis
 
 **Retire a goal that just promoted to main** — the gap-closer so a promoted goal doesn't linger `greenlit`. Two sanctioned steps: **(1)** [[goals-table]] `setGoalStatus(goalId, 'complete')` — the explicit `greenlit → complete` lifecycle override (the board *derives* `complete`, but the stored column stays `greenlit` after M5, and the goal-fold lane's guard reads the *stored* status); skipped if already `complete`/`folded`. **(2)** enqueue ONE `kind='goal-fold'` `agent_jobs` row (deduped on an in-flight goal-fold for the slug; skipped if the goal is already `folded`) — the goal-fold lane folds the goal's durable knowledge into the permanent brain pages and flips `goals.status='folded'`. Called by `promoteCompleteGoalsToMain` right after `applyGoalPromotionEffects`, so it fires for EVERY goal post-M5 in both seams (box standing pass + Gate-C webhook). `agent_jobs` is not a PM table, so the goal-fold enqueue is a plain insert; the goal-status write is the only PM write, via the SDK. Best-effort + idempotent; never throws.
 
+### `reconcileCompletedGoalsToFolded` — function  *(completed-goal-self-archive — the standing fold reconciler)*
+
+```ts
+async function reconcileCompletedGoalsToFolded(workspaceId, adminClient?): Promise<CompletedGoalFoldResult>
+```
+
+**Self-archive a COMPLETE non-parent goal** — the FORWARD fix so a 100% goal never sits stranded on the active board awaiting a manual backfill. `finalizePromotedGoal` (above) retires ONLY a goal that shipped THROUGH a goal branch; a **legacy goal whose member specs shipped one-off** (no `goal/{slug}` branch → the M5 promoter never evaluated it) reaches a 100% rollup but never gets the greenlit→complete + goal-fold enqueue — it lingers FOREVER as `greenlit`/`complete` (the 8 goals Dylan hand-folded). This standing reconciler re-evaluates the FULL active goal set each pass via [[brain-roadmap]] `getGoals` (folded goals are off that read = never a candidate) and, for each goal: **(1) ROLLUP 100%** — require the DERIVED card `status === 'complete'` (every milestone rolls up complete = every member spec shipped|folded) AND `linkedSpecCount >= 1` (never fold an empty 0-spec goal); **(2) PARENT EXEMPTION** — skip via [[goals-table]] `isGoalParentExempt` (`is_parent` flag **OR** has child goals — `goalHasChildGoals` counts EVERY child row incl. already-folded children, the structural signal that exempts `ceo-mode` — **OR** no buildable specs); a parent stays active at 100% awaiting its sub-goals and NEVER auto-folds; **(3) FOLD** — reuse `finalizePromotedGoal` (greenlit/complete → complete + goal-fold enqueue). Wired into [[../lifecycles/roadmap-build-console]]'s `runPlatformDirectorStandingPass` right after the M5 goal→main promote block. Idempotent (a folded goal is off `getGoals`; an in-flight goal-fold is deduped → reported `kept`, never double-enqueued), bounded (the active set), and LOGGED — one `reconciled_completed_goal_folded` [[../tables/director_activity]] row per goal folded (never silent). Best-effort per goal; never throws.
+
 ### `reconcileMergedJobs` — function
 
 ```ts
@@ -249,7 +257,8 @@ The **auto-merge SUCCESS GATE**. The repo has no CI / branch protection, so GitH
 
 ## Tables written
 
-- [[../tables/agent_jobs]] (inserts `spec-test` rows via `enqueueSpecTestIfDue`; inserts auto-queued `build` rows via `autoQueueUnblockedBy` — [[../specs/spec-blockers]]; flips jobs → `merged` in `reconcileMergedJobs`)
+- [[../tables/agent_jobs]] (inserts `spec-test` rows via `enqueueSpecTestIfDue`; inserts auto-queued `build` rows via `autoQueueUnblockedBy` — [[../specs/spec-blockers]]; inserts `goal-fold` rows via `finalizePromotedGoal` / `reconcileCompletedGoalsToFolded`; flips jobs → `merged` in `reconcileMergedJobs`)
+- [[../tables/director_activity]] (`reconcileCompletedGoalsToFolded` writes one `reconciled_completed_goal_folded` row per completed non-parent goal it self-archives — via [[director-activity]] `recordDirectorActivity`)
 
 ## Tables read (not written)
 
