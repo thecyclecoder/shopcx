@@ -30,7 +30,7 @@ async function dispatchSlackNotification(workspaceId: string, eventType: EventTy
 
 ## Gotchas
 
-_None documented._
+- The catch block logs at **`console.warn`**, not `console.error` — a single `chat.postMessage` timeout is expected fire-and-forget behavior and should not be promoted into the Vercel error feed (signature `vercel:b9f34c508cec092c`). Sustained Slack delivery outages are surfaced by the `slack-delivery` Control Tower heartbeat in `src/lib/slack.ts`, not by this log line. Don't 'fix' it back to error.
 
 ---
 
