@@ -47,7 +47,7 @@ Exported helper — tolerant URL parse (absolute / relative / malformed).
 - **Caller owns Central-time boundary math** (`centralBoundary`) — the SDK takes UTC instants so it stays presentation-agnostic.
 
 ## Consumers
-- (planned) the funnel-page top card + universal product-slice filter — [[../dashboard/storefront__funnel]].
+- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal product-slice filter — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns `productOptions` (from `listFunnelProducts`) computed over a wide launch→today window so the slice dropdown stays stable across date ranges.
 - (planned) Max's performance-data assembly — the Growth Director reads the same tree he directs agents on.
 
 ## Related

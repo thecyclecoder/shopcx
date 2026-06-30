@@ -18,6 +18,185 @@
 import { useEffect, useState, useCallback, Fragment } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 
+// ── Rebuilt funnel: hierarchical product → PDP / All Landers → variant → angle.
+// Powered by libraries/funnel-tree (the SDK) and the page-level product slice.
+// As each legacy card is reworked onto the SDK + slice it gets the two pills
+// below, so reworked cards are visually distinguishable from the old ones.
+interface TreeMetrics {
+  visit: number; engaged: number; pack_selected: number; checkout_started: number;
+  order_placed: number; add_to_cart: number;
+  engagement_rate: number; conversion_rate: number; atc_rate: number;
+}
+interface TreeNode {
+  level: "product" | "pdp" | "all_landers" | "variant" | "angle";
+  key: string; label: string; metrics: TreeMetrics; children?: TreeNode[];
+  enrichment?: { headline?: string | null; hero_kind?: string | null; product_title?: string | null; product_handle?: string | null };
+}
+interface FunnelTreeResponse {
+  range: { start: string; end: string };
+  productHandle: string | null;
+  products: TreeNode[];
+  unattributedEntry: TreeNode | null;
+  grandTotal: TreeMetrics;
+  productOptions: Array<{ handle: string; title: string; sessions: number }>;
+}
+
+/** The badge pair marking a card as rebuilt onto the SDK + slice. */
+function ReworkedPills() {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
+        ⚡ SDK-powered
+      </span>
+      <span className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-300">
+        ◫ Slice-aware
+      </span>
+    </div>
+  );
+}
+
+/** Page-level universal product slice. Drives every reworked card below it. */
+function SliceFilter({ options, value, onChange }: {
+  options: Array<{ handle: string; title: string; sessions: number }>;
+  value: string; onChange: (v: string) => void;
+}) {
+  return (
+    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Product slice</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+      >
+        <option value="">All products</option>
+        {options.map((o) => (
+          <option key={o.handle} value={o.handle}>{o.title} ({o.sessions.toLocaleString()})</option>
+        ))}
+      </select>
+      <span className="text-xs text-zinc-400">Drives every reworked card below.</span>
+    </div>
+  );
+}
+
+function flattenTree(nodes: TreeNode[], expanded: Set<string>, depth = 0, parent = ""): Array<{ node: TreeNode; depth: number; path: string; hasChildren: boolean; isOpen: boolean }> {
+  const rows: Array<{ node: TreeNode; depth: number; path: string; hasChildren: boolean; isOpen: boolean }> = [];
+  for (const n of nodes) {
+    const path = parent ? `${parent}/${n.key}` : n.key;
+    const hasChildren = !!(n.children && n.children.length);
+    const isOpen = expanded.has(path);
+    rows.push({ node: n, depth, path, hasChildren, isOpen });
+    if (hasChildren && isOpen) rows.push(...flattenTree(n.children!, expanded, depth + 1, path));
+  }
+  return rows;
+}
+function pctStr(x: number) { return (x * 100).toFixed(1) + "%"; }
+
+/** The first reworked card: the product → PDP/landers → variant → angle tree. */
+function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; loading: boolean }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!tree) return;
+    const open = new Set<string>();
+    const walk = (nodes: TreeNode[], parent = "") => {
+      for (const n of nodes) {
+        const path = parent ? `${parent}/${n.key}` : n.key;
+        if (n.level === "product" || n.level === "all_landers") open.add(path);
+        if (n.children) walk(n.children, path);
+      }
+    };
+    walk(tree.products);
+    setExpanded(open);
+  }, [tree]);
+
+  const toggle = (path: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+
+  const allNodes: TreeNode[] = tree
+    ? [...tree.products, ...(tree.unattributedEntry ? [tree.unattributedEntry] : [])]
+    : [];
+  const rows = flattenTree(allNodes, expanded);
+
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Funnel by product &amp; concept</h2>
+          {tree && (
+            <p className="mt-1 text-xs text-zinc-400">
+              Bare PDP vs targeted landers, rolled up per product. {tree.grandTotal.visit.toLocaleString()} visits · {pctStr(tree.grandTotal.conversion_rate)} CVR · {tree.range.start} → {tree.range.end}
+            </p>
+          )}
+        </div>
+        <ReworkedPills />
+      </div>
+
+      {loading && !tree && <p className="text-sm text-zinc-400">Loading…</p>}
+
+      {tree && (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-400 dark:border-zinc-800">
+                <th className="py-2 text-left font-medium">Concept</th>
+                <th className="py-2 text-right font-medium">Visits</th>
+                <th className="py-2 text-right font-medium">Engaged</th>
+                <th className="py-2 text-right font-medium">Pack</th>
+                <th className="py-2 text-right font-medium">Checkout</th>
+                <th className="py-2 text-right font-medium">Orders</th>
+                <th className="py-2 text-right font-medium">Eng %</th>
+                <th className="py-2 text-right font-medium">CVR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr><td colSpan={8} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
+              )}
+              {rows.map(({ node, depth, path, hasChildren, isOpen }) => {
+                const m = node.metrics;
+                return (
+                  <tr key={path} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                    <td className="py-1.5">
+                      <div className="flex items-center" style={{ paddingLeft: depth * 18 }}>
+                        {hasChildren ? (
+                          <button onClick={() => toggle(path)} className="mr-1 w-4 shrink-0 text-zinc-400 hover:text-zinc-600">
+                            {isOpen ? "▾" : "▸"}
+                          </button>
+                        ) : (
+                          <span className="mr-1 inline-block w-4 shrink-0" />
+                        )}
+                        <span className={
+                          node.level === "product" ? "font-semibold text-zinc-900 dark:text-zinc-100"
+                          : node.level === "all_landers" ? "font-medium text-sky-700 dark:text-sky-300"
+                          : node.level === "pdp" ? "font-medium text-zinc-700 dark:text-zinc-300"
+                          : node.level === "variant" ? "text-zinc-700 dark:text-zinc-300"
+                          : "text-zinc-500 dark:text-zinc-400"
+                        }>
+                          {node.label}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.visit.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.engaged.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.pack_selected.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.checkout_started.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.order_placed.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{pctStr(m.engagement_rate)}</td>
+                    <td className={"py-1.5 text-right tabular-nums font-medium " + (m.conversion_rate > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{pctStr(m.conversion_rate)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 interface FunnelStepRow {
   step: string;
   sessions: number;
@@ -202,6 +381,10 @@ export default function StorefrontFunnelPage() {
   const [end, setEnd] = useState("");
   const [data, setData] = useState<FunnelData | null>(null);
   const [loading, setLoading] = useState(true);
+  // Page-level product slice ("" = All products) + the SDK-powered tree it drives.
+  const [product, setProduct] = useState("");
+  const [tree, setTree] = useState<FunnelTreeResponse | null>(null);
+  const [treeLoading, setTreeLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -222,6 +405,18 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end]);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadTree = useCallback(async () => {
+    if (!start || !end) return;
+    setTreeLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    const res = await fetch(`/api/workspaces/${workspace.id}/funnel-tree?${q.toString()}`);
+    if (res.ok) setTree(await res.json());
+    setTreeLoading(false);
+  }, [workspace.id, start, end, product]);
+
+  useEffect(() => { loadTree(); }, [loadTree]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -245,6 +440,10 @@ export default function StorefrontFunnelPage() {
           setStart={setStart} setEnd={setEnd}
         />
       </header>
+
+      <SliceFilter options={tree?.productOptions ?? []} value={product} onChange={setProduct} />
+
+      <FunnelTreeCard tree={tree} loading={treeLoading} />
 
       {loading && !data && (
         <p className="text-sm text-zinc-400">Loading…</p>
