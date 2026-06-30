@@ -4,9 +4,10 @@ Phase 1 of the Storefront Optimizer activation gate: the **read-only policy gate
 the optimizer agent (M4) consults before it proposes any campaign. The storefront
 analogue of [[meta__decision-engine]] `loadActivePolicy` over [[../tables/iteration_policies]]:
 the engine reads the policy, never writes it. **No policy / `active=false` ⇒ zero
-proposals** (safe-by-default). See [[../specs/storefront-optimizer-activation-gate]].
+proposals** (safe-by-default). See [[../specs/growth-adopt-storefront-optimizer]]
+Phase 1 for the Director-authored authoring surface.
 
-**File:** `src/lib/storefront/optimizer-policy.ts` · Reads [[../tables/storefront_optimizer_policy]] · Consumed by M4 ([[../specs/storefront-optimizer-agent]]) + the `/dashboard/storefront/optimizer` control surface.
+**Files:** `src/lib/storefront/optimizer-policy.ts` (read-only gate) and `src/lib/storefront/optimizer-policy-authoring.ts` (Director-side authoring, [[../specs/growth-adopt-storefront-optimizer]] Phase 1) · Reads [[../tables/storefront_optimizer_policy]] · Consumed by M4 ([[../specs/storefront-optimizer-agent]]) + the `/dashboard/storefront/optimizer` control surface + Director brief ([[../specs/growth-adopt-storefront-optimizer]] Phase 2).
 
 ## Exports
 

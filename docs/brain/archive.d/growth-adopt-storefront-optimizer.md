@@ -1,0 +1,1 @@
+- **Adopt storefront optimizer under the Director** · verified 2026-06-30 · → [[../lifecycles/storefront-checkout]]
