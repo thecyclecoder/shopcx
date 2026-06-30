@@ -12,8 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Ad-dollar budget ceiling + spend governor** · verified 2026-06-30 · → [[../libraries/ad-spend-governor]]
+- **Growth Director agent — supervision shell + leash** · verified 2026-06-30 · → [[libraries/growth-director]]
 - **Storefront experiment delivery-verification** · verified 2026-06-30 · → [[../libraries/storefront-experiment-delivery-audit]]
 - **Exclude active-playbook inbounds from the AI-orchestrator work probe** · verified 2026-06-30 · → [[../libraries/control-tower]]
+- **Worker-grader: don't log the 'not_concluded' in-flight skip as an error** · verified 2026-06-30 · → [[../libraries/agent-grader]]
 - **Re-snapshot stranded pre-lag-fix daily KPI rows (autonomy_ratio drift cleanup)** · verified 2026-06-29 · → [[../libraries/platform-scorecard]]
 - **Appstle payday-retry cron skips internal subs** · verified 2026-06-29 · → [[../inngest/dunning]], [[../libraries/appstle]]
 - **Stop the grading-starved monitor mis-firing on in-flight director approvals** · verified 2026-06-29 · → [[../libraries/director-grader]]
