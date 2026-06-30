@@ -147,3 +147,59 @@ async function countExposureEvents(
     .contains("meta", { experiment_id: experimentId });
   return count ?? 0;
 }
+
+export interface UndeliveredExperiment {
+  experiment_id: string;
+  lander_type: string;
+  status: string;
+  started_at: string | null;
+  hours_since_start: number | null;
+  promoted_variant_id: string | null;
+  last_decision: Record<string, unknown> | null;
+}
+
+/**
+ * Director-brief reader — every running/promoted experiment whose `last_decision.delivery_flag`
+ * the Phase-2 sweep stamped `failed_to_deliver`. Returns enough context for the brief to
+ * surface the failure: experiment id + lander_type, age in hours, the variant the system
+ * last tried to serve (`promoted_variant_id`, null for a multi-arm running experiment), and
+ * the prior decision snapshot. Pure read; never throws.
+ */
+export async function loadUndeliveredExperiments(
+  admin: Admin,
+  workspaceId: string,
+  opts?: { nowMs?: number },
+): Promise<UndeliveredExperiment[]> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const { data } = await admin
+    .from("storefront_experiments")
+    .select("id, lander_type, status, started_at, created_at, promoted_variant_id, last_decision")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["running", "promoted"])
+    .eq("last_decision->>delivery_flag", "failed_to_deliver");
+
+  const rows = (data as
+    | {
+        id: string;
+        lander_type: string;
+        status: string;
+        started_at: string | null;
+        created_at: string;
+        promoted_variant_id: string | null;
+        last_decision: Record<string, unknown> | null;
+      }[]
+    | null) ?? [];
+  return rows.map((r) => {
+    const startedAt = r.started_at ?? r.created_at;
+    const hours = startedAt ? (nowMs - new Date(startedAt).getTime()) / 3_600_000 : null;
+    return {
+      experiment_id: r.id,
+      lander_type: r.lander_type,
+      status: r.status,
+      started_at: r.started_at,
+      hours_since_start: hours,
+      promoted_variant_id: r.promoted_variant_id,
+      last_decision: r.last_decision,
+    };
+  });
+}
