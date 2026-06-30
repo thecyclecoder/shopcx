@@ -4,8 +4,9 @@ import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSuccess } from "@/lib/agent-jobs";
 import { openDeployWatch } from "@/lib/deploy-guardian";
-import { isSpecTestGreenForBranch } from "@/lib/spec-test-runs";
+import { getSpecTestStateForBranch } from "@/lib/spec-test-runs";
 import { isSecurityGreenForBranch } from "@/lib/security-agent";
+import { recordHumanOnlyPromoteAdvisory } from "@/lib/director-activity";
 import { isSpecAccumulationComplete } from "@/lib/specs-table";
 
 /**
@@ -832,6 +833,13 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
         // SERIALIZE: only attempt the first ready PR — the post-merge push webhook drives the next one.
         // (A gate-blocked PR leaves result.merged at 0, so the scan continues to the next ready PR.)
         if (result.merged === 0) {
+          // sub-task 1b — hoisted to this (merge) scope so the post-merge advisory below can read them: the
+          // promoting spec's (workspace, slug) + whether its clean pre-merge run had ZERO machine coverage
+          // (auto_pass=0, a human-only Verification). Set inside the build-gate branch; a fold PR leaves them
+          // null/false (the advisory is build-branch only).
+          let promoteWsId: string | null = null;
+          let promoteSlug: string | null = null;
+          let zeroMachineCoverage = false;
           // fold-pr-auto-merge — FOLD GATE (the build gates DO NOT apply to a fold PR): a claude/fold-* OR
           // claude/goal-fold-* PR is a brain-doc merge of ALREADY-shipped work the SYSTEM authored — runFoldJob
           // batches every owner-verified spec into ONE `claude/fold-…` branch; runGoalFoldJob folds ONE complete
@@ -870,6 +878,8 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           }
           const wsId = gate.workspaceId;
           const slug = gate.specSlug;
+          promoteWsId = wsId;
+          promoteSlug = slug;
           // spec-goal-branch-pm-flow M4/M5 — GOAL-BOUND GUARD: Gate A merges a spec branch straight to `main`,
           // which is correct ONLY for a ONE-OFF spec (no goal). A GOAL-BOUND spec must NEVER reach main via
           // Gate A: it promotes spec-branch → its `goal/{slug}` branch (M4, `promoteEligibleSpecsToGoalBranch`)
@@ -920,8 +930,17 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           // workspace_id + spec_slug come from the SAME row the build gate just read (no extra query).
           let specGreen = false;
           let secGreen = false;
+          // sub-task 1b: did this branch's clean pre-merge run have ZERO machine coverage (auto_pass=0 —
+          // its Verification is entirely advisory `needs_human` checks)? If it promotes, surface a NON-
+          // BLOCKING advisory to Ada AFTER the merge so she can eyeball the human checks. Read off the SAME
+          // state we gate on (no extra query); only meaningful when `specGreen` is true. (`zeroMachineCoverage`
+          // is hoisted to the merge scope above.)
           try {
-            if (wsId && slug) specGreen = await isSpecTestGreenForBranch(wsId, slug, branch);
+            if (wsId && slug) {
+              const specTestState = await getSpecTestStateForBranch(wsId, slug, branch);
+              specGreen = specTestState.cleanMachinePass;
+              zeroMachineCoverage = (specTestState.latest?.summary.auto_pass ?? 0) === 0;
+            }
             secGreen = await isSecurityGreenForBranch(db, branch);
           } catch (e) {
             // Fail CLOSED on a read error — never auto-merge past a tests gate we couldn't evaluate.
@@ -966,6 +985,20 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
                 await openDeployWatch({ admin: db, branch, prNumber, mergeSha: m.mergeSha ?? null });
               } catch (e) {
                 console.warn(`[auto-merge] deploy-watch open for PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
+              }
+              // spec-test-human-only-promote-gate sub-task 1b (CEO: "ideally Ada looks at it"): this spec just
+              // promoted to main, and its clean pre-merge run had ZERO machine coverage (auto_pass=0 — a
+              // human-only Verification). Human checks are FULLY ADVISORY so this NEVER gated the merge above,
+              // but surface a LIGHTWEIGHT, NON-BLOCKING advisory so Ada can eyeball the human checks. Idempotent
+              // (one row per spec) + best-effort (never throws — an advisory that crashes the merge it follows
+              // is worse than the gap).
+              if (zeroMachineCoverage && promoteWsId && promoteSlug) {
+                try {
+                  const { recorded } = await recordHumanOnlyPromoteAdvisory(db, promoteWsId, promoteSlug);
+                  if (recorded) console.log(`[auto-merge] surfaced human-only-promote advisory for ${promoteSlug} (no machine coverage)`);
+                } catch (e) {
+                  console.warn(`[auto-merge] human-only-promote advisory for ${promoteSlug} failed:`, e instanceof Error ? e.message : e);
+                }
               }
             } else {
               ok = false;

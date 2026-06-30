@@ -337,6 +337,51 @@ export async function getHumanCheckResolutions(workspaceId: string): Promise<Map
   return map;
 }
 
+/**
+ * THE single clean-machine-pass predicate — shared by the **pre-merge promote gate**
+ * ([[getSpecTestStateForBranch]]) and the **post-ship fold gate** ([[getAutoFoldEligibleSlugs]] Rail 2),
+ * so the two supervision rails (one before the merge, one after) can NEVER disagree on what
+ * "spec-test green" means. Both call this; do NOT inline a second copy.
+ *
+ * A run is a CLEAN MACHINE PASS iff ALL hold:
+ *   (a) agent-verdict ∈ {`approved`, `needs_human`} — an `issues`/`error`/missing verdict is NOT clean
+ *       (a genuine failure, or an unparseable/errored run that the AgentVerdict doc warns must never read
+ *       as a silent pass).
+ *   (b) the run ASSERTED at least one check (`run.checks.length >= 1`). This is the floor that REPLACES the
+ *       old `summary.auto_pass >= 1` floor. The old floor's ONLY real job was to reject a degenerate
+ *       0-check / `error` "silent empty pass" (nothing was actually asserted) — but it ALSO permanently
+ *       stranded a HUMAN-ONLY spec whose Verification is entirely `needs_human` checks (auto_pass=0),
+ *       leaving it in_testing forever. CEO decision: human checks are FULLY ADVISORY — a human-only run
+ *       (≥1 check, 0 auto-fails, verdict `needs_human`) promotes WITHOUT requiring the human checks to be
+ *       resolved. `checks.length >= 1` preserves the no-empty-run / no-`error`-row guard (the only thing the
+ *       floor really protected) while letting a human-only run through.
+ *   (c) 0 UNRESOLVED auto-`fail` regressions — an evidence-backed broken bullet whose
+ *       `spec_test_human_checks` resolution is unset still BLOCKS; a `verified`/`dismissed` resolution clears
+ *       it. `needs_human` checks do NOT need resolution (advisory). This keeps a `needs_human` run carrying a
+ *       lingering machine `fail` OUT (an `approved` run won't carry a `fail`, but a `needs_human` one can).
+ *
+ * `resolutions` is the `${slug}:${check_key}` map from [[getHumanCheckResolutions]] (the SAME join the
+ * human-test queue / regression banner use). Pure.
+ */
+export function isCleanMachinePassRun(
+  run: SpecTestRun,
+  resolutions: Map<string, HumanCheckRow>,
+  slug: string,
+): boolean {
+  // (a) verdict gate — `issues`/`error`/(missing) are non-pass.
+  if (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human") return false;
+  // (b) total_checks >= 1 floor (REPLACES the old auto_pass>=1 floor) — reject a 0-check "silent empty pass",
+  //     ALLOW a human-only run (auto_pass=0 but ≥1 needs_human check) — human checks are advisory (CEO).
+  if (run.checks.length < 1) return false;
+  // (c) 0 UNRESOLVED auto-`fail` — a verified/dismissed resolution clears it; needs_human checks don't gate.
+  for (const c of run.checks) {
+    if (c.verdict !== "fail") continue;
+    const res = resolutions.get(`${slug}:${checkKey(c.text)}`);
+    if (!res?.resolution) return false;
+  }
+  return true;
+}
+
 /** Upsert one owner resolution (owner-gated API only — the agent never writes here). */
 export async function upsertHumanCheckResolution(args: {
   workspaceId: string;
@@ -587,11 +632,13 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  *      `planned`/`in_review`/`in_progress` on the row but with all phases shipped reads `shipped` here, and a
  *      still-building spec never reads shipped just because the stored column is stale. We re-assert
  *      `s.status === "shipped"` (a `deferred`/`in_review`/`in_progress`/`planned` rollup is rejected).
- *   2. POSITIVE machine pass, not absence-of-failure. The latest run must be `agent_verdict IN
- *      ('approved','needs_human')` AND carry at least one real machine `pass` check (`summary.auto_pass >= 1`),
- *      AND have 0 unresolved auto-`fail` regressions. A degenerate 0-check row — the "silent empty pass" the
- *      AgentVerdict doc warns about (an unparseable/empty verdict that reads like a clean pass) — is NOT a
- *      genuine verification: nothing was actually asserted, so it is NOT eligible. Absence of a `fail` ≠ a pass.
+ *   2. POSITIVE machine pass, not absence-of-failure (the SINGLE shared [[isCleanMachinePassRun]] predicate).
+ *      The latest run must be `agent_verdict IN ('approved','needs_human')` AND have ASSERTED at least one
+ *      check (`run.checks.length >= 1` — the total_checks floor that REPLACED the old `auto_pass >= 1` floor,
+ *      so a HUMAN-ONLY spec with auto_pass=0 but ≥1 `needs_human` check now folds instead of stranding forever;
+ *      human checks fully advisory per CEO) AND have 0 unresolved auto-`fail` regressions. A degenerate 0-check
+ *      row — the "silent empty pass" the AgentVerdict doc warns about (an unparseable/empty verdict that reads
+ *      like a clean pass) — asserted nothing, so it is NOT eligible. Absence of a `fail` ≠ a pass.
  *
  * Supervisable-autonomy posture: hitting the security rail (live/surfaced) = DEFER + escalate (the Build
  * card surfaces the routed fix); the gate NEVER folds past it.
@@ -633,28 +680,19 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
     if (liveSlugs.has(s.slug)) continue;
     const run = runs[s.slug];
-    // Rail 2 — POSITIVE machine pass, not absence-of-failure. The latest run must be a CLEAN MACHINE PASS:
-    // agent-verdict `approved` OR `needs_human` (task #29 — `needs_human` means the agent machine-verified
-    // everything it could and flagged the REMAINDER for OPTIONAL human review; human QA is advisory, NOT a
-    // failure or a fold gate), AND carry at least one real machine `pass` check (`summary.auto_pass >= 1`).
-    // `issues`/`error` (a genuine failure / unparseable-or-errored run) and a MISSING run are non-pass → not
-    // eligible. A degenerate 0-check row asserted nothing, so it is NOT a genuine verification — absence of a
-    // `fail` ≠ a machine pass. The unresolved-`fail` guard below additionally rejects a `needs_human` run whose
-    // machine checks include an open `fail` regression.
-    if (!run || (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human")) continue;
-    if (run.summary.auto_pass < 1) continue;
-
-    // 0 regressions only: an UNRESOLVED auto-`fail` (an evidence-backed broken bullet) blocks the fold — that
-    // is a real machine-detected failure, not a human-QA item. This is the guard that keeps a `needs_human`
-    // run with a lingering machine `fail` OUT (an `approved` run won't carry a `fail`, but a `needs_human` one
-    // can) — and also covers any hand-edited / future verdict shape that would fold over an open regression.
-    let hasRegression = false;
-    for (const c of run.checks) {
-      if (c.verdict !== "fail") continue;
-      const res = resolutions.get(`${s.slug}:${checkKey(c.text)}`);
-      if (!res?.resolution) { hasRegression = true; break; }
-    }
-    if (hasRegression) continue;
+    // Rail 2 — POSITIVE machine pass, not absence-of-failure. The latest run must be a CLEAN MACHINE PASS by
+    // the SINGLE shared predicate [[isCleanMachinePassRun]] (the pre-merge promote gate
+    // [[getSpecTestStateForBranch]] calls the SAME helper, so the two rails can never disagree):
+    //   - agent-verdict `approved` OR `needs_human` (task #29 — `needs_human` means the agent machine-verified
+    //     everything it could and flagged the REMAINDER for OPTIONAL human review; human QA is advisory, NOT a
+    //     failure or a fold gate; `issues`/`error`/missing are non-pass),
+    //   - the run ASSERTED at least one check (`run.checks.length >= 1`) — the floor that REPLACES the old
+    //     `auto_pass >= 1` floor: it still rejects a degenerate 0-check "silent empty pass" (nothing asserted),
+    //     but a HUMAN-ONLY spec (Verification all `needs_human`, auto_pass=0) now folds instead of sitting
+    //     in_testing forever (CEO: human checks fully advisory — promote on 0 auto-fails without resolving them),
+    //   - 0 UNRESOLVED auto-`fail` regressions — an evidence-backed broken bullet (a `verified`/`dismissed`
+    //     resolution clears it). This keeps a `needs_human` run carrying a lingering machine `fail` OUT.
+    if (!run || !isCleanMachinePassRun(run, resolutions, s.slug)) continue;
 
     // Security-test gate (build-card-lifecycle-timeline Phase 3): require a clean terminal security review.
     // No record yet (`undefined`) is NOT clean — the post-merge security pass hasn't landed; defer. Live
@@ -708,12 +746,15 @@ export interface AutoFoldResult {
  * because both gates are the same supervision rail (one before the merge, one
  * after).
  *
- * So this section mirrors `getAutoFoldEligibleSlugs`'s **Rail 2** verbatim:
+ * So this section shares `getAutoFoldEligibleSlugs`'s **Rail 2** predicate
+ * ([[isCleanMachinePassRun]] — the SAME helper, not a copy):
  *   - agent-verdict `approved` OR `needs_human` (the `needs_human`-is-eligible
  *     task #29 carve-out — the agent machine-verified what it could and flagged
  *     the rest as optional human review; human QA is advisory),
- *   - `summary.auto_pass >= 1` (a real machine check actually passed — no silent
- *     0-check `approved` reads as a pass; absence-of-fail ≠ pass),
+ *   - the run ASSERTED ≥1 check (`run.checks.length >= 1` — the total_checks floor
+ *     that REPLACED the old `auto_pass >= 1` floor: it still rejects a 0-check silent
+ *     empty pass, but a HUMAN-ONLY run with auto_pass=0 and ≥1 `needs_human` check now
+ *     promotes; human checks fully advisory per CEO. Absence-of-fail ≠ pass),
  *   - 0 UNRESOLVED auto-`fail` regressions (consult the same
  *     `spec_test_human_checks` resolutions the human-queue uses, so a dismissed
  *     false-positive doesn't keep the branch un-promotable).
@@ -730,11 +771,13 @@ export interface SpecTestStateForBranch {
   /** Latest `spec_test_runs` row for this `(workspace, slug, branch)`, or null when none yet. */
   latest: SpecTestRun | null;
   /**
-   * True iff `latest` is a CLEAN MACHINE PASS by the SAME definition
-   * [[getAutoFoldEligibleSlugs]] Rail 2 uses: agent-verdict `approved` OR
-   * `needs_human`, `summary.auto_pass >= 1`, and zero UNRESOLVED auto-`fail`
-   * checks. The pre-merge promote gate and the post-ship fold gate can never
-   * disagree because they share this predicate.
+   * True iff `latest` is a CLEAN MACHINE PASS by the SAME shared predicate
+   * [[isCleanMachinePassRun]] that [[getAutoFoldEligibleSlugs]] Rail 2 uses:
+   * agent-verdict `approved` OR `needs_human`, the run ASSERTED ≥1 check
+   * (`run.checks.length >= 1` — the total_checks floor that replaced the old
+   * `auto_pass >= 1` floor, so a human-only run promotes; human checks advisory),
+   * and zero UNRESOLVED auto-`fail` checks. The pre-merge promote gate and the
+   * post-ship fold gate can never disagree because they share this predicate.
    */
   cleanMachinePass: boolean;
 }
@@ -771,9 +814,11 @@ export async function getLatestSpecTestRunForBranch(
  *   - agent-verdict IN (`approved`, `needs_human`) — `needs_human` is advisory-eligible
  *     (task #29); a `needs_human` run that machine-verified everything it could and
  *     flagged the rest as OPTIONAL human review is a pass, just like an `approved` one.
- *   - `summary.auto_pass >= 1` — at least one real machine check actually passed.
- *     A degenerate 0-check row (the "silent empty pass" the AgentVerdict doc warns about)
- *     is NOT a genuine verification.
+ *   - the run ASSERTED ≥1 check (`run.checks.length >= 1`) — the total_checks floor that
+ *     REPLACED the old `auto_pass >= 1` floor. It still rejects a degenerate 0-check
+ *     "silent empty pass" (the AgentVerdict doc's warning — nothing asserted), but a
+ *     HUMAN-ONLY run (auto_pass=0, ≥1 `needs_human` check) now promotes; human checks are
+ *     fully advisory per CEO (promote on 0 auto-fails without resolving them).
  *   - 0 UNRESOLVED auto-`fail` regressions — joins `spec_test_human_checks` resolutions
  *     the same way the human-queue regression banner does, so a dismissed false-positive
  *     doesn't keep the branch un-promotable.
@@ -795,27 +840,24 @@ export async function getSpecTestStateForBranch(
   ]);
   state.latest = latest;
   if (!latest) return state;
-  // Rail 2 — POSITIVE machine pass (mirrors getAutoFoldEligibleSlugs Rail 2 verbatim).
-  if (latest.agent_verdict !== "approved" && latest.agent_verdict !== "needs_human") return state;
-  if (latest.summary.auto_pass < 1) return state;
-  // 0 UNRESOLVED auto-`fail` regressions — same `${slug}:${check_key}` join the
-  // human-queue / fold gate use; a dismissed/verified resolution clears the fail.
-  for (const c of latest.checks) {
-    if (c.verdict !== "fail") continue;
-    const res = resolutions.get(`${specSlug}:${checkKey(c.text)}`);
-    if (!res?.resolution) return state;
-  }
-  state.cleanMachinePass = true;
+  // Rail 2 — POSITIVE machine pass via the SINGLE shared predicate [[isCleanMachinePassRun]] (the post-ship
+  // fold gate [[getAutoFoldEligibleSlugs]] calls the SAME helper, so the pre-merge promote gate and the fold
+  // gate can never disagree): verdict ∈ {approved, needs_human}, ≥1 check ASSERTED (the total_checks>=1 floor
+  // that REPLACES the old auto_pass>=1 floor — a human-only run with auto_pass=0 but ≥1 needs_human check now
+  // passes; human checks are fully advisory per CEO), and 0 UNRESOLVED auto-`fail` regressions.
+  state.cleanMachinePass = isCleanMachinePassRun(latest, resolutions, specSlug);
   return state;
 }
 
 /**
  * The "spec-test green for this branch" signal the **M4 pre-merge promote gate** reads
  * ([[../specs/spec-test-on-preview-pre-merge]] Phase 3). Green iff
- * [[getSpecTestStateForBranch]]'s `cleanMachinePass` is true — the SAME pass definition
- * [[getAutoFoldEligibleSlugs]] Rail 2 enforces (`approved`/`needs_human` +
- * `auto_pass >= 1` + 0 unresolved auto-`fail`). The pre-merge gate and the post-ship
- * fold gate share this predicate so they can never disagree. A branch with no pre-merge
+ * [[getSpecTestStateForBranch]]'s `cleanMachinePass` is true — the SAME shared predicate
+ * [[isCleanMachinePassRun]] that [[getAutoFoldEligibleSlugs]] Rail 2 enforces
+ * (`approved`/`needs_human` + `run.checks.length >= 1` + 0 unresolved auto-`fail`; the
+ * total_checks floor replaced the old `auto_pass >= 1` so a human-only run promotes). The
+ * pre-merge gate and the post-ship fold gate share this predicate so they can never
+ * disagree. A branch with no pre-merge
  * `spec_test_runs` row yet is NOT green (defer; same absence-≠-clean rule).
  *
  * Mirrors [[../libraries/security-agent]] `isSecurityGreenForBranch` so M4 reads both

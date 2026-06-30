@@ -87,7 +87,14 @@ export type DirectorActionKind =
   // `authorIterationPolicyWithSpendGuard` BEFORE activation runs; the Director then routes the diagnosis
   // to the CEO via `escalateDiagnosisToCeo` (escalationKind='ad_spend_ceiling'). One row per refusal;
   // metadata: { policy_id?, draft_step_pct, projected_delta_cents, ceiling_cents, meta_ad_account_id }.
-  | "refused_iteration_policy";
+  | "refused_iteration_policy"
+  // human-only-promote advisory (spec-test-human-only-promote-gate sub-task 1b; CEO: "ideally Ada looks at
+  // it"). A ZERO-machine-coverage spec (its `## Verification` is entirely `needs_human` checks, auto_pass=0)
+  // just promoted to main on 0 auto-fails alone — human checks are FULLY ADVISORY so this NEVER gated the
+  // promotion, but Ada (the Platform/DevOps Director) should eyeball the human checks. A LIGHTWEIGHT,
+  // NON-BLOCKING surfacing row — it builds no approval card and blocks nothing. One per spec (idempotent).
+  // metadata: { autonomous:true, advisory:true, zero_machine_coverage:true }.
+  | "human_only_promote_advisory";
 
 export interface DirectorActivityInput {
   workspaceId: string;
@@ -194,5 +201,56 @@ export async function recordDirectorActivity(admin: Admin, input: DirectorActivi
   } catch (err) {
     console.warn("[director-activity] recordDirectorActivity threw:", err instanceof Error ? err.message : err);
     return { recorded: false, reason: "threw" };
+  }
+}
+
+/**
+ * spec-test-human-only-promote-gate sub-task 1b — surface a LIGHTWEIGHT, NON-BLOCKING advisory to the
+ * Platform/DevOps Director (Ada) when a ZERO-machine-coverage spec promotes (CEO: "ideally Ada looks at it").
+ *
+ * A human-only spec — its `## Verification` is entirely `needs_human` checks, so the spec-test run has
+ * auto_pass=0 — now promotes on 0 auto-`fail`s alone (human checks are FULLY ADVISORY; the promote gate no
+ * longer requires `auto_pass >= 1`, see [[spec-test-runs]] `isCleanMachinePassRun`). That is correct + by
+ * design, but the CEO wants Ada to EYEBALL the human checks when it happens. This records ONE
+ * `human_only_promote_advisory` `director_activity` row so it shows up in Ada's activity feed / EOD recap.
+ *
+ * It is FULLY ADVISORY: it NEVER gates the promotion, builds NO approval card, and blocks nothing — it is a
+ * surfacing row only, reusing the EXISTING director-activity feed (no new lane). Call it AT the promote point
+ * (after the merge lands), guarded on `summary.auto_pass === 0`.
+ *
+ * Idempotent: at most ONE advisory per (workspace, spec) — a pre-existing row short-circuits the insert, so a
+ * re-run of the promote path doesn't fan out duplicates. Best-effort + never throws (mirrors
+ * recordDirectorActivity); an advisory write that crashed the merge it follows would be strictly worse.
+ */
+export async function recordHumanOnlyPromoteAdvisory(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+): Promise<{ recorded: boolean }> {
+  if (!workspaceId || !slug) return { recorded: false };
+  try {
+    const { data: existing } = await admin
+      .from("director_activity")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("action_kind", "human_only_promote_advisory")
+      .limit(1);
+    if (Array.isArray(existing) && existing.length > 0) return { recorded: false }; // already surfaced — idempotent
+    const r = await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: PLATFORM_FUNCTION,
+      actionKind: "human_only_promote_advisory",
+      specSlug: slug,
+      reason:
+        `${slug} shipped with no machine coverage — eyeball the human checks. Its \`## Verification\` is ` +
+        `entirely human-only (auto_pass=0); it promoted on 0 auto-fails alone (human checks are advisory, ` +
+        `non-blocking).`,
+      metadata: { autonomous: true, advisory: true, zero_machine_coverage: true },
+    });
+    return { recorded: r.recorded };
+  } catch (err) {
+    console.warn("[director-activity] recordHumanOnlyPromoteAdvisory threw:", err instanceof Error ? err.message : err);
+    return { recorded: false };
   }
 }
