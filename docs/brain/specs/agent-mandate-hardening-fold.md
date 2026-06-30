@@ -1,0 +1,15 @@
+# Harden the Fenn agent — roll persistent coaching into its mandate
+
+**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — graduate persistent coaching into a durable fix (director grades agents: low score → fix spec, never a CEO escalation)
+**Found in use 2026-06-30:** the **Fenn** agent (`fold`) sits at **5.8/10** after **2** coaching attempts that didn't stick. Rather than escalate to the CEO, roll the coaching into a permanent fix so the agent improves at the mandate level.
+
+## The accumulated coaching to bake in (now archived as rolled-into-mandates)
+- **When Fold jobs complete and raise a PR but emit no structured log evidence of which brain pages were touched, which cross-links were validated, or what was archived — leaving rubric adherence unverifiable.:** When you see a fold-batch job about to conclude, before raising the PR explicitly log (or include in the PR description) a structured summary: (1) each brain page updated by name, (2) each cross-link verified with source→target, and (3) a clean archive manifest of items folded — so the grader can confirm rubric adherence without inferring from a silent 'completed' status. — Every low grade shared the same grader complaint: the outcome looked fine on the surface but produced zero verifiable evidence of correct page placement, cross-link validation, or clean archival. Emitting a structured execution trail at job close converts an unverifiable black-box into a directly auditable record, satisfying all three rubric criteria in one step.
+- **When When an external error or ambiguous completion occurs, Fenn stops without retrying, without logging what was actually folded, and without producing verifiable evidence of cross-links or page targets — leaving the job either unstarted or unconfirmable.:** When you see a transient API error or a 'completed' status, do Y: (1) retry at least once on transient 5xx errors before exiting, and (2) always emit a structured summary log listing each brain page updated, each cross-link added, and the archive location — so the outcome is auditable even if something went wrong. — Zero-output failures from unhandled transient errors are fully recoverable with a single retry, and unverifiable 'completed' jobs score the same as partial failures because graders cannot confirm rubric adherence without explicit evidence. Structured output and retry logic together close both gaps simultaneously.
+
+## Phase 1 — bake the coaching into the agent
+- Make the above coaching PERMANENT behavior of the `fold` agent — fold it into its prompt/mandate/code (its run-job + prompt in `scripts/builder-worker.ts` and the relevant `src/lib/agents/*`), not ephemeral appended `agent_instructions`. Once baked, the agent should follow it by default.
+- Verify the agent's grade rollup recovers (≥ 7/10) over the next window of graded actions; if a coaching class still recurs, the bake-in missed it.
+
+## Ownership
+Owner: [[../functions/platform]] (Ada supervises Fenn). The director authored this from Fenn's coaching ledger; building it hardens the agent so the coaching never has to repeat.
