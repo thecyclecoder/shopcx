@@ -63,6 +63,12 @@ The **"why"** to the tree's "what". For one **destination** (`'pdp'` | a variant
 
 **Hero labels** are destination-aware: the shared `AdvertorialHero` component emits `advertorial-hero` on both landers, so the SDK relabels it **"Listicle Hero"** on `reasons` vs **"Advertorial Hero"** on `advertorial` (and `beforeafter-hero` → "Before/After Hero") via the variant — no component change, no historical break. This subsumes the old [[../specs/chapter-performance-variant-dimension]] concern for this card.
 
+### `computeBreakdowns({ admin, workspaceId, startIso, endIso, productHandle?, utmSource?, referrer? })` → `{ device, country }`
+Per `device_type` / `ip_country`: visits + **CVR + LTV/visit** (slice-aware), so a high-traffic non-converting segment is visible. Surfaced PR = 0% CVR / $0 LTV at ~35% of US volume. Source is NOT a breakdown (it's a slice). Folded into the funnel-tree route.
+
+### `computeCartAnalytics({ admin, workspaceId, startIso, endIso, productHandle?, utmSource?, referrer?, destination? })` → `CartAnalyticsResult`
+Abandoned-cart + lead-capture **summary** (no per-cart logs), slice + destination aware (joined via `cart_drafts.anonymous_id` / `storefront_leads.anonymous_id` → session). **Corrected recovery:** a reminded cart counts as recovered if its customer orders AFTER the reminder, **even via a new cart** (the old `converted_order_id`-only check read 0% when the true rate was 6.3%). Also returns `followups_sent` (the 2-step sequence's step 2 — both = 16, so the 2-step IS firing), `misfired_reminders` (sent to already-purchased customers — a real bug, 4 found), and `fast_converted_in_session` (converted <30min, never reminded). Route: `GET /api/workspaces/[id]/cart-analytics`. Replaced the per-cart-log AbandonedCartsPanel.
+
 ### `referrerGroup(referrer)` → group key
 Exported helper. Normalizes a raw `referrer` to a platform/origin: in-app webview app ids + hosts → Facebook / Instagram / Google Search / Bing / TikTok; **the Blog is on the STORE host (`shop.superfoodscompany.com/blog`)** so it's keyed on the `/blog` PATH, with same-host non-blog referrers → "Internal / on-site"; empty → "Direct / in-app"; unknown → bare host. The referrer slice adds resolution `utm_source` lacks — it splits `utm_source=meta` into Facebook vs Instagram.
 

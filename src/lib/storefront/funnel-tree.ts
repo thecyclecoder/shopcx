@@ -1290,3 +1290,139 @@ export async function computeBreakdowns(args: {
 
   return { device: toRows(device), country: toRows(country) };
 }
+
+// ───────────────── Cart + lead analytics (summary, slice-aware) ─────────────────
+// Abandoned-cart SUMMARY (no per-cart logs) + lead capture, sliceable by
+// Product × Source × Referrer + a destination (pdp/variant), joined through the
+// cart/lead session (anonymous_id / session_id → storefront_sessions). Fixes the
+// recovery metric: a reminded cart counts as RECOVERED if its customer ordered
+// AFTER the reminder (even via a NEW cart) — the old converted_order_id-only check
+// missed returns-via-new-cart. Also flags mis-fired reminders (sent to a customer
+// who had already ordered).
+export interface CartAnalyticsResult {
+  abandoned: {
+    open_with_email: number;
+    carts_reminded: number;
+    followups_sent: number; // step 2 of the 2-step sequence
+    recovered: number;
+    recovery_rate_pct: number;
+    revenue_recovered_cents: number;
+    misfired_reminders: number;
+    fast_converted_in_session: number;
+  };
+  leads: { emails: number; phones: number };
+}
+
+export async function computeCartAnalytics(args: {
+  admin: Admin; workspaceId: string; startIso: string; endIso: string;
+  productHandle?: string | null; utmSource?: string | null; referrer?: string | null; destination?: string | null;
+}): Promise<CartAnalyticsResult> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+  const destWanted = args.destination && args.destination.trim() ? args.destination.trim() : null;
+
+  const [{ data: productRows }, { data: internalCustomerRows }] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+
+  // carts in window
+  const carts = await fetchAllRows<{ id: string; email: string | null; status: string; anonymous_id: string | null; customer_id: string | null; subtotal_cents: number | null; total_cents: number | null; abandoned_email_sent_at: string | null; abandoned_followup_sent_at: string | null; converted_order_id: string | null; created_at: string; updated_at: string }>(() =>
+    admin.from("cart_drafts")
+      .select("id, email, status, anonymous_id, customer_id, subtotal_cents, total_cents, abandoned_email_sent_at, abandoned_followup_sent_at, converted_order_id, created_at, updated_at, id")
+      .eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso).order("created_at", { ascending: true }),
+  );
+
+  // leads in window
+  const leadRows = await fetchAllRows<{ email: string | null; phone: string | null; anonymous_id: string | null }>(() =>
+    admin.from("storefront_leads").select("email, phone, anonymous_id, id")
+      .eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+
+  // slice/destination filter: classify each cart/lead session by anonymous_id
+  const anonIds = [...new Set([...carts.map((c) => c.anonymous_id), ...leadRows.map((l) => l.anonymous_id)].filter(Boolean) as string[])];
+  const sessByAnon = new Map<string, { variant: string | null; ok: boolean }>();
+  for (let i = 0; i < anonIds.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("anonymous_id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer")
+      .eq("workspace_id", workspaceId).in("anonymous_id", anonIds.slice(i, i + 300));
+    for (const s of data || []) {
+      let ok = !s.is_internal && !s.is_bot && !(s.customer_id && internalCustomerIds.has(s.customer_id as string));
+      ok = ok && matchUtm((s.utm_source as string) ?? null, utmWanted) && matchRef((s.referrer as string) ?? null, refWanted);
+      const { segments, variant } = parseLanding((s.landing_url as string) ?? null);
+      if (ok && product && resolveHandle(segments, handleSet) !== product) ok = false;
+      sessByAnon.set(s.anonymous_id as string, { variant, ok });
+    }
+  }
+  const cartInScope = (c: { anonymous_id: string | null }) => {
+    if (!utmWanted && !refWanted && !product && !destWanted) return true; // no slice → all carts
+    if (!c.anonymous_id) return false;
+    const s = sessByAnon.get(c.anonymous_id);
+    if (!s || !s.ok) return false;
+    if (destWanted) return destWanted === "pdp" ? !s.variant : s.variant === destWanted;
+    return true;
+  };
+  const scoped = carts.filter(cartInScope);
+
+  // recovery: cart email → did the customer order AFTER the reminder?
+  const emails = [...new Set(scoped.map((c) => (c.email || "").toLowerCase()).filter(Boolean))];
+  const orderTimesByEmail = new Map<string, number[]>();
+  if (emails.length) {
+    const custIds = new Map<string, string>(); // customer_id → email
+    for (let i = 0; i < emails.length; i += 200) {
+      const { data } = await admin.from("customers").select("id, email").eq("workspace_id", workspaceId).in("email", emails.slice(i, i + 200));
+      for (const cu of data || []) custIds.set(cu.id as string, String(cu.email).toLowerCase());
+    }
+    const ids = [...custIds.keys()];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data } = await admin.from("orders").select("customer_id, created_at").in("customer_id", ids.slice(i, i + 200));
+      for (const o of data || []) {
+        const em = custIds.get(o.customer_id as string); if (!em) continue;
+        const arr = orderTimesByEmail.get(em) || []; arr.push(new Date(o.created_at as string).getTime()); orderTimesByEmail.set(em, arr);
+      }
+    }
+  }
+
+  let open_with_email = 0, carts_reminded = 0, followups_sent = 0, recovered = 0, misfired = 0, fast = 0, revenueRecovered = 0;
+  for (const c of scoped) {
+    const hasEmail = !!(c.email && c.email.trim());
+    if (c.status === "open" && hasEmail) open_with_email++;
+    if (c.abandoned_email_sent_at) {
+      carts_reminded++;
+      if (c.abandoned_followup_sent_at) followups_sent++;
+      const remind = new Date(c.abandoned_email_sent_at).getTime();
+      const times = orderTimesByEmail.get((c.email || "").toLowerCase()) || [];
+      if (times.some((t) => t > remind)) { recovered++; revenueRecovered += Number(c.total_cents || c.subtotal_cents || 0); }
+      if (times.some((t) => t <= remind)) misfired++;
+    } else if (c.converted_order_id && new Date(c.updated_at).getTime() < new Date(c.created_at).getTime() + 30 * 60_000) {
+      fast++;
+    }
+  }
+
+  // leads (sliced via the same anonymous_id → session scope built above)
+  const leadInScope = (l: { anonymous_id: string | null }) => {
+    if (!utmWanted && !refWanted && !product && !destWanted) return true;
+    if (!l.anonymous_id) return false;
+    const s = sessByAnon.get(l.anonymous_id);
+    if (!s) return false; // lead's session not in the (carts') scope map — best-effort
+    if (!s.ok) return false;
+    if (destWanted) return destWanted === "pdp" ? !s.variant : s.variant === destWanted;
+    return true;
+  };
+  const scopedLeads = leadRows.filter(leadInScope);
+  const emailsCount = scopedLeads.filter((l) => l.email && l.email.trim()).length;
+  const phonesCount = scopedLeads.filter((l) => l.phone && l.phone.trim()).length;
+
+  return {
+    abandoned: {
+      open_with_email, carts_reminded, followups_sent, recovered,
+      recovery_rate_pct: carts_reminded > 0 ? round1((100 * recovered) / carts_reminded) : 0,
+      revenue_recovered_cents: revenueRecovered, misfired_reminders: misfired, fast_converted_in_session: fast,
+    },
+    leads: { emails: emailsCount, phones: phonesCount },
+  };
+}

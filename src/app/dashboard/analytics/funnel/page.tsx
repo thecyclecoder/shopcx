@@ -51,6 +51,55 @@ interface FunnelTreeResponse {
 }
 interface BreakdownRowT { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
 
+interface CartAnalyticsResponse {
+  range: { start: string; end: string };
+  abandoned: { open_with_email: number; carts_reminded: number; followups_sent: number; recovered: number; recovery_rate_pct: number; revenue_recovered_cents: number; misfired_reminders: number; fast_converted_in_session: number };
+  leads: { emails: number; phones: number };
+}
+
+/** Abandoned-cart + lead capture SUMMARY (no per-cart logs), slice + destination
+ *  aware. Recovery is corrected (credits returns-via-new-cart) + flags mis-fires. */
+function CartAnalyticsCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const a = data?.abandoned;
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Abandoned carts &amp; lead capture</h2>
+          <p className="mt-1 text-xs text-zinc-400">Reminder is a 2-step sequence (step 1 + follow-up). Recovery credits a reminded customer who orders afterward, even via a new cart.</p>
+        </div>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+
+      {a && data && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard label="Open (has email)" value={a.open_with_email.toLocaleString()} />
+          <StatCard label="Carts reminded (×2 steps)" value={`${a.carts_reminded} / ${a.followups_sent}`} />
+          <StatCard label="Recovered" value={a.recovered.toLocaleString()} tone={a.recovered > 0 ? "good" : "neutral"} />
+          <StatCard label="Recovery rate" value={`${a.recovery_rate_pct.toFixed(1)}%`} tone={a.recovery_rate_pct >= 10 ? "good" : "neutral"} />
+          <StatCard label="Revenue recovered" value={money(a.revenue_recovered_cents)} tone={a.revenue_recovered_cents > 0 ? "good" : "neutral"} />
+          <StatCard label="Fast in-session buys" value={a.fast_converted_in_session.toLocaleString()} />
+          <StatCard label="Mis-fired reminders" value={a.misfired_reminders.toLocaleString()} tone={a.misfired_reminders > 0 ? "bad" : "neutral"} />
+          <StatCard label="Leads (email / phone)" value={`${data.leads.emails} / ${data.leads.phones}`} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** SDK-driven, slice-aware dimension breakdown with CVR + LTV/visit per row —
  *  surfaces a high-traffic segment that doesn't convert (tablet layout bug,
  *  PR shipping friction, …). */
@@ -633,6 +682,9 @@ export default function StorefrontFunnelPage() {
   const [waterfallDest, setWaterfallDest] = useState("");
   const [waterfall, setWaterfall] = useState<ChapterDiagResponse | null>(null);
   const [waterfallLoading, setWaterfallLoading] = useState(true);
+  const [cartDest, setCartDest] = useState("");
+  const [cart, setCart] = useState<CartAnalyticsResponse | null>(null);
+  const [cartLoading, setCartLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -697,8 +749,23 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end, product, utmSource, referrer, waterfallDest]);
 
   useEffect(() => { loadWaterfall(); }, [loadWaterfall]);
+
+  const loadCart = useCallback(async () => {
+    if (!start || !end) return;
+    setCartLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (cartDest) q.set("destination", cartDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setCart(await res.json());
+    setCartLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, cartDest]);
+
+  useEffect(() => { loadCart(); }, [loadCart]);
   // A page-slice change can change which destinations exist → re-default the cards.
-  useEffect(() => { setChapterDest(""); setWaterfallDest(""); }, [product, utmSource, referrer]);
+  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); }, [product, utmSource, referrer]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -752,9 +819,7 @@ export default function StorefrontFunnelPage() {
             </div>
           )}
 
-          {data.abandonedCarts && (
-            <AbandonedCartsPanel block={data.abandonedCarts} />
-          )}
+          <CartAnalyticsCard data={cart} loading={cartLoading} dest={cartDest} onDest={setCartDest} destOptions={chapter?.availableDestinations ?? []} />
 
           {data.runningExperiments && data.runningExperiments.length > 0 && (
             <RunningExperimentsPanel rows={data.runningExperiments} />
@@ -876,11 +941,11 @@ function DateRangePicker({
   );
 }
 
-function StatCard({ label, value, tone }: { label: string; value: string; tone?: "good" | "neutral" }) {
+function StatCard({ label, value, tone }: { label: string; value: string; tone?: "good" | "neutral" | "bad" }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{label}</p>
-      <p className={`mt-1 text-2xl font-bold tabular-nums ${tone === "good" ? "text-emerald-600" : "text-zinc-900 dark:text-zinc-100"}`}>
+      <p className={`mt-1 text-2xl font-bold tabular-nums ${tone === "good" ? "text-emerald-600" : tone === "bad" ? "text-rose-600" : "text-zinc-900 dark:text-zinc-100"}`}>
         {value}
       </p>
     </div>
@@ -981,85 +1046,6 @@ function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunne
 }
 
 
-function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
-  const recoveredPct = block.recovery_rate_pct;
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Abandoned carts
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          Reminder fires after 30 min idle, once per cart.
-        </span>
-      </div>
-      <div className="mb-5 grid gap-3 sm:grid-cols-4">
-        <StatCard label="Open now (has email)" value={block.open_with_email.toLocaleString()} />
-        <StatCard label="Reminders sent" value={block.emailed.toLocaleString()} />
-        <StatCard
-          label="Recovered"
-          value={block.recovered.toLocaleString()}
-          tone={block.recovered > 0 ? "good" : "neutral"}
-        />
-        <StatCard
-          label="Recovery rate"
-          value={`${recoveredPct.toFixed(1)}%`}
-          tone={recoveredPct >= 5 ? "good" : "neutral"}
-        />
-      </div>
-      <div className="mb-4 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-300">
-        Revenue recovered:&nbsp;
-        <strong>${(block.revenue_recovered_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
-      </div>
-      {block.recent.length === 0 ? (
-        <p className="text-xs text-zinc-400">No abandoned carts in this range yet.</p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm">
-            <thead>
-              <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                <th className="py-2 pr-2">Created</th>
-                <th className="py-2 pr-2">Email</th>
-                <th className="py-2 pr-2">Items</th>
-                <th className="py-2 pr-2 text-right">Subtotal</th>
-                <th className="py-2 pr-2">Reminder</th>
-                <th className="py-2 pr-2">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {block.recent.map(c => (
-                <tr key={c.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                  <td className="whitespace-nowrap py-2 pr-2 text-zinc-500">
-                    {new Date(c.created_at).toLocaleString()}
-                  </td>
-                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{c.email}</td>
-                  <td className="py-2 pr-2 tabular-nums text-zinc-700 dark:text-zinc-300">{c.item_count}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
-                    ${(c.subtotal_cents / 100).toFixed(2)}
-                  </td>
-                  <td className="whitespace-nowrap py-2 pr-2 text-xs text-zinc-500">
-                    {c.abandoned_email_sent_at
-                      ? new Date(c.abandoned_email_sent_at).toLocaleString()
-                      : <span className="text-amber-600">pending</span>}
-                  </td>
-                  <td className="py-2 pr-2">
-                    {c.status === "converted" ? (
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800">recovered</span>
-                    ) : c.status === "abandoned" ? (
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-zinc-100 text-zinc-600">abandoned</span>
-                    ) : (
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-800">open</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
 
 
 function RunningExperimentsPanel({ rows }: { rows: NonNullable<FunnelData["runningExperiments"]> }) {
