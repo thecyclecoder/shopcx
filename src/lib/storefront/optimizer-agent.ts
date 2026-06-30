@@ -47,6 +47,7 @@ import { getCalibrationState } from "@/lib/storefront/calibration";
 import { loadLeverGradeSignal, type LeverGradeSignal } from "@/lib/storefront/campaign-grader";
 import type { VariantPatch } from "@/lib/storefront/experiments";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -245,6 +246,33 @@ export async function hasActiveCampaignForSurface(admin: Admin, s: OptimizerSurf
     return !!(data && data.length);
   } catch {
     return false;
+  }
+}
+
+/** Spec growth-adopt-storefront-optimizer Phase 3 — mirror of the experiment-refresh gate
+ *  ([[storefront-experiment-refresh]]) on the materialization side. Surfaces a previously-
+ *  failed-to-deliver experiment on the SAME surface (any status, latest first) so the
+ *  worker refuses to stand up a new campaign that would silently promote the same
+ *  (untrusted-delivery) variant configuration without re-verification. Returns the
+ *  blocking experiment id if one exists, else null. Best-effort (degrades to null). */
+export async function findUndeliveredExperimentForSurface(
+  admin: Admin,
+  s: OptimizerSurface,
+): Promise<string | null> {
+  try {
+    const { data } = await admin
+      .from("storefront_experiments")
+      .select("id, created_at")
+      .eq("workspace_id", s.workspace_id)
+      .eq("product_id", s.product_id)
+      .eq("lander_type", s.lander_type)
+      .eq("audience", s.audience)
+      .eq("last_decision->>delivery_flag", "failed_to_deliver")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    return data && data.length ? (data[0].id as string) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -603,6 +631,36 @@ export async function materializeCampaign(opts: {
   // ≤1 active campaign per surface — clean attribution, never bundle.
   if (await hasActiveCampaignForSurface(admin, surface)) {
     return { ok: false, detail: `a campaign is already active on ${surfaceKey(surface)} — not standing up a second` };
+  }
+
+  // Spec growth-adopt-storefront-optimizer Phase 3 — mirror of the experiment-refresh
+  // delivery gate: refuse to stand up a NEW campaign on a surface whose latest prior
+  // experiment carries `last_decision.delivery_flag='failed_to_deliver'`. The previous
+  // campaign's variant configuration never actually reached shoppers; standing up a new
+  // one would re-bury the failure under a fresh hypothesis. Logs one
+  // `blocked_promote_undelivered` director_activity row so the refusal surfaces to the
+  // Growth director, then refuses.
+  const blockingExperimentId = await findUndeliveredExperimentForSurface(admin, surface);
+  if (blockingExperimentId) {
+    await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: "growth",
+      actionKind: "blocked_promote_undelivered",
+      specSlug: null,
+      reason: `materializeCampaign refused on ${surfaceKey(surface)} — prior experiment ${blockingExperimentId} carries delivery_flag='failed_to_deliver'; re-verify delivery before standing up a new campaign`,
+      metadata: {
+        experiment_id: blockingExperimentId,
+        lander_type: p.lander_type,
+        audience: p.audience,
+        product_id: opts.productId,
+        lever: p.lever_key,
+        source: "materializeCampaign",
+      },
+    });
+    return {
+      ok: false,
+      detail: `prior experiment ${blockingExperimentId} on ${surfaceKey(surface)} carries delivery_flag='failed_to_deliver' — re-verify delivery before standing up a new campaign`,
+    };
   }
 
   const patch = opts.patchOverride ?? p.variant.patch ?? {};
