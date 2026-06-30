@@ -1,0 +1,1 @@
+- **Blended new-customer CAC↔LTV objective + payback window** · verified 2026-06-30 · → [[libraries/blended-cac-ltv]]

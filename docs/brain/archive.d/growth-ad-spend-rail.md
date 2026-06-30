@@ -1,0 +1,1 @@
+- **Ad-dollar budget ceiling + spend governor** · verified 2026-06-30 · → [[../libraries/ad-spend-governor]]

@@ -38,11 +38,15 @@ User token with `ads_management` from `meta_connections.access_token_encrypted` 
 - **Token expiry** — the connected token expires periodically; reconnect Meta when Graph returns an auth error.
 - New Inngest function → needs an **Inngest sync** after deploy (`PUT /api/inngest`) before the first publish, like other new functions.
 
-## Status / open work (2026-06-10)
+## Director-approved ready-to-test promotion (2026-06-30)
 
-- Shipped: client + copy gen + job table + routes + Inngest + UI; typechecks; read-side (accounts/campaigns/adsets/pages) verified live.
+The Growth director can now queue ready-to-test creatives ([[../libraries/ready-to-test]]) for publish with `publish_active=false`, creating **PAUSED Meta ads** awaiting manual activation in Ads Manager. On Director approval, the worker fires `ad-tool/publish-to-meta` with the PAUSED flag, stamps a `promoted_ready_to_test` row in [[director_activity]], and after publish completes, writes an `attributed_creative_outcome` row linking the creative's ROAS back to the promotion decision (via [[../tables/meta_attribution_daily]] settled outcomes ≥3d later).
+
+## Status / open work (2026-06-30)
+
+- Shipped: client + copy gen + job table + routes + Inngest + UI; typechecks; read-side (accounts/campaigns/adsets/pages) verified live; ready-to-test promotion + Director approval + outcome lineage.
 - Open: multi-format placement customization (upload 4:5 too); per-placement creative; saving/reusing copy on the job; the destination URL default (currently manual — could default to the storefront/product URL).
 
 ## Related
 
-[[ad-render]] · [[ad-static]] · [[../integrations/meta-marketing]] · [[../integrations/meta-graph]] · [[../tables/ad_publish_jobs]] · [[../inngest/ad-tool]] · [[../libraries/meta-ads]]
+[[ad-render]] · [[ad-static]] · [[../integrations/meta-marketing]] · [[../integrations/meta-graph]] · [[../tables/ad_publish_jobs]] · [[../inngest/ad-tool]] · [[../libraries/meta-ads]] · [[../libraries/ready-to-test]] · [[director_activity]]
