@@ -1,0 +1,1 @@
+- **Growth Director live + autonomous cutover** · verified 2026-06-30 · → [[functions/growth]]
