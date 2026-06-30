@@ -1,0 +1,55 @@
+# libraries/funnel-tree
+
+The **single source of truth** for the rebuilt storefront funnel — one computation that powers both the Growth Director (Max) and the funnel-page card, so the number Max acts on and the number Dylan sees are identical. Replaces the per-route inline aggregation that let the funnel, the chapter table, and Max's reads silently drift.
+
+**File:** `src/lib/storefront/funnel-tree.ts` · Reads [[../tables/storefront_events]] (funnel-step events in window) + [[../tables/storefront_sessions]] (`landing_url` first-touch + exclusion flags) + [[../tables/products]] (handle→title, the slice key) + [[../tables/advertorial_pages]] (slug→headline, **enrichment only**) + [[../tables/customers]] (`is_internal` set). Read-only — never writes. Takes UTC instants, so it runs unchanged in a Next.js route handler AND in Max's agent runtime.
+
+## The tree (per product, variable depth)
+
+```
+Amazing Coffee                ← PRODUCT  (rollup of PDP + All Landers)
+├── Product Page (bare PDP)       ← leaf
+└── All Landers                   ← rollup of every variant  (PDP-vs-targeted comparison)
+    ├── Advertorial                   ← VARIANT (rollup of its angles)
+    │   └── {angle} …                     ← angle (leaf — atomic)
+    ├── Listicle / Reasons            ← VARIANT
+    └── Before/After                  ← VARIANT
+```
+
+When no product slice is applied the top level is a **forest** of product nodes; slicing to one product returns just that subtree.
+
+## Bucketing keys (URL-param-first; locked 2026-06-30)
+
+- **PRODUCT** ← the `products.handle` segment of `landing_url`'s path (first segment matching a known handle). Universal — resolves PDP and lander alike, first-touch. Robust to path shape (`/amazing-coffee`, `/store/superfoods/amazing-coffee`).
+- **PDP vs LANDER** ← presence of the **`?variant=` param** in `landing_url`. Absent = bare PDP; present = lander. Keyed on the PARAM, **not `advertorial_page_id`** — the param captures intent and survives angle-resolution misses that would otherwise leak a lander into PDP. (Validated 2026-06-30: this also correctly flips ~14/30d cookie-/heal-stamped paid-PDP sessions back to PDP.)
+- **VARIANT** ← the VALUE of `?variant=` (`reasons` → "Listicle / Reasons", `advertorial`, `beforeafter`). No join.
+- **ANGLE** ← the VALUE of `?angle=` — the atomic leaf. `advertorial_pages` join (by slug) is **pure enrichment** (headline / hero_kind / page id for display), never bucketing.
+
+## Exports
+
+### `computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle? })` → `FunnelTreeResult`
+1. Pull funnel-step events (`pdp_view`/`pdp_engaged`/`pack_selected`/`checkout_view`/`order_placed`/`add_to_cart`) in `[startIso,endIso]`, paginated → per-session reached-step set.
+2. Fetch the referenced sessions (chunked `.in("id")`, 300/page); drop `is_internal`, `is_bot`, internal-customer-stitched — same real-traffic exclusion as the legacy funnel.
+3. Bucket each session into one leaf via the keys above; accumulate step counts.
+4. Roll up **bottom-up by summation** (leaf session sets are mutually exclusive — first-touch), **recomputing rates at every node** from summed counts (never averaging child %).
+- Returns `products` (forest), `unattributedEntry` (non-product landings e.g. `/checkout` — surfaced separately but **included in `grandTotal`** so it reconciles), and `grandTotal` (all sessions combined). Each node carries `FunnelNodeMetrics`: the 5 step counts + `add_to_cart`, plus `engagement_rate` (engaged/visit), `conversion_rate` (order/visit), `atc_rate`.
+
+### `listFunnelProducts({ admin, workspaceId, startIso, endIso })` → `{ handle, title, sessions }[]`
+The slice-dropdown source: products with real sessions in the window (resolution-based, so dead SKUs never appear), ordered by volume. Dynamic + self-pruning.
+
+### `parseLanding(landingUrl)` → `{ segments, variant, angle }`
+Exported helper — tolerant URL parse (absolute / relative / malformed).
+
+## Invariants & gotchas
+- **Pack-selected ↔ Checkout-started are 1:1 by design** (the customize page is optional). The 100% step is structural, not a tracking gap. `checkout_view` is the reliable "reached checkout" signal.
+- **`grandTotal` reconciles** with the legacy `GET /api/workspaces/[id]/storefront-funnel` top line for the same window (verified via `scripts/_probe-funnel-tree-verify.ts` — distinct-session counts match exactly).
+- **No silent drops:** an unknown `variant` value gets its own visible row; a variant present without an `angle` becomes a visible `(no angle)` leaf.
+- **Caller owns Central-time boundary math** (`centralBoundary`) — the SDK takes UTC instants so it stays presentation-agnostic.
+
+## Consumers
+- (planned) the funnel-page top card + universal product-slice filter — [[../dashboard/storefront__funnel]].
+- (planned) Max's performance-data assembly — the Growth Director reads the same tree he directs agents on.
+
+## Related
+- Fixes the same un-segmented-by-variant root issue logged in [[../specs/chapter-performance-variant-dimension]].
+- Distinct from [[storefront-experiment-funnel]] (per-experiment-arm rollup, bandit-keyed) — this is the product/page-type/variant/angle hierarchy keyed on first-touch landing.
