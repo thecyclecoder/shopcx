@@ -66,4 +66,4 @@ Entry: "Upload static ad" card on `/dashboard/marketing/ads`.
 
 ## Related
 
-[[ad-render]] (video) · [[../integrations/remotion-lambda]] · [[../inngest/ad-tool]] · [[../tables/ad_videos]] · [[../tables/ad_segments]]
+[[ad-render]] (video) · [[../lifecycles/creative-finder]] · [[../libraries/ads__customer-voice-mining]] · [[../tables/product_ad_angles]] · [[../integrations/remotion-lambda]] · [[../inngest/ad-tool]] · [[../tables/ad_videos]] · [[../tables/ad_segments]]

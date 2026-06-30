@@ -1,8 +1,16 @@
 # libraries/ads/customer-voice-mining
 
-Phase 1 of [[../specs/growth-customer-voice-to-ad-angles]] — a pure-read mining pass that turns captured customer voice into typed `VoiceFragment[]` for a workspace+product. NO LLM call; the Phase 2 synthesizer consumes this output to score angle candidates into [[../tables/product_ad_angles]].
+Customer-voice-to-ad-angles synthesizer: mines captured customer voice (reviews, cancellations, support tickets) → synthesizes angle candidates via LLM → persists scored proposals to [[../tables/product_ad_angles]] → Director approves and fans into [[../lifecycles/ad-static]] / [[../lifecycles/ad-render]]. Closes the 'customer voice → ads' half of the performance→creative loop.
 
-**File:** `src/lib/ads/customer-voice-mining.ts` · Test: `src/lib/ads/customer-voice-mining.test.ts` (`npm run test:customer-voice-mining`).
+**File:** `src/lib/ads/customer-voice-mining.ts` · Test: `src/lib/ads/customer-voice-mining.test.ts` (`npm run test:customer-voice-mining`). **Owner:** [[../functions/growth]] · **Mandate:** Performance→creative loop.
+
+## Three-phase flow
+
+**Phase 1 — Voice mining (pure read):** Extract customer signals from [[../tables/product_reviews]], [[../tables/customer_events]] (cancellations), [[../tables/tickets]] (support themes) → typed `VoiceFragment[]` array. No LLM, safe to run repeatedly.
+
+**Phase 2 — Synthesize + score (LLM once):** Pass fragments + [[../libraries/creative-skeleton]] pattern matrix to Opus → emit K candidate angles `{hook, mechanism_claim, proof, offer, supporting_fragment_ids:[]}`. Score by cross-brand overlap + fragment density. Persist accepted to [[../tables/product_ad_angles]] at `status='proposed'`.
+
+**Phase 3 — Director approval → hand-off:** [[../functions/growth]] Director reviews proposed angles on the brief; on approve, flip `status='approved'` + enqueue static/video render request to [[../lifecycles/ad-static]] or [[../lifecycles/ad-render]] and write `director_activity` row (`action_kind='approved_voice_angle'`).
 
 ## Exports
 
@@ -16,6 +24,22 @@ function mineCustomerVoice(
 ```
 
 Default `sinceMs` is 90 days. Each fragment carries `{ source, source_id, text, signal }` so a downstream pass can write `metadata.mined_from: { review_ids:[], cancel_event_ids:[], ticket_ids:[] }` to `product_ad_angles`.
+
+### `synthesizeAdAngles` — function (Phase 2)
+
+```ts
+function synthesizeAdAngles(opts: {
+  fragments: VoiceFragment[];
+  patternMatrix: CreativePatternMatrix;
+  productId: string;
+}): Promise<{ candidates: AdAngleCandidate[] }>
+```
+
+Calls Opus once with fragments + pattern matrix → emits K angle candidates. Each candidate carries `{hook_slug, mechanism_claim, proof, offer, supporting_fragment_ids[], score, matrix_overlap}`. Scores determined by (a) cross-brand pattern overlap and (b) supporting fragment density. Calls `persistProposedAngles()` to write results to `product_ad_angles` at `status='proposed'`.
+
+### `persistProposedAngles` — function (Phase 2)
+
+Writes synthesized candidates to [[../tables/product_ad_angles]] with `status='proposed'`, `is_active=false`, `generated_by='agent'`, carrying `metadata={mined_from:{review_ids:[], cancel_event_ids:[], ticket_ids:[]}, matrix_overlap, score}`.
 
 ### `VoiceFragment` — type
 
@@ -47,7 +71,8 @@ interface VoiceFragment {
 
 ## Callers
 
-_None yet — Phase 2 (`synthesizeAdAngles`) of the same spec will be the first caller._
+- **Phase 2 synthesizer:** `scripts/builder-worker.ts` orchestrator job (scheduled or manual trigger) calls `mineCustomerVoice()` + `synthesizeAdAngles()` → persists proposed angles to [[../tables/product_ad_angles]].
+- **Phase 3 director sweep:** [[../functions/growth]] Growth Director session (via `/dashboard/`) reviews `product_ad_angles.status='proposed'` angles; on approve, flips to `approved` + enqueues `ad-tool/static-requested` or `ad-tool/video-requested` events to [[../inngest/ad-tool]] (kickstarts [[ad-static]] or [[ad-render]] generation) + writes `director_activity` row.
 
 ---
 

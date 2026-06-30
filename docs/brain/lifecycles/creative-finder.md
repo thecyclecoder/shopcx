@@ -1,6 +1,6 @@
 # Lifecycle: creative finder (static competitor analysis)
 
-Discovers long-running competitor + category static ads from [[../integrations/adlibrary]], reverse-engineers their structure (hook → mechanism claim → proof → offer skeleton) via vision, and mines cross-brand repetition patterns to inform variant generation. The pattern matrix is the consumable hand-off for the copy-generation + variant tools.
+Discovers long-running competitor + category static ads from [[../integrations/adlibrary]], reverse-engineers their structure (hook → mechanism claim → proof → offer skeleton) via vision, and mines cross-brand repetition patterns. The pattern matrix is the consumable hand-off for variant generation and — critically — for [[../libraries/ads__customer-voice-mining]] Phase 2 (the synthesizer scores customer-voice-mined angle candidates against the active pattern matrix before persisting to [[../tables/product_ad_angles]]).
 
 **Owner:** [[../functions/growth]] · **Mandate:** Static-ad optimization
 
@@ -84,4 +84,4 @@ Routed via `status='video_pending'` at ingestion; deferred to [[../specs/creativ
 
 ## Related
 
-[[../specs/winning-static-creative-finder]] · [[../specs/creative-finder-video]] · [[../specs/ad-creative-scout]] · [[../specs/competitor-scout]] · [[../specs/landing-page-scout]] · [[ad-static]] · [[ad-publish]] · [[ad-render]] · [[advertorial-landers]] · [[../tables/creative_skeletons]] · [[../tables/competitors]] · [[../integrations/adlibrary]] · [[../integrations/anthropic]] · [[../inngest/creative-finder]] · [[../libraries/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/competitors]] · [[../libraries/video-skeleton]] · [[../libraries/ad-gap]] · [[../functions/growth]] · [[../README]]
+[[../specs/winning-static-creative-finder]] · [[../specs/creative-finder-video]] · [[../specs/ad-creative-scout]] · [[../specs/competitor-scout]] · [[../specs/landing-page-scout]] · [[ad-static]] · [[ad-publish]] · [[ad-render]] · [[advertorial-landers]] · [[../tables/creative_skeletons]] · [[../tables/competitors]] · [[../integrations/adlibrary]] · [[../integrations/anthropic]] · [[../inngest/creative-finder]] · [[../libraries/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/ads__customer-voice-mining]] · [[../libraries/competitors]] · [[../libraries/video-skeleton]] · [[../libraries/ad-gap]] · [[../functions/growth]] · [[../README]]
