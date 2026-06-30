@@ -244,6 +244,7 @@ interface ChapterDiagResponse {
   summary: { visits: number; reached_pricing: number; carry_to_pricing_pct: number; packed: number; close_pct: number; jumped_to_pricing: number; scrolled_to_pricing: number } | null;
   funnelSteps: FunnelStepDatum[];
   chapters: ChapterDiagRow[];
+  bottlenecks?: { destinations: Array<{ key: string; label: string; bottleneck: string; recommendation: string; confidence: string }> };
 }
 
 /** SDK-driven, slice-aware funnel waterfall (vertical bars) with a card-local
@@ -335,6 +336,20 @@ function ChapterDiagnosticsCard({ data, loading, dest, onDest }: {
           <StatCard label="Jump / scroll to price" value={`${s.jumped_to_pricing} / ${s.scrolled_to_pricing}`} />
         </div>
       )}
+
+      {(() => {
+        const v = data?.bottlenecks?.destinations?.find((d) => d.key === data?.destination?.key);
+        if (!v || v.bottleneck === "insufficient_data") return null;
+        const tone = v.bottleneck === "close" ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
+          : v.bottleneck === "carry" ? "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300"
+          : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300";
+        return (
+          <div className={`mb-4 rounded-md border px-3 py-2 text-xs ${tone}`}>
+            <strong className="uppercase tracking-wide">Bottleneck: {v.bottleneck}</strong> — {v.recommendation}
+            <span className="ml-1 opacity-60">(confidence: {v.confidence})</span>
+          </div>
+        );
+      })()}
 
       {data && data.chapters.length > 0 && (
         <div className="overflow-x-auto">
