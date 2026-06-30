@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleGetUpcomingOrders, appstleAttemptBilling } from "@/lib/appstle";
+import { orderNowByContract } from "@/lib/appstle";
 import { logCustomerEvent } from "@/lib/customer-events";
 
 export async function POST(
@@ -22,14 +22,11 @@ export async function POST(
 
   if (!sub) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Get upcoming order to get billing attempt ID
-  const ordersRes = await appstleGetUpcomingOrders(workspaceId, sub.shopify_contract_id);
-  if (!ordersRes.success || !ordersRes.orders?.length) {
-    return NextResponse.json({ error: "No upcoming orders found" }, { status: 400 });
-  }
-
-  const billingAttemptId = ordersRes.orders[0].id;
-  const result = await appstleAttemptBilling(workspaceId, billingAttemptId);
+  // Flavor-aware order-now: internal subs fire the Braintree renewal pipeline,
+  // Appstle subs attempt the upcoming Appstle billing. Calling appstle directly
+  // here silently no-ops on internal subs (appstleAttemptBilling short-circuits a
+  // synthetic internal-* id to fake success), so order-now must go through this.
+  const result = await orderNowByContract(workspaceId, sub.shopify_contract_id);
 
   if (!result.success) {
     return NextResponse.json({ error: result.error || "Billing failed" }, { status: 500 });
@@ -39,8 +36,10 @@ export async function POST(
     await logCustomerEvent({
       workspaceId, customerId: sub.customer_id,
       eventType: "subscription.bill_now", source: "agent",
-      summary: "Immediate billing triggered by agent",
-      properties: { shopify_contract_id: sub.shopify_contract_id, billingAttemptId },
+      summary: result.internal
+        ? "Immediate renewal triggered by agent (internal sub)"
+        : "Immediate billing triggered by agent",
+      properties: { shopify_contract_id: sub.shopify_contract_id, internal: !!result.internal },
     });
   }
 

@@ -454,27 +454,26 @@ export const directActionHandlers: Record<
   },
 
   change_next_date: async (ctx, p) => {
-    const { appstleUpdateNextBillingDate, appstleGetUpcomingOrders, appstleAttemptBilling } = await import("@/lib/appstle");
+    const { appstleUpdateNextBillingDate, orderNowByContract } = await import("@/lib/appstle");
     // Appstle rejects past/today timestamps. If Sonnet passes a date
     // ≤ today (Central) — which it does when a customer says "ship
     // it ASAP" or "send right away" — we don't shove next_billing
-    // into the future; we just charge now via bill_now. This matches
+    // into the future; we just charge now via order-now. This matches
     // customer intent (get product TODAY) and avoids the 400 we used
-    // to bounce on.
+    // to bounce on. orderNowByContract is flavor-aware (internal → Braintree
+    // renewal pipeline, Appstle → attempt-billing); a raw appstle call here
+    // silently no-ops on internal subs.
     let date = p.date!;
     const centralToday = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
     centralToday.setHours(0, 0, 0, 0);
     const requested = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
     if (!isNaN(requested.getTime()) && requested.getTime() <= centralToday.getTime()) {
-      const upcoming = await appstleGetUpcomingOrders(ctx.workspaceId, p.contract_id!);
-      if (upcoming.success && upcoming.orders?.length) {
-        const billed = await appstleAttemptBilling(ctx.workspaceId, upcoming.orders[0].id);
-        if (billed.success) {
-          return { success: true, summary: "Triggered bill_now (customer asked to ship today)" };
-        }
-        // bill_now failed → fall through to bumping date as a soft fallback
-        console.warn(`[change_next_date] bill_now fallback failed for ${p.contract_id}:`, billed.error);
+      const billed = await orderNowByContract(ctx.workspaceId, p.contract_id!);
+      if (billed.success) {
+        return { success: true, summary: "Triggered order now (customer asked to ship today)" };
       }
+      // order-now failed → fall through to bumping date as a soft fallback
+      console.warn(`[change_next_date] order-now fallback failed for ${p.contract_id}:`, billed.error);
       const tomorrow = new Date(centralToday);
       tomorrow.setDate(tomorrow.getDate() + 1);
       date = tomorrow.toISOString().slice(0, 10);
@@ -486,20 +485,16 @@ export const directActionHandlers: Record<
 
   /**
    * bill_now — charge the current upcoming order on a sub right
-   * away (Appstle's attemptBilling endpoint). Use this when the
-   * customer says "ship it now", "ASAP", "I'm out of product".
-   * Does NOT change next_billing_date — after the charge, Appstle
-   * advances the schedule by one cycle.
+   * away. Use this when the customer says "ship it now", "ASAP",
+   * "I'm out of product". Does NOT change next_billing_date — after
+   * the charge, the schedule advances by one cycle. Flavor-aware:
+   * internal subs fire the Braintree renewal pipeline, Appstle subs
+   * attempt the upcoming Appstle billing (orderNowByContract).
    */
   bill_now: async (ctx, p) => {
-    const { appstleGetUpcomingOrders, appstleAttemptBilling } = await import("@/lib/appstle");
+    const { orderNowByContract } = await import("@/lib/appstle");
     if (!p.contract_id) return { success: false, error: "bill_now missing contract_id" };
-    const upcoming = await appstleGetUpcomingOrders(ctx.workspaceId, p.contract_id);
-    if (!upcoming.success || !upcoming.orders?.length) {
-      return { success: false, error: `No upcoming order to bill: ${upcoming.error || "(empty)"}` };
-    }
-    const billed = await appstleAttemptBilling(ctx.workspaceId, upcoming.orders[0].id);
-    return { ...billed, summary: "Triggered bill_now" };
+    return orderNowByContract(ctx.workspaceId, p.contract_id);
   },
 
   add_item: async (ctx, p) => {
