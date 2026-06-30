@@ -4724,6 +4724,45 @@ async function runGrowthDirectorJob(job: Job) {
         return;
       }
       await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "growth", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${bundleLabel})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true } });
+
+      // growth-adopt-creative-makers Phase 2: a `promote_ready_to_test_creative` action is
+      // SELF-EXECUTING — it inserts an `ad_publish_jobs` row with `publish_active=false` and fires
+      // `ad-tool/publish-to-meta` inline (the ad lands PAUSED; a second human approve flips it live).
+      // Each promotion also stamps one `director_activity` row of `action_kind='promoted_ready_to_test'`
+      // so the creative→publish-job lineage is gradable (Phase 3 closes the loop with the outcome row).
+      // Run after `applyDirectorApproval` has stamped each action `approved`; on success the target
+      // is finalized to `completed` (no separate resume runner needed).
+      const hasPromote = leashActions.some((a) => a.category === "promote_ready_to_test_creative");
+      if (hasPromote) {
+        const promoteLib = await import("../src/lib/ads/ready-to-test-promote");
+        const { data: refreshed } = await db
+          .from("agent_jobs")
+          .select("id, workspace_id, spec_slug, pending_actions")
+          .eq("id", t.id)
+          .maybeSingle();
+        if (refreshed) {
+          const refreshedTarget = refreshed as unknown as import("../src/lib/ads/ready-to-test-promote").PromoteTargetJob;
+          const exec = await promoteLib.executeApprovedPromotions(db, refreshedTarget);
+          const stillPending = (refreshedTarget.pending_actions || []).some((a) => (a.status ?? "pending") === "pending");
+          await db
+            .from("agent_jobs")
+            .update({
+              pending_actions: refreshedTarget.pending_actions,
+              status: stillPending ? "queued_resume" : exec.ok ? "completed" : "needs_attention",
+              error: exec.ok ? null : exec.executed.find((e) => !e.ok)?.reason ?? "promote failed",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", t.id);
+          const publishedIds = exec.executed.filter((e) => e.ok).map((e) => e.ad_publish_jobs_id).filter(Boolean);
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approved ${t.kind} (${bundleLabel}); promoted ${publishedIds.length} creative(s) → ad_publish_jobs ${publishedIds.join(", ")}.\n${reasoning}`.slice(-2000),
+          });
+          console.log(`${tag} auto-approved ${t.kind} (${bundleLabel}) — published ${publishedIds.length}/${exec.executed.length}`);
+          return;
+        }
+      }
+
       await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → target queued_resume.\n${reasoning}`.slice(-2000) });
       console.log(`${tag} auto-approved ${t.kind} (${bundleLabel})`);
       return;

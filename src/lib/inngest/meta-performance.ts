@@ -23,6 +23,7 @@ import {
   type StageRecord,
 } from "@/lib/meta/iteration-run";
 import { runGrowthAllocationPass } from "@/lib/growth-allocation";
+import { attributeCreativeOutcomes } from "@/lib/ads/creative-outcome-attribution";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
@@ -382,6 +383,34 @@ export const metaIterationRun = inngest.createFunction(
           };
         }
       });
+
+      // ── Stage 9 — creative→outcome lineage (growth-adopt-creative-makers Phase 3) ──────
+      // Stamp `attributed_creative_outcome` rows for every Director-promoted creative whose
+      // publish has matured (≥ OUTCOME_MATURATION_DAYS) and whose meta_ad_id now has
+      // attribution-window rows. Idempotent — a per-workspace pass per snapshot. Best-effort:
+      // never aborts the run on a failure (the iteration loop continues regardless).
+      const lineage = await step.run("creative-outcome-lineage", async () => {
+        const t0 = Date.now();
+        try {
+          const admin = createAdminClient();
+          const r = await attributeCreativeOutcomes(admin, {
+            workspaceId: workspace_id,
+            snapshotDate,
+          });
+          return { ms: Date.now() - t0, status: "ok" as const, ...r };
+        } catch (err) {
+          return {
+            ms: Date.now() - t0,
+            status: "error" as const,
+            error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+            attributed: 0,
+            skipped_immature: 0,
+            skipped_not_published: 0,
+            skipped_no_attribution: 0,
+            skipped_already_done: 0,
+          };
+        }
+      });
       stages.push({
         name: "growth-allocation",
         status: allocation.error ? "error" : "ok",
@@ -392,6 +421,16 @@ export const metaIterationRun = inngest.createFunction(
         escalated: allocation.escalated,
         escalation_kind: allocation.escalation_kind,
         ...(allocation.error ? { error: allocation.error } : {}),
+      });
+      stages.push({
+        name: "creative-outcome-lineage",
+        status: lineage.status,
+        ms: lineage.ms,
+        attributed: lineage.attributed,
+        skipped_immature: lineage.skipped_immature,
+        skipped_not_published: lineage.skipped_not_published,
+        skipped_no_attribution: lineage.skipped_no_attribution,
+        skipped_already_done: lineage.skipped_already_done,
       });
 
       const counts = {
@@ -408,6 +447,7 @@ export const metaIterationRun = inngest.createFunction(
         growth_allocation_decision_kind: allocation.decision_kind,
         growth_allocation_action_kind: allocation.action_kind,
         growth_allocation_escalated: allocation.escalated,
+        creative_outcomes_attributed: lineage.attributed,
       };
 
       await step.run("finish-run", () =>
