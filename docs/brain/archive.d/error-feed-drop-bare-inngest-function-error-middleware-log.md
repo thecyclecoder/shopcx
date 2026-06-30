@@ -1,0 +1,1 @@
+- **Error feed: drop the bare Inngest middleware 'Inngest function error' log on /api/inngest** · verified 2026-06-30 · → [[../libraries/control-tower]]

@@ -252,6 +252,32 @@ test("isBareInngestStepErrorMiddlewareLog returns false on empty / nullish input
   assert.equal(isBareInngestStepErrorMiddlewareLog("   ", "/api/inngest"), false);
 });
 
+// The sibling bare label — Inngest SDK's `wrapFunctionHandler` emits
+// `proxyLogger.error({ err }, 'Inngest function error')` on every function-handler
+// rejection, same `{ err }, <label>` shape as onStepError. The bare middleware log on
+// /api/inngest opened Control Tower signature `vercel:dcc421bdd0ffd0a5` — the second
+// bare label noise on top of the authoritative inngest/function.failed capture
+// (error-feed-drop-bare-inngest-function-error-middleware-log).
+
+test("isBareInngestStepErrorMiddlewareLog drops the exact 'Inngest function error' label on /api/inngest", () => {
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest function error", "/api/inngest"), true);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("  Inngest function error  ", "/api/inngest"), true);
+});
+
+test("isBareInngestStepErrorMiddlewareLog KEEPS 'Inngest function error' on a different path", () => {
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest function error", "/api/other"), false);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest function error", null), false);
+  assert.equal(isBareInngestStepErrorMiddlewareLog("Inngest function error", undefined), false);
+});
+
+test("isBareInngestStepErrorMiddlewareLog KEEPS a non-bare 'Inngest function error' on /api/inngest (real body)", () => {
+  // Same label PLUS additional detail Vercel managed to surface ⇒ not bare, still captured.
+  assert.equal(
+    isBareInngestStepErrorMiddlewareLog("Inngest function error: TypeError: x is undefined", "/api/inngest"),
+    false,
+  );
+});
+
 // ── isTransientShopifyWebhookHmacFailure (error-feed-shopify-webhook-hmac-transient) ──
 // /api/webhooks/shopify(-returns) rejects an unverified request with a 401 + a
 // console.error("Shopify webhook HMAC failed for topic=… shop=…"). A single such log is a

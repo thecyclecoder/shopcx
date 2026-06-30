@@ -1,0 +1,1 @@
+- **Customer-voice → ad-angles synthesizer** · verified 2026-06-30 · → [[../libraries/ads__customer-voice-mining]]

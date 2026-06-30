@@ -1,0 +1,1 @@
+- **Quiet single Slack-notify timeouts so they stop tripping the error feed** · verified 2026-06-30 · → [[../libraries/slack-notify]]

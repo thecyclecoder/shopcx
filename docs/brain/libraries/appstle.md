@@ -40,13 +40,17 @@ async function appstleUpdateNextBillingDate(workspaceId: string, contractId: str
 async function appstleGetUpcomingOrders(workspaceId: string, contractId: string,) : Promise<
 ```
 
+**JSON-id coercion at the boundary:** Appstle's `top-orders` endpoint returns each upcoming order's `id` as a JSON **number**, but our type signature and every downstream caller (dunning, portal order-now, `appstleAttemptBilling`'s `.startsWith` guard) treats it as a string. The helper maps each row through `String(o.id)` before returning, so every caller sees a consistent string id from the start (signature `vercel:c16ba1c31f84151b`).
+
 ### `appstleAttemptBilling` — function
 
 ```ts
 async function appstleAttemptBilling(workspaceId: string, billingAttemptId: string,) : Promise<
 ```
 
-**Internal-billing-attempt-id guard:** If `billingAttemptId.startsWith("internal-")`, returns `{ success: true }` with a `console.warn` and **no Appstle API call**. Internal subs are Braintree-billed by the daily [[internal-subscription-renewals]] cron, not Appstle, but upstream callers (dunning payday-retry cron, new-card-recovery) synthesize a `internal-*` id into the billing-attempt slot. This early-return prevents the synthetic id from hitting Appstle's real API and 400-ing (signature vercel:cdfbac68e30a91f9), which would noise the error feed and Control Tower — see [[../specs/archive.d/dunning-payday-retry-skip-internal-subs]].
+**Defensive `String(...)` coercion:** Even though the parameter is typed as `string`, the helper wraps `billingAttemptId` with `String(...)` once at the top and uses the coerced value for the `startsWith` guard, the log message, and the URL interpolation. This makes the function type-safe regardless of upstream shape — previously, dunning passed `ordersRes.orders[0].id` straight through and Appstle's numeric JSON id tripped `TypeError: t.startsWith is not a function`, aborting every Appstle-billed retry and noising the Vercel error feed (signature `vercel:c16ba1c31f84151b`, also seen as `inngest:c800bfc534ae9a1e`). Belt-and-braces with the boundary coercion in `appstleGetUpcomingOrders` above.
+
+**Internal-billing-attempt-id guard:** If the (coerced) id `startsWith("internal-")`, returns `{ success: true }` with a `console.warn` and **no Appstle API call**. Internal subs are Braintree-billed by the daily [[internal-subscription-renewals]] cron, not Appstle, but upstream callers (dunning payday-retry cron, new-card-recovery) synthesize a `internal-*` id into the billing-attempt slot. This early-return prevents the synthetic id from hitting Appstle's real API and 400-ing (signature vercel:cdfbac68e30a91f9), which would noise the error feed and Control Tower — see [[../specs/archive.d/dunning-payday-retry-skip-internal-subs]].
 
 On a non-2xx/204 response (real Appstle attempts only) it returns the Appstle **response body** in `error` (mirrors `appstleSkipUpcomingOrder` / `appstleSubscriptionAction`) so callers can pattern-match instead of seeing a bare status string. When the upstream body matches *"billing operation is already in progress"* (Appstle's concurrency lock — meaning Appstle is ALREADY billing this contract), the helper logs at `console.warn` instead of `console.error` so the Vercel error feed / Control Tower stop capturing the benign race. [[portal__handlers__order-now]] keys off the same text to convert the response into a 200 with `alreadyBilling: true`.
 
