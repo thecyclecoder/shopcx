@@ -9,11 +9,12 @@ into autonomous actions + approval-gated recommendations (P4). **Phase 5** folds
 whole sequence into one durable, run-recorded daily run (`meta-iteration-run`) with a
 reconcile/reversal stage and a failure alert. **Phase 6** executes the decisions:
 6a autonomous adapters run as the daily run's stage 7, and `meta-execute-recommendation`
-turns an approved recommendation into a PAUSED Meta draft. Delegates to
-[[../libraries/meta__performance]], [[../libraries/meta__attribution]],
+turns an approved recommendation into a PAUSED Meta draft. **Phase 8** composes the
+Growth Director's cross-tool allocation decision (stage 8 post-execute, [[../libraries/growth-allocation]]).
+Delegates to [[../libraries/meta__performance]], [[../libraries/meta__attribution]],
 [[../libraries/meta__scorecards]], [[../libraries/meta__decision-engine]],
-[[../libraries/meta__iteration-run]], [[../libraries/meta__execution]] (6a), and
-[[../libraries/meta__recommendation-execute]] (6b).
+[[../libraries/meta__iteration-run]], [[../libraries/meta__execution]] (6a),
+[[../libraries/meta__recommendation-execute]] (6b), and [[../libraries/growth-allocation]] (8).
 
 **File:** `src/lib/inngest/meta-performance.ts`
 
@@ -35,7 +36,7 @@ turns an approved recommendation into a PAUSED Meta draft. Delegates to
 - **Trigger:** event `meta/iteration-run`
 - **Retries:** 1 · **Concurrency:** `[{ limit: 1, key: "event.data.ad_account_id" }]`
 - **Event data:** `{ workspace_id, ad_account_id, meta_account_id, trigger?, incremental_days? }`
-- Runs the whole pipeline as ONE durable run: **ingest (P1) → attribution (P2/2b) → rollups (P3) → reconcile prior actions → 4a autonomous actions + 4b recommendations → persist actions + link reversals → execute (6a)**. Opens an [[../tables/iteration_runs]] record (`status='running'`) up front; stamps `complete`/`failed` with per-stage timings + summary counts on finish; on any stage error writes the failed run record and fires [[../libraries/notify-ops-alert]]. Delegates to [[../libraries/meta__iteration-run]] (`startRun`/`finishRun`/`reconcilePriorActions`/`linkReversals`) + the P1–P4 libraries. Enforces Phase 5 noise floors (min spend / min sessions) via `runDecisionEngine` opts; per-object cooldown + per-account budget-delta ceiling + the no-active-policy invariant are enforced inside the decision engine. Persists 4a decisions to [[../tables/iteration_actions]] (`status='decided'`), then **stage 7 executes them** ([[../libraries/meta__execution]] `executeAutonomousActions` — pause/unpause/scale flip the row to `executed`/`failed`; un-enabled types like `replenish_creative` stay `decided`). Idempotent — only `status='decided'` rows execute, so a same-day re-run never double-writes/recommends/acts.
+- Runs the whole pipeline as ONE durable run: **ingest (P1) → attribution (P2/2b) → rollups (P3) → reconcile prior actions → 4a autonomous actions + 4b recommendations → persist actions + link reversals → execute (6a) → growth-allocation (8)**. Opens an [[../tables/iteration_runs]] record (`status='running'`) up front; stamps `complete`/`failed` with per-stage timings + summary counts on finish; on any stage error writes the failed run record and fires [[../libraries/notify-ops-alert]]. Delegates to [[../libraries/meta__iteration-run]] (`startRun`/`finishRun`/`reconcilePriorActions`/`linkReversals`) + the P1–P4 + P8 libraries. Enforces Phase 5 noise floors (min spend / min sessions) via `runDecisionEngine` opts; per-object cooldown + per-account budget-delta ceiling + the no-active-policy invariant are enforced inside the decision engine. Persists 4a decisions to [[../tables/iteration_actions]] (`status='decided'`), then **stage 7 executes them** ([[../libraries/meta__execution]] `executeAutonomousActions` — pause/unpause/scale flip the row to `executed`/`failed`; un-enabled types like `replenish_creative` stay `decided`). **Stage 8** ([[../libraries/growth-allocation]] `runGrowthAllocationPass`) composes the daily allocation decision across Meta + Storefront, writes [[../tables/director_activity]] rows, and escalates ceiling-raises / new-platform entries to the Growth Director via [[../libraries/platform-director]]. Idempotent — only `status='decided'` rows execute, so a same-day re-run never double-writes/recommends/acts.
 
 ### `meta-execute-recommendation` (Phase 6b)
 - **Trigger:** event `meta/execute-recommendation`
@@ -83,6 +84,7 @@ turns an approved recommendation into a PAUSED Meta draft. Delegates to
 - [[../tables/iteration_actions]] (Phase 5 — `meta-iteration-run` persists 4a decisions + reversals; Phase 6a stage 7 flips to `executed`/`failed`)
 - [[../tables/iteration_runs]] (Phase 5 — per-run audit record)
 - [[../tables/ad_publish_jobs]] (Phase 6b — `meta-execute-recommendation` creates the PAUSED draft job)
+- [[../tables/director_activity]] (Phase 8 — `growth-allocation` stamps allocation decisions + escalations)
 
 ## Tables read (not written)
 
@@ -92,6 +94,7 @@ turns an approved recommendation into a PAUSED Meta draft. Delegates to
 - [[../tables/orders]] · [[../tables/storefront_sessions]] · [[../tables/advertorial_pages]] · [[../tables/customers]] (Phase 2 attribution)
 - [[../tables/storefront_events]] · [[../tables/product_ad_angles]] · [[../tables/product_benefit_selections]] (Phase 3 scorecards)
 - [[../tables/iteration_scorecards_daily]] · `iteration_policies` (Phase 4c, read-only) · [[../tables/meta_adsets]] · [[../tables/meta_campaigns]] (Phase 4 budgets) · [[../tables/product_ad_angles]] · [[../tables/product_benefit_selections]] (Phase 4b grounding)
+- [[../tables/ad_spend_budgets]] · [[../tables/storefront_experiments]] (Phase 8 allocation read)
 
 ---
 

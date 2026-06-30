@@ -1,0 +1,1 @@
+- **Cross-tool allocation brain — Meta vs Storefront** · verified 2026-06-30 · → [[../libraries/growth-allocation]]
