@@ -43,3 +43,11 @@ Action-kind vocabulary (open vocabulary on [[../tables/director_activity]]):
 - **`running` only on the storefront side.** Promoted / killed / rolled-back experiments aren't candidates — they have no open lever to pull.
 - **No active iteration_policies row degrades safely** to `DEFAULT_SCALE_UP_ROAS_TRIGGER=1.5` (a flag is emitted) — mirrors the decision-engine's "no policy → degrade safely" pattern.
 - **Pure scorers are deterministic** — fixture inputs map to a single expected score. Phase 2's composer pins on these to test allocation-decision branches without needing a database.
+
+## Status
+
+Fully shipped and wired (verified 2026-06-30). The phase 3 allocation pass runs daily as stage 8 of the [[../inngest/meta-performance]] `meta-iteration-run` chain, post-execute.
+
+---
+
+[[../README]] · [[growth-director]] · [[ad-spend-governor]] · [[blended-cac-ltv]] · [[meta__iteration-run]] · [[../inngest/meta-performance]] · [[../tables/director_activity]]
