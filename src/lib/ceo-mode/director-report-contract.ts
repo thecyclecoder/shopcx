@@ -18,11 +18,17 @@
 export type DirectorEffort = "low" | "medium" | "high";
 export type DirectorConfidence = "low" | "medium" | "high";
 export type MetricStatus = "above" | "at" | "below" | "unknown";
-export type FindingSeverity = "info" | "watch" | "risk";
+// "high" lets a director surface a cross-cutting Goodhart guardrail (e.g. growth's `do_not_cut`
+// finding when blended CAC:LTV ≥ target but a per-channel revenue-ROAS < 1) as a finding the CEO
+// must weigh — the trio "info | watch | risk" only spans diagnostic / cautionary observations.
+export type FindingSeverity = "info" | "watch" | "risk" | "high";
 export type RiskSeverity = "low" | "medium" | "high";
 
 /** One tracked metric against its setpoint, with the week-over-week move. */
 export interface MetricVsTarget {
+  /** Stable machine-readable identifier (e.g. "blended_cac_ltv") so downstream consumers can pick a
+   *  specific row without parsing the human label. Optional for backwards-compat with per-line rows. */
+  key?: string;
   /** Human label, e.g. "AcqROAS — Amazing Coffee". */
   metric: string;
   /** Current value over the report window; null when undefined (e.g. no spend). */
@@ -94,7 +100,7 @@ export interface DirectorReportContract {
 const EFFORTS: DirectorEffort[] = ["low", "medium", "high"];
 const CONFIDENCES: DirectorConfidence[] = ["low", "medium", "high"];
 const METRIC_STATUSES: MetricStatus[] = ["above", "at", "below", "unknown"];
-const FINDING_SEVERITIES: FindingSeverity[] = ["info", "watch", "risk"];
+const FINDING_SEVERITIES: FindingSeverity[] = ["info", "watch", "risk", "high"];
 const RISK_SEVERITIES: RiskSeverity[] = ["low", "medium", "high"];
 
 export interface ContractValidation {
