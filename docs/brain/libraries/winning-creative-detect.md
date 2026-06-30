@@ -1,6 +1,6 @@
 # winning-creative-detect
 
-Phases 1–3 of the [[../specs/growth-winning-creative-amplifier]] amplifier — finds winning
+Phases 1–3 of the winning-creative amplifier — finds winning
 `(meta_ad_id, variant)` cells over our own [[../tables/meta_attribution_daily]] and joins each
 to its source [[../tables/ad_campaigns]] + [[../tables/product_ad_angles]] row, amplifies each
 winner via the makers pipeline, and opens a matched-lander draft experiment for advertorial-family
@@ -72,4 +72,4 @@ The REVERSE direction (a promoted lander variant → fresh static via
 
 ## Cross-links
 
-[[../tables/meta_attribution_daily]] · [[../tables/ad_campaigns]] · [[../tables/product_ad_angles]] · [[../tables/director_activity]] · [[meta__attribution]] · [[blended-cac-ltv]] · [[optimizer-agent]] · [[storefront-experiments]] · [[../specs/growth-winning-creative-amplifier]] · [[../functions/growth]]
+[[../tables/meta_attribution_daily]] · [[../tables/ad_campaigns]] · [[../tables/product_ad_angles]] · [[../tables/director_activity]] · [[meta__attribution]] · [[blended-cac-ltv]] · [[optimizer-agent]] · [[storefront-experiments]] · [[../functions/growth]]

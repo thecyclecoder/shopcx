@@ -1,0 +1,1 @@
+- **Winning-angle amplifier** · verified 2026-06-30 · → [[../libraries/winning-creative-detect]]
