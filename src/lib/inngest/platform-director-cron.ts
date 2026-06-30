@@ -183,23 +183,31 @@ export const platformDirectorCron = inngest.createFunction(
     // ONCE PER ISO WEEK per workspace (the upsert on (metric_key, cadence='weekly', snapshot_date)
     // already makes a same-week re-run a no-op — the guard is spend-saving). Best-effort + idempotent.
     const scorecardWeekly = await step.run("snapshot-platform-scorecard-weekly", async () => {
+      // The weekly snapshot's effective date is the LAST DAY OF THE PREVIOUS CLOSED ISO WEEK (the
+      // Sunday immediately before the current ISO Monday), mirroring the daily lag pattern
+      // (devops-kpi-weekly-snapshot-date-lag-fix, extending devops-kpi-daily-snapshot-date-lag-fix).
+      // The trailing 7-day window then becomes [prev Mon 00:00Z, prev Sun 23:59:59Z] — a fully
+      // closed ISO week — so the snapshot value byte-matches the audit's ground-truth re-derivation
+      // and the loop:kpi_drift:approvals_untouched_pct:weekly false-positive clears at the writer.
       const today = new Date().toISOString().slice(0, 10);
-      // ISO week start (Monday, UTC) — any weekly snapshot already taken on/after it covers this week.
       const d = new Date(`${today}T00:00:00Z`);
       const mondayOffset = (d.getUTCDay() + 6) % 7; // Sun=0 → 6, Mon=1 → 0, …
-      const weekStart = new Date(d.getTime() - mondayOffset * 86_400_000).toISOString().slice(0, 10);
+      const thisMonday = new Date(d.getTime() - mondayOffset * 86_400_000);
+      const snapshotDate = new Date(thisMonday.getTime() - 86_400_000).toISOString().slice(0, 10);
+      // The done guard matches on the same lagged snapshot_date so the once-per-week spend-saving
+      // check still holds (a second beat in the same ISO week sees the prev-Sunday row and skips).
       const { data: existing } = await admin
         .from("platform_scorecard_snapshots")
         .select("workspace_id")
         .eq("cadence", "weekly")
-        .gte("snapshot_date", weekStart);
+        .eq("snapshot_date", snapshotDate);
       const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
       let snapshotted = 0;
       let metricsWritten = 0;
       for (const workspaceId of result.workspaceIds || []) {
         if (done.has(workspaceId)) continue; // already snapshotted this ISO week (spend-saving)
         try {
-          const rows = await computePlatformScorecard(workspaceId, { cadence: "weekly", windowDays: 7 });
+          const rows = await computePlatformScorecard(workspaceId, { cadence: "weekly", windowDays: 7, snapshotDate });
           if (rows.length) {
             snapshotted++;
             metricsWritten += rows.length;
@@ -208,7 +216,7 @@ export const platformDirectorCron = inngest.createFunction(
           console.error(`[platform-director-cron] weekly scorecard snapshot failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
         }
       }
-      return { snapshotted, metricsWritten, week_start: weekStart };
+      return { snapshotted, metricsWritten, snapshot_date: snapshotDate };
     });
 
     // The Platform Department Scorecard monthly leading curve (platform-scorecard-monthly spec,
