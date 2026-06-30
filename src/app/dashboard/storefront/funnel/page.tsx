@@ -47,6 +47,48 @@ interface FunnelTreeResponse {
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
   referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
+  breakdowns: { device: BreakdownRowT[]; country: BreakdownRowT[] };
+}
+interface BreakdownRowT { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
+
+/** SDK-driven, slice-aware dimension breakdown with CVR + LTV/visit per row —
+ *  surfaces a high-traffic segment that doesn't convert (tablet layout bug,
+ *  PR shipping friction, …). */
+function BreakdownPanel({ title, rows }: { title: string; rows: BreakdownRowT[] }) {
+  const max = Math.max(...rows.map((r) => r.visits), 1);
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[10px] uppercase tracking-wide text-zinc-400">
+            <th className="pb-1 text-left font-medium">{title}</th>
+            <th className="pb-1 text-right font-medium">Sessions</th>
+            <th className="pb-1 text-right font-medium">CVR</th>
+            <th className="pb-1 text-right font-medium">LTV/visit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={4} className="py-2 text-xs text-zinc-400">No sessions.</td></tr>}
+          {rows.map((r) => (
+            <tr key={r.value} className="border-t border-zinc-100 dark:border-zinc-800/50">
+              <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-300">{r.value}</td>
+              <td className="py-1.5 text-right">
+                <div className="flex items-center justify-end gap-2">
+                  <div className="hidden h-1.5 w-16 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800 sm:block">
+                    <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.visits / max) * 100}%` }} />
+                  </div>
+                  <span className="tabular-nums text-zinc-900 dark:text-zinc-100">{r.visits.toLocaleString()}</span>
+                </div>
+              </td>
+              <td className={"py-1.5 text-right tabular-nums " + (r.cvr > 0 ? "font-medium text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{r.cvr.toFixed(1)}%</td>
+              <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{money(r.ltv_per_visit_cents)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 /** The badge pair marking a card as rebuilt onto the SDK + slice. */
@@ -703,20 +745,12 @@ export default function StorefrontFunnelPage() {
           {data.popupFunnel && <PopupFunnelPanel data={data.popupFunnel} />}
           {data.surveyFunnel && <SurveyFunnelPanel data={data.surveyFunnel} />}
 
-          <div className="mb-8 grid gap-4 lg:grid-cols-3">
-            <BreakdownCard
-              title="Device"
-              rows={data.deviceBreakdown.map(d => ({ label: d.device_type, value: d.sessions }))}
-            />
-            <BreakdownCard
-              title="Source"
-              rows={data.sourceBreakdown.map(s => ({ label: s.utm_source, value: s.sessions }))}
-            />
-            <BreakdownCard
-              title="Country"
-              rows={data.countryBreakdown.map(c => ({ label: c.ip_country, value: c.sessions }))}
-            />
-          </div>
+          {tree && (
+            <div className="mb-8 grid gap-4 lg:grid-cols-2">
+              <BreakdownPanel title="Device" rows={tree.breakdowns.device} />
+              <BreakdownPanel title="Country" rows={tree.breakdowns.country} />
+            </div>
+          )}
 
           {data.abandonedCarts && (
             <AbandonedCartsPanel block={data.abandonedCarts} />
@@ -946,10 +980,6 @@ function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunne
   );
 }
 
-function BreakdownCard({
-  title,
-  rows,
-}: {
   title: string;
   rows: Array<{ label: string; value: number }>;
 }) {

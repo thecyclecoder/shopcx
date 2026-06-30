@@ -1193,3 +1193,100 @@ export async function computeBottlenecks(args: {
 
   return { destinations: verdicts, benchmark: { best_carry_pct: round1(bestCarry), best_close_pct: round1(bestClose) } };
 }
+
+// ───────────────── Dimension breakdowns (device / country) ─────────────────
+// Per device_type / ip_country: visits + CVR + LTV/visit, so a high-traffic
+// segment that doesn't convert (e.g. tablet layout bug, PR shipping friction)
+// is visible. Slice-aware (Product × Source × Referrer). Source is NOT a
+// breakdown here — it's a page slice.
+export interface BreakdownRow { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
+export interface BreakdownsResult { device: BreakdownRow[]; country: BreakdownRow[]; }
+
+export async function computeBreakdowns(args: {
+  admin: Admin; workspaceId: string; startIso: string; endIso: string;
+  productHandle?: string | null; utmSource?: string | null; referrer?: string | null;
+  churnTrailingMonths?: number | null;
+}): Promise<BreakdownsResult> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+
+  const [{ data: productRows }, { data: internalCustomerRows }, churn] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+    getMonthlyChurn({ admin, workspaceId, trailingMonths: args.churnTrailingMonths }),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+  const subLO = churn.sub_lifetime_orders;
+
+  const eventRows = await fetchAllRows<{ session_id: string }>(() =>
+    admin.from("storefront_events").select("session_id, id")
+      .eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const universe = new Set<string>(eventRows.map((e) => e.session_id));
+  const sessionIds = [...universe];
+
+  // order revenue/ltv + who ordered (from the order_placed EVENT, reliably session-linked)
+  const orderEvents = await fetchAllRows<{ session_id: string; meta: Record<string, unknown> }>(() =>
+    admin.from("storefront_events").select("session_id, meta, id")
+      .eq("workspace_id", workspaceId).eq("event_type", "order_placed")
+      .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const orderIds = [...new Set(orderEvents.map((e) => String((e.meta || {}).order_id || "")).filter(Boolean))];
+  const subByOrderId = new Map<string, boolean>();
+  for (let i = 0; i < orderIds.length; i += 300) {
+    const { data } = await admin.from("orders").select("id, subscription_id").in("id", orderIds.slice(i, i + 300));
+    for (const o of data || []) subByOrderId.set(o.id as string, !!o.subscription_id);
+  }
+  const orderBySession = new Map<string, { ltv: number; ordered: boolean }>();
+  for (const e of orderEvents) {
+    const m = e.meta || {};
+    const cents = Number(m.total_cents) || 0;
+    const oid = String(m.order_id || "");
+    const isSub = oid ? (subByOrderId.get(oid) ?? false) : false;
+    const cur = orderBySession.get(e.session_id) || { ltv: 0, ordered: false };
+    cur.ltv += cents * (isSub ? subLO : 1);
+    cur.ordered = true;
+    orderBySession.set(e.session_id, cur);
+  }
+
+  type Agg = { visits: number; orders: number; ltv: number };
+  const device = new Map<string, Agg>();
+  const country = new Map<string, Agg>();
+  const bump = (map: Map<string, Agg>, key: string, ordered: boolean, ltv: number) => {
+    const a = map.get(key) || { visits: 0, orders: 0, ltv: 0 };
+    a.visits++; if (ordered) a.orders++; a.ltv += ltv; map.set(key, a);
+  };
+
+  for (let i = 0; i < sessionIds.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer, device_type, ip_country")
+      .in("id", sessionIds.slice(i, i + 300));
+    for (const s of data || []) {
+      if (s.is_internal || s.is_bot) continue;
+      if (s.customer_id && internalCustomerIds.has(s.customer_id as string)) continue;
+      if (!matchUtm((s.utm_source as string) ?? null, utmWanted)) continue;
+      if (!matchRef((s.referrer as string) ?? null, refWanted)) continue;
+      if (product) {
+        const { segments } = parseLanding((s.landing_url as string) ?? null);
+        if (resolveHandle(segments, handleSet) !== product) continue;
+      }
+      const ov = orderBySession.get(s.id as string);
+      const ordered = !!ov?.ordered;
+      const ltv = ov?.ltv || 0;
+      bump(device, (s.device_type as string) || "unknown", ordered, ltv);
+      bump(country, (s.ip_country as string) || "—", ordered, ltv);
+    }
+  }
+
+  const toRows = (map: Map<string, Agg>): BreakdownRow[] =>
+    [...map.entries()].map(([value, a]) => ({
+      value, visits: a.visits, orders: a.orders,
+      cvr: a.visits > 0 ? round1((100 * a.orders) / a.visits) : 0,
+      ltv_per_visit_cents: a.visits > 0 ? Math.round(a.ltv / a.visits) : 0,
+    })).sort((x, y) => y.visits - x.visits);
+
+  return { device: toRows(device), country: toRows(country) };
+}
