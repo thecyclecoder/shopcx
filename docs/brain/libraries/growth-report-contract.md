@@ -22,6 +22,14 @@ the degenerate move the proxy invites — cutting a proven SKU on **on-site ROAS
 **halo-blended AcqROAS ≥ target** (the Amazon halo carries it) — as a **high-severity risk** + a
 do-NOT-cut finding, never as a `recommended_action`. This is the Goodhart guardrail the spec requires.
 
+**Cross-cutting do_not_cut (Phase 3).** A director-level finding fires when the BLENDED CAC:LTV ≥
+target AND any per-channel on-site ROAS is < 1: `severity: "high"`, summary `do_not_cut: blended
+CAC:LTV X× ≥ target Y× but per-channel on-site ROAS < 1 on {lines} — hold spend`. Lives on
+`contract.findings`; the agent has no "cut" move to push to `recommended_actions`. Distinct from the
+per-line halo-carries risk: this one compares the blended top-line (not the per-line halo-blended
+AcqROAS) against the per-channel on-site ROAS, so it surfaces the cross-cutting trap even when a
+single line's per-line halo-blended AcqROAS is itself below the per-line setpoint.
+
 ## Exports
 
 ### `buildGrowthReportContract(params): Promise<DirectorReportContract>` — function
@@ -69,7 +77,9 @@ wiring on fixture inputs without a database: blended row first + key `blended_ca
 second + `lower is better` note, per-line rows after, COGS-deferred + LTV-uncalibrated +
 window-rate-extrapolation assumptions surfaced, `health_score` derived from the blended ratio
 (100 when above target, proportional when below, 50 when null), no-mapping watch finding,
-`contract.proxy === 'blended_cac_ltv'`.
+`contract.proxy === 'blended_cac_ltv'`, and the Phase 3 `do_not_cut` cross-cutting finding (fires
+only when blended is healthy AND a per-channel on-site ROAS < 1; never appears in
+`recommended_actions`).
 
 ## Gotchas
 

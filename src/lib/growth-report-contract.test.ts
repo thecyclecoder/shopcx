@@ -192,6 +192,66 @@ test("noMappedGroups=true emits the no-mapping watch finding", () => {
   );
 });
 
+// ── Phase 3 — Goodhart do_not_cut guardrail (blended healthy + per-channel < 1) ─────────────────
+
+// A per-line whose on-site channel under-performs but whose Amazon halo carries it. Spend $4k, on-site
+// revenue $1k → on-site ROAS 0.25× (< 1). A naive per-channel proxy says cut; the BLENDED top-line
+// says hold.
+function lineHaloCarries(groupId: string, groupName: string) {
+  return {
+    current: acq({
+      groupId,
+      groupName,
+      channelSplit: { onsiteCents: 1_000_00, amazonCents: 5_000_00, spendCents: 4_000_00 },
+      numeratorCents: 6_000_00,
+      acqRoas: 1.5,
+    }),
+    prior: null as AcqRoasResult | null,
+  };
+}
+
+test("Phase 3 — blended healthy + per-channel on-site < 1 emits a do_not_cut finding at severity 'high'", () => {
+  const contract = assembleGrowthReportContract({
+    ...baseInput,
+    blendedCurrent: blendedHealthy(), // ratio 4×, target 3×
+    passes: [lineHaloCarries("g1", "Halo SKU")],
+  });
+
+  const { valid, errors } = validateDirectorReportContract(contract);
+  assert.equal(valid, true, `expected valid contract with the high-severity finding, got: ${JSON.stringify(errors)}`);
+
+  const doNotCut = contract.findings.find((f) => f.summary.startsWith("do_not_cut"));
+  assert.ok(doNotCut, `expected a do_not_cut finding; got: ${JSON.stringify(contract.findings)}`);
+  assert.equal(doNotCut!.severity, "high");
+  assert.match(doNotCut!.summary, /blended CAC:LTV 4× ≥ target 3×/);
+  assert.match(doNotCut!.summary, /Halo SKU/);
+
+  // Goal of the guardrail: the finding lives on `findings`, NEVER on `recommended_actions`.
+  assert.equal(contract.recommended_actions.length, 0);
+});
+
+test("Phase 3 — blended below target emits NO do_not_cut finding (cut may be real)", () => {
+  const contract = assembleGrowthReportContract({
+    ...baseInput,
+    blendedCurrent: blendedBelowTarget(), // ratio 2×, target 3×
+    passes: [lineHaloCarries("g1", "Halo SKU")],
+  });
+
+  const doNotCut = contract.findings.find((f) => f.summary.startsWith("do_not_cut"));
+  assert.equal(doNotCut, undefined, `expected no do_not_cut finding; got: ${JSON.stringify(contract.findings)}`);
+});
+
+test("Phase 3 — blended healthy + every per-channel on-site ≥ 1 emits NO do_not_cut finding", () => {
+  // Baseline fixture's on-site ROAS = 6000_00 / 4000_00 = 1.5× → above 1. No Goodhart trap.
+  const contract = assembleGrowthReportContract({
+    ...baseInput,
+    blendedCurrent: blendedHealthy(),
+  });
+
+  const doNotCut = contract.findings.find((f) => f.summary.startsWith("do_not_cut"));
+  assert.equal(doNotCut, undefined);
+});
+
 test("explicit targetPaybackDays surfaces on the payback row and drives its status", () => {
   const contract = assembleGrowthReportContract({
     ...baseInput,

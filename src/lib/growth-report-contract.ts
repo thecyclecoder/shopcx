@@ -163,6 +163,56 @@ function buildLine(pass: LinePass, target: number): LineContribution {
   return { metric, findings, actions, risks, aboveTarget };
 }
 
+/**
+ * Phase 3 Goodhart guardrail (do_not_cut). Cross-cutting director-level finding the CEO must weigh:
+ * the BLENDED CAC:LTV (top-line, halo + LTV included) clears its setpoint, BUT a single per-channel
+ * revenue-ROAS — the on-site channel of a measured product line — is below break-even. That is the
+ * exact per-channel Goodhart trap the goal calls out: a proven SKU on on-site ROAS < 1 alone when
+ * the halo-blended director-number ≥ target — the Amazon halo (and the blended LTV) carries it. The
+ * finding cites the blended-vs-per-channel comparison directly and is NEVER pushed to
+ * `recommended_actions` (it is a HOLD; the agent must not have a "cut" move to auto-execute against).
+ *
+ * Returns null when (a) blended is below target — no Goodhart trap, the cut may be real — or (b) no
+ * per-line on-site ROAS is below 1 — nothing to guard.
+ */
+function buildBlendedDoNotCutFinding(
+  blended: BlendedCacLtvResult,
+  passes: LinePass[],
+  targetCacLtv: number,
+): Finding | null {
+  if (blended.cacLtvRatio === null || blended.cacLtvRatio < targetCacLtv) return null;
+
+  const exposed = passes
+    .map((p) => ({ pass: p, onsite: onsiteRoas(p.current) }))
+    .filter((x) => x.onsite !== null && x.onsite < 1 && x.pass.current.channelSplit.spendCents > 0);
+  if (exposed.length === 0) return null;
+
+  const names = exposed.map((x) => x.pass.current.groupName || x.pass.current.groupId).join(", ");
+  const blendedStr = round2(blended.cacLtvRatio);
+  const targetStr = round2(targetCacLtv);
+
+  return {
+    summary:
+      `do_not_cut: blended CAC:LTV ${blendedStr}× ≥ target ${targetStr}× but per-channel on-site ROAS < 1 on ${names} — hold spend`,
+    detail:
+      `The Director's BLENDED CAC:LTV (${blendedStr}×) clears its setpoint (${targetStr}×); a naive per-channel ` +
+      `proxy would say cut ${names} because each line's on-site ROAS is below break-even. The blended-vs-per-channel ` +
+      `comparison says HOLD — the Amazon halo (and the blended LTV proxy) carries those lines. Cutting on the ` +
+      `per-channel proxy alone is the Goodhart trap the goal calls out and destroys profitable new-customer acquisition.`,
+    severity: "high",
+    evidence: {
+      blendedCacLtvRatio: blended.cacLtvRatio,
+      targetCacLtv,
+      perChannel: exposed.map((x) => ({
+        line: x.pass.current.groupName || x.pass.current.groupId,
+        onsiteRoas: round2(x.onsite!),
+        acqRoas: x.pass.current.acqRoas,
+        spendCents: x.pass.current.channelSplit.spendCents,
+      })),
+    },
+  };
+}
+
 /** Build the top-line blended CAC:LTV row (higher is better). Status compares value to target the
  *  same direction-agnostic way the per-line AcqROAS rows do. */
 function buildBlendedCacLtvRow(
@@ -299,6 +349,12 @@ export function assembleGrowthReportContract(input: AssembleGrowthReportInput): 
   // ── Top-line: blended CAC:LTV + payback BEFORE per-product rows ──
   metrics_vs_target.push(buildBlendedCacLtvRow(blendedCurrent, blendedPrior, targetCacLtv));
   metrics_vs_target.push(buildBlendedPaybackRow(blendedCurrent, blendedPrior, targetPaybackDays));
+
+  // ── Phase 3 Goodhart guardrail: blended healthy + per-channel < 1 → do_not_cut (high) ──
+  // Pushed BEFORE per-line findings so the cross-cutting director-level guardrail leads the
+  // findings list. The CEO must weigh this before reading the per-line diagnostics.
+  const doNotCut = buildBlendedDoNotCutFinding(blendedCurrent, passes, targetCacLtv);
+  if (doNotCut) findings.push(doNotCut);
 
   for (const pass of passes) {
     const line = buildLine(pass, targetAcqRoas);
