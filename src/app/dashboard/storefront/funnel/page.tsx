@@ -145,12 +145,63 @@ interface ChapterDiagRow {
   cta_origin: number; cta_origin_pct: number;
   view_to_pricing_pct: number; view_to_pack_pct: number;
 }
+interface FunnelStepDatum { step: string; label: string; count: number; conv_from_prev_pct: number; conv_from_top_pct: number; drop_from_prev: number; }
 interface ChapterDiagResponse {
   range: { start: string; end: string };
   destination: { key: string; label: string } | null;
   availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number; parent?: string }>;
   summary: { visits: number; reached_pricing: number; carry_to_pricing_pct: number; packed: number; close_pct: number; jumped_to_pricing: number; scrolled_to_pricing: number } | null;
+  funnelSteps: FunnelStepDatum[];
   chapters: ChapterDiagRow[];
+}
+
+/** SDK-driven, slice-aware funnel waterfall (vertical bars) with a card-local
+ *  destination selector — the same controls as the chapter-diagnostics card. */
+function FunnelWaterfallCard({ data, loading, dest, onDest }: {
+  data: ChapterDiagResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+}) {
+  const steps = data?.funnelSteps ?? [];
+  const top = steps[0]?.count || 1;
+  const effectiveDest = dest || data?.destination?.key || "";
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Funnel</h2>
+        <ReworkedPills />
+      </div>
+      <div className="mb-5 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={effectiveDest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          {(data?.availableDestinations ?? []).map((d) => (
+            <option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label} ({d.visits.toLocaleString()})</option>
+          ))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+
+      {steps.length > 0 && (
+        <div className="flex items-end gap-3 sm:gap-5" style={{ height: 200 }}>
+          {steps.map((s, i) => {
+            const h = Math.max(2, Math.round((s.count / top) * 100));
+            const isLast = i === steps.length - 1;
+            return (
+              <div key={s.step} className="flex h-full flex-1 flex-col items-center justify-end text-center">
+                <div className="mb-1 text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{s.count.toLocaleString()}</div>
+                <div className={"w-full rounded-t " + (isLast ? "bg-emerald-500" : "bg-zinc-800 dark:bg-zinc-200")} style={{ height: `${h}%` }} />
+                <div className="mt-2 text-[11px] font-medium leading-tight text-zinc-600 dark:text-zinc-300">{s.label}</div>
+                <div className="text-[10px] tabular-nums text-zinc-400">
+                  {i === 0 ? "top" : `${s.conv_from_prev_pct.toFixed(0)}% prev`}
+                  {i > 0 && s.drop_from_prev > 0 && <span className="ml-1 text-rose-400">↓{s.drop_from_prev}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function dwellStr(ms: number) { return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`; }
@@ -536,6 +587,10 @@ export default function StorefrontFunnelPage() {
   const [chapterDest, setChapterDest] = useState("");
   const [chapter, setChapter] = useState<ChapterDiagResponse | null>(null);
   const [chapterLoading, setChapterLoading] = useState(true);
+  // The rebuilt funnel waterfall — its own card-local destination (chapter-diagnostics endpoint).
+  const [waterfallDest, setWaterfallDest] = useState("");
+  const [waterfall, setWaterfall] = useState<ChapterDiagResponse | null>(null);
+  const [waterfallLoading, setWaterfallLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -585,8 +640,23 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end, product, utmSource, referrer, chapterDest]);
 
   useEffect(() => { loadChapter(); }, [loadChapter]);
-  // A page-slice change can change which destinations exist → re-default the card.
-  useEffect(() => { setChapterDest(""); }, [product, utmSource, referrer]);
+
+  const loadWaterfall = useCallback(async () => {
+    if (!start || !end) return;
+    setWaterfallLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (waterfallDest) q.set("destination", waterfallDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/chapter-diagnostics?${q.toString()}`);
+    if (res.ok) setWaterfall(await res.json());
+    setWaterfallLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, waterfallDest]);
+
+  useEffect(() => { loadWaterfall(); }, [loadWaterfall]);
+  // A page-slice change can change which destinations exist → re-default the cards.
+  useEffect(() => { setChapterDest(""); setWaterfallDest(""); }, [product, utmSource, referrer]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -619,6 +689,8 @@ export default function StorefrontFunnelPage() {
 
       <FunnelTreeCard tree={tree} loading={treeLoading} />
 
+      <FunnelWaterfallCard data={waterfall} loading={waterfallLoading} dest={waterfallDest} onDest={setWaterfallDest} />
+
       <ChapterDiagnosticsCard data={chapter} loading={chapterLoading} dest={chapterDest} onDest={setChapterDest} />
 
       {loading && !data && (
@@ -627,12 +699,6 @@ export default function StorefrontFunnelPage() {
 
       {data && (
         <>
-          <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-            <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-              Funnel — {data.range.start} to {data.range.end}
-            </h2>
-            <FunnelChart funnel={data.funnel} topOfFunnel={topOfFunnel} />
-          </section>
 
           {data.popupFunnel && <PopupFunnelPanel data={data.popupFunnel} />}
           {data.surveyFunnel && <SurveyFunnelPanel data={data.surveyFunnel} />}
@@ -787,55 +853,6 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
   );
 }
 
-function FunnelChart({ funnel, topOfFunnel }: { funnel: FunnelStepRow[]; topOfFunnel: number }) {
-  return (
-    <div className="space-y-1.5">
-      {funnel.map((row, i) => {
-        const pctOfTop = topOfFunnel > 0 ? (row.sessions / topOfFunnel) * 100 : 0;
-        const isFirst = i === 0;
-        const isLast = i === funnel.length - 1;
-        const dropPct = isFirst ? null : 100 - row.conv_from_prev_pct;
-        return (
-          <div key={row.step}>
-            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-sm">
-              <span className="min-w-0 truncate font-semibold text-zinc-900 dark:text-zinc-100">
-                {STEP_LABELS[row.step] || row.step}
-              </span>
-              <div className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
-                <span className="text-zinc-900 dark:text-zinc-100 font-semibold">
-                  {row.sessions.toLocaleString()}
-                </span>
-                {!isFirst && (
-                  <span className="text-xs text-zinc-500" title="Conversion from previous step">
-                    {row.conv_from_prev_pct.toFixed(1)}% from prev
-                  </span>
-                )}
-                {!isFirst && (
-                  <span className="text-xs text-zinc-400" title="Conversion from top of funnel">
-                    {row.conv_from_top_pct.toFixed(1)}% from top
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="mt-1 h-7 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
-              <div
-                className={`h-full rounded transition-all ${
-                  isLast ? "bg-emerald-500" : "bg-zinc-900 dark:bg-zinc-100"
-                }`}
-                style={{ width: `${Math.max(pctOfTop, 0.5)}%` }}
-              />
-            </div>
-            {!isFirst && row.drop_from_prev > 0 && (
-              <p className="mt-0.5 text-[11px] text-rose-600">
-                ↓ {row.drop_from_prev.toLocaleString()} dropped ({dropPct?.toFixed(1)}%)
-              </p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"]> }) {
   const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");

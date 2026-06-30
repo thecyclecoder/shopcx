@@ -816,6 +816,14 @@ export interface ChapterRow {
   view_to_pack_pct: number;
 }
 
+export interface FunnelStep {
+  step: string;
+  label: string;
+  count: number;
+  conv_from_prev_pct: number;
+  conv_from_top_pct: number;
+  drop_from_prev: number;
+}
 export interface ChapterDiagnosticsResult {
   destination: { key: string; label: string } | null;
   availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number; parent?: string }>;
@@ -828,6 +836,8 @@ export interface ChapterDiagnosticsResult {
     jumped_to_pricing: number;
     scrolled_to_pricing: number;
   } | null;
+  /** the 5-step funnel waterfall for the selected destination */
+  funnelSteps: FunnelStep[];
   chapters: ChapterRow[];
 }
 
@@ -917,7 +927,7 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
     const top = [...destVisits.entries()].filter(([, v]) => v.level !== "angle").sort((a, b) => b[1].visits - a[1].visits)[0];
     destKey = top ? top[0] : null;
   }
-  if (!destKey) return { destination: null, availableDestinations, summary: null, chapters: [] };
+  if (!destKey) return { destination: null, availableDestinations, summary: null, funnelSteps: [], chapters: [] };
   const destLevel = destVisits.get(destKey)?.level ?? "variant";
 
   const selected = new Set<string>();
@@ -927,7 +937,7 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
   }
   const visits = selected.size;
   const destination = { key: destKey, label: labelFor(destKey, destLevel) };
-  if (visits === 0) return { destination, availableDestinations, summary: null, chapters: [] };
+  if (visits === 0) return { destination, availableDestinations, summary: null, funnelSteps: [], chapters: [] };
 
   // An event belongs to this destination's PAGE iff its stamped `lander_variant`
   // matches (new events — durable against chapter reordering). Old events lack
@@ -943,7 +953,8 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
 
   const chapEvents = await fetchAllRows<{ event_type: string; session_id: string; meta: Record<string, unknown> }>(() =>
     admin.from("storefront_events").select("event_type, session_id, meta, id")
-      .eq("workspace_id", workspaceId).in("event_type", ["chapter_view", "chapter_dwell", "pack_selected"])
+      .eq("workspace_id", workspaceId)
+      .in("event_type", ["chapter_view", "chapter_dwell", "pack_selected", "pdp_engaged", "checkout_view", "order_placed"])
       .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
   );
 
@@ -953,10 +964,15 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
   const ctaOrigin = new Map<string, number>();
   const pricingSessions = new Set<string>();
   const packedSessions = new Set<string>();
+  // funnel-step sets for the selected destination (the waterfall)
+  const engagedSet = new Set<string>(); const checkoutSet = new Set<string>(); const orderSet = new Set<string>();
   let jumped = 0, scrolled = 0;
 
   for (const e of chapEvents) {
     if (!selected.has(e.session_id)) continue;
+    if (e.event_type === "pdp_engaged") { engagedSet.add(e.session_id); continue; }
+    if (e.event_type === "checkout_view") { checkoutSet.add(e.session_id); continue; }
+    if (e.event_type === "order_placed") { orderSet.add(e.session_id); continue; }
     if (e.event_type === "pack_selected") { packedSessions.add(e.session_id); continue; }
     const m = e.meta || {};
     const ch = m.chapter as string | undefined;
@@ -995,6 +1011,25 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
   // reached_pricing/close are now page-accurate (pricing views on THIS page).
   const reachedPricing = pricingSessions.size;
   const packedAmongPricing = [...pricingSessions].filter((id) => packedSessions.has(id)).length;
+
+  // 5-step funnel waterfall for the selected destination (visit→engaged→pack→checkout→order)
+  const stepCounts: Array<{ step: string; label: string; count: number }> = [
+    { step: "visit", label: "Visit", count: visits },
+    { step: "engaged", label: "Engaged", count: engagedSet.size },
+    { step: "pack_selected", label: "Pack selected", count: packedSessions.size },
+    { step: "checkout_started", label: "Checkout started", count: checkoutSet.size },
+    { step: "order_placed", label: "Order placed", count: orderSet.size },
+  ];
+  const funnelSteps: FunnelStep[] = stepCounts.map((c, i) => {
+    const prev = i > 0 ? stepCounts[i - 1].count : c.count;
+    return {
+      step: c.step, label: c.label, count: c.count,
+      conv_from_prev_pct: prev > 0 ? round1((100 * c.count) / prev) : 0,
+      conv_from_top_pct: visits > 0 ? round1((100 * c.count) / visits) : 0,
+      drop_from_prev: i > 0 ? Math.max(0, prev - c.count) : 0,
+    };
+  });
+
   return {
     destination,
     availableDestinations,
@@ -1003,6 +1038,7 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
       packed: packedSessions.size, close_pct: reachedPricing > 0 ? round1((100 * packedAmongPricing) / reachedPricing) : 0,
       jumped_to_pricing: jumped, scrolled_to_pricing: scrolled,
     },
+    funnelSteps,
     chapters,
   };
 }
