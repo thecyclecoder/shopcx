@@ -13,10 +13,15 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Re-snapshot stranded pre-lag-fix daily KPI rows (autonomy_ratio drift cleanup)** · verified 2026-06-29 · → [[../libraries/platform-scorecard]]
+- **Appstle payday-retry cron skips internal subs** · verified 2026-06-29 · → [[../inngest/dunning]], [[../libraries/appstle]]
+- **Stop the grading-starved monitor mis-firing on in-flight director approvals** · verified 2026-06-29 · → [[../libraries/director-grader]]
 - **KPI audit pass skips current-state point-read metrics** · verified 2026-06-29 · → [[libraries/kpi-review]]
 - **KPI audit — skip metrics whose ground truth depends on the live spec set** · verified 2026-06-29 · → [[libraries/kpi-review]]
+- **KPI audit: flag needs_attention as a current-state point read so the audit skips it** · verified 2026-06-29 · → [[../libraries/kpi-review]]
 - **KPI audit: count-metric zero-snapshot boundary-race floor** · verified 2026-06-29 · → [[libraries/kpi-review]]
 - **Heal stale pre-lagged-fix daily KPI snapshot rows by tightening the snapshot-platform-scorecard done guard** · verified 2026-06-29 · → [[../inngest/platform-director-cron]]
+- **KPI review: widen loop_health tolerance — current-state metric, not windowed** · verified 2026-06-29 · → [[libraries/kpi-review]]
+- **KPI tolerance: loop_health is a current-state point read — widen to 5% like lane_utilization** · verified 2026-06-29 · → [[libraries/kpi-review]]
 - **[TEST] No-op pipeline validation v4 (one-off path)** · verified 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 - **[TEST] No-op pipeline validation v6 (zero-assistance run)** · verified 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 - **DevOps KPI daily snapshot date should lag one UTC day (previous complete day)** · verified 2026-06-28 · → [[../libraries/platform-scorecard]]
@@ -332,6 +337,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Shopify theme management via ShopCX (AI-driven, GitHub-commit)** · verified 2026-06-18 · → [[recipes/edit-shopify-theme]]
 - **Storefront MVP — Amazing Coffee subscription funnel (internal subs · instrumentation · Meta CAPI · smart popup · checkout hardening)** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
 - **Storefront: survey chapter + converter-first PDP reorder** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
+- **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 
 ## Related
 

@@ -52,6 +52,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
 - [[dev-message-center-db]] — read-only prod-DB queries from the Developer Message Center (throwaway `scripts/_*.ts`, SELECT-only, never committed)
 - [[pm-flow-data-sources]] — the PM flow's post-purge call graph (DB row → typed reader → consumer) + every surviving consumer of `serializeSpecRowToMarkdown` ([[../specs/retire-md-reads-from-pm-flow]])
+- [[pipeline-doctor]] — `diagnosePipeline` / `scripts/pipeline-status.ts`: an INSTANT read-only diagnosis of the whole spec pipeline (derived status + jobs/gates + what's stuck and WHY, via named anomaly detectors). Composes the canonical readers — never re-derives status with raw SQL.
 - [[next16-metadata-boundary-csr-bail]] — why /store, /widget, /portal, /help bail to CSR under cacheComponents (Next's `botType && isRoutePPREnabled` metadata short-circuit) + the `src/proxy.ts` bot-UA-neutralization fix
 - [[next16-empty-generate-static-params-preview-build]] — why spec-build PREVIEW deploys fail with `EmptyGenerateStaticParamsError` while prod builds clean (empty build-time DB query + cacheComponents PPR), and the `__placeholder__`-sentinel fix in the storefront `generateStaticParams` helpers (NOT an env-var issue — preview & prod share the same DB)
 
