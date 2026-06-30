@@ -22,6 +22,7 @@ import {
   MIN_VARIANT_SESSIONS,
   type StageRecord,
 } from "@/lib/meta/iteration-run";
+import { runGrowthAllocationPass } from "@/lib/growth-allocation";
 import { attributeCreativeOutcomes } from "@/lib/ads/creative-outcome-attribution";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -344,7 +345,46 @@ export const metaIterationRun = inngest.createFunction(
         skipped: execute.skipped,
       });
 
-      // ── Stage 8 — creative→outcome lineage (growth-adopt-creative-makers Phase 3) ──────
+      // ── Stage 8 — growth-allocation pass (growth-allocation-brain Phase 3) ──
+      // Compose ONE cross-tool allocation decision (Meta vs Storefront) grounded in
+      // the M2 blended CAC:LTV objective + each tool's marginal-leverage signal +
+      // the active ad-spend ceiling. Stamp `director_activity` (director_function='growth')
+      // and route `escalate_*` kinds to the CEO via `escalateDiagnosisToCeo` — the
+      // % of autonomous reallocations is the M2 goal's success metric, so every pass
+      // must leave one auditable row. Best-effort: a failure here must NEVER roll back
+      // the just-executed stage-7 actions, so the stage is recorded as error + the run
+      // still finishes complete.
+      const allocation = await step.run("growth-allocation", async () => {
+        const t0 = Date.now();
+        try {
+          const r = await runGrowthAllocationPass({
+            workspaceId: workspace_id,
+            adAccountId: ad_account_id,
+            snapshotDate,
+          });
+          return {
+            ms: Date.now() - t0,
+            decision_kind: r.decision.kind,
+            action_kind: r.actionKind,
+            activity_recorded: r.activityRecorded,
+            escalated: !!r.escalation?.emitted,
+            escalation_kind: r.escalation?.escalationKind ?? null,
+            error: null as string | null,
+          };
+        } catch (e) {
+          return {
+            ms: Date.now() - t0,
+            decision_kind: null as string | null,
+            action_kind: null as string | null,
+            activity_recorded: false,
+            escalated: false,
+            escalation_kind: null as string | null,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      });
+
+      // ── Stage 9 — creative→outcome lineage (growth-adopt-creative-makers Phase 3) ──────
       // Stamp `attributed_creative_outcome` rows for every Director-promoted creative whose
       // publish has matured (≥ OUTCOME_MATURATION_DAYS) and whose meta_ad_id now has
       // attribution-window rows. Idempotent — a per-workspace pass per snapshot. Best-effort:
@@ -372,6 +412,17 @@ export const metaIterationRun = inngest.createFunction(
         }
       });
       stages.push({
+        name: "growth-allocation",
+        status: allocation.error ? "error" : "ok",
+        ms: allocation.ms,
+        decision_kind: allocation.decision_kind,
+        action_kind: allocation.action_kind,
+        activity_recorded: allocation.activity_recorded,
+        escalated: allocation.escalated,
+        escalation_kind: allocation.escalation_kind,
+        ...(allocation.error ? { error: allocation.error } : {}),
+      });
+      stages.push({
         name: "creative-outcome-lineage",
         status: lineage.status,
         ms: lineage.ms,
@@ -393,6 +444,9 @@ export const metaIterationRun = inngest.createFunction(
         actions_failed: execute.failed,
         recommendations: decision.recommendations.persisted,
         spend_drift_objects: ingest.drift,
+        growth_allocation_decision_kind: allocation.decision_kind,
+        growth_allocation_action_kind: allocation.action_kind,
+        growth_allocation_escalated: allocation.escalated,
         creative_outcomes_attributed: lineage.attributed,
       };
 
