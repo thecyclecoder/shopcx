@@ -1,0 +1,26 @@
+# Box crash-loop watchdog (box-crash-loop-watchdog) — one-shot, fired by the .timer.
+#
+# Detects a crash-looping `shopcx-builder`, alerts the CEO (loop_alerts + dashboard_notifications),
+# and auto-rolls the box checkout back to the last-known-good SHA. Runs from OUTSIDE the worker so it
+# SURVIVES a worker crash. See docs/brain/recipes/build-box-setup.md § Box crash-loop watchdog.
+#
+# Install: copy to /etc/systemd/system/, then enable the .timer (the .service is Type=oneshot — the
+# timer triggers it; you never `enable` the .service itself). See the brain recipe for full steps.
+[Unit]
+Description=ShopCX box crash-loop watchdog (monitors shopcx-builder)
+# Independent of the worker: do NOT bind to shopcx-builder — the whole point is to run when it's down.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: needs systemctl restart + journalctl read; git ops in the repo drop to `builder` via runuser.
+User=root
+# Same secret store the worker uses (Supabase service role etc.) — the watchdog writes loop_alerts /
+# dashboard_notifications through createAdminClient(). Reuse the worker's EnvironmentFile.
+EnvironmentFile=/root/shopcx-worker.env
+WorkingDirectory=/home/builder/shopcx
+ExecStart=/usr/bin/tsx /home/builder/shopcx/scripts/box-watchdog.ts
+# A single tick must never hang the timer — the rollback+verify path waits at most ~20s.
+TimeoutStartSec=120
+# A watchdog failure is itself noteworthy but must not spam — the timer re-fires on the next minute.

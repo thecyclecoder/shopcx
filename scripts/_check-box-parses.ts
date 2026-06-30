@@ -44,6 +44,7 @@ const BOX_ENTRYPOINTS = [
   "scripts/spec-test-sandbox.ts",
   "scripts/improve-box-tools.ts",
   "scripts/seed-product-tools.ts",
+  "scripts/box-watchdog.ts", // box crash-loop watchdog — its own systemd timer entrypoint (box-crash-loop-watchdog)
 ];
 
 function fail(msg: string): never {
