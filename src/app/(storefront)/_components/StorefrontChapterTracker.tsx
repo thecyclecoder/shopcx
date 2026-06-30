@@ -41,9 +41,14 @@ const PRICING_CHAPTER = "pricing";
 
 interface Props {
   productId: string;
+  /** The page's lander variant ('pdp' | 'reasons' | 'advertorial' | 'beforeafter').
+   *  Stamped on every chapter event so events self-identify which page they fired
+   *  on — durable against chapter reordering AND disambiguates the shared
+   *  AdvertorialHero (listicle hero vs advertorial hero). See [[libraries/funnel-tree]]. */
+  pageVariant?: string;
 }
 
-export function StorefrontChapterTracker({ productId }: Props) {
+export function StorefrontChapterTracker({ productId, pageVariant = "pdp" }: Props) {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -126,6 +131,7 @@ export function StorefrontChapterTracker({ productId }: Props) {
           product_id: productId,
           chapter: id,
           chapter_index: chapterIndex.get(el) ?? null,
+          lander_variant: pageVariant,
         };
         if (jumpActive && id === PRICING_CHAPTER) {
           meta.arrived_via_jump = true;
@@ -212,6 +218,7 @@ export function StorefrontChapterTracker({ productId }: Props) {
         cta_kind: kind,
         chapter: originChapter,
         chapter_index: chapterEl?.dataset.chapterIndex ? Number(chapterEl.dataset.chapterIndex) : null,
+        lander_variant: pageVariant,
       });
 
       // A scroll-to-price CTA means "this chapter persuaded them to go to
@@ -237,10 +244,10 @@ export function StorefrontChapterTracker({ productId }: Props) {
       accrueDwell();
       for (const [id, ms] of dwellMs) {
         if (ms >= 250) {
-          track("chapter_dwell", { product_id: productId, chapter: id, dwell_ms: Math.round(ms) });
+          track("chapter_dwell", { product_id: productId, chapter: id, dwell_ms: Math.round(ms), lander_variant: pageVariant });
         }
       }
-      track("scroll_depth", { product_id: productId, max_depth_pct: maxDepthPct, reversals });
+      track("scroll_depth", { product_id: productId, max_depth_pct: maxDepthPct, reversals, lander_variant: pageVariant });
     };
 
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -258,7 +265,7 @@ export function StorefrontChapterTracker({ productId }: Props) {
       document.removeEventListener("click", onCtaClick, { capture: true });
       window.removeEventListener("pagehide", flushExit);
     };
-  }, [productId]);
+  }, [productId, pageVariant]);
 
   return null;
 }

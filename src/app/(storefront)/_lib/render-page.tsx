@@ -160,7 +160,7 @@ export function StorefrontPage({
       />
       {/* Phase 2 instrumentation — observes [data-section] nodes for
           chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}
-      <StorefrontChapterTracker productId={data.product.id} />
+      <StorefrontChapterTracker productId={data.product.id} pageVariant={advertorial?.variant ?? "pdp"} />
       {/* Phase 4 — behaviorally-triggered smart popup. Silent for
           decisive buyers; intervenes only on hesitation/indecision. */}
       <SmartPopup

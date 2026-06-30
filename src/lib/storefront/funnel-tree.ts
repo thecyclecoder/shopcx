@@ -720,6 +720,15 @@ function round1(x: number): number { return Math.round(x * 10) / 10; }
 function humanizeChapter(id: string): string {
   return id.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
+/** Destination-aware chapter label. The shared AdvertorialHero component emits
+ *  `advertorial-hero` on BOTH the listicle and the advertorial — so the page
+ *  variant is the only thing that distinguishes the listicle hero from the
+ *  advertorial hero. */
+function chapterLabel(chapter: string, destType: string): string {
+  if (chapter === "advertorial-hero") return destType === "reasons" ? "Listicle Hero" : "Advertorial Hero";
+  if (chapter === "beforeafter-hero") return "Before/After Hero";
+  return humanizeChapter(chapter);
+}
 
 export interface ChapterRow {
   chapter: string;
@@ -850,6 +859,18 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
   const destination = { key: destKey, label: labelFor(destKey, destLevel) };
   if (visits === 0) return { destination, availableDestinations, summary: null, chapters: [] };
 
+  // An event belongs to this destination's PAGE iff its stamped `lander_variant`
+  // matches (new events — durable against chapter reordering). Old events lack
+  // the stamp → fall back to the per-variant section allowlist.
+  const destType = destLevel === "pdp" ? "pdp" : destLevel === "variant" ? destKey : (angleParent.get(destKey) || destKey);
+  const allowedChapters = DESTINATION_CHAPTERS[destType] || null;
+  const belongs = (m: Record<string, unknown>) => {
+    const lv = m.lander_variant as string | undefined;
+    if (lv) return lv === destType;
+    const ch = m.chapter as string | undefined;
+    return !allowedChapters || (!!ch && allowedChapters.has(ch));
+  };
+
   const chapEvents = await fetchAllRows<{ event_type: string; session_id: string; meta: Record<string, unknown> }>(() =>
     admin.from("storefront_events").select("event_type, session_id, meta, id")
       .eq("workspace_id", workspaceId).in("event_type", ["chapter_view", "chapter_dwell", "pack_selected"])
@@ -870,6 +891,7 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
     const m = e.meta || {};
     const ch = m.chapter as string | undefined;
     if (!ch) continue;
+    if (!belongs(m)) continue; // drop foreign-page (cross-nav) events
     if (e.event_type === "chapter_dwell") {
       const ms = Number(m.dwell_ms);
       if (Number.isFinite(ms)) { const d = dwell.get(ch) || { sum: 0, n: 0 }; d.sum += ms; d.n++; dwell.set(ch, d); }
@@ -885,21 +907,14 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
     }
   }
 
-  // Restrict the displayed chapters to those the destination's page actually
-  // renders (drops cross-navigation noise — see DESTINATION_CHAPTERS).
-  const destType = destLevel === "pdp" ? "pdp" : destLevel === "variant" ? destKey : (angleParent.get(destKey) || destKey);
-  const allowedChapters = DESTINATION_CHAPTERS[destType] || null;
-
-  const chapters: ChapterRow[] = [...chapterSessions.entries()]
-    .filter(([chapter]) => !allowedChapters || allowedChapters.has(chapter))
-    .map(([chapter, sess]) => {
+  const chapters: ChapterRow[] = [...chapterSessions.entries()].map(([chapter, sess]) => {
     const reach = sess.size;
     const toPricing = [...sess].filter((id) => pricingSessions.has(id)).length;
     const toPack = [...sess].filter((id) => packedSessions.has(id)).length;
     const d = dwell.get(chapter);
     const co = ctaOrigin.get(chapter) || 0;
     return {
-      chapter, label: humanizeChapter(chapter), index: chapterIndex.has(chapter) ? chapterIndex.get(chapter)! : null,
+      chapter, label: chapterLabel(chapter, destType), index: chapterIndex.has(chapter) ? chapterIndex.get(chapter)! : null,
       reach, reach_pct: round1((100 * reach) / visits), avg_dwell_ms: d && d.n ? Math.round(d.sum / d.n) : 0,
       cta_origin: co, cta_origin_pct: jumped > 0 ? round1((100 * co) / jumped) : 0,
       view_to_pricing_pct: reach > 0 ? round1((100 * toPricing) / reach) : 0,
@@ -907,14 +922,15 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
     };
   }).sort((a, b) => (a.index ?? 999) - (b.index ?? 999) || b.reach - a.reach);
 
+  // reached_pricing/close are now page-accurate (pricing views on THIS page).
   const reachedPricing = pricingSessions.size;
-  const packed = packedSessions.size;
+  const packedAmongPricing = [...pricingSessions].filter((id) => packedSessions.has(id)).length;
   return {
     destination,
     availableDestinations,
     summary: {
       visits, reached_pricing: reachedPricing, carry_to_pricing_pct: round1((100 * reachedPricing) / visits),
-      packed, close_pct: reachedPricing > 0 ? round1((100 * packed) / reachedPricing) : 0,
+      packed: packedSessions.size, close_pct: reachedPricing > 0 ? round1((100 * packedAmongPricing) / reachedPricing) : 0,
       jumped_to_pricing: jumped, scrolled_to_pricing: scrolled,
     },
     chapters,
