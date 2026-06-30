@@ -6008,19 +6008,82 @@ async function runPlanJob(job: Job) {
     // (e.g. "M1") or the raw milestone_id (both are rendered into the materialized goal). Build a lookup
     // keyed by BOTH "M{position}" and the id itself so either form resolves. A spec whose `milestone`
     // doesn't resolve fails the job loudly (no silently-orphaned spec) — mirrors the missingSlugs gate.
-    const { getGoal: getGoalForMilestones } = await import("../src/lib/goals-table");
-    const goalForMilestones = await getGoalForMilestones(job.workspace_id, goalSlug).catch(() => null);
+    const { getGoal: getGoalForMilestones, upsertGoal: upsertGoalForMilestones } = await import("../src/lib/goals-table");
+    let goalForMilestones = await getGoalForMilestones(job.workspace_id, goalSlug).catch(() => null);
     const milestoneByHandle = new Map<string, string>(); // "M1" | "<uuid>" | "<title-lower>" → milestone id
-    for (const m of goalForMilestones?.milestones ?? []) {
-      milestoneByHandle.set(`m${m.position}`, m.id);
-      milestoneByHandle.set(m.id.toLowerCase(), m.id);
-      if (m.title) milestoneByHandle.set(m.title.trim().toLowerCase(), m.id);
-    }
+    const rebuildMilestoneMap = () => {
+      milestoneByHandle.clear();
+      for (const m of goalForMilestones?.milestones ?? []) {
+        milestoneByHandle.set(`m${m.position}`, m.id);
+        milestoneByHandle.set(m.id.toLowerCase(), m.id);
+        if (m.title) milestoneByHandle.set(m.title.trim().toLowerCase(), m.id);
+      }
+    };
+    rebuildMilestoneMap();
     const resolveMilestoneId = (handle?: string): string | null => {
       if (!handle) return null;
       const key = handle.trim().toLowerCase();
       return milestoneByHandle.get(key) ?? milestoneByHandle.get(key.replace(/\s+.*$/, "")) ?? null;
     };
+
+    // RECURRENCE FIX (growth-director 0-milestone bug): a goal PROPOSED with a prose milestone arc (not a
+    // `## Decomposition` block) seeds ZERO `goal_milestones` rows — so Pia's `M{n}` handles resolve to nothing
+    // and (pre-fix) every spec authored with milestone_id=NULL, silently UNLINKED → the goal rolls up 0% forever
+    // even after all its specs ship. The planner's APPROVED decomposition IS the milestone structure, so
+    // MATERIALIZE any milestone an approved spec references that doesn't yet exist as a row (parse the position
+    // from the `M{n}` handle / `parent` label; title from the `parent` label). Union with the existing
+    // milestones (never delete/retitle an existing position — upsertGoal REPLACE-by-position preserves ids) so
+    // a partial decomposition can't orphan prior milestones. After this, the milestone gate below fails LOUDLY
+    // for anything still unresolved instead of silently authoring an unlinked spec.
+    {
+      const parseMilestoneRef = (a: PendingAction): { position: number; title: string } | null => {
+        const s = a.spec!;
+        const handle = (s.milestone || "").trim();
+        const parent = (s.parent || "").trim();
+        const mNum = handle.match(/^m\s*(\d+)$/i) || parent.match(/^m\s*(\d+)\b/i);
+        if (!mNum) return null;
+        const position = parseInt(mNum[1], 10);
+        if (!Number.isFinite(position) || position < 1) return null;
+        const title = /^m\s*\d+\b/i.test(parent) ? parent : `M${position} — ${parent || handle}`;
+        return { position, title };
+      };
+      const existingPositions = new Set((goalForMilestones?.milestones ?? []).map((m) => m.position));
+      const toCreate = new Map<number, string>(); // position → title
+      for (const a of approved) {
+        if (resolveMilestoneId(a.spec!.milestone) || resolveMilestoneId(a.spec!.parent)) continue; // already resolves
+        const ref = parseMilestoneRef(a);
+        if (ref && !existingPositions.has(ref.position) && !toCreate.has(ref.position)) toCreate.set(ref.position, ref.title);
+      }
+      if (toCreate.size && goalForMilestones) {
+        const union = [
+          ...goalForMilestones.milestones.map((m) => ({ position: m.position, title: m.title, body: m.body })),
+          ...[...toCreate.entries()].map(([position, title]) => ({ position, title, body: null as string | null })),
+        ].sort((x, y) => x.position - y.position);
+        try {
+          await upsertGoalForMilestones(
+            job.workspace_id,
+            {
+              slug: goalForMilestones.slug,
+              title: goalForMilestones.title,
+              body: goalForMilestones.body,
+              outcome: goalForMilestones.outcome,
+              success_metric: goalForMilestones.success_metric,
+              owner: goalForMilestones.owner,
+              proposer_function: goalForMilestones.proposer_function,
+              parent_goal_id: goalForMilestones.parent_goal_id,
+              is_parent: goalForMilestones.is_parent,
+              status: goalForMilestones.status,
+            },
+            union,
+          );
+          goalForMilestones = await getGoalForMilestones(job.workspace_id, goalSlug).catch(() => goalForMilestones);
+          rebuildMilestoneMap();
+          console.log(`${tag} materialized ${toCreate.size} missing milestone(s) from the approved decomposition: ${[...toCreate.keys()].map((p) => `M${p}`).join(", ")}`);
+        } catch (e) {
+          console.error(`${tag} milestone materialization failed (specs will fail the unresolved-milestone gate): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
 
     const specList = approved
       .map((a, i) => {
@@ -6104,7 +6167,13 @@ async function runPlanJob(job: Job) {
       }
       // Resolve the milestone (prefer the planner's returned handle, fall back to the approved action's).
       const milestoneId = resolveMilestoneId(out.milestone) ?? resolveMilestoneId(s.milestone);
-      if (goalForMilestones?.milestones.length && (out.milestone || s.milestone) && !milestoneId) {
+      // RECURRENCE FIX: a spec that NAMES a milestone which doesn't resolve fails LOUDLY — regardless of how
+      // many milestones the goal has. The old `goalForMilestones?.milestones.length &&` precondition meant a
+      // ZERO-milestone goal (proposed with a prose arc, not a `## Decomposition` block) silently authored every
+      // spec with milestone_id=NULL → unlinked → 0% rollup forever (the growth-director bug). The milestone-
+      // materialization step above now creates the referenced milestones from the approved decomposition; if a
+      // named milestone STILL doesn't resolve, refuse to author an orphaned spec rather than swallow it.
+      if ((out.milestone || s.milestone) && !milestoneId) {
         milestoneUnresolved.push(`${s.slug} (milestone="${out.milestone || s.milestone}")`);
         continue;
       }
