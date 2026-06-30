@@ -491,6 +491,12 @@ export async function synthesizeAdAngles(
 // Persistence — write scored candidates to `product_ad_angles` at
 // status='proposed' with a `metadata.mined_from` provenance object so Phase 3
 // can trace each approved angle back to the exact rows that produced it.
+//
+// Phase 3 (the disposition step) lives in `./voice-angle-approve.ts`: the
+// Growth director's `approve_voice_angle` leash action flips the angle row to
+// status='approved', inserts an `ad_campaigns` row tagged to it, fires the
+// makers static-request, and stamps a `director_activity` row of
+// `action_kind='approved_voice_angle'` carrying {angle_id, source_signal_counts}.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface PersistProposedAnglesOpts {

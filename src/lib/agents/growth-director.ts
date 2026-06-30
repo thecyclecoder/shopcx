@@ -63,7 +63,8 @@ export type LeashCategory =
   | "storefront_optimizer_policy_activation"
   | "pause_underperforming_creative"
   | "reallocate_within_ceiling"
-  | "promote_ready_to_test_creative";
+  | "promote_ready_to_test_creative"
+  | "approve_voice_angle";
 
 export const LEASH_CATEGORIES: LeashCategory[] = [
   "iteration_policy_activation",
@@ -71,6 +72,7 @@ export const LEASH_CATEGORIES: LeashCategory[] = [
   "pause_underperforming_creative",
   "reallocate_within_ceiling",
   "promote_ready_to_test_creative",
+  "approve_voice_angle",
 ];
 
 /**
@@ -88,6 +90,7 @@ const LEASH_ACTION_TYPES: Record<string, LeashCategory> = {
   pause_underperforming_creative: "pause_underperforming_creative",
   reallocate_within_ceiling: "reallocate_within_ceiling",
   promote_ready_to_test_creative: "promote_ready_to_test_creative",
+  approve_voice_angle: "approve_voice_angle",
 };
 
 /** A loosely-typed agent_jobs row as the worker/enqueuer reads it (Supabase returns untyped JSON). */
@@ -98,6 +101,9 @@ export interface DirectorActionLike {
   summary?: string;
   preview?: string;
   cmd?: string;
+  /** Per-action payload carried by self-executing leash actions (e.g. `promote_ready_to_test_creative`,
+   * `approve_voice_angle`). Shape is action-specific; readers cast it. */
+  payload?: unknown;
 }
 export interface DirectorTargetJob {
   id: string;
@@ -222,6 +228,19 @@ export interface GrowthDirectorBriefAction {
   cmd: string;
 }
 
+/** Per-proposed-angle summary loaded into the brief so the director reads the voice density without
+ * a second DB hit. Populated only when the request carries ≥1 `approve_voice_angle` action. */
+export interface ProposedVoiceAngleSummary {
+  id: string;
+  product_id: string;
+  hook_one_liner: string | null;
+  mechanism_claim: string | null;
+  source_signal_counts: { positive: number; objection: number; use_case: number };
+  matrix_overlap: number | null;
+  density: number | null;
+  score: number | null;
+}
+
 /** The read-only brief the Growth director investigates — the request + the loaded control surfaces. */
 export interface GrowthDirectorBrief {
   jobId: string;
@@ -244,6 +263,9 @@ export interface GrowthDirectorBrief {
   pendingRecommendations: IterationRecommendationSummary[];
   /** every `ad_spend_budgets` row for the workspace + its current rolling-window actual — the leash. */
   adSpendBudgets: AdSpendBudgetSummary[];
+  /** the proposed `product_ad_angles` rows targeted by `approve_voice_angle` actions in this request,
+   * loaded so the prompt can render hook + score + voice density. Empty when no such actions exist. */
+  proposedVoiceAngles: ProposedVoiceAngleSummary[];
   logTail: string;
 }
 
@@ -405,6 +427,63 @@ export async function buildGrowthDirectorBrief(
     /* best-effort */
   }
 
+  // growth-customer-voice-to-ad-angles Phase 3: when ≥1 leash action is `approve_voice_angle`,
+  // load the proposed angle rows so the prompt renders the hook + voice density + score the
+  // director judges. Workspace-scoped + bounded to the ids the actions carry.
+  let proposedVoiceAngles: ProposedVoiceAngleSummary[] = [];
+  const voiceAngleIds = Array.from(
+    new Set(
+      candidates
+        .filter((c) => c.category === "approve_voice_angle")
+        .map((c) => {
+          const a = (job.pending_actions || []).find((p) => p.id === c.actionId);
+          const ang = (a?.payload as { angle_id?: string } | null)?.angle_id;
+          return typeof ang === "string" ? ang : "";
+        })
+        .filter(Boolean),
+    ),
+  );
+  if (voiceAngleIds.length) {
+    try {
+      const { data } = await admin
+        .from("product_ad_angles")
+        .select("id, product_id, hook_one_liner, metadata")
+        .eq("workspace_id", job.workspace_id)
+        .in("id", voiceAngleIds);
+      proposedVoiceAngles = ((data || []) as Array<{
+        id: string;
+        product_id: string;
+        hook_one_liner: string | null;
+        metadata: {
+          mined_from?: { review_ids?: string[]; cancel_event_ids?: string[]; ticket_ids?: string[] };
+          mechanism_claim?: string;
+          matrix_overlap?: number;
+          density?: number;
+          score?: number;
+        } | null;
+      }>).map((r) => {
+        const m = r.metadata ?? {};
+        const mined = m.mined_from ?? {};
+        return {
+          id: r.id,
+          product_id: r.product_id,
+          hook_one_liner: r.hook_one_liner ?? null,
+          mechanism_claim: typeof m.mechanism_claim === "string" ? m.mechanism_claim : null,
+          source_signal_counts: {
+            positive: Array.isArray(mined.review_ids) ? mined.review_ids.length : 0,
+            objection: Array.isArray(mined.cancel_event_ids) ? mined.cancel_event_ids.length : 0,
+            use_case: Array.isArray(mined.ticket_ids) ? mined.ticket_ids.length : 0,
+          },
+          matrix_overlap: typeof m.matrix_overlap === "number" ? m.matrix_overlap : null,
+          density: typeof m.density === "number" ? m.density : null,
+          score: typeof m.score === "number" ? m.score : null,
+        };
+      });
+    } catch {
+      /* best-effort — prompt narrates the gap */
+    }
+  }
+
   return {
     jobId: job.id,
     workspaceId: job.workspace_id,
@@ -418,6 +497,7 @@ export async function buildGrowthDirectorBrief(
     storefrontOptimizerPolicy,
     pendingRecommendations,
     adSpendBudgets,
+    proposedVoiceAngles,
     logTail: (job.log_tail || "").slice(-2000),
   };
 }
@@ -471,6 +551,23 @@ function renderPendingRecommendations(rows: IterationRecommendationSummary[]): s
     (r) => `  - [${r.action_type}${r.persona ? ` · ${r.persona}` : ""}] ${r.title ?? "(no title)"}${r.rationale ? ` — ${r.rationale.slice(0, 200)}` : ""}`,
   );
   return ["iteration_recommendations (status=pending, newest first):", ...lines].join("\n");
+}
+
+/** Render proposed voice-mined angles tied to `approve_voice_angle` actions — hook + voice density + score. */
+function renderProposedVoiceAngles(rows: ProposedVoiceAngleSummary[]): string {
+  if (!rows.length) return "";
+  const lines = rows.map((r) => {
+    const counts = r.source_signal_counts;
+    const cited = counts.positive + counts.objection + counts.use_case;
+    const score = r.score != null ? r.score.toFixed(3) : "?";
+    const overlap = r.matrix_overlap != null ? r.matrix_overlap.toFixed(2) : "?";
+    const density = r.density != null ? r.density.toFixed(2) : "?";
+    return `  - angle ${r.id.slice(0, 8)} · product ${r.product_id.slice(0, 8)} · score=${score} (overlap=${overlap}, density=${density}) · cited ${cited} fragments (${counts.positive}p/${counts.objection}o/${counts.use_case}u)${r.hook_one_liner ? `\n      hook: "${r.hook_one_liner.slice(0, 160)}"` : ""}${r.mechanism_claim ? `\n      mechanism: "${r.mechanism_claim.slice(0, 160)}"` : ""}`;
+  });
+  return [
+    "proposed product_ad_angles (voice-mined candidates targeted by this request — cited customer language is the ANCHOR; an angle that cites 0 fragments is unanchored and you must escalate it):",
+    ...lines,
+  ].join("\n");
 }
 
 /**
@@ -529,6 +626,11 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     "  (no ceiling-breaking deltas; the active ceiling is the hard rail).",
     "- promote_ready_to_test_creative: approving a creative INTO the ad_publish_jobs PAUSED flow (the publisher",
     "  writes meta ids back PAUSED — never goes live without a second approve).",
+    "- approve_voice_angle: approving a voice-mined product_ad_angle (status='proposed') — flips the angle row",
+    "  to status='approved' + is_active=true, inserts an ad_campaigns row tagged to it, and enqueues a",
+    "  static-request via the makers pipeline. The new creative lands on the ready-to-test queue PAUSED;",
+    "  a second approval is still required to flip it live. ANCHORING IS NON-NEGOTIABLE — an angle whose",
+    "  metadata.mined_from contains 0 real review/cancel/ticket ids is unanchored and you MUST escalate it.",
     "",
     "ALWAYS ESCALATE (never auto-approve): anything destructive or irreversible, a budget ceiling change /",
     "ceiling-breaking spend delta, a non-binary CHOICE action, modifying or abandoning an approved goal,",
@@ -547,16 +649,19 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     renderAdSpendBudgets(brief.adSpendBudgets),
     "",
     renderPendingRecommendations(brief.pendingRecommendations),
+    brief.proposedVoiceAngles.length ? "\n" + renderProposedVoiceAngles(brief.proposedVoiceAngles) : "",
     "",
     "## The request under investigation",
     actionBlock,
     brief.logTail ? `\ninvestigation log so far:\n${brief.logTail}` : "",
     "",
     "Investigate read-only (the implicated policy version SQL, the optimizer policy row, the recommendation rationale,",
-    "the creative/spend lines this touches). Confirm every action is sound, reversible, and within the leash before approving.",
+    "the creative/spend lines this touches, and — for approve_voice_angle — the angle's mined_from fragment ids must be",
+    "REAL row ids in product_reviews / customer_events / tickets). Confirm every action is sound, reversible, and within",
+    "the leash before approving.",
     "",
     "Final message = ONLY one JSON object:",
-    '{"verdict":"auto-approve","leash_category":"iteration_policy_activation|storefront_optimizer_policy_activation|pause_underperforming_creative|reallocate_within_ceiling|promote_ready_to_test_creative","reasoning":"<why every action is sound + low-risk + within the leash, and the bundle is reversible>"}',
+    '{"verdict":"auto-approve","leash_category":"iteration_policy_activation|storefront_optimizer_policy_activation|pause_underperforming_creative|reallocate_within_ceiling|promote_ready_to_test_creative|approve_voice_angle","reasoning":"<why every action is sound + low-risk + within the leash, and the bundle is reversible>"}',
     '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice / a ceiling change>"}',
   ]
     .filter(Boolean)

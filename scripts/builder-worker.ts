@@ -4763,6 +4763,43 @@ async function runGrowthDirectorJob(job: Job) {
         }
       }
 
+      // growth-customer-voice-to-ad-angles Phase 3: an `approve_voice_angle` action is SELF-EXECUTING —
+      // it inserts an ad_campaigns row at status='ready' tagged to the angle, flips the angle to
+      // status='approved', fires `ad-tool/static-requested` so the makers pipeline renders into
+      // ad_videos, and stamps `director_activity` action_kind='approved_voice_angle' carrying
+      // {angle_id, source_signal_counts}. Mirrors the promote branch above — same target lifecycle,
+      // independent executor module.
+      const hasApproveVoiceAngle = leashActions.some((a) => a.category === "approve_voice_angle");
+      if (hasApproveVoiceAngle) {
+        const voiceLib = await import("../src/lib/ads/voice-angle-approve");
+        const { data: refreshed } = await db
+          .from("agent_jobs")
+          .select("id, workspace_id, spec_slug, pending_actions")
+          .eq("id", t.id)
+          .maybeSingle();
+        if (refreshed) {
+          const refreshedTarget = refreshed as unknown as import("../src/lib/ads/voice-angle-approve").VoiceAngleTargetJob;
+          const exec = await voiceLib.executeApprovedVoiceAngles(db, refreshedTarget);
+          const stillPending = (refreshedTarget.pending_actions || []).some((a) => (a.status ?? "pending") === "pending");
+          await db
+            .from("agent_jobs")
+            .update({
+              pending_actions: refreshedTarget.pending_actions,
+              status: stillPending ? "queued_resume" : exec.ok ? "completed" : "needs_attention",
+              error: exec.ok ? null : exec.executed.find((e) => !e.ok)?.reason ?? "approve_voice_angle failed",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", t.id);
+          const campaignIds = exec.executed.filter((e) => e.ok).map((e) => e.ad_campaign_id).filter(Boolean);
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approved ${t.kind} (${bundleLabel}); approved ${campaignIds.length} voice angle(s) → ad_campaigns ${campaignIds.join(", ")}.\n${reasoning}`.slice(-2000),
+          });
+          console.log(`${tag} auto-approved ${t.kind} (${bundleLabel}) — approved_voice_angle ${campaignIds.length}/${exec.executed.length}`);
+          return;
+        }
+      }
+
       await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → target queued_resume.\n${reasoning}`.slice(-2000) });
       console.log(`${tag} auto-approved ${t.kind} (${bundleLabel})`);
       return;
@@ -13600,6 +13637,18 @@ async function main() {
         growthDirectorSweepInFlight = true;
         void (async () => {
           try {
+            // growth-customer-voice-to-ad-angles Phase 3: scan status='proposed' angles + batch one
+            // `growth-voice-angle-approval` target per workspace BEFORE the director enqueuer runs, so
+            // the freshly-queued `needs_approval` rows are picked up in the SAME sweep tick. Dormant
+            // (a no-op) until the M6 flag flips function_autonomy('growth') live+autonomous.
+            try {
+              const { enqueueVoiceAngleApprovalJobs } = await import("../src/lib/ads/voice-angle-approve");
+              const v = await enqueueVoiceAngleApprovalJobs(db);
+              if (v.enqueued)
+                console.log(`[growth-voice-angles] queued ${v.enqueued} target(s) carrying ${v.queued_actions} approve_voice_angle action(s)`);
+            } catch (e) {
+              console.error("[growth-voice-angles] enqueue failed (continuing):", e instanceof Error ? e.message : e);
+            }
             const { enqueueGrowthDirectorJobs } = await import("../src/lib/agents/growth-director");
             const r = await enqueueGrowthDirectorJobs(db);
             if (r.enqueued) console.log(`[growth-director] queued ${r.enqueued} director job(s): ${r.slugs.join(", ")}`);

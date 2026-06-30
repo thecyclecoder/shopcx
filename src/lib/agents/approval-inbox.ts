@@ -79,6 +79,11 @@ const KIND_TO_FUNCTION: Record<string, string> = (() => {
   }
   if (!m["db_health"]) m["db_health"] = "platform";
   if (!m["coverage-register"]) m["coverage-register"] = "platform";
+  // growth-customer-voice-to-ad-angles Phase 3: a `growth-voice-angle-approval` target carries one
+  // `approve_voice_angle` pending action per status='proposed' angle and routes UP from the Growth
+  // function; while Growth is live+autonomous, the Growth director auto-approves within the leash,
+  // otherwise it falls through to the CEO (the fail-safe).
+  if (!m["growth-voice-angle-approval"]) m["growth-voice-angle-approval"] = "growth";
   // `proposed-goal` (director-proposed-goals) is deliberately ABSENT — a goal NEVER routes to a director for
   // greenlight, even a live+autonomous one (a director may propose its own goal but never greenlight any).
   // Unmapped ⇒ ownerFunctionForKind returns null ⇒ resolveApprover falls through to the CEO. Do not add it.
