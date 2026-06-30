@@ -1436,9 +1436,15 @@ function goalRowToCard(
   allRows: GoalRow[] = [row],
 ): GoalCard {
   let linkedSpecCount = 0;
+  // spec-goal-branch-pm-flow M6 — dedupe THIS goal's member specs by slug across ITS milestones (a spec can
+  // be linked through more than one milestone). Collect them here, keyed off `row.milestones`, so the count
+  // is scoped to this goal. (Iterating `specsByMilestone.values()` instead would leak EVERY goal's specs on
+  // the list path, where the map covers all active goals' milestones — the "N of 47" board bug.)
+  const memberBySlug = new Map<string, SpecCard>();
   const milestones = row.milestones.map((m) => {
     const linked = specsByMilestone.get(m.id) ?? [];
     linkedSpecCount += linked.length;
+    for (const s of linked) memberBySlug.set(s.slug, s);
     return milestoneRowToCard(m, linked);
   });
   const pct = milestones.length
@@ -1449,11 +1455,9 @@ function goalRowToCard(
   // specs — never invent `complete` for a goal with zero milestones or a milestone with no linked specs.
   const allComplete = milestones.length > 0 && milestones.every((m) => m.completion >= 1);
   const status: GoalStatus = allComplete ? "complete" : dbGoalRowStatus(row.status);
-  // spec-goal-branch-pm-flow M6 — the goal-branch accumulation. Dedupe member specs by slug across the
-  // milestones (a spec can be linked through more than one milestone) so the "N of M on the goal branch"
-  // count matches `goalBranchState`'s unique-spec set, then derive from each card's `onGoalBranch` flag.
-  const memberBySlug = new Map<string, SpecCard>();
-  for (const list of specsByMilestone.values()) for (const s of list) memberBySlug.set(s.slug, s);
+  // spec-goal-branch-pm-flow M6 — the goal-branch accumulation, derived from THIS goal's deduped member
+  // specs (collected above from `row.milestones`) so the "N of M on the goal branch" count matches
+  // `goalBranchState`'s unique-spec set + the `linkedSpecCount`/detail-page scoping.
   const members = [...memberBySlug.values()];
   const exempt = deriveGoalExemption(row, allRows, members.length);
   const accumulation = deriveGoalAccumulation(members, exempt);
