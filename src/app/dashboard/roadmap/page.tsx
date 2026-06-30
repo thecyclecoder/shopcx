@@ -133,6 +133,7 @@ const FOLDED_DERIVATION = deriveLifecycleStage({
   status: "folded",
   valePass: true,
   phases: [],
+  builtOnBranch: true,
   buildLive: false,
   buildNeedsAttention: false,
   specTestVerdict: "approved",

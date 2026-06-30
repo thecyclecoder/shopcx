@@ -43,6 +43,15 @@ Two pure functions, no I/O, no DB calls — the page-level loader does the fetch
 - **`specTestHasOpenRegression(slug, run, humanResolutions)`** — boolean. Mirrors `getAutoFoldEligibleSlugs`'s
   regression definition so the Spec Test node + the fold gate can never disagree on the same data.
 
+- **`builtOnBranch`** (computed internally by `deriveBuiltOnBranch(spec, buildJob, folded)`, not exported) —
+  the branch-flow Build-done signal ([[../lifecycles/spec-goal-branch-pm-flow]]). True once the spec is fully
+  built on `claude/build-{slug}` BEFORE it merges to main, so the Build node finishes while the pre-merge
+  spec-test + security gates run. Derived from the SpecCard's per-phase `build_sha`: a multi-phase spec where
+  every phase carries a `build_sha` or is terminal (`shipped`/`rejected` — the `isSpecAccumulationComplete`
+  condition), a one-shot spec whose build job reached `completed`/`merged`, or any spec already
+  `in_testing`/`shipped`/`folded`. This is what fixed the bug where a spec mid pre-merge spec-test showed
+  Build=active + Spec Test/Security greyed.
+
 ## Why pure (no DB I/O)
 
 The page-level loader fetches once and re-uses the maps across every card. A per-spec round-trip from

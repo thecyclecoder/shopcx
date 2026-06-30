@@ -4,16 +4,26 @@
  *
  * The 5 stages, in order: `spec-review` → `build` → `spec-test` → `security-test` → `fold`.
  *
+ * **Branch-flow order (spec-goal-branch-pm-flow).** The pipeline builds + TESTS a spec on its branch
+ * preview BEFORE promoting it to `main`: build-on-branch → spec-test (pre-merge) → security (pre-merge)
+ * → MERGE/ship to main → fold. So the Build node is `done` once the spec is **built on its branch**
+ * (every phase carries a `build_sha`, or — one-shot — the build job reached completed/merged), NOT when
+ * the spec has shipped; and Spec Test + Security are the **pre-merge gates** that run while the spec is
+ * still `in_testing` (built + being tested on a branch, not yet on main). The "shipped to main" event
+ * happens between Security-done and Fold — the card's top 3-node timeline (built on branch → in testing →
+ * shipped) shows it; this 5-node detail folds it into that Build/SpecTest/Security → Fold transition.
+ *
  * `deriveLifecycleStage(ctx)` is **pure + side-effect-free** — it reads only the context the board /
- * Control Tower already loads (the spec's status, vale_pass, phases, the latest spec_test_runs row, the
- * live/terminal security-review agent_jobs state for the slug). No DB reads, no I/O. Unit-testable from a
- * fixture (see `scripts/verify-build-lifecycle.ts`).
+ * Control Tower already loads (the spec's status, vale_pass, phases, the built-on-branch signal, the
+ * latest spec_test_runs row, the live/terminal security-review agent_jobs state for the slug). No DB
+ * reads, no I/O. Unit-testable from a fixture (see `src/lib/build-lifecycle.test.ts`).
  *
  * Per-stage rollup mirrors the spec language so the timeline UI (Phase 2) can render a check on every
  * completed upstream stage AND attach the live status pill to the CURRENT (earliest non-done) stage. The
  * current stage is the furthest-right stage the spec has reached — by construction the upstream stages are
  * `done` once that current stage is reached, because the inputs progress monotonically (Build can't be done
- * until the spec has shipped; Spec Test can't be done until Build is; etc.).
+ * until the spec is built on its branch; Spec Test can't be done until Build is; Security can't be done
+ * until Spec Test is).
  *
  * Security state in this helper MUST match what the fold gate (Phase 3) will read — the Security node can
  * never read "done" while the gate still blocks, or vice-versa.
@@ -40,6 +50,14 @@ export interface LifecycleContext {
   valePass: boolean | null;
   /** The spec's phases (only `status` is read here) — the SpecCard.phases array verbatim. */
   phases: { status: Phase }[];
+  /** **Built on its branch** — the branch-flow Build-done signal (spec-goal-branch-pm-flow). True once the
+   *  spec is fully built on `claude/build-{slug}`, BEFORE it merges to main: a multi-phase spec where every
+   *  phase carries a `build_sha` or is terminal (the `isSpecAccumulationComplete` condition), or a one-shot
+   *  spec whose build job reached `completed`/`merged`, or any spec already at `in_testing`/`shipped`/
+   *  `folded`. Computed in `build-lifecycle-context.ts` from the SpecCard's phases (`build_sha`) + the build
+   *  job — the helper just reads it. This is what makes the Build node go `done` while spec-test/security
+   *  run pre-merge, instead of staying `active` for the whole pre-merge testing window. */
+  builtOnBranch: boolean;
   /** A `build` `agent_jobs` row for this slug in ACTIVE_STATUSES (live build). */
   buildLive: boolean;
   /** A `build` `agent_jobs` row for this slug surfaced for the owner (`needs_attention` or a
@@ -112,23 +130,29 @@ function reviewStatus(ctx: LifecycleContext): LifecycleStageStatus {
 
 function buildStatusFor(ctx: LifecycleContext): LifecycleStageStatus {
   if (ctx.buildNeedsAttention) return "needs-attention";
-  // Multi-phase spec: roll up from `phases`. `rejected` (cut) phases count as done — they're not blocking.
+  // Branch-flow Build-done = BUILT ON BRANCH (spec-goal-branch-pm-flow), NOT shipped-to-main. The
+  // `builtOnBranch` signal (computed in build-lifecycle-context.ts) is true once every phase carries a
+  // `build_sha`/is terminal, or a one-shot's build job reached completed/merged, or the spec is already
+  // `in_testing`/`shipped`/`folded`. This is what lets the Build node finish while the pre-merge spec-test
+  // + security still run on the branch preview.
+  if (ctx.builtOnBranch) return "done";
+  // Not yet fully built on branch — show `active` while a build is in flight, else `pending`.
   if (ctx.phases.length > 0) {
-    const allDone = ctx.phases.every((p) => p.status === "shipped" || p.status === "rejected");
-    if (allDone) return "done";
     const anyInProgress = ctx.phases.some((p) => p.status === "in_progress");
     if (anyInProgress || ctx.buildLive) return "active";
     return "pending";
   }
-  // One-shot spec (no `## Phase` sections — the whole spec ships in one PR). Use the row status.
-  if (ctx.status === "shipped" || ctx.status === "folded") return "done";
+  // One-shot spec (no `## Phase` sections — the whole spec ships in one PR), still building on its branch.
   if (ctx.buildLive || ctx.status === "in_progress") return "active";
   return "pending";
 }
 
-function specTestStatus(ctx: LifecycleContext): LifecycleStageStatus {
-  // Spec-test runs POST-ship only — before the spec has merged there's nothing for the QA agent to test.
-  if (ctx.status !== "shipped" && ctx.status !== "folded") return "pending";
+function specTestStatus(ctx: LifecycleContext, buildDone: boolean): LifecycleStageStatus {
+  // Spec-test is a PRE-MERGE gate (spec-goal-branch-pm-flow M3): it runs on the branch preview once the
+  // spec is fully built on its branch, BEFORE it merges to main — NOT post-ship. So gate only on Build
+  // being done (built on branch), then derive from the spec-test signals regardless of shipped status. A
+  // live pre-merge run therefore lights this node `active` (not grey) for the whole testing window.
+  if (!buildDone) return "pending";
   // The fold gate requires `approved` + 0 open regressions (`getAutoFoldEligibleSlugs`) — mirror exactly so
   // the Spec Test node and the fold gate can never disagree.
   if (ctx.specTestVerdict === "approved" && !ctx.specTestHasOpenRegression) return "done";
@@ -138,13 +162,16 @@ function specTestStatus(ctx: LifecycleContext): LifecycleStageStatus {
   return "active";
 }
 
-function securityStatus(ctx: LifecycleContext): LifecycleStageStatus {
-  // Security review fires post-merge (the merge hook enqueues it) — pre-ship, nothing to read.
-  if (ctx.status !== "shipped" && ctx.status !== "folded") return "pending";
+function securityStatus(ctx: LifecycleContext, specTestDone: boolean): LifecycleStageStatus {
+  // Security is the second PRE-MERGE gate (spec-goal-branch-pm-flow M4): it runs on the branch preview
+  // before the merge to main, NOT post-merge. Gate it on the spec-test node having cleared (which itself
+  // requires Build done), then derive from the security signals regardless of shipped status. A live
+  // pre-merge security review therefore lights this node `active` (not grey).
+  if (!specTestDone) return "pending";
   if (ctx.securitySurfaced) return "needs-attention";
   if (ctx.securityLive) return "active";
   if (ctx.securityCompletedClean) return "done";
-  // Post-ship but no security-review record yet — the queue is about to fire / will be picked up shortly.
+  // Spec-test cleared but no security-review record yet — the review is about to fire / will be picked up.
   return "active";
 }
 
@@ -158,11 +185,17 @@ function foldStatus(ctx: LifecycleContext): LifecycleStageStatus {
  * comes from `ctx`. See file header for the stage definitions and sourcing rules.
  */
 export function deriveLifecycleStage(ctx: LifecycleContext): LifecycleDerivation {
+  // Branch-flow gates chain: Spec Test waits on Build (built on branch); Security waits on Spec Test —
+  // mirroring the on-branch build → pre-merge spec-test → pre-merge security order (the ship-to-main event
+  // sits between Security and Fold). Compute upstream-done flags so the gates can't disagree.
+  const buildStage = buildStatusFor(ctx);
+  const specTestStage = specTestStatus(ctx, buildStage === "done");
+  const securityStage = securityStatus(ctx, specTestStage === "done");
   const perStage: Record<LifecycleStageName, LifecycleStageStatus> = {
     "spec-review": reviewStatus(ctx),
-    "build": buildStatusFor(ctx),
-    "spec-test": specTestStatus(ctx),
-    "security-test": securityStatus(ctx),
+    "build": buildStage,
+    "spec-test": specTestStage,
+    "security-test": securityStage,
     "fold": foldStatus(ctx),
   };
 

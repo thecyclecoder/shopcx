@@ -49,6 +49,28 @@ export interface BuildLifecycleInputs {
 }
 
 /**
+ * **Built on its branch** — the branch-flow Build-done signal (spec-goal-branch-pm-flow). True once the
+ * spec is fully built on `claude/build-{slug}`, BEFORE it merges to main, so the 5-node timeline's Build
+ * node can finish while the pre-merge spec-test + security gates run on the branch preview.
+ *
+ * Derivation (mirrors `isSpecAccumulationComplete` / the `in_testing` deriver in brain-roadmap):
+ * - Already past the build window (`in_testing` / `shipped` / `folded`) ⇒ built. (`in_testing` is the
+ *   derived "built + green on a branch, not yet on main" slot; it can only hold once accumulation is
+ *   complete, so it implies built-on-branch.)
+ * - A **multi-phase** spec is built when every phase carries a `build_sha` or is terminal
+ *   (`shipped`/`rejected`) — the accumulation-complete condition, read off `SpecCard.phases` directly.
+ * - A **one-shot** spec (0 phases) is built when its `build` job reached a `completed`/`merged` terminal.
+ */
+function deriveBuiltOnBranch(spec: SpecCard, buildJob: AgentJob | null, folded: boolean): boolean {
+  if (folded || spec.status === "shipped" || spec.status === "in_testing") return true;
+  if (spec.phases.length > 0) {
+    return spec.phases.every((p) => !!p.build_sha || p.status === "shipped" || p.status === "rejected");
+  }
+  // One-shot spec, still pre-`in_testing`: rely on the build job reaching a built terminal on its branch.
+  return !!buildJob && (buildJob.status === "completed" || buildJob.status === "merged");
+}
+
+/**
  * Build the LifecycleContext for one spec from the board's already-loaded signals.
  *
  * Build-stage signals: only a `build` job counts as the spec's BUILD lifecycle state — a `spec-test` /
@@ -65,6 +87,7 @@ export function buildLifecycleContext(opts: BuildLifecycleInputs): LifecycleCont
     status: folded ? "folded" : spec.status,
     valePass: typeof spec.valePass === "boolean" ? spec.valePass : null,
     phases: spec.phases.map((p) => ({ status: p.status })),
+    builtOnBranch: deriveBuiltOnBranch(spec, buildJob, !!folded),
     buildLive: !!(buildJob && isActive(buildJob.status)),
     buildNeedsAttention: !!(buildJob && BUILD_NEEDS_ATTENTION_STATUSES.has(buildJob.status)),
     specTestVerdict: testRun?.agent_verdict ?? null,
@@ -168,7 +191,7 @@ export function lifecyclePillForCurrent(
     if (currentStatus === "needs-attention") {
       return { label: "Security: needs review", title: "A security review surfaced a routed real-vuln fix or a needs-human finding — clear it in the Agents inbox before fold." };
     }
-    return { label: "Security review", title: "Post-merge security review is in flight — the fold gate defers until it clears (Phase 3)." };
+    return { label: "Security review", title: "Pre-merge security review is in flight on the branch preview — promotion to main defers until it clears." };
   }
 
   // Fold (active without a folding row) — the spec passed both gates (spec-test + security) and is

@@ -17,9 +17,26 @@ every completed upstream stage AND attach the live status pill to the CURRENT (e
 the pill lands where work is actually happening.
 
 The helper is **pure + side-effect-free**: it reads only signals the board / Control Tower already loads,
-does no DB I/O, and is unit-testable from a fixture (`scripts/_verify-build-lifecycle.ts`). No new column is
-added — every stage status is **derived** from the existing data ([[brain-roadmap]] phases, the spec's
-`vale_pass`, the latest [[spec-test-runs]] row, the [[security-agent]] `agent_jobs` state).
+does no DB I/O, and is unit-testable from a fixture (`src/lib/build-lifecycle.test.ts`, `npm run
+test:build-lifecycle`). No new column is added — every stage status is **derived** from the existing data
+([[brain-roadmap]] phases + per-phase `build_sha`, the spec's `vale_pass`, the latest [[spec-test-runs]]
+row, the [[security-agent]] `agent_jobs` state).
+
+## Stage order is the BRANCH-FLOW order (spec-goal-branch-pm-flow)
+
+The pipeline builds + **tests a spec on its branch preview BEFORE promoting it to `main`**
+([[../lifecycles/spec-goal-branch-pm-flow]]): **build-on-branch → spec-test (pre-merge) → security
+(pre-merge) → MERGE/ship to main → fold**. So the Build node finishes when the spec is **built on its
+branch** (NOT when it ships), and **Spec Test + Security are the pre-merge gates** that run while the spec
+is still `in_testing` (built + being tested on a branch, not yet on `main`). The "shipped to main" event
+sits between Security-done and Fold — the card's top 3-node timeline (built on branch → in testing →
+shipped) shows that hop; this 5-node detail folds it into the Build/SpecTest/Security → Fold transition.
+
+> **This replaced the old post-ship gates.** Previously Spec Test + Security were gated `status !== shipped
+> → pending`, so a spec actively running its pre-merge spec-test (Build done on branch, status still
+> `in_testing`/`in_progress`) rendered Build=active + Spec Test/Security greyed — the card looked like "no
+> spec test happened" for the whole pre-merge window. The gates now key on the branch-flow `builtOnBranch`
+> signal, not shipped status.
 
 ## Stages
 
@@ -27,23 +44,26 @@ The 5 stages, in order — a spec walks them left to right:
 
 1. **`spec-review`** — Vale's CHECKLIST gate. Active while `vale_pass` is null on an `in_review` spec; done
    when Vale passes (or the spec has moved past `in_review` at all); needs-attention on a needs_fix verdict.
-2. **`build`** — Build agent shipping the phases. Active while any phase is `in_progress` OR a live build
-   job exists; done when every phase is `shipped` (cut `rejected` phases count as done); needs-attention
-   on a `needs_attention`/`needs_approval` build job. For a one-shot spec (no `## Phase` sections), done
-   when `status === shipped` / `folded`.
-3. **`spec-test`** — The box spec-test QA agent ([[spec-test-runs]]). Pending until the spec has shipped;
-   then active while a run is live OR no verdict yet; done iff `agent_verdict === "approved"` AND 0 open
-   regressions (mirrors `getAutoFoldEligibleSlugs` exactly so this and the fold gate can't disagree);
-   needs-attention on `issues`/`error`/open regression.
-4. **`security-test`** — The [[security-agent]] post-merge review. Pending until the spec has shipped;
-   then active while the security-review job is `queued`/`claimed`/`building`/`needs_input`/`queued_resume`
-   (or post-ship with no record yet); done on a clean `completed`; needs-attention on `needs_approval`
-   (routed real-vuln fix) / `needs_attention` (needs-human finding). **Phase 3 (shipped)** extends the fold
-   gate to require this stage to be `done` before fold — so the timeline and the gate read the SAME state
-   (`securityCompletedClean === true` in both places).
+2. **`build`** — Build agent accumulating phases on the spec branch. Done once the spec is **built on its
+   branch** (`builtOnBranch`): a multi-phase spec where every phase carries a `build_sha` or is terminal
+   (`shipped`/`rejected` — the `isSpecAccumulationComplete` condition), a one-shot spec whose build job
+   reached `completed`/`merged`, or any spec already `in_testing`/`shipped`/`folded`. Active while any
+   phase is `in_progress` OR a live build job exists; needs-attention on a `needs_attention`/`needs_approval`
+   build job.
+3. **`spec-test`** — The pre-merge spec-test QA agent on the branch preview ([[spec-test-runs]], M3). Pending
+   until **Build is done (built on branch)** — NOT until shipped; then active while a run is live OR no green
+   verdict yet (so a live pre-merge run lights the node active, not grey); done iff `agent_verdict ===
+   "approved"` AND 0 open regressions (mirrors `getAutoFoldEligibleSlugs` exactly so this and the fold gate
+   can't disagree); needs-attention on `issues`/`error`/open regression.
+4. **`security-test`** — The [[security-agent]] pre-merge review on the branch preview (M4). Pending until the
+   **Spec Test node has cleared** (which itself requires Build done) — NOT until shipped; then active while
+   the security-review job is `queued`/`claimed`/`building`/`needs_input`/`queued_resume` (or Spec-Test-done
+   with no record yet); done on a clean `completed`; needs-attention on `needs_approval` (routed real-vuln
+   fix) / `needs_attention` (needs-human finding). The fold gate requires this stage `done` before fold — so
+   the timeline and the gate read the SAME state (`securityCompletedClean === true` in both places).
 5. **`fold`** — The spec is archived to brain (`specs.status === "folded"`). Done iff folded; pending
-   otherwise. By construction, a folded spec has every upstream stage done (build shipped, spec-test
-   passed, security cleared) so the full timeline reads checked.
+   otherwise. By construction, a folded spec has every upstream stage done (built on branch, spec-test
+   passed, security cleared, then shipped to main) so the full timeline reads checked.
 
 ## Types
 
@@ -51,9 +71,12 @@ The 5 stages, in order — a spec walks them left to right:
 - **`LifecycleStageStatus`** = `"pending" | "active" | "done" | "needs-attention"`.
 - **`LifecycleContext`** — the inputs `deriveLifecycleStage` reads (the board / Control Tower computes these
   from data they already load): `status` (SpecStatus | "folded"), `valePass` (boolean | null), `phases[]`
-  (status only), `buildLive`, `buildNeedsAttention`, `specTestVerdict` ([[spec-test-runs]] `AgentVerdict`
-  | null), `specTestHasOpenRegression`, `specTestLive`, `securityLive`, `securitySurfaced`,
-  `securityCompletedClean`. See the source for field-level docs.
+  (status only), **`builtOnBranch`** (the branch-flow Build-done signal — see below), `buildLive`,
+  `buildNeedsAttention`, `specTestVerdict` ([[spec-test-runs]] `AgentVerdict` | null),
+  `specTestHasOpenRegression`, `specTestLive`, `securityLive`, `securitySurfaced`, `securityCompletedClean`.
+  See the source for field-level docs. **`builtOnBranch`** is computed by [[build-lifecycle-context]]
+  (`deriveBuiltOnBranch`) from the SpecCard's per-phase `build_sha` + the build job — the pure helper just
+  reads it.
 - **`LifecycleStage`** `{ name, label, status }` · **`LifecycleDerivation`** `{ current, currentStatus, stages[] }`.
 
 ## Exports
@@ -61,8 +84,10 @@ The 5 stages, in order — a spec walks them left to right:
 - **`deriveLifecycleStage(ctx)`** → `LifecycleDerivation` — the one pure entry point. Returns all 5 stage
   rollups plus the `current` stage (the earliest non-done) and its status (what the timeline pill renders).
   By construction every stage upstream of `current` is `done` — the inputs progress monotonically (Spec
-  Test can't be done until Build is; Security can't run until ship; Fold can't be done until Security
-  clears under Phase 3), so the rendered timeline naturally has a contiguous block of checks.
+  Test can't be done until Build is built-on-branch; Security can't be done until Spec Test clears; Fold
+  can't be done until Security clears), so the rendered timeline naturally has a contiguous block of checks.
+  The gates chain explicitly: `deriveLifecycleStage` passes `buildStage === "done"` into the spec-test
+  deriver and `specTestStage === "done"` into the security deriver.
 - **`LIFECYCLE_STAGE_LABELS`** — stable display strings for each stage (`"Spec Review"`, `"Build"`, …).
 - **`LIFECYCLE_STAGE_ORDER`** — the 5 stages in order (the traversal contract).
 
@@ -94,14 +119,21 @@ The 5 stages, in order — a spec walks them left to right:
 - **`valePass` is only consulted when `status === "in_review"`.** A spec past `in_review` has Vale cleared
   by definition (the build pipeline refuses an in_review spec), so a stale `valePass: false` on a planned/
   shipped spec never reads as needs-attention.
-- **Per-stage status must agree with the fold gate.** When Phase 3 extends `getAutoFoldEligibleSlugs`, the
-  `securityCompletedClean` boolean and the gate's read of security-review terminal state MUST share one
-  source so the Security node and the fold gate can never disagree.
+- **Per-stage status must agree with the fold gate.** `getAutoFoldEligibleSlugs` and the Security node both
+  read `securityCompletedClean` (the same `getSecurityStateBySlug` source) so the Security node and the
+  fold gate can never disagree.
+- **Build-done is built-on-branch, NOT shipped.** Spec Test + Security gate on `builtOnBranch` / the
+  upstream node clearing — never on `status === shipped`. They run pre-merge on the branch preview, so a
+  spec mid pre-merge testing (built on branch, `in_testing`/`in_progress`, not yet on `main`) correctly
+  shows Build=done with a live Spec Test/Security node, instead of greying them for the whole pre-merge
+  window. `builtOnBranch` is derived in [[build-lifecycle-context]] from per-phase `build_sha`
+  (`isSpecAccumulationComplete`) or the one-shot build job's completed/merged terminal.
 
 ## Related
 
-[[../specs/build-card-lifecycle-timeline]] · [[brain-roadmap]] · [[spec-test-runs]] · [[security-agent]] ·
-[[spec-card-state]] · [[agent-jobs]] · [[../dashboard/roadmap]] · [[../dashboard/control-tower]]
+[[../specs/build-card-lifecycle-timeline]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[build-lifecycle-context]] ·
+[[brain-roadmap]] · [[spec-test-runs]] · [[security-agent]] · [[spec-card-state]] · [[agent-jobs]] ·
+[[../dashboard/roadmap]] · [[../dashboard/control-tower]]
 
 ---
 
