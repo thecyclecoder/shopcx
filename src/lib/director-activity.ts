@@ -76,7 +76,18 @@ export type DirectorActionKind =
   // and a CONCRETE reason (for a loop-repair defer: which loop/signature + WHY — resolved/superseded/
   // pending-deploy), and the same helper emits a CEO "Spec deferred — <why>" notification with one-click
   // un-defer. No silent parks: a programmatic defer with no audit row + no surface is the gap this closes.
-  | "spec_deferred_programmatic";
+  | "spec_deferred_programmatic"
+  // growth-adopt-meta-iteration-engine Phase 1 — the Growth Director (or a human via this same surface)
+  // authored + activated a new `iteration_policies` version, ending Meta's dormant mode for the workspace
+  // (or re-tuning an already-live one). One row per successful activation, emitted by the worker after
+  // `activateIterationPolicy` returns. metadata: { policy_id, version, rationale, superseded_policy_id }.
+  | "activated_iteration_policy"
+  // growth-adopt-meta-iteration-engine Phase 3 — the spend-rail guard REFUSED to activate a policy whose
+  // expected daily budget motion would breach the active `ad_spend_budgets` ceiling. Written by
+  // `authorIterationPolicyWithSpendGuard` BEFORE activation runs; the Director then routes the diagnosis
+  // to the CEO via `escalateDiagnosisToCeo` (escalationKind='ad_spend_ceiling'). One row per refusal;
+  // metadata: { policy_id?, draft_step_pct, projected_delta_cents, ceiling_cents, meta_ad_account_id }.
+  | "refused_iteration_policy";
 
 export interface DirectorActivityInput {
   workspaceId: string;

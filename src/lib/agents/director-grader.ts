@@ -33,6 +33,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { PLATFORM } from "@/lib/agents/platform-director";
+import { GROWTH } from "@/lib/agents/growth-director";
 import { getGoals } from "@/lib/brain-roadmap";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -203,7 +204,14 @@ function clampGrade(n: number): number {
 async function upsertGrade(
   admin: Admin,
   existing: ExistingGradeRow | null,
-  key: { dimension: GradeDimension; workspaceId: string; approvalDecisionId?: string | null; goalSlug?: string | null; milestone?: string | null },
+  key: {
+    dimension: GradeDimension;
+    workspaceId: string;
+    directorFunction: string;
+    approvalDecisionId?: string | null;
+    goalSlug?: string | null;
+    milestone?: string | null;
+  },
   graded: { json: GraderJson; costCents: number; usage: unknown },
 ): Promise<DirectorGradeResult> {
   if (existing && existing.graded_by === "human") {
@@ -215,6 +223,7 @@ async function upsertGrade(
   const usage = graded.usage as { input_tokens?: number; output_tokens?: number } | undefined;
   const payload = {
     workspace_id: key.workspaceId,
+    director_function: key.directorFunction,
     dimension: key.dimension,
     approval_decision_id: key.approvalDecisionId ?? null,
     goal_slug: key.goalSlug ?? null,
@@ -239,8 +248,73 @@ async function upsertGrade(
 
 // ── auto-approval dimension ───────────────────────────────────────────────────────────────────────
 
+/**
+ * Optional outcome-engine context for a graded auto-approval. Right now only Growth Director's
+ * `propose_policy_activation` approvals carry it (the activated iteration_policy's per-run actions +
+ * their realized ROAS / status mix — the "did this policy hold up" signal that replaces the
+ * platform-side repeat-failure count for the iteration loop). The grader splices this block in
+ * underneath the regular HOW-IT-LANDED summary when present.
+ */
+export interface IterationPolicyOutcome {
+  policyId: string;
+  version: number | null;
+  runs: Array<{
+    runId: string;
+    status: string;
+    snapshotDate: string | null;
+    counts: Record<string, unknown> | null;
+  }>;
+  actions: Array<{
+    actionType: string;
+    status: string;
+    outcomeRoas: number | null;
+    outcomeWindowDays: number | null;
+  }>;
+}
+
+function summarizeActions(actions: IterationPolicyOutcome["actions"]): string {
+  if (!actions.length) return "  (no iteration_actions decided under this policy yet — too early to score the outcome)";
+  const byStatus = new Map<string, number>();
+  const roasSeen: number[] = [];
+  for (const a of actions) {
+    byStatus.set(a.status, (byStatus.get(a.status) ?? 0) + 1);
+    if (typeof a.outcomeRoas === "number" && Number.isFinite(a.outcomeRoas)) roasSeen.push(a.outcomeRoas);
+  }
+  const breakdown = Array.from(byStatus.entries())
+    .map(([s, n]) => `${s}=${n}`)
+    .join(", ");
+  const roasLine = roasSeen.length
+    ? `  realized outcome_roas across ${roasSeen.length} reconciled action(s): mean ${(roasSeen.reduce((a, b) => a + b, 0) / roasSeen.length).toFixed(2)} (min ${Math.min(...roasSeen).toFixed(2)}, max ${Math.max(...roasSeen).toFixed(2)})`
+    : "  outcome_roas: (not yet reconciled — reconcilePriorActions has not back-filled this window)";
+  return [`  iteration_actions status mix: ${breakdown}`, roasLine].join("\n");
+}
+
+function formatIterationOutcomeBlock(o: IterationPolicyOutcome): string {
+  const runHeader = o.runs.length
+    ? o.runs
+        .map(
+          (r) =>
+            `    - run ${r.runId.slice(0, 8)} · status=${r.status}${r.snapshotDate ? ` · day=${r.snapshotDate}` : ""}`,
+        )
+        .join("\n")
+    : "    (no iteration_runs yet under this policy)";
+  return [
+    ``,
+    `  ITERATION-ENGINE OUTCOME (the realized signal that supersedes repeat-failure count for policy-activation approvals):`,
+    `  policy ${o.policyId.slice(0, 8)}${o.version != null ? ` (v${o.version})` : ""}`,
+    `  iteration_runs that executed under this policy:`,
+    runHeader,
+    summarizeActions(o.actions),
+  ].join("\n");
+}
+
 /** Compact, gradeable description of one auto-approval: the director's reasoning + how the build landed. */
-function formatAutoApprovalForGrading(decision: ApprovalDecisionRow, job: TargetJobRow | null, repeatFailures: number): string {
+function formatAutoApprovalForGrading(
+  decision: ApprovalDecisionRow,
+  job: TargetJobRow | null,
+  repeatFailures: number,
+  iterationOutcome?: IterationPolicyOutcome | null,
+): string {
   const approvedAction = (job?.pending_actions || []).find((a) => a.status === "approved") || (job?.pending_actions || [])[0] || {};
   const concluded = job ? (TERMINAL_JOB_STATUSES.has(job.status) ? job.status : `still in-flight (${job.status})`) : "(target job gone)";
   return [
@@ -258,9 +332,78 @@ function formatAutoApprovalForGrading(decision: ApprovalDecisionRow, job: Target
     job?.error ? `  target error: ${job.error.slice(0, 400)}` : "",
     `  later repeat-failures of the same spec after this approval: ${repeatFailures}`,
     job?.log_tail ? `  build log tail:\n${job.log_tail.slice(-1200)}` : "",
+    iterationOutcome ? formatIterationOutcomeBlock(iterationOutcome) : "",
   ]
     .filter((l) => l !== "")
     .join("\n");
+}
+
+/**
+ * Load the iteration-engine outcome for a Growth Director policy-activation approval. The
+ * `propose_policy_activation` action runs `authorIterationPolicy` then `activateIterationPolicy`,
+ * and the worker records a `director_activity` row of `action_kind='activated_iteration_policy'`
+ * carrying `metadata.policy_id` (see scripts/builder-worker.ts § growth-director runner). From that
+ * policy_id we can read every iteration_run that ran under it + every iteration_action it produced,
+ * with the reconcilePriorActions-backfilled `outcome_roas` already in place — the realized signal
+ * the spec wants us to grade against.
+ *
+ * Best-effort: any read failure / missing metadata returns null so the grader still grades on
+ * soundness + repeat-failure count alone.
+ */
+async function loadIterationOutcomeForApproval(
+  admin: Admin,
+  decision: ApprovalDecisionRow,
+  approvedActionType: string | undefined,
+): Promise<IterationPolicyOutcome | null> {
+  if (approvedActionType !== "propose_policy_activation" && approvedActionType !== "iteration_policy_activation") return null;
+  if (!decision.agent_job_id) return null;
+  try {
+    const { data: activity } = await admin
+      .from("director_activity")
+      .select("metadata")
+      .eq("workspace_id", decision.workspace_id)
+      .eq("action_kind", "activated_iteration_policy")
+      .order("created_at", { ascending: false })
+      .limit(20);
+    const row = ((activity as Array<{ metadata: Record<string, unknown> | null }>) ?? []).find(
+      (r) => typeof r.metadata?.job_id === "string" && r.metadata.job_id === decision.agent_job_id,
+    );
+    const policyId = (row?.metadata?.policy_id as string | undefined) ?? null;
+    const version = (row?.metadata?.version as number | undefined) ?? null;
+    if (!policyId) return null;
+
+    const { data: runs } = await admin
+      .from("iteration_runs")
+      .select("id, status, snapshot_date, counts")
+      .eq("workspace_id", decision.workspace_id)
+      .eq("policy_version_id", policyId)
+      .order("started_at", { ascending: false })
+      .limit(20);
+    const runRows = ((runs as Array<{ id: string; status: string; snapshot_date: string | null; counts: Record<string, unknown> | null }>) ?? []).map((r) => ({
+      runId: r.id,
+      status: r.status,
+      snapshotDate: r.snapshot_date,
+      counts: r.counts ?? null,
+    }));
+
+    const { data: actions } = await admin
+      .from("iteration_actions")
+      .select("action_type, status, outcome_roas, outcome_window_days")
+      .eq("workspace_id", decision.workspace_id)
+      .eq("policy_version_id", policyId)
+      .order("created_at", { ascending: false })
+      .limit(100);
+    const actionRows = ((actions as Array<{ action_type: string; status: string; outcome_roas: number | null; outcome_window_days: number | null }>) ?? []).map((a) => ({
+      actionType: a.action_type,
+      status: a.status,
+      outcomeRoas: a.outcome_roas == null ? null : Number(a.outcome_roas),
+      outcomeWindowDays: a.outcome_window_days,
+    }));
+
+    return { policyId, version, runs: runRows, actions: actionRows };
+  } catch {
+    return null;
+  }
 }
 
 /** Count later failed/needs_attention builds of the same spec after the approval — the "did it hold up" signal. */
@@ -320,12 +463,22 @@ export async function gradeAutoApproval(opts: { approvalDecisionId: string; admi
   }
 
   const repeatFailures = await countRepeatFailures(admin, decision, job);
+  const approvedActionType = ((job?.pending_actions || []).find((a) => a.status === "approved") || (job?.pending_actions || [])[0])?.type;
+  const iterationOutcome = await loadIterationOutcomeForApproval(admin, decision, approvedActionType);
   const system = await buildDirectorGraderSystemPrompt(admin, decision.workspace_id, "auto-approval");
-  const userMsg = `Grade this auto-approval call. Return the JSON only.\n\n${formatAutoApprovalForGrading(decision, job, repeatFailures)}`;
+  const userMsg = `Grade this auto-approval call. Return the JSON only.\n\n${formatAutoApprovalForGrading(decision, job, repeatFailures, iterationOutcome)}`;
 
   const graded = await runGrader(system, userMsg, decision.workspace_id);
   if ("error" in graded) return { ok: false, reason: graded.error };
-  return upsertGrade(admin, existingRow, { dimension: "auto-approval", workspaceId: decision.workspace_id, approvalDecisionId: decision.id }, graded);
+  // Stamp the director function from the approval's routed_to_function — that's the director whose
+  // call this was. Falls back to Platform if the routing field was somehow blank (historical rows).
+  const directorFunction = decision.routed_to_function || PLATFORM;
+  return upsertGrade(
+    admin,
+    existingRow,
+    { dimension: "auto-approval", workspaceId: decision.workspace_id, directorFunction, approvalDecisionId: decision.id },
+    graded,
+  );
 }
 
 // ── goal-escort dimension ─────────────────────────────────────────────────────────────────────────
@@ -335,6 +488,8 @@ interface MilestoneContext {
   goalTitle: string;
   milestoneId: string;
   milestoneName: string;
+  /** The director that escorted this goal — function slug ('platform' | 'growth' | …). */
+  directorFunction: string;
   specs: Array<{ slug: string; status: string }>;
   escortReasons: string[];
   regressionCount: number;
@@ -381,7 +536,13 @@ export async function gradeGoalEscort(opts: { context: MilestoneContext; workspa
   return upsertGrade(
     admin,
     existingRow,
-    { dimension: "goal-escort", workspaceId: opts.workspaceId, goalSlug: ctx.goalSlug, milestone: ctx.milestoneId },
+    {
+      dimension: "goal-escort",
+      workspaceId: opts.workspaceId,
+      directorFunction: ctx.directorFunction || PLATFORM,
+      goalSlug: ctx.goalSlug,
+      milestone: ctx.milestoneId,
+    },
     graded,
   );
 }
@@ -405,6 +566,14 @@ export async function gradeDirectorCall(opts: {
   if (!opts.context) return { ok: false, reason: "missing_milestone_context" };
   return gradeGoalEscort({ context: opts.context, workspaceId: opts.workspaceId, admin: opts.admin });
 }
+
+/**
+ * Public alias the growth-adopt-meta-iteration-engine spec (Phase 2) names —
+ * `gradeDirectorDecision`. Identical signature + behavior as `gradeDirectorCall`; we expose both so
+ * the Growth-side callsites can read against the spec's preferred verb without renaming the existing
+ * Platform-side wiring.
+ */
+export const gradeDirectorDecision = gradeDirectorCall;
 
 // ── The standing-cadence sweep (fired from platform-director-cron, M1) ───────────────────────────────
 
@@ -432,14 +601,22 @@ export function tallySweepResult(state: { considered: number; graded: number }, 
 }
 
 /**
- * Resolve the escorted milestones the director OWNS that have CONCLUDED (every spec shipped) and that
- * the director actually escorted (an `escorted_goal` activity row for the goal). Each is one gradeable
- * goal-escort call. Best-effort.
+ * Resolve the escorted milestones the named director OWNS that have CONCLUDED (every spec shipped)
+ * and that the director actually escorted (an `escorted_goal` activity row for the goal under that
+ * director_function). Each is one gradeable goal-escort call. Best-effort.
+ *
+ * Phase 2 (growth-adopt-meta-iteration-engine): now parameterized on `directorFunction` so the same
+ * sweep grades the Growth Director's escorts (when it grows that responsibility) without rewriting
+ * the goal pool to PLATFORM. The default stays PLATFORM for backwards-compat with existing callers.
  */
-async function concludedEscortedMilestones(admin: Admin, workspaceId: string): Promise<MilestoneContext[]> {
+async function concludedEscortedMilestones(
+  admin: Admin,
+  workspaceId: string,
+  directorFunction: string = PLATFORM,
+): Promise<MilestoneContext[]> {
   const out: MilestoneContext[] = [];
   try {
-    const goals = (await getGoals()).filter((g) => g.owner === PLATFORM);
+    const goals = (await getGoals()).filter((g) => g.owner === directorFunction);
     if (!goals.length) return out;
 
     // Goals the director actually escorted (logged an `escorted_goal` activity row).
@@ -447,7 +624,7 @@ async function concludedEscortedMilestones(admin: Admin, workspaceId: string): P
       .from("director_activity")
       .select("reason, metadata")
       .eq("workspace_id", workspaceId)
-      .eq("director_function", PLATFORM)
+      .eq("director_function", directorFunction)
       .eq("action_kind", "escorted_goal")
       .order("created_at", { ascending: false })
       .limit(500);
@@ -470,6 +647,7 @@ async function concludedEscortedMilestones(admin: Admin, workspaceId: string): P
           goalTitle: goal.title,
           milestoneId: m.id || m.name,
           milestoneName: m.name,
+          directorFunction,
           specs: m.specSlugs.map((slug) => ({ slug, status: "shipped" })),
           escortReasons: escortByGoal.get(goal.slug) ?? [],
           regressionCount: 0,
@@ -477,7 +655,7 @@ async function concludedEscortedMilestones(admin: Admin, workspaceId: string): P
       }
     }
   } catch (e) {
-    console.warn(`[director-grader] escort-candidate resolve failed ws=${workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[director-grader] escort-candidate resolve failed ws=${workspaceId} fn=${directorFunction}: ${e instanceof Error ? e.message : String(e)}`);
   }
   return out;
 }
@@ -531,14 +709,18 @@ export async function gradeConcludedDirectorCalls(opts: { workspaceId: string; a
       tallySweepResult(state, await gradeAutoApproval({ approvalDecisionId: d.id, admin }));
     }
 
-    // ── goal-escort — every concluded escorted milestone ────────────────────────────────────────
+    // ── goal-escort — every concluded escorted milestone for every live director ───────────────
     // Mirror the auto-approval gate for symmetry: a milestone that isn't truly concluded must not
     // tick `considered`. `concludedEscortedMilestones` already pre-filters to `status='shipped'`,
     // so in practice every row here is gradeable; the gate stays in place defensively in case
-    // `gradeGoalEscort` ever grows an in-flight skip reason of its own.
-    for (const ctx of await concludedEscortedMilestones(admin, opts.workspaceId)) {
-      if (gradedEscorts.has(`${ctx.goalSlug}:${ctx.milestoneId}`)) continue;
-      tallySweepResult(state, await gradeGoalEscort({ context: ctx, workspaceId: opts.workspaceId, admin }));
+    // `gradeGoalEscort` ever grows an in-flight skip reason of its own. We sweep BOTH Platform and
+    // Growth so the Growth Director's goal-escort calls (when it grows that responsibility) feed
+    // the same standing cadence — no second cron is needed.
+    for (const fn of [PLATFORM, GROWTH]) {
+      for (const ctx of await concludedEscortedMilestones(admin, opts.workspaceId, fn)) {
+        if (gradedEscorts.has(`${ctx.goalSlug}:${ctx.milestoneId}`)) continue;
+        tallySweepResult(state, await gradeGoalEscort({ context: ctx, workspaceId: opts.workspaceId, admin }));
+      }
     }
   } catch (e) {
     console.warn(`[director-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);

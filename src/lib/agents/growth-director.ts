@@ -76,14 +76,18 @@ export const LEASH_CATEGORIES: LeashCategory[] = [
 /**
  * The pending-action types that are UNCONDITIONALLY leash candidates → their leash category. Each must
  * still pass the read-only investigation verdict (the soundness gate added in Phase 2). The mapping is
- * 1:1 with the categories — Growth's pending-action `type` fields are named the same as the leash
- * categories themselves, so no separate adapter is needed.
+ * mostly 1:1 with the categories — Growth's pending-action `type` fields are named the same as the
+ * leash categories themselves — with one alias: the iteration engine emits `propose_policy_activation`
+ * (carrying the draft + rationale) which falls under the `iteration_policy_activation` leash class
+ * (the executor that authors + activates lives in [[../iteration-policy-authoring]]; the worker runs
+ * it after the Director auto-approves).
  *
  * Anything not in this map — including any non-binary CHOICE action (e.g. a multi-option budget
  * reallocation choice) — falls out of leash and escalates to the CEO.
  */
 const LEASH_ACTION_TYPES: Record<string, LeashCategory> = {
   iteration_policy_activation: "iteration_policy_activation",
+  propose_policy_activation: "iteration_policy_activation",
   storefront_optimizer_policy_activation: "storefront_optimizer_policy_activation",
   pause_underperforming_creative: "pause_underperforming_creative",
   reallocate_within_ceiling: "reallocate_within_ceiling",
@@ -169,6 +173,10 @@ export function directorLeashCandidates(job: DirectorTargetJob): { actions: Leas
 //     auto_run_reversible) — what flipping `active` actually affects.
 //   - iteration_recommendations — the open `pending` recommendation queue (so the director sees the
 //     spend lines an approval will unlock or change).
+//   - iteration_runs (latest row) + iteration_actions (latest-run outcomes mix + outcome_roas) —
+//     growth-adopt-meta-iteration-engine Phase 2: the supervisability record + the realized
+//     executed/failed/reversed/escalated breakdown that tells the Director whether the
+//     previously-activated policy is HOLDING UP before it approves the next version.
 // The brief itself is data only; the prompt is the wrap (with directorLiveStateFact prepended).
 // `loadAutonomyMap` creates its own admin client internally — we read function_autonomy directly via
 // the passed admin to keep this testable + keep one connection per call.
@@ -214,6 +222,38 @@ export interface IterationRecommendationSummary {
   created_at: string | null;
 }
 
+/** One `iteration_runs` row — the latest pipeline run for the workspace (the supervisability record). */
+export interface IterationRunSummary {
+  id: string;
+  status: string;
+  snapshot_date: string | null;
+  policy_active: boolean;
+  policy_version_id: string | null;
+  meta_ad_account_id: string | null;
+  counts: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+}
+
+/**
+ * One `iteration_actions` outcome — the realized action ledger for the latest run. The grader uses
+ * the (status, outcome_roas) mix as the "did the activated policy hold up" signal that replaces the
+ * build-side repeat-failure count for policy-activation approvals.
+ */
+export interface IterationActionOutcomeSummary {
+  id: string;
+  action_type: string;
+  status: string;
+  rationale: string | null;
+  outcome_roas: number | null;
+  outcome_revenue_cents: number | null;
+  outcome_window_days: number | null;
+  guardrail: string | null;
+  created_at: string | null;
+}
+
 /** One in-leash action inside the brief — what the investigation confirms is sound. */
 export interface GrowthDirectorBriefAction {
   category: LeashCategory;
@@ -242,6 +282,14 @@ export interface GrowthDirectorBrief {
   storefrontOptimizerPolicy: StorefrontOptimizerPolicySummary | null;
   /** the open `status='pending'` iteration_recommendations rows for the workspace (newest first). */
   pendingRecommendations: IterationRecommendationSummary[];
+  /** the latest `iteration_runs` row for the workspace (null if the engine has never run). */
+  latestIterationRun: IterationRunSummary | null;
+  /**
+   * `iteration_actions` outcomes (status + outcome_roas mix) for the latest run's account/snapshot.
+   * The grader reads this as the realized signal — executed / failed / reversed / escalated — that
+   * tells the Director whether the policy it activated is holding up.
+   */
+  iterationActionOutcomes: IterationActionOutcomeSummary[];
   /** every `ad_spend_budgets` row for the workspace + its current rolling-window actual — the leash. */
   adSpendBudgets: AdSpendBudgetSummary[];
   logTail: string;
@@ -250,6 +298,8 @@ export interface GrowthDirectorBrief {
 /** How many iteration_policies versions + pending recommendations the brief carries — cap the prompt size. */
 const POLICY_VERSIONS_CAP = 8;
 const PENDING_RECOS_CAP = 25;
+/** Cap on iteration_action outcomes carried in the brief — the grader summary doesn't need more. */
+const ACTION_OUTCOMES_CAP = 50;
 
 /**
  * Load every `ad_spend_budgets` row for the workspace + its CURRENT rolling-window actual (the
@@ -405,6 +455,79 @@ export async function buildGrowthDirectorBrief(
     /* best-effort */
   }
 
+  // The latest iteration_runs row — the supervisability record for the engine's most recent pipeline
+  // execution (ingest → attribution → rollups → reconcile → 4a actions → 4b recommendations → 6a).
+  // This is the audit trail the Director MUST see before approving a new policy activation, and the
+  // anchor the grader's outcome signal hangs off (the run's iteration_actions outcomes below).
+  let latestIterationRun: IterationRunSummary | null = null;
+  try {
+    const { data } = await admin
+      .from("iteration_runs")
+      .select("id, status, snapshot_date, policy_active, policy_version_id, meta_ad_account_id, counts, error, started_at, finished_at, duration_ms")
+      .eq("workspace_id", job.workspace_id)
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) {
+      latestIterationRun = {
+        id: data.id as string,
+        status: data.status as string,
+        snapshot_date: (data.snapshot_date as string | null) ?? null,
+        policy_active: !!data.policy_active,
+        policy_version_id: (data.policy_version_id as string | null) ?? null,
+        meta_ad_account_id: (data.meta_ad_account_id as string | null) ?? null,
+        counts: (data.counts as Record<string, unknown> | null) ?? null,
+        error: (data.error as string | null) ?? null,
+        started_at: (data.started_at as string | null) ?? null,
+        finished_at: (data.finished_at as string | null) ?? null,
+        duration_ms: data.duration_ms == null ? null : Number(data.duration_ms),
+      };
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  // The iteration_actions outcomes (status + outcome_roas mix) for the latest run's account on the
+  // run's snapshot day — the realized executed/failed/reversed/escalated breakdown the grader uses to
+  // judge whether the previously-activated policy is holding up. Scoped by snapshot_date so a re-run
+  // doesn't bleed in unrelated days. Skipped if the latest run never decided a snapshot day yet.
+  let iterationActionOutcomes: IterationActionOutcomeSummary[] = [];
+  try {
+    if (latestIterationRun?.snapshot_date && latestIterationRun?.meta_ad_account_id) {
+      const { data } = await admin
+        .from("iteration_actions")
+        .select("id, action_type, status, rationale, outcome_roas, outcome_revenue_cents, outcome_window_days, guardrail, created_at")
+        .eq("workspace_id", job.workspace_id)
+        .eq("meta_ad_account_id", latestIterationRun.meta_ad_account_id)
+        .eq("snapshot_date", latestIterationRun.snapshot_date)
+        .order("created_at", { ascending: false })
+        .limit(ACTION_OUTCOMES_CAP);
+      iterationActionOutcomes = ((data || []) as Array<{
+        id: string;
+        action_type: string;
+        status: string;
+        rationale: string | null;
+        outcome_roas: number | string | null;
+        outcome_revenue_cents: number | string | null;
+        outcome_window_days: number | string | null;
+        guardrail: string | null;
+        created_at: string | null;
+      }>).map((r) => ({
+        id: r.id,
+        action_type: r.action_type,
+        status: r.status,
+        rationale: r.rationale ?? null,
+        outcome_roas: r.outcome_roas == null ? null : Number(r.outcome_roas),
+        outcome_revenue_cents: r.outcome_revenue_cents == null ? null : Number(r.outcome_revenue_cents),
+        outcome_window_days: r.outcome_window_days == null ? null : Number(r.outcome_window_days),
+        guardrail: r.guardrail ?? null,
+        created_at: r.created_at ?? null,
+      }));
+    }
+  } catch {
+    /* best-effort */
+  }
+
   return {
     jobId: job.id,
     workspaceId: job.workspace_id,
@@ -417,6 +540,8 @@ export async function buildGrowthDirectorBrief(
     iterationPolicies,
     storefrontOptimizerPolicy,
     pendingRecommendations,
+    latestIterationRun,
+    iterationActionOutcomes,
     adSpendBudgets,
     logTail: (job.log_tail || "").slice(-2000),
   };
@@ -471,6 +596,57 @@ function renderPendingRecommendations(rows: IterationRecommendationSummary[]): s
     (r) => `  - [${r.action_type}${r.persona ? ` · ${r.persona}` : ""}] ${r.title ?? "(no title)"}${r.rationale ? ` — ${r.rationale.slice(0, 200)}` : ""}`,
   );
   return ["iteration_recommendations (status=pending, newest first):", ...lines].join("\n");
+}
+
+/** Render the latest iteration_runs row — the supervisability record the Director MUST see. */
+function renderLatestIterationRun(run: IterationRunSummary | null): string {
+  if (!run) return "iteration_runs: (no runs yet — the daily pipeline has never executed for this workspace)";
+  const counts = run.counts && Object.keys(run.counts).length ? JSON.stringify(run.counts) : "(none)";
+  return [
+    "iteration_runs (latest, newest first):",
+    `  - id=${run.id.slice(0, 8)} · status=${run.status} · day=${run.snapshot_date ?? "?"} · policy_active=${run.policy_active}${run.policy_version_id ? ` · policy=${run.policy_version_id.slice(0, 8)}` : ""}`,
+    `  - started ${run.started_at ?? "?"}${run.finished_at ? ` · finished ${run.finished_at}` : ""}${run.duration_ms != null ? ` · ${run.duration_ms}ms` : ""}`,
+    `  - counts: ${counts}`,
+    run.error ? `  - error: ${run.error.slice(0, 300)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Render the iteration_actions outcomes for the latest run — the realized executed/failed/reversed/
+ * escalated mix the Director needs to see before approving the next policy version. ROAS line is
+ * summary stats so the prompt stays compact.
+ */
+function renderIterationActionOutcomes(rows: IterationActionOutcomeSummary[]): string {
+  if (!rows.length) {
+    return "iteration_actions (latest run): (no actions decided on the latest run's snapshot — engine is in observation-only mode or no triggers fired)";
+  }
+  const byStatus = new Map<string, number>();
+  const guardrails = new Map<string, number>();
+  const roasSeen: number[] = [];
+  for (const a of rows) {
+    byStatus.set(a.status, (byStatus.get(a.status) ?? 0) + 1);
+    if (a.guardrail) guardrails.set(a.guardrail, (guardrails.get(a.guardrail) ?? 0) + 1);
+    if (typeof a.outcome_roas === "number" && Number.isFinite(a.outcome_roas)) roasSeen.push(a.outcome_roas);
+  }
+  const statusLine = Array.from(byStatus.entries())
+    .map(([s, n]) => `${s}=${n}`)
+    .join(", ");
+  const guardrailLine = guardrails.size
+    ? `  guardrails fired: ${Array.from(guardrails.entries()).map(([g, n]) => `${g}=${n}`).join(", ")}`
+    : "";
+  const roasLine = roasSeen.length
+    ? `  realized outcome_roas: mean ${(roasSeen.reduce((a, b) => a + b, 0) / roasSeen.length).toFixed(2)} across ${roasSeen.length} reconciled action(s) (min ${Math.min(...roasSeen).toFixed(2)}, max ${Math.max(...roasSeen).toFixed(2)})`
+    : "  realized outcome_roas: (not yet reconciled for this run's actions — reconcilePriorActions runs after the maturation window)";
+  return [
+    `iteration_actions (latest run · ${rows.length} action${rows.length === 1 ? "" : "s"}):`,
+    `  status mix: ${statusLine}`,
+    guardrailLine,
+    roasLine,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**
@@ -545,6 +721,10 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     renderOptimizerPolicy(brief.storefrontOptimizerPolicy),
     "",
     renderAdSpendBudgets(brief.adSpendBudgets),
+    "",
+    renderLatestIterationRun(brief.latestIterationRun),
+    "",
+    renderIterationActionOutcomes(brief.iterationActionOutcomes),
     "",
     renderPendingRecommendations(brief.pendingRecommendations),
     "",
