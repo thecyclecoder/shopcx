@@ -980,33 +980,6 @@ function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunne
   );
 }
 
-  title: string;
-  rows: Array<{ label: string; value: number }>;
-}) {
-  const max = rows[0]?.value || 1;
-  return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
-      {rows.length === 0 ? (
-        <p className="text-xs text-zinc-400">No data.</p>
-      ) : (
-        <ul className="space-y-1.5">
-          {rows.slice(0, 6).map((r) => (
-            <li key={r.label} className="text-xs">
-              <div className="flex items-center justify-between">
-                <span className="min-w-0 truncate text-zinc-700 dark:text-zinc-300">{r.label}</span>
-                <span className="ml-2 shrink-0 tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">{r.value}</span>
-              </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
-                <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.value / max) * 100}%` }} />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
 
 function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
   const recoveredPct = block.recovery_rate_pct;
