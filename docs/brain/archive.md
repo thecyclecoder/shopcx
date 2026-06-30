@@ -12,8 +12,19 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Coerce Appstle billing-attempt id to string before the internal-prefix guard** · verified 2026-06-30 · → [[../libraries/appstle]]
+- **Downgrade appstle-heal per-line PUT failure to warn** · verified 2026-06-30 · → [[lifecycles/subscription-billing]]
+- **Error feed: drop the bare Inngest middleware 'Inngest function error' log on /api/inngest** · verified 2026-06-30 · → [[../libraries/control-tower]]
+- **Ad-dollar budget ceiling + spend governor** · verified 2026-06-30 · → [[../libraries/ad-spend-governor]]
+- **Adopt creative makers under the Director (ready-to-test surface)** · verified 2026-06-30 · → [[../lifecycles/ad-publish]]
+- **Adopt Meta iteration engine under the Director** · verified 2026-06-30 · → [[../libraries/growth-director]]
+- **Blended new-customer CAC↔LTV objective + payback window** · verified 2026-06-30 · → [[libraries/blended-cac-ltv]]
+- **Customer-voice → ad-angles synthesizer** · verified 2026-06-30 · → [[../libraries/ads__customer-voice-mining]]
+- **Growth Director agent — supervision shell + leash** · verified 2026-06-30 · → [[libraries/growth-director]]
 - **Storefront experiment delivery-verification** · verified 2026-06-30 · → [[../libraries/storefront-experiment-delivery-audit]]
+- **Quiet single Slack-notify timeouts so they stop tripping the error feed** · verified 2026-06-30 · → [[../libraries/slack-notify]]
 - **Exclude active-playbook inbounds from the AI-orchestrator work probe** · verified 2026-06-30 · → [[../libraries/control-tower]]
+- **Worker-grader: don't log the 'not_concluded' in-flight skip as an error** · verified 2026-06-30 · → [[../libraries/agent-grader]]
 - **Re-snapshot stranded pre-lag-fix daily KPI rows (autonomy_ratio drift cleanup)** · verified 2026-06-29 · → [[../libraries/platform-scorecard]]
 - **Appstle payday-retry cron skips internal subs** · verified 2026-06-29 · → [[../inngest/dunning]], [[../libraries/appstle]]
 - **Stop the grading-starved monitor mis-firing on in-flight director approvals** · verified 2026-06-29 · → [[../libraries/director-grader]]
