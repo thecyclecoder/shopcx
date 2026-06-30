@@ -716,31 +716,45 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // callSonnetOrchestratorV2. Inbound traffic with 0 successful decision beats means
             // the per-ticket decision agent went silent (couldn't reply or act on anyone).
             //
-            // Handler-driving filter (control-tower-ticket-decision-workprobe-scope): not every
-            // inbound/customer insert fires ticket/inbound-message. The CSAT-reopen path
-            // (src/app/api/csat/[ticketId]/route.ts) inserts an inbound customer message, reopens
-            // the ticket, and routes it to a human — emitting NO ticket/inbound-message event — so
-            // the handler legitimately never beats on it. Counting those over-counts demand: a
-            // single reopen note in an otherwise-quiet window reads as work=1 with 0 beats and
-            // trips a false idle_while_work red.
+            // Three legitimate-bypass classes are subtracted because each one is an inbound
+            // customer message that, by design, will NOT produce an ai:orchestrator beat:
             //
-            // Closed-ticket short-circuit (ticket-decision-workprobe-exclude-positive-close): the
-            // handler DOES fire ticket/inbound-message for these, but several pre-orchestrator
-            // gates resolve and CLOSE the ticket BEFORE reaching callSonnetOrchestratorV2 — the
-            // positive-close path (unified-ticket-handler.ts:1635 → status 'positive_close'), the
-            // fraud gate, and the chargeback gate (~1654). Those messages never drive an
-            // ai:orchestrator beat, so counting them over-counts demand the same way: a lone
-            // 'Thank you' that triggers a positive-close in an otherwise-quiet window reads as
-            // work=1 with 0 beats and false-pages idle_while_work. Subtract inbound messages whose
-            // ticket is now closed. A still-OPEN ticket with no beat keeps counting, so a genuine
-            // orchestrator outage (inbound traffic piling up on tickets nothing can close) still
-            // alerts; a normally-served ticket that the orchestrator closed has its own ok beat, so
-            // dropping it from the work count never manufactures a false negative.
+            // (1) CSAT-reopen path (control-tower-ticket-decision-workprobe-scope): not every
+            //     inbound/customer insert fires ticket/inbound-message. The CSAT-reopen route
+            //     (src/app/api/csat/[ticketId]/route.ts) inserts an inbound customer message,
+            //     reopens the ticket, and routes it to a human — emitting NO
+            //     ticket/inbound-message event — so the handler legitimately never beats on it.
+            //     A single reopen note in an otherwise-quiet window would otherwise read as
+            //     work=1 with 0 beats and false-fire idle_while_work.
             //
-            // Both exclusions are expressed as a single positive-match (closed OR csat:reopened)
-            // subtraction — NULL-safe (tickets with NULL/empty tags still count) and overlap-free
-            // (a csat:reopened ticket that later closes is counted once, not double-subtracted),
-            // unlike a negated array filter.
+            // (2) Closed-ticket short-circuit (ticket-decision-workprobe-exclude-positive-close):
+            //     the handler DOES fire ticket/inbound-message for these, but several
+            //     pre-orchestrator gates resolve and CLOSE the ticket BEFORE reaching
+            //     callSonnetOrchestratorV2 — the positive-close path
+            //     (unified-ticket-handler.ts:1635 → status 'positive_close'), the fraud gate,
+            //     and the chargeback gate (~1654). Those messages never drive an ai:orchestrator
+            //     beat, so a lone 'Thank you' that triggers a positive-close in an otherwise-
+            //     quiet window would over-count demand the same way.
+            //
+            // (3) Active-playbook continuation (ticket-decision-workprobe-exclude-active-playbook):
+            //     a customer mid-playbook (refund/cancel/return flow) routes through
+            //     executePlaybookStep and never reaches callSonnetOrchestratorV2, so the
+            //     orchestrator legitimately emits no beat on those messages. Two such playbook-
+            //     continuation inbounds in a quiet 120m window are enough to flip the
+            //     ai:orchestrator tile red. An active-playbook ticket has a designated handler
+            //     that already owns the message.
+            //
+            // A still-OPEN, no-playbook ticket with no beat keeps counting, so a genuine
+            // orchestrator outage (inbound traffic piling up on tickets nothing can close or
+            // hand to a playbook) still alerts; a normally-served ticket that the orchestrator
+            // closed has its own ok beat, so dropping it from the work count never manufactures
+            // a false negative.
+            //
+            // All three exclusions are expressed as a single positive-match
+            // (closed OR csat:reopened OR active_playbook_id IS NOT NULL) subtraction — NULL-safe
+            // (tickets with NULL/empty tags or NULL active_playbook_id still count) and
+            // overlap-free (a csat:reopened ticket that later closes is counted once, not
+            // double-subtracted), unlike a negated array filter.
             const [allRes, excludedRes] = await Promise.all([
               admin
                 .from("ticket_messages")
@@ -754,7 +768,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
-                .or("status.eq.closed,tags.cs.{csat:reopened}", { referencedTable: "tickets" }),
+                .or("status.eq.closed,tags.cs.{csat:reopened},active_playbook_id.not.is.null", { referencedTable: "tickets" }),
             ]);
             return Math.max(0, (allRes.count ?? 0) - (excludedRes.count ?? 0));
           }
