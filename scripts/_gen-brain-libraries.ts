@@ -396,6 +396,9 @@ const GOTCHAS: Record<string, string[]> = {
   "ticket-tags": [
     "Idempotent set. Calling `addTicketTag()` with an already-applied tag is a no-op.",
   ],
+  "slack-notify": [
+    "The catch block logs at **`console.warn`**, not `console.error` — a single `chat.postMessage` timeout is expected fire-and-forget behavior and should not be promoted into the Vercel error feed (signature `vercel:b9f34c508cec092c`). Sustained Slack delivery outages are surfaced by the `slack-delivery` Control Tower heartbeat in `src/lib/slack.ts`, not by this log line. Don't 'fix' it back to error.",
+  ],
 };
 
 // ──────────────────────────────────────────────────────────────────────
