@@ -76,14 +76,18 @@ export const LEASH_CATEGORIES: LeashCategory[] = [
 /**
  * The pending-action types that are UNCONDITIONALLY leash candidates → their leash category. Each must
  * still pass the read-only investigation verdict (the soundness gate added in Phase 2). The mapping is
- * 1:1 with the categories — Growth's pending-action `type` fields are named the same as the leash
- * categories themselves, so no separate adapter is needed.
+ * mostly 1:1 with the categories — Growth's pending-action `type` fields are named the same as the
+ * leash categories themselves — with one alias: the iteration engine emits `propose_policy_activation`
+ * (carrying the draft + rationale) which falls under the `iteration_policy_activation` leash class
+ * (the executor that authors + activates lives in [[../iteration-policy-authoring]]; the worker runs
+ * it after the Director auto-approves).
  *
  * Anything not in this map — including any non-binary CHOICE action (e.g. a multi-option budget
  * reallocation choice) — falls out of leash and escalates to the CEO.
  */
 const LEASH_ACTION_TYPES: Record<string, LeashCategory> = {
   iteration_policy_activation: "iteration_policy_activation",
+  propose_policy_activation: "iteration_policy_activation",
   storefront_optimizer_policy_activation: "storefront_optimizer_policy_activation",
   pause_underperforming_creative: "pause_underperforming_creative",
   reallocate_within_ceiling: "reallocate_within_ceiling",
