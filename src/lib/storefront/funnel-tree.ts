@@ -140,6 +140,8 @@ export interface FunnelStepCounts {
   checkout_started: number;
   order_placed: number;
   add_to_cart: number;
+  /** subscription orders (order with subscription_id) — for sub-attach rate */
+  sub_orders: number;
   /** Σ order total_cents from this node's sessions (immediate revenue). */
   revenue_cents: number;
   /** Σ order total_cents × (sub ? 1/churn : 1) — predicted lifetime value. */
@@ -149,10 +151,16 @@ export interface FunnelStepCounts {
 export interface FunnelNodeMetrics extends FunnelStepCounts {
   /** engaged / visit */
   engagement_rate: number;
+  /** pack_selected / visit */
+  pack_rate: number;
+  /** checkout_started / visit */
+  checkout_rate: number;
   /** order_placed / visit — the overall PDP→order CVR */
   conversion_rate: number;
   /** add_to_cart / visit */
   atc_rate: number;
+  /** sub_orders / order_placed — % of orders that attach a subscription */
+  sub_attach_rate: number;
   /** revenue_cents / visit — immediate $ per visit */
   revenue_per_visit_cents: number;
   /** ltv_cents / visit — predicted LTV per visit (Max's north-star metric) */
@@ -202,7 +210,7 @@ export interface FunnelTreeResult {
 
 // ── internal mutable accumulators ──────────────────────────────────────────
 function zero(): FunnelStepCounts {
-  return { visit: 0, engaged: 0, pack_selected: 0, checkout_started: 0, order_placed: 0, add_to_cart: 0, revenue_cents: 0, ltv_cents: 0 };
+  return { visit: 0, engaged: 0, pack_selected: 0, checkout_started: 0, order_placed: 0, add_to_cart: 0, sub_orders: 0, revenue_cents: 0, ltv_cents: 0 };
 }
 function addInto(target: FunnelStepCounts, reached: Set<keyof FunnelStepCounts>) {
   for (const step of reached) target[step] += 1; // reached only ever holds step keys
@@ -214,6 +222,7 @@ function sumInto(target: FunnelStepCounts, src: FunnelStepCounts) {
   target.checkout_started += src.checkout_started;
   target.order_placed += src.order_placed;
   target.add_to_cart += src.add_to_cart;
+  target.sub_orders += src.sub_orders;
   target.revenue_cents += src.revenue_cents;
   target.ltv_cents += src.ltv_cents;
 }
@@ -224,8 +233,11 @@ function metricsOf(c: FunnelStepCounts): FunnelNodeMetrics {
   return {
     ...c,
     engagement_rate: rate(c.engaged, c.visit),
+    pack_rate: rate(c.pack_selected, c.visit),
+    checkout_rate: rate(c.checkout_started, c.visit),
     conversion_rate: rate(c.order_placed, c.visit),
     atc_rate: rate(c.add_to_cart, c.visit),
+    sub_attach_rate: rate(c.sub_orders, c.order_placed),
     revenue_per_visit_cents: c.visit > 0 ? Math.round(c.revenue_cents / c.visit) : 0,
     ltv_per_visit_cents: c.visit > 0 ? Math.round(c.ltv_cents / c.visit) : 0,
   };
@@ -353,29 +365,38 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
   }
 
   // ── LTV basis (churn) + per-session order revenue/ltv ─────────────────────
-  // Sub multiplier = 1/churn (trailing window by default — responsive to
-  // retention). orders.session_id links the storefront order to its session.
+  // Sub multiplier = 1/churn (trailing window by default — responsive to retention).
+  // Revenue comes from the `order_placed` EVENT (meta.total_cents) — it's reliably
+  // session-linked (matches the ORDERS column). `orders.session_id` is sparse and
+  // backfilled late, which zeroed fresh orders. The sub flag is joined order_id →
+  // orders.subscription_id (best-effort: a not-yet-written order falls back to
+  // one-time, so revenue still shows even before the order row exists).
   const ltvBasis = await getMonthlyChurn({ admin, workspaceId, trailingMonths: args.churnTrailingMonths });
   const subLO = ltvBasis.sub_lifetime_orders;
-
-  // ── fetch the visit-universe sessions (batched) ───────────────────────────
   const sessionIds = [...visitSessions];
-  const orderBySession = new Map<string, { rev: number; ltv: number }>();
-  for (let i = 0; i < sessionIds.length; i += 300) {
-    const { data } = await admin
-      .from("orders")
-      .select("session_id, total_cents, subscription_id")
-      .eq("workspace_id", workspaceId)
-      .in("session_id", sessionIds.slice(i, i + 300));
-    for (const o of data || []) {
-      const sid = o.session_id as string;
-      const cents = Number(o.total_cents) || 0;
-      const isSub = !!o.subscription_id;
-      const cur = orderBySession.get(sid) || { rev: 0, ltv: 0 };
-      cur.rev += cents;
-      cur.ltv += cents * (isSub ? subLO : 1);
-      orderBySession.set(sid, cur);
-    }
+
+  const orderEvents = await fetchAllRows<{ session_id: string; meta: Record<string, unknown> }>(() =>
+    admin.from("storefront_events").select("session_id, meta, id")
+      .eq("workspace_id", workspaceId).eq("event_type", "order_placed")
+      .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const orderIds = [...new Set(orderEvents.map((e) => String((e.meta || {}).order_id || "")).filter(Boolean))];
+  const subByOrderId = new Map<string, boolean>();
+  for (let i = 0; i < orderIds.length; i += 300) {
+    const { data } = await admin.from("orders").select("id, subscription_id").in("id", orderIds.slice(i, i + 300));
+    for (const o of data || []) subByOrderId.set(o.id as string, !!o.subscription_id);
+  }
+  const orderBySession = new Map<string, { rev: number; ltv: number; subs: number }>();
+  for (const e of orderEvents) {
+    const m = e.meta || {};
+    const cents = Number(m.total_cents) || 0;
+    const oid = String(m.order_id || "");
+    const isSub = oid ? (subByOrderId.get(oid) ?? false) : false;
+    const cur = orderBySession.get(e.session_id) || { rev: 0, ltv: 0, subs: 0 };
+    cur.rev += cents;
+    cur.ltv += cents * (isSub ? subLO : 1);
+    if (isSub) cur.subs += 1;
+    orderBySession.set(e.session_id, cur);
   }
   const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null; utm_source: string | null; referrer: string | null }>();
   for (let i = 0; i < sessionIds.length; i += 300) {
@@ -423,7 +444,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     const handle = resolveHandle(segments, handleSet);
 
     const ov = orderBySession.get(sid);
-    const addRevLtv = (t: FunnelStepCounts) => { if (ov) { t.revenue_cents += ov.rev; t.ltv_cents += Math.round(ov.ltv); } };
+    const addRevLtv = (t: FunnelStepCounts) => { if (ov) { t.revenue_cents += ov.rev; t.ltv_cents += Math.round(ov.ltv); t.sub_orders += ov.subs; } };
 
     if (!handle) {
       addInto(unattributed, reached);
@@ -984,4 +1005,155 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
     },
     chapters,
   };
+}
+
+// ───────────────── Bottleneck classifier (a Max decision signal) ─────────────────
+// For each destination (PDP + variants), the two conversion levers — carry-to-
+// pricing (engagement) and close (offer) — benchmarked against the best-in-class
+// destination, so Max knows WHICH lever is the binding constraint and what KIND of
+// fix it implies. Page-accurate (lander_variant stamp / allowlist), matching the
+// chapter-diagnostics card. Primarily a signal for the Growth director; surfaced
+// compactly on the funnel page for oversight.
+
+export type Bottleneck = "carry" | "close" | "balanced" | "insufficient_data";
+export interface BottleneckVerdict {
+  key: string;
+  label: string;
+  visits: number;
+  reached_pricing: number;
+  carry_to_pricing_pct: number;
+  close_pct: number;
+  bottleneck: Bottleneck;
+  /** headroom to best-in-class on each lever (percentage points) */
+  carry_gap_pct: number;
+  close_gap_pct: number;
+  recommendation: string;
+  confidence: "low" | "medium" | "high";
+  /** traffic-weighted opportunity = visits × dominant gap; ranks where to act */
+  priority: number;
+}
+export interface BottlenecksResult {
+  destinations: BottleneckVerdict[]; // sorted by priority desc
+  benchmark: { best_carry_pct: number; best_close_pct: number };
+}
+
+const BN_MIN_VISITS = 30;
+const BN_MIN_PRICING = 10;
+
+export async function computeBottlenecks(args: {
+  admin: Admin; workspaceId: string; startIso: string; endIso: string;
+  productHandle?: string | null; utmSource?: string | null; referrer?: string | null;
+}): Promise<BottlenecksResult> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+
+  const [{ data: productRows }, { data: internalCustomerRows }] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+
+  const eventRows = await fetchAllRows<{ session_id: string }>(() =>
+    admin.from("storefront_events").select("session_id, id")
+      .eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const universe = new Set<string>(eventRows.map((e) => e.session_id));
+
+  // session → its landing destination ('pdp' | variant)
+  const sessDest = new Map<string, string>();
+  const ids = [...universe];
+  for (let i = 0; i < ids.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer").in("id", ids.slice(i, i + 300));
+    for (const s of data || []) {
+      if (s.is_internal || s.is_bot) continue;
+      if (s.customer_id && internalCustomerIds.has(s.customer_id as string)) continue;
+      if (!matchUtm((s.utm_source as string) ?? null, utmWanted)) continue;
+      if (!matchRef((s.referrer as string) ?? null, refWanted)) continue;
+      const { segments, variant } = parseLanding((s.landing_url as string) ?? null);
+      const handle = resolveHandle(segments, handleSet);
+      if (product && handle !== product) continue;
+      if (!handle) continue; // bottleneck is per product-destination only
+      sessDest.set(s.id as string, variant || "pdp");
+    }
+  }
+
+  // page-accurate pricing reach + pack per session (matches chapter-diagnostics)
+  const chapEvents = await fetchAllRows<{ event_type: string; session_id: string; meta: Record<string, unknown> }>(() =>
+    admin.from("storefront_events").select("event_type, session_id, meta, id")
+      .eq("workspace_id", workspaceId).in("event_type", ["chapter_view", "pack_selected"])
+      .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const reachedPricing = new Set<string>();
+  const packed = new Set<string>();
+  for (const e of chapEvents) {
+    const dest = sessDest.get(e.session_id);
+    if (!dest) continue;
+    if (e.event_type === "pack_selected") { packed.add(e.session_id); continue; }
+    const m = e.meta || {};
+    if (!PRICING_CHAPTERS.has(m.chapter as string)) continue;
+    const lv = m.lander_variant as string | undefined;
+    const onPage = lv ? lv === dest : true; // stamped → must match; unstamped → assume on-page
+    if (onPage) reachedPricing.add(e.session_id);
+  }
+
+  // aggregate per destination
+  const VARIANT_DEST_LABEL = (d: string) => (d === "pdp" ? "Product Page (bare PDP)" : VARIANT_LABEL[d] || d);
+  type Agg = { visits: number; reached: number; packedReached: number };
+  const agg = new Map<string, Agg>();
+  for (const [sid, dest] of sessDest) {
+    const a = agg.get(dest) || { visits: 0, reached: 0, packedReached: 0 };
+    a.visits++;
+    const r = reachedPricing.has(sid);
+    if (r) a.reached++;
+    if (r && packed.has(sid)) a.packedReached++;
+    agg.set(dest, a);
+  }
+
+  const rows = [...agg.entries()].map(([key, a]) => ({
+    key,
+    carry: a.visits > 0 ? (100 * a.reached) / a.visits : 0,
+    close: a.reached > 0 ? (100 * a.packedReached) / a.reached : 0,
+    a,
+  }));
+  // best-in-class benchmark among destinations with enough data
+  const eligible = rows.filter((r) => r.a.visits >= BN_MIN_VISITS && r.a.reached >= BN_MIN_PRICING);
+  const bestCarry = eligible.length ? Math.max(...eligible.map((r) => r.carry)) : 0;
+  const bestClose = eligible.length ? Math.max(...eligible.map((r) => r.close)) : 0;
+
+  const verdicts: BottleneckVerdict[] = rows.map((r) => {
+    const enough = r.a.visits >= BN_MIN_VISITS && r.a.reached >= BN_MIN_PRICING;
+    const carryGap = Math.max(0, bestCarry - r.carry);
+    const closeGap = Math.max(0, bestClose - r.close);
+    let bottleneck: Bottleneck;
+    let recommendation: string;
+    if (!enough) {
+      bottleneck = "insufficient_data";
+      recommendation = `Not enough traffic to diagnose (need ≥${BN_MIN_VISITS} visits, ≥${BN_MIN_PRICING} reaching pricing).`;
+    } else if (carryGap < 5 && closeGap < 5) {
+      bottleneck = "balanced";
+      recommendation = "Near best-in-class on both levers — scale it, or test a different destination.";
+    } else if (carryGap >= closeGap) {
+      bottleneck = "carry";
+      recommendation = `Sequence leaks before pricing (carry ${r.carry.toFixed(0)}% vs best ${bestCarry.toFixed(0)}%). Find the drop-off chapter and fix/move it.`;
+    } else {
+      bottleneck = "close";
+      recommendation = `Reaches pricing but doesn't close (close ${r.close.toFixed(0)}% vs best ${bestClose.toFixed(0)}%). Rework the pricing/offer for this traffic.`;
+    }
+    const dominantGap = bottleneck === "carry" ? carryGap : bottleneck === "close" ? closeGap : 0;
+    const confidence: BottleneckVerdict["confidence"] = r.a.reached >= 30 ? "high" : r.a.reached >= BN_MIN_PRICING ? "medium" : "low";
+    return {
+      key: r.key, label: VARIANT_DEST_LABEL(r.key),
+      visits: r.a.visits, reached_pricing: r.a.reached,
+      carry_to_pricing_pct: round1(r.carry), close_pct: round1(r.close),
+      bottleneck, carry_gap_pct: round1(carryGap), close_gap_pct: round1(closeGap),
+      recommendation, confidence,
+      priority: Math.round(r.a.visits * (dominantGap / 100)),
+    };
+  }).sort((x, y) => y.priority - x.priority);
+
+  return { destinations: verdicts, benchmark: { best_carry_pct: round1(bestCarry), best_close_pct: round1(bestClose) } };
 }

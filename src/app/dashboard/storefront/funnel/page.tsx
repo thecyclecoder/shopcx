@@ -24,8 +24,9 @@ import { useWorkspace } from "@/lib/workspace-context";
 // below, so reworked cards are visually distinguishable from the old ones.
 interface TreeMetrics {
   visit: number; engaged: number; pack_selected: number; checkout_started: number;
-  order_placed: number; add_to_cart: number;
-  engagement_rate: number; conversion_rate: number; atc_rate: number;
+  order_placed: number; add_to_cart: number; sub_orders: number;
+  engagement_rate: number; pack_rate: number; checkout_rate: number; conversion_rate: number;
+  atc_rate: number; sub_attach_rate: number;
   revenue_cents: number; ltv_cents: number;
   revenue_per_visit_cents: number; ltv_per_visit_cents: number;
 }
@@ -125,6 +126,17 @@ function flattenTree(nodes: TreeNode[], expanded: Set<string>, depth = 0, parent
 }
 function pctStr(x: number) { return (x * 100).toFixed(1) + "%"; }
 function money(cents: number) { return "$" + (cents / 100).toFixed(2); }
+
+/** A funnel-step cell: the count with its rate-from-visit beneath, so each
+ *  step's % is visible for period-over-period drift comparison. */
+function StepCell({ count, rate, strong, rateGood }: { count: number; rate: number; strong?: boolean; rateGood?: boolean }) {
+  return (
+    <td className="py-1.5 text-right">
+      <div className={"tabular-nums " + (strong ? "font-medium text-zinc-900 dark:text-zinc-100" : "text-zinc-700 dark:text-zinc-300")}>{count.toLocaleString()}</div>
+      <div className={"text-[10px] tabular-nums " + (rateGood && rate > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{pctStr(rate)}</div>
+    </td>
+  );
+}
 
 // ── Chapter diagnostics (the "why") — per-destination chapter sequence ──────
 interface ChapterDiagRow {
@@ -275,15 +287,17 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                 <th className="py-2 text-right font-medium">Pack</th>
                 <th className="py-2 text-right font-medium">Checkout</th>
                 <th className="py-2 text-right font-medium">Orders</th>
-                <th className="py-2 text-right font-medium">Eng %</th>
-                <th className="py-2 text-right font-medium">CVR</th>
+                <th className="py-2 text-right font-medium">Sub-attach</th>
                 <th className="py-2 text-right font-medium">Rev/visit</th>
                 <th className="py-2 text-right font-medium">LTV/visit</th>
+              </tr>
+              <tr className="text-[9px] uppercase tracking-wide text-zinc-300 dark:text-zinc-600">
+                <th /><th /><th className="text-right font-normal">n · rate</th><th className="text-right font-normal">n · rate</th><th className="text-right font-normal">n · rate</th><th className="text-right font-normal">n · CVR</th><th /><th /><th />
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={10} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
+                <tr><td colSpan={9} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
               )}
               {rows.map(({ node, depth, path, hasChildren, isOpen }) => {
                 const m = node.metrics;
@@ -310,12 +324,11 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                       </div>
                     </td>
                     <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.visit.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.engaged.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.pack_selected.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.checkout_started.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.order_placed.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{pctStr(m.engagement_rate)}</td>
-                    <td className={"py-1.5 text-right tabular-nums font-medium " + (m.conversion_rate > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{pctStr(m.conversion_rate)}</td>
+                    <StepCell count={m.engaged} rate={m.engagement_rate} />
+                    <StepCell count={m.pack_selected} rate={m.pack_rate} />
+                    <StepCell count={m.checkout_started} rate={m.checkout_rate} />
+                    <StepCell count={m.order_placed} rate={m.conversion_rate} strong rateGood />
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.order_placed > 0 ? pctStr(m.sub_attach_rate) : "—"}</td>
                     <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{money(m.revenue_per_visit_cents)}</td>
                     <td className={"py-1.5 text-right tabular-nums font-semibold " + (m.ltv_per_visit_cents > 0 ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-400")}>{money(m.ltv_per_visit_cents)}</td>
                   </tr>
@@ -614,19 +627,6 @@ export default function StorefrontFunnelPage() {
 
       {data && (
         <>
-          <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            <StatCard label="Total sessions" value={data.total_sessions.toLocaleString()} />
-            <StatCard label="PDP visits" value={topOfFunnel.toLocaleString()} />
-            <StatCard label="Add-to-cart rate" value={`${atcRate.toFixed(1)}%`} tone={atcRate >= 5 ? "good" : "neutral"} />
-            <StatCard label="Leads generated" value={(data.leads_generated ?? 0).toLocaleString()} tone={(data.leads_generated ?? 0) > 0 ? "good" : "neutral"} />
-            <StatCard label="Orders" value={orderPlaced.toLocaleString()} />
-            <StatCard
-              label="PDP → order"
-              value={`${overallCvr.toFixed(2)}%`}
-              tone={overallCvr >= 2 ? "good" : "neutral"}
-            />
-          </div>
-
           <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-zinc-500">
               Funnel — {data.range.start} to {data.range.end}
@@ -654,10 +654,6 @@ export default function StorefrontFunnelPage() {
 
           {data.abandonedCarts && (
             <AbandonedCartsPanel block={data.abandonedCarts} />
-          )}
-
-          {data.predictedLtv && data.predictedLtv.length > 0 && (
-            <PredictedLtvPanel rows={data.predictedLtv} />
           )}
 
           {data.runningExperiments && data.runningExperiments.length > 0 && (
@@ -729,53 +725,6 @@ export default function StorefrontFunnelPage() {
             </section>
           )}
 
-          <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-              Recent events (last 30)
-            </h2>
-            {data.recentEvents.length === 0 ? (
-              <p className="text-xs text-zinc-400">No events in this range.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[640px] text-xs">
-                  <thead>
-                    <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                      <th className="py-2 pr-2">Time</th>
-                      <th className="py-2 pr-2">Event</th>
-                      <th className="py-2 pr-2">Session</th>
-                      <th className="py-2 pr-2">URL</th>
-                      <th className="py-2 pr-2">Meta</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.recentEvents.map(e => (
-                      <tr key={e.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                        <td className="whitespace-nowrap py-2 pr-2 text-zinc-500">
-                          {new Date(e.created_at).toLocaleString()}
-                        </td>
-                        <td className="py-2 pr-2">
-                          <EventChip type={e.event_type} />
-                        </td>
-                        <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">
-                          {e.anonymous_id.slice(0, 8)}…
-                        </td>
-                        <td className="py-2 pr-2 text-zinc-600 dark:text-zinc-400" title={e.url || ""}>
-                          <div className="max-w-[260px] truncate">
-                            {e.url ? new URL(e.url).pathname + new URL(e.url).search : "—"}
-                          </div>
-                        </td>
-                        <td className="py-2 pr-2 font-mono text-[10px] text-zinc-500" title={JSON.stringify(e.meta)}>
-                          <div className="max-w-[260px] truncate">
-                            {e.meta && Object.keys(e.meta).length > 0 ? JSON.stringify(e.meta) : "—"}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
         </>
       )}
     </div>
@@ -1092,70 +1041,6 @@ function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
   );
 }
 
-function PredictedLtvPanel({ rows }: { rows: NonNullable<FunnelData["predictedLtv"]> }) {
-  // The M3 reward the bandit optimizes: predicted lifetime MARGIN per exposed visitor per
-  // (product × lander × audience), shown week-over-week. While uncalibrated the proxy hasn't
-  // been truth-checked by the 4-month reconciler, so the bandit bets conservatively.
-  const money = (cents: number) => "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const anyUncalibrated = rows.some((r) => !r.calibrated);
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Predicted LTV per visitor
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          The reward the agent optimizes — predicted lifetime margin per visitor, week-over-week.
-          {anyUncalibrated && (
-            <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
-              uncalibrated — betting conservatively
-            </span>
-          )}
-        </span>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[680px] text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-              <th className="py-2 pr-2">Cohort</th>
-              <th className="py-2 pr-2 text-right">Visitors</th>
-              <th className="py-2 pr-2 text-right">Sub-attach</th>
-              <th className="py-2 pr-2 text-right">Est sub-LTV</th>
-              <th className="py-2 pr-2 text-right">Pred. LTV/visitor</th>
-              <th className="py-2 pr-2 text-right">vs last wk</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => {
-              const wow = r.wow_delta_pct;
-              return (
-                <tr key={`${r.product_id}-${r.lander_type}-${r.audience}-${i}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">
-                    {r.product_title}
-                    <span className="ml-1 text-[10px] uppercase text-zinc-400">{r.lander_type} · {r.audience}</span>
-                  </td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.visitors.toLocaleString()}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{Math.round(r.sub_attach_rate * 1000) / 10}%</td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{money(r.est_sub_ltv_cents)}</td>
-                  <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{money(r.predicted_ltv_per_visitor_cents)}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums font-semibold">
-                    {wow === null ? (
-                      <span className="text-zinc-400">—</span>
-                    ) : (
-                      <span className={wow > 0.1 ? "text-emerald-600" : wow < -0.1 ? "text-rose-600" : "text-zinc-400"}>
-                        {wow > 0 ? "+" : ""}{wow}%
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
 
 function RunningExperimentsPanel({ rows }: { rows: NonNullable<FunnelData["runningExperiments"]> }) {
   const cvr = (a: { conversions: number; sessions: number }) =>
@@ -1506,26 +1391,3 @@ function CampaignGradesPanel({
   );
 }
 
-function EventChip({ type }: { type: string }) {
-  const tone: Record<string, string> = {
-    pdp_view: "bg-zinc-100 text-zinc-700",
-    pdp_engaged: "bg-amber-100 text-amber-800",
-    chapter_view: "bg-sky-50 text-sky-700",
-    chapter_dwell: "bg-sky-50 text-sky-600",
-    scroll_depth: "bg-zinc-100 text-zinc-600",
-    cta_click: "bg-orange-100 text-orange-800",
-    add_to_cart: "bg-blue-100 text-blue-800",
-    pack_selected: "bg-blue-100 text-blue-800",
-    customize_view: "bg-indigo-100 text-indigo-800",
-    upsell_added: "bg-emerald-100 text-emerald-800",
-    upsell_skipped: "bg-zinc-100 text-zinc-600",
-    checkout_view: "bg-violet-100 text-violet-800",
-    checkout_redirect: "bg-violet-100 text-violet-800",
-    order_placed: "bg-emerald-200 text-emerald-900 font-bold",
-  };
-  return (
-    <span className={`inline-flex whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold ${tone[type] || "bg-zinc-100 text-zinc-700"}`}>
-      {type}
-    </span>
-  );
-}
