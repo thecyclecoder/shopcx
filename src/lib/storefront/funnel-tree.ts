@@ -696,6 +696,26 @@ export async function listSliceOptions(args: {
 // chapter-performance data-section mislabel.
 
 const PRICING_CHAPTERS = new Set(["pricing", "bundle-pricing"]);
+
+// Which chapters each destination's page ACTUALLY renders — mirrors the section
+// composition in `src/app/(storefront)/_lib/render-page.tsx` (KEEP IN SYNC). Used
+// to drop cross-navigation noise: chapter events attribute to a session's landing
+// destination, so a PDP-landing session that later hops to a lander would otherwise
+// show that lander's hero/body in the PDP's list. We only display chapters the
+// destination's own page renders.
+const STANDARD_BODY = [
+  "why-this-works", "mechanism", "ingredients", "endorsement", "upsell-chapter",
+  "pricing", "bundle-pricing", "ugc", "comparison", "expect", "reviews", "faq",
+  "final-cta", "brand-trust",
+];
+const DESTINATION_CHAPTERS: Record<string, Set<string>> = {
+  pdp: new Set(["hero", "survey", ...STANDARD_BODY]),
+  // The reasons listicle has its OWN curated body (not StandardChapters).
+  reasons: new Set(["advertorial-hero", "reasons-listicle", "ingredients", "pricing", "reviews", "final-cta", "brand-trust"]),
+  beforeafter: new Set(["beforeafter-hero", "hero", "testimonial-wall", ...STANDARD_BODY]),
+  advertorial: new Set(["advertorial-hero", "advertorial-chapter", ...STANDARD_BODY]),
+};
+
 function round1(x: number): number { return Math.round(x * 10) / 10; }
 function humanizeChapter(id: string): string {
   return id.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -865,7 +885,14 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
     }
   }
 
-  const chapters: ChapterRow[] = [...chapterSessions.entries()].map(([chapter, sess]) => {
+  // Restrict the displayed chapters to those the destination's page actually
+  // renders (drops cross-navigation noise — see DESTINATION_CHAPTERS).
+  const destType = destLevel === "pdp" ? "pdp" : destLevel === "variant" ? destKey : (angleParent.get(destKey) || destKey);
+  const allowedChapters = DESTINATION_CHAPTERS[destType] || null;
+
+  const chapters: ChapterRow[] = [...chapterSessions.entries()]
+    .filter(([chapter]) => !allowedChapters || allowedChapters.has(chapter))
+    .map(([chapter, sess]) => {
     const reach = sess.size;
     const toPricing = [...sess].filter((id) => pricingSessions.has(id)).length;
     const toPack = [...sess].filter((id) => packedSessions.has(id)).length;
