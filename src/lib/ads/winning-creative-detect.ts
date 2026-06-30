@@ -1,20 +1,32 @@
 /**
- * Winning-creative detection — growth-winning-creative-amplifier Phase 1.
+ * Winning-creative detection + amplification — growth-winning-creative-amplifier Phases 1-2.
  *
- * Reads our own [[../../tables/meta_attribution_daily]] grouped by `(meta_ad_id, variant)` over a
- * trailing window, scores per-row attributed ROAS = `revenue_cents / attributed_spend_cents` (the
- * `(onsiteCents+amazonCents)/spend_cents` shape the spec calls for — Amazon halo applied as an
- * optional workspace-level multiplier since it is not attributable per Meta ad), filters by a
- * min-spend AND a min-ROAS floor, and returns the top-K winners with each one's source
- * [[../../tables/ad_campaigns]] + [[../../tables/product_ad_angles]] joined so Phase 2's amplifier
- * knows the archetype/angle to clone.
+ * Phase 1 (`detectWinners`): reads our own [[../../tables/meta_attribution_daily]] grouped by
+ * `(meta_ad_id, variant)` over a trailing window, scores per-row attributed ROAS =
+ * `revenue_cents / attributed_spend_cents` (the `(onsiteCents+amazonCents)/spend_cents` shape the
+ * spec calls for — Amazon halo applied as an optional workspace-level multiplier since it is not
+ * attributable per Meta ad), filters by a min-spend AND a min-ROAS floor, and returns the top-K
+ * winners with each one's source [[../../tables/ad_campaigns]] + [[../../tables/product_ad_angles]]
+ * joined so Phase 2's amplifier knows the archetype/angle to clone.
  *
- * STRICTLY OUR DATA — read only from `meta_attribution_daily` + the two joined source tables.
+ * Phase 2 (`amplifyWinner`): per detected winner, ENQUEUES up to N variant ad-campaign rows at
+ * `status='ready'` so the `growth-adopt-creative-makers` ready-to-test queue picks them up. The
+ * mix is decided from the source campaign's existing assets — a video-shaped source spawns one
+ * video clone via [[../../lifecycles/ad-render]] (`ad-tool/generate-full`) PLUS up to N-1 static
+ * variants via [[../../lifecycles/ad-static]] (`ad-tool/static-requested`); a static-shaped source
+ * spawns N statics. Per-winner cap {@link MAX_VARIANTS_PER_WINNER}; per-workspace per-day cap
+ * {@link MAX_AMPLIFICATIONS_PER_DAY}. Each call writes ONE
+ * [[../../tables/director_activity]] row of `action_kind='amplified_winner'` carrying
+ * `{source_meta_ad_id, new_ad_campaign_ids, angle_id}` so the lineage is traceable.
+ *
+ * STRICTLY OUR DATA — Phase 1 reads only `meta_attribution_daily` + the two joined source tables.
  * No external ad-intelligence integrations are read here (the audit-mandated assumption check
  * encoded in the spec's verification grep).
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { DEFAULT_BLENDED_CAC_LTV_TARGET } from "@/lib/blended-cac-ltv";
+import { inngest } from "@/lib/inngest/client";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -315,4 +327,336 @@ export async function detectWinners(
       angle: _angleId ? anglesById.get(_angleId) ?? null : null,
     };
   });
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 2 — auto-spawn N variants through the makers
+// ────────────────────────────────────────────────────────────────────────────────
+
+/** Max new `ad_campaigns` rows a single `amplifyWinner` call may insert. */
+export const MAX_VARIANTS_PER_WINNER = 4;
+
+/**
+ * Per-workspace per-UTC-day cap on the total count of new `ad_campaigns` rows produced via
+ * `amplifyWinner`, summed across all calls in the day. Computed from a read over today's
+ * `director_activity` rows of `action_kind='amplified_winner'` for this workspace.
+ */
+export const MAX_AMPLIFICATIONS_PER_DAY = 8;
+
+/** The `director_activity.action_kind` stamped per amplification call. */
+export const AMPLIFIED_WINNER_ACTION_KIND = "amplified_winner" as const;
+
+/** Killer-statics archetype set (cold-50+) — see [[../../lifecycles/ad-static]] § Cold-50+ "killer" archetype system. */
+const KILLER_STATIC_ARCHETYPES = [
+  "advertorial",
+  "testimonial",
+  "authority",
+  "big_claim",
+  "before_after",
+  "ingredient_breakdown",
+] as const;
+
+/** Legacy static archetype set — kept for back-compat. */
+const LEGACY_STATIC_ARCHETYPES = ["review", "offer", "benefit_authority"] as const;
+
+const ALL_STATIC_ARCHETYPES: Set<string> = new Set<string>([
+  ...KILLER_STATIC_ARCHETYPES,
+  ...LEGACY_STATIC_ARCHETYPES,
+]);
+
+/** Fallback static archetype when the winner's lander variant doesn't normalize to a known one. */
+export const DEFAULT_AMPLIFY_STATIC_ARCHETYPE = "testimonial";
+
+/**
+ * Normalize a lander-variant slug to a known static archetype. Lander variants ship with both
+ * `before-after`/`beforeafter`/`before_after` flavors over time; this folds them to the canonical
+ * archetype slug the maker pipeline accepts. Falls back to {@link DEFAULT_AMPLIFY_STATIC_ARCHETYPE}.
+ */
+export function archetypeForVariant(variant: string): string {
+  const norm = variant.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  if (ALL_STATIC_ARCHETYPES.has(norm)) return norm;
+  if (norm === "beforeafter") return "before_after";
+  if (norm === "bigclaim" || norm === "big-claim") return "big_claim";
+  if (norm === "ingredientbreakdown" || norm === "ingredient-breakdown") return "ingredient_breakdown";
+  return DEFAULT_AMPLIFY_STATIC_ARCHETYPE;
+}
+
+/** One variant the amplifier plans to spawn for the winner. */
+export type AmplificationVariantPlan =
+  | { kind: "static"; archetype: string }
+  | { kind: "video" };
+
+/** Inputs the planner reads off the winner's source campaign — pure-data shape so tests are trivial. */
+export interface PlanAmplificationSource {
+  /** The source campaign's script_text — non-null when this is a video-shaped source. */
+  scriptText: string | null;
+  /** The source campaign's hero_image_url — non-null when this is a video-shaped source. */
+  heroImageUrl: string | null;
+  /** The winner's lander variant — drives the static archetype selection. */
+  variant: string;
+}
+
+/**
+ * Plan the N-variant amplification mix from the source campaign's shape. Pure; exposed for tests.
+ *
+ * Rules:
+ * - n is clamped to {@link MAX_VARIANTS_PER_WINNER} (and to ≥0).
+ * - A "video-shaped" source (script_text AND hero_image_url present) gets ONE video clone first
+ *   (per the spec's "AND/OR one video variant" clause), followed by static variants of the
+ *   normalized archetype for the remaining (n-1) slots.
+ * - A "static-shaped" source spawns N statics of the normalized archetype.
+ *
+ * Returning [] is a valid plan (n<=0 or n capped to 0) — the executor short-circuits.
+ */
+export function planAmplificationVariants(
+  source: PlanAmplificationSource,
+  n: number,
+): AmplificationVariantPlan[] {
+  const want = Math.max(0, Math.min(Math.floor(n) || 0, MAX_VARIANTS_PER_WINNER));
+  if (want === 0) return [];
+  const archetype = archetypeForVariant(source.variant);
+  const isVideoSource = Boolean(source.scriptText && source.heroImageUrl);
+  const plans: AmplificationVariantPlan[] = [];
+  if (isVideoSource) {
+    plans.push({ kind: "video" });
+    for (let i = 1; i < want; i += 1) plans.push({ kind: "static", archetype });
+  } else {
+    for (let i = 0; i < want; i += 1) plans.push({ kind: "static", archetype });
+  }
+  return plans;
+}
+
+/** Injection seam for tests — the live executor sends Inngest events + writes director_activity rows via the real modules; tests pass spies. */
+export interface AmplifyWinnerDeps {
+  sendInngest?: (event: { name: string; data: unknown }) => Promise<unknown>;
+  recordActivity?: (
+    admin: Admin,
+    row: Parameters<typeof recordDirectorActivity>[1],
+  ) => Promise<unknown>;
+}
+
+const defaultAmplifyDeps: Required<AmplifyWinnerDeps> = {
+  sendInngest: (event) => inngest.send(event) as Promise<unknown>,
+  recordActivity: (admin, row) => recordDirectorActivity(admin, row),
+};
+
+export interface AmplifyWinnerOptions {
+  workspaceId: string;
+  /** A winner row from {@link detectWinners} — its joined `campaign` row is the clone source. */
+  winner: DetectedWinner;
+  /** Requested variant count. Clamped per-winner to {@link MAX_VARIANTS_PER_WINNER} and per-day to {@link MAX_AMPLIFICATIONS_PER_DAY}. */
+  n: number;
+  /** Director function whose objective owns the action (Growth supervises the makers). */
+  directorFunction?: string;
+  /** Spec slug to stamp on the activity row. */
+  specSlug?: string | null;
+  /** Override "now" for deterministic day-cap windows in tests. */
+  nowMs?: number;
+  /** Test-only deps. */
+  deps?: AmplifyWinnerDeps;
+}
+
+export interface AmplifyWinnerResult {
+  ok: boolean;
+  reason?: string;
+  /** The new `ad_campaigns.id` values inserted by this call (length === `variants_spawned`). */
+  new_ad_campaign_ids: string[];
+  /** How many new campaigns this call inserted (after capping). May be less than `n`. */
+  variants_spawned: number;
+  /** Total amplified campaigns this workspace produced today BEFORE this call (UTC day). */
+  day_count_before: number;
+  /** Pure plan of what was queued. Useful for tests + observability. */
+  plan: AmplificationVariantPlan[];
+}
+
+/** UTC day start as an ISO string (`YYYY-MM-DDT00:00:00.000Z`) — matches `director_activity.created_at`. */
+function utcDayStartIso(nowMs: number): string {
+  const d = new Date(nowMs);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())).toISOString();
+}
+
+/**
+ * Count how many ad_campaigns rows this workspace has already amplified today (UTC) by summing
+ * `metadata.new_ad_campaign_ids.length` across today's `amplified_winner` `director_activity` rows.
+ * Defensive: a malformed row contributes 0 rather than throwing.
+ */
+async function loadAmplifiedTodayCount(admin: Admin, workspaceId: string, nowMs: number): Promise<number> {
+  try {
+    const dayStartIso = utcDayStartIso(nowMs);
+    const { data } = await admin
+      .from("director_activity")
+      .select("metadata, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("action_kind", AMPLIFIED_WINNER_ACTION_KIND)
+      .gte("created_at", dayStartIso);
+    const rows = (data ?? []) as { metadata: Record<string, unknown> | null }[];
+    let total = 0;
+    for (const r of rows) {
+      const meta = r.metadata ?? {};
+      const ids = (meta as { new_ad_campaign_ids?: unknown }).new_ad_campaign_ids;
+      if (Array.isArray(ids)) total += ids.length;
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Amplify ONE detected winner — clone the source campaign N ways, fire the matching maker event,
+ * and stamp the lineage row. Returns the inserted `ad_campaigns.id` values + the plan that was
+ * executed. Never throws — every failure resolves to `{ok:false, reason}`.
+ *
+ * Caps:
+ * - per-call ≤ {@link MAX_VARIANTS_PER_WINNER} (`n` is clamped).
+ * - per-workspace per-day ≤ {@link MAX_AMPLIFICATIONS_PER_DAY}; if the day is already at the cap
+ *   the call short-circuits with `reason='daily_cap_reached'` (0 inserts).
+ *
+ * The plan mix is decided by {@link planAmplificationVariants}: a video-shaped source kicks off
+ * with one video clone (`ad-tool/generate-full`), followed by N-1 statics (`ad-tool/static-requested`);
+ * a static-shaped source spawns N statics. Each new row mirrors the source's product / variant /
+ * avatar / angle / script / hero / scene_style / caption_style / length / landing_url at
+ * `status='ready'` so the [[../../specs/growth-adopt-creative-makers]] ready-to-test queue picks
+ * it up as soon as the maker render completes.
+ */
+export async function amplifyWinner(
+  admin: Admin,
+  opts: AmplifyWinnerOptions,
+): Promise<AmplifyWinnerResult> {
+  const deps = { ...defaultAmplifyDeps, ...(opts.deps ?? {}) };
+  const nowMs = opts.nowMs ?? Date.now();
+  const empty = (reason: string): AmplifyWinnerResult => ({
+    ok: false,
+    reason,
+    new_ad_campaign_ids: [],
+    variants_spawned: 0,
+    day_count_before: 0,
+    plan: [],
+  });
+
+  const source = opts.winner.campaign;
+  if (!source) return empty("no_source_campaign");
+  if (!source.product_id) return empty("source_missing_product");
+
+  const dayCountBefore = await loadAmplifiedTodayCount(admin, opts.workspaceId, nowMs);
+  const dayBudget = Math.max(0, MAX_AMPLIFICATIONS_PER_DAY - dayCountBefore);
+  if (dayBudget === 0) {
+    return { ...empty("daily_cap_reached"), day_count_before: dayCountBefore };
+  }
+
+  const requested = Math.max(0, Math.floor(opts.n) || 0);
+  const effectiveN = Math.min(requested, MAX_VARIANTS_PER_WINNER, dayBudget);
+  if (effectiveN === 0) {
+    return { ...empty("nothing_to_spawn"), day_count_before: dayCountBefore };
+  }
+
+  const plan = planAmplificationVariants(
+    {
+      scriptText: source.script_text ?? null,
+      heroImageUrl: source.hero_image_url ?? null,
+      variant: opts.winner.variant,
+    },
+    effectiveN,
+  );
+  if (plan.length === 0) {
+    return { ...empty("nothing_to_spawn"), day_count_before: dayCountBefore };
+  }
+
+  const angleId = source.angle_id ?? opts.winner.angle?.id ?? null;
+  const namePrefix = opts.winner.angle?.hook_one_liner
+    ? String(opts.winner.angle.hook_one_liner).slice(0, 60)
+    : source.name
+      ? String(source.name).slice(0, 60)
+      : opts.winner.metaAdId.slice(0, 8);
+
+  const inserted: string[] = [];
+  for (let i = 0; i < plan.length; i += 1) {
+    const variantPlan = plan[i];
+    const baseRow = {
+      workspace_id: opts.workspaceId,
+      product_id: source.product_id,
+      variant_id: source.variant_id ?? null,
+      avatar_id: source.avatar_id ?? null,
+      angle_id: angleId,
+      name: `Amplified · ${namePrefix} (${variantPlan.kind})`,
+      status: "ready" as const,
+      landing_url: source.landing_url ?? null,
+      length_sec: source.length_sec ?? 15,
+      scene_style: source.scene_style ?? null,
+      caption_style: source.caption_style ?? "hormozi_yellow",
+      // Clone hero + script ONLY for the video variant (cloning the source's hero + script with the
+      // winning angle); statics start clean so the maker derives PI-grounded copy/imagery.
+      hero_image_url: variantPlan.kind === "video" ? source.hero_image_url ?? null : null,
+      script_text: variantPlan.kind === "video" ? source.script_text ?? null : null,
+    };
+
+    const { data: campaign, error: cErr } = await admin
+      .from("ad_campaigns")
+      .insert(baseRow)
+      .select("id")
+      .maybeSingle();
+    if (cErr || !campaign) {
+      // Per-row failure does NOT abort the rest — the partial set is still amplified. The reason
+      // is folded into the activity row's metadata so the audit trail records the gap.
+      continue;
+    }
+    const adCampaignId = (campaign as { id: string }).id;
+    inserted.push(adCampaignId);
+
+    // Fire the matching maker event. Best-effort — a transient Inngest hiccup leaves the row at
+    // `status='ready'`; a follow-up `POST /api/ads/campaigns/[id]/static` (or `/render`) re-requests.
+    try {
+      if (variantPlan.kind === "static") {
+        await deps.sendInngest({
+          name: "ad-tool/static-requested",
+          data: {
+            workspace_id: opts.workspaceId,
+            campaign_id: adCampaignId,
+            archetype: variantPlan.archetype,
+          },
+        });
+      } else {
+        await deps.sendInngest({
+          name: "ad-tool/generate-full",
+          data: { workspace_id: opts.workspaceId, campaign_id: adCampaignId },
+        });
+      }
+    } catch {
+      /* persisted state is what matters; the maker can be re-triggered */
+    }
+  }
+
+  if (inserted.length === 0) {
+    return { ...empty("all_inserts_failed"), day_count_before: dayCountBefore, plan };
+  }
+
+  await deps.recordActivity(admin, {
+    workspaceId: opts.workspaceId,
+    directorFunction: opts.directorFunction ?? "growth",
+    actionKind: AMPLIFIED_WINNER_ACTION_KIND,
+    specSlug: opts.specSlug ?? null,
+    reason:
+      `Amplified winner ${opts.winner.metaAdId} (variant=${opts.winner.variant}, ROAS=${opts.winner.roas}) ` +
+      `→ ${inserted.length} new ad_campaigns row(s) at status='ready' ` +
+      `[${plan.map((p) => (p.kind === "static" ? `static:${p.archetype}` : "video")).join(", ")}].`,
+    metadata: {
+      source_meta_ad_id: opts.winner.metaAdId,
+      source_ad_campaign_id: source.id,
+      new_ad_campaign_ids: inserted,
+      angle_id: angleId,
+      variant: opts.winner.variant,
+      roas: opts.winner.roas,
+      plan,
+      day_count_before: dayCountBefore,
+      autonomous: true,
+    },
+  });
+
+  return {
+    ok: true,
+    new_ad_campaign_ids: inserted,
+    variants_spawned: inserted.length,
+    day_count_before: dayCountBefore,
+    plan,
+  };
 }

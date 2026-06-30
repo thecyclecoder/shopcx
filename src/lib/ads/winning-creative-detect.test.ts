@@ -1,22 +1,35 @@
 /**
- * Unit tests for the winning-creative detector (growth-winning-creative-amplifier Phase 1).
+ * Unit tests for the winning-creative detector + amplifier
+ * (growth-winning-creative-amplifier Phases 1-2).
  *
  * Built-in node:test — no test-runner dependency. Run:
  *   npm run test:winning-creative-detect
  *   (= tsx --test src/lib/ads/winning-creative-detect.test.ts)
  *
- * Covers the spec's fixture (two ads above floor + one below → exactly the two top-K winners with
- * their angle joined), plus the audit assumption check (no AdLibrary import) and the score-cell
- * floors.
+ * Phase 1 coverage: the spec's fixture (two ads above floor + one below → exactly the two top-K
+ * winners with their angle joined), the audit assumption check (no AdLibrary import), and the
+ * score-cell floors.
+ *
+ * Phase 2 coverage: the spec's verification fixture (winner spawns ≤ MAX_VARIANTS_PER_WINNER
+ * campaigns; two calls in one day at the cap do not exceed MAX_AMPLIFICATIONS_PER_DAY total),
+ * plus the variant→archetype normalization and the planner mix.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AMPLIFIED_WINNER_ACTION_KIND,
   DEFAULT_MIN_SPEND_CENTS,
+  MAX_AMPLIFICATIONS_PER_DAY,
+  MAX_VARIANTS_PER_WINNER,
   ROAS_FLOOR_MARGIN,
+  amplifyWinner,
+  archetypeForVariant,
   detectWinners,
   groupAttributionRows,
+  planAmplificationVariants,
   scoreCell,
+  type AmplifyWinnerDeps,
+  type DetectedWinner,
   type WinnerAttributionRow,
 } from "./winning-creative-detect";
 
@@ -190,6 +203,333 @@ test("empty attribution table returns an empty winner list", async () => {
     nowMs: Date.parse("2026-06-30T00:00:00Z"),
   });
   assert.deepEqual(winners, []);
+});
+
+// ── Phase 2 — archetypeForVariant + planAmplificationVariants (pure) ─────────────
+
+test("archetypeForVariant normalizes lander-variant slugs to the maker archetype set", () => {
+  assert.equal(archetypeForVariant("advertorial"), "advertorial");
+  assert.equal(archetypeForVariant("testimonial"), "testimonial");
+  assert.equal(archetypeForVariant("before_after"), "before_after");
+  assert.equal(archetypeForVariant("before-after"), "before_after");
+  assert.equal(archetypeForVariant("beforeafter"), "before_after");
+  assert.equal(archetypeForVariant("big-claim"), "big_claim");
+  assert.equal(archetypeForVariant("ingredient-breakdown"), "ingredient_breakdown");
+  // Unknown variants fall back to testimonial (the safe storefront-PDP archetype).
+  assert.equal(archetypeForVariant("reasons"), "testimonial");
+  assert.equal(archetypeForVariant("listicle"), "testimonial");
+});
+
+test("planAmplificationVariants spawns N statics when the source has no video assets", () => {
+  const plan = planAmplificationVariants(
+    { scriptText: null, heroImageUrl: null, variant: "advertorial" },
+    3,
+  );
+  assert.equal(plan.length, 3);
+  assert.deepEqual(plan, [
+    { kind: "static", archetype: "advertorial" },
+    { kind: "static", archetype: "advertorial" },
+    { kind: "static", archetype: "advertorial" },
+  ]);
+});
+
+test("planAmplificationVariants picks one video + N-1 statics when the source has script+hero", () => {
+  const plan = planAmplificationVariants(
+    { scriptText: "hook line", heroImageUrl: "https://x/hero.png", variant: "before_after" },
+    4,
+  );
+  assert.equal(plan.length, 4);
+  assert.deepEqual(plan[0], { kind: "video" });
+  for (let i = 1; i < plan.length; i += 1) {
+    assert.deepEqual(plan[i], { kind: "static", archetype: "before_after" });
+  }
+});
+
+test("planAmplificationVariants clamps n to MAX_VARIANTS_PER_WINNER", () => {
+  const plan = planAmplificationVariants(
+    { scriptText: null, heroImageUrl: null, variant: "testimonial" },
+    99,
+  );
+  assert.equal(plan.length, MAX_VARIANTS_PER_WINNER);
+});
+
+test("planAmplificationVariants returns [] for n<=0", () => {
+  const plan = planAmplificationVariants(
+    { scriptText: null, heroImageUrl: null, variant: "testimonial" },
+    0,
+  );
+  assert.deepEqual(plan, []);
+});
+
+// ── Phase 2 — amplifyWinner (caps + maker fan-out + activity row) ────────────────
+
+interface AmplifyFakeStores {
+  director_activity_today: { metadata: { new_ad_campaign_ids?: unknown[] } | null }[];
+  inserted_ad_campaigns: Record<string, unknown>[];
+}
+
+interface InsertedRecord { table: string; values: Record<string, unknown>; }
+
+function makeAmplifyAdmin(stores: AmplifyFakeStores) {
+  let nextIdCounter = 0;
+  const inserts: InsertedRecord[] = [];
+  function makeReadChain(rows: unknown[]) {
+    const obj: Record<string, unknown> = {};
+    obj.select = () => obj;
+    obj.eq = () => obj;
+    obj.gte = () => obj;
+    obj.lte = () => obj;
+    obj.in = () => obj;
+    obj.then = (onFulfilled: (v: { data: unknown; error: null }) => unknown) =>
+      Promise.resolve({ data: rows, error: null }).then(onFulfilled);
+    return obj;
+  }
+  function makeInsertChain(table: string) {
+    const obj: Record<string, unknown> = {};
+    let resolved: { data: unknown; error: null } | null = null;
+    obj.insert = (values: unknown) => {
+      const v = values as Record<string, unknown>;
+      inserts.push({ table, values: v });
+      if (table === "ad_campaigns") {
+        nextIdCounter += 1;
+        const id = `camp-${nextIdCounter}`;
+        stores.inserted_ad_campaigns.push({ ...v, id });
+        resolved = { data: { id }, error: null };
+      } else {
+        resolved = { data: null, error: null };
+      }
+      return obj;
+    };
+    obj.select = () => obj;
+    obj.maybeSingle = () => obj;
+    obj.single = () => obj;
+    obj.then = (onFulfilled: (v: { data: unknown; error: null }) => unknown) =>
+      Promise.resolve(resolved ?? { data: null, error: null }).then(onFulfilled);
+    return obj;
+  }
+  const admin = {
+    from(table: string) {
+      if (table === "director_activity") {
+        // SELECT path is used for the daily count read; INSERT path is captured via the deps spy
+        // so we never need to chain-route writes through here.
+        return makeReadChain(stores.director_activity_today);
+      }
+      if (table === "ad_campaigns") return makeInsertChain("ad_campaigns");
+      return makeInsertChain(table);
+    },
+  } as unknown as Parameters<typeof amplifyWinner>[0];
+  return { admin, inserts };
+}
+
+function makeAmplifySpyDeps(): {
+  deps: AmplifyWinnerDeps;
+  sentInngest: Array<{ name: string; data: unknown }>;
+  recordedActivity: Array<Record<string, unknown>>;
+} {
+  const sentInngest: Array<{ name: string; data: unknown }> = [];
+  const recordedActivity: Array<Record<string, unknown>> = [];
+  return {
+    deps: {
+      sendInngest: async (event) => { sentInngest.push(event); return { ids: ["stub"] }; },
+      recordActivity: async (_admin, row) => { recordedActivity.push(row as unknown as Record<string, unknown>); return undefined; },
+    },
+    sentInngest,
+    recordedActivity,
+  };
+}
+
+function makeFixtureWinner(over: Partial<DetectedWinner> = {}): DetectedWinner {
+  return {
+    workspaceId: "ws-1",
+    metaAdId: "AD-WIN-A",
+    variant: "advertorial",
+    spendCents: 20_000,
+    onsiteCents: 100_000,
+    haloAdjustedRevenueCents: 100_000,
+    roas: 5,
+    sessions: 800,
+    windowStart: "2026-06-16",
+    windowEnd: "2026-06-30",
+    campaign: {
+      id: "C-A",
+      name: "winning advertorial",
+      product_id: "P-1",
+      variant_id: "V-1",
+      avatar_id: "AV-1",
+      angle_id: "ANG-A",
+      script_text: null,
+      hero_image_url: null,
+      landing_url: "https://shop.example.com/x",
+      composition: null,
+      length_sec: 15,
+      scene_style: "outdoor_selfie",
+      caption_style: "hormozi_yellow",
+    },
+    angle: {
+      id: "ANG-A",
+      hook_slug: "problem_now",
+      lf8_slot: 1,
+      lead_benefit_anchor: "sleep deeper",
+      hook_one_liner: "still tired at 3pm?",
+      meta_headline: "Sleep deeper",
+      meta_primary_text: null,
+      meta_description: null,
+    },
+    ...over,
+  };
+}
+
+test("amplifyWinner spawns ≤ MAX_VARIANTS_PER_WINNER new ad_campaigns + fires the maker + logs one activity row", async () => {
+  const stores: AmplifyFakeStores = { director_activity_today: [], inserted_ad_campaigns: [] };
+  const { admin } = makeAmplifyAdmin(stores);
+  const { deps, sentInngest, recordedActivity } = makeAmplifySpyDeps();
+
+  // Request well over the cap — should clamp to MAX_VARIANTS_PER_WINNER (=4).
+  const res = await amplifyWinner(admin, {
+    workspaceId: "ws-1",
+    winner: makeFixtureWinner(),
+    n: 99,
+    specSlug: "growth-winning-creative-amplifier",
+    nowMs: Date.parse("2026-06-30T12:00:00Z"),
+    deps,
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.variants_spawned, MAX_VARIANTS_PER_WINNER);
+  assert.equal(res.new_ad_campaign_ids.length, MAX_VARIANTS_PER_WINNER);
+  assert.equal(stores.inserted_ad_campaigns.length, MAX_VARIANTS_PER_WINNER);
+  // Every inserted row lands at status='ready' tagged to the winner's angle.
+  for (const r of stores.inserted_ad_campaigns) {
+    assert.equal((r as { status: string }).status, "ready");
+    assert.equal((r as { angle_id: string }).angle_id, "ANG-A");
+    assert.equal((r as { workspace_id: string }).workspace_id, "ws-1");
+    assert.equal((r as { product_id: string }).product_id, "P-1");
+  }
+  // No source video assets → all statics with the advertorial archetype.
+  assert.equal(sentInngest.length, MAX_VARIANTS_PER_WINNER);
+  for (const e of sentInngest) {
+    assert.equal(e.name, "ad-tool/static-requested");
+    assert.equal((e.data as { archetype: string }).archetype, "advertorial");
+  }
+  // ONE activity row stamped per amplification with the spec's metadata shape.
+  assert.equal(recordedActivity.length, 1);
+  const row = recordedActivity[0] as { actionKind: string; directorFunction: string; metadata: Record<string, unknown> };
+  assert.equal(row.actionKind, AMPLIFIED_WINNER_ACTION_KIND);
+  assert.equal(row.directorFunction, "growth");
+  assert.equal(row.metadata.source_meta_ad_id, "AD-WIN-A");
+  assert.equal(row.metadata.angle_id, "ANG-A");
+  assert.deepEqual(row.metadata.new_ad_campaign_ids, res.new_ad_campaign_ids);
+});
+
+test("amplifyWinner spawns ONE video + (N-1) statics when the source has script_text + hero_image_url", async () => {
+  const stores: AmplifyFakeStores = { director_activity_today: [], inserted_ad_campaigns: [] };
+  const { admin } = makeAmplifyAdmin(stores);
+  const { deps, sentInngest } = makeAmplifySpyDeps();
+
+  const winner = makeFixtureWinner({
+    variant: "before-after",
+    campaign: {
+      id: "C-A",
+      name: "video source",
+      product_id: "P-1",
+      variant_id: "V-1",
+      avatar_id: "AV-1",
+      angle_id: "ANG-A",
+      script_text: "you tried everything…",
+      hero_image_url: "https://cdn.example/hero.png",
+      landing_url: null,
+      composition: null,
+      length_sec: 30,
+      scene_style: "kitchen_counter",
+      caption_style: "hormozi_yellow",
+    },
+  });
+
+  const res = await amplifyWinner(admin, {
+    workspaceId: "ws-1",
+    winner,
+    n: 3,
+    nowMs: Date.parse("2026-06-30T12:00:00Z"),
+    deps,
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.variants_spawned, 3);
+  // First event = the video clone via the full-generate orchestrator; rest = the static maker.
+  assert.equal(sentInngest[0].name, "ad-tool/generate-full");
+  assert.equal(sentInngest[1].name, "ad-tool/static-requested");
+  assert.equal((sentInngest[1].data as { archetype: string }).archetype, "before_after");
+  assert.equal(sentInngest[2].name, "ad-tool/static-requested");
+  // The video row carries the cloned script + hero; the statics start clean.
+  const videoRow = stores.inserted_ad_campaigns[0] as Record<string, unknown>;
+  assert.equal(videoRow.script_text, "you tried everything…");
+  assert.equal(videoRow.hero_image_url, "https://cdn.example/hero.png");
+  assert.equal(videoRow.length_sec, 30);
+  assert.equal(videoRow.scene_style, "kitchen_counter");
+  const staticRow = stores.inserted_ad_campaigns[1] as Record<string, unknown>;
+  assert.equal(staticRow.script_text, null);
+  assert.equal(staticRow.hero_image_url, null);
+});
+
+test("amplifyWinner respects MAX_AMPLIFICATIONS_PER_DAY — two cap-sized calls in one day never exceed the daily ceiling", async () => {
+  // Pretend a prior call today already spawned MAX_VARIANTS_PER_WINNER campaigns.
+  const stores: AmplifyFakeStores = {
+    director_activity_today: [
+      { metadata: { new_ad_campaign_ids: ["camp-prev-1", "camp-prev-2", "camp-prev-3", "camp-prev-4"] } },
+    ],
+    inserted_ad_campaigns: [],
+  };
+  const { admin } = makeAmplifyAdmin(stores);
+  const { deps } = makeAmplifySpyDeps();
+
+  // Second call (still under the day cap) — budget = 8 - 4 = 4, n=4 → spawns 4.
+  const res1 = await amplifyWinner(admin, {
+    workspaceId: "ws-1",
+    winner: makeFixtureWinner({ metaAdId: "AD-WIN-B" }),
+    n: MAX_VARIANTS_PER_WINNER,
+    nowMs: Date.parse("2026-06-30T12:00:00Z"),
+    deps,
+  });
+  assert.equal(res1.ok, true);
+  assert.equal(res1.day_count_before, 4);
+  assert.equal(res1.variants_spawned, MAX_VARIANTS_PER_WINNER);
+  // The fake's director_activity_today won't reflect the new row (the spy captures it instead);
+  // simulate that explicitly so the next call sees the realistic post-state.
+  stores.director_activity_today.push({ metadata: { new_ad_campaign_ids: res1.new_ad_campaign_ids } });
+
+  // Third call — budget now 0, returns daily_cap_reached with zero inserts.
+  const res2 = await amplifyWinner(admin, {
+    workspaceId: "ws-1",
+    winner: makeFixtureWinner({ metaAdId: "AD-WIN-C" }),
+    n: MAX_VARIANTS_PER_WINNER,
+    nowMs: Date.parse("2026-06-30T18:00:00Z"),
+    deps,
+  });
+  assert.equal(res2.ok, false);
+  assert.equal(res2.reason, "daily_cap_reached");
+  assert.equal(res2.variants_spawned, 0);
+  assert.equal(res2.new_ad_campaign_ids.length, 0);
+  // Total ad_campaigns inserts ≤ MAX_AMPLIFICATIONS_PER_DAY total across the two real calls.
+  assert.ok(stores.inserted_ad_campaigns.length <= MAX_AMPLIFICATIONS_PER_DAY);
+});
+
+test("amplifyWinner refuses to amplify when the source campaign join is missing", async () => {
+  const stores: AmplifyFakeStores = { director_activity_today: [], inserted_ad_campaigns: [] };
+  const { admin } = makeAmplifyAdmin(stores);
+  const { deps, sentInngest, recordedActivity } = makeAmplifySpyDeps();
+  const winner = makeFixtureWinner({ campaign: null });
+  const res = await amplifyWinner(admin, {
+    workspaceId: "ws-1",
+    winner,
+    n: 4,
+    nowMs: Date.parse("2026-06-30T12:00:00Z"),
+    deps,
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "no_source_campaign");
+  assert.equal(sentInngest.length, 0);
+  assert.equal(recordedActivity.length, 0);
+  assert.equal(stores.inserted_ad_campaigns.length, 0);
 });
 
 test("topK trims to the requested cap, keeping the highest-ROAS rows", async () => {
