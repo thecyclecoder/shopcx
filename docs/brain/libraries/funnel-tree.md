@@ -46,6 +46,9 @@ The traffic-source slice-dropdown source: distinct `utm_source` values present i
 ### `listReferrers({ admin, workspaceId, startIso, endIso })` → `{ referrer, label, sessions }[]`
 The referrer slice-dropdown source: real sessions grouped by `referrerGroup()`. The group key IS the slice value. Dynamic + self-pruning.
 
+### `listSliceOptions({ admin, workspaceId, startIso, endIso, product?, utmSource?, referrer? })` → `{ productOptions, utmSourceOptions, referrerOptions }`
+**Faceted / chained** dropdown options in one pass: each list is cross-filtered by the OTHER selected slices but NOT its own — so Source=meta narrows the Referrer list to referrers *seen in Meta traffic*, while the Source list still shows every source. "All" (null) on a slice = no constraint from it. This is what the route serves to the page (superseding the single-facet `list*` helpers, which remain exported for programmatic use). The page keeps a 0-count placeholder so a narrowed-out current selection stays visible in its `<select>`.
+
 ### `referrerGroup(referrer)` → group key
 Exported helper. Normalizes a raw `referrer` to a platform/origin: in-app webview app ids + hosts → Facebook / Instagram / Google Search / Bing / TikTok; **the Blog is on the STORE host (`shop.superfoodscompany.com/blog`)** so it's keyed on the `/blog` PATH, with same-host non-blog referrers → "Internal / on-site"; empty → "Direct / in-app"; unknown → bare host. The referrer slice adds resolution `utm_source` lacks — it splits `utm_source=meta` into Facebook vs Instagram.
 
@@ -59,7 +62,7 @@ Exported helper — tolerant URL parse (absolute / relative / malformed).
 - **Caller owns Central-time boundary math** (`centralBoundary`) — the SDK takes UTC instants so it stays presentation-agnostic.
 
 ## Consumers
-- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal slice filters (**Product × Source × Referrer**, all composing) — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns `productOptions` + `utmSourceOptions` (from `listFunnelProducts` / `listUtmSources`) computed over a wide launch→today window so the slice dropdowns stay stable across date ranges.
+- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal slice filters (**Product × Source × Referrer**, all composing) — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns the three dropdown lists from `listSliceOptions` (faceted/chained — each reflects the other selected slices), computed over a wide launch→today window so the dropdowns stay stable across date ranges.
 - (planned) Max's performance-data assembly — the Growth Director reads the same tree he directs agents on.
 
 ## Related

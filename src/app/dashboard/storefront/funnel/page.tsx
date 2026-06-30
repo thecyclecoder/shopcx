@@ -78,6 +78,7 @@ function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource
         <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Product</span>
         <select value={product} onChange={(e) => onProduct(e.target.value)} className={selectClass}>
           <option value="">All products</option>
+          {product && !productOptions.some((o) => o.handle === product) && <option value={product}>{product} (0)</option>}
           {productOptions.map((o) => (
             <option key={o.handle} value={o.handle}>{o.title} ({o.sessions.toLocaleString()})</option>
           ))}
@@ -87,6 +88,7 @@ function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource
         <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Source</span>
         <select value={utmSource} onChange={(e) => onUtmSource(e.target.value)} className={selectClass}>
           <option value="">All sources</option>
+          {utmSource && !utmOptions.some((o) => o.source === utmSource) && <option value={utmSource}>{utmSource} (0)</option>}
           {utmOptions.map((o) => (
             <option key={o.source} value={o.source}>{o.label} ({o.sessions.toLocaleString()})</option>
           ))}
@@ -96,6 +98,7 @@ function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource
         <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Referrer</span>
         <select value={referrer} onChange={(e) => onReferrer(e.target.value)} className={selectClass}>
           <option value="">All referrers</option>
+          {referrer && !referrerOptions.some((o) => o.referrer === referrer) && <option value={referrer}>{referrer} (0)</option>}
           {referrerOptions.map((o) => (
             <option key={o.referrer} value={o.referrer}>{o.label} ({o.sessions.toLocaleString()})</option>
           ))}

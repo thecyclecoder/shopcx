@@ -119,6 +119,19 @@ export function referrerGroup(referrer: string | null): string {
   return host || "Direct / in-app";
 }
 
+// ── shared slice-match predicates (used by the tree AND the faceted options) ──
+/** wanted=null → match all. DIRECT_UTM → sessions with no utm_source. */
+function matchUtm(sUtm: string | null, wanted: string | null): boolean {
+  if (!wanted) return true;
+  if (wanted === DIRECT_UTM) return !sUtm;
+  return (sUtm || "").toLowerCase() === wanted;
+}
+/** wanted=null → match all. Else compares against the session's referrerGroup. */
+function matchRef(sRef: string | null, wanted: string | null): boolean {
+  if (!wanted) return true;
+  return referrerGroup(sRef) === wanted;
+}
+
 export interface FunnelStepCounts {
   visit: number;
   engaged: number;
@@ -355,13 +368,9 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     if (s.is_internal || s.is_bot) continue;
     if (s.customer_id && internalCustomerIds.has(s.customer_id)) continue;
 
-    // Traffic-source slice (composes with the product slice below).
-    if (utmWanted) {
-      if (utmWanted === DIRECT_UTM) { if (s.utm_source) continue; }
-      else if ((s.utm_source || "").toLowerCase() !== utmWanted) continue;
-    }
-    // Referrer slice (composes with the others).
-    if (refWanted && referrerGroup(s.referrer) !== refWanted) continue;
+    // Traffic-source + referrer slices (compose with the product slice below).
+    if (!matchUtm(s.utm_source, utmWanted)) continue;
+    if (!matchRef(s.referrer, refWanted)) continue;
 
     // Every session in the universe loaded the page → always a visit. The deeper
     // steps come from the events it actually fired in the window.
@@ -600,4 +609,81 @@ export async function listReferrers(args: {
   return [...counts.entries()]
     .map(([referrer, sessions]) => ({ referrer, label: referrer, sessions }))
     .sort((a, b) => b.sessions - a.sessions);
+}
+
+/**
+ * Faceted (chained) slice options for all three dropdowns in ONE pass. Each
+ * list is cross-filtered by the OTHER selected slices but NOT its own — so
+ * selecting Source=meta narrows the Referrer list to referrers SEEN in Meta
+ * traffic, while the Source list itself still shows every source. "All" on a
+ * slice (null) = no constraint from it. Computed over the wide dropdown window
+ * so the lists stay stable across the selected date range.
+ */
+export async function listSliceOptions(args: {
+  admin: Admin;
+  workspaceId: string;
+  startIso: string;
+  endIso: string;
+  product?: string | null;
+  utmSource?: string | null;
+  referrer?: string | null;
+}): Promise<{
+  productOptions: Array<{ handle: string; title: string; sessions: number }>;
+  utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
+  referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
+}> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.product ? args.product.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+
+  const { data: productRows } = await admin
+    .from("products").select("handle, title").eq("workspace_id", workspaceId);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const handleTitle = new Map<string, string>((productRows || []).map((p) => [String(p.handle).toLowerCase(), p.title as string]));
+
+  const sessions = await fetchAllRows<{ landing_url: string | null; utm_source: string | null; referrer: string | null }>(() =>
+    admin
+      .from("storefront_sessions")
+      .select("landing_url, utm_source, referrer, last_seen_at")
+      .eq("workspace_id", workspaceId)
+      .eq("is_internal", false)
+      .eq("is_bot", false)
+      .gte("last_seen_at", startIso)
+      .lte("last_seen_at", endIso)
+      .order("last_seen_at", { ascending: true }),
+  );
+
+  const productCounts = new Map<string, number>();
+  const utmCounts = new Map<string, number>();
+  const refCounts = new Map<string, number>();
+  for (const s of sessions) {
+    const { segments } = parseLanding(s.landing_url);
+    const handle = resolveHandle(segments, handleSet);
+    const okProduct = !product || handle === product;
+    const okUtm = matchUtm(s.utm_source, utmWanted);
+    const okRef = matchRef(s.referrer, refWanted);
+
+    if (okUtm && okRef && handle) productCounts.set(handle, (productCounts.get(handle) || 0) + 1);
+    if (okProduct && okRef) {
+      const key = s.utm_source && s.utm_source.trim() ? s.utm_source : DIRECT_UTM;
+      utmCounts.set(key, (utmCounts.get(key) || 0) + 1);
+    }
+    if (okProduct && okUtm) {
+      const key = referrerGroup(s.referrer);
+      refCounts.set(key, (refCounts.get(key) || 0) + 1);
+    }
+  }
+
+  return {
+    productOptions: [...productCounts.entries()]
+      .map(([handle, sessions]) => ({ handle, title: handleTitle.get(handle) ?? handle, sessions }))
+      .sort((a, b) => b.sessions - a.sessions),
+    utmSourceOptions: [...utmCounts.entries()]
+      .map(([source, sessions]) => ({ source, label: source === DIRECT_UTM ? "Direct / none" : source, sessions }))
+      .sort((a, b) => b.sessions - a.sessions),
+    referrerOptions: [...refCounts.entries()]
+      .map(([referrer, sessions]) => ({ referrer, label: referrer, sessions }))
+      .sort((a, b) => b.sessions - a.sessions),
+  };
 }
