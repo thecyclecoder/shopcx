@@ -149,6 +149,8 @@ Reap is **by kind**:
 5. **Repo + secrets.** Clone with a token (`git clone https://x-access-token:$GITHUB_TOKEN@github.com/thecyclecoder/shopcx.git /root/shopcx`), `npm install`, drop in `.env.local` (prod secrets + `GITHUB_TOKEN`) **with `ANTHROPIC_API_KEY` commented out**.
 6. **Service.** `/etc/systemd/system/shopcx-builder.service` → `ExecStart=/usr/bin/tsx scripts/builder-worker.ts`, `WorkingDirectory=/root/shopcx`, `Environment=HOME=/root`, `Restart=always`, **plus `StartLimitIntervalSec=300` / `StartLimitBurst=5`** (so the self-update crash-loop guard can park a flapping worker — see § Worker self-update). Then `systemctl enable --now shopcx-builder`.
 
+**The entrypoint + every script the box spawns run under `tsx` (esbuild), not `tsc`.** Those are different parsers — a syntax error esbuild rejects (e.g. an unescaped backtick in a template literal) can pass `tsc --noEmit` clean and merge, then crash-loop the worker at boot (it did, ~5h, 2026-06). The `predeploy` gate runs `check:box-parses` (`scripts/_check-box-parses.ts`) to esbuild-bundle-parse `builder-worker.ts` + every spawned tsx entrypoint before merge — see [[../operational-rules#box-code-parses-under-esbuild-not-just-tsc-predeploy-guard]].
+
 ## Gotchas (learned in the live bring-up 2026-06-18)
 
 - **A fresh box has no git identity** → `git commit` silently fails → empty branch → GitHub rejects the PR ("No commits between…"). The worker now sets a repo-local identity itself (`ensureGitIdentity`) and fails loudly on commit/push/PR errors.
