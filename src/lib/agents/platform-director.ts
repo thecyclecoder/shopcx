@@ -1375,14 +1375,30 @@ const ACTIVE_BUILD_STATUSES: ReadonlySet<string> = new Set([
 export const BUILD_POOL_CAPACITY = 8;
 
 /** Statuses a build/plan job sits in while it OCCUPIES or is HEADED FOR a lane (queued included) — the
- *  saturation denominator. `claimed` (the RPC's pre-launch flip) counts; a terminal/held job does not. */
-const INFLIGHT_POOL_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"];
+ *  saturation denominator. `claimed` (the RPC's pre-launch flip) counts; a terminal/held job does not.
+ *
+ *  ⭐ PARKED ≠ RUNNING/HEADED (box-fill-8-lanes). `needs_input`/`needs_approval` are DELIBERATELY EXCLUDED:
+ *  a build parked on a human ("1 build paused — storefront-optimizer, awaiting owner action") is NOT on a
+ *  lane and is NOT headed for one until the owner acts — it consumes ZERO lane capacity. Counting parked
+ *  builds here read the pool "full" when lanes were wide open, so the director GROOMED/INITIATED nothing and
+ *  queued builds sat 30+ min behind a couple of parked ones. The denominator now counts ONLY builds that
+ *  occupy a lane (`claimed`/`building`) or are genuinely headed for one (`queued`/`queued_resume`); a parked
+ *  build must never reduce the lanes available to enqueue + run OTHER queued work. `queued` stays IN (it's
+ *  headed for a lane) so the pass tops up to capacity without OVER-queuing — but parked is out.
+ *
+ *  Note the box CLAIM loop (`scripts/builder-worker.ts`, `while (countOther() < MAX_CONCURRENT)`) already
+ *  computes free lanes as `8 − running` from its in-memory `active` map (a parked build ends its session, so
+ *  it's removed from `active` and holds no lane) — the claim path was never parked-inclusive. This is the
+ *  matching fix on the ENQUEUE side so the queue actually gets filled to feed those open lanes. */
+const INFLIGHT_POOL_STATUSES = ["queued", "claimed", "building", "queued_resume"];
 
 /**
  * Saturation target (director-initiation-throughput Phase 1): how many MORE builds the pool can take right
- * now = {@link BUILD_POOL_CAPACITY} − (build/plan jobs already in-flight). Counts every in-flight status
- * (queued included) so a build queued earlier in THIS pass shrinks the target for the next lane — the pass
- * tops the pool up to capacity and never over-fills it. When lanes are full it returns 0 (enqueue nothing);
+ * now = {@link BUILD_POOL_CAPACITY} − (build/plan jobs occupying or headed for a lane). Counts the
+ * lane-bound statuses (queued/claimed/building/queued_resume) — `queued` included so a build queued earlier
+ * in THIS pass shrinks the target for the next lane (the pass tops the pool up to capacity and never
+ * over-fills it). PARKED builds (needs_input/needs_approval) are NOT counted: parked on a human ⇒ off-lane ⇒
+ * must not throttle topping up the pool for other work. When lanes are full it returns 0 (enqueue nothing);
  * with 2 idle it returns 2; with 8 it returns 8. Clamped ≥0. Fail-CLOSED: a read error yields 0 so a
  * transient blip never over-saturates.
  */
