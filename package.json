@@ -25,6 +25,8 @@
     "test:error-feed": "tsx --test src/lib/control-tower/error-feed.test.ts",
     "test:portal-remediation": "tsx --test src/lib/portal/remediation.test.ts",
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
+    "test:ready-to-test": "tsx --test src/lib/ads/ready-to-test.test.ts",
+    "test:creative-outcome-attribution": "tsx --test src/lib/ads/creative-outcome-attribution.test.ts",
     "test:blended-cac-ltv": "tsx --test src/lib/blended-cac-ltv.test.ts",
     "test:growth-report-contract": "tsx --test src/lib/growth-report-contract.test.ts",
     "test:ad-spend-governor": "tsx --test src/lib/ad-spend-governor.test.ts"
