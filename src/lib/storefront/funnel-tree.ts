@@ -28,6 +28,14 @@
  *               beforeafter|…). No join, resolution-independent.
  *   - ANGLE    ← the VALUE of the `?angle=` param. The atomic leaf.
  *
+ * ── Visit definition ──────────────────────────────────────────────────────
+ *   Top-of-funnel "visit" = a session that fired ANY storefront event in the
+ *   window (the page loaded), NOT strictly a `pdp_view` event. pdp_view's
+ *   first-flush delivery drops ~17% (pixel reliability), so counting it would
+ *   undercount visits and inflate every rate. Deeper steps (engaged / pack /
+ *   checkout / order) stay event-based. This intentionally makes the visit
+ *   count EXCEED the legacy funnel's pdp_view top line — by the dropped ~17%.
+ *
  * ── Rollup math ──────────────────────────────────────────────────────────
  *   Each session lands on exactly one leaf (first-touch), so leaf session
  *   sets are MUTUALLY EXCLUSIVE — counts roll up by summation with no
@@ -49,15 +57,16 @@ type Admin = ReturnType<typeof createAdminClient>;
 /** event_type → funnel step key. Pack-selected ↔ checkout-started are 1:1 by
  *  design (the customize page is optional), so checkout_view is the reliable
  *  "reached checkout" signal. */
+// Deeper-step events → funnel step key. `visit` is NOT derived from pdp_view
+// (it's forced for every session in the event-window universe — see below);
+// pdp_view is left out of this map intentionally.
 const STEP_OF_EVENT: Record<string, keyof FunnelStepCounts> = {
-  pdp_view: "visit",
   pdp_engaged: "engaged",
   pack_selected: "pack_selected",
   checkout_view: "checkout_started",
   order_placed: "order_placed",
   add_to_cart: "add_to_cart",
 };
-const STEP_EVENT_TYPES = Object.keys(STEP_OF_EVENT);
 
 const VARIANT_LABEL: Record<string, string> = {
   reasons: "Listicle / Reasons",
@@ -226,19 +235,25 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     pageBySlug.set(String(p.slug), { id: p.id as string, headline: (p.headline as string) ?? null, hero_kind: (p.hero_kind as string) ?? null });
   }
 
-  // ── funnel-step events in window → per-session reached steps ──────────────
+  // ── ALL events in window → visit universe + per-session reached steps ─────
+  // "Visit" = a session that fired ANY storefront event in the window (the page
+  // loaded), NOT strictly a `pdp_view` event. pdp_view's first-flush delivery
+  // drops ~17% of the time (see specs/pixel-pdp-view-delivery), which would
+  // silently undercount top-of-funnel and INFLATE every downstream rate. A
+  // session's mere presence in the event log is the reliable visit signal.
   const eventRows = await fetchAllRows<{ event_type: string; session_id: string }>(() =>
     admin
       .from("storefront_events")
       .select("event_type, session_id")
       .eq("workspace_id", workspaceId)
-      .in("event_type", STEP_EVENT_TYPES)
       .gte("created_at", startIso)
       .lte("created_at", endIso)
       .order("id", { ascending: true }),
   );
+  const visitSessions = new Set<string>();
   const reachedBySession = new Map<string, Set<keyof FunnelStepCounts>>();
   for (const e of eventRows) {
+    visitSessions.add(e.session_id);
     const step = STEP_OF_EVENT[e.event_type];
     if (!step) continue;
     let set = reachedBySession.get(e.session_id);
@@ -246,8 +261,8 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     set.add(step);
   }
 
-  // ── fetch the sessions referenced by those events (batched) ───────────────
-  const sessionIds = [...reachedBySession.keys()];
+  // ── fetch the visit-universe sessions (batched) ───────────────────────────
+  const sessionIds = [...visitSessions];
   const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null }>();
   for (let i = 0; i < sessionIds.length; i += 300) {
     const chunk = sessionIds.slice(i, i + 300);
@@ -273,11 +288,16 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
 
   const NO_ANGLE = "(no angle)";
 
-  for (const [sid, reached] of reachedBySession) {
+  for (const sid of visitSessions) {
     const s = sessionById.get(sid);
     if (!s) continue; // session row missing — can't bucket
     if (s.is_internal || s.is_bot) continue;
     if (s.customer_id && internalCustomerIds.has(s.customer_id)) continue;
+
+    // Every session in the universe loaded the page → always a visit. The deeper
+    // steps come from the events it actually fired in the window.
+    const reached = new Set<keyof FunnelStepCounts>(reachedBySession.get(sid));
+    reached.add("visit");
 
     const { segments, variant, angle } = parseLanding(s.landing_url);
     const handle = resolveHandle(segments, handleSet);

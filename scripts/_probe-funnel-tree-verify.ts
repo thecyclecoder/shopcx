@@ -33,31 +33,32 @@ function printTree(nodes: FunnelNode[], depth = 0) {
 }
 
 async function rawGrandTotal(admin: ReturnType<typeof createAdminClient>, ws: string, startIso: string, endIso: string) {
-  // legacy method: distinct sessions per step from events, excluding internal/bot/internal-customer
+  // Independent method matching the SDK's definition: visit = distinct real
+  // sessions firing ANY event in window; deeper steps = distinct sessions per
+  // step event. Excludes internal/bot/internal-customer.
   const { data: ic } = await admin.from("customers").select("id").eq("workspace_id", ws).eq("is_internal", true);
   const icIds = new Set((ic || []).map((c) => c.id as string));
-  const types = ["pdp_view", "pdp_engaged", "pack_selected", "checkout_view", "order_placed"];
+  const stepTypes = ["pdp_engaged", "pack_selected", "checkout_view", "order_placed"];
+  const anyEvent = new Set<string>();
   const out: Record<string, Set<string>> = {};
-  for (const t of types) out[t] = new Set();
+  for (const t of stepTypes) out[t] = new Set();
   let from = 0;
   for (;;) {
     const { data } = await admin.from("storefront_events").select("event_type, session_id")
-      .eq("workspace_id", ws).in("event_type", types).gte("created_at", startIso).lte("created_at", endIso)
+      .eq("workspace_id", ws).gte("created_at", startIso).lte("created_at", endIso)
       .order("id", { ascending: true }).range(from, from + 999);
     const rows = data || [];
-    for (const r of rows) out[r.event_type as string]?.add(r.session_id as string);
+    for (const r of rows) { anyEvent.add(r.session_id as string); out[r.event_type as string]?.add(r.session_id as string); }
     if (rows.length < 1000) break; from += 1000;
   }
-  // exclude internal sessions
-  const allIds = new Set<string>(); for (const t of types) for (const id of out[t]) allIds.add(id);
   const internalSess = new Set<string>();
-  const idArr = [...allIds];
+  const idArr = [...anyEvent];
   for (let i = 0; i < idArr.length; i += 300) {
     const { data } = await admin.from("storefront_sessions").select("id, is_internal, is_bot, customer_id").in("id", idArr.slice(i, i + 300));
     for (const s of data || []) if (s.is_internal || s.is_bot || (s.customer_id && icIds.has(s.customer_id as string))) internalSess.add(s.id as string);
   }
-  const count = (t: string) => [...out[t]].filter((id) => !internalSess.has(id)).length;
-  return { visit: count("pdp_view"), engaged: count("pdp_engaged"), pack: count("pack_selected"), checkout: count("checkout_view"), order: count("order_placed") };
+  const count = (set: Set<string>) => [...set].filter((id) => !internalSess.has(id)).length;
+  return { visit: count(anyEvent), engaged: count(out["pdp_engaged"]), pack: count(out["pack_selected"]), checkout: count(out["checkout_view"]), order: count(out["order_placed"]) };
 }
 
 async function main() {

@@ -301,8 +301,28 @@ function flush() {
     experiment_assignments: experimentAssignments,
   });
 
-  // Fire-and-forget POST. keepalive lets the request survive a
-  // page-navigation race when not using sendBeacon.
+  post(payload);
+}
+
+/**
+ * Beacon-first delivery. sendBeacon is the reliable path even during the
+ * heavy initial page load — keepalive `fetch` issued at first-flush time
+ * (≈500ms after mount) was being dropped ~17% of the time, esp. on iOS
+ * Safari, silently losing the pdp_view that opens the funnel (the session
+ * still landed via a later flush, so the visit existed but read as
+ * pdp_view-less). The endpoint is upsert-with-ignore-duplicates so a
+ * sendBeacon that races a later flush is harmless. Falls back to
+ * keepalive fetch when sendBeacon is unavailable or refuses the payload.
+ */
+function post(payload: string) {
+  if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    try {
+      const blob = new Blob([payload], { type: "application/json" });
+      if (navigator.sendBeacon(PIXEL_PATH, blob)) return;
+    } catch {
+      /* sendBeacon threw (queue full / too large) — fall through to fetch */
+    }
+  }
   fetch(PIXEL_PATH, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -340,18 +360,7 @@ function flushBeacon() {
     experiment_assignments: experimentAssignments,
   });
 
-  try {
-    const blob = new Blob([payload], { type: "application/json" });
-    navigator.sendBeacon(PIXEL_PATH, blob);
-  } catch {
-    // Older browsers, no sendBeacon — fall back to fire-and-forget fetch.
-    fetch(PIXEL_PATH, {
-      method: "POST",
-      body: payload,
-      headers: { "Content-Type": "application/json" },
-      keepalive: true,
-    }).catch(() => {});
-  }
+  post(payload);
 }
 
 function getOrCreateAnonymousId(): string {

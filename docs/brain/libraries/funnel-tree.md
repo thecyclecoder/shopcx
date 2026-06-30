@@ -28,10 +28,12 @@ When no product slice is applied the top level is a **forest** of product nodes;
 ## Exports
 
 ### `computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle? })` → `FunnelTreeResult`
-1. Pull funnel-step events (`pdp_view`/`pdp_engaged`/`pack_selected`/`checkout_view`/`order_placed`/`add_to_cart`) in `[startIso,endIso]`, paginated → per-session reached-step set.
-2. Fetch the referenced sessions (chunked `.in("id")`, 300/page); drop `is_internal`, `is_bot`, internal-customer-stitched — same real-traffic exclusion as the legacy funnel.
-3. Bucket each session into one leaf via the keys above; accumulate step counts.
+1. Pull **ALL** events in `[startIso,endIso]`, paginated → the **visit universe** (every session that fired any event = the page loaded) + the per-session reached-step set (engaged/pack/checkout/order/atc).
+2. Fetch the visit-universe sessions (chunked `.in("id")`, 300/page); drop `is_internal`, `is_bot`, internal-customer-stitched — same real-traffic exclusion as the legacy funnel.
+3. Bucket each session into one leaf via the keys above; **force `visit`** for every universe session, accumulate deeper-step counts from the events it fired.
 4. Roll up **bottom-up by summation** (leaf session sets are mutually exclusive — first-touch), **recomputing rates at every node** from summed counts (never averaging child %).
+
+**Visit definition:** top-of-funnel `visit` = a session that fired ANY event in the window, **not** strictly a `pdp_view` event. pdp_view's first-flush delivery drops ~17% ([[../specs/pixel-pdp-view-delivery]]), so counting it undercounts visits and inflates every downstream rate. This intentionally makes `visit` EXCEED the legacy funnel's pdp_view top line by the dropped ~17%.
 - Returns `products` (forest), `unattributedEntry` (non-product landings e.g. `/checkout` — surfaced separately but **included in `grandTotal`** so it reconciles), and `grandTotal` (all sessions combined). Each node carries `FunnelNodeMetrics`: the 5 step counts + `add_to_cart`, plus `engagement_rate` (engaged/visit), `conversion_rate` (order/visit), `atc_rate`.
 
 ### `listFunnelProducts({ admin, workspaceId, startIso, endIso })` → `{ handle, title, sessions }[]`
@@ -42,7 +44,7 @@ Exported helper — tolerant URL parse (absolute / relative / malformed).
 
 ## Invariants & gotchas
 - **Pack-selected ↔ Checkout-started are 1:1 by design** (the customize page is optional). The 100% step is structural, not a tracking gap. `checkout_view` is the reliable "reached checkout" signal.
-- **`grandTotal` reconciles** with the legacy `GET /api/workspaces/[id]/storefront-funnel` top line for the same window (verified via `scripts/_probe-funnel-tree-verify.ts` — distinct-session counts match exactly).
+- **`grandTotal` intentionally exceeds the legacy `GET /api/workspaces/[id]/storefront-funnel` top line** (which counts pdp_view) by the dropped ~17% — the SDK is the corrected number. `grandTotal` self-reconciles with an independent any-event count (verified via `scripts/_probe-funnel-tree-verify.ts`); deeper steps still match the legacy event-based counts exactly.
 - **No silent drops:** an unknown `variant` value gets its own visible row; a variant present without an `angle` becomes a visible `(no angle)` leaf.
 - **Caller owns Central-time boundary math** (`centralBoundary`) — the SDK takes UTC instants so it stays presentation-agnostic.
 
