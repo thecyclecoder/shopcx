@@ -152,7 +152,13 @@ export async function healAppstleContract(workspaceId: string, contractId: strin
         cache: "no-store",
       });
       if (pr.ok) result.healedLines++;
-      else { result.failed++; console.error(`[appstle-heal] PUT ${pr.status} for ${contractId}/${line.id}`); }
+      else {
+        result.failed++;
+        // healOnTouch already records this non-fatally via HealResult.failed — warn (not error) keeps it off the Control Tower ERR feed.
+        const body = await pr.text().catch(() => "");
+        const snippet = body.replace(/\s+/g, " ").trim().slice(0, 200);
+        console.warn(`[appstle-heal] PUT ${pr.status} for ${contractId}/${line.id} — body: ${snippet}`);
+      }
     } catch (e) {
       result.failed++;
       console.error(`[appstle-heal] threw for ${contractId}/${line.id}:`, e instanceof Error ? e.message : e);

@@ -28,10 +28,12 @@ Generated ad angles per product — each row is one hook × Life Force 8 slot, a
 | `times_used` | `int4` | — | default: `0` |
 | `last_performance` | `jsonb` | ✓ |  |
 | `is_active` | `bool` | — | default: `true` |
+| `status` | `text` | — | default: `'approved'` · CHECK in (`proposed`, `approved`, `archived`) — voice-mined candidates land at `proposed` and flip to `approved` on Director sign-off |
+| `metadata` | `jsonb` | — | default: `'{}'` · voice-mining provenance: `{mined_from:{review_ids,cancel_event_ids,ticket_ids}, matrix_overlap, density, score, mechanism_claim, offer}` |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
 
-Index: `product_ad_angles_active_lookup_idx (workspace_id, product_id, created_at DESC) WHERE is_active`.
+Indexes: `product_ad_angles_active_lookup_idx (workspace_id, product_id, created_at DESC) WHERE is_active` · `product_ad_angles_proposed_idx (workspace_id, product_id, created_at DESC) WHERE status='proposed'`.
 
 ## Foreign keys
 
@@ -69,7 +71,8 @@ const { count } = await admin.from("product_ad_angles")
 - `lead_benefit_anchor` must be **verbatim** from [[product_page_content]] or [[product_benefit_selections]] — never paraphrased. This is the anchoring contract that ties an angle to a real, approved claim.
 - `meta_headline` / `meta_primary_text` / `meta_description` are length-capped by CHECK constraints (40 / 125 / 30) — inserts that exceed them fail at the DB.
 - **Re-runs archive, never overwrite:** `generateAngles()` flips prior active rows to `is_active=false`, then appends fresh rows. Read with `WHERE is_active`.
-- Written by `generateAngles()` in `src/lib/ad-angles.ts`.
+- Written by `generateAngles()` in `src/lib/ad-angles.ts` (the tier-1..5 product-intel pipeline → `status='approved'` + `is_active=true`).
+- Also written by `persistProposedAngles()` in `src/lib/ads/customer-voice-mining.ts` (the customer-voice → ad-angles synthesizer) → `status='proposed'`, `is_active=false`, `generated_by='agent'`. The Phase-3 Director sweep is what flips those to `approved` and turns on `is_active`.
 
 ---
 

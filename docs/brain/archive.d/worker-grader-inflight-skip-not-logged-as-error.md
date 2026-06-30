@@ -1,0 +1,1 @@
+- **Worker-grader: don't log the 'not_concluded' in-flight skip as an error** · verified 2026-06-30 · → [[../libraries/agent-grader]]

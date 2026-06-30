@@ -221,17 +221,34 @@ export async function enqueuePrResolveJob(
     .maybeSingle();
   if (existing) return { enqueued: false, reason: "active job exists" };
 
-  // Retry cap (dirty-pr-resolver-duplicate-detection Phase 1): count EVERY pr-resolve job ever enqueued for
-  // this PR (any status). At/over the cap, stop looping — surface to the owner once and do NOT enqueue again.
-  const { count } = await admin
+  // Retry cap (dirty-pr-resolver-duplicate-detection Phase 1): stop looping after MAX_PR_RESOLVE_ATTEMPTS
+  // GENUINE resolve attempts — surface to the owner once and do NOT enqueue again.
+  //
+  // pr-resolve-cap-ignores-infra-failures: count only attempts that actually RAN the resolver to a verdict.
+  // An INFRASTRUCTURE failure — `git worktree add` blew up, a push/fetch died, the box crashed before the
+  // resolver started — is NOT the resolver giving up on a hard conflict; counting it burned the 3-strike
+  // human-escalation budget on a box bug. That's exactly what wedged growth-adopt-storefront-optimizer (#878)
+  // + kpi-audit (#847): all 3 of each PR's pr-resolve jobs `failed` with "worktree add failed" during the 5h
+  // crash-loop's unstable window → cap reached → surfaced needs-human → the green branch never resolved/merged
+  // even though the box bug (the missing removeWorktreeForBranch precondition) is now fixed. We also exclude
+  // the `needs_attention` sentinel surfaceExhaustedPrResolve leaves (a marker, not an attempt). So once the
+  // infra bug is fixed, the standing-pass dirty-PR backstop re-enqueues a fresh, now-succeeding resolve.
+  const { data: priorJobs } = await admin
     .from("agent_jobs")
-    .select("id", { count: "exact", head: true })
+    .select("status, error")
     .eq("workspace_id", input.workspaceId)
     .eq("kind", "pr-resolve")
     .eq("spec_slug", slug);
-  if ((count ?? 0) >= MAX_PR_RESOLVE_ATTEMPTS) {
-    await surfaceExhaustedPrResolve(admin, input.workspaceId, input.prNumber, count ?? 0);
-    return { enqueued: false, reason: `retry cap reached (${count} attempts) — surfaced to owner` };
+  const INFRA_FAILURE_RE = /worktree add failed|git (?:push|fetch|checkout|merge|worktree) failed|ENOSPC|could not lock|no space left/i;
+  const genuineAttempts = (priorJobs ?? []).filter((j) => {
+    const job = j as { status: string; error: string | null };
+    if (job.status === "needs_attention") return false; // the surfaced sentinel — not an attempt
+    if (job.status === "failed" && INFRA_FAILURE_RE.test(job.error ?? "")) return false; // box/infra, not a resolve verdict
+    return true;
+  }).length;
+  if (genuineAttempts >= MAX_PR_RESOLVE_ATTEMPTS) {
+    await surfaceExhaustedPrResolve(admin, input.workspaceId, input.prNumber, genuineAttempts);
+    return { enqueued: false, reason: `retry cap reached (${genuineAttempts} attempts) — surfaced to owner` };
   }
 
   const { error } = await admin.from("agent_jobs").insert({

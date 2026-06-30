@@ -302,7 +302,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier" | "propose_policy_activation";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -3112,6 +3112,29 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing auto-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // DIRTY-PR resolve backstop (finalize-standing-backstop — Gate-A conflict leg). The MIRROR of the
+    // auto-merge backstop above: that one merges READY (clean) one-off PRs; THIS one enqueues a pr-resolve
+    // job for the CONFLICTING ones so they get rebased and THEN auto-merged next pass. WHY a standing-pass
+    // backstop is REQUIRED, not just nice-to-have: detectAndEnqueueDirtyPrs previously ran ONLY from the
+    // GitHub `push`-to-main webhook. That webhook fires the instant main moves — but GitHub hasn't COMPUTED
+    // the new mergeability yet, so the freshly-conflicted PR still reads `mergeable: null` (unknown) and is
+    // skipped; the later "mergeability computed → CONFLICTING" transition has NO webhook (GitHub doesn't send
+    // one), so the pr-resolve job is never enqueued and a green one-off PR sits CONFLICTING forever while the
+    // auto-merge gate (correctly) refuses every non-clean PR (the live growth-adopt-storefront-optimizer
+    // wedge: PR #878 built+green+accumulated on a HEALTHY box, but dirty vs main → no resolver, never merged).
+    // This is the SAME event-only fragility Gate A / the pre-merge legs had. Re-checking every pass catches
+    // the conflict once GitHub HAS computed it. Idempotent: enqueuePrResolveJob dedupes per PR + is retry-
+    // capped, and a duplicate (work already on main via a sibling) is closed instead of looped.
+    const { detectAndEnqueueDirtyPrs } = await import("../src/lib/github-pr-resolve");
+    const dp = await detectAndEnqueueDirtyPrs(db);
+    if (dp.enqueued || dp.closedDuplicate) {
+      notes.push(`dirty-pr backstop → ${dp.enqueued} pr-resolve enqueued, ${dp.closedDuplicate} duplicate(s) closed (of ${dp.conflicting} conflicting / ${dp.checked} claude PRs)`);
+    }
+  } catch (e) {
+    notes.push(`dirty-pr backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing dirty-pr backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // MERGED-PHASE reconcile (ship-all-phases-on-squash-merge / post-merge-ships-only-one-phase fix). A
     // squash-merge ships the WHOLE accumulated spec atomically, but the merge hook only runs on the
     // completed→merged transition — a spec that ALREADY merged under the old one-phase-only hook stays stuck
@@ -3126,6 +3149,32 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`merged-phase reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing merged-phase reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // BUILT-NOT-STAMPED heal backstop (finalize-standing-backstop — finalize/stamp leg). Detects a spec with
+    // a non-terminal phase (not shipped/rejected) whose completed/merged build job proves the work ALREADY
+    // landed on main — via the "already merged via #N" / "already built — PR #N implemented …" signal, or the
+    // per-phase "All Phase-N artifacts already exist on main" no-op — and stamps those phase(s) shipped (the
+    // leaf write that advances the derived status). WHY a standing-pass backstop is REQUIRED, not just nice-
+    // to-have: healBuiltUnstampedPhases previously ran ONLY in the Inngest `spec-drift-reconcile` function —
+    // an OUTSIDE-the-box trigger an Inngest sync/deploy can silently reap (the very thing the 5h crash-loop
+    // did). The wedge it heals is the live built-not-stamped class: a HEALTHY-box build finds the work already
+    // on main (so it makes zero edits), the no-change reconcile can't auto-confirm + marks the job completed
+    // without ever stamping the phases → accumulation never completes, Gate A never fires, the job is terminal
+    // so it never re-dispatches (appstle-attempt-billing-coerce-string-id: both phases merged via #891, left
+    // in_progress + un-stamped). Re-running it every standing pass self-heals these. SAFE by construction: it
+    // acts ONLY on a strong already-shipped-via-#N proof in a completed/merged job (a spec with a REAL
+    // spec-test failure or a needs_human gate carries NO such signal, so it is never force-shipped), skips
+    // folded specs, is idempotent (a re-run finds the phase already shipped → no-op), and reports every heal
+    // as a `healed_built_unstamped` director_activity row (never silent).
+    const { healBuiltUnstampedPhases } = await import("../src/lib/spec-drift");
+    const healed = await healBuiltUnstampedPhases(job.workspace_id);
+    if (healed.length) {
+      notes.push(`built-not-stamped heal → stamped ${healed.reduce((n, h) => n + h.phases.length, 0)} phase(s) shipped across ${healed.length} spec(s): ${healed.map((h) => h.slug).join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`built-not-stamped heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing built-not-stamped heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // PRE-MERGE checks backstop (security-test-on-preview-pre-merge + spec-goal-branch-pm-flow M3). WHY a
@@ -4816,6 +4865,68 @@ async function runGrowthDirectorJob(job: Job) {
     const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
 
     if (verdict === "auto-approve") {
+      // growth-adopt-meta-iteration-engine Phase 3 — spend-rail guard at activation time. BEFORE we
+      // mark anything approved + executed, project the daily budget motion each propose_policy_activation
+      // would authorize against the workspace's effective `ad_spend_budgets` ceiling for the same
+      // (workspace_id, meta_ad_account_id). If ANY action would breach the rail, refuse the WHOLE
+      // bundle in-leash: write one `refused_iteration_policy` activity row per refused action and
+      // route the diagnosis to the CEO via `escalateDiagnosisToCeo` (escalationKind='ad_spend_ceiling').
+      // The Director's leash boundary — raising the ceiling is the CEO's call; the loop never widens
+      // its own envelope (operational-rules § North star).
+      const proposeForGuard = (t.pending_actions ?? []).filter((a) => a.type === "propose_policy_activation" && a.id);
+      if (proposeForGuard.length) {
+        const { validateActivationAgainstSpendRail } = await import("../src/lib/iteration-policy-authoring");
+        type ProposeGuardPayload = {
+          draft?: { per_account_daily_budget_delta_ceiling_cents?: number; scale_up_step_pct?: number };
+          meta_ad_account_id?: string | null;
+        };
+        const refusals: { actionId: string; diagnosis: string; metadata: Record<string, unknown> }[] = [];
+        for (const a of proposeForGuard) {
+          const payload = a.payload as ProposeGuardPayload | undefined;
+          if (!payload?.draft) continue; // Phase 1's existing missing-payload branch handles this below
+          const guard = await validateActivationAgainstSpendRail(db, {
+            workspaceId: t.workspace_id,
+            draft: {
+              per_account_daily_budget_delta_ceiling_cents: Number(payload.draft.per_account_daily_budget_delta_ceiling_cents ?? 0),
+              scale_up_step_pct: Number(payload.draft.scale_up_step_pct ?? 0),
+            },
+            metaAdAccountId: payload.meta_ad_account_id ?? null,
+          });
+          if (!guard.allow) {
+            refusals.push({ actionId: a.id as string, diagnosis: guard.diagnosis, metadata: { ...guard.metadata, action_id: a.id, job_id: t.id, target_kind: t.kind } });
+          }
+        }
+        if (refusals.length) {
+          const firstRefusal = refusals[0]; // one CEO escalation is enough — the guard's diagnosis covers the bundle's worst breach.
+          for (const r of refusals) {
+            await recordDirectorActivity(db, {
+              workspaceId: t.workspace_id,
+              directorFunction: "growth",
+              actionKind: "refused_iteration_policy",
+              specSlug: t.spec_slug,
+              reason: r.diagnosis,
+              metadata: { ...r.metadata, refusal_reason: "ad_spend_ceiling_would_breach", autonomous: true },
+            });
+          }
+          await pdLib.escalateDiagnosisToCeo(db, {
+            workspaceId: t.workspace_id,
+            specSlug: t.spec_slug,
+            title: "Ad spend ceiling would breach — policy activation refused",
+            diagnosis: firstRefusal.diagnosis,
+            dedupeKey: `ad_spend_ceiling:${t.workspace_id}:policy:${t.id}`,
+            deepLink: "/dashboard/marketing/ads",
+            escalationKind: "ad_spend_ceiling",
+            metadata: firstRefusal.metadata,
+          });
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approve REFUSED by spend-rail guard (${refusals.length}/${proposeForGuard.length} actions would breach the ad_spend_budgets ceiling) → routed to CEO inbox`.slice(-2000),
+          });
+          console.log(`${tag} spend-rail refusal: ${refusals.length}/${proposeForGuard.length} would breach → CEO escalation emitted`);
+          return;
+        }
+      }
+
       const res = await lib.applyDirectorApproval(db, t, leashActions.map((a) => a.actionId), reasoning || `auto-approved (${bundleLabel}) within the leash`);
       if (!res.ok) {
         await update(job.id, { status: "needs_attention", error: `director approve failed: ${res.error}`, log_tail: `auto-approve FAILED: ${res.error}`.slice(-2000) });
@@ -4823,6 +4934,165 @@ async function runGrowthDirectorJob(job: Job) {
         return;
       }
       await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "growth", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${bundleLabel})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true } });
+
+      // growth-adopt-meta-iteration-engine Phase 1 — execute every approved propose_policy_activation
+      // action inline. The leash gate has already cleared the bundle + the investigation soundness
+      // gate ran; on auto-approve the Director's authoring + activation IS the side effect (no
+      // separate queued_resume runner — the action's payload carries everything we need). After
+      // execution we mark the target's matching actions `done` and flip the target to `completed`
+      // so it doesn't sit in `queued_resume` waiting for a runner that doesn't exist. Failures park
+      // needs_attention on the growth-director job so the CEO sees the gap; the already-recorded
+      // approved_approval row stays for audit.
+      const propose = (t.pending_actions ?? []).filter((a) => a.type === "propose_policy_activation" && a.id);
+      if (propose.length) {
+        const { authorIterationPolicy, activateIterationPolicy } = await import("../src/lib/iteration-policy-authoring");
+        type ProposePayload = {
+          draft: import("../src/lib/iteration-policy-authoring").IterationPolicyDraft;
+          rationale: string;
+        };
+        const activations: string[] = [];
+        const proposeIds = new Set(propose.map((a) => a.id as string));
+        const updatedActions: typeof t.pending_actions = (t.pending_actions ?? []).map((a) => ({ ...a }));
+        for (const a of propose) {
+          const payload = a.payload as ProposePayload | undefined;
+          if (!payload?.draft || !payload?.rationale) {
+            await update(job.id, { status: "needs_attention", error: `propose_policy_activation action ${a.id} missing payload.draft/payload.rationale`, log_tail: `auto-approve OK but ${a.id} cannot execute — missing payload`.slice(-2000) });
+            console.warn(`${tag} propose_policy_activation ${a.id} missing payload — parked needs_attention`);
+            return;
+          }
+          try {
+            const authored = await authorIterationPolicy(db, {
+              workspaceId: t.workspace_id,
+              draft: payload.draft,
+              createdBy: "director",
+              rationale: payload.rationale,
+            });
+            const activated = await activateIterationPolicy(db, {
+              workspaceId: t.workspace_id,
+              policyId: authored.policyId,
+              activatedBy: "director",
+            });
+            await recordDirectorActivity(db, {
+              workspaceId: t.workspace_id,
+              directorFunction: "growth",
+              actionKind: "activated_iteration_policy",
+              specSlug: t.spec_slug,
+              reason: payload.rationale,
+              metadata: {
+                job_id: t.id,
+                target_kind: t.kind,
+                policy_id: authored.policyId,
+                version: authored.version,
+                rationale: payload.rationale,
+                superseded_policy_id: activated.supersededPolicyId,
+                autonomous: true,
+              },
+            });
+            const result = `activated iteration_policies v${authored.version}${activated.supersededPolicyId ? ` (superseded ${activated.supersededPolicyId.slice(0, 8)})` : ""}`;
+            for (const u of updatedActions ?? []) {
+              if (u.id === a.id) { u.status = "done"; (u as { result?: string }).result = result; }
+            }
+            activations.push(`v${authored.version} (${authored.policyId.slice(0, 8)})`);
+          } catch (e) {
+            const err = e instanceof Error ? e.message : String(e);
+            await update(job.id, { status: "needs_attention", error: `iteration_policies activation failed: ${err}`, log_tail: `auto-approve OK but activation FAILED: ${err}`.slice(-2000) });
+            console.warn(`${tag} iteration_policies activation FAILED: ${err}`);
+            return;
+          }
+        }
+        // Close the target so it doesn't sit `queued_resume`. The target's other approved actions
+        // (if any) keep their `approved` status so the kind-specific runner can still resume them on
+        // the next claim; for a target whose pending_actions are ALL propose_* there is nothing
+        // further to do and the target flips straight to `completed`.
+        void proposeIds; // proposeIds retained for readability of intent above
+        const fullyResolved = (updatedActions ?? []).every((u) => u.status === "done" || u.status === "declined" || u.status === "failed");
+        await db
+          .from("agent_jobs")
+          .update({
+            pending_actions: updatedActions,
+            status: fullyResolved ? "completed" : "queued_resume",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", t.id);
+        await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → activated iteration_policies ${activations.join(", ")}.\n${reasoning}`.slice(-2000) });
+        console.log(`${tag} auto-approved ${t.kind} (${bundleLabel}) → activated ${activations.join(", ")}`);
+        return;
+      }
+      // growth-adopt-creative-makers Phase 2: a `promote_ready_to_test_creative` action is
+      // SELF-EXECUTING — it inserts an `ad_publish_jobs` row with `publish_active=false` and fires
+      // `ad-tool/publish-to-meta` inline (the ad lands PAUSED; a second human approve flips it live).
+      // Each promotion also stamps one `director_activity` row of `action_kind='promoted_ready_to_test'`
+      // so the creative→publish-job lineage is gradable (Phase 3 closes the loop with the outcome row).
+      // Run after `applyDirectorApproval` has stamped each action `approved`; on success the target
+      // is finalized to `completed` (no separate resume runner needed).
+      const hasPromote = leashActions.some((a) => a.category === "promote_ready_to_test_creative");
+      if (hasPromote) {
+        const promoteLib = await import("../src/lib/ads/ready-to-test-promote");
+        const { data: refreshed } = await db
+          .from("agent_jobs")
+          .select("id, workspace_id, spec_slug, pending_actions")
+          .eq("id", t.id)
+          .maybeSingle();
+        if (refreshed) {
+          const refreshedTarget = refreshed as unknown as import("../src/lib/ads/ready-to-test-promote").PromoteTargetJob;
+          const exec = await promoteLib.executeApprovedPromotions(db, refreshedTarget);
+          const stillPending = (refreshedTarget.pending_actions || []).some((a) => (a.status ?? "pending") === "pending");
+          await db
+            .from("agent_jobs")
+            .update({
+              pending_actions: refreshedTarget.pending_actions,
+              status: stillPending ? "queued_resume" : exec.ok ? "completed" : "needs_attention",
+              error: exec.ok ? null : exec.executed.find((e) => !e.ok)?.reason ?? "promote failed",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", t.id);
+          const publishedIds = exec.executed.filter((e) => e.ok).map((e) => e.ad_publish_jobs_id).filter(Boolean);
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approved ${t.kind} (${bundleLabel}); promoted ${publishedIds.length} creative(s) → ad_publish_jobs ${publishedIds.join(", ")}.\n${reasoning}`.slice(-2000),
+          });
+          console.log(`${tag} auto-approved ${t.kind} (${bundleLabel}) — published ${publishedIds.length}/${exec.executed.length}`);
+          return;
+        }
+      }
+
+      // growth-customer-voice-to-ad-angles Phase 3: an `approve_voice_angle` action is SELF-EXECUTING —
+      // it inserts an ad_campaigns row at status='ready' tagged to the angle, flips the angle to
+      // status='approved', fires `ad-tool/static-requested` so the makers pipeline renders into
+      // ad_videos, and stamps `director_activity` action_kind='approved_voice_angle' carrying
+      // {angle_id, source_signal_counts}. Mirrors the promote branch above — same target lifecycle,
+      // independent executor module.
+      const hasApproveVoiceAngle = leashActions.some((a) => a.category === "approve_voice_angle");
+      if (hasApproveVoiceAngle) {
+        const voiceLib = await import("../src/lib/ads/voice-angle-approve");
+        const { data: refreshed } = await db
+          .from("agent_jobs")
+          .select("id, workspace_id, spec_slug, pending_actions")
+          .eq("id", t.id)
+          .maybeSingle();
+        if (refreshed) {
+          const refreshedTarget = refreshed as unknown as import("../src/lib/ads/voice-angle-approve").VoiceAngleTargetJob;
+          const exec = await voiceLib.executeApprovedVoiceAngles(db, refreshedTarget);
+          const stillPending = (refreshedTarget.pending_actions || []).some((a) => (a.status ?? "pending") === "pending");
+          await db
+            .from("agent_jobs")
+            .update({
+              pending_actions: refreshedTarget.pending_actions,
+              status: stillPending ? "queued_resume" : exec.ok ? "completed" : "needs_attention",
+              error: exec.ok ? null : exec.executed.find((e) => !e.ok)?.reason ?? "approve_voice_angle failed",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", t.id);
+          const campaignIds = exec.executed.filter((e) => e.ok).map((e) => e.ad_campaign_id).filter(Boolean);
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approved ${t.kind} (${bundleLabel}); approved ${campaignIds.length} voice angle(s) → ad_campaigns ${campaignIds.join(", ")}.\n${reasoning}`.slice(-2000),
+          });
+          console.log(`${tag} auto-approved ${t.kind} (${bundleLabel}) — approved_voice_angle ${campaignIds.length}/${exec.executed.length}`);
+          return;
+        }
+      }
+
       await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → target queued_resume.\n${reasoning}`.slice(-2000) });
       console.log(`${tag} auto-approved ${t.kind} (${bundleLabel})`);
       return;
@@ -9882,6 +10152,14 @@ async function runPrResolveJob(job: Job) {
   const wt = join(BUILDS_DIR, job.id);
   sh("git", ["fetch", "origin"]);
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
+  // pr-resolve-worktree-add-stale-branch: `git worktree add -B <branch>` FAILS ("already used by worktree
+  // at …") when ANY OTHER worktree still holds <branch> — left by a build/resolve that crashed without
+  // tearing down (exactly what the 5h crash-loop produced). Removing only the wt PATH above doesn't clear a
+  // sibling worktree on the same branch, so every retry re-hit "worktree add failed" until the cap was burned
+  // (the live cause #878 + #847 hit `pr-resolve retry cap reached` and never resolved → sat CONFLICTING → the
+  // green branch never merged). The build path already guards this via removeWorktreeForBranch; pr-resolve
+  // didn't. Add the SAME idempotent precondition so a stale-branch worktree can't wedge the resolver.
+  removeWorktreeForBranch(branch);
   const add = sh("git", ["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
   if (add.code !== 0) {
     await update(job.id, { status: "failed", error: "worktree add failed", log_tail: add.err.slice(-2000) });
@@ -13039,7 +13317,21 @@ async function dispatchJob(job: Job) {
         try {
           const { reconcileSpecDrift } = await import("../src/lib/spec-drift");
           const r = await reconcileSpecDrift(job.workspace_id, slug);
-          if (r.flipped.length || r.status === "shipped" || r.status === "in_progress") {
+          // built-not-stamped-no-advance-wedge (LIVE FIX): only treat the reconcile as a successful
+          // completion when it ACTUALLY ADVANCED the spec — at least one phase flipped shipped, OR the spec
+          // is now fully `shipped`. The prior `|| r.status === "in_progress"` clause was the live wedge bug:
+          // when Bo finds "no delta" but reconcileSpecDrift can NOT prove the phases are on main (its
+          // code-path match misses, or the work shipped via a SIBLING/duplicate PR it doesn't follow — e.g.
+          // appstle-attempt-billing-coerce-string-id whose both phases merged via #891), it returns
+          // status='in_progress' with flipped=[] (nothing advanced). Completing the job there left a
+          // `completed` build whose phase is still `in_progress`, no build_sha, no PR → accumulation never
+          // completes, Gate A never fires, the job is terminal so it never re-dispatches: a permanent,
+          // SILENT wedge on a HEALTHY box (it bit fix-growth-allocation-brain-3fd059 + appstle on 2026-06-30,
+          // hours AFTER the box recovered — NOT a crash orphan). A no-advance reconcile now falls through to
+          // `needs_attention` (surfaced, never silently completed); the standing-pass built-not-stamped
+          // backstop (healBuiltUnstampedPhases) then SHIPS the genuinely-already-on-main ones from the
+          // "already built — PR #N" signal, and a true no-op (nothing on main) stays visible for the owner.
+          if (r.flipped.length || r.status === "shipped") {
             reconciled = true;
             await update(job.id, { status: "completed", log_tail: `already built — Bo found no delta; DB reconciled to ${r.status}${r.flipped.length ? ` (flipped ${r.flipped.map((f) => "P" + (f.index + 1)).join(",")})` : ""}. ${noChangeReason}`.slice(-2000) });
             console.log(`${tag} no changes → already built; DB reconciled → ${r.status}`);
@@ -13049,7 +13341,7 @@ async function dispatchJob(job: Job) {
         }
         if (!reconciled) {
           await update(job.id, { status: "needs_attention", error: noChangeReason, log_tail: logTail });
-          console.error(`${tag} no changes + code NOT on main → needs_attention: ${noChangeReason}`);
+          console.error(`${tag} no changes + spec did not advance (no phase flipped / not on main) → needs_attention: ${noChangeReason}`);
         }
       }
       return;
@@ -13660,6 +13952,18 @@ async function main() {
         growthDirectorSweepInFlight = true;
         void (async () => {
           try {
+            // growth-customer-voice-to-ad-angles Phase 3: scan status='proposed' angles + batch one
+            // `growth-voice-angle-approval` target per workspace BEFORE the director enqueuer runs, so
+            // the freshly-queued `needs_approval` rows are picked up in the SAME sweep tick. Dormant
+            // (a no-op) until the M6 flag flips function_autonomy('growth') live+autonomous.
+            try {
+              const { enqueueVoiceAngleApprovalJobs } = await import("../src/lib/ads/voice-angle-approve");
+              const v = await enqueueVoiceAngleApprovalJobs(db);
+              if (v.enqueued)
+                console.log(`[growth-voice-angles] queued ${v.enqueued} target(s) carrying ${v.queued_actions} approve_voice_angle action(s)`);
+            } catch (e) {
+              console.error("[growth-voice-angles] enqueue failed (continuing):", e instanceof Error ? e.message : e);
+            }
             const { enqueueGrowthDirectorJobs } = await import("../src/lib/agents/growth-director");
             const r = await enqueueGrowthDirectorJobs(db);
             if (r.enqueued) console.log(`[growth-director] queued ${r.enqueued} director job(s): ${r.slugs.join(", ")}`);

@@ -10,6 +10,7 @@ The CEO's **director-decision grade** — one row per graded **director call**, 
 |---|---|---|---|
 | `id` | `uuid` | — | PK · default `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id · ON DELETE CASCADE |
+| `director_function` | `text` | — | the director-function slug the graded call belongs to (e.g. `platform` \| `growth`) · default `platform` · added in `20260804120000_director_decision_grades_director_function.sql` for [[../specs/growth-adopt-meta-iteration-engine]] Phase 2 so the per-director report + leash-loosen/tighten recommendations stop blurring the two pools |
 | `dimension` | `text` | — | CHECK ∈ `auto-approval` \| `goal-escort` — which kind of director call this grades |
 | `approval_decision_id` | `uuid` | ✓ | → [[approval_decisions]].id · ON DELETE CASCADE · set for `dimension='auto-approval'` |
 | `goal_slug` | `text` | ✓ | the escorted goal (lives in `docs/brain/goals`, **no FK**) · set for `dimension='goal-escort'` |
@@ -29,7 +30,7 @@ The CEO's **director-decision grade** — one row per graded **director call**, 
 
 **Unique:** partial `(approval_decision_id) where approval_decision_id is not null` (one grade per auto-approval); partial `(workspace_id, goal_slug, milestone) where dimension='goal-escort'` (one grade per escorted milestone) — idempotent grading; a re-run UPDATEs in place, never duplicates.
 
-**Indexes:** `(workspace_id, created_at desc)`; `(workspace_id, dimension, created_at desc)` (per-dimension report + trend — Phase 4).
+**Indexes:** `(workspace_id, created_at desc)`; `(workspace_id, dimension, created_at desc)` (per-dimension report + trend — Phase 4); `(workspace_id, director_function, created_at desc)` (per-director slice for the Director-grades tab — [[../specs/growth-adopt-meta-iteration-engine]] Phase 2).
 
 ## Foreign keys
 

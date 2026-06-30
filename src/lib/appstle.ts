@@ -335,7 +335,19 @@ export async function appstleGetUpcomingOrders(
     }
 
     const data = await res.json();
-    return { success: true, orders: Array.isArray(data) ? data : [] };
+    // Appstle returns each order `id` as a JSON number, but our type signature
+    // and every downstream caller (dunning, portal order-now, appstleAttemptBilling
+    // .startsWith guard) treats it as a string. Coerce at the read boundary so
+    // every caller sees a consistent string id (signature vercel:c16ba1c31f84151b).
+    type RawOrder = { id: string | number; billingDate: string; status: string };
+    const orders = Array.isArray(data)
+      ? (data as RawOrder[]).map((o) => ({
+          id: String(o.id),
+          billingDate: o.billingDate,
+          status: o.status,
+        }))
+      : [];
+    return { success: true, orders };
   } catch (err) {
     console.error("Appstle get upcoming orders failed:", err);
     return { success: false, error: String(err) };
@@ -346,13 +358,18 @@ export async function appstleAttemptBilling(
   workspaceId: string,
   billingAttemptId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // Appstle's top-orders endpoint returns `id` as a JSON number, but our TS
+  // signature and the internal-* synthesized ids are strings. Coerce once at
+  // the boundary so the .startsWith() guard, log message, and URL interpolation
+  // are all type-safe regardless of upstream shape (signature vercel:c16ba1c31f84151b).
+  const id = String(billingAttemptId);
   // Internal subs (Braintree-billed) never have an Appstle billing attempt — the
   // upstream callers stamp a synthetic `internal-*` id into the cycle. Hitting
   // Appstle with that id 400s and noises the error feed. Short-circuit cleanly
   // (signature vercel:cdfbac68e30a91f9) so callers see a success while the real
   // renewal is driven by the internal daily renewal cron.
-  if (billingAttemptId.startsWith("internal-")) {
-    console.warn(`[appstleAttemptBilling] skipped internal billing-attempt id ${billingAttemptId} — Braintree-billed sub, no Appstle attempt to charge`);
+  if (id.startsWith("internal-")) {
+    console.warn(`[appstleAttemptBilling] skipped internal billing-attempt id ${id} — Braintree-billed sub, no Appstle attempt to charge`);
     return { success: true };
   }
   const creds = await getAppstleCredentials(workspaceId);
@@ -360,7 +377,7 @@ export async function appstleAttemptBilling(
 
   try {
     const res = await loggedAppstleFetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/attempt-billing/${billingAttemptId}`,
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/attempt-billing/${id}`,
       { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
     );
 
@@ -372,16 +389,16 @@ export async function appstleAttemptBilling(
       // success; log at warn so the Vercel error feed / Control Tower stop
       // capturing the benign race. See [[portal-order-now-billing-collision]].
       if (/billing operation is already in progress/i.test(text)) {
-        console.warn(`Appstle attempt billing race for ${billingAttemptId} (concurrent charge already running):`, text);
+        console.warn(`Appstle attempt billing race for ${id} (concurrent charge already running):`, text);
       } else if (/usergeneratederror/i.test(text) && /out of stock/i.test(text)) {
         // Appstle UserGeneratedError = business-condition rejection from
         // upstream (here: a line item is out of stock), not a server fault.
         // Dunning rotation will pick this up via the existing return shape
         // below; log at warn so it stops noising the Vercel error feed /
         // Control Tower as a foreign-app error.
-        console.warn(`Appstle attempt billing benign upstream rejection for ${billingAttemptId} (out of stock):`, text);
+        console.warn(`Appstle attempt billing benign upstream rejection for ${id} (out of stock):`, text);
       } else {
-        console.error(`Appstle attempt billing error for ${billingAttemptId}:`, text);
+        console.error(`Appstle attempt billing error for ${id}:`, text);
       }
       // Surface raw upstream text so the handler can pattern-match (mirrors the
       // appstleSkipUpcomingOrder shape).

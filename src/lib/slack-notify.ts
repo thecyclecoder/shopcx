@@ -92,6 +92,9 @@ export async function dispatchSlackNotification(
       }
     }
   } catch (err) {
-    console.error(`[Slack] notification error (${eventType}):`, err);
+    // warn (not error): a single chat.postMessage timeout here is expected fire-and-forget behavior.
+    // Sustained Slack delivery failures are surfaced by the `slack-delivery` Control Tower heartbeat
+    // in `src/lib/slack.ts`, not by this log line — keep this as warn so transient blips don't trip the error feed.
+    console.warn(`[Slack] notification error (${eventType}):`, err);
   }
 }

@@ -1,0 +1,1 @@
+- **Adopt Meta iteration engine under the Director** · verified 2026-06-30 · → [[../libraries/growth-director]]

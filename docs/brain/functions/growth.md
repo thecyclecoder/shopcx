@@ -2,7 +2,7 @@
 
 The permanent owner of **paid acquisition + landing-page conversion**. One of the org-chart functions ([[../goals/ceo-mode]]); this doc is both the **Growth director-agent's CEO-mode charter** and the **home that owns every Growth mandate + spec** on the roadmap. A function is never "done" — it carries perpetual mandates and contributes to finite goals.
 
-> **Operate + author, never build (CEO directive 2026-06-29).** The Growth director OPERATES its own software (its `function_autonomy` is *operational* autonomy) and AUTHORS specs for the tools it needs — it is the requester/operator. It NEVER drives a build: **Ada / Platform / DevOps is the sole builder for every spec, all departments, permanently** ([[platform]]). A Growth-owned spec's `owner` is attribution + where the finished tool's operation lives; the build is always Ada's. Growth going live+autonomous does not move build-driving onto it.
+> **Operate + author, never build (CEO directive 2026-06-29).** The Growth director OPERATES its own software (its `function_autonomy` is *operational* autonomy) and AUTHORS specs for the tools it needs — it is the requester/operator. It NEVER drives a build: **Ada / Platform / DevOps is the sole builder for every spec, all departments, permanently** ([[platform]]). A Growth-owned spec's `owner` is attribution + where the finished tool's operation lives; the build is always Ada's. Growth going live+autonomous does not move build-driving onto it. The Growth director's **supervision machinery** lives in [[../libraries/growth-director]] — the agent that investigates + auto-approves Growth-routed approval requests within a leash, mirroring the Platform director pattern.
 
 ## Scope + owned metrics
 
@@ -21,6 +21,7 @@ Continuously find, test, and scale **winning static creative**, and kill losers 
 - **Specs under this mandate:**
   - [[../specs/winning-static-creative-finder]] ⏳ — ingest winning static ads (competitor/library/our own top performers) into the ideas bin so we can make more killer statics.
   - [[../specs/killer-statics]] ✅ — cold-50+ static archetypes, both formats.
+  - [[../specs/growth-adopt-creative-makers]] ✅ — Director-visible ready-to-test queue for creatives + Director-approved publish with PAUSED ads + outcome lineage (archived → [[../lifecycles/ad-publish]]).
   - _(future: auto-pause underperformers; variant generator; creative-performance scoring)_
 
 ### Ad-matched landing pages
@@ -32,7 +33,7 @@ Every ad has a scent-matched lander (advertorial / before-after) so paid traffic
 The storefront is a conversion surface — continuously lift PDP engagement and price-step conversion across the Amazing Coffee funnel.
 - **Metric:** PDP engagement, price-step conversion, sessions→subscription rate; ultimately **predicted-LTV-per-visitor**.
 - **Goal:** [[../goals/storefront-optimizer]] — the autonomous **Storefront Optimizer agent**, this director's *graded employee*: form hypothesis → run a bandit campaign → learn (a hierarchical lever-importance model) → promote/kill, across all four Amazing Coffee lander types, optimizing predicted-LTV-per-visitor. **This is the "landing-page experiment harness" gap (above), finally built** — and a concrete CEO→role-agent→tool instance for [[../goals/ceo-mode]]. The Growth director sets its rails + grades each campaign 1–10.
-- **Specs:** **storefront-mvp** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **homepage-rebuild** ✅ (verified + archived → [[../recipes/edit-shopify-theme]]) · **checkout-customize-bypass** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **storefront-survey-chapter** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · [[../specs/storefront-iteration-engine]] ⏳ (the ad-side iteration engine — the optimizer's funnel partner).
+- **Specs:** **storefront-mvp** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **homepage-rebuild** ✅ (verified + archived → [[../recipes/edit-shopify-theme]]) · **checkout-customize-bypass** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · **storefront-survey-chapter** ✅ (verified + archived → [[../lifecycles/storefront-checkout]]) · [[../specs/storefront-iteration-engine]] ⏳ (the ad-side iteration engine — the optimizer's funnel partner) · [[../specs/growth-adopt-meta-iteration-engine]] ✅ (Director authoring/activation surface — the engine's governance, so it can leave dormant mode and start making autonomous decisions under Director supervision).
 
 ## The Growth agent supervises its tools (worked example)
 

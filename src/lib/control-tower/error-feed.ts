@@ -144,29 +144,35 @@ export function isBareLifecycle(message: string): boolean {
 }
 
 /**
- * Inngest's built-in `LoggerMiddleware` "step error" log line — drop before signature
- * grouping ([[../specs/error-feed-drop-bare-inngest-step-error-middleware-log]]).
+ * Inngest's built-in `LoggerMiddleware` bare-label log lines — drop before signature
+ * grouping ([[../specs/error-feed-drop-bare-inngest-step-error-middleware-log]] +
+ * [[../specs/error-feed-drop-bare-inngest-function-error-middleware-log]]).
  *
- * The Inngest SDK's `LoggerMiddleware.onStepError` fires on EVERY step throw (transient
- * + final) with `proxyLogger.error({ err: arg.error }, 'Inngest step error')`. The
- * actual error object lives in the JSON `err` context — Vercel's drain serializes only
- * the bare Pino `msg` field, so what reaches us is the literal label `"Inngest step
- * error"` with no error body. Terminal failures are already authoritatively captured on
+ * The Inngest SDK's `LoggerMiddleware` emits the same `{ err }, <label>` pattern in two
+ * places: `onStepError` (`'Inngest step error'`, every step throw — transient + final)
+ * and `wrapFunctionHandler` (`'Inngest function error'`, every function-handler
+ * rejection). The actual error object lives in the JSON `err` context — Vercel's drain
+ * serializes only the bare Pino `msg` field, so what reaches us is the literal label
+ * with no error body. Terminal failures are already authoritatively captured on
  * `source='inngest'` by inngest-failure-capture.ts (triggers on
- * `inngest/function.failed`), so the bare middleware log on `/api/inngest` is duplicate
- * noise on a healthy retry loop — minting a fresh OPEN incident for it pages Platform
- * owners on a function that already self-heals (Control Tower `vercel:b1daa612f563f5e9`).
+ * `inngest/function.failed`), so the bare middleware logs on `/api/inngest` are
+ * duplicate noise on a healthy retry loop — minting a fresh OPEN incident for either
+ * pages Platform owners on a function that already self-heals (Control Tower
+ * `vercel:b1daa612f563f5e9` for the step label, `vercel:dcc421bdd0ffd0a5` for the
+ * function label).
  *
- * `true` ONLY for path `/api/inngest` + the exact bare `"Inngest step error"` message.
- * A log with the same label but additional body (a real stack/detail Vercel managed to
- * surface) is NOT bare and is still captured.
+ * `true` ONLY for path `/api/inngest` + a message whose trimmed body equals one of the
+ * two exact bare labels. A log with the same label but additional body (a real
+ * stack/detail Vercel managed to surface) is NOT bare and is still captured.
  */
+const BARE_INNGEST_MIDDLEWARE_LABELS = new Set(["Inngest step error", "Inngest function error"]);
+
 export function isBareInngestStepErrorMiddlewareLog(
   message: string,
   path: string | null | undefined,
 ): boolean {
   if (path !== "/api/inngest") return false;
-  return (message ?? "").trim() === "Inngest step error";
+  return BARE_INNGEST_MIDDLEWARE_LABELS.has((message ?? "").trim());
 }
 
 /**

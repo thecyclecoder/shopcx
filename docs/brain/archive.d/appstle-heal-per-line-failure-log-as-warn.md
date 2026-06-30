@@ -1,0 +1,1 @@
+- **Downgrade appstle-heal per-line PUT failure to warn** · verified 2026-06-30 · → [[lifecycles/subscription-billing]]

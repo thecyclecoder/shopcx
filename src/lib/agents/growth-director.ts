@@ -42,6 +42,12 @@ import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { directorLiveStateFact } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import {
+  listAdSpendBudgets,
+  rollupAdSpendActual,
+  type AdSpendBudget,
+  type AdSpendRollup,
+} from "@/lib/ad-spend-governor";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -58,7 +64,8 @@ export type LeashCategory =
   | "storefront_optimizer_policy_activation"
   | "pause_underperforming_creative"
   | "reallocate_within_ceiling"
-  | "promote_ready_to_test_creative";
+  | "promote_ready_to_test_creative"
+  | "approve_voice_angle";
 
 export const LEASH_CATEGORIES: LeashCategory[] = [
   "iteration_policy_activation",
@@ -66,23 +73,29 @@ export const LEASH_CATEGORIES: LeashCategory[] = [
   "pause_underperforming_creative",
   "reallocate_within_ceiling",
   "promote_ready_to_test_creative",
+  "approve_voice_angle",
 ];
 
 /**
  * The pending-action types that are UNCONDITIONALLY leash candidates → their leash category. Each must
  * still pass the read-only investigation verdict (the soundness gate added in Phase 2). The mapping is
- * 1:1 with the categories — Growth's pending-action `type` fields are named the same as the leash
- * categories themselves, so no separate adapter is needed.
+ * mostly 1:1 with the categories — Growth's pending-action `type` fields are named the same as the
+ * leash categories themselves — with one alias: the iteration engine emits `propose_policy_activation`
+ * (carrying the draft + rationale) which falls under the `iteration_policy_activation` leash class
+ * (the executor that authors + activates lives in [[../iteration-policy-authoring]]; the worker runs
+ * it after the Director auto-approves).
  *
  * Anything not in this map — including any non-binary CHOICE action (e.g. a multi-option budget
  * reallocation choice) — falls out of leash and escalates to the CEO.
  */
 const LEASH_ACTION_TYPES: Record<string, LeashCategory> = {
   iteration_policy_activation: "iteration_policy_activation",
+  propose_policy_activation: "iteration_policy_activation",
   storefront_optimizer_policy_activation: "storefront_optimizer_policy_activation",
   pause_underperforming_creative: "pause_underperforming_creative",
   reallocate_within_ceiling: "reallocate_within_ceiling",
   promote_ready_to_test_creative: "promote_ready_to_test_creative",
+  approve_voice_angle: "approve_voice_angle",
 };
 
 /** A loosely-typed agent_jobs row as the worker/enqueuer reads it (Supabase returns untyped JSON). */
@@ -93,6 +106,9 @@ export interface DirectorActionLike {
   summary?: string;
   preview?: string;
   cmd?: string;
+  /** Per-action payload carried by self-executing leash actions (e.g. `promote_ready_to_test_creative`,
+   * `approve_voice_angle`). Shape is action-specific; readers cast it. */
+  payload?: unknown;
 }
 export interface DirectorTargetJob {
   id: string;
@@ -164,6 +180,10 @@ export function directorLeashCandidates(job: DirectorTargetJob): { actions: Leas
 //     auto_run_reversible) — what flipping `active` actually affects.
 //   - iteration_recommendations — the open `pending` recommendation queue (so the director sees the
 //     spend lines an approval will unlock or change).
+//   - iteration_runs (latest row) + iteration_actions (latest-run outcomes mix + outcome_roas) —
+//     growth-adopt-meta-iteration-engine Phase 2: the supervisability record + the realized
+//     executed/failed/reversed/escalated breakdown that tells the Director whether the
+//     previously-activated policy is HOLDING UP before it approves the next version.
 // The brief itself is data only; the prompt is the wrap (with directorLiveStateFact prepended).
 // `loadAutonomyMap` creates its own admin client internally — we read function_autonomy directly via
 // the passed admin to keep this testable + keep one connection per call.
@@ -189,6 +209,13 @@ export interface StorefrontOptimizerPolicySummary {
   rationale: string | null;
   updated_by: string | null;
   updated_at: string | null;
+}
+
+/** One workspace ad-spend ceiling + its current rolling-window actual — the leash the director must see. */
+export interface AdSpendBudgetSummary {
+  budget: AdSpendBudget;
+  /** Today's rolling-window actual spend (the same window the governor's `currentOver` check reads). */
+  current: AdSpendRollup;
 }
 
 /** One open `pending` recommendation row — the spend lines the optimizer/Meta engine want to open. */
@@ -246,12 +273,57 @@ export interface StorefrontExperimentSummary {
   stopped_at: string | null;
 }
 
+/** One `iteration_runs` row — the latest pipeline run for the workspace (the supervisability record). */
+export interface IterationRunSummary {
+  id: string;
+  status: string;
+  snapshot_date: string | null;
+  policy_active: boolean;
+  policy_version_id: string | null;
+  meta_ad_account_id: string | null;
+  counts: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+}
+
+/**
+ * One `iteration_actions` outcome — the realized action ledger for the latest run. The grader uses
+ * the (status, outcome_roas) mix as the "did the activated policy hold up" signal that replaces the
+ * build-side repeat-failure count for policy-activation approvals.
+ */
+export interface IterationActionOutcomeSummary {
+  id: string;
+  action_type: string;
+  status: string;
+  rationale: string | null;
+  outcome_roas: number | null;
+  outcome_revenue_cents: number | null;
+  outcome_window_days: number | null;
+  guardrail: string | null;
+  created_at: string | null;
+}
+
 /** One in-leash action inside the brief — what the investigation confirms is sound. */
 export interface GrowthDirectorBriefAction {
   category: LeashCategory;
   summary: string;
   preview: string;
   cmd: string;
+}
+
+/** Per-proposed-angle summary loaded into the brief so the director reads the voice density without
+ * a second DB hit. Populated only when the request carries ≥1 `approve_voice_angle` action. */
+export interface ProposedVoiceAngleSummary {
+  id: string;
+  product_id: string;
+  hook_one_liner: string | null;
+  mechanism_claim: string | null;
+  source_signal_counts: { positive: number; objection: number; use_case: number };
+  matrix_overlap: number | null;
+  density: number | null;
+  score: number | null;
 }
 
 /** The read-only brief the Growth director investigates — the request + the loaded control surfaces. */
@@ -282,6 +354,19 @@ export interface GrowthDirectorBrief {
   /** the recent storefront_experiments rows for the workspace (newest first) — the per-campaign
    *  mini-report carrying the `last_decision.delivery_flag` (the Phase-3 gate on promote/kill). */
   recentExperiments: StorefrontExperimentSummary[];
+  /** the latest `iteration_runs` row for the workspace (null if the engine has never run). */
+  latestIterationRun: IterationRunSummary | null;
+  /**
+   * `iteration_actions` outcomes (status + outcome_roas mix) for the latest run's account/snapshot.
+   * The grader reads this as the realized signal — executed / failed / reversed / escalated — that
+   * tells the Director whether the policy it activated is holding up.
+   */
+  iterationActionOutcomes: IterationActionOutcomeSummary[];
+  /** every `ad_spend_budgets` row for the workspace + its current rolling-window actual — the leash. */
+  adSpendBudgets: AdSpendBudgetSummary[];
+  /** the proposed `product_ad_angles` rows targeted by `approve_voice_angle` actions in this request,
+   * loaded so the prompt can render hook + score + voice density. Empty when no such actions exist. */
+  proposedVoiceAngles: ProposedVoiceAngleSummary[];
   logTail: string;
 }
 
@@ -308,6 +393,53 @@ const OPEN_OPTIMIZER_JOB_STATUSES = [
   "queued_resume",
   "blocked_on_usage",
 ];
+/** Cap on iteration_action outcomes carried in the brief — the grader summary doesn't need more. */
+const ACTION_OUTCOMES_CAP = 50;
+
+/**
+ * Load every `ad_spend_budgets` row for the workspace + its CURRENT rolling-window actual (the
+ * same rollup the governor's `currentOver` check reads, ending today UTC). This is what the
+ * Growth director sees as its LEASH on every investigation — within-ceiling reallocation is
+ * autonomous; raising the ceiling is the CEO's call.
+ *
+ * Best-effort: a transient read failure on either side (`listAdSpendBudgets` or `rollupAdSpendActual`)
+ * returns the empty list / a zero rollup so the brief never throws (the prompt narrates the gap).
+ */
+export async function loadEffectiveAdSpendBudgets(
+  admin: Admin,
+  workspaceId: string,
+): Promise<AdSpendBudgetSummary[]> {
+  let budgets: AdSpendBudget[] = [];
+  try {
+    budgets = await listAdSpendBudgets(admin, workspaceId);
+  } catch {
+    return [];
+  }
+  const summaries: AdSpendBudgetSummary[] = [];
+  for (const budget of budgets) {
+    let current: AdSpendRollup;
+    try {
+      current = await rollupAdSpendActual(admin, {
+        workspaceId: budget.workspaceId,
+        platform: budget.platform,
+        metaAdAccountId: budget.metaAdAccountId,
+        windowDays: budget.windowDays,
+      });
+    } catch {
+      const today = new Date().toISOString().slice(0, 10);
+      const since = new Date(`${today}T00:00:00Z`);
+      since.setUTCDate(since.getUTCDate() - (budget.windowDays - 1));
+      current = {
+        actualCents: 0,
+        toDate: today,
+        sinceDate: since.toISOString().slice(0, 10),
+        windowDays: budget.windowDays,
+      };
+    }
+    summaries.push({ budget, current });
+  }
+  return summaries;
+}
 
 /**
  * Load the Growth director's brief — every loader is best-effort + returns the empty/null shape on
@@ -381,6 +513,16 @@ export async function buildGrowthDirectorBrief(
         updated_at: data.updated_at ?? null,
       };
     }
+  } catch {
+    /* best-effort */
+  }
+
+  // The ad-spend leash — every active ceiling + its current rolling-window actual. Surfacing the
+  // ad_spend_budgets here gives the director full visibility on the rail it MAY NOT breach (raising
+  // the ceiling is the CEO's call) and the headroom every `reallocate_within_ceiling` decision has.
+  let adSpendBudgets: AdSpendBudgetSummary[] = [];
+  try {
+    adSpendBudgets = await loadEffectiveAdSpendBudgets(admin, job.workspace_id);
   } catch {
     /* best-effort */
   }
@@ -487,6 +629,136 @@ export async function buildGrowthDirectorBrief(
     /* best-effort */
   }
 
+  // growth-customer-voice-to-ad-angles Phase 3: when ≥1 leash action is `approve_voice_angle`,
+  // load the proposed angle rows so the prompt renders the hook + voice density + score the
+  // director judges. Workspace-scoped + bounded to the ids the actions carry.
+  let proposedVoiceAngles: ProposedVoiceAngleSummary[] = [];
+  const voiceAngleIds = Array.from(
+    new Set(
+      candidates
+        .filter((c) => c.category === "approve_voice_angle")
+        .map((c) => {
+          const a = (job.pending_actions || []).find((p) => p.id === c.actionId);
+          const ang = (a?.payload as { angle_id?: string } | null)?.angle_id;
+          return typeof ang === "string" ? ang : "";
+        })
+        .filter(Boolean),
+    ),
+  );
+  if (voiceAngleIds.length) {
+    try {
+      const { data } = await admin
+        .from("product_ad_angles")
+        .select("id, product_id, hook_one_liner, metadata")
+        .eq("workspace_id", job.workspace_id)
+        .in("id", voiceAngleIds);
+      proposedVoiceAngles = ((data || []) as Array<{
+        id: string;
+        product_id: string;
+        hook_one_liner: string | null;
+        metadata: {
+          mined_from?: { review_ids?: string[]; cancel_event_ids?: string[]; ticket_ids?: string[] };
+          mechanism_claim?: string;
+          matrix_overlap?: number;
+          density?: number;
+          score?: number;
+        } | null;
+      }>).map((r) => {
+        const m = r.metadata ?? {};
+        const mined = m.mined_from ?? {};
+        return {
+          id: r.id,
+          product_id: r.product_id,
+          hook_one_liner: r.hook_one_liner ?? null,
+          mechanism_claim: typeof m.mechanism_claim === "string" ? m.mechanism_claim : null,
+          source_signal_counts: {
+            positive: Array.isArray(mined.review_ids) ? mined.review_ids.length : 0,
+            objection: Array.isArray(mined.cancel_event_ids) ? mined.cancel_event_ids.length : 0,
+            use_case: Array.isArray(mined.ticket_ids) ? mined.ticket_ids.length : 0,
+          },
+          matrix_overlap: typeof m.matrix_overlap === "number" ? m.matrix_overlap : null,
+          density: typeof m.density === "number" ? m.density : null,
+          score: typeof m.score === "number" ? m.score : null,
+        };
+      });
+    } catch {
+      /* best-effort — prompt narrates the gap */
+    }
+  }
+
+  // The latest iteration_runs row — the supervisability record for the engine's most recent pipeline
+  // execution (ingest → attribution → rollups → reconcile → 4a actions → 4b recommendations → 6a).
+  // This is the audit trail the Director MUST see before approving a new policy activation, and the
+  // anchor the grader's outcome signal hangs off (the run's iteration_actions outcomes below).
+  let latestIterationRun: IterationRunSummary | null = null;
+  try {
+    const { data } = await admin
+      .from("iteration_runs")
+      .select("id, status, snapshot_date, policy_active, policy_version_id, meta_ad_account_id, counts, error, started_at, finished_at, duration_ms")
+      .eq("workspace_id", job.workspace_id)
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) {
+      latestIterationRun = {
+        id: data.id as string,
+        status: data.status as string,
+        snapshot_date: (data.snapshot_date as string | null) ?? null,
+        policy_active: !!data.policy_active,
+        policy_version_id: (data.policy_version_id as string | null) ?? null,
+        meta_ad_account_id: (data.meta_ad_account_id as string | null) ?? null,
+        counts: (data.counts as Record<string, unknown> | null) ?? null,
+        error: (data.error as string | null) ?? null,
+        started_at: (data.started_at as string | null) ?? null,
+        finished_at: (data.finished_at as string | null) ?? null,
+        duration_ms: data.duration_ms == null ? null : Number(data.duration_ms),
+      };
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  // The iteration_actions outcomes (status + outcome_roas mix) for the latest run's account on the
+  // run's snapshot day — the realized executed/failed/reversed/escalated breakdown the grader uses to
+  // judge whether the previously-activated policy is holding up. Scoped by snapshot_date so a re-run
+  // doesn't bleed in unrelated days. Skipped if the latest run never decided a snapshot day yet.
+  let iterationActionOutcomes: IterationActionOutcomeSummary[] = [];
+  try {
+    if (latestIterationRun?.snapshot_date && latestIterationRun?.meta_ad_account_id) {
+      const { data } = await admin
+        .from("iteration_actions")
+        .select("id, action_type, status, rationale, outcome_roas, outcome_revenue_cents, outcome_window_days, guardrail, created_at")
+        .eq("workspace_id", job.workspace_id)
+        .eq("meta_ad_account_id", latestIterationRun.meta_ad_account_id)
+        .eq("snapshot_date", latestIterationRun.snapshot_date)
+        .order("created_at", { ascending: false })
+        .limit(ACTION_OUTCOMES_CAP);
+      iterationActionOutcomes = ((data || []) as Array<{
+        id: string;
+        action_type: string;
+        status: string;
+        rationale: string | null;
+        outcome_roas: number | string | null;
+        outcome_revenue_cents: number | string | null;
+        outcome_window_days: number | string | null;
+        guardrail: string | null;
+        created_at: string | null;
+      }>).map((r) => ({
+        id: r.id,
+        action_type: r.action_type,
+        status: r.status,
+        rationale: r.rationale ?? null,
+        outcome_roas: r.outcome_roas == null ? null : Number(r.outcome_roas),
+        outcome_revenue_cents: r.outcome_revenue_cents == null ? null : Number(r.outcome_revenue_cents),
+        outcome_window_days: r.outcome_window_days == null ? null : Number(r.outcome_window_days),
+        guardrail: r.guardrail ?? null,
+        created_at: r.created_at ?? null,
+      }));
+    }
+  } catch {
+    /* best-effort */
+  }
+
   return {
     jobId: job.id,
     workspaceId: job.workspace_id,
@@ -502,6 +774,10 @@ export async function buildGrowthDirectorBrief(
     openOptimizerJobs,
     recentCampaignGrades,
     recentExperiments,
+    latestIterationRun,
+    iterationActionOutcomes,
+    adSpendBudgets,
+    proposedVoiceAngles,
     logTail: (job.log_tail || "").slice(-2000),
   };
 }
@@ -529,6 +805,23 @@ function renderOptimizerPolicy(p: StorefrontOptimizerPolicySummary | null): stri
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** Render the ad-spend ceilings + current rolling-window actuals — the director's leash. */
+function renderAdSpendBudgets(rows: AdSpendBudgetSummary[]): string {
+  if (!rows.length) {
+    return "ad_spend_budgets: (no ad-spend ceilings configured — within-ceiling reallocation is unbounded; any spend-shifting action must escalate)";
+  }
+  const lines = rows.map((s) => {
+    const scope = s.budget.metaAdAccountId ? `account ${s.budget.metaAdAccountId.slice(0, 8)}` : `${s.budget.platform}-wide`;
+    const usdCeil = (s.budget.usdCeilingCents / 100).toFixed(2);
+    const usdNow = (s.current.actualCents / 100).toFixed(2);
+    const pct = s.budget.usdCeilingCents > 0
+      ? Math.round((s.current.actualCents / s.budget.usdCeilingCents) * 100)
+      : 0;
+    return `  - ${s.budget.platform} · ${scope} · ${s.budget.windowDays}d ceiling=$${usdCeil} · current=$${usdNow} (${pct}% of ceiling, window ending ${s.current.toDate})`;
+  });
+  return ["ad_spend_budgets (rolling-window leash — within-ceiling reallocation is autonomous, raising the ceiling is the CEO's call):", ...lines].join("\n");
 }
 
 /** Render the pending recommendation queue inside the prompt — what the engines want to open. */
@@ -577,6 +870,75 @@ function renderExperimentsMiniReport(rows: StorefrontExperimentSummary[]): strin
     ...lines,
   ].join("\n");
 }
+
+/** Render proposed voice-mined angles tied to `approve_voice_angle` actions — hook + voice density + score. */
+function renderProposedVoiceAngles(rows: ProposedVoiceAngleSummary[]): string {
+  if (!rows.length) return "";
+  const lines = rows.map((r) => {
+    const counts = r.source_signal_counts;
+    const cited = counts.positive + counts.objection + counts.use_case;
+    const score = r.score != null ? r.score.toFixed(3) : "?";
+    const overlap = r.matrix_overlap != null ? r.matrix_overlap.toFixed(2) : "?";
+    const density = r.density != null ? r.density.toFixed(2) : "?";
+    return `  - angle ${r.id.slice(0, 8)} · product ${r.product_id.slice(0, 8)} · score=${score} (overlap=${overlap}, density=${density}) · cited ${cited} fragments (${counts.positive}p/${counts.objection}o/${counts.use_case}u)${r.hook_one_liner ? `\n      hook: "${r.hook_one_liner.slice(0, 160)}"` : ""}${r.mechanism_claim ? `\n      mechanism: "${r.mechanism_claim.slice(0, 160)}"` : ""}`;
+  });
+  return [
+    "proposed product_ad_angles (voice-mined candidates targeted by this request — cited customer language is the ANCHOR; an angle that cites 0 fragments is unanchored and you must escalate it):",
+    ...lines,
+  ].join("\n");
+}
+
+/** Render the latest iteration_runs row — the supervisability record the Director MUST see. */
+function renderLatestIterationRun(run: IterationRunSummary | null): string {
+  if (!run) return "iteration_runs: (no runs yet — the daily pipeline has never executed for this workspace)";
+  const counts = run.counts && Object.keys(run.counts).length ? JSON.stringify(run.counts) : "(none)";
+  return [
+    "iteration_runs (latest, newest first):",
+    `  - id=${run.id.slice(0, 8)} · status=${run.status} · day=${run.snapshot_date ?? "?"} · policy_active=${run.policy_active}${run.policy_version_id ? ` · policy=${run.policy_version_id.slice(0, 8)}` : ""}`,
+    `  - started ${run.started_at ?? "?"}${run.finished_at ? ` · finished ${run.finished_at}` : ""}${run.duration_ms != null ? ` · ${run.duration_ms}ms` : ""}`,
+    `  - counts: ${counts}`,
+    run.error ? `  - error: ${run.error.slice(0, 300)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Render the iteration_actions outcomes for the latest run — the realized executed/failed/reversed/
+ * escalated mix the Director needs to see before approving the next policy version. ROAS line is
+ * summary stats so the prompt stays compact.
+ */
+function renderIterationActionOutcomes(rows: IterationActionOutcomeSummary[]): string {
+  if (!rows.length) {
+    return "iteration_actions (latest run): (no actions decided on the latest run's snapshot — engine is in observation-only mode or no triggers fired)";
+  }
+  const byStatus = new Map<string, number>();
+  const guardrails = new Map<string, number>();
+  const roasSeen: number[] = [];
+  for (const a of rows) {
+    byStatus.set(a.status, (byStatus.get(a.status) ?? 0) + 1);
+    if (a.guardrail) guardrails.set(a.guardrail, (guardrails.get(a.guardrail) ?? 0) + 1);
+    if (typeof a.outcome_roas === "number" && Number.isFinite(a.outcome_roas)) roasSeen.push(a.outcome_roas);
+  }
+  const statusLine = Array.from(byStatus.entries())
+    .map(([s, n]) => `${s}=${n}`)
+    .join(", ");
+  const guardrailLine = guardrails.size
+    ? `  guardrails fired: ${Array.from(guardrails.entries()).map(([g, n]) => `${g}=${n}`).join(", ")}`
+    : "";
+  const roasLine = roasSeen.length
+    ? `  realized outcome_roas: mean ${(roasSeen.reduce((a, b) => a + b, 0) / roasSeen.length).toFixed(2)} across ${roasSeen.length} reconciled action(s) (min ${Math.min(...roasSeen).toFixed(2)}, max ${Math.max(...roasSeen).toFixed(2)})`
+    : "  realized outcome_roas: (not yet reconciled for this run's actions — reconcilePriorActions runs after the maturation window)";
+  return [
+    `iteration_actions (latest run · ${rows.length} action${rows.length === 1 ? "" : "s"}):`,
+    `  status mix: ${statusLine}`,
+    guardrailLine,
+    roasLine,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 
 /**
  * The Max `claude -p` investigation prompt — read-only diagnose → one JSON verdict.
@@ -634,6 +996,11 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     "  (no ceiling-breaking deltas; the active ceiling is the hard rail).",
     "- promote_ready_to_test_creative: approving a creative INTO the ad_publish_jobs PAUSED flow (the publisher",
     "  writes meta ids back PAUSED — never goes live without a second approve).",
+    "- approve_voice_angle: approving a voice-mined product_ad_angle (status='proposed') — flips the angle row",
+    "  to status='approved' + is_active=true, inserts an ad_campaigns row tagged to it, and enqueues a",
+    "  static-request via the makers pipeline. The new creative lands on the ready-to-test queue PAUSED;",
+    "  a second approval is still required to flip it live. ANCHORING IS NON-NEGOTIABLE — an angle whose",
+    "  metadata.mined_from contains 0 real review/cancel/ticket ids is unanchored and you MUST escalate it.",
     "",
     "ALWAYS ESCALATE (never auto-approve): anything destructive or irreversible, a budget ceiling change /",
     "ceiling-breaking spend delta, a non-binary CHOICE action, modifying or abandoning an approved goal,",
@@ -655,17 +1022,26 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     "",
     renderExperimentsMiniReport(brief.recentExperiments),
     "",
+    renderAdSpendBudgets(brief.adSpendBudgets),
+    "",
+    renderLatestIterationRun(brief.latestIterationRun),
+    "",
+    renderIterationActionOutcomes(brief.iterationActionOutcomes),
+    "",
     renderPendingRecommendations(brief.pendingRecommendations),
+    brief.proposedVoiceAngles.length ? "\n" + renderProposedVoiceAngles(brief.proposedVoiceAngles) : "",
     "",
     "## The request under investigation",
     actionBlock,
     brief.logTail ? `\ninvestigation log so far:\n${brief.logTail}` : "",
     "",
     "Investigate read-only (the implicated policy version SQL, the optimizer policy row, the recommendation rationale,",
-    "the creative/spend lines this touches). Confirm every action is sound, reversible, and within the leash before approving.",
+    "the creative/spend lines this touches, and — for approve_voice_angle — the angle's mined_from fragment ids must be",
+    "REAL row ids in product_reviews / customer_events / tickets). Confirm every action is sound, reversible, and within",
+    "the leash before approving.",
     "",
     "Final message = ONLY one JSON object:",
-    '{"verdict":"auto-approve","leash_category":"iteration_policy_activation|storefront_optimizer_policy_activation|pause_underperforming_creative|reallocate_within_ceiling|promote_ready_to_test_creative","reasoning":"<why every action is sound + low-risk + within the leash, and the bundle is reversible>"}',
+    '{"verdict":"auto-approve","leash_category":"iteration_policy_activation|storefront_optimizer_policy_activation|pause_underperforming_creative|reallocate_within_ceiling|promote_ready_to_test_creative|approve_voice_angle","reasoning":"<why every action is sound + low-risk + within the leash, and the bundle is reversible>"}',
     '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice / a ceiling change>"}',
   ]
     .filter(Boolean)
