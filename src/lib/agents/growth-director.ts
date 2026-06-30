@@ -1,5 +1,5 @@
 /**
- * Growth Director agent (growth-director-agent spec, Phases 1–2) — the SECOND live director, after Ada.
+ * Growth Director agent (growth-director-agent spec, Phases 1–3) — the SECOND live director, after Ada.
  *
  * North star (operational-rules § supervisable autonomy): CEO → Director → tool. The Growth tools
  * (iteration policies, storefront optimizer, Meta creative actions, ad-spend reallocation, ad-publish)
@@ -10,19 +10,36 @@
  *     open iteration_recommendations) + `growthDirectorInvestigationPrompt` (the Max `claude -p`
  *     prompt wrapped with `directorLiveStateFact(admin,'growth')` so the verdict is premised on the
  *     LIVE flag, never on stale brain prose). The session emits ONE JSON verdict `auto-approve|escalate`.
- *   - Phase 3 adds the enqueuer + applyDirectorApproval + box-worker wiring.
+ *   - Phase 3 — `routesToGrowth` + `enqueueGrowthDirectorJobs` (the throttled sweep that queues one
+ *     idempotent `kind='growth-director'` job per open Growth-routed Approval Request) +
+ *     `applyDirectorApproval` (mark `approved` + flip to `queued_resume` + log the supervisable-
+ *     autonomy ledger row with `routed_to_function='growth'`). The box worker (`runGrowthDirectorJob`)
+ *     loads the brief, runs the Max investigation, and on `auto-approve` calls `applyDirectorApproval`
+ *     or on `escalate` re-routes via `escalateApprovalRequestToCeo` (reused from platform-director,
+ *     parameterized by director identity so the CEO inbox notification carries "Growth Director"
+ *     instead of Ada). A `director_activity` row is written per decision (`director_function='growth'`,
+ *     `action_kind='approved_approval'|'escalated'`).
  *
  * Build-driving stays with Ada permanently (CEO directive 2026-06-29) — Growth OPERATES its software,
  * never builds.
  *
  * Activation is owner-confirmed and lands later (M6 flag flip): until `function_autonomy('growth')` is
- * `live + autonomous`, `reconcileApprovalInbox` never stamps `routed_to_function='growth'`, so the
- * enqueuer (Phase 3) is a no-op — the machinery is built but dormant.
+ * `live + autonomous`, `resolveApprover` never routes a Growth-owned tool's approval here, so the
+ * enqueuer is a no-op — the machinery is built but dormant.
  *
  * See docs/brain/specs/growth-director-agent.md · docs/brain/libraries/platform-director.md.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
-import { isAutoApprover, type AutonomyMap } from "@/lib/agents/approval-router";
+import {
+  buildOrgChartGraph,
+  isAutoApprover,
+  loadAutonomyMap,
+  resolveApprover,
+  type AutonomyMap,
+  type OrgChartGraph,
+} from "@/lib/agents/approval-router";
+import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { directorLiveStateFact } from "@/lib/agents/platform-director";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -454,4 +471,108 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+// ── Phase 3 — enqueuer + applyDirectorApproval ───────────────────────────────────────────────────
+// Mirrors platform-director's enqueuer + helper. The box worker handler (`runGrowthDirectorJob`,
+// scripts/builder-worker.ts) is the other half — it claims the queued job, builds the brief, runs the
+// Max investigation, and dispatches the verdict via `applyDirectorApproval` (auto-approve) or the
+// reused `escalateApprovalRequestToCeo` (escalate). The supervisable-autonomy ledger row
+// (`approval_decisions`, decided_by='director', routed_to_function='growth', autonomous=true) is
+// written by `applyDirectorApproval`; the per-decision `director_activity` row
+// (director_function='growth', action_kind='approved_approval'|'escalated') is written by the worker.
+
+/** Does an approval raised by `kind` route to the Growth director, given the live chart + flags? */
+export function routesToGrowth(kind: string, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
+  return resolveApprover(ownerFunctionForKind(kind), chart, autonomy) === GROWTH;
+}
+
+/**
+ * Auto-approve a target job — the AUTONOMOUS director path. Mirrors platform-director's helper:
+ * mark every listed action `approved`, flip the job to `queued_resume` once no pending actions remain
+ * (the execution path is unchanged — the worker resumes the same way the human approve path does),
+ * then write the supervisable-autonomy ledger row (decided_by='director', routed_to_function='growth',
+ * autonomous=true). A bundle is approved atomically — the leash gate has already verified ALL-OR-NOTHING.
+ */
+export async function applyDirectorApproval(
+  admin: Admin,
+  target: DirectorTargetJob,
+  actionIds: string | string[],
+  reasoning: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const ids = new Set(Array.isArray(actionIds) ? actionIds : [actionIds]);
+  const actions = (target.pending_actions || []).map((a) => (a.id && ids.has(a.id) ? { ...a, status: "approved" } : a));
+  const stillPending = actions.some((a) => (a.status ?? "pending") === "pending");
+  const patch: Record<string, unknown> = { pending_actions: actions, updated_at: new Date().toISOString() };
+  if (!stillPending) patch.status = "queued_resume";
+  const { error } = await admin.from("agent_jobs").update(patch).eq("id", target.id);
+  if (error) return { ok: false, error: error.message };
+
+  await recordApprovalDecision(admin, {
+    workspaceId: target.workspace_id,
+    agentJobId: target.id,
+    // One ledger row per approval. A single action keeps its id; a bundle keys on the job (the grader
+    // reads approval_decision_id, not the action), so pending_action_id is null.
+    pendingActionId: ids.size === 1 ? Array.from(ids)[0] : null,
+    raisedByFunction: ownerFunctionForKind(target.kind) ?? GROWTH,
+    routedToFunction: GROWTH,
+    decidedBy: "director",
+    decision: "approved",
+    reasoning,
+    autonomous: true,
+  });
+  return { ok: true };
+}
+
+/**
+ * The enqueuer — find every open Growth-routed Approval Request and queue ONE `growth-director` job
+ * per target for the box lane to investigate. Idempotent (one director job per target, ever) and a
+ * NO-OP while Growth isn't live+autonomous (the dormant-until-M6 state — `resolveApprover` won't pick
+ * Growth, so no target ever matches). Best-effort. Mirrors `enqueuePlatformDirectorJobs`.
+ */
+export async function enqueueGrowthDirectorJobs(admin: Admin): Promise<{ enqueued: number; slugs: string[] }> {
+  const autonomy = await loadAutonomyMap();
+  if (!growthIsAutoApprover(autonomy)) return { enqueued: 0, slugs: [] }; // dormant until the M6 flag flips
+  const chart = await buildOrgChartGraph();
+
+  const { data: jobs } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, pending_actions")
+    .eq("status", "needs_approval")
+    .limit(200);
+  const targets = (jobs || []).filter((j) => routesToGrowth(String(j.kind), chart, autonomy));
+  if (!targets.length) return { enqueued: 0, slugs: [] };
+
+  // Dedup: never queue a second director job for a target that already has one (any status). A
+  // deferred (escalated) target stays needs_approval, so this is what stops an infinite re-enqueue.
+  const { data: existing } = await admin
+    .from("agent_jobs")
+    .select("instructions")
+    .eq("kind", "growth-director")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const seen = new Set<string>();
+  for (const e of existing || []) {
+    try {
+      const i = JSON.parse((e.instructions as string) || "{}");
+      if (i.target_job_id) seen.add(String(i.target_job_id));
+    } catch {
+      /* not JSON — skip */
+    }
+  }
+
+  const slugs: string[] = [];
+  for (const t of targets) {
+    if (seen.has(String(t.id))) continue;
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: t.workspace_id,
+      spec_slug: t.spec_slug || String(t.kind),
+      kind: "growth-director",
+      status: "queued",
+      created_by: null,
+      instructions: JSON.stringify({ target_job_id: t.id, target_kind: t.kind }),
+    });
+    if (!error) slugs.push(t.spec_slug || String(t.kind));
+  }
+  return { enqueued: slugs.length, slugs };
 }

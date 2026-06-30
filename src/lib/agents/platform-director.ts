@@ -1436,12 +1436,27 @@ export async function specBuildState(admin: Admin, workspaceId: string, specSlug
  * the CEO inbox shows it instead of Platform's. If the reconciler hasn't emitted the notification yet,
  * we create a CEO-routed one (idempotent on agent_job_id — the reconciler then skips it). Best-effort.
  */
+/**
+ * The director identity carried into a CEO escalation — the slug used in the metadata's
+ * `escalated_by_director` field and the human label that prefixes the escalation note. Default is
+ * Ada (Platform/DevOps Director); the Growth director (growth-director-agent Phase 3) reuses this
+ * function with `{slug:'growth', label:'Growth Director'}` so the CEO inbox correctly attributes
+ * the escalation to whoever raised it.
+ */
+export interface EscalatingDirector {
+  slug: string;
+  label: string;
+}
+
+const ADA_IDENTITY: EscalatingDirector = { slug: PLATFORM, label: "Ada (Platform/DevOps Director)" };
+
 export async function escalateApprovalRequestToCeo(
   admin: Admin,
   target: DirectorTargetJob,
   diagnosis: string,
+  director: EscalatingDirector = ADA_IDENTITY,
 ): Promise<{ ok: boolean; created: boolean }> {
-  const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you — outside the leash / a call only you should make:\n${diagnosis}`.slice(0, 4000);
+  const note = `🛠️ ${director.label} escalated this to you — outside the leash / a call only you should make:\n${diagnosis}`.slice(0, 4000);
   const { data: notifs } = await admin
     .from("dashboard_notifications")
     .select("id, body, metadata")
@@ -1451,7 +1466,7 @@ export async function escalateApprovalRequestToCeo(
   const existing = (notifs ?? []).find((n) => (n.metadata as Record<string, unknown> | null)?.["agent_job_id"] === target.id);
 
   if (existing) {
-    const meta = { ...((existing.metadata as Record<string, unknown> | null) ?? {}), routed_to_function: CEO, escalated_by_director: PLATFORM, escalation_reason: diagnosis.slice(0, 2000) };
+    const meta = { ...((existing.metadata as Record<string, unknown> | null) ?? {}), routed_to_function: CEO, escalated_by_director: director.slug, escalation_reason: diagnosis.slice(0, 2000) };
     const body = `${note}\n\n${(existing.body as string) ?? ""}`.slice(0, 4000);
     const { error } = await admin.from("dashboard_notifications").update({ metadata: meta, body, read: false }).eq("id", existing.id);
     return { ok: !error, created: false };
@@ -1469,7 +1484,7 @@ export async function escalateApprovalRequestToCeo(
     routed_to_function: CEO,
     approve_action_id: inlineApproveActionId(target as unknown as ApprovalJobRow),
     deep_link: approvalDeepLink(target.kind, target.spec_slug ?? null),
-    escalated_by_director: PLATFORM,
+    escalated_by_director: director.slug,
     escalation_reason: diagnosis.slice(0, 2000),
   };
   const { error } = await admin.from("dashboard_notifications").insert({

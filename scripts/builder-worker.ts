@@ -251,6 +251,13 @@ const PLATFORM_DIRECTOR_INTERVAL_MS = 60 * 1000; // ~1 min — quick to pick up 
 let lastPlatformDirectorSweep = 0; // 0 ⇒ run on the first poll so a routed request is picked up right away.
 let platformDirectorSweepInFlight = false;
 
+// Growth Director enqueuer (growth-director-agent P3): twin of the platform sweep — queues a
+// `growth-director` job per open Growth-routed Approval Request. Dormant (a no-op) until the M6 flag
+// flips `function_autonomy('growth')` live+autonomous; `resolveApprover` simply never picks Growth
+// until then, so the inner SELECT returns nothing. Same cadence + in-flight guard.
+let lastGrowthDirectorSweep = 0;
+let growthDirectorSweepInFlight = false;
+
 // Platform/DevOps Director goal escort (platform-director-agent P2): a throttled sweep that drives each
 // approved goal the director owns forward — kicks off the unblocked specs the reactive blocked_by
 // auto-queue didn't catch + logs the advance. Also a no-op while Platform isn't live+autonomous. Slower
@@ -355,7 +362,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1752,7 +1759,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "proposed-goal"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -4616,6 +4623,120 @@ async function runPlatformDirectorJob(job: Job) {
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   } finally {
     if (investWt) sh("git", ["worktree", "remove", "--force", investWt]); // clean up the branch-review worktree
+  }
+}
+
+// growth-director-agent (Phase 3): the box session that drives one Growth Director decision. A twin
+// of runPlatformDirectorJob, narrowed to Growth's leash + control surfaces (function_autonomy('growth') +
+// iteration_policies + storefront_optimizer_policy + open iteration_recommendations). Read-only Max
+// investigation → ONE JSON verdict; auto-approve within the leash (logged via approval_decisions
+// routed_to_function='growth' + director_activity director_function='growth') or escalate to the CEO
+// via the SHARED escalateApprovalRequestToCeo (parameterized with the Growth identity so the inbox
+// note correctly reads "Growth Director"). Dormant until the M6 flag flips function_autonomy('growth')
+// live+autonomous — until then no `needs_approval` job ever routes to Growth, so this handler is
+// reachable only via a synthetic enqueue (the dormant-rehearsal verification path in the spec).
+async function runGrowthDirectorJob(job: Job) {
+  const tag = `[growth-director:${job.id.slice(0, 8)}]`;
+  let instr: { target_job_id?: string; target_kind?: string } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — no target */
+  }
+  const targetId = instr.target_job_id;
+  if (!targetId) {
+    // No standing pass for Growth — build-driving stays with Ada, and goal-escort/grooming/init are
+    // Platform-only. A target-less growth-director job is a no-op (defensive guard).
+    await update(job.id, { status: "completed", log_tail: `no target_job_id — no-op (Growth has no standing pass)`.slice(-2000) });
+    console.log(`${tag} no target — no-op`);
+    return;
+  }
+
+  const lib = await import("../src/lib/agents/growth-director");
+  const pdLib = await import("../src/lib/agents/platform-director");
+  const { ownerFunctionForKind } = await import("../src/lib/agents/approval-inbox");
+  const { resolveApprover, buildOrgChartGraph, loadAutonomyMap } = await import("../src/lib/agents/approval-router");
+  const { appendDirectorInstructions } = await import("../src/lib/agents/director-instructions");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const { data: target } = await db
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, pending_actions, log_tail")
+    .eq("id", targetId)
+    .maybeSingle();
+  if (!target) {
+    await update(job.id, { status: "completed", log_tail: `target ${targetId.slice(0, 8)} gone — nothing to decide`.slice(-2000) });
+    console.log(`${tag} target gone — no-op`);
+    return;
+  }
+  const t = target as unknown as import("../src/lib/agents/growth-director").DirectorTargetJob;
+  if (t.status !== "needs_approval") {
+    await update(job.id, { status: "completed", log_tail: `target already decided (${t.status}) — no-op`.slice(-2000) });
+    console.log(`${tag} target already decided (${t.status}) — no-op`);
+    return;
+  }
+
+  // Re-confirm routing — Growth must STILL be the live+autonomous approver for this kind. (Fail-safe:
+  // if the flag was cleared after the job was queued, do nothing — it routes elsewhere.)
+  const [chart, autonomy] = await Promise.all([buildOrgChartGraph(), loadAutonomyMap()]);
+  if (resolveApprover(ownerFunctionForKind(t.kind), chart, autonomy) !== "growth") {
+    await update(job.id, { status: "completed", log_tail: `target no longer routes to growth — no-op`.slice(-2000) });
+    console.log(`${tag} no longer routes to growth — no-op`);
+    return;
+  }
+
+  // Structural leash gate — auto-approvable iff EVERY pending action is in Growth's leash. One out-of-leash
+  // action — a multi-CHOICE, a non-leash type, a destructive op — escalates the WHOLE request.
+  const { actions: leashActions, verdict: leashVerdict } = lib.directorLeashCandidates(t);
+  if (leashVerdict === "none") {
+    const reason = "outside the auto-approve leash (multi-choice / non-leash / a destructive action) — needs the CEO";
+    await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "growth", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind } });
+    await pdLib.escalateApprovalRequestToCeo(db, t, reason, { slug: "growth", label: "Growth Director" });
+    await update(job.id, { status: "completed", log_tail: `escalate → ${reason}; routed to CEO inbox`.slice(-2000) });
+    console.log(`${tag} escalate → outside leash, routed to CEO`);
+    return;
+  }
+
+  const categories = leashActions.map((a) => a.category).join("+");
+  const bundleLabel = leashVerdict === "multi" ? `${leashActions.length}-action bundle (${categories})` : categories;
+
+  console.log(`${tag} investigating ${t.kind} (${bundleLabel}) for target ${targetId.slice(0, 8)}`);
+  try {
+    // The brief loader needs the admin client (it reads the Growth control surfaces). The investigation
+    // prompt already wraps itself with directorLiveStateFact(admin,'growth') (Phase 2), so we only need
+    // to append the CEO's active coaching (the seam other director lanes share via directorDecisionPrompt).
+    const brief = await lib.buildGrowthDirectorBrief(db, t, leashActions);
+    const basePrompt = await lib.growthDirectorInvestigationPrompt(db, brief);
+    const investPrompt = await appendDirectorInstructions(db, t.workspace_id, "growth", basePrompt);
+    const { session, resultText, isError, usage, model } = await runBoxLane((cfg, sid) => runDirectorClaude(investPrompt, sid, REPO_DIR, cfg, job.id));
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+    const parsed = extractJson<{ verdict?: string; reasoning?: string; leash_category?: string }>(resultText);
+    const verdict = String(parsed?.verdict || "");
+    const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
+
+    if (verdict === "auto-approve") {
+      const res = await lib.applyDirectorApproval(db, t, leashActions.map((a) => a.actionId), reasoning || `auto-approved (${bundleLabel}) within the leash`);
+      if (!res.ok) {
+        await update(job.id, { status: "needs_attention", error: `director approve failed: ${res.error}`, log_tail: `auto-approve FAILED: ${res.error}`.slice(-2000) });
+        console.warn(`${tag} auto-approve FAILED: ${res.error}`);
+        return;
+      }
+      await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "growth", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${bundleLabel})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true } });
+      await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → target queued_resume.\n${reasoning}`.slice(-2000) });
+      console.log(`${tag} auto-approved ${t.kind} (${bundleLabel})`);
+      return;
+    }
+
+    // escalate — OR no recognizable verdict (fail safe: escalate, NEVER auto-approve on an ambiguous result).
+    const reason = reasoning || (isError ? "investigation errored — escalating, not approving" : "could not confirm sound + within the leash");
+    await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "growth", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind, verdict: verdict || "(none)" } });
+    await pdLib.escalateApprovalRequestToCeo(db, t, reason, { slug: "growth", label: "Growth Director" });
+    await update(job.id, { status: "completed", log_tail: `escalate → routed ${t.kind} to CEO inbox: ${reason}`.slice(-2000) });
+    console.log(`${tag} escalate → ${verdict || "no verdict"} (routed to CEO)`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
 
@@ -12078,6 +12199,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
   if (job.kind === "platform-director") return runPlatformDirectorJob(job);
   if (job.kind === "director-bounce-back") return runDirectorBounceBackJob(job);
+  if (job.kind === "growth-director") return runGrowthDirectorJob(job);
   if (job.kind === "proposed-goal") return runProposedGoalJob(job);
   if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
@@ -13048,10 +13170,10 @@ async function main() {
   const countCoverageRegister = () => [...active.values()].filter((v) => v.kind === "coverage-register" || v.kind === "audit-spec-shipped-state").length;
   // platform-director shares its concurrency-1 lane with director-bounce-back so a bounce never
   // races the standing pass on the same workspace (bounce-escalation-back-to-director).
-  const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back").length;
+  const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
     // Stamp an initial heartbeat at claim time (stale-session-reaper) so a just-claimed job that hasn't
@@ -13325,8 +13447,11 @@ async function main() {
       // Request read-only on Max → auto-approve within the leash (logging the decision), else escalate.
       // bounce-escalation-back-to-director: `director-bounce-back` shares this concurrency-1 lane so a
       // bounce re-investigation never races the standing pass.
+      // growth-director-agent Phase 3: `growth-director` shares the SAME concurrency-1 director lane —
+      // both directors run read-only Max investigations against the SAME Anthropic account, so co-locating
+      // them here avoids a second-director starvation lane and keeps director rate-limit cost bounded.
       while (countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director", "director-bounce-back"] });
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director", "director-bounce-back", "growth-director"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ${job.kind} ${job.id.slice(0, 8)} → ${countPlatformDirector() + 1}/${MAX_PLATFORM_DIRECTOR} platform-director lane`);
@@ -13425,6 +13550,23 @@ async function main() {
             console.error("[platform-director] enqueue failed (continuing):", e instanceof Error ? e.message : e);
           } finally {
             platformDirectorSweepInFlight = false;
+          }
+        })();
+      }
+      // Growth Director enqueuer (growth-director-agent P3): twin of the sweep above for the Growth
+      // director. Dormant (a no-op) until the M6 flag flips function_autonomy('growth') live+autonomous.
+      if (!growthDirectorSweepInFlight && Date.now() - lastGrowthDirectorSweep > PLATFORM_DIRECTOR_INTERVAL_MS) {
+        lastGrowthDirectorSweep = Date.now();
+        growthDirectorSweepInFlight = true;
+        void (async () => {
+          try {
+            const { enqueueGrowthDirectorJobs } = await import("../src/lib/agents/growth-director");
+            const r = await enqueueGrowthDirectorJobs(db);
+            if (r.enqueued) console.log(`[growth-director] queued ${r.enqueued} director job(s): ${r.slugs.join(", ")}`);
+          } catch (e) {
+            console.error("[growth-director] enqueue failed (continuing):", e instanceof Error ? e.message : e);
+          } finally {
+            growthDirectorSweepInFlight = false;
           }
         })();
       }
