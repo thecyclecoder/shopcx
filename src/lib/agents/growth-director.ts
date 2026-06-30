@@ -41,6 +41,7 @@ import {
 import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { directorLiveStateFact } from "@/lib/agents/platform-director";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -201,6 +202,50 @@ export interface IterationRecommendationSummary {
   created_at: string | null;
 }
 
+/** One open `storefront-optimizer` agent_jobs row — a proposal in flight the director must see
+ *  before approving an optimizer-policy flip (so they can read what the optimizer wants to do
+ *  with the on-switch they're about to flip). */
+export interface StorefrontOptimizerJobSummary {
+  id: string;
+  /** The surface key `product:lander:audience` — the agent_jobs.spec_slug. */
+  surfaceKey: string;
+  status: string;
+  pendingActionsCount: number;
+  createdAt: string | null;
+}
+
+/** One recent storefront_campaign_grades row — the Head-of-Growth grade the director can
+ *  override via `gradeDirectorDecision`. The brief carries the per-experiment grade so the
+ *  director can grade/un-grade from the mini-report. */
+export interface StorefrontCampaignGradeSummary {
+  id: string;
+  experiment_id: string;
+  grade_initial: number | null;
+  grade_revised: number | null;
+  hypothesis_quality: number | null;
+  result_quality: number | null;
+  graded_by: string;
+  initial_graded_at: string | null;
+  revised_graded_at: string | null;
+}
+
+/** One in-window storefront_experiments row — the per-campaign mini-report. Carries the
+ *  `last_decision.delivery_flag` from growth-storefront-experiment-delivery-verification so the
+ *  director can see which campaigns failed to deliver (the Phase-3 gate on promote/kill keys on
+ *  exactly this flag). */
+export interface StorefrontExperimentSummary {
+  id: string;
+  product_id: string;
+  lander_type: string;
+  audience: string;
+  lever: string;
+  status: string;
+  /** Pulled from `last_decision.delivery_flag` (null when the audit hasn't run yet). */
+  delivery_flag: string | null;
+  started_at: string | null;
+  stopped_at: string | null;
+}
+
 /** One in-leash action inside the brief — what the investigation confirms is sound. */
 export interface GrowthDirectorBriefAction {
   category: LeashCategory;
@@ -229,12 +274,40 @@ export interface GrowthDirectorBrief {
   storefrontOptimizerPolicy: StorefrontOptimizerPolicySummary | null;
   /** the open `status='pending'` iteration_recommendations rows for the workspace (newest first). */
   pendingRecommendations: IterationRecommendationSummary[];
+  /** the open `kind='storefront-optimizer'` agent_jobs rows for the workspace — proposals in flight. */
+  openOptimizerJobs: StorefrontOptimizerJobSummary[];
+  /** the recent storefront_campaign_grades rows for the workspace (newest first) — what the
+   *  director can grade/un-grade via `gradeDirectorDecision`. */
+  recentCampaignGrades: StorefrontCampaignGradeSummary[];
+  /** the recent storefront_experiments rows for the workspace (newest first) — the per-campaign
+   *  mini-report carrying the `last_decision.delivery_flag` (the Phase-3 gate on promote/kill). */
+  recentExperiments: StorefrontExperimentSummary[];
   logTail: string;
 }
 
 /** How many iteration_policies versions + pending recommendations the brief carries — cap the prompt size. */
 const POLICY_VERSIONS_CAP = 8;
 const PENDING_RECOS_CAP = 25;
+/** How many recent grades + experiments the brief carries — cap the prompt size. */
+const RECENT_GRADES_CAP = 15;
+const RECENT_EXPERIMENTS_CAP = 15;
+/** How many open `storefront-optimizer` agent_jobs the brief carries (one proposal per surface). */
+const OPEN_OPTIMIZER_JOBS_CAP = 25;
+/** The agent_jobs.status values that count as "open" — i.e. a proposal still in flight (any
+ *  non-terminal status). Mirrors the spirit of `LIVE_OPTIMIZER_STATUSES` in optimizer-agent.ts;
+ *  duplicated here to keep `growth-director.ts` free of a transitive dependency on the
+ *  optimizer-agent module (which pulls in Nano-Banana / Gemini code paths the director never
+ *  touches). The list errs on the side of inclusion — a status the optimizer adds later still
+ *  surfaces until it terminalizes. */
+const OPEN_OPTIMIZER_JOB_STATUSES = [
+  "queued",
+  "claimed",
+  "building",
+  "needs_input",
+  "needs_approval",
+  "queued_resume",
+  "blocked_on_usage",
+];
 
 /**
  * Load the Growth director's brief — every loader is best-effort + returns the empty/null shape on
@@ -335,6 +408,85 @@ export async function buildGrowthDirectorBrief(
     /* best-effort */
   }
 
+  // The open `kind='storefront-optimizer'` agent_jobs — proposals in flight on each surface. The
+  // director needs to see WHICH surfaces have live optimizer activity before approving a policy
+  // flip (a flip on `active` immediately starts churning those surfaces; surfacing them lets the
+  // director catch a flip that would race a still-resolving proposal).
+  let openOptimizerJobs: StorefrontOptimizerJobSummary[] = [];
+  try {
+    const { data } = await admin
+      .from("agent_jobs")
+      .select("id, spec_slug, status, pending_actions, created_at")
+      .eq("workspace_id", job.workspace_id)
+      .eq("kind", "storefront-optimizer")
+      .in("status", OPEN_OPTIMIZER_JOB_STATUSES)
+      .order("created_at", { ascending: false })
+      .limit(OPEN_OPTIMIZER_JOBS_CAP);
+    openOptimizerJobs = ((data || []) as { id: string; spec_slug: string | null; status: string; pending_actions: unknown; created_at: string | null }[]).map((r) => ({
+      id: r.id,
+      surfaceKey: r.spec_slug ?? "(no surface key)",
+      status: r.status,
+      pendingActionsCount: Array.isArray(r.pending_actions) ? (r.pending_actions as unknown[]).length : 0,
+      createdAt: r.created_at ?? null,
+    }));
+  } catch {
+    /* best-effort */
+  }
+
+  // The recent storefront_campaign_grades — the Head-of-Growth grade per concluded campaign.
+  // Surfaces both axes (initial + revised) + the human-override flag so the director can decide
+  // whether to grade/un-grade via `gradeDirectorDecision`.
+  let recentCampaignGrades: StorefrontCampaignGradeSummary[] = [];
+  try {
+    const { data } = await admin
+      .from("storefront_campaign_grades")
+      .select("id, experiment_id, grade_initial, grade_revised, hypothesis_quality, result_quality, graded_by, initial_graded_at, revised_graded_at")
+      .eq("workspace_id", job.workspace_id)
+      .order("updated_at", { ascending: false })
+      .limit(RECENT_GRADES_CAP);
+    recentCampaignGrades = ((data || []) as StorefrontCampaignGradeSummary[]).map((r) => ({
+      id: r.id,
+      experiment_id: r.experiment_id,
+      grade_initial: r.grade_initial ?? null,
+      grade_revised: r.grade_revised ?? null,
+      hypothesis_quality: r.hypothesis_quality ?? null,
+      result_quality: r.result_quality ?? null,
+      graded_by: r.graded_by ?? "agent",
+      initial_graded_at: r.initial_graded_at ?? null,
+      revised_graded_at: r.revised_graded_at ?? null,
+    }));
+  } catch {
+    /* best-effort */
+  }
+
+  // The recent storefront_experiments — the per-campaign mini-report. `last_decision.delivery_flag`
+  // is pulled out for the prompt (the Phase-3 gate on promote/kill keys on this exact value).
+  let recentExperiments: StorefrontExperimentSummary[] = [];
+  try {
+    const { data } = await admin
+      .from("storefront_experiments")
+      .select("id, product_id, lander_type, audience, lever, status, last_decision, started_at, stopped_at")
+      .eq("workspace_id", job.workspace_id)
+      .order("updated_at", { ascending: false })
+      .limit(RECENT_EXPERIMENTS_CAP);
+    recentExperiments = ((data || []) as { id: string; product_id: string; lander_type: string; audience: string; lever: string; status: string; last_decision: Record<string, unknown> | null; started_at: string | null; stopped_at: string | null }[]).map((r) => {
+      const decisionFlag = r.last_decision && typeof r.last_decision === "object" ? (r.last_decision as Record<string, unknown>)["delivery_flag"] : null;
+      return {
+        id: r.id,
+        product_id: r.product_id,
+        lander_type: r.lander_type,
+        audience: r.audience,
+        lever: r.lever,
+        status: r.status,
+        delivery_flag: typeof decisionFlag === "string" ? decisionFlag : null,
+        started_at: r.started_at ?? null,
+        stopped_at: r.stopped_at ?? null,
+      };
+    });
+  } catch {
+    /* best-effort */
+  }
+
   return {
     jobId: job.id,
     workspaceId: job.workspace_id,
@@ -347,6 +499,9 @@ export async function buildGrowthDirectorBrief(
     iterationPolicies,
     storefrontOptimizerPolicy,
     pendingRecommendations,
+    openOptimizerJobs,
+    recentCampaignGrades,
+    recentExperiments,
     logTail: (job.log_tail || "").slice(-2000),
   };
 }
@@ -383,6 +538,44 @@ function renderPendingRecommendations(rows: IterationRecommendationSummary[]): s
     (r) => `  - [${r.action_type}${r.persona ? ` · ${r.persona}` : ""}] ${r.title ?? "(no title)"}${r.rationale ? ` — ${r.rationale.slice(0, 200)}` : ""}`,
   );
   return ["iteration_recommendations (status=pending, newest first):", ...lines].join("\n");
+}
+
+/** Render the open storefront-optimizer agent_jobs — proposals in flight per surface. */
+function renderOptimizerJobs(rows: StorefrontOptimizerJobSummary[]): string {
+  if (!rows.length) return "storefront-optimizer agent_jobs (open): (none — no proposals in flight)";
+  const lines = rows.map(
+    (r) => `  - surface=${r.surfaceKey} · status=${r.status} · pending_actions=${r.pendingActionsCount}${r.createdAt ? ` · created ${r.createdAt}` : ""}`,
+  );
+  return ["storefront-optimizer agent_jobs (open, newest first):", ...lines].join("\n");
+}
+
+/** Render the recent storefront_campaign_grades — initial + revised + override flag. */
+function renderCampaignGrades(rows: StorefrontCampaignGradeSummary[]): string {
+  if (!rows.length) return "storefront_campaign_grades (recent): (none — no campaigns graded yet)";
+  const lines = rows.map((r) => {
+    const init = r.grade_initial != null ? `${r.grade_initial}/10` : "—";
+    const rev = r.grade_revised != null ? `${r.grade_revised}/10` : "—";
+    const sub = r.hypothesis_quality != null || r.result_quality != null
+      ? ` · hypothesis=${r.hypothesis_quality ?? "—"} · result=${r.result_quality ?? "—"}`
+      : "";
+    return `  - exp=${r.experiment_id} · initial=${init} · revised=${rev}${sub} · graded_by=${r.graded_by}`;
+  });
+  return ["storefront_campaign_grades (recent, newest first):", ...lines].join("\n");
+}
+
+/** Render the in-window storefront_experiments — per-campaign mini-report with delivery flag.
+ *  This is the surface the director grades/un-grades over via `gradeDirectorDecision`. */
+function renderExperimentsMiniReport(rows: StorefrontExperimentSummary[]): string {
+  if (!rows.length) return "storefront_experiments (recent): (none — no in-window experiments)";
+  const lines = rows.map((r) => {
+    const flag = r.delivery_flag ? ` · delivery_flag=${r.delivery_flag}` : "";
+    return `  - exp=${r.id} · product=${r.product_id} · lander=${r.lander_type}/${r.audience} · lever=${r.lever} · status=${r.status}${flag}${r.started_at ? ` · started ${r.started_at}` : ""}${r.stopped_at ? ` · stopped ${r.stopped_at}` : ""}`;
+  });
+  return [
+    "storefront_experiments (recent, newest first) — the per-campaign mini-report:",
+    "  (a `delivery_flag='failed_to_deliver'` means the audit found the variant didn't actually reach shoppers — blocks promote/kill until verified.)",
+    ...lines,
+  ].join("\n");
 }
 
 /**
@@ -455,6 +648,12 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     renderIterationPolicies(brief.iterationPolicies),
     "",
     renderOptimizerPolicy(brief.storefrontOptimizerPolicy),
+    "",
+    renderOptimizerJobs(brief.openOptimizerJobs),
+    "",
+    renderCampaignGrades(brief.recentCampaignGrades),
+    "",
+    renderExperimentsMiniReport(brief.recentExperiments),
     "",
     renderPendingRecommendations(brief.pendingRecommendations),
     "",
@@ -575,4 +774,155 @@ export async function enqueueGrowthDirectorJobs(admin: Admin): Promise<{ enqueue
     if (!error) slugs.push(t.spec_slug || String(t.kind));
   }
   return { enqueued: slugs.length, slugs };
+}
+
+// ── Phase 2 — director grading on the per-campaign mini-report ───────────────────────────────────
+// The brief surfaces a per-campaign mini-report (status + delivery_flag + current grade); this is the
+// write the Growth director uses to grade/un-grade one of those campaigns. Mirrors the dashboard
+// override route (src/app/api/workspaces/[id]/storefront-campaign-grades/[gradeId]/route.ts):
+// updates the chosen axis (initial / revised), stamps graded_by='human' + the overrider + the reason,
+// and writes one `director_activity` row (`action_kind='graded_optimizer_campaign'`). The autonomous
+// audit trail the spec's prod verification queries.
+//
+// `axis: 'clear'` is the un-grade — drops the chosen axis (initial OR revised) back to NULL so the
+// next agent grading pass writes a fresh grade. Used when the override itself was wrong (the director
+// re-considers and resets to let the agent's grade stand). The director_activity row records the
+// un-grade with `metadata.action='cleared'` so the audit trail keeps the override + reset pair.
+
+export interface GradeDirectorDecisionInput {
+  workspaceId: string;
+  /** The storefront_experiments.id whose campaign is being graded — the lookup key on the grade row. */
+  experimentId: string;
+  /** Which grade axis the director is grading. `'initial'` = the proxy-time grade, `'revised'` = the
+   *  ~4-month actual-LTV grade. */
+  axis: "initial" | "revised";
+  /** A 1–10 grade, OR `null` to CLEAR the override (un-grade the axis back to NULL). */
+  grade: number | null;
+  /** The Director's WHY — surfaced on the audit row + the override_reason column. */
+  reasoning: string;
+  /** auth.users.id of the human/agent the Director acts on behalf of (stamped onto `overridden_by`). */
+  decidedBy?: string | null;
+}
+
+export interface GradeDirectorDecisionResult {
+  ok: boolean;
+  /** The storefront_campaign_grades.id that was written (when found). */
+  gradeId?: string;
+  /** Whether the axis was cleared (un-grade) — true for grade=null, false for an override. */
+  cleared?: boolean;
+  detail: string;
+}
+
+/**
+ * The Growth director's grade/un-grade write on the per-campaign mini-report. Writes:
+ *   1. storefront_campaign_grades update — the chosen axis grade + override_reason + graded_by='human'
+ *      + overridden_by + overridden_at. The OTHER axis is left untouched (both grades always persist).
+ *      For `grade=null` (un-grade) the chosen axis is reset to NULL with graded_by='agent' so the
+ *      next agent pass writes a fresh grade.
+ *   2. director_activity row — `action_kind='graded_optimizer_campaign'`, carrying the experiment_id
+ *      + axis + the prior + new grade + the reasoning + decidedBy. The audit trail the spec's prod
+ *      verification queries; ≥1 row per concluded campaign is the expected post-merge state.
+ *
+ * Best-effort + typed result (no throws) — mirrors `authorOptimizerPolicy` /
+ * `activateOptimizerPolicy`. A grade row missing for the experiment_id fails fast (the director
+ * cannot grade what hasn't been graded yet — the agent grades first at significance, then the
+ * director overrides).
+ */
+export async function gradeDirectorDecision(
+  admin: Admin,
+  input: GradeDirectorDecisionInput,
+): Promise<GradeDirectorDecisionResult> {
+  if (!input.workspaceId) return { ok: false, detail: "gradeDirectorDecision: workspaceId required" };
+  if (!input.experimentId) return { ok: false, detail: "gradeDirectorDecision: experimentId required" };
+  if (input.axis !== "initial" && input.axis !== "revised") {
+    return { ok: false, detail: `gradeDirectorDecision: axis must be 'initial' or 'revised' (got ${input.axis})` };
+  }
+  const grade = input.grade;
+  const cleared = grade === null;
+  if (!cleared) {
+    if (!Number.isInteger(grade) || (grade as number) < 1 || (grade as number) > 10) {
+      return { ok: false, detail: "gradeDirectorDecision: grade must be 1–10 or null (to clear)" };
+    }
+  }
+  const reason = (input.reasoning || "").trim();
+  if (!reason) return { ok: false, detail: "gradeDirectorDecision: reasoning required" };
+
+  // Load the grade row by experiment_id (UNIQUE — one grade row per campaign).
+  const { data: existing, error: loadErr } = await admin
+    .from("storefront_campaign_grades")
+    .select("id, grade_initial, grade_revised, graded_by")
+    .eq("workspace_id", input.workspaceId)
+    .eq("experiment_id", input.experimentId)
+    .maybeSingle();
+  if (loadErr) return { ok: false, detail: `gradeDirectorDecision load failed: ${loadErr.message}` };
+  if (!existing) {
+    return {
+      ok: false,
+      detail: `gradeDirectorDecision: no storefront_campaign_grades row for experiment ${input.experimentId} (the agent must grade at significance first)`,
+    };
+  }
+  const gradeId = (existing as { id: string }).id;
+  const priorGrade = input.axis === "revised" ? (existing as { grade_revised: number | null }).grade_revised : (existing as { grade_initial: number | null }).grade_initial;
+
+  const now = new Date().toISOString();
+  const update: Record<string, unknown> = { updated_at: now };
+  if (cleared) {
+    // Un-grade: reset the chosen axis to NULL so the next agent pass writes a fresh grade.
+    // graded_by flips back to 'agent' so the agent isn't locked out by the human-override guard.
+    if (input.axis === "revised") {
+      update.grade_revised = null;
+      update.grade_revised_reasoning = null;
+      update.revised_graded_at = null;
+    } else {
+      update.grade_initial = null;
+      update.grade_initial_reasoning = null;
+      update.initial_graded_at = null;
+    }
+    update.graded_by = "agent";
+    update.overridden_by = null;
+    update.override_reason = null;
+    update.overridden_at = null;
+  } else {
+    if (input.axis === "revised") {
+      update.grade_revised = grade;
+      update.grade_revised_reasoning = `[Growth override] ${reason}`;
+    } else {
+      update.grade_initial = grade;
+      update.grade_initial_reasoning = `[Growth override] ${reason}`;
+    }
+    update.graded_by = "human";
+    update.overridden_by = input.decidedBy ?? null;
+    update.override_reason = reason;
+    update.overridden_at = now;
+  }
+
+  const { error: upErr } = await admin.from("storefront_campaign_grades").update(update).eq("id", gradeId);
+  if (upErr) return { ok: false, detail: `gradeDirectorDecision update failed: ${upErr.message}` };
+
+  // One director_activity row — the audit trail the spec's prod verification queries.
+  await recordDirectorActivity(admin, {
+    workspaceId: input.workspaceId,
+    directorFunction: GROWTH,
+    actionKind: "graded_optimizer_campaign",
+    reason,
+    metadata: {
+      experiment_id: input.experimentId,
+      grade_id: gradeId,
+      axis: input.axis,
+      prior_grade: priorGrade,
+      new_grade: grade,
+      cleared,
+      decided_by: input.decidedBy ?? null,
+      autonomous: true,
+    },
+  });
+
+  return {
+    ok: true,
+    gradeId,
+    cleared,
+    detail: cleared
+      ? `cleared ${input.axis} grade on experiment ${input.experimentId}`
+      : `set ${input.axis} grade to ${grade} on experiment ${input.experimentId}`,
+  };
 }
