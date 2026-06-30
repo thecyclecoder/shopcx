@@ -12,7 +12,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeFunnelTree, listFunnelProducts } from "@/lib/storefront/funnel-tree";
+import { computeFunnelTree, listFunnelProducts, listUtmSources } from "@/lib/storefront/funnel-tree";
 
 function todayCentral(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
@@ -58,6 +58,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     if (start < launchDate) start = launchDate;
   }
   const productHandle = url.searchParams.get("product") || null;
+  const utmSource = url.searchParams.get("utm_source") || null;
 
   const startIso = centralBoundary(start, false);
   const endIso = centralBoundary(end, true);
@@ -69,17 +70,21 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     ? new Date(launchAt).toLocaleDateString("en-CA", { timeZone: "America/Chicago" })
     : daysAgoCentral(90);
 
-  const [tree, productOptions] = await Promise.all([
-    computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle }),
-    listFunnelProducts({ admin, workspaceId, startIso: centralBoundary(dropdownStart, false), endIso }),
+  const dropdownStartIso = centralBoundary(dropdownStart, false);
+  const [tree, productOptions, utmSourceOptions] = await Promise.all([
+    computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle, utmSource }),
+    listFunnelProducts({ admin, workspaceId, startIso: dropdownStartIso, endIso }),
+    listUtmSources({ admin, workspaceId, startIso: dropdownStartIso, endIso }),
   ]);
 
   return NextResponse.json({
     range: { start, end },
     productHandle: tree.productHandle,
+    utmSource: tree.utmSource,
     products: tree.products,
     unattributedEntry: tree.unattributedEntry,
     grandTotal: tree.grandTotal,
     productOptions,
+    utmSourceOptions,
   });
 }

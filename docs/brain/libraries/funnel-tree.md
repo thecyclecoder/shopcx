@@ -27,7 +27,8 @@ When no product slice is applied the top level is a **forest** of product nodes;
 
 ## Exports
 
-### `computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle? })` → `FunnelTreeResult`
+### `computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle?, utmSource? })` → `FunnelTreeResult`
+`utmSource` is an optional **traffic-source slice** (a `utm_source` value, or `DIRECT_UTM` = `"(direct)"` for sessions with no source). It **composes** with `productHandle` — a session must pass both. Omit/null = All sources.
 1. Pull **ALL** events in `[startIso,endIso]`, paginated → the **visit universe** (every session that fired any event = the page loaded) + the per-session reached-step set (engaged/pack/checkout/order/atc).
 2. Fetch the visit-universe sessions (chunked `.in("id")`, 300/page); drop `is_internal`, `is_bot`, internal-customer-stitched — same real-traffic exclusion as the legacy funnel.
 3. Bucket each session into one leaf via the keys above; **force `visit`** for every universe session, accumulate deeper-step counts from the events it fired.
@@ -37,7 +38,10 @@ When no product slice is applied the top level is a **forest** of product nodes;
 - Returns `products` (forest), `unattributedEntry` (non-product landings e.g. `/checkout` — surfaced separately but **included in `grandTotal`** so it reconciles), and `grandTotal` (all sessions combined). Each node carries `FunnelNodeMetrics`: the 5 step counts + `add_to_cart`, plus `engagement_rate` (engaged/visit), `conversion_rate` (order/visit), `atc_rate`.
 
 ### `listFunnelProducts({ admin, workspaceId, startIso, endIso })` → `{ handle, title, sessions }[]`
-The slice-dropdown source: products with real sessions in the window (resolution-based, so dead SKUs never appear), ordered by volume. Dynamic + self-pruning.
+The product slice-dropdown source: products with real sessions in the window (resolution-based, so dead SKUs never appear), ordered by volume. Dynamic + self-pruning.
+
+### `listUtmSources({ admin, workspaceId, startIso, endIso })` → `{ source, label, sessions }[]`
+The traffic-source slice-dropdown source: distinct `utm_source` values present in real sessions, ordered by volume. Sessions with no source collapse into one `DIRECT_UTM` row (label "Direct / none"). Dynamic — a new or stray source (e.g. `facebook` alongside `meta`) appears on its own, never hidden.
 
 ### `parseLanding(landingUrl)` → `{ segments, variant, angle }`
 Exported helper — tolerant URL parse (absolute / relative / malformed).
@@ -49,7 +53,7 @@ Exported helper — tolerant URL parse (absolute / relative / malformed).
 - **Caller owns Central-time boundary math** (`centralBoundary`) — the SDK takes UTC instants so it stays presentation-agnostic.
 
 ## Consumers
-- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal product-slice filter — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns `productOptions` (from `listFunnelProducts`) computed over a wide launch→today window so the slice dropdown stays stable across date ranges.
+- `GET /api/workspaces/[id]/funnel-tree` (auth + Central-time boundaries) → the funnel page's top card ("Funnel by product & concept") + the page-level universal slice filters (**Product × Source**, composing) — [[../dashboard/storefront__funnel]]. The card carries two pills (⚡ SDK-powered · ◫ Slice-aware) marking it as rebuilt onto this SDK; legacy cards on that page are NOT yet reworked (one-at-a-time migration). The route also returns `productOptions` + `utmSourceOptions` (from `listFunnelProducts` / `listUtmSources`) computed over a wide launch→today window so the slice dropdowns stay stable across date ranges.
 - (planned) Max's performance-data assembly — the Growth Director reads the same tree he directs agents on.
 
 ## Related

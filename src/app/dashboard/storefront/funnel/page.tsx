@@ -35,10 +35,12 @@ interface TreeNode {
 interface FunnelTreeResponse {
   range: { start: string; end: string };
   productHandle: string | null;
+  utmSource: string | null;
   products: TreeNode[];
   unattributedEntry: TreeNode | null;
   grandTotal: TreeMetrics;
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
+  utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
 }
 
 /** The badge pair marking a card as rebuilt onto the SDK + slice. */
@@ -55,25 +57,38 @@ function ReworkedPills() {
   );
 }
 
-/** Page-level universal product slice. Drives every reworked card below it. */
-function SliceFilter({ options, value, onChange }: {
-  options: Array<{ handle: string; title: string; sessions: number }>;
-  value: string; onChange: (v: string) => void;
+const selectClass =
+  "rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
+
+/** Page-level universal slices (product × traffic source). They compose, and
+ *  drive every reworked card below. */
+function SliceFilter({ productOptions, product, onProduct, utmOptions, utmSource, onUtmSource }: {
+  productOptions: Array<{ handle: string; title: string; sessions: number }>;
+  product: string; onProduct: (v: string) => void;
+  utmOptions: Array<{ source: string; label: string; sessions: number }>;
+  utmSource: string; onUtmSource: (v: string) => void;
 }) {
   return (
-    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Product slice</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-      >
-        <option value="">All products</option>
-        {options.map((o) => (
-          <option key={o.handle} value={o.handle}>{o.title} ({o.sessions.toLocaleString()})</option>
-        ))}
-      </select>
-      <span className="text-xs text-zinc-400">Drives every reworked card below.</span>
+    <div className="mb-6 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Product</span>
+        <select value={product} onChange={(e) => onProduct(e.target.value)} className={selectClass}>
+          <option value="">All products</option>
+          {productOptions.map((o) => (
+            <option key={o.handle} value={o.handle}>{o.title} ({o.sessions.toLocaleString()})</option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Source</span>
+        <select value={utmSource} onChange={(e) => onUtmSource(e.target.value)} className={selectClass}>
+          <option value="">All sources</option>
+          {utmOptions.map((o) => (
+            <option key={o.source} value={o.source}>{o.label} ({o.sessions.toLocaleString()})</option>
+          ))}
+        </select>
+      </div>
+      <span className="text-xs text-zinc-400">Slices compose. Drive every reworked card below.</span>
     </div>
   );
 }
@@ -381,8 +396,9 @@ export default function StorefrontFunnelPage() {
   const [end, setEnd] = useState("");
   const [data, setData] = useState<FunnelData | null>(null);
   const [loading, setLoading] = useState(true);
-  // Page-level product slice ("" = All products) + the SDK-powered tree it drives.
+  // Page-level slices ("" = all) + the SDK-powered tree they drive.
   const [product, setProduct] = useState("");
+  const [utmSource, setUtmSource] = useState("");
   const [tree, setTree] = useState<FunnelTreeResponse | null>(null);
   const [treeLoading, setTreeLoading] = useState(true);
 
@@ -411,10 +427,11 @@ export default function StorefrontFunnelPage() {
     setTreeLoading(true);
     const q = new URLSearchParams({ start, end });
     if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
     const res = await fetch(`/api/workspaces/${workspace.id}/funnel-tree?${q.toString()}`);
     if (res.ok) setTree(await res.json());
     setTreeLoading(false);
-  }, [workspace.id, start, end, product]);
+  }, [workspace.id, start, end, product, utmSource]);
 
   useEffect(() => { loadTree(); }, [loadTree]);
 
@@ -441,7 +458,10 @@ export default function StorefrontFunnelPage() {
         />
       </header>
 
-      <SliceFilter options={tree?.productOptions ?? []} value={product} onChange={setProduct} />
+      <SliceFilter
+        productOptions={tree?.productOptions ?? []} product={product} onProduct={setProduct}
+        utmOptions={tree?.utmSourceOptions ?? []} utmSource={utmSource} onUtmSource={setUtmSource}
+      />
 
       <FunnelTreeCard tree={tree} loading={treeLoading} />
 

@@ -74,6 +74,10 @@ const VARIANT_LABEL: Record<string, string> = {
   beforeafter: "Before/After",
 };
 
+/** Sentinel slice value for sessions with no `utm_source` (direct / organic).
+ *  Round-trips through the route + dropdown so "Direct / none" is selectable. */
+export const DIRECT_UTM = "(direct)";
+
 export interface FunnelStepCounts {
   visit: number;
   engaged: number;
@@ -115,6 +119,8 @@ export interface FunnelTreeResult {
   endIso: string;
   /** The product slice applied (null = all products). */
   productHandle: string | null;
+  /** The traffic-source slice applied (null = all sources; DIRECT_UTM = direct). */
+  utmSource: string | null;
   /** Forest of product nodes (one when sliced). */
   products: FunnelNode[];
   /** Sessions whose landing path matched no known product handle (e.g. landed
@@ -209,6 +215,10 @@ export interface FunnelTreeArgs {
   endIso: string;
   /** Optional product slice — a `products.handle`. Omit/null for All products. */
   productHandle?: string | null;
+  /** Optional traffic-source slice — a `utm_source` value, or DIRECT_UTM for
+   *  sessions with no utm_source. Omit/null for All sources. Composes with
+   *  productHandle (a session must pass both). */
+  utmSource?: string | null;
 }
 
 /**
@@ -219,6 +229,7 @@ export interface FunnelTreeArgs {
 export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTreeResult> {
   const { admin, workspaceId, startIso, endIso } = args;
   const slice = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
 
   // ── reference data ──────────────────────────────────────────────────────
   const [{ data: productRows }, { data: internalCustomerRows }, { data: pageRows }] = await Promise.all([
@@ -263,12 +274,12 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
 
   // ── fetch the visit-universe sessions (batched) ───────────────────────────
   const sessionIds = [...visitSessions];
-  const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null }>();
+  const sessionById = new Map<string, { landing_url: string | null; is_internal: boolean; is_bot: boolean; customer_id: string | null; utm_source: string | null }>();
   for (let i = 0; i < sessionIds.length; i += 300) {
     const chunk = sessionIds.slice(i, i + 300);
     const { data } = await admin
       .from("storefront_sessions")
-      .select("id, landing_url, is_internal, is_bot, customer_id")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source")
       .in("id", chunk);
     for (const s of data || []) {
       sessionById.set(s.id as string, {
@@ -276,6 +287,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
         is_internal: !!s.is_internal,
         is_bot: !!s.is_bot,
         customer_id: (s.customer_id as string) ?? null,
+        utm_source: (s.utm_source as string) ?? null,
       });
     }
   }
@@ -293,6 +305,12 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     if (!s) continue; // session row missing — can't bucket
     if (s.is_internal || s.is_bot) continue;
     if (s.customer_id && internalCustomerIds.has(s.customer_id)) continue;
+
+    // Traffic-source slice (composes with the product slice below).
+    if (utmWanted) {
+      if (utmWanted === DIRECT_UTM) { if (s.utm_source) continue; }
+      else if ((s.utm_source || "").toLowerCase() !== utmWanted) continue;
+    }
 
     // Every session in the universe loaded the page → always a visit. The deeper
     // steps come from the events it actually fired in the window.
@@ -417,6 +435,7 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     startIso,
     endIso,
     productHandle: slice,
+    utmSource: utmWanted,
     products: productNodes,
     unattributedEntry,
     grandTotal: metricsOf(grand),
@@ -460,5 +479,39 @@ export async function listFunnelProducts(args: {
   }
   return [...counts.entries()]
     .map(([handle, sessions]) => ({ handle, title: handleTitle.get(handle) ?? handle, sessions }))
+    .sort((a, b) => b.sessions - a.sessions);
+}
+
+/**
+ * Traffic-source list for the funnel-page `utm_source` slice dropdown:
+ * distinct utm_source values present in real sessions in the window, ordered by
+ * volume. Sessions with no utm_source collapse into one DIRECT_UTM row. Dynamic
+ * + self-pruning — new sources (or stray ones like `facebook`) appear on their own.
+ */
+export async function listUtmSources(args: {
+  admin: Admin;
+  workspaceId: string;
+  startIso: string;
+  endIso: string;
+}): Promise<Array<{ source: string; label: string; sessions: number }>> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const rows = await fetchAllRows<{ utm_source: string | null }>(() =>
+    admin
+      .from("storefront_sessions")
+      .select("utm_source, last_seen_at")
+      .eq("workspace_id", workspaceId)
+      .eq("is_internal", false)
+      .eq("is_bot", false)
+      .gte("last_seen_at", startIso)
+      .lte("last_seen_at", endIso)
+      .order("last_seen_at", { ascending: true }),
+  );
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = r.utm_source && r.utm_source.trim() ? r.utm_source : DIRECT_UTM;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([source, sessions]) => ({ source, label: source === DIRECT_UTM ? "Direct / none" : source, sessions }))
     .sort((a, b) => b.sessions - a.sessions);
 }
