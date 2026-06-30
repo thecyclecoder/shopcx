@@ -1129,10 +1129,14 @@ const directorCallGrade: MetricDef = {
   compute: async (ctx) => {
     const { admin, workspaceId, curr, prev } = ctx;
     const meanFor = async (w: MetricWindow["curr"]): Promise<{ blended: number | null; byDim: Record<string, { mean: number | null; count: number }>; total: number }> => {
+      // Platform scorecard — only grade the Platform Director's calls.
+      // growth-adopt-meta-iteration-engine Phase 2 added a Growth slice to director_decision_grades;
+      // without this filter the Platform metric would blend in Growth's grades and conflate the two.
       const { data } = await admin
         .from("director_decision_grades")
         .select("dimension, grade")
         .eq("workspace_id", workspaceId)
+        .eq("director_function", "platform")
         .gte("created_at", w.startIso)
         .lte("created_at", w.endIso);
       const rows = (data ?? []) as Array<{ dimension: string; grade: number | null }>;

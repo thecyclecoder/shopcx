@@ -22,9 +22,14 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadAutonomyMap } from "@/lib/agents/approval-router";
 import { PLATFORM } from "@/lib/agents/platform-director";
+import { GROWTH } from "@/lib/agents/growth-director";
 import type { GradeDimension } from "@/lib/agents/director-grader";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/** Director-function slugs the leash report knows how to render — Platform and Growth today. */
+export const REPORTABLE_DIRECTOR_FUNCTIONS = [PLATFORM, GROWTH] as const;
+export type DirectorFunction = (typeof REPORTABLE_DIRECTOR_FUNCTIONS)[number];
 
 // ── Tuning (the thresholds that turn a grade trend into a recommendation) ──────────────────────────
 /** Min graded calls in a scope before we'll recommend anything — no envelope move on one lucky call. */
@@ -233,10 +238,20 @@ function recommendFor(opts: {
  * Read every director grade for the workspace and compute the Phase-4 feedback report: per-dimension
  * + per-leash-category stats with a trend, the actionable leash-adjustment recommendations, the
  * recent grade rows (for the table + override), the proposed calibration rules awaiting CEO review,
- * and the current Platform autonomy envelope. Best-effort: a read failure degrades to an empty report.
+ * and the current director-function autonomy envelope. Best-effort: a read failure degrades to an
+ * empty report.
+ *
+ * `directorFunction` selects which director's grades + autonomy envelope the report covers. Default
+ * is PLATFORM (the original Phase-4 caller); growth-adopt-meta-iteration-engine Phase 2 adds GROWTH
+ * so the API can return a per-director slice for the Agents-hub Director-grades tab.
  */
-export async function computeDirectorGradeReport(opts: { workspaceId: string; admin?: Admin }): Promise<DirectorGradeReport> {
+export async function computeDirectorGradeReport(opts: {
+  workspaceId: string;
+  admin?: Admin;
+  directorFunction?: string;
+}): Promise<DirectorGradeReport> {
   const admin = opts.admin ?? createAdminClient();
+  const directorFunction = opts.directorFunction || PLATFORM;
   const generatedAt = new Date().toISOString();
   const empty: DirectorGradeReport = {
     dimensions: [],
@@ -244,7 +259,7 @@ export async function computeDirectorGradeReport(opts: { workspaceId: string; ad
     recommendations: [],
     rows: [],
     proposedRules: [],
-    autonomy: { function: PLATFORM, live: false, autonomous: false },
+    autonomy: { function: directorFunction, live: false, autonomous: false },
     generatedAt,
   };
 
@@ -254,6 +269,7 @@ export async function computeDirectorGradeReport(opts: { workspaceId: string; ad
         .from("director_decision_grades")
         .select("id, dimension, approval_decision_id, goal_slug, milestone, grade, reasoning, graded_by, overridden_by, created_at")
         .eq("workspace_id", opts.workspaceId)
+        .eq("director_function", directorFunction)
         .order("created_at", { ascending: false })
         .limit(500),
       loadAutonomyMap(),
@@ -267,7 +283,7 @@ export async function computeDirectorGradeReport(opts: { workspaceId: string; ad
     ]);
 
     const raw = (gradeData as RawGradeRow[] | null) ?? [];
-    const autonomy = autonomyMap[PLATFORM] ?? { live: false, autonomous: false };
+    const autonomy = autonomyMap[directorFunction] ?? { live: false, autonomous: false };
     const ctxById = await resolveAutoApprovalContext(admin, raw);
 
     // ── rows (newest-first, for the table + override) ──────────────────────────────────────────────
@@ -341,11 +357,11 @@ export async function computeDirectorGradeReport(opts: { workspaceId: string; ad
       recommendations,
       rows,
       proposedRules: (ruleData as Array<{ id: string; title: string; content: string; created_at: string }> | null) ?? [],
-      autonomy: { function: PLATFORM, live: !!autonomy.live, autonomous: !!autonomy.autonomous },
+      autonomy: { function: directorFunction, live: !!autonomy.live, autonomous: !!autonomy.autonomous },
       generatedAt,
     };
   } catch (e) {
-    console.warn(`[director-leash-recommendations] report failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[director-leash-recommendations] report failed ws=${opts.workspaceId} fn=${directorFunction}: ${e instanceof Error ? e.message : String(e)}`);
     return empty;
   }
 }
