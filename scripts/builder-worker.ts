@@ -3177,6 +3177,25 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing built-not-stamped heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // ARCHIVED-NOT-FOLDED heal backstop (folded-spec-must-stay-folded — the symmetric leg). Where the
+    // built-not-stamped heal above stamps a SHIPPED phase the DB missed, this FOLDS a DB row the ARCHIVE
+    // says is done: a slug whose markdown is in docs/brain/archive.d/ but whose DB row reads a non-folded
+    // status. That split (the db-reduce-calls incident) makes a shipped+folded spec re-appear in the
+    // board's Planned column AND makes cancelJobsForArchivedSpecs auto-cancel its builds as "spec
+    // archived". Same single-workspace contract + same standing-pass rationale as the heal above (an
+    // Inngest sync/deploy can silently reap the cron leg, so the box re-runs it every pass). SAFE: acts
+    // ONLY when the slug is genuinely in archive.d/ AND the DB row is non-folded; idempotent; reports each
+    // re-fold as a `reconciled_archived_not_folded` director_activity row (never silent).
+    const { reconcileArchivedNotFolded } = await import("../src/lib/spec-drift");
+    const refolded = await reconcileArchivedNotFolded(job.workspace_id);
+    if (refolded.length) {
+      notes.push(`archived-not-folded heal → re-folded ${refolded.length} spec(s): ${refolded.map((r) => r.slug).join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`archived-not-folded heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing archived-not-folded heal failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // PRE-MERGE checks backstop (security-test-on-preview-pre-merge + spec-goal-branch-pm-flow M3). WHY a
     // standing-pass backstop is REQUIRED, not just nice-to-have: BOTH pre-merge enqueues (spec-test +
     // security) fire ONLY from the build's fire-and-forget preview-capture READY callback. The security leg

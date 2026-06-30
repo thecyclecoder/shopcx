@@ -330,6 +330,27 @@ export async function upsertSpec(
     upsertRow.status = isOverride ? row.status : null;
   }
 
+  // folded-spec-must-stay-folded: `folded` is TERMINAL. A re-author must NEVER silently clear that override
+  // back to NULL/active — that is the db-reduce-calls split (archive.d/ markdown present, but a later
+  // re-author normalized a derived status to NULL → the rollup re-DERIVES `planned`/`in_progress` → the
+  // archived spec re-appears on the active board AND `cancelJobsForArchivedSpecs` auto-cancels its builds
+  // as "spec archived"). Read the existing override; if it's already `folded`, PRESERVE it unless the caller
+  // is EXPLICITLY re-folding (`row.status === 'folded'`). The only sanctioned un-fold is an explicit
+  // `setSpecStatus(slug, null)` by the CEO — a re-author is never an implicit un-fold. (Belt-and-suspenders:
+  // an omitted `status` is already preserved by the upsert, but a derived `status` would clobber it; this
+  // re-asserts `folded` in both cases.)
+  {
+    const { data: existing } = await admin
+      .from("specs")
+      .select("status")
+      .eq("workspace_id", workspaceId)
+      .eq("slug", row.slug)
+      .maybeSingle();
+    if ((existing as { status: string | null } | null)?.status === "folded" && upsertRow.status !== "folded") {
+      upsertRow.status = "folded";
+    }
+  }
+
   const { data: upserted, error: upErr } = await admin
     .from("specs")
     .upsert(upsertRow, { onConflict: "workspace_id,slug" })

@@ -36,6 +36,7 @@ import {
   getSpec,
   listSpecs,
   listSpecPhaseAnomalies,
+  setSpecStatus,
   stampPhaseShipped,
   type SpecPhaseRow,
 } from "@/lib/specs-table";
@@ -583,6 +584,80 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
       } catch {
         /* audit is best-effort — the stamp already landed */
       }
+    }
+  }
+
+  return healed;
+}
+
+// ── Self-heal "archived-but-not-folded" specs (folded-spec-must-stay-folded) ────────────────────────
+
+/**
+ * The SYMMETRIC backstop to `healBuiltUnstampedPhases`: where that stamps a SHIPPED phase the DB missed,
+ * this FOLDS a DB row the ARCHIVE says is done. Together they make the spec-drift reconciler self-heal
+ * BOTH drift directions.
+ *
+ * THE LOOP THIS CLOSES (the db-reduce-calls incident): the fold worker moves a spec's markdown to
+ * `docs/brain/archive.d/{slug}.md` AND flips `specs.status='folded'` — but the two are NOT atomic (the
+ * markdown lands on `main` at PR-MERGE, the status flips at PR-OPEN) and `folded` is an OVERRIDE-ONLY
+ * column a later re-author/reconcile can clobber to NULL. When that happens the slug's markdown is in
+ * archive.d/ (authoritative: it shipped + folded) but the DB row reads NULL/planned/in_progress → the
+ * phase rollup DERIVES an ACTIVE status → the archived spec re-appears in the board's Planned column AND
+ * `cancelJobsForArchivedSpecs` (which keys on archive.d/ presence) auto-cancels its builds as "spec
+ * archived". A DB-vs-archive split that strands a phantom planned spec forever.
+ *
+ * THE FIX: the archive is AUTHORITATIVE — the markdown was DELIBERATELY moved to archive.d/, so the spec
+ * shipped + folded. For every archived slug whose DB row exists with `status != 'folded'`, persist the
+ * `folded` override via `setSpecStatus` (the only sanctioned `specs.status` writer). No code-on-main check
+ * is needed (unlike the phase-stamp paths) — archive.d/ presence IS the proof. One supervisor-visible
+ * `director_activity` row per heal. Idempotent: a re-run finds `status='folded'` → no-op.
+ *
+ * CANNOT FALSE-FIRE: it acts ONLY when (a) the slug is genuinely in `docs/brain/archive.d/` AND (b) the DB
+ * row exists with a NON-folded status. It NEVER folds an active spec that isn't archived, and NEVER
+ * authors a row for an archived slug that has no DB row in this workspace.
+ *
+ * SINGLE-WORKSPACE by contract (mirrors `healBuiltUnstampedPhases`) — it MUTATES status, so the caller
+ * passes the canonical PM workspace; this never iterates workspaces.
+ */
+export async function reconcileArchivedNotFolded(
+  workspaceId: string,
+): Promise<{ slug: string; previous: SpecStatus | null }[]> {
+  const archived = await listArchivedSlugs();
+  if (!archived.length) return [];
+  const admin = createAdminClient();
+  const healed: { slug: string; previous: SpecStatus | null }[] = [];
+
+  for (const slug of archived) {
+    let spec: Awaited<ReturnType<typeof getSpec>>;
+    try {
+      spec = await getSpec(workspaceId, slug);
+    } catch {
+      continue; // read failure — leave it for the next sweep
+    }
+    if (!spec) continue; // archived slug with no DB row in this workspace — never author one
+    if (spec.status === "folded") continue; // already terminal — idempotent no-op
+    const previous = spec.status;
+
+    try {
+      await setSpecStatus(workspaceId, slug, "folded", "reconciler:spec-drift");
+    } catch {
+      continue; // write failed — the next sweep re-attempts
+    }
+    healed.push({ slug, previous });
+
+    // Supervisor-visible report: one director_activity row naming the slug + the status it drifted from.
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "reconciled_archived_not_folded",
+        specSlug: slug,
+        reason: `reconciler:spec-drift folded ${slug} — its markdown is in docs/brain/archive.d/ (the spec shipped + was folded into the brain) but the DB row still read '${previous ?? "planned (derived from the phase rollup)"}', so it drifted back onto the active board and its builds were being auto-cancelled as "spec archived". The archive is authoritative — persisted the 'folded' override to self-heal.`,
+        metadata: { actor: "reconciler:spec-drift", signal: "archived-not-folded", previous },
+      });
+    } catch {
+      /* audit is best-effort — the fold already landed */
     }
   }
 

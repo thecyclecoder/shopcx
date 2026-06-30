@@ -61,6 +61,12 @@ export type DirectorActionKind =
   // shipped after the box no-op'd a build as "already merged via #N" (work on main, phase left planned by
   // a backfill). One row per healed spec; metadata carries { actor:'reconciler:spec-drift', pr, phases }.
   | "healed_built_unstamped"
+  // folded-spec-must-stay-folded — the SYMMETRIC spec-drift heal: a slug whose markdown is in
+  // docs/brain/archive.d/ (shipped + folded) but whose DB row drifted to a non-folded status (a fold-race /
+  // re-author cleared the `folded` override → the rollup re-derived `planned` → phantom on the active board
+  // + builds auto-cancelled as "spec archived"). The reconciler re-persists `folded`. One row per re-folded
+  // spec; metadata carries { actor:'reconciler:spec-drift', signal:'archived-not-folded', previous }.
+  | "reconciled_archived_not_folded"
   // repurpose-spec-drift-reconciler Phase 2 — the reconciler's read-only sweep over `spec_phases` for
   // genuine anomalies it can't auto-heal: orphan rows (FK parent missing), duplicate (spec_id, position)
   // clusters (unique index missing/dropped), or shipped phases with no pr + no merge_sha (provenance
