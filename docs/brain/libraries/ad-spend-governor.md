@@ -74,8 +74,8 @@ Per-budget snapshot exposed by `runAdSpendGovernorPass` and reused by the Phase-
 
 ## Callers
 
-- **Phase 3 (planned):** [[../inngest/growth-ad-spend-governor-cron]] daily cron — fans out one event per workspace with ≥1 [[../tables/ad_spend_budgets]] row; the handler calls `runAdSpendGovernorPass(admin, { workspaceId })`.
-- **Phase 3 (planned):** [[../libraries/growth-director]] brief loader — `loadEffectiveAdSpendBudgets` exposes the workspace's active ceilings + current rolling-window actuals to `buildGrowthDirectorBrief`, so every Growth director investigation can see the leash.
+- [[../inngest/growth-ad-spend-governor]] daily cron — fans out one `growth/ad-spend-governor-sweep` event per workspace with ≥1 [[../tables/ad_spend_budgets]] row; the per-workspace handler calls `runAdSpendGovernorPass(admin, { workspaceId })`.
+- [[growth-director]] brief loader — `loadEffectiveAdSpendBudgets` exposes the workspace's active ceilings + current rolling-window actuals to `buildGrowthDirectorBrief`, so every Growth director investigation can see the leash.
 
 ## Gotchas
 
