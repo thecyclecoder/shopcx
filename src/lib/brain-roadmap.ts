@@ -624,7 +624,7 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
   if (!cards.length) return out;
   try {
     const { createAdminClient } = await import("@/lib/supabase/admin");
-    const { getLatestSpecTestRuns, checkKey, getHumanCheckResolutions } = await import("@/lib/spec-test-runs");
+    const { getLatestSpecTestRuns, getHumanCheckResolutions, isCleanMachinePassRun } = await import("@/lib/spec-test-runs");
     const { getSecurityStateBySlug } = await import("@/lib/security-agent");
     const admin = createAdminClient();
     const slugs = cards.map((c) => c.slug);
@@ -671,19 +671,13 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
         card.phases.length > 0 &&
         card.phases.every((p) => p.status === "rejected" || (p.merge_sha ?? null) !== null);
       const merged = jobStatus === "merged" || phasesOnMain;
-      // Spec-test green — mirror of the fold gate's MACHINE-PASS rail (approved/needs_human verdict +
-      // auto_pass>=1 + no unresolved auto-`fail` regressions). Same rule as `getAutoFoldEligibleSlugs`.
+      // Spec-test green — the SAME shared predicate `isCleanMachinePassRun` the fold gate
+      // (`getAutoFoldEligibleSlugs`) + the pre-merge promote gate (`getSpecTestStateForBranch`) use, so the
+      // board's in_testing overlay can never disagree with the gates: approved/needs_human verdict + the
+      // run ASSERTED ≥1 check (the total_checks floor that replaced the old auto_pass>=1 floor — a human-only
+      // run promotes; human checks advisory) + no unresolved auto-`fail` regression.
       const run = runs[card.slug];
-      let specTestGreen = false;
-      if (run && (run.agent_verdict === "approved" || run.agent_verdict === "needs_human") && run.summary.auto_pass >= 1) {
-        let openFail = false;
-        for (const c of run.checks) {
-          if (c.verdict !== "fail") continue;
-          const res = resolutions.get(`${card.slug}:${checkKey(c.text)}`);
-          if (!res?.resolution) { openFail = true; break; }
-        }
-        specTestGreen = !openFail;
-      }
+      const specTestGreen = !!run && isCleanMachinePassRun(run, resolutions, card.slug);
       // Security green — same `completedClean` rollup the fold gate reads.
       const securityGreen = !!securityBySlug[card.slug]?.completedClean;
       // spec-goal-branch-pm-flow fix: a spec is in_testing only once ALL phases have accumulated on the

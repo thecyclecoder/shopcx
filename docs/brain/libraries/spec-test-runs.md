@@ -77,14 +77,20 @@ The spec-test agent runs in TWO modes off the SAME runner + JSON contract:
 - `getLatestSpecTestRunForBranch(workspaceId, slug, branch)` → `SpecTestRun | null` — the latest pre-merge row for the branch
   (per-branch index read; null = no pre-merge run landed yet → defer, NOT green).
 - `getSpecTestStateForBranch(workspaceId, slug, branch)` → `{ latest, cleanMachinePass }` — the per-branch rollup the
-  **M4 pre-merge promote gate** reads. **Mirrors [[#auto-fold-gate--gate-b-fold-on-machine-spec-test-pass--security-clear-fold-on-spec-test-pass-task-29-specsbuild-card-lifecycle-timeline-phase-3|getAutoFoldEligibleSlugs]] Rail 2 verbatim** so the pre-merge gate and the post-ship fold gate can never disagree on what "spec-test green" means:
-  agent-verdict `approved` OR `needs_human` (task #29: `needs_human` is advisory-eligible), `summary.auto_pass >= 1` (≥1 real
-  machine check — no silent 0-check pass), 0 UNRESOLVED auto-`fail` regressions (joins the same `spec_test_human_checks`
-  resolutions the human-queue uses, so a dismissed false-positive doesn't keep the branch un-promotable).
+  **M4 pre-merge promote gate** reads. **Calls the SINGLE shared `isCleanMachinePassRun` predicate** that
+  [[#auto-fold-gate--gate-b-fold-on-machine-spec-test-pass--security-clear-fold-on-spec-test-pass-task-29-specsbuild-card-lifecycle-timeline-phase-3|getAutoFoldEligibleSlugs]] Rail 2 also calls (not a copy — the helper IS the rule), so the pre-merge gate and the post-ship fold gate can never disagree on what "spec-test green" means.
+- `isCleanMachinePassRun(run, resolutions, slug)` → `boolean` — **THE clean-machine-pass predicate, shared by both gates.** A run is clean iff: (a) agent-verdict `approved` OR `needs_human` (task #29: `needs_human` is advisory-eligible; `issues`/`error`/missing are non-pass); (b) **the run ASSERTED ≥1 check (`run.checks.length >= 1`)** — the **`total_checks >= 1` floor that REPLACED the old `auto_pass >= 1` floor**: it still rejects a degenerate 0-check / `error` "silent empty pass" (nothing asserted), but a **HUMAN-ONLY spec** whose Verification is entirely `needs_human` checks (`auto_pass=0`) now passes the floor instead of sitting `in_testing` forever — **CEO decision: human checks are FULLY ADVISORY, a human-only run promotes on 0 auto-fails WITHOUT resolving the human checks**; (c) 0 UNRESOLVED auto-`fail` regressions (joins the same `spec_test_human_checks` resolutions the human-queue uses — a `verified`/`dismissed` resolution clears it; `needs_human` checks never gate).
 - `isSpecTestGreenForBranch(workspaceId, slug, branch)` → `boolean` — convenience boolean (`cleanMachinePass`). Mirrors
   [[security-agent]] `isSecurityGreenForBranch` so M4 reads both signals with one call pattern.
 - **Absence of a run is NOT green** — defer (the pre-merge enqueue hasn't fired yet, or the box hasn't reached a verdict);
   same absence-≠-clean rule the post-ship fold gate applies.
+- **Human-only-promote advisory (sub-task 1b; CEO "ideally Ada looks at it").** When a **ZERO-machine-coverage** spec
+  (`summary.auto_pass === 0` — a human-only Verification) PROMOTES at the M4 auto-merge point ([[github-pr-resolve]]
+  `resolveOpenSpecPrs`, right after the squash-merge), the promote path surfaces a **lightweight, NON-BLOCKING** advisory via
+  [[director-activity]] `recordHumanOnlyPromoteAdvisory(admin, ws, slug)` — one `human_only_promote_advisory` `director_activity`
+  row ("shipped with no machine coverage — eyeball the human checks") for the Platform/DevOps Director (Ada). It **NEVER gates
+  the promotion**, builds **no approval card**, and is **idempotent** (one row per spec). The `zeroMachineCoverage` flag is read
+  off the SAME `getSpecTestStateForBranch` the gate already evaluated (no extra query).
 
 ### Auto-fold gate — Gate B (fold on MACHINE spec-test pass + SECURITY clear; fold-on-spec-test-pass, task #29; [[../specs/build-card-lifecycle-timeline]] Phase 3)
 **The fold trigger is the MACHINE spec-test pass + a clean post-merge SECURITY review, NOT human verification.** Fold is
@@ -94,16 +100,27 @@ sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a wa
 `failed` resolution NEVER blocks the fold (task #29).
 - `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the shipped-not-archived specs whose **machine spec-test passed AND
   security cleared**:
-  - **Spec-test gate:** latest run a **clean machine pass** (agent-verdict `approved` **OR `needs_human`**) **with
-    `summary.auto_pass >= 1`** (≥1 real machine check actually passed) · 0 **unresolved auto-`fail` regressions**.
+  - **Spec-test gate (the shared `isCleanMachinePassRun` predicate — same helper the pre-merge gate calls):** latest run a
+    **clean machine pass** (agent-verdict `approved` **OR `needs_human`**) **with `run.checks.length >= 1`** (the run ASSERTED
+    at least one check) · 0 **unresolved auto-`fail` regressions**.
+    **`total_checks >= 1` REPLACED the old `auto_pass >= 1` floor (spec-test-human-only-promote-gate):** the old floor's only
+    real job was to reject a degenerate 0-check / `error` "silent empty pass", but it ALSO permanently stranded a **HUMAN-ONLY
+    spec** whose Verification is entirely `needs_human` checks (`auto_pass=0`, e.g. `devops-kpi-weekly-snapshot-date-lag-fix`
+    `pass:0 fail:0 human:1`) — it sat `in_testing` forever. **CEO decision: human checks are FULLY ADVISORY — a human-only run
+    (≥1 check, 0 auto-fails, verdict `needs_human`) promotes WITHOUT requiring the human checks to be resolved.** `checks.length
+    >= 1` preserves the no-empty-run / no-`error`-row guard (all the floor really protected) while letting the human-only run
+    through.
     **`needs_human` is ADVISORY-ELIGIBLE (task #29):** a `needs_human` verdict means the agent machine-verified everything it
-    could and flagged the REMAINDER for *optional* human review — it is NOT a failure, so a `needs_human` run that carries real
-    machine passes and no open auto-`fail` folds just like an `approved` one. (Before this fix the gate required
-    `agent_verdict='approved'`, which wrongly stranded the machine-passed `needs_human` specs shipped-but-unfoldable.) It does
+    could and flagged the REMAINDER for *optional* human review — it is NOT a failure. It does
     **NOT** consult `needs_human` *checks* or human `failed` resolutions (those are advisory). A genuinely failing run
-    (`issues`/`error`, a 0-machine-pass degenerate row, or an open auto-`fail` — including a `needs_human` run whose checks
+    (`issues`/`error`, a **0-check degenerate row**, or an open auto-`fail` — including a `needs_human` run whose checks
     include an UNRESOLVED machine `fail`) is NOT eligible — it surfaces the failure instead. It grades `getRoadmap(workspaceId)`
     (the SAME tenant whose runs it reads), not the default-resolved workspace.
+    > **Three copies stay in sync via the one helper.** `getSpecTestStateForBranch` (pre-merge promote), `getAutoFoldEligibleSlugs`
+    > Rail 2 (post-ship fold), and the board's `in_testing` overlay (`brain-roadmap.ts` `readInTestingSignals`) ALL call
+    > `isCleanMachinePassRun`. The overlay matters: `applyInTestingOverlay` forces `in_testing` (overriding `shipped`) unless the
+    > spec-test is green — so if the overlay disagreed, a merged human-only spec would be downgraded out of `shipped` and the fold
+    > gate's `s.status === "shipped"` check would re-strand it. One predicate ⇒ they can never disagree.
   - **Security-test gate (Phase 3):** the per-diff [[security-agent]] review for the slug must be `completedClean` via
     [[security-agent]] `getSecurityStateBySlug` (a `completed` job exists AND no live `queued`/`claimed`/`building`/
     `needs_input`/`queued_resume` job AND no surfaced `needs_approval` routed fix / `needs_attention` needs-human finding).
