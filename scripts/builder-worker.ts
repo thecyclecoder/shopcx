@@ -13685,7 +13685,7 @@ async function main() {
         try {
           const { reconcileApprovalInbox } = await import("../src/lib/agents/approval-inbox");
           const r = await reconcileApprovalInbox(db);
-          if (r.created || r.dismissed) console.log(`[approval-inbox] +${r.created} request(s), -${r.dismissed} dismissed`);
+          if (r.created || r.dismissed || r.parksCleared) console.log(`[approval-inbox] +${r.created} request(s), -${r.dismissed} dismissed, -${r.parksCleared} stale park(s) cleared`);
         } catch (e) {
           console.error("[approval-inbox] reconcile failed (continuing):", e instanceof Error ? e.message : e);
         }
