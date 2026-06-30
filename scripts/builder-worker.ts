@@ -302,7 +302,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier" | "propose_policy_activation";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -4717,6 +4717,68 @@ async function runGrowthDirectorJob(job: Job) {
     const reasoning = String(parsed?.reasoning || "").slice(0, 4000);
 
     if (verdict === "auto-approve") {
+      // growth-adopt-meta-iteration-engine Phase 3 — spend-rail guard at activation time. BEFORE we
+      // mark anything approved + executed, project the daily budget motion each propose_policy_activation
+      // would authorize against the workspace's effective `ad_spend_budgets` ceiling for the same
+      // (workspace_id, meta_ad_account_id). If ANY action would breach the rail, refuse the WHOLE
+      // bundle in-leash: write one `refused_iteration_policy` activity row per refused action and
+      // route the diagnosis to the CEO via `escalateDiagnosisToCeo` (escalationKind='ad_spend_ceiling').
+      // The Director's leash boundary — raising the ceiling is the CEO's call; the loop never widens
+      // its own envelope (operational-rules § North star).
+      const proposeForGuard = (t.pending_actions ?? []).filter((a) => a.type === "propose_policy_activation" && a.id);
+      if (proposeForGuard.length) {
+        const { validateActivationAgainstSpendRail } = await import("../src/lib/iteration-policy-authoring");
+        type ProposeGuardPayload = {
+          draft?: { per_account_daily_budget_delta_ceiling_cents?: number; scale_up_step_pct?: number };
+          meta_ad_account_id?: string | null;
+        };
+        const refusals: { actionId: string; diagnosis: string; metadata: Record<string, unknown> }[] = [];
+        for (const a of proposeForGuard) {
+          const payload = a.payload as ProposeGuardPayload | undefined;
+          if (!payload?.draft) continue; // Phase 1's existing missing-payload branch handles this below
+          const guard = await validateActivationAgainstSpendRail(db, {
+            workspaceId: t.workspace_id,
+            draft: {
+              per_account_daily_budget_delta_ceiling_cents: Number(payload.draft.per_account_daily_budget_delta_ceiling_cents ?? 0),
+              scale_up_step_pct: Number(payload.draft.scale_up_step_pct ?? 0),
+            },
+            metaAdAccountId: payload.meta_ad_account_id ?? null,
+          });
+          if (!guard.allow) {
+            refusals.push({ actionId: a.id as string, diagnosis: guard.diagnosis, metadata: { ...guard.metadata, action_id: a.id, job_id: t.id, target_kind: t.kind } });
+          }
+        }
+        if (refusals.length) {
+          const firstRefusal = refusals[0]; // one CEO escalation is enough — the guard's diagnosis covers the bundle's worst breach.
+          for (const r of refusals) {
+            await recordDirectorActivity(db, {
+              workspaceId: t.workspace_id,
+              directorFunction: "growth",
+              actionKind: "refused_iteration_policy",
+              specSlug: t.spec_slug,
+              reason: r.diagnosis,
+              metadata: { ...r.metadata, refusal_reason: "ad_spend_ceiling_would_breach", autonomous: true },
+            });
+          }
+          await pdLib.escalateDiagnosisToCeo(db, {
+            workspaceId: t.workspace_id,
+            specSlug: t.spec_slug,
+            title: "Ad spend ceiling would breach — policy activation refused",
+            diagnosis: firstRefusal.diagnosis,
+            dedupeKey: `ad_spend_ceiling:${t.workspace_id}:policy:${t.id}`,
+            deepLink: "/dashboard/marketing/ads",
+            escalationKind: "ad_spend_ceiling",
+            metadata: firstRefusal.metadata,
+          });
+          await update(job.id, {
+            status: "completed",
+            log_tail: `auto-approve REFUSED by spend-rail guard (${refusals.length}/${proposeForGuard.length} actions would breach the ad_spend_budgets ceiling) → routed to CEO inbox`.slice(-2000),
+          });
+          console.log(`${tag} spend-rail refusal: ${refusals.length}/${proposeForGuard.length} would breach → CEO escalation emitted`);
+          return;
+        }
+      }
+
       const res = await lib.applyDirectorApproval(db, t, leashActions.map((a) => a.actionId), reasoning || `auto-approved (${bundleLabel}) within the leash`);
       if (!res.ok) {
         await update(job.id, { status: "needs_attention", error: `director approve failed: ${res.error}`, log_tail: `auto-approve FAILED: ${res.error}`.slice(-2000) });
@@ -4725,6 +4787,89 @@ async function runGrowthDirectorJob(job: Job) {
       }
       await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "growth", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${bundleLabel})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true } });
 
+      // growth-adopt-meta-iteration-engine Phase 1 — execute every approved propose_policy_activation
+      // action inline. The leash gate has already cleared the bundle + the investigation soundness
+      // gate ran; on auto-approve the Director's authoring + activation IS the side effect (no
+      // separate queued_resume runner — the action's payload carries everything we need). After
+      // execution we mark the target's matching actions `done` and flip the target to `completed`
+      // so it doesn't sit in `queued_resume` waiting for a runner that doesn't exist. Failures park
+      // needs_attention on the growth-director job so the CEO sees the gap; the already-recorded
+      // approved_approval row stays for audit.
+      const propose = (t.pending_actions ?? []).filter((a) => a.type === "propose_policy_activation" && a.id);
+      if (propose.length) {
+        const { authorIterationPolicy, activateIterationPolicy } = await import("../src/lib/iteration-policy-authoring");
+        type ProposePayload = {
+          draft: import("../src/lib/iteration-policy-authoring").IterationPolicyDraft;
+          rationale: string;
+        };
+        const activations: string[] = [];
+        const proposeIds = new Set(propose.map((a) => a.id as string));
+        const updatedActions: typeof t.pending_actions = (t.pending_actions ?? []).map((a) => ({ ...a }));
+        for (const a of propose) {
+          const payload = a.payload as ProposePayload | undefined;
+          if (!payload?.draft || !payload?.rationale) {
+            await update(job.id, { status: "needs_attention", error: `propose_policy_activation action ${a.id} missing payload.draft/payload.rationale`, log_tail: `auto-approve OK but ${a.id} cannot execute — missing payload`.slice(-2000) });
+            console.warn(`${tag} propose_policy_activation ${a.id} missing payload — parked needs_attention`);
+            return;
+          }
+          try {
+            const authored = await authorIterationPolicy(db, {
+              workspaceId: t.workspace_id,
+              draft: payload.draft,
+              createdBy: "director",
+              rationale: payload.rationale,
+            });
+            const activated = await activateIterationPolicy(db, {
+              workspaceId: t.workspace_id,
+              policyId: authored.policyId,
+              activatedBy: "director",
+            });
+            await recordDirectorActivity(db, {
+              workspaceId: t.workspace_id,
+              directorFunction: "growth",
+              actionKind: "activated_iteration_policy",
+              specSlug: t.spec_slug,
+              reason: payload.rationale,
+              metadata: {
+                job_id: t.id,
+                target_kind: t.kind,
+                policy_id: authored.policyId,
+                version: authored.version,
+                rationale: payload.rationale,
+                superseded_policy_id: activated.supersededPolicyId,
+                autonomous: true,
+              },
+            });
+            const result = `activated iteration_policies v${authored.version}${activated.supersededPolicyId ? ` (superseded ${activated.supersededPolicyId.slice(0, 8)})` : ""}`;
+            for (const u of updatedActions ?? []) {
+              if (u.id === a.id) { u.status = "done"; (u as { result?: string }).result = result; }
+            }
+            activations.push(`v${authored.version} (${authored.policyId.slice(0, 8)})`);
+          } catch (e) {
+            const err = e instanceof Error ? e.message : String(e);
+            await update(job.id, { status: "needs_attention", error: `iteration_policies activation failed: ${err}`, log_tail: `auto-approve OK but activation FAILED: ${err}`.slice(-2000) });
+            console.warn(`${tag} iteration_policies activation FAILED: ${err}`);
+            return;
+          }
+        }
+        // Close the target so it doesn't sit `queued_resume`. The target's other approved actions
+        // (if any) keep their `approved` status so the kind-specific runner can still resume them on
+        // the next claim; for a target whose pending_actions are ALL propose_* there is nothing
+        // further to do and the target flips straight to `completed`.
+        void proposeIds; // proposeIds retained for readability of intent above
+        const fullyResolved = (updatedActions ?? []).every((u) => u.status === "done" || u.status === "declined" || u.status === "failed");
+        await db
+          .from("agent_jobs")
+          .update({
+            pending_actions: updatedActions,
+            status: fullyResolved ? "completed" : "queued_resume",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", t.id);
+        await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → activated iteration_policies ${activations.join(", ")}.\n${reasoning}`.slice(-2000) });
+        console.log(`${tag} auto-approved ${t.kind} (${bundleLabel}) → activated ${activations.join(", ")}`);
+        return;
+      }
       // growth-adopt-creative-makers Phase 2: a `promote_ready_to_test_creative` action is
       // SELF-EXECUTING — it inserts an `ad_publish_jobs` row with `publish_active=false` and fires
       // `ad-tool/publish-to-meta` inline (the ad lands PAUSED; a second human approve flips it live).

@@ -11,7 +11,7 @@ This is a **supervised tool that only RECOMMENDS** ([[../operational-rules]] § 
 
 | Symbol | Signature | Notes |
 |---|---|---|
-| `computeDirectorGradeReport` | `({ workspaceId, admin? }) → Promise<DirectorGradeReport>` | The whole report: per-dimension + per-leash-category stats with a trend, the actionable recommendations, the recent grade rows, the proposed calibration rules, and the current Platform envelope. Pure read; best-effort (a read failure degrades to an empty report). |
+| `computeDirectorGradeReport` | `({ workspaceId, admin?, directorFunction? }) → Promise<DirectorGradeReport>` | The whole report for ONE director (default `platform`; `growth` is the Phase-2 addition): per-dimension + per-leash-category stats with a trend, the actionable recommendations, the recent grade rows, the proposed calibration rules, and the named director's envelope. Pure read; best-effort (a read failure degrades to an empty report). The grades are filtered by `director_decision_grades.director_function`. |
 | `MIN_SAMPLE` `LOOSEN_AVG` `TIGHTEN_AVG` `OVERRIDE_GAP_RULE_THRESHOLD` | constants | The tuning: ≥3 graded calls before any recommendation; avg ≥8 → **loosen**; avg ≤4.5 → **tighten**; a human override moving the grade by ≥3 points proposes a calibration rule. |
 
 ## How it computes

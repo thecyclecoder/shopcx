@@ -74,7 +74,7 @@ const baseJob: DirectorTargetJob = {
   log_tail: "engine evaluated v3 candidate; rationale: tighten ROAS floor after weekend traffic",
 };
 
-test("buildGrowthDirectorBrief loads the growth autonomy row, the iteration_policies versions, the optimizer policy, and the pending recommendations", async () => {
+test("buildGrowthDirectorBrief loads the growth autonomy row, the iteration_policies versions, the optimizer policy, the pending recommendations, the latest iteration_runs row, and its iteration_actions outcomes", async () => {
   const admin = makeAdmin({
     function_autonomy: { data: { live: true, autonomous: false }, error: null },
     iteration_policies: {
@@ -101,6 +101,29 @@ test("buildGrowthDirectorBrief loads the growth autonomy row, the iteration_poli
       data: [
         { id: "r1", action_type: "new_static_adset", title: "Test ROAS-1.6 floor adset", rationale: "Top-quartile creative on the v3 floor", persona: "media_buyer", status: "pending", created_at: "2026-06-29T11:00:00Z" },
         { id: "r2", action_type: "new_lander_variant", title: "Bold benefit hero", rationale: "winning angle from grader", persona: "direct_response_marketer", status: "pending", created_at: "2026-06-29T10:00:00Z" },
+      ],
+      error: null,
+    },
+    iteration_runs: {
+      data: {
+        id: "run-1",
+        status: "complete",
+        snapshot_date: "2026-06-29",
+        policy_active: true,
+        policy_version_id: "p2",
+        meta_ad_account_id: "acct-1",
+        counts: { actions_decided: 2, recommendations: 2, outcomes_reconciled: 1 },
+        error: null,
+        started_at: "2026-06-29T08:00:00Z",
+        finished_at: "2026-06-29T08:05:00Z",
+        duration_ms: 300000,
+      },
+      error: null,
+    },
+    iteration_actions: {
+      data: [
+        { id: "a1", action_type: "scale_up", status: "executed", rationale: "ROAS 1.8 ≥ trigger", outcome_roas: 1.7, outcome_revenue_cents: 12000, outcome_window_days: 7, guardrail: null, created_at: "2026-06-29T08:02:00Z" },
+        { id: "a2", action_type: "pause", status: "escalated", rationale: "below floor 3d", outcome_roas: null, outcome_revenue_cents: null, outcome_window_days: null, guardrail: "min_budget_floor", created_at: "2026-06-29T08:03:00Z" },
       ],
       error: null,
     },
@@ -141,6 +164,20 @@ test("buildGrowthDirectorBrief loads the growth autonomy row, the iteration_poli
   // The open pending recommendation queue is loaded.
   assert.equal(brief.pendingRecommendations.length, 2);
   assert.equal(brief.pendingRecommendations[0].action_type, "new_static_adset");
+
+  // The latest iteration_runs row is loaded with its supervisability fields.
+  assert.ok(brief.latestIterationRun, "expected a latest iteration_runs row");
+  assert.equal(brief.latestIterationRun!.id, "run-1");
+  assert.equal(brief.latestIterationRun!.status, "complete");
+  assert.equal(brief.latestIterationRun!.policy_active, true);
+  assert.equal(brief.latestIterationRun!.snapshot_date, "2026-06-29");
+
+  // The iteration_actions outcomes (status mix + outcome_roas) are loaded.
+  assert.equal(brief.iterationActionOutcomes.length, 2);
+  assert.equal(brief.iterationActionOutcomes[0].action_type, "scale_up");
+  assert.equal(brief.iterationActionOutcomes[0].status, "executed");
+  assert.equal(brief.iterationActionOutcomes[0].outcome_roas, 1.7);
+  assert.equal(brief.iterationActionOutcomes[1].guardrail, "min_budget_floor");
 });
 
 test("buildGrowthDirectorBrief survives read errors — missing rows render as null/[], not a throw", async () => {
@@ -149,6 +186,8 @@ test("buildGrowthDirectorBrief survives read errors — missing rows render as n
     iteration_policies: { data: null, error: null },
     storefront_optimizer_policy: { data: null, error: null },
     iteration_recommendations: { data: null, error: null },
+    iteration_runs: { data: null, error: null },
+    iteration_actions: { data: null, error: null },
   });
   const { actions } = directorLeashCandidates(baseJob);
   const brief = await buildGrowthDirectorBrief(admin, baseJob, actions);
@@ -156,9 +195,11 @@ test("buildGrowthDirectorBrief survives read errors — missing rows render as n
   assert.deepEqual(brief.iterationPolicies, []);
   assert.equal(brief.storefrontOptimizerPolicy, null);
   assert.deepEqual(brief.pendingRecommendations, []);
+  assert.equal(brief.latestIterationRun, null);
+  assert.deepEqual(brief.iterationActionOutcomes, []);
 });
 
-test("growthDirectorInvestigationPrompt wraps with directorLiveStateFact and renders the loaded brief data", async () => {
+test("growthDirectorInvestigationPrompt wraps with directorLiveStateFact and renders the loaded brief data (including the latest iteration_runs row + iteration_actions outcomes)", async () => {
   const admin = makeAdmin({
     // directorLiveStateFact also reads function_autonomy → renders the LIVE+AUTONOMOUS line into the prompt.
     function_autonomy: { data: { live: true, autonomous: true, updated_at: "2026-06-29T08:00:00Z", updated_by: "ceo-uid" }, error: null },
@@ -175,6 +216,28 @@ test("growthDirectorInvestigationPrompt wraps with directorLiveStateFact and ren
     },
     iteration_recommendations: {
       data: [{ id: "r1", action_type: "new_static_adset", title: "Test ROAS-1.6 floor adset", rationale: "Top-quartile creative", persona: "media_buyer", status: "pending", created_at: "2026-06-29T11:00:00Z" }],
+      error: null,
+    },
+    iteration_runs: {
+      data: {
+        id: "run-1",
+        status: "complete",
+        snapshot_date: "2026-06-29",
+        policy_active: true,
+        policy_version_id: "p2",
+        meta_ad_account_id: "acct-1",
+        counts: { actions_decided: 2, recommendations: 1 },
+        error: null,
+        started_at: "2026-06-29T08:00:00Z",
+        finished_at: "2026-06-29T08:05:00Z",
+        duration_ms: 300000,
+      },
+      error: null,
+    },
+    iteration_actions: {
+      data: [
+        { id: "a1", action_type: "scale_up", status: "executed", rationale: "ROAS 1.8 ≥ trigger", outcome_roas: 1.7, outcome_revenue_cents: 12000, outcome_window_days: 7, guardrail: null, created_at: "2026-06-29T08:02:00Z" },
+      ],
       error: null,
     },
   });
@@ -201,6 +264,16 @@ test("growthDirectorInvestigationPrompt wraps with directorLiveStateFact and ren
   assert.match(prompt, /storefront_optimizer_policy:[\s\S]*active=true/);
   assert.match(prompt, /Test ROAS-1\.6 floor adset/);
 
+  // growth-adopt-meta-iteration-engine Phase 2 — the latest iteration_runs row + the
+  // iteration_actions outcomes mix render into the prompt (the realized signal the Director judges
+  // before approving the next policy version).
+  assert.match(prompt, /iteration_runs \(latest, newest first\):/);
+  assert.match(prompt, /policy_active=true/);
+  assert.match(prompt, /day=2026-06-29/);
+  assert.match(prompt, /iteration_actions \(latest run · 1 action\):/);
+  assert.match(prompt, /status mix: executed=1/);
+  assert.match(prompt, /realized outcome_roas: mean 1\.70/);
+
   // The request under investigation block + the JSON verdict shape are present.
   assert.match(prompt, /This request — category=iteration_policy_activation/);
   assert.match(prompt, /"verdict":"auto-approve"/);
@@ -220,6 +293,8 @@ test("growthDirectorInvestigationPrompt renders a multi-action bundle with the a
     iteration_policies: { data: [], error: null },
     storefront_optimizer_policy: { data: null, error: null },
     iteration_recommendations: { data: [], error: null },
+    iteration_runs: { data: null, error: null },
+    iteration_actions: { data: [], error: null },
   });
   const { actions, verdict } = directorLeashCandidates(multiJob);
   assert.equal(verdict, "multi");
