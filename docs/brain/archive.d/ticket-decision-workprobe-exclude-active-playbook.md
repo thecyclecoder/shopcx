@@ -1,0 +1,1 @@
+- **Exclude active-playbook inbounds from the AI-orchestrator work probe** · verified 2026-06-30 · → [[../libraries/control-tower]]
