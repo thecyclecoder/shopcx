@@ -54,6 +54,26 @@ const BUILD_HARD_CAP_MS = 60 * 60 * 1000;     // absolute ceiling, even while st
 // Product-seed runs the full Engine to completion on Max (per-ingredient web
 // research + ~2000-review analysis + content + imagery) — give it a long ceiling.
 const SEED_TIMEOUT_MS = 90 * 60 * 1000;
+// ── Stale-session reaper (stale-session-reaper) ──────────────────────────────
+// A session that dies mid-run (Max usage cap, crash, disconnect, a box crash-loop that never reaches
+// the startup reapOrphans) leaves its row stuck `building` forever — claim_agent_job only takes
+// queued/queued_resume, so the lane is held and the work stalls indefinitely (observed live: a `plan`
+// job for goal growth-director sat `building` ~5h, updated_at frozen at claimed_at). The startup
+// orphan-reaper only fires on a clean RESTART; a wedged box never gets there. The fix is a HEARTBEAT
+// the live session bumps + an in-loop REAPER keyed on its staleness.
+//
+//   M (HEARTBEAT_INTERVAL_MS): how often a LIVE session bumps agent_jobs.last_heartbeat_at while it's
+//     emitting stream-json events. Small enough that a dead session is detectable within ~N minutes.
+//   N (REAP_STALE_MS): no heartbeat for this long ⇒ the session is DEAD ⇒ re-queue (or escalate). N must
+//     be comfortably > M + the build idle-kill window (10 min) so a legitimately-long-but-alive build —
+//     which bumps every M — is NEVER reaped. A live build's heartbeat is at most M old; only a truly
+//     dead one crosses N.
+//   K (REAP_MAX): a job reaped >= this many times stops being re-queued and escalates to needs_attention
+//     (a CEO-visible park) instead of infinite-looping the reaper on a structurally-doomed job.
+const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000;   // M — bump heartbeat at most every 2 min per live session
+const REAP_STALE_MS = 20 * 60 * 1000;          // N — no heartbeat for 20 min ⇒ session dead (> M + idle-kill)
+const REAP_MAX = 3;                            // K — reap/re-queue at most 3× before escalating
+const REAP_SWEEP_INTERVAL_MS = 60 * 1000;      // run the reaper sweep ~once a minute (well under N)
 // A ticket-improve turn is one Max `claude -p` investigation/proposal (read brain/src + web + the
 // read-only DB tools). Minutes, not the 90-min seed ceiling. See box-ticket-improve.
 const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1243,6 +1263,36 @@ function makeChecklistWriter(jobId: string): { onLine: (line: string) => void; f
   };
 }
 
+// Session heartbeat (stale-session-reaper): while a session is alive it emits stream-json lines
+// continuously (that's why the runner uses stream-json — see runBoxSession). On EACH line we bump
+// agent_jobs.last_heartbeat_at, throttled to once per HEARTBEAT_INTERVAL_MS (M) so a chatty stream
+// costs at most one tiny write every M minutes. A FRESH last_heartbeat_at ⇒ the session is alive (even
+// on a 40-min build); a STALE one (the reaper's threshold N) ⇒ the process died mid-run and the row is
+// a zombie holding its lane. Direct write (NOT the `update` helper) — we only touch last_heartbeat_at,
+// not updated_at + the needs_attention classifier, so a heartbeat is never mistaken for a lifecycle
+// mutation. Best-effort: a heartbeat write must never break the session (it's a liveness signal, not a
+// contract). Mirrors makeChecklistWriter's throttle/direct-write discipline.
+function makeHeartbeatBumper(jobId: string): { bump: () => void } {
+  let lastBumpAt = 0;
+  let inFlight = false;
+  return {
+    bump: () => {
+      const now = Date.now();
+      if (inFlight || now - lastBumpAt < HEARTBEAT_INTERVAL_MS) return;
+      lastBumpAt = now;
+      inFlight = true;
+      void db
+        .from("agent_jobs")
+        .update({ last_heartbeat_at: new Date().toISOString() })
+        .eq("id", jobId)
+        .then(
+          () => { inFlight = false; },
+          () => { inFlight = false; }, // swallow — best-effort liveness signal
+        );
+    },
+  };
+}
+
 interface RunBoxSessionOpts {
   configDir?: string;
   jobId?: string | null;
@@ -1297,6 +1347,15 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   const augmentedPrompt = `${BOX_SESSION_CHECKLIST_INSTRUCTION}\n\n${prompt}`;
   const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
   const writer = opts.jobId ? makeChecklistWriter(opts.jobId) : null;
+  // Heartbeat (stale-session-reaper): bump last_heartbeat_at on each stream line so the in-loop reaper
+  // can tell a LIVE-but-long session from a DEAD one. Keyed on jobId only (independent of the checklist),
+  // so EVERY session-bearing kind that carries a jobId (build/plan + every Max lane) gets a heartbeat.
+  const heartbeat = opts.jobId ? makeHeartbeatBumper(opts.jobId) : null;
+  // Combine the checklist writer + heartbeat onto a single onLine: every line both streams the checklist
+  // (if any) AND bumps the heartbeat (throttled internally). Undefined only when there's no jobId.
+  const onLine = (writer || heartbeat)
+    ? (line: string) => { heartbeat?.bump(); writer?.onLine(line); }
+    : undefined;
   // Account display (box-show-account-for-all-sessions): build/plan (kind="build") stamp + count their Round
   // Robin account in the dispatch loop already; every OTHER session kind does it HERE so its box card shows
   // the account AND the per-account in-flight count includes it (not just builds).
@@ -1310,7 +1369,7 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
       env,
       idleTimeout: opts.idleTimeout,
       timeout: opts.timeout,
-      onLine: writer ? writer.onLine : undefined,
+      onLine,
     });
   } finally {
     if (tracksAccountHere && acctHere) acctHere.inFlight--; // release the account slot when the session ends
@@ -1838,6 +1897,95 @@ async function reapOrphans() {
     await reapOrphanWorktrees();
   } catch (e) {
     console.error("[reaper] worktree sweep failed (continuing):", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// ── Stale-session reaper (stale-session-reaper) ──────────────────────────────
+// Runs EVERY ~minute in the poll loop (unlike reapOrphans, which only fires once at startup). A session
+// that dies mid-run — Max usage cap, crash, disconnect, a box crash-loop that never reaches reapOrphans —
+// stops bumping its heartbeat but leaves its row stuck `building`/`claimed`/`queued_resume`, holding the
+// lane forever (observed live: a `plan` job for goal growth-director sat `building` ~5h). This sweep
+// finds those zombies (heartbeat stale > N) and re-queues them onto a fresh Max account so the lane frees
+// and the work re-runs; a job that zombies repeatedly (>= K) escalates to needs_attention instead of
+// looping. LANE-AGNOSTIC: every session-bearing kind (build/plan/spec-test/director/…) flows through
+// runBoxSession, which writes the heartbeat, so all of them are covered by one sweep.
+//
+// LIVE-vs-DEAD: a job THIS worker process is actively running is in the `active` Map — NEVER reaped (its
+// session is alive; runBoxSession bumps its heartbeat every M min, so even a 40-min build stays fresh).
+// Only a row whose heartbeat is stale beyond N AND that this process is not running is treated as dead.
+// Heartbeat fallback: a pre-migration / never-yet-bumped row uses updated_at (its last lifecycle write)
+// so a zombie that predates this feature is still caught — and `launch` stamps an initial heartbeat at
+// claim, so a just-claimed row that hasn't emitted its first line is never prematurely reaped.
+//
+// In-memory counters: a reaped zombie is a DEAD process's row — its account `inFlight` was incremented in
+// THAT process, not this one, so there is nothing to decrement here (this process's live sessions, which
+// DO hold an inFlight slot, are the `active` ones we exempt). Their own runBoxSession finally already
+// released the slot when the dead process exited (or it died with the whole process — counter gone).
+const REAP_STALE_STATUSES = ["building", "claimed", "queued_resume"] as const;
+async function reapStaleSessions(active: Map<string, { kind: Job["kind"] }>) {
+  const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
+  // Pull in-flight rows whose heartbeat (or, if never set, updated_at) is older than the cutoff. We OR
+  // the two so a pre-migration row with a NULL heartbeat still qualifies via updated_at. Capped — a tick
+  // never reaps an unbounded batch.
+  const { data, error } = await db
+    .from("agent_jobs")
+    .select("id, kind, spec_slug, status, claude_session_id, last_heartbeat_at, updated_at, reap_count")
+    .in("status", REAP_STALE_STATUSES as unknown as string[])
+    .or(`last_heartbeat_at.lt.${cutoff},and(last_heartbeat_at.is.null,updated_at.lt.${cutoff})`)
+    .limit(50);
+  if (error) {
+    console.error("[reaper] stale-session query failed (skipping):", error.message);
+    return;
+  }
+  const rows = (data ?? []) as Array<
+    Pick<Job, "id" | "kind" | "spec_slug" | "status" | "claude_session_id"> & {
+      last_heartbeat_at: string | null;
+      updated_at: string | null;
+      reap_count: number | null;
+    }
+  >;
+  let requeued = 0;
+  let escalated = 0;
+  for (const r of rows) {
+    // NEVER reap a session this worker is actively running — it's alive (its heartbeat is at most M old;
+    // a transient DB hiccup that delayed a bump must not kill a live build). The `active` Map is the
+    // authoritative liveness signal for this process.
+    if (active.has(r.id)) continue;
+    const beat = r.last_heartbeat_at ?? r.updated_at;
+    const ageMin = beat ? Math.round((Date.now() - new Date(beat).getTime()) / 60000) : null;
+    const reaps = r.reap_count ?? 0;
+    if (reaps >= REAP_MAX) {
+      // Repeat zombie (>= K reaps): stop re-queuing — escalate to needs_attention (a CEO-visible park)
+      // so a structurally-doomed job (one that dies every run) doesn't loop the reaper forever.
+      await update(r.id, {
+        status: "needs_attention",
+        claimed_at: null,
+        error: `stale-session reaper: session died mid-run ${reaps}× (>= ${REAP_MAX}); escalating instead of re-queuing (heartbeat stale ~${ageMin ?? "?"}m)`,
+        log_tail: `(stale-session reaper escalated after ${reaps} reaps — heartbeat last seen ~${ageMin ?? "?"}m ago on status '${r.status}')`,
+      });
+      escalated++;
+      console.warn(`[reaper] ESCALATE zombie ${r.kind} ${r.spec_slug} (job ${r.id.slice(0, 8)}) — ${reaps} prior reaps >= ${REAP_MAX}, heartbeat stale ~${ageMin ?? "?"}m → needs_attention`);
+      continue;
+    }
+    // Re-queue: clear the claim/session so it re-runs FRESH on whatever account the dispatcher picks next
+    // (a resume to a dead session's account would just fail "No conversation found"); drop the stale
+    // log_tail. A job that HAD a session is re-run from scratch (queued) — a half-finished session can't be
+    // safely resumed once its process is gone; treating it as fresh is the safe, idempotent choice the
+    // startup reaper already makes for re-runnable kinds. Bump reap_count toward the K cap.
+    await update(r.id, {
+      status: "queued",
+      claimed_at: null,
+      claude_session_id: null,
+      claude_session_config_dir: null,
+      log_tail: null,
+      reap_count: reaps + 1,
+      error: null,
+    });
+    requeued++;
+    console.warn(`[reaper] REAP stale session ${r.kind} ${r.spec_slug} (job ${r.id.slice(0, 8)}) — heartbeat stale ~${ageMin ?? "?"}m on status '${r.status}' → re-queued (reap ${reaps + 1}/${REAP_MAX})`);
+  }
+  if (requeued || escalated) {
+    console.log(`[reaper] stale-session sweep: re-queued ${requeued}, escalated ${escalated} (of ${rows.length} stale candidate(s))`);
   }
 }
 
@@ -12906,6 +13054,11 @@ async function main() {
   const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
     active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
+    // Stamp an initial heartbeat at claim time (stale-session-reaper) so a just-claimed job that hasn't
+    // emitted its first stream-json line yet isn't immediately treated as stale — the reaper's N-minute
+    // window starts now, and runBoxSession's per-line bumps keep it fresh while the session is alive.
+    // Direct write (not `update`) — liveness only, never a lifecycle mutation. Best-effort.
+    void db.from("agent_jobs").update({ last_heartbeat_at: new Date().toISOString() }).eq("id", job.id).then(() => {}, () => {});
     const startedAt = Date.now();
     let errored = false;
     runJob(job)
@@ -12954,6 +13107,8 @@ async function main() {
 
   let steady = false; // flips true after the first clean poll tick → clears the crash-loop counter
   let lastApprovalSweep = 0; // approval-routing-engine M2: throttle the routed-inbox reconcile
+  let lastReapSweep = 0; // stale-session-reaper: throttle the in-loop zombie sweep (0 ⇒ run on first tick)
+  let reapSweepInFlight = false; // guard so a slow sweep never overlaps the next tick
   for (;;) {
     try {
       // Vercel Ignored-Build-Step auto-heal on every tick (regression-of: per-build-vercel-preview-deploys):
@@ -12975,6 +13130,24 @@ async function main() {
         await requeueBlockedOnUsage();
       } catch (e) {
         console.error("[multi-account] blocked_on_usage requeue failed (continuing):", e instanceof Error ? e.message : e);
+      }
+
+      // Stale-session reaper (stale-session-reaper): re-queue any in-flight row whose session died mid-run
+      // (heartbeat stale > N) so the held lane frees and the work re-runs on a fresh Max account; a repeat
+      // zombie (>= K reaps) escalates to needs_attention instead of looping. Runs BEFORE the claim block so
+      // a just-freed lane is re-filled in this same tick. Throttled (~1 min) + in-flight-guarded; awaited
+      // (a small capped query) so its requeue is visible to the claims below. Best-effort — never breaks
+      // the loop. `active` is passed so a session THIS process is running is exempt (it's alive).
+      if (!reapSweepInFlight && Date.now() - lastReapSweep > REAP_SWEEP_INTERVAL_MS) {
+        lastReapSweep = Date.now();
+        reapSweepInFlight = true;
+        try {
+          await reapStaleSessions(active);
+        } catch (e) {
+          console.error("[reaper] stale-session sweep failed (continuing):", e instanceof Error ? e.message : e);
+        } finally {
+          reapSweepInFlight = false;
+        }
       }
 
       // Claude-down breaker (agent-outage-resilience Phase 2): when Claude is down, park the autonomous
