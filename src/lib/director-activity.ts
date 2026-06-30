@@ -100,7 +100,16 @@ export type DirectorActionKind =
   // promotion, but Ada (the Platform/DevOps Director) should eyeball the human checks. A LIGHTWEIGHT,
   // NON-BLOCKING surfacing row — it builds no approval card and blocks nothing. One per spec (idempotent).
   // metadata: { autonomous:true, advisory:true, zero_machine_coverage:true }.
-  | "human_only_promote_advisory";
+  | "human_only_promote_advisory"
+  // completed-goal-self-archive — the standing reconciler (`reconcileCompletedGoalsToFolded`) folds a
+  // COMPLETE non-parent goal into the Archive on its own. A goal whose rollup reached 100% but that shipped
+  // one-off (no goal branch → the atomic goal→main path never retired it) used to linger forever as
+  // greenlit/complete on the active board awaiting a manual backfill (the 8 goals Dylan hand-folded). The
+  // reconciler runs the sanctioned retire path (finalizePromotedGoal → complete + goal-fold enqueue). PARENT
+  // goals are NEVER folded (is_parent OR has child goals — incl. folded children — OR no buildable specs).
+  // One row per goal folded; metadata: { actor:'reconciler:completed-goal-self-archive', linked_spec_count,
+  // milestones, completed, fold_queued }.
+  | "reconciled_completed_goal_folded";
 
 export interface DirectorActivityInput {
   workspaceId: string;

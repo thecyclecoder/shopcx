@@ -3312,6 +3312,27 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing goal→main promote failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // completed-goal-self-archive — fold every COMPLETE NON-PARENT goal into the Archive on its own. WHY a
+    // standing-pass reconciler is REQUIRED, not just the M5 atomic-promote finalize: the M5 retire path
+    // (`finalizePromotedGoal`) fires ONLY for a goal that shipped THROUGH a goal branch. A LEGACY goal whose
+    // member specs shipped one-off (no `goal/{slug}` branch → the M5 promoter never evaluated it) reaches a
+    // 100% rollup but never gets the greenlit→complete + goal-fold enqueue — it lingers FOREVER as
+    // greenlit/complete on the active board (the 8 goals Dylan hand-backfilled to `folded`). This re-evaluates
+    // the FULL active goal set each pass and self-folds any non-parent 100% goal via the SAME sanctioned path.
+    // PARENT goals (is_parent OR has child goals — incl. ceo-mode with is_parent=false + 8 children — OR no
+    // buildable specs) stay active at 100% awaiting their sub-goals; a goal < 100% or with 0 specs is left
+    // alone. Idempotent (a folded goal is off `getGoals`; an in-flight goal-fold is deduped); one
+    // `reconciled_completed_goal_folded` director_activity row per goal folded (never silent).
+    const { reconcileCompletedGoalsToFolded } = await import("../src/lib/agent-jobs");
+    const cg = await reconcileCompletedGoalsToFolded(job.workspace_id, db);
+    if (cg.folded.length) {
+      notes.push(`completed-goal self-archive → folded ${cg.folded.length} goal(s): ${cg.folded.map((g) => g.slug).join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`completed-goal self-archive failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing completed-goal self-archive failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // director-escort-inflight-specs Phase 1 — pre-grooming sweep over every in-flight / critical-planned /
     // recently-authored spec this director drives. Dispatches each into one of five mechanical lanes
     // (queued_build · status_drift · failed_retry · failed_repeat · stalled) so the gap between authoring a

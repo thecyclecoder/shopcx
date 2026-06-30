@@ -1506,6 +1506,109 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
   }
 }
 
+export interface CompletedGoalFoldResult {
+  /** goals folded this pass (rollup 100%, non-parent) — `previous` is the derived status before the fold. */
+  folded: { slug: string; previous: string }[];
+  /** goals evaluated at 100% but KEPT — a parent (is_parent / has-children / no-specs) or already mid-fold. */
+  kept: { slug: string; reason: string }[];
+}
+
+/**
+ * completed-goal-self-archive — the STANDING reconciler that folds a COMPLETE NON-PARENT goal into the
+ * Archive on its own, so a goal whose rollup reached 100% never sits stranded on the active board waiting
+ * for a manual backfill.
+ *
+ * THE GAP THIS CLOSES: the atomic goal→main retire path (`promoteCompleteGoalsToMain` → `finalizePromotedGoal`)
+ * fires ONLY for a goal that shipped THROUGH a goal branch. LEGACY goals whose member specs shipped one-off
+ * (no `goal/{slug}` branch, so the M5 promoter never evaluated them) reach a 100% rollup but never get the
+ * greenlit→complete + goal-fold enqueue — they linger forever as `greenlit`/`complete` on the active board
+ * (the 8 goals Dylan hand-backfilled to `folded`). This is the FORWARD fix: every standing pass, any
+ * non-parent 100% goal self-folds via the SAME sanctioned path, so completed goals self-archive — no manual
+ * backfill.
+ *
+ * For each ACTIVE (non-folded) goal in the PM workspace (`getGoals` drops folded rows = never a candidate):
+ *   1. ROLLUP 100% — require the DERIVED card `status === 'complete'` (every milestone rolls up complete =
+ *      every member spec shipped|folded) AND `linkedSpecCount >= 1`. A goal with 0 specs or any milestone
+ *      < 100% is LEFT ALONE — never fold an empty or partial goal.
+ *   2. PARENT EXEMPTION — skip a PARENT goal via `isGoalParentExempt`: `is_parent` flag OR it HAS child
+ *      goals (`goalHasChildGoals` counts EVERY child row, INCLUDING already-folded children — the structural
+ *      signal that exempts `ceo-mode`, which has `is_parent=false` but 8 children) OR it has no buildable
+ *      member specs. A parent stays active at 100% awaiting its sub-goals; it NEVER auto-folds. This is the
+ *      critical guard: the parent test is is_parent OR has-children, not is_parent alone.
+ *   3. FOLD — `finalizePromotedGoal` (the sanctioned retire path, reused from M5): greenlit/complete →
+ *      complete (explicit override via `setGoalStatus`) + enqueue ONE `kind='goal-fold'` job (the lane folds
+ *      the goal's durable knowledge into the brain archive doc, then flips status → `folded`). The goal moves
+ *      to the Archive section next pass.
+ *
+ * IDEMPOTENT: a folded goal is off `getGoals` (never re-evaluated); `finalizePromotedGoal` no-ops an
+ * already-folded goal and DEDUPES an in-flight goal-fold (a goal mid-fold is reported `kept`, never
+ * double-enqueued). BOUNDED (the active goal set). LOGGED: one `reconciled_completed_goal_folded`
+ * director_activity row per goal folded (never silent). Best-effort per goal — one goal's failure never
+ * blocks the rest; never throws.
+ */
+export async function reconcileCompletedGoalsToFolded(
+  workspaceId: string,
+  adminClient?: Admin,
+): Promise<CompletedGoalFoldResult> {
+  const out: CompletedGoalFoldResult = { folded: [], kept: [] };
+  const admin = adminClient || createAdminClient();
+  try {
+    const { getGoals } = await import("@/lib/brain-roadmap");
+    const { isGoalParentExempt } = await import("@/lib/goals-table");
+    const goals = await getGoals(workspaceId); // active (non-folded) GoalCards; rollup status DERIVED
+    for (const goal of goals) {
+      try {
+        // (1) ROLLUP 100% — DERIVED complete (every milestone's specs shipped|folded) AND ≥1 member spec.
+        //     status==='complete' already implies ≥1 milestone all-done; the linkedSpecCount guard is the
+        //     explicit "never fold an empty 0-spec goal" belt-and-suspenders.
+        if (goal.status !== "complete" || goal.linkedSpecCount < 1) continue;
+        // (2) PARENT EXEMPTION — is_parent OR has child goals (incl. folded) OR no buildable specs → KEEP.
+        const exempt = await isGoalParentExempt(workspaceId, goal.slug);
+        if (exempt.exempt) {
+          out.kept.push({ slug: goal.slug, reason: exempt.reason });
+          continue;
+        }
+        // (3) FOLD via the sanctioned retire path (greenlit/complete → complete + goal-fold enqueue).
+        const fin = await finalizePromotedGoal(workspaceId, goal.slug, admin);
+        if (fin.foldQueued || fin.completed) {
+          out.folded.push({ slug: goal.slug, previous: goal.status });
+          // Supervisor-visible report: one director_activity row per goal folded (never silent).
+          try {
+            const { recordDirectorActivity } = await import("@/lib/director-activity");
+            await recordDirectorActivity(admin, {
+              workspaceId,
+              directorFunction: "platform",
+              actionKind: "reconciled_completed_goal_folded",
+              specSlug: goal.slug,
+              reason: `reconciler:completed-goal-self-archive folded the completed goal '${goal.slug}' — its rollup is 100% (${goal.linkedSpecCount} member spec(s) all shipped|folded across ${goal.milestones.length} milestone(s)) and it is NOT a parent goal, but it never retired (it shipped one-off, so the atomic goal→main path never evaluated it). Ran the sanctioned retire path (greenlit/complete → complete + goal-fold enqueue) so it self-archives into the brain + moves to the Archive section.`,
+              metadata: {
+                actor: "reconciler:completed-goal-self-archive",
+                signal: "completed-goal-not-folded",
+                linked_spec_count: goal.linkedSpecCount,
+                milestones: goal.milestones.length,
+                completed: fin.completed,
+                fold_queued: fin.foldQueued,
+                finalize_reason: fin.reason ?? null,
+              },
+            });
+          } catch {
+            /* audit is best-effort — the fold already enqueued */
+          }
+        } else {
+          // already mid-fold (in-flight goal-fold deduped) or a benign no-op — record as kept for visibility.
+          out.kept.push({ slug: goal.slug, reason: fin.reason ?? "finalize no-op" });
+        }
+      } catch (e) {
+        console.warn(`[completed-goal-self-archive] ${goal.slug} fold threw (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
+    return out;
+  } catch (e) {
+    console.error("[completed-goal-self-archive] pass failed:", e instanceof Error ? e.message : e);
+    return out;
+  }
+}
+
 /**
  * spec-blockers Phase 2 — auto-queue on unblock. A blocking spec `shippedSlug` just shipped (its build
  * PR merged + phases flipped ✅). Find every live spec that named it as a `Blocked-by` prerequisite and,
