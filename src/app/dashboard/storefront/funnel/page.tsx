@@ -132,7 +132,7 @@ interface ChapterDiagRow {
 interface ChapterDiagResponse {
   range: { start: string; end: string };
   destination: { key: string; label: string } | null;
-  availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+  availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number; parent?: string }>;
   summary: { visits: number; reached_pricing: number; carry_to_pricing_pct: number; packed: number; close_pct: number; jumped_to_pricing: number; scrolled_to_pricing: number } | null;
   chapters: ChapterDiagRow[];
 }

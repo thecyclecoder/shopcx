@@ -719,7 +719,7 @@ export interface ChapterRow {
 
 export interface ChapterDiagnosticsResult {
   destination: { key: string; label: string } | null;
-  availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+  availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number; parent?: string }>;
   summary: {
     visits: number;
     reached_pricing: number;
@@ -786,19 +786,32 @@ export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): P
   }
 
   const destVisits = new Map<string, { level: "pdp" | "variant" | "angle"; visits: number }>();
+  const angleParent = new Map<string, string>(); // angle slug → its variant (so angles nest under their variant)
   const bump = (key: string, level: "pdp" | "variant" | "angle") => {
     const cur = destVisits.get(key) || { level, visits: 0 }; cur.visits++; destVisits.set(key, cur);
   };
   for (const s of sessByDest.values()) {
     if (!s.variant) bump("pdp", "pdp");
-    else { bump(s.variant, "variant"); if (s.angle) bump(s.angle, "angle"); }
+    else { bump(s.variant, "variant"); if (s.angle) { bump(s.angle, "angle"); angleParent.set(s.angle, s.variant); } }
   }
   const labelFor = (key: string, level: "pdp" | "variant" | "angle") =>
     level === "pdp" ? "Product Page (bare PDP)" : level === "variant" ? (VARIANT_LABEL[key] || key) : (headlineBySlug.get(key) || key);
-  const levelRank = { pdp: 0, variant: 1, angle: 2 } as const;
-  const availableDestinations = [...destVisits.entries()]
-    .map(([key, v]) => ({ key, level: v.level, label: labelFor(key, v.level), visits: v.visits }))
-    .sort((a, b) => levelRank[a.level] - levelRank[b.level] || b.visits - a.visits);
+  const mk = (key: string, v: { level: "pdp" | "variant" | "angle"; visits: number }, parent?: string) =>
+    ({ key, level: v.level, label: labelFor(key, v.level), visits: v.visits, parent });
+  // Order: PDP, then each variant immediately followed by its OWN angles (so the
+  // Listicle's "8 Reasons" angle nests under Listicle, not under whatever variant
+  // happens to be last in the list).
+  const entries = [...destVisits.entries()];
+  const availableDestinations: Array<{ key: string; level: "pdp" | "variant" | "angle"; label: string; visits: number; parent?: string }> = [];
+  for (const [k, v] of entries.filter(([, v]) => v.level === "pdp")) availableDestinations.push(mk(k, v));
+  for (const [vk, vv] of entries.filter(([, v]) => v.level === "variant").sort((a, b) => b[1].visits - a[1].visits)) {
+    availableDestinations.push(mk(vk, vv));
+    for (const [ak, av] of entries.filter(([ak, v]) => v.level === "angle" && angleParent.get(ak) === vk).sort((a, b) => b[1].visits - a[1].visits)) {
+      availableDestinations.push(mk(ak, av, vk));
+    }
+  }
+  const placed = new Set(availableDestinations.map((d) => d.key));
+  for (const [ak, av] of entries.filter(([k, v]) => v.level === "angle" && !placed.has(k))) availableDestinations.push(mk(ak, av));
 
   let destKey = args.destination && args.destination.trim() ? args.destination.trim() : null;
   if (!destKey) {
