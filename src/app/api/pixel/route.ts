@@ -38,6 +38,9 @@ const TRANSPARENT_GIF = Buffer.from(
 const ALLOWED_EVENT_TYPES = new Set([
   "pdp_view",
   "pdp_engaged",
+  // Blog instrumentation — non-PDP top-of-funnel content reads.
+  "blog_view",
+  "blog_engaged",
   // Phase 2 on-site instrumentation — chapter/scroll/CTA telemetry.
   "chapter_view",
   "chapter_dwell",

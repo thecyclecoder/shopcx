@@ -15,6 +15,7 @@ import { storefrontThemeStyle } from "../../../../_lib/storefront-theme";
 import { BlogHeader } from "../../../../_components/BlogHeader";
 import { BlogPostCard } from "../../../../_components/BlogPostCard";
 import { BlogPostJsonLd } from "../../../../_components/BlogJsonLd";
+import { BlogPixelInit } from "../../../../_components/BlogPixelInit";
 import { StorefrontFooter } from "../../../../_components/StorefrontFooter";
 import { getAuthor } from "@/lib/blog/authors";
 
@@ -133,6 +134,12 @@ export default async function BlogPostPage({
 
   return (
     <div className={font.className} style={themeStyle}>
+      <BlogPixelInit
+        workspaceId={ws.id}
+        metaPixelId={ws.meta_pixel_id}
+        blogHandle={post.handle}
+        title={post.title}
+      />
       <BlogPostJsonLd
         brand={ws.name}
         logoUrl={ws.design.logo_url}
