@@ -5558,6 +5558,36 @@ async function runDirectorBounceBackJob(job: Job) {
   }
 }
 
+// Watchdog quarantine pin (worker-self-update-respects-quarantine): the box-watchdog (scripts/box-watchdog.ts,
+// systemd shopcx-box-watchdog.timer) auto-rolls-back the checkout to last-known-good when main crash-loops,
+// and persists the bad SHA as `quarantinedSha` in /home/builder/.box-watchdog.json. Without this read the idle
+// self-update below would re-pull that SAME bad origin/main SHA within one cycle → the watchdog re-asserts the
+// rollback every tick → the box OSCILLATES (good code most of the time, but flapping). So before advancing the
+// worker READS the watchdog's marker (well-known path, same `builder` user owns it) and refuses to self-update
+// ONTO a SHA the watchdog has quarantined. The watchdog stores the SHORT sha (`git rev-parse --short HEAD`)
+// while we hold the FULL origin/main sha here, so the compare is prefix-tolerant. FAIL-OPEN for availability:
+// a missing / unreadable / malformed marker NEVER blocks an update — only a clearly-set quarantinedSha that
+// matches origin/main's tip holds. The moment main advances to a different (fixed) SHA the pin no longer
+// matches → self-update proceeds, and the watchdog self-clears the quarantine once the box is healthy on the
+// new SHA. WORKER_PIN_SHA is an additional manual operator hold in the same shape: name a SHA you want the box
+// to refuse to advance onto. Marker-file contract with the watchdog: { quarantinedSha: <short-sha>|null, … }.
+const WATCHDOG_STATE_FILE = process.env.WATCHDOG_STATE_FILE || "/home/builder/.box-watchdog.json";
+function readQuarantinedSha(): string | null {
+  try {
+    const o = JSON.parse(readFileSync(WATCHDOG_STATE_FILE, "utf8"));
+    const q = o?.quarantinedSha;
+    return typeof q === "string" && q.trim() ? q.trim() : null;
+  } catch {
+    return null; // missing / unreadable / malformed → fail-open: behave exactly as if no quarantine is set
+  }
+}
+// Prefix-tolerant SHA compare: the watchdog persists the short sha, the worker has the full origin/main sha.
+// A `--short` sha is >= 7 hex chars (git's collision-avoiding minimum), so a startsWith match is unambiguous.
+function shaMatches(full: string, marker: string): boolean {
+  if (!full || !marker) return false;
+  return full === marker || full.startsWith(marker) || marker.startsWith(full);
+}
+
 // Idle self-update: ONLY when no build/fold lane is running (active === 0 — in-flight work is sacrosanct).
 // Fetch origin, and if local HEAD is behind origin/main, hard-reset the MAIN repo (worktrees live in a
 // sibling dir, so this never touches a running build), npm ci if deps changed, then exit(0) — systemd
@@ -5577,6 +5607,20 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   const local = sh("git", ["rev-parse", "HEAD"]).out.trim();
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
   if (!local || !remote || local === remote) return; // current → no-op (no thrash)
+
+  // HONOR the watchdog quarantine (worker-self-update-respects-quarantine): never advance ONTO a SHA the
+  // watchdog has rolled away from. If origin/main's tip is the quarantined (known-bad) SHA, HOLD on the
+  // current good checkout and log loudly — the watchdog would just re-roll us back, so updating only flaps
+  // the box. Fix main (advance the tip past the bad SHA) to release the pin. Fail-open: readQuarantinedSha()
+  // returns null on any missing/garbage marker, so this guard is a no-op unless a quarantine is clearly set.
+  const pin = process.env.WORKER_PIN_SHA?.trim() || readQuarantinedSha();
+  if (pin && shaMatches(remote, pin)) {
+    const via = process.env.WORKER_PIN_SHA?.trim() ? "WORKER_PIN_SHA" : "the watchdog";
+    console.warn(
+      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via} — holding on ${local.slice(0, 8)} (good); fix main to release`,
+    );
+    return;
+  }
 
   // Idle → update on any drift. Busy → only when FAR behind (max-staleness override); a small lag waits for
   // the next idle window so in-flight builds aren't interrupted for one or two commits.
