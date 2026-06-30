@@ -7,6 +7,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { useSectionNav, type SectionNavItem } from "@/lib/section-nav-context";
 import { getPersona } from "@/lib/agents/personas";
 import { DirectorActivity } from "@/components/agents/director-activity";
+import { DirectorGuide } from "@/components/agents/director-guide";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
 import { XpCard, type DirectorXp } from "@/components/agents/xp-card";
 import { AgentCoachingHistory } from "@/components/agents/agent-coaching-history";
@@ -121,6 +122,8 @@ function ProfileCard({
     const isPlatform = directorSlug === "platform";
     const sections: SectionNavItem[] = [
       { key: "overview", label: "Overview" },
+      // The friendly, self-updating plain-English intro — right after Overview (director-guide-tab).
+      { key: "guide", label: "Guide" },
       ...(isPlatform ? [{ key: "grades", label: "Grades" } as SectionNavItem, { key: "coach", label: "Coach" } as SectionNavItem] : []),
       { key: "activity", label: "Activity" },
       { key: "autonomy", label: "Autonomy" },
@@ -216,7 +219,9 @@ function ProfileCard({
       ) : null;
     // Sidebar-takeover IA (#16): render ONE section at a time (the active `?s=` from the contextual nav).
     const section =
-      activeSection === "grades" && isPlatform ? (
+      activeSection === "guide" ? (
+        <DirectorGuide slug={d.slug} />
+      ) : activeSection === "grades" && isPlatform ? (
         <DirectorGradePanel />
       ) : activeSection === "coach" && isPlatform ? (
         <DirectorCoachChat />
