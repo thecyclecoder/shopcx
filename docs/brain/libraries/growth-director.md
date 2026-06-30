@@ -1,0 +1,49 @@
+# libraries/growth-director
+
+The **Growth Director agent** — the **second live director** ([[../specs/growth-director-agent]], [[../goals/ceo-mode]] M6). Investigate every Approval Request **routed to Growth** and either **auto-approve within the leash** (with the reasoning logged) or **leave it for the CEO**. It **supervises** the existing growth tools ([[../tables/iteration_policies]], [[../tables/storefront_optimizer_policy]], [[../tables/iteration_actions]], [[../tables/ad_publish_jobs]], [[../tables/ad_spend_budgets]]) — it does **not** rebuild them. Build-driving stays with Ada permanently ([[../functions/platform]]; CEO directive 2026-06-29) — Growth OPERATES its software, never builds.
+
+**File:** `src/lib/agents/growth-director.ts`
+
+## Why this exists
+
+North star ([[../operational-rules]] § supervisable autonomy): **CEO → Director → tool**. Growth's tools already work, but nothing supervised them *as a director* — every growth approval the CEO rubber-stamps landed in the CEO inbox. This module is the supervisor: it reuses the [[../specs/approval-routing-engine|approval-routing]] plumbing rather than adding a parallel approval path, and records every call to the supervisable-autonomy ledger so the CEO can audit **what** it decided and **why** — in history, never in the queue.
+
+**Activation (owner-confirmed, M6 flag flip) — pending.** Growth's [[../tables/function_autonomy]] row is **not yet** `live + autonomous`; until it is, [[approval-router]] `resolveApprover` never routes growth-owned approvals here, so `enqueueGrowthDirectorJobs` and every surface below are **dormant** — the machinery is built but the lever isn't pulled. When the Growth director is greenlit to go live+autonomous, the M6 flag flip will activate the surfaces below in-place, with **zero new code** — every surface already checks its runtime guard (`growthIsAutoApprover` gates the enqueuer, `directorLiveStateFact` wraps every investigation prompt).
+
+## The leash (what it MAY auto-approve)
+
+The `goals/ceo-mode` § M6 leash + the standing autonomy rule ([[../operational-rules]]). A **structural** gate (which action class) **and** a **soundness** gate (the read-only investigation — *never rubber-stamps*):
+
+| `LeashCategory` | Pending-action `type` | What |
+|---|---|---|
+| `iteration_policy_activation` | `iteration_policy_activation` | author/activate a versioned [[../tables/iteration_policies]] row (a new ad-spend control rule) |
+| `storefront_optimizer_policy_activation` | `storefront_optimizer_policy_activation` | flip [[../tables/storefront_optimizer_policy]] `.active` for an allowlisted product (pause/resume testing) |
+| `pause_underperforming_creative` | `pause_underperforming_creative` | Meta status flip via the existing [[../tables/iteration_actions]] `pause` adapter ([[../libraries/meta__execution]]) |
+| `reallocate_within_ceiling` | `reallocate_within_ceiling` | within an active [[../tables/ad_spend_budgets]] ceiling — rebalance spend across campaigns |
+| `promote_ready_to_test_creative` | `promote_ready_to_test_creative` | approve into the [[../tables/ad_publish_jobs]] PAUSED flow ([[../lifecycles/ad-publish]]) — stage creative to test |
+
+**Multi-action (worker-grading P8).** The gate is `directorLeashCandidates` (not the old single-action `directorLeashCandidate`): it auto-approves a request with **one** in-leash action OR a **bundle** where **every** action is in-leash — a bundle is **all-or-nothing**: one out-of-leash action escalates the whole request, and `applyDirectorApproval` approves all actions atomically (the target flips `queued_resume` only when none stay pending). The soundness gate is unchanged — the investigation must confirm EVERY action (and the bundle as a whole) is sound + reversible.
+
+**Always escalates** (never auto-approves): destructive/irreversible actions, a non-binary **multi-CHOICE** decision (e.g. multi-option budget reallocation), a ceiling-breaking spend that exceeds guardrails, or anything it cannot confirm sound. **CEO escalation routing** is live (Phase 3): an escalation now **re-routes** the Approval Request to the CEO inbox carrying the Growth director's diagnosis (`escalateApprovalRequestToCeo`), instead of leaving it untouched.
+
+## Exports
+
+- **`enqueueGrowthDirectorJobs(admin)`** → `{ enqueued, slugs }` — the poll-loop background sweep. Finds every open `needs_approval` [[../tables/agent_jobs]] routed to Growth and queues one `kind='growth-director'` job per target (instructions `{ target_job_id, target_kind }`). **Idempotent** (one director job per target, ever). No-op unless `growthIsAutoApprover`.
+- **`directorLeashCandidates(job)`** → `{ actions: LeashAction[], verdict: 'none'｜'single'｜'multi' }` — the structural gate. Returns every pending action with its leash class; `verdict='none'` (escalate) when **any** pending action is out of leash (all-or-nothing); `single`/`multi` carry the in-leash action(s).
+- **`buildGrowthDirectorBrief(job, candidates)`** / **`growthDirectorInvestigationPrompt(admin, brief)`** — the read-only Max `claude -p` investigation prompt over the action(s): `GrowthDirectorBrief` carries `actions[]` + `categories[]` + the loaded Growth control surfaces (`growthAutonomy`, `iterationPolicies`, `storefrontOptimizerPolicy`, `pendingRecommendations`). For a bundle the prompt is **all-or-nothing** (every action sound) → one JSON verdict `auto-approve｜escalate`.
+- **`applyDirectorApproval(admin, target, actionIds, reasoning)`** → `{ ok, error? }` — the **autonomous approve** path; marks every action `approved`, flips the job to `queued_resume` when none stay pending, then writes the [[../tables/approval_decisions]] row (`decided_by='director'`, `autonomous=true`; `director_function='growth'`). Writes one `director_activity` row per decision (`action_kind='approved_approval'`).
+- **`growthIsAutoApprover(autonomy)`** / **`routesToGrowth(kind, chart, autonomy)`** — routing predicates over [[approval-router]].
+- **`escalateApprovalRequestToCeo(admin, target, diagnosis)`** — re-route a declined Approval Request to the CEO inbox with the Growth director's diagnosis (Phase 3). The target stays `needs_approval` (never auto-approved).
+- Const **`GROWTH`** (the function slug), **`LEASH_CATEGORIES`** (the 5 categories above); types **`LeashCategory`**, **`LeashAction`**, **`DirectorTargetJob`**, **`GrowthDirectorBrief`**, **`GrowthDirectorBriefAction`**.
+
+## The box lane
+
+`scripts/builder-worker.ts` `runGrowthDirectorJob` (concurrency-1 `growth-director` lane shared with `platform-director`, claimed via `claim_agent_job`; `runDirectorClaude` is the Max session — read-only DB creds kept, API key stripped). Every read-only investigation prompt is wrapped with `directorLiveStateFact(admin,'growth')` ([[../specs/brain-platform-live-autonomous-status]] Phase 2 — the recurrence guard applied to Growth) — so a decision reads the LIVE flag, never stale brain prose. It re-loads the target, **re-confirms** it still `needs_approval` and still routes to Growth (fail-safe), runs the leash gate, investigates read-only, then:
+- **`auto-approve`** → `applyDirectorApproval` + a `director_activity` `approved_approval` row.
+- **`escalate`** (or any ambiguous/unparseable verdict — fail safe) → a `director_activity` `escalated` row **and** `escalateApprovalRequestToCeo` re-routes the request to the CEO inbox with the diagnosis (Phase 3).
+
+It **never** edits product code, opens a PR, or runs a migration — it only decides on the existing gated action.
+
+## Activation gate
+
+Until `function_autonomy('growth').live + autonomous`, this agent is **dormant**: `enqueueGrowthDirectorJobs` is a no-op (the runtime guard `growthIsAutoApprover` returns false), so no Growth-routed Approval Request triggers a director job. When activated by the M6 flag flip (owner-confirmed), the enqueuer awakens with **zero code changes** — every surface already tests the flag. See [[../tables/function_autonomy]] for the permanent on/off switch.

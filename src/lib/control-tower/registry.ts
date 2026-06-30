@@ -546,6 +546,13 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "klaviyo-engagement-sync", kind: "cron", owner: "cmo", label: "Klaviyo engagement sync", description: "Daily Klaviyo engagement metrics sync.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "marketing-coupon-auto-disable", kind: "cron", owner: "cmo", label: "Marketing coupon auto-disable", description: "Auto-disables expired/over-budget marketing coupons.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "meta-performance-daily", kind: "cron", owner: "growth", label: "Meta performance pipeline", description: "Daily Meta ad performance iteration pipeline.", expectedCadence: "daily (30 11 * * *)", livenessWindowMs: 26 * HOUR },
+  // growth-ad-spend-rail spec, Phase 3: daily SUPERVISOR pass on the ad-DOLLAR proxy. Fans out
+  // one `growth/ad-spend-governor-sweep` event per workspace with ≥1 ad_spend_budgets row; each
+  // pass rolls up daily_meta_ad_spend over the rolling window vs the ceiling and ESCALATES on a
+  // 2-day trend over via platform-director.escalateDiagnosisToCeo (escalationKind='ad_spend_ceiling')
+  // + a growth-owned director_activity row. NEVER pauses or throttles a campaign.
+  // registeredAt graces the first-tick window (newcron-grace).
+  { id: "growth-ad-spend-governor-cron", kind: "cron", owner: "growth", label: "Growth ad-spend governor", description: "Daily fan-out: reads each effective ad_spend_budgets row vs the rolling daily_meta_ad_spend sum → escalates a 2-day trend over the ceiling (loop-guarded, never auto-throttles).", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-30T12:00:00Z" },
   { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments (near-live test stats). No-ops when no running experiments.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN, registeredAt: "2026-06-22T17:45:00Z" },
   { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },
