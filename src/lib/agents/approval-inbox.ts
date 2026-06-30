@@ -504,14 +504,249 @@ async function postChatModeInvitation(
 }
 
 /**
+ * one-card-per-park: the job id a notification is ABOUT, read off whichever metadata key carried it.
+ * The reconciler's routed Approval Requests carry `agent_job_id`; the director park escalators
+ * (`escalateDiagnosisToCeo` triage/backstop/design-change) and the system age-alarm carry `job_id`.
+ * Either uniquely identifies the same parked `agent_jobs` row — so the dedup + auto-clear passes can
+ * collapse the 2–3 surfaces a single park otherwise spawns into ONE card.
+ */
+export function notifJobId(metadata: Record<string, unknown> | null | undefined): string | null {
+  if (!metadata) return null;
+  const a = metadata["agent_job_id"];
+  if (typeof a === "string" && a) return a;
+  const b = metadata["job_id"];
+  if (typeof b === "string" && b) return b;
+  return null;
+}
+
+/**
+ * one-card-per-park (DEDUP): is there ALREADY an active (non-dismissed) CEO card for this parked
+ * `agent_jobs` row? ANY park surface counts — a routed Approval Request (`agent_approval_request`,
+ * keyed on `agent_job_id`) OR a director park escalation / system age-alarm (keyed on `job_id`). The
+ * three park emitters ("Parked {kind}" triage · "Park needs eyes" backstop · "Parked >70 min" age
+ * alarm — plus the design-change chat invite) each call this BEFORE inserting, so a single parked job
+ * surfaces AT MOST ONE card: whichever emitter fires first wins, the rest gate off. Two narrow
+ * filtered reads (one per metadata key) rather than a JS scan, so it's cheap to call per row.
+ * Best-effort: a read error returns false (better a rare duplicate than a suppressed escalation).
+ */
+export async function activeParkCardExistsForJob(admin: Admin, workspaceId: string, jobId: string): Promise<boolean> {
+  for (const key of ["agent_job_id", "job_id"]) {
+    const { data, error } = await admin
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("dismissed", false)
+      .filter(`metadata->>${key}`, "eq", jobId)
+      .limit(1);
+    if (error) continue; // fail-open: never suppress an escalation on a transient read error
+    if ((data ?? []).length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * The director-emitted PARK escalation_kinds (every surface `escalateDiagnosisToCeo` raises for a
+ * needs_attention park) whose card auto-clears once its reason is gone. NON-park escalations
+ * (loop_guard / groom_unsure / init-unsure / new_goal / external_blocker / deploy_rollback …) are
+ * deliberately EXCLUDED — those answer to a different condition and must not be auto-dropped here.
+ */
+const PARK_ESCALATION_KINDS: ReadonlySet<string> = new Set(["needs_attention", "park_backstop", "park_design_change"]);
+/** The system age-alarm marker (`metadata.kind`) — the "Parked >70 min" no-parked-specs invariant card. */
+const PARK_AGE_ALARM_KIND = "no_parked_specs_invariant";
+/** Spec statuses that mean "the work is done / superseded" — a park on one of these is obsolete. */
+const SPEC_DONE_STATUSES: ReadonlySet<string> = new Set(["folded", "shipped"]);
+
+/** A live park card the auto-clear pass evaluates (a director escalation OR a system age-alarm). */
+interface ParkCardRow {
+  id: string;
+  workspace_id: string;
+  metadata: Record<string, unknown> | null;
+}
+
+/** Dismiss one stale park card + log why. Best-effort; a failed update just leaves it for next tick. */
+async function dismissParkCard(admin: Admin, id: string, reason: string): Promise<boolean> {
+  const { error } = await admin.from("dashboard_notifications").update({ dismissed: true }).eq("id", id);
+  if (error) {
+    console.warn(`[approval-inbox] stale-park dismiss failed for ${id}: ${error.message}`);
+    return false;
+  }
+  console.log(`[approval-inbox] auto-cleared stale park card ${id.slice(0, 8)} — ${reason}`);
+  return true;
+}
+
+/**
+ * one-card-per-park (AUTO-CLEAR): dismiss an active park/escalation card the moment its underlying
+ * reason is genuinely gone, so the CEO inbox never inflates with obsolete parks. Idempotent (runs
+ * every tick inside `reconcileApprovalInbox`), logged, and CONSERVATIVE — it only clears on a
+ * definitively-resolved reason, never on a still-valid escalation (a real failing spec-test or a
+ * genuine needs_human stays put).
+ *
+ * Two card families, each with its own "reason gone" test:
+ *
+ *  1. Job-backed park cards (triage "Parked {kind}", backstop "Park needs eyes", design-change chat,
+ *     and the system "Parked >70 min" age alarm — all carry `metadata.job_id`):
+ *       - the `agent_jobs` row is GONE or no longer `needs_attention` (it was dismissed / resolved /
+ *         re-queued, e.g. the pr-878 resolver bug got fixed) → reason gone → dismiss.
+ *       - the row is STILL needs_attention but its spec is `folded` (the CEO folded it as superseded,
+ *         or it shipped+folded clean) → the park is obsolete → dismiss. (A merely-`shipped`-by-rollup
+ *         spec whose job is still parked is NOT cleared on status alone — a genuine spec-test park on
+ *         a shipped spec must survive; only the `agent_jobs` leaving needs_attention clears it.)
+ *
+ *  2. Reva "Ambiguous post-deploy signal" cards (escalation_kind `deploy_unsure`, no agent_job — keyed
+ *     on `metadata.spec_slug` + `deploy_watch_id`): the ambiguous signal has RESOLVED when the spec has
+ *     since shipped/folded clean AND no NEW (non-baseline) error_events landed in the deploy's canary
+ *     window. Both must hold — a fresh in-window error keeps the card (the signal was real after all).
+ *
+ * Returns the count cleared. Best-effort; a single failure never aborts the pass.
+ */
+export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
+  const { data: notifData, error } = await admin
+    .from("dashboard_notifications")
+    .select("id, workspace_id, metadata")
+    .in("type", [APPROVAL_REQUEST_TYPE, "system"])
+    .eq("dismissed", false)
+    .limit(2000);
+  // SAFETY: never act on a FAILED read (a null result would look like "no cards" but clears nothing —
+  // harmless here, but we bail explicitly so a transient error is visible rather than silently no-op).
+  if (error) {
+    console.warn(`[approval-inbox] stale-park read failed — skipping auto-clear this tick: ${error.message}`);
+    return 0;
+  }
+  const notifs = (notifData ?? []) as ParkCardRow[];
+
+  // Partition the live cards into the two park families (everything else — routed approvals, non-park
+  // escalations — is left untouched).
+  const jobCards: Array<{ card: ParkCardRow; jobId: string }> = [];
+  const revaCards: Array<{ card: ParkCardRow; specSlug: string | null; watchId: string | null }> = [];
+  for (const n of notifs) {
+    const m = n.metadata ?? {};
+    const escKind = typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : null;
+    const metaKind = typeof m["kind"] === "string" ? (m["kind"] as string) : null;
+    if (escKind === "deploy_unsure") {
+      revaCards.push({
+        card: n,
+        specSlug: typeof m["spec_slug"] === "string" ? (m["spec_slug"] as string) : null,
+        watchId: typeof m["deploy_watch_id"] === "string" ? (m["deploy_watch_id"] as string) : null,
+      });
+      continue;
+    }
+    const isPark = (escKind !== null && PARK_ESCALATION_KINDS.has(escKind)) || metaKind === PARK_AGE_ALARM_KIND;
+    if (!isPark) continue;
+    const jobId = notifJobId(m);
+    if (jobId) jobCards.push({ card: n, jobId });
+  }
+
+  let cleared = 0;
+
+  // ── Family 1: job-backed park cards ──────────────────────────────────────────
+  if (jobCards.length) {
+    const jobIds = Array.from(new Set(jobCards.map((c) => c.jobId)));
+    const { data: jobsData } = await admin
+      .from("agent_jobs")
+      .select("id, status, spec_slug")
+      .in("id", jobIds);
+    const jobs = new Map<string, { status: string; spec_slug: string | null }>();
+    for (const j of (jobsData ?? []) as Array<{ id: string; status: string; spec_slug: string | null }>) {
+      jobs.set(j.id, { status: j.status, spec_slug: j.spec_slug });
+    }
+    // Batch-fetch the spec statuses for jobs STILL needs_attention (to catch a CEO-folded park).
+    const stillParkedSlugs = new Set<string>();
+    for (const { jobId } of jobCards) {
+      const job = jobs.get(jobId);
+      if (job && job.status === "needs_attention" && job.spec_slug) stillParkedSlugs.add(job.spec_slug);
+    }
+    const specStatus = await loadSpecStatuses(admin, stillParkedSlugs);
+
+    for (const { card, jobId } of jobCards) {
+      const job = jobs.get(jobId);
+      if (!job) {
+        // The job row is gone entirely — nothing left to decide.
+        if (await dismissParkCard(admin, card.id, `job ${jobId.slice(0, 8)} no longer exists`)) cleared++;
+        continue;
+      }
+      if (job.status !== "needs_attention") {
+        // Resolved / dismissed / re-queued — the park reason is gone (e.g. pr-878 after the fix landed).
+        if (await dismissParkCard(admin, card.id, `job ${jobId.slice(0, 8)} left needs_attention (now '${job.status}')`)) cleared++;
+        continue;
+      }
+      // Still parked — only clear if the spec was FOLDED (superseded by the CEO / folded clean). A
+      // genuine still-failing park keeps its card.
+      const status = job.spec_slug ? specStatus.get(job.spec_slug) : null;
+      if (status === "folded") {
+        if (await dismissParkCard(admin, card.id, `spec ${job.spec_slug} is folded — park superseded`)) cleared++;
+      }
+    }
+  }
+
+  // ── Family 2: Reva "Ambiguous post-deploy signal" cards ──────────────────────
+  if (revaCards.length) {
+    const slugs = new Set<string>();
+    for (const r of revaCards) if (r.specSlug) slugs.add(r.specSlug);
+    const specStatus = await loadSpecStatuses(admin, slugs);
+    for (const r of revaCards) {
+      if (!r.specSlug) continue; // can't evaluate without a spec to confirm clean
+      const status = specStatus.get(r.specSlug);
+      if (!status || !SPEC_DONE_STATUSES.has(status)) continue; // spec hasn't shipped/folded yet — keep
+      if (!(await deployWindowIsClean(admin, r.watchId))) continue; // a real in-window error → keep
+      if (await dismissParkCard(admin, r.card.id, `deploy of ${r.specSlug} shipped clean (${status}), no new in-window errors — ambiguous signal resolved`)) cleared++;
+    }
+  }
+
+  return cleared;
+}
+
+/** Batch-load `specs.status` keyed by slug for the given slugs (workspace-agnostic; slugs are unique enough). */
+async function loadSpecStatuses(admin: Admin, slugs: Set<string>): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!slugs.size) return out;
+  const { data } = await admin.from("specs").select("slug, status").in("slug", Array.from(slugs));
+  for (const s of (data ?? []) as Array<{ slug: string; status: string | null }>) {
+    if (s.status) out.set(s.slug, s.status);
+  }
+  return out;
+}
+
+/**
+ * Reva auto-clear guard: did the deploy's canary window stay CLEAN — i.e. no NEW (non-baseline)
+ * error signature first-seen inside [deployed_at, window_ends_at]? Reads the `deploy_watches` row by
+ * id (its pre-deploy baseline + window bounds) and re-samples `error_events`. Returns true (clean) when
+ * the in-window ambiguous signal is no longer present, so the card can be cleared. Fail-CLOSED: a
+ * missing watch / read error returns false (keep the card) — we never drop a Reva escalation we can't
+ * positively confirm resolved.
+ */
+async function deployWindowIsClean(admin: Admin, watchId: string | null): Promise<boolean> {
+  if (!watchId) return false;
+  const { data: watch, error } = await admin
+    .from("deploy_watches")
+    .select("deployed_at, window_ends_at, baseline")
+    .eq("id", watchId)
+    .maybeSingle();
+  if (error || !watch) return false;
+  const w = watch as { deployed_at: string; window_ends_at: string; baseline: { errorSignatures?: string[] } | null };
+  const baseline = new Set((w.baseline?.errorSignatures ?? []).filter(Boolean));
+  const { data: errs, error: errErr } = await admin
+    .from("error_events")
+    .select("signature")
+    .gt("first_seen_at", w.deployed_at)
+    .lte("first_seen_at", w.window_ends_at);
+  if (errErr) return false; // can't confirm clean → keep the card
+  for (const r of (errs ?? []) as Array<{ signature: string | null }>) {
+    if (r.signature && !baseline.has(r.signature)) return false; // a genuine new in-window error remains
+  }
+  return true;
+}
+
+/**
  * The reconciler — the single "one inbox, no orphans" sweep. Run it from the box worker poll loop.
  *   - For every open needs_approval job with NO routed Approval Request yet → emit one (idempotent
  *     on metadata.agent_job_id, so a job that re-parks to needs_approval doesn't double-emit).
  *   - For every live Approval Request whose job has LEFT needs_approval (approved/declined/done/gone)
  *     → dismiss it, so the inbox only ever shows requests still awaiting a decision.
+ *   - AUTO-CLEAR stale PARK cards (reconcileStaleParkCards): a director park escalation / system age
+ *     alarm whose reason is gone (job left needs_attention, spec folded, Reva signal resolved clean).
  * Best-effort + bounded; never throws into the caller.
  */
-export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: number; dismissed: number }> {
+export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: number; dismissed: number; parksCleared: number }> {
   const [chart, autonomy] = await Promise.all([buildOrgChartGraph(), loadAutonomyMap()]);
 
   const { data: jobsData, error: jobsError } = await admin
@@ -530,7 +765,15 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
   // whole CEO inbox (observed 2026-06-24). On error, bail and leave the inbox untouched until the next tick.
   if (jobsError) {
     console.warn(`[approval-inbox] job read failed — skipping reconcile to protect the inbox: ${jobsError.message}`);
-    return { created: 0, dismissed: 0 };
+    // The stale-park auto-clear reads its OWN sources (park notifications + agent_jobs/specs/deploy_watches),
+    // independent of this failed needs_approval read — so still run it (its own guard bails on its own error).
+    let parksCleared = 0;
+    try {
+      parksCleared = await reconcileStaleParkCards(admin);
+    } catch (e) {
+      console.warn(`[approval-inbox] stale-park reconcile threw on bail path (continuing): ${e instanceof Error ? e.message : e}`);
+    }
+    return { created: 0, dismissed: 0, parksCleared };
   }
   const jobs = (jobsData ?? []) as ApprovalJobRow[];
   const openJobIds = new Set(jobs.map((j) => j.id));
@@ -587,7 +830,18 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
     }
   }
 
-  return { created, dismissed };
+  // AUTO-CLEAR stale PARK cards (one-card-per-park): dismiss any director park escalation / system age
+  // alarm whose underlying reason is gone. Separate from the needs_approval dismiss loop above (those
+  // are routed Approval Requests keyed on agent_job_id; park cards key on job_id + escalation_kind).
+  // Best-effort; never aborts the sweep.
+  let parksCleared = 0;
+  try {
+    parksCleared = await reconcileStaleParkCards(admin);
+  } catch (e) {
+    console.warn(`[approval-inbox] stale-park reconcile threw (continuing): ${e instanceof Error ? e.message : e}`);
+  }
+
+  return { created, dismissed, parksCleared };
 }
 
 /**

@@ -15,7 +15,26 @@ The "**one inbox, no orphans**" sweep. The box worker poll loop (`scripts/builde
 - **Emit** — for every open `needs_approval` job with no routed Approval Request yet, insert one `dashboard_notifications` row (`type='agent_approval_request'`). **Idempotent** on `metadata.agent_job_id`, so a job that re-parks to `needs_approval` (resume-with-no-decision) never double-emits.
 - **Dismiss** — for every live Approval Request whose job has **left** `needs_approval` (approved → `queued_resume`, declined, done, gone), set `dismissed=true`. The inbox only ever shows requests still awaiting a decision.
 
-Catches **every** kind regardless of which surface raised it (repair / db_health / coverage-register / plan / migration-fix / storefront / build). Best-effort + bounded (≤500 jobs, ≤2000 open requests per sweep); never throws into the poll loop. Returns `{ created, dismissed }`.
+Catches **every** kind regardless of which surface raised it (repair / db_health / coverage-register / plan / migration-fix / storefront / build). Best-effort + bounded (≤500 jobs, ≤2000 open requests per sweep); never throws into the poll loop. Returns `{ created, dismissed, parksCleared }`.
+
+## One card per parked job — DEDUP + AUTO-CLEAR
+
+A `needs_approval` job is the routed-approval path above. A `needs_attention` **park** is a *different* path with **three** distinct emitters (all keyed on `metadata.job_id`, not `agent_job_id`), so a single parked job historically inflated the CEO inbox to 2–3 cards (the migration-fix `b1a80b2d` 9-item bottleneck = ~4 real issues × duplicate cards):
+
+| Emitter | Card | Where |
+|---|---|---|
+| triage ([[platform-director]] `reconcileNeedsAttention`) | `Parked {kind}: {slug}` (`agent_approval_request`, `escalation_kind=needs_attention`, dedupe `needsattn:{job}`) | non-build QC parks |
+| backstop ([[needs-attention-route]] `routeBackstop` a) | `Park needs eyes: {slug}` (`agent_approval_request`, `escalation_kind=park_backstop`, dedupe `parkbackstop:{job}`) | a park `unknown` >60 min |
+| age alarm ([[needs-attention-route]] `routeBackstop` b) | `Parked > 70 min: {slug}` (`type='system'`, `metadata.kind=no_parked_specs_invariant`, dedupe `parkalarm:{job}`) | a park >70 min |
+
+**Invariant — a parked `agent_jobs` row surfaces AT MOST ONE active CEO card.** Each emitter (plus the design-change chat invite in `routeDesignChange`) gates on **`activeParkCardExistsForJob(admin, workspaceId, jobId)`** *before* inserting — a non-dismissed notification carrying this job id under **either** `metadata.agent_job_id` OR `metadata.job_id` (`notifJobId(metadata)` resolves whichever). Whichever emitter fires first wins (triage runs before route in the standing pass; for build parks triage is skipped so the route's richer chat-invite / "Park needs eyes" wins); the rest skip. The per-emitter `dedupe_key` still prevents *self*-duplication; `activeParkCardExistsForJob` is the **cross-emitter** gate that collapses the trio.
+
+**AUTO-CLEAR stale parks — `reconcileStaleParkCards(admin)`** (run every tick inside `reconcileApprovalInbox`, even on the needs_approval read-bail path since it reads its own sources). Dismisses an active park card the moment its reason is genuinely gone. **Conservative — only clears on a definitively-resolved reason; a real failing spec-test / genuine needs_human stays.** Two families:
+
+- **Job-backed park cards** (triage / backstop / age alarm / design-change — carry `metadata.job_id`): dismiss when the `agent_jobs` row is **gone or no longer `needs_attention`** (resolved / dismissed / re-queued — e.g. pr-878 after the resolver fix), OR it's still parked but its **spec is `folded`** (the CEO folded it as superseded). A merely-`shipped`-by-rollup spec whose job is still parked is **NOT** cleared on status alone (protects a genuine spec-test park on a shipped spec).
+- **Reva "Ambiguous post-deploy signal" cards** (`escalation_kind=deploy_unsure`, no agent_job — keyed on `metadata.spec_slug` + `deploy_watch_id`, from [[deploy-guardian]]): dismiss when the spec has since shipped/**folded** clean **AND** `deployWindowIsClean` confirms no NEW (non-baseline) `error_events` landed in the deploy's canary window. Both must hold — a fresh in-window error keeps the card. `deployWindowIsClean` fails **closed** (a missing watch / read error keeps the card).
+
+Idempotent, logged (`[approval-inbox] auto-cleared stale park card …`), and it **never touches routed Approval Requests** (those have no `escalation_kind` / park `metadata.kind` and are owned by the needs_approval dismiss loop above).
 
 ## Routing — up the org chart, else the CEO
 
@@ -52,7 +71,10 @@ Slack-tap callers pass `source: 'slack-inbox'` to skip the mirror (their own `up
 
 ## Exports
 
-- **`reconcileApprovalInbox(admin)`** → `Promise<{ created, dismissed }>` — the sweep (above).
+- **`reconcileApprovalInbox(admin)`** → `Promise<{ created, dismissed, parksCleared }>` — the sweep (above); also runs `reconcileStaleParkCards`.
+- **`reconcileStaleParkCards(admin)`** → `Promise<number>` — auto-clear obsolete park cards (job left needs_attention / spec folded / Reva signal resolved). Count cleared.
+- **`activeParkCardExistsForJob(admin, workspaceId, jobId)`** → `Promise<boolean>` — the one-card-per-park DEDUP gate every park emitter calls before inserting.
+- **`notifJobId(metadata)`** → `string | null` — the job id off `metadata.agent_job_id` ?? `metadata.job_id`.
 - **`ownerFunctionForKind(kind)`** → `string | null` — kind → owning function (null ⇒ unknown ⇒ CEO).
 - **`routingOwnerForJob(job)`** → `string | null` — sync routing owner (model-tier target kind; else the job's kind).
 - **`routingOwnerForJobAsync(admin, job)`** → `Promise<string | null>` — async routing owner; a `plan` job resolves to its **goal's** owner (`goals.owner` keyed by `job.spec_slug`), else delegates to `routingOwnerForJob`.
@@ -71,6 +93,8 @@ Slack-tap callers pass `source: 'slack-inbox'` to skip the mirror (their own `up
 - **Route up, never sideways/down** + **default to CEO** — inherited from [[approval-router]] `resolveApprover` (unchanged here).
 - **No orphans** — the reconciler is exhaustive over `needs_approval`; a request with no resolvable approver routes to the CEO, never dropped.
 - **Idempotent** — keyed on `metadata.agent_job_id`; re-parks don't duplicate.
+- **One card per parked job** — every park emitter gates on `activeParkCardExistsForJob`; a parked `agent_jobs` row surfaces ≤1 active CEO card (the trio collapses).
+- **Auto-clear is reason-true only** — `reconcileStaleParkCards` dismisses a park ONLY when its reason is genuinely gone (job left needs_attention / spec folded / Reva clean); a still-valid escalation is never silently dropped.
 - **Execution path unchanged** — emit only surfaces the request; `POST /api/roadmap/approve` → `queued_resume` is untouched.
 
 ## Callers

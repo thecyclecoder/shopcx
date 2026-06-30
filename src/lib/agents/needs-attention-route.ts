@@ -33,6 +33,7 @@ import {
   escalateDiagnosisToCeo,
 } from "@/lib/agents/platform-director";
 import { loadAutonomyMap } from "@/lib/agents/approval-router";
+import { activeParkCardExistsForJob } from "@/lib/agents/approval-inbox";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { getSpec } from "@/lib/brain-roadmap";
@@ -407,6 +408,12 @@ ${evidence}
  * parked job id so the box turn lands with full context.
  */
 async function routeDesignChange(admin: Admin, row: ParkedRow): Promise<boolean> {
+  // one-card-per-park (DEDUP): if a sibling park surface (the triage "Parked {kind}" card, the >70-min
+  // age alarm) already has an active card for this job, don't add a second. One card per parked job. We
+  // do NOT markRouted here — that would make this a "routed zombie" the next pass flips to `completed`,
+  // which would then auto-clear the SURVIVING sibling card. Leaving the row untouched keeps the single
+  // card live; the gate just re-skips each pass (one cheap read) while that card stands.
+  if (await activeParkCardExistsForJob(admin, row.workspace_id, row.id)) return false;
   // The escalateDiagnosisToCeo helper already emits a CEO-routed Approval Request the inbox
   // reconciler picks up; we tag it `chat_mode_request:true` so the Slack mirror posts an
   // invitation thread instead of an Approve/Reject card (the existing chat-mode rules already
@@ -466,8 +473,12 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
         error: row.error,
         logTail: row.log_tail,
       });
-      // If the re-classification still landed unknown, escalate to the CEO — human triage.
-      if (fresh.klass === "unknown") {
+      // If the re-classification still landed unknown, escalate to the CEO — human triage. one-card-per-park
+      // (DEDUP): skip the escalation when a sibling park surface (the triage "Parked {kind}" card emitted by
+      // reconcileNeedsAttention, or a prior tick's backstop) already has an active card for this job — one
+      // card per parked job. We still re-classified above (cheap + keeps the class fresh); we just don't
+      // add a second CEO surface.
+      if (fresh.klass === "unknown" && !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id))) {
         await escalateDiagnosisToCeo(admin, {
           workspaceId: row.workspace_id,
           specSlug: row.spec_slug,
@@ -493,8 +504,13 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
     }
   }
 
-  // (b) >70 min still in needs_attention → post the invariant alarm (idempotent per job).
-  if (ageMs >= NEEDS_ATTENTION_ALARM_MS) {
+  // (b) >70 min still in needs_attention → post the invariant alarm (idempotent per job). one-card-per-park
+  // (DEDUP): only the LEAST-informative surface — skip it entirely when ANY active card already exists for
+  // this job (the triage "Parked {kind}" card, the backstop "Park needs eyes", a routed approval). The
+  // CEO already has eyes on the job, so the bare age alarm is pure noise; the no-parked-specs invariant is
+  // still satisfied (an active card IS the surfacing). Only when NOTHING else surfaced the park does the
+  // alarm fire as the backstop-of-last-resort.
+  if (ageMs >= NEEDS_ATTENTION_ALARM_MS && !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id))) {
     try {
       const { data: existing } = await admin
         .from("dashboard_notifications")

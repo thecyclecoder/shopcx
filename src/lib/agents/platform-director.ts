@@ -50,6 +50,7 @@ import {
   inlineApproveActionId,
   buildApprovalContent,
   approvalDeepLink,
+  activeParkCardExistsForJob,
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
@@ -2423,6 +2424,11 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
     // CLEAR diagnosis (the reason + an excerpt), never a bare flag. Conservative: anything not a clearly-
     // recoverable QC inconclusive lands here.
     if (atCap) continue; // bounded — re-drives next pass
+    // one-card-per-park (DEDUP): if ANOTHER park surface (the backstop "Park needs eyes", the >70-min
+    // age alarm, or a prior tick's card) already has an active card for this job, don't add a second.
+    // A single parked job must surface AT MOST ONE CEO card. escalateDiagnosisToCeo also dedupes on its
+    // own `needsattn:` key, but that wouldn't catch a sibling emitter's differently-keyed card.
+    if (await activeParkCardExistsForJob(admin, workspaceId, j.id)) { confirmed++; continue; }
     const why = alreadyReran
       ? "re-ran once after an inconclusive QC result and parked AGAIN — likely a real blocker, not a transient"
       : recoverable
