@@ -362,24 +362,48 @@ interface UngradedJob {
   status: string;
 }
 
-/** The concluded, ungraded worker actions for a workspace (oldest first) — the pool the cadence grades. */
+/**
+ * The concluded, ungraded worker actions for a workspace (returned OLDEST-FIRST — the pool the cadence
+ * grades). Two starvation traps this query MUST avoid (both bit prod — fix-starved-grading round 2):
+ *
+ *  1. RECENCY WINDOW. The job fetch orders `created_at` DESCENDING then re-sorts ascending — it must
+ *     sample the NEWEST `limit` gradeable jobs, not the oldest. Ordering ascending clipped the window to
+ *     the OLDEST 1000 gradeable jobs, which are 100% already-graded once grading has ever run — so the
+ *     recent backlog NEVER entered the window and `ungraded` was permanently ~0 (the heartbeat read
+ *     `considered:0`, "nothing to grade", while hundreds of fresh concluded jobs sat ungraded). Recent
+ *     work is exactly what we want to grade, so the window must track the tail, not the head.
+ *  2. GRADED-SET COMPLETENESS. PostgREST caps a single response at 1000 rows regardless of `.limit()`,
+ *     so the already-graded set (one row per ever-graded job — thousands over time) must be PAGINATED.
+ *     A truncated graded set would falsely re-surface old graded jobs as "ungraded" and waste LLM spend.
+ */
 async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000): Promise<UngradedJob[]> {
-  const { data: gradeRows } = await admin
-    .from("agent_action_grades")
-    .select("agent_job_id")
-    .eq("workspace_id", workspaceId)
-    .limit(10000);
-  const gradedJobs = new Set<string>((gradeRows as Array<{ agent_job_id: string }> | null)?.map((r) => r.agent_job_id) ?? []);
+  // Paginate the graded set past the 1000-row PostgREST response cap (thousands of grades accumulate).
+  const gradedJobs = new Set<string>();
+  for (let from = 0; ; from += 1000) {
+    const { data } = await admin
+      .from("agent_action_grades")
+      .select("agent_job_id")
+      .eq("workspace_id", workspaceId)
+      .range(from, from + 999);
+    const rows = (data as Array<{ agent_job_id: string }> | null) ?? [];
+    for (const r of rows) gradedJobs.add(r.agent_job_id);
+    if (rows.length < 1000) break;
+  }
 
+  // Fetch the NEWEST `limit` gradeable concluded jobs (descending), then re-sort ascending so callers
+  // still get oldest-first (the batch-ready gate reads ungraded[0] as the oldest). Descending is what
+  // keeps the window on the recent tail instead of the long-graded head.
   const { data: jobs } = await admin
     .from("agent_jobs")
     .select("id, created_at, kind, status")
     .eq("workspace_id", workspaceId)
     .in("kind", GRADEABLE_KINDS)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(limit);
-  return ((jobs as UngradedJob[]) || []).filter((j) => !gradedJobs.has(j.id));
+  return ((jobs as UngradedJob[]) || [])
+    .filter((j) => !gradedJobs.has(j.id))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
 /**
@@ -503,6 +527,11 @@ export async function gradeConcludedAgentActions(opts: { workspaceId: string; ad
       if (r.ok && !r.idempotent_update) {
         graded++;
         if (r.agent_kind) gradedKinds.add(r.agent_kind);
+      } else if (!r.ok) {
+        // LOUD: a grade attempt that FAILED (grader_http_429 / parse_failed / not_concluded) must not
+        // silently vanish into considered>0,graded==0. Log it so a rate-limited/erroring grader is
+        // diagnosable from the runtime logs, not just inferred from the starvation heartbeat.
+        console.error(`[worker-grader] grade attempt failed job=${j.id} kind=${j.kind}: ${r.reason}`);
       }
     }
   } catch (e) {

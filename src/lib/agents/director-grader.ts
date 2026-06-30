@@ -494,17 +494,24 @@ export async function gradeConcludedDirectorCalls(opts: { workspaceId: string; a
   if (!ANTHROPIC_API_KEY) return state;
 
   try {
-    // Already-graded keys → skip (don't re-spend the LLM on a settled grade).
-    const { data: gradeRows } = await admin
-      .from("director_decision_grades")
-      .select("dimension, approval_decision_id, goal_slug, milestone")
-      .eq("workspace_id", opts.workspaceId)
-      .limit(5000);
+    // Already-graded keys → skip (don't re-spend the LLM on a settled grade). PAGINATE past the
+    // 1000-row PostgREST response cap (a single `.limit(5000)` still returns at most 1000) — a
+    // truncated graded set would falsely re-surface settled grades as ungraded and re-spend the LLM,
+    // the same truncation trap the worker grader's pool query hit (fix-starved-grading round 2).
     const gradedApprovals = new Set<string>();
     const gradedEscorts = new Set<string>();
-    for (const r of (gradeRows as Array<{ dimension: string; approval_decision_id: string | null; goal_slug: string | null; milestone: string | null }>) || []) {
-      if (r.dimension === "auto-approval" && r.approval_decision_id) gradedApprovals.add(r.approval_decision_id);
-      else if (r.dimension === "goal-escort" && r.goal_slug) gradedEscorts.add(`${r.goal_slug}:${r.milestone ?? ""}`);
+    for (let from = 0; ; from += 1000) {
+      const { data: gradeRows } = await admin
+        .from("director_decision_grades")
+        .select("dimension, approval_decision_id, goal_slug, milestone")
+        .eq("workspace_id", opts.workspaceId)
+        .range(from, from + 999);
+      const rows = (gradeRows as Array<{ dimension: string; approval_decision_id: string | null; goal_slug: string | null; milestone: string | null }>) || [];
+      for (const r of rows) {
+        if (r.dimension === "auto-approval" && r.approval_decision_id) gradedApprovals.add(r.approval_decision_id);
+        else if (r.dimension === "goal-escort" && r.goal_slug) gradedEscorts.add(`${r.goal_slug}:${r.milestone ?? ""}`);
+      }
+      if (rows.length < 1000) break;
     }
 
     // ── auto-approval — every autonomous director approval ──────────────────────────────────────
