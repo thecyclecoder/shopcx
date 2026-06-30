@@ -41,6 +41,12 @@ import {
 import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { directorLiveStateFact } from "@/lib/agents/platform-director";
+import {
+  listAdSpendBudgets,
+  rollupAdSpendActual,
+  type AdSpendBudget,
+  type AdSpendRollup,
+} from "@/lib/ad-spend-governor";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -190,6 +196,13 @@ export interface StorefrontOptimizerPolicySummary {
   updated_at: string | null;
 }
 
+/** One workspace ad-spend ceiling + its current rolling-window actual — the leash the director must see. */
+export interface AdSpendBudgetSummary {
+  budget: AdSpendBudget;
+  /** Today's rolling-window actual spend (the same window the governor's `currentOver` check reads). */
+  current: AdSpendRollup;
+}
+
 /** One open `pending` recommendation row — the spend lines the optimizer/Meta engine want to open. */
 export interface IterationRecommendationSummary {
   id: string;
@@ -229,12 +242,59 @@ export interface GrowthDirectorBrief {
   storefrontOptimizerPolicy: StorefrontOptimizerPolicySummary | null;
   /** the open `status='pending'` iteration_recommendations rows for the workspace (newest first). */
   pendingRecommendations: IterationRecommendationSummary[];
+  /** every `ad_spend_budgets` row for the workspace + its current rolling-window actual — the leash. */
+  adSpendBudgets: AdSpendBudgetSummary[];
   logTail: string;
 }
 
 /** How many iteration_policies versions + pending recommendations the brief carries — cap the prompt size. */
 const POLICY_VERSIONS_CAP = 8;
 const PENDING_RECOS_CAP = 25;
+
+/**
+ * Load every `ad_spend_budgets` row for the workspace + its CURRENT rolling-window actual (the
+ * same rollup the governor's `currentOver` check reads, ending today UTC). This is what the
+ * Growth director sees as its LEASH on every investigation — within-ceiling reallocation is
+ * autonomous; raising the ceiling is the CEO's call.
+ *
+ * Best-effort: a transient read failure on either side (`listAdSpendBudgets` or `rollupAdSpendActual`)
+ * returns the empty list / a zero rollup so the brief never throws (the prompt narrates the gap).
+ */
+export async function loadEffectiveAdSpendBudgets(
+  admin: Admin,
+  workspaceId: string,
+): Promise<AdSpendBudgetSummary[]> {
+  let budgets: AdSpendBudget[] = [];
+  try {
+    budgets = await listAdSpendBudgets(admin, workspaceId);
+  } catch {
+    return [];
+  }
+  const summaries: AdSpendBudgetSummary[] = [];
+  for (const budget of budgets) {
+    let current: AdSpendRollup;
+    try {
+      current = await rollupAdSpendActual(admin, {
+        workspaceId: budget.workspaceId,
+        platform: budget.platform,
+        metaAdAccountId: budget.metaAdAccountId,
+        windowDays: budget.windowDays,
+      });
+    } catch {
+      const today = new Date().toISOString().slice(0, 10);
+      const since = new Date(`${today}T00:00:00Z`);
+      since.setUTCDate(since.getUTCDate() - (budget.windowDays - 1));
+      current = {
+        actualCents: 0,
+        toDate: today,
+        sinceDate: since.toISOString().slice(0, 10),
+        windowDays: budget.windowDays,
+      };
+    }
+    summaries.push({ budget, current });
+  }
+  return summaries;
+}
 
 /**
  * Load the Growth director's brief — every loader is best-effort + returns the empty/null shape on
@@ -312,6 +372,16 @@ export async function buildGrowthDirectorBrief(
     /* best-effort */
   }
 
+  // The ad-spend leash — every active ceiling + its current rolling-window actual. Surfacing the
+  // ad_spend_budgets here gives the director full visibility on the rail it MAY NOT breach (raising
+  // the ceiling is the CEO's call) and the headroom every `reallocate_within_ceiling` decision has.
+  let adSpendBudgets: AdSpendBudgetSummary[] = [];
+  try {
+    adSpendBudgets = await loadEffectiveAdSpendBudgets(admin, job.workspace_id);
+  } catch {
+    /* best-effort */
+  }
+
   // The open `status='pending'` recommendations — the spend lines this approval could unlock or change.
   let pendingRecommendations: IterationRecommendationSummary[] = [];
   try {
@@ -347,6 +417,7 @@ export async function buildGrowthDirectorBrief(
     iterationPolicies,
     storefrontOptimizerPolicy,
     pendingRecommendations,
+    adSpendBudgets,
     logTail: (job.log_tail || "").slice(-2000),
   };
 }
@@ -374,6 +445,23 @@ function renderOptimizerPolicy(p: StorefrontOptimizerPolicySummary | null): stri
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** Render the ad-spend ceilings + current rolling-window actuals — the director's leash. */
+function renderAdSpendBudgets(rows: AdSpendBudgetSummary[]): string {
+  if (!rows.length) {
+    return "ad_spend_budgets: (no ad-spend ceilings configured — within-ceiling reallocation is unbounded; any spend-shifting action must escalate)";
+  }
+  const lines = rows.map((s) => {
+    const scope = s.budget.metaAdAccountId ? `account ${s.budget.metaAdAccountId.slice(0, 8)}` : `${s.budget.platform}-wide`;
+    const usdCeil = (s.budget.usdCeilingCents / 100).toFixed(2);
+    const usdNow = (s.current.actualCents / 100).toFixed(2);
+    const pct = s.budget.usdCeilingCents > 0
+      ? Math.round((s.current.actualCents / s.budget.usdCeilingCents) * 100)
+      : 0;
+    return `  - ${s.budget.platform} · ${scope} · ${s.budget.windowDays}d ceiling=$${usdCeil} · current=$${usdNow} (${pct}% of ceiling, window ending ${s.current.toDate})`;
+  });
+  return ["ad_spend_budgets (rolling-window leash — within-ceiling reallocation is autonomous, raising the ceiling is the CEO's call):", ...lines].join("\n");
 }
 
 /** Render the pending recommendation queue inside the prompt — what the engines want to open. */
@@ -455,6 +543,8 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     renderIterationPolicies(brief.iterationPolicies),
     "",
     renderOptimizerPolicy(brief.storefrontOptimizerPolicy),
+    "",
+    renderAdSpendBudgets(brief.adSpendBudgets),
     "",
     renderPendingRecommendations(brief.pendingRecommendations),
     "",
