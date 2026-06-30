@@ -3112,6 +3112,29 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing auto-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // DIRTY-PR resolve backstop (finalize-standing-backstop — Gate-A conflict leg). The MIRROR of the
+    // auto-merge backstop above: that one merges READY (clean) one-off PRs; THIS one enqueues a pr-resolve
+    // job for the CONFLICTING ones so they get rebased and THEN auto-merged next pass. WHY a standing-pass
+    // backstop is REQUIRED, not just nice-to-have: detectAndEnqueueDirtyPrs previously ran ONLY from the
+    // GitHub `push`-to-main webhook. That webhook fires the instant main moves — but GitHub hasn't COMPUTED
+    // the new mergeability yet, so the freshly-conflicted PR still reads `mergeable: null` (unknown) and is
+    // skipped; the later "mergeability computed → CONFLICTING" transition has NO webhook (GitHub doesn't send
+    // one), so the pr-resolve job is never enqueued and a green one-off PR sits CONFLICTING forever while the
+    // auto-merge gate (correctly) refuses every non-clean PR (the live growth-adopt-storefront-optimizer
+    // wedge: PR #878 built+green+accumulated on a HEALTHY box, but dirty vs main → no resolver, never merged).
+    // This is the SAME event-only fragility Gate A / the pre-merge legs had. Re-checking every pass catches
+    // the conflict once GitHub HAS computed it. Idempotent: enqueuePrResolveJob dedupes per PR + is retry-
+    // capped, and a duplicate (work already on main via a sibling) is closed instead of looped.
+    const { detectAndEnqueueDirtyPrs } = await import("../src/lib/github-pr-resolve");
+    const dp = await detectAndEnqueueDirtyPrs(db);
+    if (dp.enqueued || dp.closedDuplicate) {
+      notes.push(`dirty-pr backstop → ${dp.enqueued} pr-resolve enqueued, ${dp.closedDuplicate} duplicate(s) closed (of ${dp.conflicting} conflicting / ${dp.checked} claude PRs)`);
+    }
+  } catch (e) {
+    notes.push(`dirty-pr backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing dirty-pr backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // MERGED-PHASE reconcile (ship-all-phases-on-squash-merge / post-merge-ships-only-one-phase fix). A
     // squash-merge ships the WHOLE accumulated spec atomically, but the merge hook only runs on the
     // completed→merged transition — a spec that ALREADY merged under the old one-phase-only hook stays stuck
@@ -3126,6 +3149,32 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`merged-phase reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing merged-phase reconcile failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // BUILT-NOT-STAMPED heal backstop (finalize-standing-backstop — finalize/stamp leg). Detects a spec with
+    // a non-terminal phase (not shipped/rejected) whose completed/merged build job proves the work ALREADY
+    // landed on main — via the "already merged via #N" / "already built — PR #N implemented …" signal, or the
+    // per-phase "All Phase-N artifacts already exist on main" no-op — and stamps those phase(s) shipped (the
+    // leaf write that advances the derived status). WHY a standing-pass backstop is REQUIRED, not just nice-
+    // to-have: healBuiltUnstampedPhases previously ran ONLY in the Inngest `spec-drift-reconcile` function —
+    // an OUTSIDE-the-box trigger an Inngest sync/deploy can silently reap (the very thing the 5h crash-loop
+    // did). The wedge it heals is the live built-not-stamped class: a HEALTHY-box build finds the work already
+    // on main (so it makes zero edits), the no-change reconcile can't auto-confirm + marks the job completed
+    // without ever stamping the phases → accumulation never completes, Gate A never fires, the job is terminal
+    // so it never re-dispatches (appstle-attempt-billing-coerce-string-id: both phases merged via #891, left
+    // in_progress + un-stamped). Re-running it every standing pass self-heals these. SAFE by construction: it
+    // acts ONLY on a strong already-shipped-via-#N proof in a completed/merged job (a spec with a REAL
+    // spec-test failure or a needs_human gate carries NO such signal, so it is never force-shipped), skips
+    // folded specs, is idempotent (a re-run finds the phase already shipped → no-op), and reports every heal
+    // as a `healed_built_unstamped` director_activity row (never silent).
+    const { healBuiltUnstampedPhases } = await import("../src/lib/spec-drift");
+    const healed = await healBuiltUnstampedPhases(job.workspace_id);
+    if (healed.length) {
+      notes.push(`built-not-stamped heal → stamped ${healed.reduce((n, h) => n + h.phases.length, 0)} phase(s) shipped across ${healed.length} spec(s): ${healed.map((h) => h.slug).join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`built-not-stamped heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing built-not-stamped heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // PRE-MERGE checks backstop (security-test-on-preview-pre-merge + spec-goal-branch-pm-flow M3). WHY a
@@ -10004,6 +10053,14 @@ async function runPrResolveJob(job: Job) {
   const wt = join(BUILDS_DIR, job.id);
   sh("git", ["fetch", "origin"]);
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
+  // pr-resolve-worktree-add-stale-branch: `git worktree add -B <branch>` FAILS ("already used by worktree
+  // at …") when ANY OTHER worktree still holds <branch> — left by a build/resolve that crashed without
+  // tearing down (exactly what the 5h crash-loop produced). Removing only the wt PATH above doesn't clear a
+  // sibling worktree on the same branch, so every retry re-hit "worktree add failed" until the cap was burned
+  // (the live cause #878 + #847 hit `pr-resolve retry cap reached` and never resolved → sat CONFLICTING → the
+  // green branch never merged). The build path already guards this via removeWorktreeForBranch; pr-resolve
+  // didn't. Add the SAME idempotent precondition so a stale-branch worktree can't wedge the resolver.
+  removeWorktreeForBranch(branch);
   const add = sh("git", ["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
   if (add.code !== 0) {
     await update(job.id, { status: "failed", error: "worktree add failed", log_tail: add.err.slice(-2000) });
@@ -13161,7 +13218,21 @@ async function dispatchJob(job: Job) {
         try {
           const { reconcileSpecDrift } = await import("../src/lib/spec-drift");
           const r = await reconcileSpecDrift(job.workspace_id, slug);
-          if (r.flipped.length || r.status === "shipped" || r.status === "in_progress") {
+          // built-not-stamped-no-advance-wedge (LIVE FIX): only treat the reconcile as a successful
+          // completion when it ACTUALLY ADVANCED the spec — at least one phase flipped shipped, OR the spec
+          // is now fully `shipped`. The prior `|| r.status === "in_progress"` clause was the live wedge bug:
+          // when Bo finds "no delta" but reconcileSpecDrift can NOT prove the phases are on main (its
+          // code-path match misses, or the work shipped via a SIBLING/duplicate PR it doesn't follow — e.g.
+          // appstle-attempt-billing-coerce-string-id whose both phases merged via #891), it returns
+          // status='in_progress' with flipped=[] (nothing advanced). Completing the job there left a
+          // `completed` build whose phase is still `in_progress`, no build_sha, no PR → accumulation never
+          // completes, Gate A never fires, the job is terminal so it never re-dispatches: a permanent,
+          // SILENT wedge on a HEALTHY box (it bit fix-growth-allocation-brain-3fd059 + appstle on 2026-06-30,
+          // hours AFTER the box recovered — NOT a crash orphan). A no-advance reconcile now falls through to
+          // `needs_attention` (surfaced, never silently completed); the standing-pass built-not-stamped
+          // backstop (healBuiltUnstampedPhases) then SHIPS the genuinely-already-on-main ones from the
+          // "already built — PR #N" signal, and a true no-op (nothing on main) stays visible for the owner.
+          if (r.flipped.length || r.status === "shipped") {
             reconciled = true;
             await update(job.id, { status: "completed", log_tail: `already built — Bo found no delta; DB reconciled to ${r.status}${r.flipped.length ? ` (flipped ${r.flipped.map((f) => "P" + (f.index + 1)).join(",")})` : ""}. ${noChangeReason}`.slice(-2000) });
             console.log(`${tag} no changes → already built; DB reconciled → ${r.status}`);
@@ -13171,7 +13242,7 @@ async function dispatchJob(job: Job) {
         }
         if (!reconciled) {
           await update(job.id, { status: "needs_attention", error: noChangeReason, log_tail: logTail });
-          console.error(`${tag} no changes + code NOT on main → needs_attention: ${noChangeReason}`);
+          console.error(`${tag} no changes + spec did not advance (no phase flipped / not on main) → needs_attention: ${noChangeReason}`);
         }
       }
       return;
