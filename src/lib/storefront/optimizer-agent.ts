@@ -48,6 +48,7 @@ import { loadLeverGradeSignal, type LeverGradeSignal } from "@/lib/storefront/ca
 import type { VariantPatch } from "@/lib/storefront/experiments";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { inngest } from "@/lib/inngest/client";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -599,10 +600,16 @@ export interface MaterializeResult {
 
 /**
  * Stand up the M1 experiment from the agent's typed proposal: create the
- * `storefront_experiments` row (status='running', carrying the HYPOTHESIS — the campaign
- * record M5 grades) + a control arm vs the variant arm, then it serves traffic and the
- * M1 refresh ([[storefront-experiment-refresh]]) drives attribution → decision →
+ * `storefront_experiments` row (status='running' by default, carrying the HYPOTHESIS — the
+ * campaign record M5 grades) + a control arm vs the variant arm, then it serves traffic and
+ * the M1 refresh ([[storefront-experiment-refresh]]) drives attribution → decision →
  * promote/kill/rollback → commit-to-M2, all already wired. ONE atomic lever per campaign.
+ *
+ * Pass `initialStatus: 'draft'` (used by Phase 3 of [[../specs/growth-winning-creative-amplifier]]
+ * via `materializeOptimizerCampaign` + `pairAmplifiedWinnerWithLander`) to stand up the
+ * experiment at status='draft' with NO `started_at` — the owner approves it before any
+ * traffic is served. Calls then flip the row to 'running' via the experiment-detail approval
+ * action (same shape as the existing offer 'proposed' → 'active' flip).
  *
  * Idempotent at the surface grain: refuses to stand up a second campaign while one is
  * active (≤1 per surface). Conservative mode (M3 uncalibrated) reserves a bigger holdout.
@@ -617,6 +624,10 @@ export async function materializeCampaign(opts: {
   patchOverride?: VariantPatch;
   now?: Date;
   admin?: Admin;
+  /** Initial status of the new experiment row. Defaults to 'running' (serve immediately).
+   *  Phase 3 of [[../specs/growth-winning-creative-amplifier]] passes 'draft' so the
+   *  matched-lander experiment from an amplified winner is owner-approved before serving. */
+  initialStatus?: "draft" | "running";
 }): Promise<MaterializeResult> {
   const admin = opts.admin ?? createAdminClient();
   const now = opts.now ?? new Date();
@@ -673,29 +684,32 @@ export async function materializeCampaign(opts: {
   holdout = Math.min(0.9, Math.max(0.05, holdout));
   if (opts.conservative) holdout = Math.max(holdout, CONSERVATIVE_MIN_HOLDOUT);
 
-  // Create the experiment (the campaign record).
+  // Create the experiment (the campaign record). `initialStatus='draft'` (Phase 3
+  // matched-lander pairing) defers `started_at` until the owner approves the row.
+  const initialStatus = opts.initialStatus ?? "running";
+  const expInsert: Record<string, unknown> = {
+    workspace_id: opts.workspaceId,
+    product_id: opts.productId,
+    lander_type: p.lander_type,
+    audience: p.audience,
+    lever: p.lever_key,
+    hypothesis: p.hypothesis,
+    status: initialStatus,
+    holdout_pct: holdout,
+    created_by: opts.createdBy ?? null,
+    last_decision: {
+      action: initialStatus === "draft" ? "proposed" : "stood_up",
+      by: "storefront-optimizer",
+      lever_class: p.lever_class,
+      reasoning: p.reasoning,
+      conservative: opts.conservative,
+      at: now.toISOString(),
+    },
+  };
+  if (initialStatus === "running") expInsert.started_at = now.toISOString();
   const { data: expRow, error: expErr } = await admin
     .from("storefront_experiments")
-    .insert({
-      workspace_id: opts.workspaceId,
-      product_id: opts.productId,
-      lander_type: p.lander_type,
-      audience: p.audience,
-      lever: p.lever_key,
-      hypothesis: p.hypothesis,
-      status: "running",
-      holdout_pct: holdout,
-      created_by: opts.createdBy ?? null,
-      started_at: now.toISOString(),
-      last_decision: {
-        action: "stood_up",
-        by: "storefront-optimizer",
-        lever_class: p.lever_class,
-        reasoning: p.reasoning,
-        conservative: opts.conservative,
-        at: now.toISOString(),
-      },
-    })
+    .insert(expInsert)
     .select("id")
     .single();
   if (expErr || !expRow) {
@@ -728,8 +742,9 @@ export async function materializeCampaign(opts: {
 
   // Re-publish the active-experiment manifest to the edge + purge the PDP render so
   // the new arm serves immediately (pdp-edge-served-experiments). PDP only — the
-  // other lander types render server-side, not via the edge manifest.
-  if (p.lander_type === "pdp") {
+  // other lander types render server-side, not via the edge manifest. Only publishes
+  // for status='running' — a draft has no arm to serve.
+  if (p.lander_type === "pdp" && initialStatus === "running") {
     await republishExperimentManifest(admin, [opts.productId]);
   }
 
@@ -737,8 +752,170 @@ export async function materializeCampaign(opts: {
     ok: true,
     experiment_id: experimentId,
     lever_key: p.lever_key,
-    detail: `stood up experiment ${experimentId} on ${surfaceKey(surface)} — lever ${p.lever_key}, holdout ${holdout}${opts.conservative ? " (conservative)" : ""}`,
+    detail: `stood up experiment ${experimentId} on ${surfaceKey(surface)} — lever ${p.lever_key}, holdout ${holdout}${opts.conservative ? " (conservative)" : ""}${initialStatus === "draft" ? " (status=draft, awaiting owner approval)" : ""}`,
   };
+}
+
+/**
+ * Alias for [[materializeCampaign]] — the optimizer's WRITE entry as referenced by
+ * Phase 3 of [[../specs/growth-winning-creative-amplifier]]: an amplified winner whose
+ * archetype is advertorial-family opens a matched-lander hypothesis via this entry at
+ * `status='draft'` with the winner's hook/mechanism as the variant patch. Same surface
+ * dedup + margin guard as the optimizer's own stand-up path — Phase 3 just calls in
+ * from the ads side.
+ */
+export const materializeOptimizerCampaign = materializeCampaign;
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 3 reverse direction (growth-winning-creative-amplifier) — promoted lander
+// variant ⇒ fresh static ad for the matching angle.
+// ────────────────────────────────────────────────────────────────────────────────
+
+/** The `director_activity.action_kind` stamped on each Phase 3 cross-side pairing — both
+ *  the forward direction (amplified winner → matched-lander experiment in `pairAmplifiedWinnerWithLander`)
+ *  and the reverse direction (promoted lander variant → fresh static via
+ *  `pairPromotedLanderWithAd` below). One stable kind so the brain audit + Growth
+ *  director's recap can trace the perf↔creative loop end-to-end. */
+export const PAIRED_WINNER_LANDER_ACTION_KIND = "paired_winner_lander" as const;
+
+/** Map a storefront lander_type to the killer-statics archetype the maker pipeline accepts.
+ *  Used by the reverse direction (promoted lander → fresh static) so the new static lands on
+ *  an archetype that mirrors the winning lander's shape. */
+export function archetypeForPromotedLanderType(landerType: LanderType): string {
+  if (landerType === "advertorial") return "advertorial";
+  if (landerType === "beforeafter") return "before_after";
+  if (landerType === "listicle") return "testimonial";
+  return "testimonial";
+}
+
+/** Test seam for `pairPromotedLanderWithAd` — the live path sends Inngest events + writes
+ *  director_activity rows via the real modules; tests pass spies. */
+export interface PairPromotedLanderDeps {
+  sendInngest?: (event: { name: string; data: unknown }) => Promise<unknown>;
+  recordActivity?: (
+    admin: Admin,
+    row: Parameters<typeof recordDirectorActivity>[1],
+  ) => Promise<unknown>;
+}
+
+const defaultPairPromotedDeps: Required<PairPromotedLanderDeps> = {
+  sendInngest: (event) => inngest.send(event) as Promise<unknown>,
+  recordActivity: (admin, row) => recordDirectorActivity(admin, row),
+};
+
+export interface PairPromotedLanderResult {
+  ok: boolean;
+  reason?: string;
+  /** The fresh `ad_campaigns.id` inserted at status='ready' (when ok=true). */
+  ad_campaign_id?: string;
+  /** The `product_ad_angles.id` resolved as the lander's matching angle. */
+  angle_id?: string;
+  /** The static archetype the `ad-tool/static-requested` event was fired with. */
+  archetype?: string;
+}
+
+/**
+ * Reverse direction of [[../specs/growth-winning-creative-amplifier]] Phase 3 — when the
+ * storefront optimizer (via the experiment-refresh promote path) marks a lander variant
+ * as the winner on an advertorial-family surface, request a FRESH static ad for that
+ * lander's matching angle so the ad side gets a creative refresh that mirrors the lander
+ * shape.
+ *
+ * Process:
+ *   1. Resolve the matching angle — the most-recent active [[../tables/product_ad_angles]]
+ *      row for (workspace, product). The lander variant doesn't carry an angle FK, so the
+ *      most-recent active angle is the best deterministic anchor.
+ *   2. Insert a fresh `ad_campaigns` row at `status='ready'` tagged to that angle (mirrors
+ *      the voice-angle-approve + amplifier insert shape so the ready-to-test queue picks
+ *      it up once the maker render completes).
+ *   3. Fire `ad-tool/static-requested` for the new campaign with the archetype derived
+ *      from the lander_type ([[archetypeForPromotedLanderType]]).
+ *   4. Stamp ONE [[../tables/director_activity]] row of action_kind
+ *      [[PAIRED_WINNER_LANDER_ACTION_KIND]] so the perf↔creative loop is traceable.
+ *
+ * Best-effort: a missing angle / failed insert resolves to {ok:false, reason} so the
+ * outer refresh tick continues unaffected. Skips entirely for non-advertorial-family
+ * lander types (`pdp` — the ad side doesn't ship statics tied to bare-PDP variants).
+ */
+export async function pairPromotedLanderWithAd(
+  admin: Admin,
+  opts: {
+    workspaceId: string;
+    productId: string;
+    landerType: LanderType;
+    experimentId: string;
+    variantId: string;
+    specSlug?: string | null;
+    deps?: PairPromotedLanderDeps;
+  },
+): Promise<PairPromotedLanderResult> {
+  const deps = { ...defaultPairPromotedDeps, ...(opts.deps ?? {}) };
+  try {
+    if (opts.landerType === "pdp") {
+      return { ok: false, reason: "lander_type_not_advertorial_family" };
+    }
+    const archetype = archetypeForPromotedLanderType(opts.landerType);
+
+    const { data: angles } = await admin
+      .from("product_ad_angles")
+      .select("id, hook_one_liner")
+      .eq("workspace_id", opts.workspaceId)
+      .eq("product_id", opts.productId)
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const angle = ((angles ?? []) as Array<{ id: string; hook_one_liner: string | null }>)[0] ?? null;
+    if (!angle) return { ok: false, reason: "no_matching_angle" };
+
+    const namePrefix = angle.hook_one_liner ? String(angle.hook_one_liner).slice(0, 60) : opts.experimentId.slice(0, 8);
+    const { data: campaign, error: cErr } = await admin
+      .from("ad_campaigns")
+      .insert({
+        workspace_id: opts.workspaceId,
+        product_id: opts.productId,
+        angle_id: angle.id,
+        name: `Paired · ${namePrefix} (${opts.landerType} promoted)`,
+        status: "ready",
+      })
+      .select("id")
+      .maybeSingle();
+    if (cErr || !campaign) return { ok: false, reason: `ad_campaigns_insert_failed:${cErr?.message ?? "no_row"}` };
+    const adCampaignId = (campaign as { id: string }).id;
+
+    try {
+      await deps.sendInngest({
+        name: "ad-tool/static-requested",
+        data: { workspace_id: opts.workspaceId, campaign_id: adCampaignId, archetype },
+      });
+    } catch {
+      /* persisted state is what matters; the maker can be re-triggered */
+    }
+
+    await deps.recordActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: "growth",
+      actionKind: PAIRED_WINNER_LANDER_ACTION_KIND,
+      specSlug: opts.specSlug ?? null,
+      reason:
+        `Promoted lander variant on ${opts.landerType} (experiment=${opts.experimentId}) — paired with fresh ` +
+        `${archetype} static on ad_campaigns ${adCampaignId.slice(0, 8)} (angle ${angle.id.slice(0, 8)}).`,
+      metadata: {
+        direction: "lander_to_ad",
+        experiment_id: opts.experimentId,
+        variant_id: opts.variantId,
+        lander_type: opts.landerType,
+        product_id: opts.productId,
+        angle_id: angle.id,
+        ad_campaign_id: adCampaignId,
+        archetype,
+        autonomous: true,
+      },
+    });
+
+    return { ok: true, ad_campaign_id: adCampaignId, angle_id: angle.id, archetype };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+  }
 }
 
 // ── Persist-to-renewal offer lever (storefront-renewal-offer-lever) ─────────────

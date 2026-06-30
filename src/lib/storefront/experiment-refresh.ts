@@ -23,7 +23,12 @@ import { updatePosterior } from "@/lib/storefront/lever-memory";
 import { gradeCampaign } from "@/lib/storefront/campaign-grader";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 import { isEdgeConfigWriteConfigured } from "@/lib/storefront/experiment-manifest";
-import { expireRenewalOffers, rollbackRenewalOffersForExperiment } from "@/lib/storefront/optimizer-agent";
+import {
+  expireRenewalOffers,
+  rollbackRenewalOffersForExperiment,
+  pairPromotedLanderWithAd,
+} from "@/lib/storefront/optimizer-agent";
+import type { LanderType } from "@/lib/storefront/lever-memory";
 import { recordDirectorActivity } from "@/lib/director-activity";
 
 /** A serving arm whose LTV-per-session sits this far below control counts as a
@@ -312,9 +317,11 @@ export async function refreshStorefrontExperiments(opts: {
         updated_at: now.toISOString(),
       };
       let terminal = false;
+      let promotedVariantId: string | null = null;
       if (decision.action === "promote" && decision.winnerVariantId) {
         update.status = "promoted";
         update.promoted_variant_id = decision.winnerVariantId;
+        promotedVariantId = decision.winnerVariantId;
         counts.promoted++;
         terminal = true;
       } else if (decision.action === "kill") {
@@ -356,6 +363,29 @@ export async function refreshStorefrontExperiments(opts: {
         // serves all non-holdout traffic from its own cached render; a kill reverts
         // everyone to the real cached PDP.
         if (exp.lander_type === "pdp") await republishExperimentManifest(admin, [exp.product_id]);
+        // Spec growth-winning-creative-amplifier Phase 3 reverse direction — a promoted
+        // lander variant on an advertorial-family surface requests a fresh static ad for
+        // the lander's matching angle so the perf↔creative loop closes both ways. Skips
+        // pdp (the ad side doesn't ship statics tied to bare-PDP variants). Best-effort:
+        // a failure here NEVER unwinds the promote — the matched ad is a downstream
+        // enrichment, not a precondition. Stamps one paired_winner_lander activity row
+        // (the cross-side audit trail).
+        if (promotedVariantId && exp.lander_type !== "pdp") {
+          try {
+            await pairPromotedLanderWithAd(admin, {
+              workspaceId: opts.workspaceId,
+              productId: exp.product_id,
+              landerType: exp.lander_type as LanderType,
+              experimentId,
+              variantId: promotedVariantId,
+              specSlug: "growth-winning-creative-amplifier",
+            });
+          } catch (e) {
+            console.warn(
+              `[storefront-experiments] paired_winner_lander pair-on-promote failed exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+        }
       }
       decisions.push({
         experiment_id: experimentId,
