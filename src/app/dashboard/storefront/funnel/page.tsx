@@ -122,6 +122,98 @@ function flattenTree(nodes: TreeNode[], expanded: Set<string>, depth = 0, parent
 }
 function pctStr(x: number) { return (x * 100).toFixed(1) + "%"; }
 
+// ── Chapter diagnostics (the "why") — per-destination chapter sequence ──────
+interface ChapterDiagRow {
+  chapter: string; label: string; index: number | null;
+  reach: number; reach_pct: number; avg_dwell_ms: number;
+  cta_origin: number; cta_origin_pct: number;
+  view_to_pricing_pct: number; view_to_pack_pct: number;
+}
+interface ChapterDiagResponse {
+  range: { start: string; end: string };
+  destination: { key: string; label: string } | null;
+  availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+  summary: { visits: number; reached_pricing: number; carry_to_pricing_pct: number; packed: number; close_pct: number; jumped_to_pricing: number; scrolled_to_pricing: number } | null;
+  chapters: ChapterDiagRow[];
+}
+
+function dwellStr(ms: number) { return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`; }
+
+/** The "why" card: a destination's chapter sequence — where it leaks (reach by
+ *  placement), which chapter earns the pricing click (CTA-origin), dwell, and
+ *  the carry/close levers. Card-local destination selector (this card only). */
+function ChapterDiagnosticsCard({ data, loading, dest, onDest }: {
+  data: ChapterDiagResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+}) {
+  const effectiveDest = dest || data?.destination?.key || "";
+  const s = data?.summary;
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Chapter diagnostics — the &ldquo;why&rdquo;</h2>
+          <p className="mt-1 text-xs text-zinc-400">Where the sequence leaks (reach by placement), which chapter earns the pricing click, and the two levers: carry-to-pricing &amp; close.</p>
+        </div>
+        <ReworkedPills />
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={effectiveDest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          {(data?.availableDestinations ?? []).map((d) => (
+            <option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label} ({d.visits.toLocaleString()})</option>
+          ))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+
+      {s && (
+        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard label="Visits" value={s.visits.toLocaleString()} />
+          <StatCard label="Carry → pricing" value={`${s.carry_to_pricing_pct.toFixed(1)}%`} tone={s.carry_to_pricing_pct >= 25 ? "good" : "neutral"} />
+          <StatCard label="Close (pricing→pack)" value={`${s.close_pct.toFixed(1)}%`} tone={s.close_pct >= 12 ? "good" : "neutral"} />
+          <StatCard label="Jump / scroll to price" value={`${s.jumped_to_pricing} / ${s.scrolled_to_pricing}`} />
+        </div>
+      )}
+
+      {data && data.chapters.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+                <th className="py-2 pr-2">#</th>
+                <th className="py-2 pr-2">Chapter (page order)</th>
+                <th className="py-2 pr-2 text-right">Reach %</th>
+                <th className="py-2 pr-2 text-right">Avg dwell</th>
+                <th className="py-2 pr-2 text-right">CTA→price origin</th>
+                <th className="py-2 pr-2 text-right">View→pack %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.chapters.map((c) => (
+                <tr key={c.chapter} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                  <td className="py-2 pr-2 tabular-nums text-zinc-400">{c.index ?? "·"}</td>
+                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{c.label}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{c.reach_pct.toFixed(1)}%</td>
+                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{dwellStr(c.avg_dwell_ms)}</td>
+                  <td className="py-2 pr-2 text-right tabular-nums">
+                    <span className={c.cta_origin_pct >= 15 ? "font-semibold text-emerald-600 dark:text-emerald-400" : c.cta_origin_pct > 0 ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400"}>
+                      {c.cta_origin_pct.toFixed(1)}%
+                    </span>
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{c.view_to_pack_pct.toFixed(1)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** The first reworked card: the product → PDP/landers → variant → angle tree. */
 function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; loading: boolean }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -418,6 +510,10 @@ export default function StorefrontFunnelPage() {
   const [referrer, setReferrer] = useState("");
   const [tree, setTree] = useState<FunnelTreeResponse | null>(null);
   const [treeLoading, setTreeLoading] = useState(true);
+  // Card-local destination for the chapter "why" card (re-scopes that card only).
+  const [chapterDest, setChapterDest] = useState("");
+  const [chapter, setChapter] = useState<ChapterDiagResponse | null>(null);
+  const [chapterLoading, setChapterLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -453,6 +549,23 @@ export default function StorefrontFunnelPage() {
 
   useEffect(() => { loadTree(); }, [loadTree]);
 
+  const loadChapter = useCallback(async () => {
+    if (!start || !end) return;
+    setChapterLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (chapterDest) q.set("destination", chapterDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/chapter-diagnostics?${q.toString()}`);
+    if (res.ok) setChapter(await res.json());
+    setChapterLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, chapterDest]);
+
+  useEffect(() => { loadChapter(); }, [loadChapter]);
+  // A page-slice change can change which destinations exist → re-default the card.
+  useEffect(() => { setChapterDest(""); }, [product, utmSource, referrer]);
+
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
   const addToCart = data?.add_to_cart ?? 0;
@@ -483,6 +596,8 @@ export default function StorefrontFunnelPage() {
       />
 
       <FunnelTreeCard tree={tree} loading={treeLoading} />
+
+      <ChapterDiagnosticsCard data={chapter} loading={chapterLoading} dest={chapterDest} onDest={setChapterDest} />
 
       {loading && !data && (
         <p className="text-sm text-zinc-400">Loading…</p>
@@ -527,10 +642,6 @@ export default function StorefrontFunnelPage() {
               rows={data.countryBreakdown.map(c => ({ label: c.ip_country, value: c.sessions }))}
             />
           </div>
-
-          {data.chapterPerformance && data.chapterPerformance.length > 0 && (
-            <ChapterPerformancePanel rows={data.chapterPerformance} />
-          )}
 
           {data.abandonedCarts && (
             <AbandonedCartsPanel block={data.abandonedCarts} />
@@ -1382,61 +1493,6 @@ function CampaignGradesPanel({
           </table>
         </div>
       )}
-    </section>
-  );
-}
-
-function ChapterPerformancePanel({ rows }: { rows: NonNullable<FunnelData["chapterPerformance"]> }) {
-  const maxReach = Math.max(...rows.map(r => r.reach_sessions), 1);
-  const fmtChapter = (c: string) => c.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-  const fmtDwell = (ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Chapter performance
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          View→pricing % = of sessions that read a chapter, how many clicked through to pricing from it.
-        </span>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[560px] text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-              <th className="py-2 pr-2">Chapter</th>
-              <th className="py-2 pr-2 text-right">Reach</th>
-              <th className="py-2 pr-2 text-right">Reach %</th>
-              <th className="py-2 pr-2 text-right">Avg dwell</th>
-              <th className="py-2 pr-2 text-right">→ Pricing</th>
-              <th className="py-2 pr-2 text-right">View→pricing %</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.chapter} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{fmtChapter(r.chapter)}</td>
-                <td className="py-2 pr-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
-                  <div className="flex items-center justify-end gap-2">
-                    <div className="hidden h-1.5 w-16 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800 sm:block">
-                      <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.reach_sessions / maxReach) * 100}%` }} />
-                    </div>
-                    {r.reach_sessions.toLocaleString()}
-                  </div>
-                </td>
-                <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.reach_rate_pct.toFixed(1)}%</td>
-                <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{fmtDwell(r.avg_dwell_ms)}</td>
-                <td className="py-2 pr-2 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{r.scroll_to_price_sessions.toLocaleString()}</td>
-                <td className="py-2 pr-2 text-right tabular-nums font-semibold">
-                  <span className={r.view_to_cta_pct >= 15 ? "text-emerald-600" : r.view_to_cta_pct > 0 ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400"}>
-                    {r.view_to_cta_pct.toFixed(1)}%
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </section>
   );
 }

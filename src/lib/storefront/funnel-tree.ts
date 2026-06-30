@@ -687,3 +687,196 @@ export async function listSliceOptions(args: {
       .sort((a, b) => b.sessions - a.sessions),
   };
 }
+
+// ───────────────────────── Chapter diagnostics (the "why") ─────────────────────────
+// Per-destination chapter sequence: WHERE the sequence leaks (reach by placement),
+// WHICH chapter earns the pricing click (CTA-origin), attention (dwell), and the two
+// levers — carry-to-pricing % and close % (pricing→pack). Attributes chapters by
+// session→destination (landing variant/angle), so it is NOT blocked by the old
+// chapter-performance data-section mislabel.
+
+const PRICING_CHAPTERS = new Set(["pricing", "bundle-pricing"]);
+function round1(x: number): number { return Math.round(x * 10) / 10; }
+function humanizeChapter(id: string): string {
+  return id.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+export interface ChapterRow {
+  chapter: string;
+  label: string;
+  /** on-page placement (chapter_index) — the sequencing signal */
+  index: number | null;
+  reach: number;
+  reach_pct: number;
+  avg_dwell_ms: number;
+  /** # pricing-jumps that fired FROM this chapter (persuasion attribution) */
+  cta_origin: number;
+  /** share of this destination's pricing jumps that originated here */
+  cta_origin_pct: number;
+  view_to_pricing_pct: number;
+  view_to_pack_pct: number;
+}
+
+export interface ChapterDiagnosticsResult {
+  destination: { key: string; label: string } | null;
+  availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+  summary: {
+    visits: number;
+    reached_pricing: number;
+    carry_to_pricing_pct: number;
+    packed: number;
+    close_pct: number; // packed / reached_pricing
+    jumped_to_pricing: number;
+    scrolled_to_pricing: number;
+  } | null;
+  chapters: ChapterRow[];
+}
+
+export interface ChapterDiagnosticsArgs {
+  admin: Admin;
+  workspaceId: string;
+  startIso: string;
+  endIso: string;
+  productHandle?: string | null;
+  utmSource?: string | null;
+  referrer?: string | null;
+  /** 'pdp' | a variant value | an angle slug. Null → the top-volume destination. */
+  destination?: string | null;
+}
+
+export async function computeChapterDiagnostics(args: ChapterDiagnosticsArgs): Promise<ChapterDiagnosticsResult> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+
+  const [{ data: productRows }, { data: internalCustomerRows }, { data: pageRows }] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+    admin.from("advertorial_pages").select("slug, headline").eq("workspace_id", workspaceId),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+  const headlineBySlug = new Map<string, string>((pageRows || []).map((p) => [String(p.slug), (p.headline as string) || ""]));
+
+  // visit universe = any event in window
+  const eventRows = await fetchAllRows<{ session_id: string }>(() =>
+    admin.from("storefront_events").select("session_id, id")
+      .eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso)
+      .order("id", { ascending: true }),
+  );
+  const universe = new Set<string>(eventRows.map((e) => e.session_id));
+
+  // classify each real + sliced session into its destination(s)
+  const sessByDest = new Map<string, { variant: string | null; angle: string | null }>();
+  const ids = [...universe];
+  for (let i = 0; i < ids.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer").in("id", ids.slice(i, i + 300));
+    for (const s of data || []) {
+      if (s.is_internal || s.is_bot) continue;
+      if (s.customer_id && internalCustomerIds.has(s.customer_id as string)) continue;
+      if (!matchUtm((s.utm_source as string) ?? null, utmWanted)) continue;
+      if (!matchRef((s.referrer as string) ?? null, refWanted)) continue;
+      const { segments, variant, angle } = parseLanding((s.landing_url as string) ?? null);
+      const handle = resolveHandle(segments, handleSet);
+      if (product && handle !== product) continue;
+      sessByDest.set(s.id as string, { variant, angle });
+    }
+  }
+
+  const destVisits = new Map<string, { level: "pdp" | "variant" | "angle"; visits: number }>();
+  const bump = (key: string, level: "pdp" | "variant" | "angle") => {
+    const cur = destVisits.get(key) || { level, visits: 0 }; cur.visits++; destVisits.set(key, cur);
+  };
+  for (const s of sessByDest.values()) {
+    if (!s.variant) bump("pdp", "pdp");
+    else { bump(s.variant, "variant"); if (s.angle) bump(s.angle, "angle"); }
+  }
+  const labelFor = (key: string, level: "pdp" | "variant" | "angle") =>
+    level === "pdp" ? "Product Page (bare PDP)" : level === "variant" ? (VARIANT_LABEL[key] || key) : (headlineBySlug.get(key) || key);
+  const levelRank = { pdp: 0, variant: 1, angle: 2 } as const;
+  const availableDestinations = [...destVisits.entries()]
+    .map(([key, v]) => ({ key, level: v.level, label: labelFor(key, v.level), visits: v.visits }))
+    .sort((a, b) => levelRank[a.level] - levelRank[b.level] || b.visits - a.visits);
+
+  let destKey = args.destination && args.destination.trim() ? args.destination.trim() : null;
+  if (!destKey) {
+    const top = [...destVisits.entries()].filter(([, v]) => v.level !== "angle").sort((a, b) => b[1].visits - a[1].visits)[0];
+    destKey = top ? top[0] : null;
+  }
+  if (!destKey) return { destination: null, availableDestinations, summary: null, chapters: [] };
+  const destLevel = destVisits.get(destKey)?.level ?? "variant";
+
+  const selected = new Set<string>();
+  for (const [sid, s] of sessByDest) {
+    const ok = destLevel === "pdp" ? !s.variant : destLevel === "variant" ? s.variant === destKey : s.angle === destKey;
+    if (ok) selected.add(sid);
+  }
+  const visits = selected.size;
+  const destination = { key: destKey, label: labelFor(destKey, destLevel) };
+  if (visits === 0) return { destination, availableDestinations, summary: null, chapters: [] };
+
+  const chapEvents = await fetchAllRows<{ event_type: string; session_id: string; meta: Record<string, unknown> }>(() =>
+    admin.from("storefront_events").select("event_type, session_id, meta, id")
+      .eq("workspace_id", workspaceId).in("event_type", ["chapter_view", "chapter_dwell", "pack_selected"])
+      .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+
+  const chapterSessions = new Map<string, Set<string>>();
+  const chapterIndex = new Map<string, number>();
+  const dwell = new Map<string, { sum: number; n: number }>();
+  const ctaOrigin = new Map<string, number>();
+  const pricingSessions = new Set<string>();
+  const packedSessions = new Set<string>();
+  let jumped = 0, scrolled = 0;
+
+  for (const e of chapEvents) {
+    if (!selected.has(e.session_id)) continue;
+    if (e.event_type === "pack_selected") { packedSessions.add(e.session_id); continue; }
+    const m = e.meta || {};
+    const ch = m.chapter as string | undefined;
+    if (!ch) continue;
+    if (e.event_type === "chapter_dwell") {
+      const ms = Number(m.dwell_ms);
+      if (Number.isFinite(ms)) { const d = dwell.get(ch) || { sum: 0, n: 0 }; d.sum += ms; d.n++; dwell.set(ch, d); }
+      continue;
+    }
+    // chapter_view
+    let set = chapterSessions.get(ch); if (!set) { set = new Set(); chapterSessions.set(ch, set); } set.add(e.session_id);
+    const idx = Number(m.chapter_index); if (Number.isFinite(idx)) chapterIndex.set(ch, idx);
+    if (PRICING_CHAPTERS.has(ch)) {
+      pricingSessions.add(e.session_id);
+      if (m.arrived_via_jump === true) { jumped++; const o = m.origin_chapter as string | undefined; if (o) ctaOrigin.set(o, (ctaOrigin.get(o) || 0) + 1); }
+      else scrolled++;
+    }
+  }
+
+  const chapters: ChapterRow[] = [...chapterSessions.entries()].map(([chapter, sess]) => {
+    const reach = sess.size;
+    const toPricing = [...sess].filter((id) => pricingSessions.has(id)).length;
+    const toPack = [...sess].filter((id) => packedSessions.has(id)).length;
+    const d = dwell.get(chapter);
+    const co = ctaOrigin.get(chapter) || 0;
+    return {
+      chapter, label: humanizeChapter(chapter), index: chapterIndex.has(chapter) ? chapterIndex.get(chapter)! : null,
+      reach, reach_pct: round1((100 * reach) / visits), avg_dwell_ms: d && d.n ? Math.round(d.sum / d.n) : 0,
+      cta_origin: co, cta_origin_pct: jumped > 0 ? round1((100 * co) / jumped) : 0,
+      view_to_pricing_pct: reach > 0 ? round1((100 * toPricing) / reach) : 0,
+      view_to_pack_pct: reach > 0 ? round1((100 * toPack) / reach) : 0,
+    };
+  }).sort((a, b) => (a.index ?? 999) - (b.index ?? 999) || b.reach - a.reach);
+
+  const reachedPricing = pricingSessions.size;
+  const packed = packedSessions.size;
+  return {
+    destination,
+    availableDestinations,
+    summary: {
+      visits, reached_pricing: reachedPricing, carry_to_pricing_pct: round1((100 * reachedPricing) / visits),
+      packed, close_pct: reachedPricing > 0 ? round1((100 * packed) / reachedPricing) : 0,
+      jumped_to_pricing: jumped, scrolled_to_pricing: scrolled,
+    },
+    chapters,
+  };
+}
