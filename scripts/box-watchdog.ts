@@ -163,6 +163,7 @@ interface JournalSummary {
   restartCounter: number; // max "restart counter is at N"
   upSha: string | null; // SHA from the most recent "builder-worker up — … @ <sha>"
   errorLine: string | null; // a captured Node/esbuild error line (the cause)
+  upAfterLastFailure: boolean; // the last `up —` boot came AFTER the last FAILURE → worker recovered, healthy now
 }
 
 function parseJournal(text: string): JournalSummary {
@@ -171,6 +172,12 @@ function parseJournal(text: string): JournalSummary {
   let restartCounter = 0;
   let upSha: string | null = null;
   let errorLine: string | null = null;
+  // Chronological ordering (journal is time-ordered): track the line index of the most recent
+  // FAILURE vs the most recent `up —` so we can tell "crashed then RECOVERED" (up after failure =
+  // healthy now) from "crashing" (failure after up, or never came up). idx-based, line-order safe.
+  let lastFailureIdx = -1;
+  let lastUpIdx = -1;
+  let idx = 0;
 
   // A Node/esbuild crash cause. Captures esbuild parse errors, missing modules, and JS runtime errors.
   const errorRe = /(SyntaxError|ReferenceError|TypeError|RangeError|Transform failed|Build failed|Expected .* but found|Unexpected|Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND|esbuild|ENOENT|Unterminated)/;
@@ -178,17 +185,22 @@ function parseJournal(text: string): JournalSummary {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
+    idx++;
     // systemd FAILURE exit (a crash) — NOT a clean exit=0 self-update.
     const m = line.match(/Main process exited, code=exited, status=(\d+)\/FAILURE/);
-    if (m && Number(m[1]) !== 0) failureCount++;
-    else if (/Failed with result 'exit-code'/.test(line)) failureCount++; // belt-and-suspenders
+    if (m && Number(m[1]) !== 0) { failureCount++; lastFailureIdx = idx; }
+    else if (/Failed with result 'exit-code'/.test(line)) { failureCount++; lastFailureIdx = idx; } // belt-and-suspenders
     const rc = line.match(/restart counter is at (\d+)/);
     if (rc) restartCounter = Math.max(restartCounter, Number(rc[1]));
     const up = line.match(/builder-worker up\b.*?@\s+(\S+?)[,\s]/);
-    if (up) upSha = up[1];
+    if (up) { upSha = up[1]; lastUpIdx = idx; }
     if (errorRe.test(line)) errorLine = line.slice(0, 400);
   }
-  return { failureCount, restartCounter, upSha, errorLine };
+  // The worker RECOVERED if its last successful boot (`up —`) is the most recent of the two events —
+  // i.e. it came up AFTER its last failure (or there were no failures). A currently-active worker that
+  // recovered is HEALTHY even though an old failure still sits in the rolling window.
+  const upAfterLastFailure = lastUpIdx >= 0 && lastUpIdx > lastFailureIdx;
+  return { failureCount, restartCounter, upSha, errorLine, upAfterLastFailure };
 }
 
 function shortSha(s: string | null | undefined): string {
@@ -386,7 +398,11 @@ async function tick(): Promise<void> {
   }
   const hbFresh = admin ? await isHeartbeatFresh(admin) : null;
 
-  const healthy = active === "active" && journal.failureCount === 0;
+  // Healthy = the service is active right now AND it is not mid-crash: either no failures in the
+  // window, OR it crashed but RECOVERED (its last `up —` boot came after the last failure). The old
+  // `failureCount === 0` check wrongly held a recovered-and-polling worker "unhealthy" while a stale
+  // failure aged out of the 6-min window — climbing consecutiveUnhealthy toward a FALSE rollback.
+  const healthy = active === "active" && (journal.failureCount === 0 || journal.upAfterLastFailure);
 
   if (healthy) {
     // Record known-good (prefer the SHA the worker logged it booted on; fall back to live HEAD).
@@ -406,7 +422,7 @@ async function tick(): Promise<void> {
       if (admin) await resolveAlert(admin);
     }
     writeState(state);
-    console.log(`[watchdog] healthy — active, 0 failures/${WINDOW_MIN}min, sha=${shortSha(curSha)}, known-good=${shortSha(state.knownGoodSha)}${hbFresh === false ? " (warn: heartbeat stale)" : ""}`);
+    console.log(`[watchdog] healthy — active, ${journal.failureCount} failure(s)/${WINDOW_MIN}min${journal.failureCount > 0 ? " (recovered: up after last failure)" : ""}, sha=${shortSha(curSha)}, known-good=${shortSha(state.knownGoodSha)}${hbFresh === false ? " (warn: heartbeat stale)" : ""}`);
     return;
   }
 
