@@ -656,7 +656,7 @@ const CODEX_KINDS = new Set<string>([
 // state mirrors an AccountState's cappedUntil: on a Codex usage wall we cool it down (so we don't re-spawn
 // Codex on every job during a wall) and route straight to Claude until it clears. In-memory; a restart
 // re-derives on the next Codex wall — Claude is always the safety net so a lost cap just costs one probe.
-const codexState = { cappedUntil: 0, capLogged: false };
+const codexState = { cappedUntil: 0, capLogged: false, inFlight: 0 };
 // Codex is the primary runtime for a kind only while ENABLED and not currently capped; else → Claude.
 function runtimeForKind(kind: string | undefined, now: number): "codex" | "claude" {
   if (CODEX_ENABLED && kind && CODEX_KINDS.has(kind) && codexState.cappedUntil <= now) return "codex";
@@ -781,6 +781,16 @@ function accountsSnapshot(now: number) {
     all_capped: allAccountsCapped(now),
     soonest_reset: allAccountsCapped(now) ? new Date(soonestReset(now)).toISOString() : null,
     events: accountEvents.slice().reverse(), // newest first
+    // The second runtime (box-codex-runner): the box view renders this as a Codex runner card alongside the
+    // Max accounts. null when Codex is disabled (kill-switch) so a Codex-less box shows only the Max pool.
+    codex: CODEX_ENABLED
+      ? {
+          label: "Codex",
+          in_flight: codexState.inFlight,
+          capped: codexState.cappedUntil > now,
+          capped_until: codexState.cappedUntil > now ? new Date(codexState.cappedUntil).toISOString() : null,
+        }
+      : null,
   };
 }
 
@@ -1591,7 +1601,13 @@ async function runCodexSession(prompt: string, sessionId: string | null, cwd: st
     : ["exec", "--json", ...modelArgs, "--dangerously-bypass-approvals-and-sandbox", codexPrompt];
   const heartbeat = opts.jobId ? makeHeartbeatBumper(opts.jobId) : null;
   const onLine = heartbeat ? (_line: string) => heartbeat.bump() : undefined;
-  const r = await shAsync("codex", args, { cwd, env, idleTimeout: opts.idleTimeout, timeout: opts.timeout, onLine });
+  codexState.inFlight++; // ground-truth in-flight for the box view's Codex runner card (one per live codex exec)
+  let r: Awaited<ReturnType<typeof shAsync>>;
+  try {
+    r = await shAsync("codex", args, { cwd, env, idleTimeout: opts.idleTimeout, timeout: opts.timeout, onLine });
+  } finally {
+    if (codexState.inFlight > 0) codexState.inFlight--;
+  }
   // Parse the JSONL events: thread.started.thread_id → session; the LAST agent_message item.completed →
   // result text; turn.completed.usage → metering; error / turn.failed → isError.
   let session = sessionId;

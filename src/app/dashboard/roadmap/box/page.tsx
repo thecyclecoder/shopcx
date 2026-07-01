@@ -55,6 +55,7 @@ interface AccountsSnapshot {
   all_capped: boolean;
   soonest_reset: string | null;
   events: AccountEvent[];
+  codex?: AccountSlot | null; // the second runtime (box-codex-runner) — null when Codex is disabled
 }
 interface Worker {
   running_sha: string | null;
@@ -334,6 +335,39 @@ function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
             </span>
           </div>
         ))}
+
+        {/* The second runtime (box-codex-runner): a Codex runner card alongside the Max accounts. Indigo
+            accent so it reads as a distinct runtime, not a Max account; rose when its ChatGPT-plan wall is hit. */}
+        {accounts.codex && (
+          <div
+            className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs shadow-sm ${
+              accounts.codex.capped
+                ? "border-rose-200 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-900/20"
+                : "border-indigo-200 bg-indigo-50/60 dark:border-indigo-900/40 dark:bg-indigo-900/15"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium text-zinc-700 dark:text-zinc-200">
+                Codex <span className="text-[10px] font-normal text-indigo-500 dark:text-indigo-400">ChatGPT plan</span>
+              </span>
+              <span
+                className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                  accounts.codex.capped
+                    ? "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"
+                    : "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300"
+                }`}
+              >
+                {accounts.codex.capped ? "capped" : "healthy"}
+              </span>
+            </div>
+            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+              {accounts.codex.in_flight} in flight
+              {accounts.codex.capped && accounts.codex.capped_until
+                ? ` · Claude fallback until ${astTime(accounts.codex.capped_until)} (~${until(accounts.codex.capped_until)})`
+                : ""}
+            </span>
+          </div>
+        )}
       </div>
 
       {accounts.events.length > 0 && (
