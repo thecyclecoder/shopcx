@@ -101,6 +101,14 @@ export type DirectorActionKind =
   // NON-BLOCKING surfacing row — it builds no approval card and blocks nothing. One per spec (idempotent).
   // metadata: { autonomous:true, advisory:true, zero_machine_coverage:true }.
   | "human_only_promote_advisory"
+  // ada-standing-pass-reasoning-gate Phase 1 — Ada's spec-drift supervision lane
+  // (`scripts/builder-worker.ts` `runSpecDriftSupervision`) stamps one row per terminal verdict on a
+  // `spec_drift` row (whether reached by the deterministic pre-filter or a Max session), so the ledger
+  // dedup (`alreadyDriftSupervised`, keyed on `metadata.drift_row_id`) can skip it next pass instead of
+  // re-spawning a Max session forever on an unresolved open row. metadata:
+  // { actor:'drift-supervise:pre-filter'|'drift-supervise:session', drift_row_id, verdict, source,
+  //   symbols_found?, paths_missing? }.
+  | "drift_supervised"
   // completed-goal-self-archive — the standing reconciler (`reconcileCompletedGoalsToFolded`) folds a
   // COMPLETE non-parent goal into the Archive on its own. A goal whose rollup reached 100% but that shipped
   // one-off (no goal branch → the atomic goal→main path never retired it) used to linger forever as
