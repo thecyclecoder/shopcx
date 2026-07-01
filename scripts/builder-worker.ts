@@ -616,10 +616,35 @@ function noteAccountRecoveries(now: number) {
   }
 }
 
+// Reconcile the per-account `inFlight` counter against the ground-truth `laneAccount` map — the set of
+// lanes this worker is actually tracking right now. `inFlight` is incremented at lane start and
+// decremented in the session's finally, but an abnormal exit BETWEEN the increment and entering that
+// try/finally (an early throw in the pre-flight — git fetch/worktree/materializer — the dispatch or
+// reaper taking a bail path that missed the paired decrement, a lane whose caller caught and skipped
+// the finally) leaks an increment. The counter drifts UPWARD and the box view + round-robin selection
+// both start lying (observed live: "Round Robin 2: 5 in flight" with only 3 real lanes; the account
+// then LOOKS busiest and stops winning the least-loaded pick even when it isn't). `laneAccount` is the
+// authoritative view — stamped when a lane's account is chosen AND deleted in launch's `.finally()`
+// which fires whether runJob resolves or throws (line ~15552). Recomputing `inFlight` from it each
+// heartbeat tick self-heals any leaked increment; the reaper's decrement stays as belt-and-suspenders.
+// Cheap: O(active lanes) — one Map iteration + N assignments (N = pool size ~3). box-grading-session-and-account-count-fixes Phase 2.
+function reconcileAccountInFlight(): void {
+  const counts = new Array<number>(accounts.length).fill(0);
+  for (const idx of laneAccount.values()) {
+    if (idx >= 0 && idx < counts.length) counts[idx]++;
+  }
+  for (let i = 0; i < accounts.length; i++) {
+    accounts[i].inFlight = counts[i];
+  }
+}
+
 // The per-account snapshot the worker writes onto its heartbeat (box-multi-account-failover Phase 2). Carries
 // per-account in-flight load + capped state, the healthy count, the all-capped flag, and the recent event
 // ring — everything the box-health view + Control Tower box tile need to show how each Max account is burning.
+// Reconciles the in-flight counter against the ground-truth lane set FIRST so a leaked increment can't
+// paint a phantom load on the box view (box-grading-session-and-account-count-fixes Phase 2).
 function accountsSnapshot(now: number) {
+  reconcileAccountInFlight();
   return {
     pool: accounts.map((a, i) => ({
       label: accountLabel(a.configDir, i),
@@ -669,7 +694,10 @@ function soonestReset(now: number): number {
 }
 // Least-recently-used / round-robin: among HEALTHY accounts pick the one with the fewest in-flight
 // builds, tie-broken by least-recently-assigned. NEW sessions only (never reassigns a pinned resume).
+// Reconciles inFlight against the ground-truth lane set first so a leaked increment (see
+// reconcileAccountInFlight) can't permanently starve an account of round-robin picks.
 function pickNewSessionAccount(now: number): AccountState | null {
+  reconcileAccountInFlight();
   const healthy = healthyAccounts(now);
   if (!healthy.length) return null;
   healthy.sort((a, b) => a.inFlight - b.inFlight || a.lastAssignedAt - b.lastAssignedAt);
