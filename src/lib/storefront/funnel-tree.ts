@@ -1497,3 +1497,86 @@ export async function computePopupFunnel(args: {
   const totals = rows.reduce((a, v) => ({ shown: a.shown + v.shown, engaged: a.engaged + v.engaged, email: a.email + v.email, phone: a.phone + v.phone }), { shown: 0, engaged: 0, email: 0, phone: 0 });
   return { byVariant: rows, totals };
 }
+
+// ───────────────── Survey chapter funnel + answers (slice-aware) ─────────────────
+// shown → step (q1 cups → q2 goal → q3 style → result) → completed → email, plus
+// the ANSWER distributions (cups_per_day / health_goal / coffee_style from
+// survey_completed). Reads survey_* events (allowlisted 2026-06-30 — they were
+// dropped before, which zeroed this card). Slice + destination aware.
+export interface SurveyFunnelResult {
+  shown: number;
+  steps: Array<{ step: string; label: string; reached: number; pct_of_shown: number }>;
+  completed: number;
+  email: number;
+  answers: { cups_per_day: Array<{ value: string; count: number }>; health_goal: Array<{ value: string; count: number }>; coffee_style: Array<{ value: string; count: number }> };
+}
+
+const SURVEY_STEP_LABEL: Record<string, string> = { q1: "Q1 · Cups/day", q2: "Q2 · Goal", q3: "Q3 · Style", result: "Result" };
+
+export async function computeSurveyFunnel(args: {
+  admin: Admin; workspaceId: string; startIso: string; endIso: string;
+  productHandle?: string | null; utmSource?: string | null; referrer?: string | null; destination?: string | null;
+}): Promise<SurveyFunnelResult> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+  const destWanted = args.destination && args.destination.trim() ? args.destination.trim() : null;
+  const sliced = !!(product || utmWanted || refWanted || destWanted);
+
+  const [{ data: productRows }, { data: internalCustomerRows }] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+
+  const events = await fetchAllRows<{ event_type: string; session_id: string; meta: Record<string, unknown> }>(() =>
+    admin.from("storefront_events").select("event_type, session_id, meta, id")
+      .eq("workspace_id", workspaceId).in("event_type", ["survey_shown", "survey_step", "survey_completed", "lead_captured"])
+      .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const sids = [...new Set(events.map((e) => e.session_id).filter(Boolean))];
+  const scope = new Map<string, boolean>();
+  for (let i = 0; i < sids.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer").in("id", sids.slice(i, i + 300));
+    for (const s of data || []) {
+      let ok = !s.is_internal && !s.is_bot && !(s.customer_id && internalCustomerIds.has(s.customer_id as string));
+      ok = ok && matchUtm((s.utm_source as string) ?? null, utmWanted) && matchRef((s.referrer as string) ?? null, refWanted);
+      const { segments, variant } = parseLanding((s.landing_url as string) ?? null);
+      if (ok && product && resolveHandle(segments, handleSet) !== product) ok = false;
+      if (ok && destWanted) ok = destWanted === "pdp" ? !variant : variant === destWanted;
+      scope.set(s.id as string, ok);
+    }
+  }
+  const pass = (sid: string) => (sliced ? scope.get(sid) === true : scope.get(sid) !== false);
+
+  const shown = new Set<string>(), completed = new Set<string>(), email = new Set<string>();
+  const stepReached = new Map<string, Set<string>>();
+  const answers = { cups_per_day: new Map<string, number>(), health_goal: new Map<string, number>(), coffee_style: new Map<string, number>() };
+  for (const e of events) {
+    if (!e.session_id || !pass(e.session_id)) continue;
+    const m = e.meta || {};
+    if (e.event_type === "survey_shown") shown.add(e.session_id);
+    else if (e.event_type === "survey_step") { const st = String(m.step || ""); if (st) { let s = stepReached.get(st); if (!s) { s = new Set(); stepReached.set(st, s); } s.add(e.session_id); } }
+    else if (e.event_type === "survey_completed") {
+      completed.add(e.session_id);
+      for (const key of ["cups_per_day", "health_goal", "coffee_style"] as const) {
+        const v = m[key] != null ? String(m[key]) : null;
+        if (v) answers[key].set(v, (answers[key].get(v) || 0) + 1);
+      }
+    } else if (e.event_type === "lead_captured" && m.source === "survey_chapter") email.add(e.session_id);
+  }
+  const shownN = shown.size;
+  const dist = (map: Map<string, number>) => [...map.entries()].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count);
+  return {
+    shown: shownN,
+    steps: ["q1", "q2", "q3", "result"].map((st) => {
+      const reached = stepReached.get(st)?.size || 0;
+      return { step: st, label: SURVEY_STEP_LABEL[st] || st, reached, pct_of_shown: shownN > 0 ? round1((100 * reached) / shownN) : 0 };
+    }),
+    completed: completed.size, email: email.size,
+    answers: { cups_per_day: dist(answers.cups_per_day), health_goal: dist(answers.health_goal), coffee_style: dist(answers.coffee_style) },
+  };
+}

@@ -52,6 +52,13 @@ const ALLOWED_EVENT_TYPES = new Set([
   "checkout_view",
   "checkout_step_completed",
   "order_placed",
+  // Survey chapter (in-page quiz after the hero). These were being SILENTLY
+  // DROPPED (not allowlisted), so the survey funnel + step-answer analytics read
+  // zero even though the survey renders. survey_step carries the per-step answer.
+  "survey_shown",
+  "survey_step",
+  "survey_completed",
+  "survey_discount_applied",
   // Storefront experiment framework — sticky-assigned arm exposure.
   // Carries { experiment_id, variant_id, is_holdout } in meta. Dropped for
   // is_internal/is_bot sessions below (experiment attribution must stay clean).

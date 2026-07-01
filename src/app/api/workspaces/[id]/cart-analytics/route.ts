@@ -6,7 +6,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeCartAnalytics, computePopupFunnel } from "@/lib/storefront/funnel-tree";
+import { computeCartAnalytics, computePopupFunnel, computeSurveyFunnel } from "@/lib/storefront/funnel-tree";
 
 function todayCentral(): string { return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); }
 function daysAgoCentral(n: number): string {
@@ -47,6 +47,6 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     referrer: url.searchParams.get("referrer") || null,
     destination: url.searchParams.get("destination") || null,
   };
-  const [result, popupFunnel] = await Promise.all([computeCartAnalytics(common), computePopupFunnel(common)]);
-  return NextResponse.json({ range: { start, end }, ...result, popupFunnel });
+  const [result, popupFunnel, surveyFunnel] = await Promise.all([computeCartAnalytics(common), computePopupFunnel(common), computeSurveyFunnel(common)]);
+  return NextResponse.json({ range: { start, end }, ...result, popupFunnel, surveyFunnel });
 }

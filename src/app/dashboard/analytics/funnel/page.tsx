@@ -57,6 +57,70 @@ interface CartAnalyticsResponse {
   abandoned: { open_with_email: number; carts_reminded: number; followups_sent: number; recovered: number; recovery_rate_pct: number; revenue_recovered_cents: number; misfired_reminders: number; fast_converted_in_session: number };
   leads: { emails: number; phones: number };
   popupFunnel: { byVariant: PopupVariantRow[]; totals: { shown: number; engaged: number; email: number; phone: number } };
+  surveyFunnel: { shown: number; steps: Array<{ step: string; label: string; reached: number; pct_of_shown: number }>; completed: number; email: number; answers: { cups_per_day: Array<{ value: string; count: number }>; health_goal: Array<{ value: string; count: number }>; coffee_style: Array<{ value: string; count: number }> } };
+}
+
+/** SDK-driven survey-chapter funnel + answer distributions, slice + destination
+ *  aware. (Survey events were dropped by the pixel allowlist — fixed 2026-06-30.) */
+function SurveyFunnelCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const sf = data?.surveyFunnel;
+  const AnswerBlock = ({ title, rows }: { title: string; rows: Array<{ value: string; count: number }> }) => {
+    const max = Math.max(...rows.map((r) => r.count), 1);
+    return (
+      <div>
+        <p className="mb-1 text-[10px] uppercase tracking-wide text-zinc-400">{title}</p>
+        {rows.length === 0 ? <p className="text-xs text-zinc-400">—</p> : rows.map((r) => (
+          <div key={r.value} className="mb-1 flex items-center gap-2 text-xs">
+            <span className="w-28 shrink-0 truncate text-zinc-700 dark:text-zinc-300">{r.value}</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.count / max) * 100}%` }} /></div>
+            <span className="w-8 shrink-0 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{r.count}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Survey chapter</h2>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+      </div>
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+      {sf && sf.shown === 0 && <p className="text-xs text-zinc-400">No survey impressions yet — survey event tracking was just enabled, so this will populate with new traffic.</p>}
+      {sf && sf.shown > 0 && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div>
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <StatCard label="Shown" value={sf.shown.toLocaleString()} />
+              <StatCard label="Completed" value={`${sf.completed} (${sf.shown > 0 ? ((sf.completed / sf.shown) * 100).toFixed(0) : 0}%)`} tone={sf.completed > 0 ? "good" : "neutral"} />
+            </div>
+            {sf.steps.map((s) => (
+              <div key={s.step} className="mb-1 flex items-center gap-2 text-xs">
+                <span className="w-24 shrink-0 text-zinc-600 dark:text-zinc-400">{s.label}</span>
+                <div className="h-2 flex-1 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-full bg-emerald-500" style={{ width: `${s.pct_of_shown}%` }} /></div>
+                <span className="w-16 shrink-0 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{s.reached} · {s.pct_of_shown.toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-3">
+            <AnswerBlock title="Cups per day (Q1)" rows={sf.answers.cups_per_day} />
+            <AnswerBlock title="Health goal (Q2)" rows={sf.answers.health_goal} />
+            <AnswerBlock title="Coffee style (Q3)" rows={sf.answers.coffee_style} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }
 
 /** SDK-driven, slice + destination aware lead-capture popup funnel. */
@@ -763,6 +827,9 @@ export default function StorefrontFunnelPage() {
   const [popupDest, setPopupDest] = useState("");
   const [popup, setPopup] = useState<CartAnalyticsResponse | null>(null);
   const [popupLoading, setPopupLoading] = useState(true);
+  const [surveyDest, setSurveyDest] = useState("");
+  const [survey, setSurvey] = useState<CartAnalyticsResponse | null>(null);
+  const [surveyLoading, setSurveyLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -857,8 +924,23 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end, product, utmSource, referrer, popupDest]);
 
   useEffect(() => { loadPopup(); }, [loadPopup]);
+
+  const loadSurvey = useCallback(async () => {
+    if (!start || !end) return;
+    setSurveyLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (surveyDest) q.set("destination", surveyDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setSurvey(await res.json());
+    setSurveyLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, surveyDest]);
+
+  useEffect(() => { loadSurvey(); }, [loadSurvey]);
   // A page-slice change can change which destinations exist → re-default the cards.
-  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); setPopupDest(""); }, [product, utmSource, referrer]);
+  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); setPopupDest(""); setSurveyDest(""); }, [product, utmSource, referrer]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -903,7 +985,7 @@ export default function StorefrontFunnelPage() {
         <>
 
           <PopupFunnelCard data={popup} loading={popupLoading} dest={popupDest} onDest={setPopupDest} destOptions={chapter?.availableDestinations ?? []} />
-          {data.surveyFunnel && <SurveyFunnelPanel data={data.surveyFunnel} />}
+          <SurveyFunnelCard data={survey} loading={surveyLoading} dest={surveyDest} onDest={setSurveyDest} destOptions={chapter?.availableDestinations ?? []} />
 
           {tree && (
             <div className="mb-8 grid gap-4 lg:grid-cols-2">
@@ -925,36 +1007,6 @@ export default function StorefrontFunnelPage() {
           {data.campaignGrades && (data.campaignGrades.rows.length > 0 || data.campaignGrades.proposed_rules.length > 0) && (
             <CampaignGradesPanel block={data.campaignGrades} workspaceId={workspace.id} onChange={load} />
           )}
-
-          <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-              Top products (by pack_selected)
-            </h2>
-            {data.topProducts.length === 0 ? (
-              <p className="text-xs text-zinc-400">No pack selections in this range yet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                      <th className="py-2 pr-2">Product</th>
-                      <th className="py-2 pr-2 text-right">Selections</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.topProducts.map(p => (
-                      <tr key={p.product_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                        <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{p.title}</td>
-                        <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                          {p.pack_selected_count.toLocaleString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
 
           {data.packBreakdown && data.packBreakdown.length > 0 && (
             <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -1047,37 +1099,6 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
 
 
 
-function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunnel"]> }) {
-  const { shown, completed, email, phone } = data;
-  const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
-  const steps = [
-    { label: "Shown", n: shown, of: shown },
-    { label: "Completed survey", n: completed, of: shown },
-    { label: "Email (step 1)", n: email, of: shown },
-    { label: "Phone (step 2)", n: phone, of: shown },
-  ];
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Survey chapter</h2>
-        <span className="text-[11px] text-zinc-400">In-page survey after the hero · % is of shown</span>
-      </div>
-      {shown === 0 ? (
-        <p className="text-xs text-zinc-400">No survey impressions in this range yet.</p>
-      ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {steps.map((s, i) => (
-            <div key={s.label} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-              <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{s.label}</p>
-              <p className="mt-1 text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">{s.n.toLocaleString()}</p>
-              {i > 0 && <p className="text-xs text-zinc-400">{pct(s.n, s.of)} of shown</p>}
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
 
 
 
