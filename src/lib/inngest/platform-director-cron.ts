@@ -180,7 +180,11 @@ export const platformDirectorCron = inngest.createFunction(
             kind: "director-grade",
             status: "queued",
             created_by: null,
-            instructions: JSON.stringify({ candidates: batch }),
+            // box-grading-session-and-account-count-fixes Phase 3 — carry the ACTING DIRECTOR's function
+            // slug so the box lane card can render "Henry Grading" (CEO grades directors), not the
+            // generic 'Agent Grade' + default mascot. Surfaced by /api/roadmap/box onto LaneRow +
+            // resolved to a persona by personaForKind on the box page.
+            instructions: JSON.stringify({ candidates: batch, director_function: "ceo" }),
           });
           if (!error) {
             enqueued++;
@@ -276,7 +280,11 @@ export const platformDirectorCron = inngest.createFunction(
             kind: "agent-grade",
             status: "queued",
             created_by: null,
-            instructions: JSON.stringify({ agent_job_ids: pool.map((j) => j.id), slips }),
+            // box-grading-session-and-account-count-fixes Phase 3 — carry the ACTING DIRECTOR's function
+            // slug so the combined grade+coach lane renders "Ada Grading" (Platform director grades her
+            // workers), not the generic 'Agent Grade' + default mascot. Surfaced by /api/roadmap/box
+            // onto LaneRow + resolved to a persona by personaForKind on the box page.
+            instructions: JSON.stringify({ agent_job_ids: pool.map((j) => j.id), slips, director_function: "platform" }),
           });
           if (!error) {
             enqueued++;

@@ -92,12 +92,34 @@ interface LaneRow {
   // For a director-coach lane only: the turn's intent (ask|coach), enriched from the job instructions
   // below so the box shows "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
   intent?: string | null;
+  // box-grading-session-and-account-count-fixes Phase 3 — the ACTING DIRECTOR's function slug the
+  // enqueue attached (e.g. "platform" for agent-grade, "ceo" for director-grade, "growth" for
+  // campaign-grade / gap-grade). Enriched from `instructions.director_function` below for the
+  // grade/coach kinds; the box page's personaForKind resolves this into the director's avatar +
+  // name + verb (Grading/Coaching), so the lane card no longer shows a generic 'Agent Grade' +
+  // default mascot. Null on legacy in-flight rows (Phase 1 retired agent-coach enqueues) → the
+  // page falls back to the kind's default director (platform/Ada).
+  director_function?: string | null;
   // box-session-transparency Phase 2 — the lane's live TodoWrite mirror, enriched from the agent_jobs
   // row below so a lane card can show what its session is doing RIGHT NOW (compact: the one-line note;
   // expand: the full checklist). Phase 1's runner writes both onto the row; Phase 2 surfaces them here.
   session_note?: string | null;
   session_checklist?: SessionChecklistItem[] | null;
 }
+
+// box-grading-session-and-account-count-fixes Phase 3 — the grade/coach `agent_jobs` kinds. Every
+// enqueue path (platform-director-cron for agent-grade + director-grade; acquisition-research-cadence
+// for gap-grade; storefront-ltv-reconcile + experiment-refresh for campaign-grade) stamps
+// `instructions.director_function` on these; `agent-coach` is the Phase-1-retired kind kept only so
+// any in-flight rows drain (no director_function on those). We surface director_function for every
+// kind here so the box page can render "Ada Grading" / "Henry Grading" / etc. on each lane card.
+const GRADE_COACH_KINDS: ReadonlySet<string> = new Set([
+  "agent-grade",
+  "agent-coach",
+  "director-grade",
+  "campaign-grade",
+  "gap-grade",
+]);
 
 // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
 // heartbeat as a single jsonb blob; passed through as-is so the box-health view can show how each account's
@@ -180,22 +202,34 @@ export async function GET() {
       }
     : null;
 
-  // Enrich director-coach lanes with their turn intent (ask|coach) from the job instructions, so the box
-  // can render "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
+  // Enrich director-coach lanes with their turn intent (ask|coach) AND grade/coach lanes with their
+  // acting director's function slug (box-grading-session-and-account-count-fixes Phase 3) — both live
+  // on `agent_jobs.instructions` and are keyed by lane job_id, so we fetch them together to avoid a
+  // second round-trip. The client renders "Asking Ada" / "Coaching Ada" for director-coach by intent,
+  // and "Ada Grading" / "Henry Grading" / etc. for the grade/coach kinds by director_function.
   if (worker?.lanes?.length) {
-    const coachIds = worker.lanes.filter((l) => l.kind === "director-coach" && l.job_id).map((l) => l.job_id);
-    if (coachIds.length) {
-      const { data: cj } = await admin.from("agent_jobs").select("id, instructions").in("id", coachIds);
+    const enrichIds = worker.lanes
+      .filter((l) => l.job_id && (l.kind === "director-coach" || GRADE_COACH_KINDS.has(l.kind)))
+      .map((l) => l.job_id);
+    if (enrichIds.length) {
+      const { data: cj } = await admin.from("agent_jobs").select("id, instructions").in("id", enrichIds);
       const intentById = new Map<string, string>();
+      const directorFnById = new Map<string, string>();
       for (const j of (cj || []) as Array<{ id: string; instructions: string | null }>) {
         try {
           const i = JSON.parse(j.instructions || "{}");
           if (i.intent) intentById.set(j.id, String(i.intent));
+          if (i.director_function) directorFnById.set(j.id, String(i.director_function));
         } catch {
           /* not JSON */
         }
       }
-      worker.lanes = worker.lanes.map((l) => (l.kind === "director-coach" && intentById.has(l.job_id) ? { ...l, intent: intentById.get(l.job_id) ?? null } : l));
+      worker.lanes = worker.lanes.map((l) => {
+        const patch: Partial<LaneRow> = {};
+        if (l.kind === "director-coach" && intentById.has(l.job_id)) patch.intent = intentById.get(l.job_id) ?? null;
+        if (GRADE_COACH_KINDS.has(l.kind) && directorFnById.has(l.job_id)) patch.director_function = directorFnById.get(l.job_id) ?? null;
+        return Object.keys(patch).length ? { ...l, ...patch } : l;
+      });
     }
   }
 
@@ -287,8 +321,23 @@ export async function GET() {
     return next ? `Phase ${next}` : null;
   };
 
+  // box-grading-session-and-account-count-fixes Phase 3 — pull the acting director's function slug off a
+  // queued grade/coach job's `instructions` JSON so the queued-jobs list can render the same director face
+  // + verb as the in-flight lane cards ("Ada Grading" / "Henry Grading" / etc.). Null when the kind isn't
+  // grade/coach, the instructions aren't JSON, or the field is absent (a legacy retired agent-coach row).
+  const directorFunctionForJob = (kind: string, instructions: string | null): string | null => {
+    if (!GRADE_COACH_KINDS.has(kind) || !instructions) return null;
+    try {
+      const j = JSON.parse(instructions);
+      if (j && typeof j === "object" && typeof j.director_function === "string") return j.director_function;
+    } catch {
+      /* not JSON */
+    }
+    return null;
+  };
+
   // Waiting = not yet in a lane; paused = needs owner action. The queue carries the avatar-log fields
-  // (kind, spec_slug, derived phase) the box page renders as the "Jobs in queue" feed.
+  // (kind, spec_slug, derived phase, acting director) the box page renders as the "Jobs in queue" feed.
   const queue = jobs
     .filter((j) => j.status === "queued" || j.status === "queued_resume")
     .map((j) => ({
@@ -300,6 +349,7 @@ export async function GET() {
       pr_number: j.pr_number,
       created_at: j.created_at,
       phase: phaseForJob(j.kind, j.spec_slug, j.instructions),
+      director_function: directorFunctionForJob(j.kind, j.instructions),
       spec_missing: specMissing(j.kind, j.spec_slug),
     }));
   const paused = jobs

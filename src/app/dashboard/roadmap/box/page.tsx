@@ -24,6 +24,13 @@ interface LaneRow {
   phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
   intent?: string | null; // director-coach lanes only: "ask" | "coach" (the CEO's button) — for the label
   account?: string | null; // which Round Robin Max account this lane is running on (box-lane-show-account)
+  // box-grading-session-and-account-count-fixes Phase 3 — for a grade/coach lane, the ACTING DIRECTOR's
+  // function slug the enqueue attached (e.g. "platform" for agent-grade, "ceo" for director-grade,
+  // "growth" for campaign-grade / gap-grade). `personaForKind` resolves this into the director's
+  // avatar + name + verb (Grading / Coaching), so a grade/coach lane card renders "Ada Grading" /
+  // "Henry Grading" instead of a generic 'Agent Grade' + default mascot. Null on non-grade/coach
+  // lanes and on legacy retired-agent-coach in-flight rows (falls back to platform/Ada).
+  director_function?: string | null;
   // box-session-transparency Phase 2: the lane's live TodoWrite mirror — what its `claude -p` session is
   // doing right now. session_note = the compact one-line verb shown on the lane card; session_checklist =
   // the full plan, expand to see. Written by the shared `runBoxSession` runner, enriched into the lane by
@@ -73,6 +80,10 @@ interface Job {
   pr_number: number | null;
   created_at: string;
   phase?: string | null; // queued-jobs-log: "Phase N" (from instructions, or the spec's next-unshipped phase)
+  // box-grading-session-and-account-count-fixes Phase 3 — the acting director's function slug on a
+  // queued grade/coach job (parsed from instructions in /api/roadmap/box), so the queue row renders
+  // the same director face + verb as the in-flight lane cards. Null for non-grade/coach kinds.
+  director_function?: string | null;
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
 }
 interface FailedJob {
@@ -153,6 +164,13 @@ const KIND_CHIP: Record<string, string> = {
   "migration-fix": "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-300",
   "director-coach": "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
   "product-seed": "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
+  // box-grading-session-and-account-count-fixes Phase 3 — explicit chip styles so a grade/coach lane
+  // doesn't fall back to the indigo `build` chip and read as a build job on the console.
+  "agent-grade": "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300",
+  "agent-coach": "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300",
+  "director-grade": "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
+  "campaign-grade": "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
+  "gap-grade": "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
 };
 
 // What each agent is *doing* — a short present-tense verb shown under its name (box-lane readability).
@@ -177,9 +195,50 @@ const KIND_ACTION: Record<string, string> = {
   "ticket-improve": "improving ticket",
 };
 
-// The director kinds embody Ada (the Platform director) — her persona + avatar, not a generic label.
-function personaForKind(kind: string) {
-  return kind === "platform-director" || kind === "director-coach" ? getPersona("platform") : getPersona(kind);
+// box-grading-session-and-account-count-fixes Phase 3 — the grade/coach kinds render as
+// "<Director> Grading" / "<Director> Coaching" (name+verb). The mapping here is the display verb; the
+// director face + name come from the persona resolved off `lane.director_function` (with a per-kind
+// fallback for legacy in-flight rows without the field).
+const GRADE_COACH_VERB: Record<string, string> = {
+  "agent-grade": "Grading",
+  "agent-coach": "Coaching",
+  "director-grade": "Grading",
+  "campaign-grade": "Grading",
+  "gap-grade": "Grading",
+};
+// Fallback director slug per grade/coach kind — used only when the enqueue didn't stamp
+// `director_function` (a Phase-1-retired agent-coach row still draining, or a pre-Phase-3 row that
+// predates the field). Matches the ownership the spec calls out: agent-grade/agent-coach → platform,
+// director-grade → ceo, campaign-grade/gap-grade → growth.
+const GRADE_COACH_DEFAULT_DIRECTOR: Record<string, string> = {
+  "agent-grade": "platform",
+  "agent-coach": "platform",
+  "director-grade": "ceo",
+  "campaign-grade": "growth",
+  "gap-grade": "growth",
+};
+// The subject the grade/coach kind operates on — the second line under the "<Director> {Grading|Coaching}"
+// title (Ada Grading · her workers this pass). Keeps the caption accurate per kind so a director-grade
+// lane doesn't read "workers this pass" when it's actually directors.
+const GRADE_COACH_SUBJECT: Record<string, string> = {
+  "agent-grade": "workers this pass",
+  "agent-coach": "a slipped worker",
+  "director-grade": "directors this pass",
+  "campaign-grade": "campaigns this pass",
+  "gap-grade": "gaps this pass",
+};
+
+// Resolve the persona to show on a lane / queued-jobs row. For a grade/coach kind, prefer the enqueue's
+// `director_function` (the ACTING DIRECTOR — Ada / Henry / Max / …), falling back to the kind's default
+// director for legacy in-flight rows; otherwise, keep the existing platform-director/director-coach →
+// Ada mapping and the kind-keyed worker persona. Extending this instead of a parallel path keeps
+// every surface (lane cards + queue log) resolving through one place.
+function personaForKind(kind: string, directorFunction?: string | null) {
+  if (GRADE_COACH_VERB[kind]) {
+    return getPersona(directorFunction || GRADE_COACH_DEFAULT_DIRECTOR[kind] || "platform");
+  }
+  if (kind === "platform-director" || kind === "director-coach") return getPersona("platform");
+  return getPersona(kind);
 }
 
 function LaneCell({ lane }: { lane: LaneRow | null }) {
@@ -192,10 +251,24 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   }
   // A director-coach lane is the CEO talking to Ada — show the SUBJECT (Ada)'s avatar + an Asking/Coaching
   // label by the button the CEO pushed (intent), and hide the meaningless thread-id slug.
+  // box-grading-session-and-account-count-fixes Phase 3 — a grade/coach lane shows the ACTING DIRECTOR
+  // (Ada / Henry / Max) + a "Grading" / "Coaching" verb resolved off `lane.director_function`, and
+  // — like director-coach — hides the meaningless "agent-grade" / "gap-grade" spec_slug beneath
+  // (it's not a real spec page).
   const isCoach = lane.kind === "director-coach";
-  const persona = personaForKind(lane.kind);
-  const title = isCoach ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`) : persona.name;
-  const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
+  const gradeCoachVerb = GRADE_COACH_VERB[lane.kind];
+  const isGradeCoach = !!gradeCoachVerb;
+  const persona = personaForKind(lane.kind, lane.director_function);
+  const title = isCoach
+    ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
+    : isGradeCoach
+      ? `${persona.name} ${gradeCoachVerb}`
+      : persona.name;
+  const action = isCoach
+    ? "with the CEO"
+    : isGradeCoach
+      ? (GRADE_COACH_SUBJECT[lane.kind] ?? "this pass")
+      : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time */}
@@ -215,7 +288,9 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
           </span>
         )}
       </div>
-      {isCoach ? (
+      {isCoach || isGradeCoach ? (
+        // director-coach and grade/coach lanes have no real spec page (their `spec_slug` is a lane key,
+        // not a slug) — show the verb line only, no dead link.
         <span className="block text-[11px] text-zinc-400">{action}</span>
       ) : (
         <Link
@@ -354,13 +429,18 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
       ) : (
         <ul className="divide-y divide-zinc-100 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
           {jobs.map((j) => {
-            const persona = personaForKind(j.kind);
+            const persona = personaForKind(j.kind, j.director_function);
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
+            // box-grading-session-and-account-count-fixes Phase 3 — for a queued grade/coach job, append
+            // the acting verb ("Grading" / "Coaching") so the queue reads the same as the in-flight lane
+            // ("Ada Grading", not just "Ada"). Non-grade/coach kinds render the persona name alone.
+            const gradeCoachVerb = GRADE_COACH_VERB[j.kind];
+            const nameLabel = gradeCoachVerb ? `${persona.name} ${gradeCoachVerb}` : persona.name;
             return (
               <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
                 <PersonaAvatar persona={persona} size={20} />
-                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{persona.name}</span>
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{nameLabel}</span>
                 <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
                   {j.kind}
                 </span>

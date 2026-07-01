@@ -89,7 +89,11 @@ export const storefrontLtvReconcile = inngest.createFunction(
         kind: "campaign-grade",
         status: "queued",
         created_by: null,
-        instructions: JSON.stringify({ candidates: batch }),
+        // box-grading-session-and-account-count-fixes Phase 3 — carry the ACTING DIRECTOR's function
+        // slug so the box lane card renders "Max Grading" (Growth director grades storefront
+        // campaigns), not the generic 'Campaign Grade' + default mascot. Surfaced by /api/roadmap/box
+        // onto LaneRow + resolved to a persona by personaForKind on the box page.
+        instructions: JSON.stringify({ candidates: batch, director_function: "growth" }),
       });
       if (error) {
         console.error(`[storefront-ltv-reconcile] campaign-grade enqueue failed ws=${workspace_id}: ${error.message}`);
