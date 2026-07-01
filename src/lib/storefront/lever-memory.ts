@@ -675,8 +675,10 @@ export const DECISION_LEVER_KEYS = new Set<string>([
 ]);
 
 /** lander_type → the funnel-tree destination KEY that describes it. `pdp` maps to
- *  the "no-variant" landing, the others map to their variant param value. */
-const LANDER_TO_DESTINATION: Record<LanderType, string> = {
+ *  the "no-variant" landing, the others map to their variant param value. Exported
+ *  so the box-session brief loader ([[storefront-optimizer-agent]] loadOptimizerBrief)
+ *  can resolve the same surface→destination the priors are anchored on. */
+export const LANDER_TO_DESTINATION: Record<LanderType, string> = {
   pdp: "pdp",
   listicle: "reasons",
   beforeafter: "beforeafter",
@@ -684,8 +686,10 @@ const LANDER_TO_DESTINATION: Record<LanderType, string> = {
 };
 
 /** Diagnostics window (days). Wide enough to accumulate the SDK's session floor
- *  for most surfaces; narrow enough that a recent regression shows up. */
-const DIAGNOSTICS_WINDOW_DAYS = 30;
+ *  for most surfaces; narrow enough that a recent regression shows up. Exported
+ *  so the box-session brief's BOTTLENECK/WHY block reads the same window as the
+ *  seeded chapter priors. */
+export const DIAGNOSTICS_WINDOW_DAYS = 30;
 
 /** Max additive boost applied to a target chapter's prior when the gap-to-best
  *  saturates. Kept ≤ (0.9 - typical top prior) so the normalized top stays 0.9. */
