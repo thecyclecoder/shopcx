@@ -3340,6 +3340,10 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     notes.push(`spec-review backstop failed: ${e instanceof Error ? e.message : String(e)}`);
     console.error(`${tag} standing spec-review backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
+  // ada-standing-pass-reasoning-gate Phase 2 — captures the slugs the phase-progression backstop advanced this
+  // pass so groomBoard can skip them (their `continue` verdict would just re-decide the same advance). Hoisted
+  // above the try so a backstop throw leaves it as an empty set (fail-open — grooming runs unchanged).
+  const backstopAdvancedSlugs = new Set<string>();
   try {
     // PHASE-PROGRESSION backstop (Ada's spec-shepherding heartbeat) — advance a multi-phase spec P1→P2→…→Pn
     // so a spec never stalls mid-accumulation. WHY a standing-pass backstop is REQUIRED, not just nice-to-have:
@@ -3356,6 +3360,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // gate (never advances an un-Vale-passed spec), one-phase-per-session, and the active-build dedupe.
     // Idempotent + best-effort; never throws.
     const prog = await lib.backstopPhaseProgression(db);
+    for (const slug of prog.advanced) backstopAdvancedSlugs.add(slug);
     if (prog.advanced.length) {
       notes.push(`phase-progression backstop → advanced next phase for ${prog.advanced.length} spec(s): ${prog.advanced.join(", ")}`);
     }
@@ -3561,7 +3566,10 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing repair-supervise failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
-    const groom = await groomBoard(job, tag);
+    // ada-standing-pass-reasoning-gate Phase 2 — pass the phase-progression backstop's advanced slug set so
+    // grooming skips any candidate whose next phase the mechanical advancer just queued (a groom `continue`
+    // on it would be a burnt Max session for the same advance).
+    const groom = await groomBoard(job, tag, backstopAdvancedSlugs);
     notes.push(groom);
   } catch (e) {
     notes.push(`groom failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -3886,7 +3894,15 @@ async function claimHeldForUnreviewedSpec(job: Job): Promise<boolean> {
 // Every decision writes a director_activity row with the reasoning. No-op unless Platform is live+autonomous
 // (findGroomCandidates returns []). Bounded per pass (PLATFORM_DIRECTOR_GROOM_CAP). Best-effort per spec —
 // one spec's failure never blocks the rest. Returns a one-line summary for the standing-pass log.
-async function groomBoard(job: Job, tag: string): Promise<string> {
+//
+// ada-standing-pass-reasoning-gate Phase 2 — mechanical-advancer skip. `backstopPhaseProgression` runs
+// EARLIER in the same standing pass and DETERMINISTICALLY queues the next planned phase for every
+// partially-built spec whose gates pass — which makes grooming's `continue` verdict (also "advance the next
+// planned phase") a redundant Max session for that same set. We pass the backstop's `advanced` slug set into
+// grooming as an explicit pre-filter: any candidate the backstop just advanced is skipped BEFORE the Max
+// session fires. The `alreadyGroomed` ledger + capacity cap are preserved unchanged — this only trims the
+// `continue` overlap; split/fold_now/author_followup_spec/dismiss_candidate/escalate still run.
+async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<string> = new Set()): Promise<string> {
   const lib = await import("../src/lib/agents/platform-director");
   const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
@@ -3900,7 +3916,22 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   let folded = 0;
   let authoredFollowup = 0;
   let dismissed = 0;
+  let skippedByBackstop = 0;
   for (const c of candidates) {
+    // ada-standing-pass-reasoning-gate Phase 2 — mechanical-advancer skip. The `backstopPhaseProgression`
+    // lane, earlier in this pass, deterministically queued this spec's next planned phase. A groom Max
+    // session that returns `continue` would just re-decide the same advance, so it's a burnt session.
+    // Skip WITHOUT firing a session. Note this filter is ADDITIONAL to `findGroomCandidates`'s existing
+    // `state.activeBuild` check — that check would ordinarily also exclude the just-queued spec, but the
+    // race between backstop's DB insert and grooming's read is closed by the explicit `prog.advanced`
+    // hand-off. If the queued phase turns out to be phantom/future (the build lands as a no-op), the next
+    // pass will re-surface the spec: `alreadyGroomed` is still false, backstop's dedup blocks a re-queue,
+    // and grooming's judgment lane then produces the fold_now/split verdict.
+    if (backstopAdvanced.has(c.slug)) {
+      skippedByBackstop++;
+      console.log(`${tag} groom ${c.slug} → skipped (backstop advanced next phase this pass — continue redundant; no Max session spent)`);
+      continue;
+    }
     try {
       // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
       // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
@@ -4227,6 +4258,9 @@ async function groomBoard(job: Job, tag: string): Promise<string> {
   if (authoredFollowup) parts.push(`authored ${authoredFollowup}`);
   if (dismissed) parts.push(`dismissed ${dismissed}`);
   if (escalated) parts.push(`escalated ${escalated}`);
+  // ada-standing-pass-reasoning-gate Phase 2: surface the mechanical-advancer skip in the standing-pass log
+  // so the pass recap accurately reflects the saved Max sessions (0-token skips, not silent drops).
+  if (skippedByBackstop) parts.push(`skipped-by-backstop ${skippedByBackstop}`);
   return `groom: assessed ${candidates.length} → ${parts.length ? parts.join(" · ") : "no moves"}`;
 }
 
