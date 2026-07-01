@@ -1,0 +1,1 @@
+- **Seed + sharpen Cleo's lever selection from the funnel-tree / chapter-diagnostics / bottleneck SDKs** · verified 2026-07-01 · → [[libraries/storefront-lever-memory]]
