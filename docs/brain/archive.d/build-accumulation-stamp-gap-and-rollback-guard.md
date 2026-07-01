@@ -1,0 +1,1 @@
+- **Fix the phase-accumulation stamp gap that wedges multi-phase builds + guard deploy-rollback against laggy monthly KPIs** · verified 2026-07-01 · → [[../lifecycles/spec-goal-branch-pm-flow]]
