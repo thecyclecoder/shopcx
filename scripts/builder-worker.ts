@@ -199,6 +199,24 @@ const MAX_AGENT_COACH = Number(process.env.AGENT_TODO_MAX_AGENT_COACH || 1);
 // One agent-coach pass: read-only Max session reading up to ROLLUP_WINDOW (=10) low-graded jobs'
 // diffs to synthesize ONE durable learning. Repair-sized ceiling; much lighter than a grade batch.
 const AGENT_COACH_TIMEOUT_MS = 15 * 60 * 1000;
+// Director-grade lane (grading-cascade-to-box-sessions Phase 3): the box-hosted director-call grader —
+// one Max `claude -p` session per batch reads each auto-approval's APPROVED DIFF (git-show of the
+// target build's merged commit) and each goal-escort's member specs' MERGED DIFFS, then independently
+// verifies whether the director's own call was sound + in-leash — instead of trusting the director's
+// stored `reasoning` string + a repeat-failure count the way the deployed Sonnet sweep did. Writes
+// director_decision_grades via `applyBoxDirectorGrade` (same partial-unique upsert + `graded_by='human'`
+// override invariant as the deployed gradeDirectorCall path). Concurrency-1 own lane; no
+// ANTHROPIC_API_KEY billed (Max plan). Retires the deployed Sonnet sweep — no more `ai_token_usage`
+// rows with `purpose='director_decision_grading'`. Enqueued by platform-director-cron's
+// grade-concluded-director-calls step (one batched box session per beat, dedup-gated). CEO directive
+// 2026-06-30: every grader box-side. See docs/brain/libraries/director-grader.md.
+const MAX_DIRECTOR_GRADE = Number(process.env.AGENT_TODO_MAX_DIRECTOR_GRADE || 1);
+// One director-grade pass: read-only Max session reading a batch (≤ DIRECTOR_GRADE_BATCH_CAP=8) of
+// concluded director calls' real diffs (auto-approval: the target build's approved merged commit;
+// goal-escort: the milestone's member specs' merged commits) + running quick tsc/CI probes. Build-
+// sized ceiling — a chatty batch (8 calls each with a non-trivial approved diff to walk) can take
+// longer than a repair/regression turn.
+const DIRECTOR_GRADE_TIMEOUT_MS = 25 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -385,7 +403,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -12176,6 +12194,371 @@ async function runAgentGradeJob(job: Job) {
   }
 }
 
+// ── Box-hosted director-call grader (grading-cascade-to-box-sessions Phase 3) ───
+// A kind='director-grade' job runs read-only on Max, one level UP the CEO→Director→Worker cascade.
+// It grades a BATCH of concluded DIRECTOR calls (auto-approvals + goal-escorts) against the
+// director-grader rubric + approved director_grader_prompts calibration rules — but crucially, the
+// box session reads the APPROVED DIFF (git-show of the target build's merged commit) or the
+// milestone's merged member specs, instead of trusting the director's own `reasoning` string + a
+// repeat-failure count the way the deployed Sonnet sweep did. Writes director_decision_grades via
+// `applyBoxDirectorGrade` — same partial-unique upsert + `graded_by='human'` override invariant as
+// the deployed gradeDirectorCall path, so the leash-adjustment recommender + calibration-rule
+// proposal arc + the Agents-hub Director-grades tab still fire off the box-written grades. No API
+// bill (Max), reasoning cites file:line, not a paraphrase. Enqueued by platform-director-cron's
+// grade-concluded-director-calls step. instructions = JSON {candidates: DirectorGradeCandidate[]}.
+async function runDirectorGradeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "director-grade", sandbox: "max", timeout: DIRECTOR_GRADE_TIMEOUT_MS });
+}
+
+interface DirectorGradeDecisionJson {
+  dimension: "auto-approval" | "goal-escort";
+  approval_decision_id?: string;
+  goal_slug?: string;
+  milestone?: string;
+  director_function?: string;
+  grade: number;
+  reasoning: string;
+}
+
+async function runDirectorGradeJob(job: Job) {
+  const tag = `[director-grade:${job.id.slice(0, 8)}]`;
+  let instr: { candidates?: unknown } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+
+  interface AutoApprovalCandidate {
+    dimension: "auto-approval";
+    approval_decision_id: string;
+    director_function: string;
+  }
+  interface GoalEscortCandidate {
+    dimension: "goal-escort";
+    goal_slug: string;
+    milestone: string;
+    director_function: string;
+    goal_title: string;
+    milestone_name: string;
+    spec_slugs: string[];
+  }
+  type Candidate = AutoApprovalCandidate | GoalEscortCandidate;
+
+  const rawCandidates = Array.isArray(instr.candidates) ? (instr.candidates as unknown[]) : [];
+  const candidates: Candidate[] = [];
+  for (const c of rawCandidates) {
+    if (!c || typeof c !== "object") continue;
+    const r = c as Record<string, unknown>;
+    if (r.dimension === "auto-approval" && typeof r.approval_decision_id === "string") {
+      candidates.push({ dimension: "auto-approval", approval_decision_id: r.approval_decision_id, director_function: String(r.director_function ?? "platform") });
+    } else if (r.dimension === "goal-escort" && typeof r.goal_slug === "string" && typeof r.milestone === "string") {
+      candidates.push({
+        dimension: "goal-escort",
+        goal_slug: r.goal_slug,
+        milestone: r.milestone,
+        director_function: String(r.director_function ?? "platform"),
+        goal_title: String(r.goal_title ?? r.goal_slug),
+        milestone_name: String(r.milestone_name ?? r.milestone),
+        spec_slugs: Array.isArray(r.spec_slugs) ? r.spec_slugs.filter((s): s is string => typeof s === "string") : [],
+      });
+    }
+  }
+
+  if (!candidates.length) {
+    await update(job.id, { status: "completed", log_tail: "no candidates in instructions — nothing to grade" });
+    console.log(`${tag} no candidates → no-op`);
+    return;
+  }
+
+  const { applyBoxDirectorGrade } = await import("../src/lib/agents/director-grader");
+  const a = await admin();
+
+  // Load per-candidate context for the prompt. Auto-approvals: the approval_decisions row + the
+  // target agent_jobs row (for the merged commit sha / PR / branch / status / log tail / approved
+  // action) + a repeat-failures count. Goal-escorts: the milestone's specs + their agent_jobs status,
+  // and the director's escorted_goal reasons for the goal.
+  interface AutoApprovalCtx extends AutoApprovalCandidate {
+    workspace_id: string;
+    director_reasoning: string | null;
+    target: {
+      id: string | null;
+      kind: string | null;
+      spec_slug: string | null;
+      status: string | null;
+      pr_url: string | null;
+      pr_number: number | null;
+      spec_branch: string | null;
+      merge_sha: string | null;
+      error: string | null;
+      log_tail: string | null;
+      pending_actions: Array<{ status?: string; type?: string; summary?: string; cmd?: string }> | null;
+    };
+    repeat_failures: number;
+  }
+  interface GoalEscortCtx extends GoalEscortCandidate {
+    workspace_id: string;
+    escort_reasons: string[];
+    specs: Array<{ slug: string; status: string; pr_url: string | null; merge_sha: string | null }>;
+  }
+
+  const autoApprovals: AutoApprovalCtx[] = [];
+  const goalEscorts: GoalEscortCtx[] = [];
+  let workspaceId: string | null = null;
+
+  for (const c of candidates) {
+    if (c.dimension === "auto-approval") {
+      const { data: dec } = await a
+        .from("approval_decisions")
+        .select("id, workspace_id, agent_job_id, reasoning, created_at")
+        .eq("id", c.approval_decision_id)
+        .maybeSingle();
+      if (!dec) continue;
+      const decision = dec as { id: string; workspace_id: string; agent_job_id: string | null; reasoning: string | null; created_at: string };
+      workspaceId = workspaceId ?? decision.workspace_id;
+      let target: AutoApprovalCtx["target"] = { id: null, kind: null, spec_slug: null, status: null, pr_url: null, pr_number: null, spec_branch: null, merge_sha: null, error: null, log_tail: null, pending_actions: null };
+      let repeatFailures = 0;
+      if (decision.agent_job_id) {
+        const { data: jobRow } = await a
+          .from("agent_jobs")
+          .select("id, kind, spec_slug, status, pr_url, pr_number, spec_branch, merge_sha, error, log_tail, pending_actions")
+          .eq("id", decision.agent_job_id)
+          .maybeSingle();
+        if (jobRow) {
+          const j = jobRow as {
+            id: string;
+            kind: string;
+            spec_slug: string | null;
+            status: string;
+            pr_url: string | null;
+            pr_number: number | null;
+            spec_branch: string | null;
+            merge_sha: string | null;
+            error: string | null;
+            log_tail: string | null;
+            pending_actions: Array<{ status?: string; type?: string; summary?: string; cmd?: string }> | null;
+          };
+          target = { id: j.id, kind: j.kind, spec_slug: j.spec_slug, status: j.status, pr_url: j.pr_url, pr_number: j.pr_number, spec_branch: j.spec_branch, merge_sha: j.merge_sha, error: j.error, log_tail: j.log_tail, pending_actions: j.pending_actions };
+          if (j.spec_slug) {
+            const { data: laterFails } = await a
+              .from("agent_jobs")
+              .select("id", { count: "exact", head: false })
+              .eq("workspace_id", decision.workspace_id)
+              .eq("spec_slug", j.spec_slug)
+              .in("status", ["failed", "needs_attention"])
+              .gt("created_at", decision.created_at)
+              .neq("id", j.id)
+              .limit(50);
+            repeatFailures = ((laterFails as Array<{ id: string }> | null) ?? []).length;
+          }
+        }
+      }
+      autoApprovals.push({ ...c, workspace_id: decision.workspace_id, director_reasoning: decision.reasoning, target, repeat_failures: repeatFailures });
+    } else {
+      // goal-escort — pull the specs' status + PR info from agent_jobs by spec_slug, and the
+      // director's escorted_goal reasons for the goal.
+      const wsRes = job.workspace_id;
+      workspaceId = workspaceId ?? wsRes;
+      const { data: escorts } = await a
+        .from("director_activity")
+        .select("reason, metadata")
+        .eq("workspace_id", wsRes)
+        .eq("director_function", c.director_function)
+        .eq("action_kind", "escorted_goal")
+        .order("created_at", { ascending: false })
+        .limit(200);
+      const escortReasons: string[] = [];
+      for (const r of ((escorts as Array<{ reason: string | null; metadata: Record<string, unknown> | null }>) || [])) {
+        const slug = typeof r.metadata?.goal_slug === "string" ? (r.metadata.goal_slug as string) : null;
+        if (slug === c.goal_slug && r.reason) {
+          escortReasons.push(r.reason);
+          if (escortReasons.length >= 6) break;
+        }
+      }
+      const specs: GoalEscortCtx["specs"] = [];
+      if (c.spec_slugs.length) {
+        const { data: specJobs } = await a
+          .from("agent_jobs")
+          .select("spec_slug, status, pr_url, merge_sha, created_at")
+          .eq("workspace_id", wsRes)
+          .eq("kind", "build")
+          .in("spec_slug", c.spec_slugs)
+          .order("created_at", { ascending: false })
+          .limit(200);
+        // Prefer the latest terminal row per spec_slug.
+        const bySlug = new Map<string, { status: string; pr_url: string | null; merge_sha: string | null }>();
+        for (const row of ((specJobs as Array<{ spec_slug: string; status: string; pr_url: string | null; merge_sha: string | null; created_at: string }>) || [])) {
+          if (!bySlug.has(row.spec_slug)) bySlug.set(row.spec_slug, { status: row.status, pr_url: row.pr_url, merge_sha: row.merge_sha });
+        }
+        for (const slug of c.spec_slugs) {
+          const row = bySlug.get(slug);
+          specs.push({ slug, status: row?.status ?? "unknown", pr_url: row?.pr_url ?? null, merge_sha: row?.merge_sha ?? null });
+        }
+      }
+      goalEscorts.push({ ...c, workspace_id: wsRes, escort_reasons: escortReasons, specs });
+    }
+  }
+
+  if (!autoApprovals.length && !goalEscorts.length) {
+    await update(job.id, { status: "completed", log_tail: `no resolvable candidates (${candidates.length} raw)` });
+    console.log(`${tag} candidates all resolved to nothing`);
+    return;
+  }
+
+  // Approved calibration rules — director_grader_prompts (CEO-approved rubric corrections).
+  const { data: rules } = await a
+    .from("director_grader_prompts")
+    .select("title, content")
+    .eq("workspace_id", workspaceId!)
+    .eq("status", "approved")
+    .order("sort_order", { ascending: true });
+  const calibrationBlock = ((rules as Array<{ title: string; content: string }>) || []).length
+    ? "\n\nCALIBRATION RULES (CEO-approved adjustments to the rubric — apply them):\n" +
+      ((rules as Array<{ title: string; content: string }>) || []).map((r) => `  • ${r.title}: ${r.content}`).join("\n")
+    : "";
+
+  const autoBlocks = autoApprovals
+    .map((c) => {
+      const t = c.target;
+      const approvedAction = (t.pending_actions || []).find((a) => a.status === "approved") || (t.pending_actions || [])[0] || {};
+      const parts = [
+        `AUTO-APPROVAL — approval_decision ${c.approval_decision_id}`,
+        `  director: ${c.director_function}`,
+        `  target build: kind=${t.kind ?? "?"} · spec=${t.spec_slug ?? "—"} · concluded status: ${t.status ?? "?"}`,
+        t.spec_branch ? `  branch: ${t.spec_branch}` : "",
+        t.pr_url ? `  PR: ${t.pr_url}${t.pr_number ? ` (#${t.pr_number})` : ""}` : "",
+        t.merge_sha ? `  merged commit: ${t.merge_sha}` : "",
+        approvedAction.type ? `  approved action: type=${approvedAction.type} · ${approvedAction.summary ?? "(no summary)"}` : "",
+        approvedAction.cmd ? `  command run on approval: ${approvedAction.cmd}` : "",
+        ``,
+        `  THE DIRECTOR'S STATED REASONING (what it claimed made this sound + in-leash):`,
+        `  ${c.director_reasoning || "(none recorded — a bare rubber-stamp is itself a red flag)"}`,
+        ``,
+        `  HOW IT LANDED:`,
+        t.error ? `  target error: ${t.error.slice(0, 400)}` : "",
+        `  later repeat-failures of the same spec after this approval: ${c.repeat_failures}`,
+        t.log_tail ? `  build log tail:\n${t.log_tail.slice(-1200)}` : "",
+      ].filter((l) => l !== "");
+      return parts.join("\n");
+    })
+    .join("\n\n");
+
+  const escortBlocks = goalEscorts
+    .map((c) => {
+      return [
+        `GOAL-ESCORT — goal "${c.goal_title}" (${c.goal_slug}) · milestone ${c.milestone || "—"}: ${c.milestone_name}`,
+        `  director: ${c.director_function}`,
+        `  the milestone's member specs (must all be shipped to land clean):`,
+        ...c.specs.map((s) => `    - ${s.slug}: ${s.status}${s.pr_url ? ` · PR ${s.pr_url}` : ""}${s.merge_sha ? ` · sha ${s.merge_sha}` : ""}`),
+        ``,
+        `  WHAT THE DIRECTOR DID (its escort activity for this goal):`,
+        ...(c.escort_reasons.length ? c.escort_reasons.map((r) => `    • ${r}`) : ["    (no escort activity recorded for this goal)"]),
+      ].join("\n");
+    })
+    .join("\n\n");
+
+  const prompt = [
+    `You are the CEO of ShopCX on Max, grading the calls of your Platform/DevOps + Growth Directors using the director-grade skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
+    ``,
+    `Your job: grade each concluded director call below 1–10 against its dimension's rubric. UNLIKE the deployed Sonnet sweep that only saw the director's own \`reasoning\` string + a repeat-failure count (and had to trust it), you can INDEPENDENTLY VERIFY the call was sound: first \`git fetch origin main\`, then for each auto-approval \`git show <merge_sha>\` OR \`git diff origin/main...origin/<branch>\` on the target build and READ the touched files — no hidden destructive DDL, no goal-touching change, actually in-leash. For a goal-escort, git-show each member spec's merged sha to confirm every spec truly landed clean. Cite concrete file:line in your reasoning — that is why we moved director grading box-side.`,
+    ``,
+    `THE DEFINING RULE — GRADE SOUNDNESS SEPARATELY FROM OUTCOME. A sound, in-leash auto-approval whose target hit a rare reversible bump still grades HIGH if the diff confirms the reasoning was right. A careless rubber-stamp whose target happened to be fine grades LOW. Weight soundness ≥ outcome — we're training a director to make SOUND CALLS within its leash, not to get lucky.`,
+    ``,
+    `THE TWO DIMENSIONS:`,
+    `  • auto-approval — the director auto-approved a platform tool's Approval Request within its leash. The DIFF must be low-risk, reversible, scoped, no destructive DDL, no goal-touching (otherwise it wasn't in-leash and the director should have escalated).`,
+    `  • goal-escort — the director escorted an already-approved goal's milestone to landing. The MEMBER SPECS must each be shipped (merged, tsc/CI green), with no regression escalated against them.`,
+    calibrationBlock,
+    ``,
+    `SCORING: 10 exemplary · 8-9 strong · 6-7 acceptable · 4-5 mediocre · 2-3 poor · 1 indefensible.`,
+    ``,
+    `THE BATCH — ${autoApprovals.length} auto-approval(s) + ${goalEscorts.length} goal-escort(s) to grade:`,
+    ``,
+    autoBlocks || "(no auto-approvals in this batch)",
+    ``,
+    escortBlocks || "(no goal-escorts in this batch)",
+    ``,
+    `Investigation protocol per call:`,
+    `  1. \`git fetch origin main\` once for the batch.`,
+    `  2. Auto-approval: \`git show <merge_sha>\` (or \`git diff origin/main...origin/<branch>\` if unmerged). Read the touched files. Check: does the diff match what the director's reasoning claimed it would? Any hidden destructive DDL / goal-touching change / out-of-leash surprise? If uncertain about type-safety, sample \`npx tsc --noEmit\` (bounded).`,
+    `  3. Goal-escort: for each member spec, \`git show <merge_sha>\` and glance at the merged file set. Any spec still unmerged / failed / needs_attention lowers the outcome score.`,
+    `  4. Non-PR / no-merge-sha auto-approvals (a policy-activation approval that acts on DB state, not code): explain in reasoning that the diff couldn't be inspected + grade on the observable outcome (target status + repeat-failures).`,
+    ``,
+    `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+    `  {"status":"completed","decisions":[{"dimension":"auto-approval","approval_decision_id":"…","director_function":"…","grade":<1-10>,"reasoning":"<2-4 sentences citing file:line from the diff when possible, and what would have made it a 10>"},{"dimension":"goal-escort","goal_slug":"…","milestone":"…","director_function":"…","grade":<1-10>,"reasoning":"<2-4 sentences>"}]}`,
+    `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ``,
+    `Every candidate in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based (concrete file/line or observed status) — never a paraphrase of the director's stored reasoning. That paraphrased reasoning is exactly what the CEO directive was moving grading box-side to eliminate.`,
+  ].join("\n");
+
+  try {
+    const { session, resultText, isError, raw, usage, model, configDir: gradeDir } = await runBoxLane(
+      (cfg, sid) => runDirectorGradeClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, gradeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; decisions?: DirectorGradeDecisionJson[] }>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `director-grade error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.decisions)) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "director-grade produced no parseable decisions", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable decisions`);
+      return;
+    }
+
+    const autoIds = new Set(autoApprovals.map((c) => c.approval_decision_id));
+    const escortKeys = new Set(goalEscorts.map((c) => `${c.goal_slug}:${c.milestone}`));
+    let applied = 0;
+    let skipped = 0;
+    for (const d of parsed.decisions) {
+      if (!d || typeof d.grade !== "number") { skipped++; continue; }
+      if (d.dimension === "auto-approval") {
+        if (typeof d.approval_decision_id !== "string" || !autoIds.has(d.approval_decision_id)) { skipped++; continue; }
+        const dirFn = d.director_function || autoApprovals.find((c) => c.approval_decision_id === d.approval_decision_id)?.director_function || "platform";
+        const r = await applyBoxDirectorGrade({
+          dimension: "auto-approval",
+          workspaceId: workspaceId!,
+          directorFunction: dirFn,
+          approvalDecisionId: d.approval_decision_id,
+          grade: d.grade,
+          reasoning: String(d.reasoning ?? ""),
+          admin: a,
+        });
+        if (r.ok) applied++;
+        else skipped++;
+      } else if (d.dimension === "goal-escort") {
+        if (typeof d.goal_slug !== "string" || typeof d.milestone !== "string" || !escortKeys.has(`${d.goal_slug}:${d.milestone}`)) { skipped++; continue; }
+        const dirFn = d.director_function || goalEscorts.find((c) => c.goal_slug === d.goal_slug && c.milestone === d.milestone)?.director_function || "platform";
+        const r = await applyBoxDirectorGrade({
+          dimension: "goal-escort",
+          workspaceId: workspaceId!,
+          directorFunction: dirFn,
+          goalSlug: d.goal_slug,
+          milestone: d.milestone,
+          grade: d.grade,
+          reasoning: String(d.reasoning ?? ""),
+          admin: a,
+        });
+        if (r.ok) applied++;
+        else skipped++;
+      } else {
+        skipped++;
+      }
+    }
+
+    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · auto=${autoApprovals.length} escort=${goalEscorts.length}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // A kind='security-review' job runs read-only on Max, the supervisor on the auto-merge proxy. Two modes
 // (instructions.mode): 'diff' — a per-merged-diff security pass (injection / secret-leak / authz / RLS /
 // unsafe admin-client / _encrypted handling) over the merged claude/* commit; 'dep-watch' — the daily
@@ -13425,6 +13808,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "regression") return runRegressionJob(job);
   if (job.kind === "security-review") return runSecurityReviewJob(job);
   if (job.kind === "agent-grade") return runAgentGradeJob(job);
+  if (job.kind === "director-grade") return runDirectorGradeJob(job);
   if (job.kind === "agent-coach") return runAgentCoachJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
@@ -14353,7 +14737,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -14409,6 +14793,7 @@ async function main() {
   const countRegression = () => [...active.values()].filter((v) => v.kind === "regression").length;
   const countSecurityReview = () => [...active.values()].filter((v) => v.kind === "security-review").length;
   const countAgentGrade = () => [...active.values()].filter((v) => v.kind === "agent-grade").length;
+  const countDirectorGrade = () => [...active.values()].filter((v) => v.kind === "director-grade").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -14697,6 +15082,22 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed agent-coach ${job.id.slice(0, 8)} → ${countAgentCoach() + 1}/${MAX_AGENT_COACH} agent-coach lane`);
+        launch(job);
+      }
+      // Fill the director-grade lane (grading-cascade-to-box-sessions Phase 3): the box-hosted
+      // director-call grader — one Max session per batch reads each auto-approval's APPROVED DIFF
+      // (via git-show of the target build's merged sha) or each goal-escort's member specs' merged
+      // diffs, then independently verifies whether the director's call was sound + in-leash instead
+      // of trusting its own `reasoning` string + a repeat-failure count. Writes director_decision_grades
+      // via applyBoxDirectorGrade (same partial-unique upsert + graded_by='human' override invariant
+      // as the deployed gradeDirectorCall path). Concurrency-1, read-only on Max. Enqueued by
+      // platform-director-cron's grade-concluded-director-calls step (one batched box session per
+      // beat, dedup-gated).
+      while (!claudeDown && countDirectorGrade() < MAX_DIRECTOR_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["director-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed director-grade ${job.id.slice(0, 8)} → ${countDirectorGrade() + 1}/${MAX_DIRECTOR_GRADE} director-grade lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
