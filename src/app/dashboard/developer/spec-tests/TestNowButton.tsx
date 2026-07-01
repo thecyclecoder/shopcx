@@ -4,11 +4,30 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 /**
- * "Test now" — enqueues a box spec-test job for one shipped-unverified spec (spec-test-agent).
+ * "Test now" — enqueues a box spec-test job for one spec (spec-test-agent).
  * POST /api/roadmap/spec-test; the box claims it on its concurrency-1 lane and writes a spec_test_runs
  * row. Owner-only (the API enforces it). The run appears here after the box finishes + a refresh.
+ *
+ * Two modes (spectest-error-visible-and-rerunnable Phase 2):
+ *  - post-ship (default): no `branch` prop → API enqueues a standing-lane `kind='spec-test'` job that hits
+ *    prod (the original behavior — shipped-unverified specs). Deduped by [[hasActiveSpecTestJob]].
+ *  - pre-merge (branch + previewUrl props): API delegates to [[enqueuePreMergeSpecTest]], stamping
+ *    `spec_branch` + `preview_url` so the runner probes the per-build `*.vercel.app` preview instead of
+ *    prod. Dedupe is per-branch (a real approved/needs_human/issues verdict blocks; an `error` verdict
+ *    falls through so a reaped session can re-run). The re-run affordance for the "Pre-merge / errored"
+ *    surface on the Developer → Spec Tests page.
  */
-export default function TestNowButton({ slug, compact = false }: { slug: string; compact?: boolean }) {
+export default function TestNowButton({
+  slug,
+  compact = false,
+  branch,
+  previewUrl,
+}: {
+  slug: string;
+  compact?: boolean;
+  branch?: string | null;
+  previewUrl?: string | null;
+}) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
@@ -22,10 +41,18 @@ export default function TestNowButton({ slug, compact = false }: { slug: string;
       const res = await fetch("/api/roadmap/spec-test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug }),
+        body: JSON.stringify({
+          slug,
+          ...(branch ? { branch } : {}),
+          ...(previewUrl ? { previewUrl } : {}),
+        }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "failed to queue");
+      if (d.queued === false) {
+        setError(typeof d.reason === "string" ? d.reason : "not enqueued");
+        return;
+      }
       setDone(true);
       router.refresh();
     } catch (e) {

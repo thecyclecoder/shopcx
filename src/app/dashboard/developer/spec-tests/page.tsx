@@ -1,7 +1,12 @@
 import Link from "next/link";
 import { getRoadmap, listArchivedSlugs, type SpecCard } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
-import { getLatestSpecTestRuns, signSpecTestScreenshot, type SpecTestRun } from "@/lib/spec-test-runs";
+import {
+  getLatestSpecTestRuns,
+  getPreMergeErrorRuns,
+  signSpecTestScreenshot,
+  type SpecTestRun,
+} from "@/lib/spec-test-runs";
 import { getFixSpecForOrigin } from "@/lib/specs-table";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AgentJob } from "@/lib/agent-jobs";
@@ -66,6 +71,16 @@ export default async function SpecTestsPage() {
     .filter((s) => s.status === "shipped" && !archivedSet.has(s.slug))
     .sort((a, b) => a.title.localeCompare(b.title));
   const runs: Record<string, SpecTestRun> = workspaceId ? await getLatestSpecTestRuns(workspaceId) : {};
+  // spectest-error-visible-and-rerunnable Phase 2 — the "Pre-merge / errored" surface. A reaped/mid-run
+  // pre-merge spec-test that stamped `error` blocks the branch from ever promoting to main (Phase 1 unwedged
+  // the enqueue path + wired auto-recovery, but a reaped run still needs a visible surface for the CEO). The
+  // shipped list above filters to status='shipped', so a PRE-MERGE (in_progress) spec's errored gate had no
+  // UI slot at all — this is that slot. Rendered below the shipped list; excludes any error-run whose spec
+  // is ALREADY listed in the shipped section (its verdict is surfaced there via the shared error branch).
+  const preMergeErrorRuns: SpecTestRun[] = workspaceId ? await getPreMergeErrorRuns(workspaceId) : [];
+  const shippedSlugs = new Set(shipped.map((s) => s.slug));
+  const preMergeErrorList = preMergeErrorRuns.filter((r) => !shippedSlugs.has(r.spec_slug));
+  const specTitleBySlug = new Map(specs.map((s) => [s.slug, s.title] as const));
   // (The aggregated "Needs human testing" card was removed — the Human-test queue sidebar item is the one
   // place for that. This page is just the per-spec test-run list.)
 
@@ -144,7 +159,7 @@ export default async function SpecTestsPage() {
         <span className="ml-1 text-zinc-400">{tested}/{shipped.length} tested.</span>
       </p>
 
-      {shipped.length === 0 ? (
+      {shipped.length === 0 && preMergeErrorList.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-200 py-12 text-center text-sm text-zinc-400 dark:border-zinc-800">
           No shipped-but-unverified specs right now.
         </div>
@@ -212,6 +227,75 @@ export default async function SpecTestsPage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {preMergeErrorList.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Pre-merge / errored
+          </h2>
+          <p className="mb-3 mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            A pre-merge spec-test job for a <code>claude/*</code> branch errored (an unparseable verdict or
+            a reaped session). The branch can&apos;t promote to main until this clears. Re-run to unwedge it —
+            the retry hits the per-build preview, never prod.
+          </p>
+          <div className="space-y-3">
+            {preMergeErrorList.map((run) => {
+              const title = specTitleBySlug.get(run.spec_slug) ?? run.spec_slug;
+              return (
+                <div
+                  key={`${run.spec_slug}::${run.spec_branch}`}
+                  className="rounded-xl border border-amber-200 bg-amber-50/40 p-4 shadow-sm dark:border-amber-900/60 dark:bg-amber-950/20"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        href={`/dashboard/roadmap/${run.spec_slug}`}
+                        className="text-sm font-medium text-zinc-900 hover:text-indigo-600 dark:text-zinc-100 dark:hover:text-indigo-400"
+                      >
+                        {title}
+                      </Link>
+                      <AgentTestedStamp verdict={run.agent_verdict} />
+                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                        {run.spec_branch}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-zinc-400">{timeAgo(run.run_at)}</span>
+                      <TestNowButton
+                        slug={run.spec_slug}
+                        branch={run.spec_branch}
+                        previewUrl={run.preview_url}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs dark:border-zinc-700 dark:bg-zinc-800/40">
+                    <p className="font-medium text-zinc-600 dark:text-zinc-300">
+                      Run errored — retry.{" "}
+                      <span className="font-normal text-zinc-500 dark:text-zinc-400">
+                        {run.error || "the agent produced no parseable verdict"}
+                      </span>
+                    </p>
+                    {run.transcript && (
+                      <details className="mt-1.5">
+                        <summary className="cursor-pointer select-none text-[11px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300">
+                          raw output tail
+                        </summary>
+                        <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-white p-1.5 text-[11px] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
+                          {run.transcript}
+                        </pre>
+                      </details>
+                    )}
+                    <p className="mt-1.5 text-[11px] text-zinc-400">
+                      Use <span className="font-medium">Test now</span> to re-fire against the branch preview.
+                    </p>
+                  </div>
+                  <code className="mt-2 block text-[11px] text-zinc-400">specs/{run.spec_slug}.md</code>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

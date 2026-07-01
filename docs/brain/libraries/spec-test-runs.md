@@ -30,6 +30,13 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
 - `normalizeRun(row)` → `SpecTestRun` — coerce a raw DB row (summary always re-derived from `checks[]`, so an
   empty `checks[]` can never read as a clean pass).
 - `getLatestSpecTestRuns(workspaceId)` → `Record<slug, SpecTestRun>` — latest run per spec (the board/page read).
+- `getPreMergeErrorRuns(workspaceId)` → `SpecTestRun[]` — the latest per-`(slug, spec_branch)` row whose
+  `agent_verdict='error'`; drives the **Pre-merge / errored** surface on `/dashboard/developer/spec-tests`
+  ([[../specs/spectest-error-visible-and-rerunnable]] Phase 2). The shipped list filters to `status='shipped'`,
+  so a PRE-MERGE (in_progress) spec's reaped-mid-run errored gate had NO UI slot — this is that read. `error`
+  is a TRANSIENT (no result), never a real pass/fail; the re-run button routes through
+  [[agent-jobs]] `enqueuePreMergeSpecTest` with the row's `spec_branch` + `preview_url` so the retry hits
+  the per-build `*.vercel.app` preview, not prod.
 - `hasActiveSpecTestJob(workspaceId, slug)` → `boolean` — in-flight dedupe for the **Test now** button.
 - `chipParts(summary)` → `{ pass, fail, human, inconclusive }` — the `✅·✗·👤·?` board chip counts.
 
