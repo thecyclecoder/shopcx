@@ -1956,6 +1956,7 @@ function tryParseSonnetDecision(text: string): SonnetDecision | null {
   }
 }
 
+// Parse failures below log via console.warn (not error) — reached only after the JSON-only retry above already failed, and the fallback returns a valid escalation decision. Same rationale as the retryable-Anthropic split at line 1750 (orchestrator-retryable-anthropic-throw-not-control-tower-err): a self-healed edge case must not mint a false Control Tower 'vercel' incident off the Vercel log drain.
 function parseSonnetDecision(text: string, inboundMessage: string = ""): SonnetDecision {
   // Each failure mode tags the reasoning so when a ticket lands in
   // the escalation pile we know which guardrail tripped — bare
@@ -1966,20 +1967,20 @@ function parseSonnetDecision(text: string, inboundMessage: string = ""): SonnetD
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.error("Sonnet v2: no JSON found in response:", snippet);
+      console.warn("Sonnet v2: no JSON found in response:", snippet);
       return fallbackWithCancelRoute(inboundMessage, `Parse fail: no JSON block in response. Got: "${snippet}"`);
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
 
     if (!parsed.reasoning || !parsed.action_type) {
-      console.error("Sonnet v2: missing required fields:", parsed);
+      console.warn("Sonnet v2: missing required fields:", parsed);
       return fallbackWithCancelRoute(inboundMessage, `Parse fail: missing reasoning/action_type. Got keys: ${Object.keys(parsed).join(", ")}`);
     }
 
     return parsed as SonnetDecision;
   } catch (err) {
-    console.error("Sonnet v2: JSON parse error:", err, "text:", snippet);
+    console.warn("Sonnet v2: JSON parse error:", err, "text:", snippet);
     return fallbackWithCancelRoute(inboundMessage, `Parse fail: ${err instanceof Error ? err.message : String(err)}. Got: "${snippet}"`);
   }
 }
