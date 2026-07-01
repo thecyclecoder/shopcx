@@ -33,6 +33,11 @@ import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
 import { agentGradingBatchReady, gradeConcludedAgentActions, detectGradeDropCoaching } from "@/lib/agents/agent-grader";
 import { computePlatformScorecard, getRegisteredMetrics } from "@/lib/agents/platform-scorecard";
 import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
+import {
+  platformHasPendingWork,
+  platformStandingPassRecentlyActive,
+  recordPlatformStandingPassGateBeat,
+} from "@/lib/agents/platform-director";
 
 export const platformDirectorCron = inngest.createFunction(
   {
@@ -49,7 +54,9 @@ export const platformDirectorCron = inngest.createFunction(
       // Build-console workspaces — any workspace that uses the agent-jobs queue (mirrors spec-test-cron).
       const { data: wsRows } = await admin.from("agent_jobs").select("workspace_id").limit(1000);
       const workspaceIds = Array.from(new Set((wsRows || []).map((r) => r.workspace_id as string)));
-      if (!workspaceIds.length) return { workspaces: 0, enqueued: 0, workspaceIds: [] as string[] };
+      if (!workspaceIds.length) {
+        return { workspaces: 0, enqueued: 0, workspaceIds: [] as string[], gated: 0, gateDecisions: [] as Array<{ ws: string; pending: boolean; reason: string; enqueued: boolean; recentlyActive: boolean; onTheHour: boolean }> };
+      }
 
       // Skip any workspace that already has an in-flight platform-director job (no daily pileup).
       const { data: inflight } = await admin
@@ -59,9 +66,57 @@ export const platformDirectorCron = inngest.createFunction(
         .in("status", ["queued", "queued_resume", "building", "claimed"]);
       const busy = new Set((inflight || []).map((j) => j.workspace_id as string));
 
+      // ada-standing-pass-reasoning-gate Phase 4 — idle work-gate + adaptive cadence backoff. Per workspace,
+      // BEFORE queueing: check `platformHasPendingWork` (cheap EXISTS/COUNT). If PENDING → enqueue as
+      // usual. If NOT pending → back off from */5 to hourly across a solid idle span. `recentlyActive`
+      // (a gate beat with `pending=true` within the last 30 min) keeps the cron on */5 through a
+      // transient quiet gap; only a solid idle span (no pending signal in 30 min) actually flips the
+      // cadence to hourly (enqueue only when the UTC minute is 0). ANY pending signal snaps it back
+      // to */5 on the next tick. Best-effort — a gate error → treat as pending (fail-open, prefer
+      // running the pass over silencing it).
+      const onTheHour = new Date().getUTCMinutes() === 0;
+
       let enqueued = 0;
+      let gated = 0;
+      const gateDecisions: Array<{ ws: string; pending: boolean; reason: string; enqueued: boolean; recentlyActive: boolean; onTheHour: boolean }> = [];
       for (const workspaceId of workspaceIds) {
         if (busy.has(workspaceId)) continue;
+
+        let pending = { pending: true, reason: "gate-error" };
+        try {
+          pending = await platformHasPendingWork(workspaceId);
+        } catch (e) {
+          console.error(`[platform-director-cron] pending-work gate failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+        }
+
+        let recentlyActive = false;
+        if (!pending.pending) {
+          try {
+            recentlyActive = await platformStandingPassRecentlyActive(workspaceId);
+          } catch (e) {
+            recentlyActive = true; // fail-open
+            console.error(`[platform-director-cron] recently-active read failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+          }
+        }
+
+        // Enqueue when: pending now · OR non-idle within the last 30 min · OR the hourly floor beat.
+        const shouldEnqueue = pending.pending || recentlyActive || onTheHour;
+
+        // Every tick per workspace writes ONE gate beat — the record `platformStandingPassRecentlyActive`
+        // reads next tick to decide the cadence. Kept best-effort so a heartbeat write never blocks the
+        // enqueue itself.
+        await recordPlatformStandingPassGateBeat(workspaceId, pending.pending, pending.reason, {
+          enqueued: shouldEnqueue,
+          recently_active: recentlyActive,
+          on_the_hour: onTheHour,
+        });
+
+        gateDecisions.push({ ws: workspaceId, pending: pending.pending, reason: pending.reason, enqueued: shouldEnqueue, recentlyActive, onTheHour });
+
+        if (!shouldEnqueue) {
+          gated++;
+          continue;
+        }
         const { error } = await admin.from("agent_jobs").insert({
           workspace_id: workspaceId,
           spec_slug: "platform-director",
@@ -71,7 +126,7 @@ export const platformDirectorCron = inngest.createFunction(
         });
         if (!error) enqueued++;
       }
-      return { workspaces: workspaceIds.length, workspaceIds, enqueued };
+      return { workspaces: workspaceIds.length, workspaceIds, enqueued, gated, gateDecisions };
     });
 
     // The grading loop (director-loop-grading Phase 3): on the SAME standing beat, grade every

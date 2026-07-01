@@ -4324,3 +4324,225 @@ export async function applyDirectorFoldSuperseded(
     folded: true,
   });
 }
+
+// ── ada-standing-pass-reasoning-gate Phase 4 — idle work-gate + adaptive cadence backoff ────────────
+// Cheap EXISTS/COUNT sweep across every input the standing pass consumes. Fires BEFORE any lane so a
+// truly-idle workspace (no directive, no drift, no non-terminal specs, no open errors/alerts, no
+// stalled jobs, no stale coverage, no unresolved regressions) records a quiet beat and skips the pass
+// entirely — returning the 5-hour Max window to real builds/repairs. The cron additionally reads the
+// recent gate beats to back its enqueue cadence off from every-5-min → hourly across a solid idle span
+// (any pending signal in the last `PLATFORM_STANDING_PASS_IDLE_MS` snaps it back to every-5-min).
+
+/**
+ * After this long without any pending signal, the cron backs the enqueue cadence off from every-5-min
+ * to hourly. ANY pending signal inside this window snaps it back to every-5-min. Read at cron time to
+ * gate the enqueue.
+ */
+export const PLATFORM_STANDING_PASS_IDLE_MS = 30 * 60 * 1000;
+
+/** The `loop_heartbeats.loop_id` the cron writes for each workspace's per-tick gate beat. */
+export function platformStandingPassGateLoopId(workspaceId: string): string {
+  return `platform-standing-pass-gate:${workspaceId}`;
+}
+
+/** The one-line verdict from `platformHasPendingWork` — `pending=true` ⇒ the pass has real work to do. */
+export interface PlatformPendingWorkResult {
+  pending: boolean;
+  reason: string;
+}
+
+/**
+ * Cheap EXISTS/COUNT gate over everything the standing pass monitors. Returns `pending=true` on the
+ * FIRST signal (cheap checks first, expensive last) so an idle workspace short-circuits after one
+ * `.select("id").limit(1)`. A `pending=false` verdict means the pass can safely skip every lane this
+ * tick — the box standing pass records a quiet beat and returns; the cron additionally uses it (plus
+ * the recent gate-heartbeats window) to back its enqueue cadence off from every-5-min to hourly.
+ *
+ * Signals scanned:
+ *  1. active [[director_directives]] for platform (headlines the pass + the daily watch)
+ *  2. open [[spec_drift]] rows (the drift-supervision lane's input)
+ *  3. [[agent_jobs]] `needs_attention` OR building > 90m (self-watch + park-route + backstop input)
+ *  4. open [[error_events]] (reconcileErrorBacklog input)
+ *  5. open [[loop_alerts]] (reconcileErrorBacklog input)
+ *  6. non-terminal [[specs]] `in_review｜planned｜in_progress` (escort / init / groom input)
+ *  7. [[goals]] `status='complete' + is_parent=false` (reconcileCompletedGoalsToFolded input)
+ *  8. coverage past freshness — any shipped spec with no [[spec_test_runs]] row within
+ *     `PLATFORM_DIRECTOR_REVERIFY_WINDOW_MS` (reconcileRegressionCoverage input)
+ *  9. unresolved evidence-backed regression fails ([[../libraries/spec-test-runs]] `getHumanTestQueue` —
+ *     reconcileRegressionBacklog input)
+ *
+ * A DB-only gate is sound because a GitHub-lane candidate (ready/dirty PR, READY branch) only exists
+ * because a build job exists, which (3) captures; a rare orphan self-heals on the next non-idle pass.
+ *
+ * IMPORTANT scope: gates ONLY the box standing pass. The grading/coaching cascade keeps its own
+ * `agentGradingBatchReady` gate ([[../inngest/platform-director-cron]] `grade-and-coach-workers`) and
+ * is out of scope here — see spec `grading-cascade-to-box-sessions`.
+ */
+export async function platformHasPendingWork(workspaceId: string): Promise<PlatformPendingWorkResult> {
+  const admin = createAdminClient();
+
+  // (1) active directive — a live directive is a pending signal by itself (headlines every pass).
+  {
+    const { data } = await admin
+      .from("director_directives")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("director_function", PLATFORM)
+      .eq("status", "active")
+      .limit(1);
+    if (data?.length) return { pending: true, reason: "active director directive" };
+  }
+
+  // (2) open spec_drift rows — Ada's supervision lane input.
+  {
+    const { data } = await admin
+      .from("spec_drift")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "open")
+      .limit(1);
+    if (data?.length) return { pending: true, reason: "open spec_drift rows" };
+  }
+
+  // (3) any parked or long-running build — self-watch + park-route input.
+  {
+    const { data: parked } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "needs_attention")
+      .limit(1);
+    if (parked?.length) return { pending: true, reason: "agent_jobs needs_attention" };
+    const stalledCutoffIso = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    const { data: stalled } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "building")
+      .lt("claimed_at", stalledCutoffIso)
+      .limit(1);
+    if (stalled?.length) return { pending: true, reason: "agent_jobs building >90m" };
+  }
+
+  // (4-5) open error backlog / open loop alerts — reconcileErrorBacklog input.
+  {
+    const { data: errs } = await admin.from("error_events").select("id").eq("status", "open").limit(1);
+    if (errs?.length) return { pending: true, reason: "open error_events" };
+    const { data: alerts } = await admin.from("loop_alerts").select("id").eq("status", "open").limit(1);
+    if (alerts?.length) return { pending: true, reason: "open loop_alerts" };
+  }
+
+  // (6) any non-terminal spec — every drive lane's input (in_review / planned / in_progress covers them).
+  {
+    const { data } = await admin
+      .from("specs")
+      .select("slug")
+      .eq("workspace_id", workspaceId)
+      .in("status", ["in_review", "planned", "in_progress"])
+      .limit(1);
+    if (data?.length) return { pending: true, reason: "non-terminal specs" };
+  }
+
+  // (7) complete non-parent goals awaiting fold — reconcileCompletedGoalsToFolded input.
+  {
+    const { data } = await admin
+      .from("goals")
+      .select("slug")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "complete")
+      .eq("is_parent", false)
+      .limit(1);
+    if (data?.length) return { pending: true, reason: "complete non-parent goals" };
+  }
+
+  // (8) coverage past freshness — a shipped spec with no spec_test_runs in the window (or never).
+  try {
+    const { data: shipped } = await admin
+      .from("specs")
+      .select("slug")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "shipped")
+      .limit(500);
+    const shippedRows = (shipped ?? []) as Array<{ slug: string }>;
+    if (shippedRows.length) {
+      const cutoffIso = new Date(Date.now() - PLATFORM_DIRECTOR_REVERIFY_WINDOW_MS).toISOString();
+      const { data: freshRuns } = await admin
+        .from("spec_test_runs")
+        .select("spec_slug")
+        .eq("workspace_id", workspaceId)
+        .in("spec_slug", shippedRows.map((s) => s.slug))
+        .gte("run_at", cutoffIso)
+        .limit(2000);
+      const freshSet = new Set(((freshRuns ?? []) as Array<{ spec_slug: string }>).map((r) => r.spec_slug));
+      if (shippedRows.some((s) => !freshSet.has(s.slug))) {
+        return { pending: true, reason: "coverage past freshness window" };
+      }
+    }
+  } catch (e) {
+    // Fail-open: a coverage read hiccup should not stall the pass. Log-and-continue.
+    console.warn(`[platformHasPendingWork] coverage read failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+  }
+
+  // (9) unresolved evidence-backed regression fails — reconcileRegressionBacklog input.
+  try {
+    const { regressions } = await getHumanTestQueue(workspaceId);
+    if (regressions.some((r) => (r.failing || []).some((f) => f && f.check_key))) {
+      return { pending: true, reason: "unresolved regression fails" };
+    }
+  } catch (e) {
+    console.warn(`[platformHasPendingWork] regression read failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+  }
+
+  return { pending: false, reason: "idle" };
+}
+
+/**
+ * True iff the cron wrote a gate beat with `produced.pending === true` for this workspace within the
+ * last `PLATFORM_STANDING_PASS_IDLE_MS`. The cron reads this to keep the enqueue on every-5-min through
+ * a transient quiet gap (one or two idle beats) and only back off to hourly across a solid idle span.
+ * A missing / read-error result is treated as "recently active" so we never over-back-off on error.
+ */
+export async function platformStandingPassRecentlyActive(workspaceId: string): Promise<boolean> {
+  const admin = createAdminClient();
+  const cutoffIso = new Date(Date.now() - PLATFORM_STANDING_PASS_IDLE_MS).toISOString();
+  try {
+    const { data } = await admin
+      .from("loop_heartbeats")
+      .select("produced")
+      .eq("loop_id", platformStandingPassGateLoopId(workspaceId))
+      .gte("ran_at", cutoffIso)
+      .order("ran_at", { ascending: false })
+      .limit(20);
+    return ((data ?? []) as Array<{ produced?: { pending?: boolean } | null }>)
+      .some((r) => r.produced?.pending === true);
+  } catch (e) {
+    console.warn(`[platformStandingPassRecentlyActive] read failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+    return true; // fail-open: prefer running the pass over silencing it on a read error.
+  }
+}
+
+/**
+ * Write one gate beat to `loop_heartbeats` for this workspace's tick — the record the cron reads via
+ * `platformStandingPassRecentlyActive` to decide whether we're in a solid idle span. Best-effort:
+ * a failed write must never break the enqueue itself.
+ */
+export async function recordPlatformStandingPassGateBeat(
+  workspaceId: string,
+  pending: boolean,
+  reason: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const admin = createAdminClient();
+  try {
+    await admin.from("loop_heartbeats").insert({
+      loop_id: platformStandingPassGateLoopId(workspaceId),
+      kind: "cron" as const,
+      ok: true,
+      produced: { pending, reason, workspace_id: workspaceId, ...extra },
+      detail: reason,
+      ran_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.warn(`[recordPlatformStandingPassGateBeat] write failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+  }
+}

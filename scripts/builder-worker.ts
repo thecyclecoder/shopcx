@@ -3239,6 +3239,35 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
 async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   const lib = await import("../src/lib/agents/platform-director");
   const notes: string[] = [];
+
+  // ada-standing-pass-reasoning-gate Phase 4 — idle work-gate. Cheap EXISTS/COUNT sweep across every
+  // input the pass consumes (directive · drift · needs_attention / >90m builds · open errors/alerts ·
+  // non-terminal specs · complete non-parent goals · coverage past freshness · unresolved regressions).
+  // A truly-idle workspace records a quiet beat + skips every lane this tick — the 5-hour Max window
+  // that would have gone into an empty pass is returned to real builds/repairs. Fail-open: any gate
+  // read error runs the full pass (never silence work on a hiccup). Scope: gates ONLY the box standing
+  // pass — the grading/coaching cascade keeps its own `agentGradingBatchReady` gate (out of scope).
+  try {
+    const pending = await lib.platformHasPendingWork(job.workspace_id);
+    if (!pending.pending) {
+      try {
+        await lib.recordPlatformStandingPassGateBeat(job.workspace_id, false, pending.reason, {
+          source: "standing-pass-worker",
+          job_id: job.id,
+        });
+      } catch { /* audit-only, never blocks the skip */ }
+      await update(job.id, {
+        status: "completed",
+        log_tail: `standing pass — quiet beat (${pending.reason})`.slice(-2000),
+      });
+      console.log(`${tag} standing pass — quiet beat: ${pending.reason}`);
+      return;
+    }
+  } catch (e) {
+    // Gate failure ⇒ run the full pass (fail-open). The failure is logged but never blocks a lane.
+    console.error(`${tag} standing pass idle-gate failed (continuing to full pass):`, e instanceof Error ? e.message : e);
+  }
+
   // director-executable-plans-and-priority: the CEO's active directive trumps routine — surface it FIRST so it
   // headlines the pass + the daily watch. The build-GATE it carries is enforced inside each lane (buildGate);
   // here we just make it visible (and auto-complete-on-ship is handled by buildGate when the gate spec lands).
