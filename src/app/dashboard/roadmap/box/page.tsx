@@ -34,6 +34,11 @@ interface LaneRow {
   // /api/roadmap/box. Null on a session that hasn't yet emitted a TodoWrite (or a pre-Phase-1 row).
   session_note?: string | null;
   session_checklist?: SessionChecklistItem[] | null;
+  // consolidate-premerge-checks-one-session Phase 2 — true for a `spec-test` lane whose underlying job's
+  // `spec_branch` is a `claude/*` PR branch (fused pre-merge session emits BOTH the spec-test verdict AND
+  // the security verdict in one JSON). The card renders TWO avatars (Vera + Vault) + a 'spec-test ·
+  // security' label; a post-ship spec-test lane (no branch) still renders single-persona.
+  fused_pre_merge?: boolean;
 }
 interface AccountSlot {
   label: string;
@@ -80,6 +85,7 @@ interface Job {
   phase?: string | null; // queued-jobs-log: "Phase N" (from instructions, or the spec's next-unshipped phase)
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
   director_function?: string | null; // box-grading-session-and-account-count-fixes Phase 3 (grade/coach kinds)
+  fused_pre_merge?: boolean; // consolidate-premerge-checks-one-session Phase 2 (queued fused pre-merge spec-test)
 }
 interface FailedJob {
   id: string;
@@ -217,6 +223,24 @@ function personaForKind(kind: string, directorFunction?: string | null) {
   return kind === "platform-director" || kind === "director-coach" ? getPersona("platform") : getPersona(kind);
 }
 
+// consolidate-premerge-checks-one-session Phase 2 — for a fused pre-merge spec-test lane the SAME session
+// emits BOTH verdicts (spec-test + security) off the same loaded branch diff, so the card renders both
+// personas + a static dual label. The label is static because the fused session is Codex-primary and Codex
+// has no TodoWrite, so we can't lean on the live session_checklist to pick the active sub-task; the card
+// must render correctly with an empty checklist. A non-fused spec-test lane (post-ship / no branch) resolves
+// to null and the caller falls back to the single-persona path.
+function fusedPreMergeInfo(
+  kind: string,
+  fusedPreMerge?: boolean,
+): { personas: [AgentPersona, AgentPersona]; title: string; label: string } | null {
+  if (kind !== "spec-test" || !fusedPreMerge) return null;
+  return {
+    personas: [getPersona("spec-test"), getPersona("security-review")],
+    title: "Vera → Vault · pre-merge check",
+    label: "spec-test · security",
+  };
+}
+
 function LaneCell({ lane }: { lane: LaneRow | null }) {
   if (!lane) {
     return (
@@ -230,25 +254,46 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const isCoach = lane.kind === "director-coach";
   const persona = personaForKind(lane.kind, lane.director_function);
   const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
-  const title = isCoach
-    ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
-    : gc
-      ? `${persona.name} ${gc.verb}`
-      : persona.name;
+  // A fused pre-merge lane (spec-test job on a claude/* branch) is ONE session emitting BOTH verdicts, so
+  // it renders both personas + a dual title / static sub-task label. Non-fused lanes are unchanged.
+  const fused = fusedPreMergeInfo(lane.kind, lane.fused_pre_merge);
+  const title = fused
+    ? fused.title
+    : isCoach
+      ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
+      : gc
+        ? `${persona.name} ${gc.verb}`
+        : persona.name;
   const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time */}
+      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A fused
+          pre-merge lane shows BOTH avatars (Vera + Vault) side-by-side; every other lane keeps its single
+          avatar. */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          <PersonaAvatar persona={persona} size={20} />
+          {fused ? (
+            <span className="flex shrink-0 items-center -space-x-2">
+              <PersonaAvatar persona={fused.personas[0]} size={20} />
+              <PersonaAvatar persona={fused.personas[1]} size={20} />
+            </span>
+          ) : (
+            <PersonaAvatar persona={persona} size={20} />
+          )}
           <span className="truncate text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{title}</span>
         </span>
         <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
       </div>
-      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header) */}
+      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header).
+          A fused pre-merge lane appends a static 'spec-test · security' sub-task label so the card reads
+          correctly with NO session_checklist (Codex has no TodoWrite). */}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-[26px]">
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
+        {fused && (
+          <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
+            {fused.label}
+          </span>
+        )}
         {lane.account && (
           <span title={`Running on ${lane.account}`} className="shrink-0 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
             {lane.account}
@@ -429,15 +474,30 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
           {jobs.map((j) => {
             const persona = personaForKind(j.kind, j.director_function);
             const gc = gradeCoachInfo(j.kind, j.director_function); // grade/coach kinds → "Ada Grading" etc.
+            // A queued fused pre-merge spec-test renders both personas + a dual title, same as the
+            // in-flight lane treatment (consolidate-premerge-checks-one-session Phase 2).
+            const fused = fusedPreMergeInfo(j.kind, j.fused_pre_merge);
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
             return (
               <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
-                <PersonaAvatar persona={persona} size={20} />
-                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
+                {fused ? (
+                  <span className="flex shrink-0 items-center -space-x-2">
+                    <PersonaAvatar persona={fused.personas[0]} size={20} />
+                    <PersonaAvatar persona={fused.personas[1]} size={20} />
+                  </span>
+                ) : (
+                  <PersonaAvatar persona={persona} size={20} />
+                )}
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{fused ? fused.title : gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
                 <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
                   {j.kind}
                 </span>
+                {fused && (
+                  <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
+                    {fused.label}
+                  </span>
+                )}
                 {slugIsLink ? (
                   <Link
                     href={`/dashboard/roadmap/${j.spec_slug}`}
