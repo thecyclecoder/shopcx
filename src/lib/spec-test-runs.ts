@@ -109,6 +109,40 @@ export async function getLatestSpecTestRuns(workspaceId: string): Promise<Record
 }
 
 /**
+ * spectest-error-visible-and-rerunnable Phase 2 — the "Pre-merge / errored" surface for the Developer →
+ * Spec Tests page. Latest `spec_test_runs` row per (slug, spec_branch) whose `agent_verdict='error'` — an
+ * unparseable / reaped pre-merge run that blocks the branch from ever promoting to main. The shipped list
+ * on the page filters to status='shipped', so a PRE-MERGE (in_progress) spec's errored gate had no UI
+ * surface; this helper is the read the page uses to render it (with the existing error branch + a re-run
+ * affordance that fires `enqueuePreMergeSpecTest` against the run's spec_branch + preview_url). A run whose
+ * spec_branch is null (post-ship / standing-lane) is NOT surfaced here — those are already listed by
+ * getLatestSpecTestRuns above. `error` is a TRANSIENT (no result), never a real pass/fail.
+ */
+export async function getPreMergeErrorRuns(workspaceId: string): Promise<SpecTestRun[]> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("spec_test_runs")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .not("spec_branch", "is", null)
+    .order("run_at", { ascending: false })
+    .limit(1000);
+  const seen = new Set<string>();
+  const out: SpecTestRun[] = [];
+  for (const raw of (data ?? []) as Record<string, unknown>[]) {
+    const branch = (raw.spec_branch as string) ?? "";
+    if (!branch) continue;
+    const key = `${String(raw.spec_slug)}::${branch}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const run = normalizeRun(raw);
+    if (run.agent_verdict !== "error") continue;
+    out.push(run);
+  }
+  return out;
+}
+
+/**
  * Per-spec count of human checks the owner has acted on (any resolution — verified/dismissed/failed).
  * The board chip uses this to render the `👤` part as DONE vs WAITING, so you can tell at a glance
  * whether the human testing is finished before deciding to Mark verified & archive.

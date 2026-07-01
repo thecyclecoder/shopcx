@@ -581,22 +581,45 @@ export async function enqueuePreMergeSpecTest(
 
   const admin = createAdminClient();
 
-  // Dedupe — skip if a spec-test job already exists for (workspace, slug, branch). Mirrors the
-  // `enqueueSpecTestIfDue` chokepoint shape (a `.from("agent_jobs").select("id")` SQL probe + first
-  // hit wins), but the key is per-BRANCH: a still-open OR an already-finished pre-merge run for the
-  // same branch is the SAME code under test, so re-running pre-merge would just re-test the same
-  // preview. A fresh commit lands a new preview deployment but the dedupe is per-branch so the run
-  // history stays attached to it; the M3 green-signal helper picks the LATEST `spec_test_runs` row
-  // for (slug, branch) regardless.
-  const { data: existing } = await admin
+  // Dedupe — mirrors the `enqueueSpecTestIfDue` chokepoint shape (a `.from(...).select("id")` SQL
+  // probe + first hit wins), keyed per-BRANCH so a pre-merge run on branch A doesn't block a run on
+  // branch B. But an `error` verdict is a TRANSIENT (the run couldn't produce a parseable verdict —
+  // a reaped session, a self-update restart), NOT a real result — so we must NOT treat it as
+  // "already tested". Narrow the block to two cases (spectest-error-visible-and-rerunnable Phase 1):
+  //   (a) an OPEN spec-test job for the same (workspace, slug, branch) is still in flight
+  //       (ACTIVE_STATUSES) — a queued/claimed/building job IS the re-run; adding another would stack;
+  //   (b) the latest `spec_test_runs` row for (workspace, slug, branch) already carries a REAL
+  //       verdict — approved / needs_human / issues — i.e. the preview WAS successfully tested; a
+  //       redundant re-run against the same preview would just re-derive the same result.
+  // A latest verdict of `error` (or NO run row + only a terminal `failed` spec-test job) falls
+  // through both branches → the enqueue proceeds, unwedging the branch. The upstream
+  // `backstopPreMergeChecks` still loop-guards standing-pass auto-recovery so a genuinely erroring
+  // run can't spin forever.
+  const { data: openJob } = await admin
     .from("agent_jobs")
     .select("id")
     .eq("workspace_id", workspaceId)
     .eq("spec_slug", slug)
     .eq("kind", "spec-test")
     .eq("spec_branch", branch)
+    .in("status", ACTIVE_STATUSES)
     .limit(1);
-  if (existing && existing.length) return { enqueued: false, reason: "in-flight" };
+  if (openJob && openJob.length) return { enqueued: false, reason: "in-flight" };
+  const { data: latestRun } = await admin
+    .from("spec_test_runs")
+    .select("agent_verdict")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("spec_branch", branch)
+    .order("run_at", { ascending: false })
+    .limit(1);
+  if (latestRun && latestRun.length) {
+    const verdict = (latestRun[0] as { agent_verdict: string | null }).agent_verdict;
+    if (verdict === "approved" || verdict === "needs_human" || verdict === "issues") {
+      return { enqueued: false, reason: `already tested (${verdict})` };
+    }
+    // verdict === "error" (or null) → transient; fall through and re-enqueue.
+  }
 
   // The runner reads the preview origin from `instructions` (Phase 2 threads it through). We also
   // best-effort-set `preview_url` for symmetry with the build's column — harmless if M1's column
@@ -810,16 +833,39 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
         }
       }
       out.scanned++;
+      // spectest-error-visible-and-rerunnable Phase 1 — LOOP-GUARDED auto-recovery: with the
+      // enqueue's dedup narrowed (an `error` verdict no longer blocks re-enqueue), the backstop
+      // now re-fires an errored pre-merge spec-test naturally on the next pass. Guard so a
+      // genuinely-erroring run (a real repro-able crash, not a one-off reap) doesn't spin forever
+      // — cap the auto-recovery at ONE retry per branch: if ≥2 error verdicts already exist for
+      // (slug, branch), skip the standing-pass re-fire. A manual TestNow re-fire (Phase 2 route)
+      // bypasses this cap; the guard is only for silent standing-pass loops.
+      let skipSpecTest = false;
       try {
-        const st = await maybeEnqueuePreMergeSpecTestOnAccumulation({
-          workspaceId: j.workspace_id,
-          slug,
-          branch,
-          previewUrl,
-        });
-        if (st.enqueued) out.specTestEnqueued.push(branch);
+        const { data: errorRuns } = await admin
+          .from("spec_test_runs")
+          .select("id")
+          .eq("workspace_id", j.workspace_id)
+          .eq("spec_slug", slug)
+          .eq("spec_branch", branch)
+          .eq("agent_verdict", "error")
+          .limit(2);
+        if (errorRuns && errorRuns.length >= 2) skipSpecTest = true;
       } catch {
-        /* best-effort per branch */
+        /* best-effort — if the count read blips, fall through to normal enqueue (its dedup still guards). */
+      }
+      if (!skipSpecTest) {
+        try {
+          const st = await maybeEnqueuePreMergeSpecTestOnAccumulation({
+            workspaceId: j.workspace_id,
+            slug,
+            branch,
+            previewUrl,
+          });
+          if (st.enqueued) out.specTestEnqueued.push(branch);
+        } catch {
+          /* best-effort per branch */
+        }
       }
       try {
         const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
