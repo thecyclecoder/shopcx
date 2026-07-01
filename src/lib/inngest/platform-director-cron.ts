@@ -222,25 +222,33 @@ export const platformDirectorCron = inngest.createFunction(
     // The Platform Department Scorecard monthly leading curve (platform-scorecard-monthly spec,
     // Phase 2): on the same standing beat, snapshot the monthly KPI set (human_touch_per_build ·
     // goals_escorted_unbabysat · time_to_approve_hours · deploy_reliability · director_call_grade)
-    // into platform_scorecard_snapshots over a trailing 30-day window. Guarded to ONCE PER CALENDAR
-    // MONTH per workspace (skip any workspace with a monthly row already taken on/after the first of
-    // the month; the upsert on (metric_key, cadence='monthly', snapshot_date) makes a same-month
-    // re-run a no-op anyway). Best-effort + idempotent.
+    // into platform_scorecard_snapshots over a trailing 30-day window ending at the PREVIOUS
+    // complete UTC day (devops-kpi-monthly-snapshot-date-lag-fix, mirroring devops-kpi-daily- /
+    // devops-kpi-weekly-snapshot-date-lag-fix). Passing that snapshotDate through to
+    // computePlatformScorecard closes the window at [snapshotDate − 29, snapshotDate] so the
+    // persisted monthly snapshot byte-matches the audit's ground-truth re-derivation (clears the
+    // loop:kpi_drift:human_touch_per_build:monthly false-positive at the writer instead of masking
+    // it at the audit). The done-set guard matches on the same lagged snapshot_date so a second
+    // beat within the same UTC day sees the yesterday-dated row and skips (spend-saving); the
+    // upsert on (metric_key, cadence='monthly', snapshot_date) makes a same-date re-run a no-op
+    // anyway. Best-effort + idempotent.
     const scorecardMonthly = await step.run("snapshot-platform-scorecard-monthly", async () => {
       const today = new Date().toISOString().slice(0, 10);
-      const monthStart = `${today.slice(0, 7)}-01`;
+      const snapshotDate = new Date(new Date(`${today}T00:00:00Z`).getTime() - 86_400_000)
+        .toISOString()
+        .slice(0, 10);
       const { data: existing } = await admin
         .from("platform_scorecard_snapshots")
         .select("workspace_id")
         .eq("cadence", "monthly")
-        .gte("snapshot_date", monthStart);
+        .eq("snapshot_date", snapshotDate);
       const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
       let snapshotted = 0;
       let metricsWritten = 0;
       for (const workspaceId of result.workspaceIds || []) {
-        if (done.has(workspaceId)) continue; // already snapshotted this calendar month (spend-saving)
+        if (done.has(workspaceId)) continue; // already snapshotted for that lagged UTC day (spend-saving)
         try {
-          const rows = await computePlatformScorecard(workspaceId, { cadence: "monthly", windowDays: 30 });
+          const rows = await computePlatformScorecard(workspaceId, { cadence: "monthly", windowDays: 30, snapshotDate });
           if (rows.length) {
             snapshotted++;
             metricsWritten += rows.length;
@@ -249,7 +257,7 @@ export const platformDirectorCron = inngest.createFunction(
           console.error(`[platform-director-cron] monthly scorecard snapshot failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
         }
       }
-      return { snapshotted, metricsWritten, month_start: monthStart };
+      return { snapshotted, metricsWritten, snapshot_date: snapshotDate };
     });
 
     // The Platform Department Scorecard audit pass (devops-kpi-review-sdk-and-data-fix Phase 5,
