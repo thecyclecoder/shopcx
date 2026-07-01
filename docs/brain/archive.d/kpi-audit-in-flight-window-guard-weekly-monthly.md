@@ -1,0 +1,1 @@
+- **Extend kpi-review's in-flight window guard from daily to weekly + monthly** · verified 2026-07-01 · → [[libraries/kpi-review]]
