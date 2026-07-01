@@ -1,0 +1,1 @@
+- **An errored pre-merge spec-test must be visible + re-runnable** · verified 2026-07-01 · → [[../libraries/agent-jobs]] + [[../libraries/spec-test-runs]]
