@@ -498,6 +498,15 @@ const ACCOUNT_POOL: string[] = (
 // Max's wall resets ~5h after first use; the CLI doesn't hand us the exact reset, so a capped account
 // rejoins rotation after this conservative cooldown (the spec's "reset-time estimate").
 const USAGE_CAP_COOLDOWN_MS = 5 * 60 * 60 * 1000;
+// cap-estimate-is-a-reprobe-not-a-hard-wait: the reset time we parse (or the 5h fallback) is only an
+// ESTIMATE, and Max's window is ROLLING — an account often frees up EARLIER than the stated reset (a
+// 10:22 wall whose window actually resets 10:50, seen 2026-07-01, was held out until a flat 3:22 guess).
+// So we NEVER hold an account out longer than this before RE-PROBING it: cappedUntil is clamped to
+// now+CAP_MAX_MS. When it expires the account rejoins for a trial; if it's genuinely still capped the
+// next session re-hits the wall and re-caps for another interval (one cheap failed start), but a recovered
+// account is back within CAP_MAX_MS instead of hours. This also un-sticks a stale over-estimate on restart
+// (restoreAccountCapsOnBoot clamps the same way), so a self-update restart can't cement a wrong reset time.
+const CAP_MAX_MS = 20 * 60 * 1000;
 
 interface AccountState {
   configDir: string;
@@ -579,10 +588,14 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
     const now = Date.now();
     let restored = 0;
     for (let i = 0; i < accounts.length && i < pool.length; i++) {
-      const until = pool[i]?.capped_until ? new Date(pool[i].capped_until as string).getTime() : 0;
+      const rawUntil = pool[i]?.capped_until ? new Date(pool[i].capped_until as string).getTime() : 0;
+      // Clamp the restored estimate to the re-probe horizon so a stale/over-estimated cap (e.g. a pre-fix
+      // +5h guess) can't survive restarts and hold a recovered account out for hours — it gets re-probed
+      // within CAP_MAX_MS of boot. A fresh (already-clamped) cap restores unchanged; only a far estimate shrinks.
+      const until = rawUntil > now ? Math.min(rawUntil, now + CAP_MAX_MS) : 0;
       if (until > now) { accounts[i].cappedUntil = until; accounts[i].capEventLogged = true; restored++; }
     }
-    if (restored) console.log(`[multi-account] restored ${restored} capped account(s) from the last heartbeat — no re-probe`);
+    if (restored) console.log(`[multi-account] restored ${restored} capped account(s) from heartbeat — re-probe within ${Math.round(CAP_MAX_MS / 60000)}m`);
   } catch (e) {
     console.warn("[multi-account] cap-state restore failed (continuing healthy):", e instanceof Error ? e.message : e);
   }
@@ -672,7 +685,10 @@ function parseResetTime(text: string, now: number): number | null {
 function markAccountCapped(dir: string, now: number, errorText?: string) {
   const a = accountByDir.get(dir);
   if (!a) return;
-  a.cappedUntil = (errorText && parseResetTime(errorText, now)) || now + USAGE_CAP_COOLDOWN_MS;
+  // The parsed/fallback reset is an estimate; never trust it past CAP_MAX_MS without a re-probe (rolling
+  // window frees up early; a null-parse fallback of +5h is a gross over-estimate). Clamp the re-probe horizon.
+  const estimate = (errorText && parseResetTime(errorText, now)) || now + USAGE_CAP_COOLDOWN_MS;
+  a.cappedUntil = Math.min(estimate, now + CAP_MAX_MS);
   if (!a.capEventLogged) {
     a.capEventLogged = true; // record the `cap` once per window; noteAccountRecoveries logs the matching `recovered`
     recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ${new Date(a.cappedUntil).toISOString()}`);
