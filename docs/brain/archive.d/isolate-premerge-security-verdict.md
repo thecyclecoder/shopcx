@@ -1,0 +1,1 @@
+- **Isolate the pre-merge security verdict** · verified 2026-07-01 · → [[../libraries/security-agent]] · [[../libraries/agent-jobs]]
