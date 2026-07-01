@@ -68,27 +68,59 @@ function RoleNav({ org }: { org: OrgChart }) {
         </span>
       </Link>
 
-      <p className="px-1 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Directors</p>
-      <div className="space-y-1">
+      <p className="px-1 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Directors + Agents</p>
+      <div className="space-y-2">
         {org.directors.map((d) => {
           const persona = getPersona(d.slug, d.title);
           return (
-            <Link
-              key={d.slug}
-              href={`/dashboard/agents/${encodeURIComponent(d.slug)}`}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
-            >
-              <PersonaAvatar persona={persona} size={30} />
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-2">
-                  <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{persona.name}</span>
-                  <span className="text-[11px] text-zinc-400">{persona.role}</span>
+            <div key={d.slug}>
+              <Link
+                href={`/dashboard/agents/${encodeURIComponent(d.slug)}`}
+                className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                <PersonaAvatar persona={persona} size={30} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{persona.name}</span>
+                    <span className="text-[11px] text-zinc-400">{persona.role}</span>
+                  </span>
+                  <span className="mt-0.5 block">
+                    <StatusBadge status={d.status} />
+                  </span>
                 </span>
-                <span className="mt-0.5 block">
-                  <StatusBadge status={d.status} />
-                </span>
-              </span>
-            </Link>
+              </Link>
+              {/* agents-sidebar-kpis-and-profile-redesign Phase 3 — workers grouped under their owning director,
+                  each with a direct KPIs affordance so the founder reaches Cleo (and any worker's KPIs) in one
+                  click from the hub without switching to Org chart. */}
+              {d.workers.length > 0 && (
+                <ul className="mt-0.5 ml-3 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                  {d.workers.map((w) => {
+                    const wp = getPersona(w.kind, w.label);
+                    return (
+                      <li key={w.kind} className="flex items-center gap-1">
+                        <Link
+                          href={`/dashboard/agents/${encodeURIComponent(w.kind)}`}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                          title={w.description}
+                        >
+                          <PersonaAvatar persona={wp} size={20} />
+                          <span className="min-w-0 flex-1 truncate text-[12px] text-zinc-700 dark:text-zinc-300">
+                            {wp.name}
+                          </span>
+                        </Link>
+                        <Link
+                          href={`/dashboard/agents/${encodeURIComponent(w.kind)}/kpi`}
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+                          title={`${wp.name}'s KPIs`}
+                        >
+                          KPIs
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
           );
         })}
       </div>

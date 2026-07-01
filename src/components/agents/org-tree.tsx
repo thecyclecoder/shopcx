@@ -116,18 +116,30 @@ export function OrgTree({ org }: { org: OrgChart }) {
                   <div className="h-4 w-px bg-zinc-200 dark:bg-zinc-800" />
                   <div className="flex flex-col items-stretch gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
                     {d.workers.map((w) => (
-                      <Node
-                        key={w.kind}
-                        slug={w.kind}
-                        label={w.label}
-                        size="worker"
-                        subtitle={w.kind}
-                        badge={
-                          <span className="mt-0.5">
-                            <WorkerStatusBadge status={w.status} reason={w.statusReason} />
-                          </span>
-                        }
-                      />
+                      <div key={w.kind} className="flex flex-col items-stretch gap-0.5">
+                        <Node
+                          slug={w.kind}
+                          label={w.label}
+                          size="worker"
+                          subtitle={w.kind}
+                          badge={
+                            <span className="mt-0.5">
+                              <WorkerStatusBadge status={w.status} reason={w.statusReason} />
+                            </span>
+                          }
+                        />
+                        {/* agents-sidebar-kpis-and-profile-redesign Phase 3 — a direct KPIs affordance on
+                            every worker node so the founder can jump straight to any agent's KPIs from the
+                            org chart (not only via the profile). Rendered as a sibling <Link> because nested
+                            <a> tags aren't valid HTML — the Node itself is already a <Link> to the profile. */}
+                        <Link
+                          href={`/dashboard/agents/${encodeURIComponent(w.kind)}/kpi`}
+                          className="rounded-md px-1 py-0.5 text-center text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+                          title={`${w.label}'s KPIs`}
+                        >
+                          KPIs →
+                        </Link>
+                      </div>
                     ))}
                   </div>
                 </>
