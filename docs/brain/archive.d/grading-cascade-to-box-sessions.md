@@ -1,0 +1,1 @@
+- **Move every grader onto Max box sessions that read the real diff** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
