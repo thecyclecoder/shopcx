@@ -33,10 +33,11 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { pickDirectorGradeBatch } from "@/lib/agents/director-grader";
-import { agentGradingBatchReady, detectGradeDropCoaching, pickAgentGradeBatch, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
+import { agentGradingBatchReady, detectGradeDropCoaching, pickAgentGradeBatch, gradeableKindsForFunction } from "@/lib/agents/agent-grader";
 import { computePlatformScorecard, getRegisteredMetrics } from "@/lib/agents/platform-scorecard";
 import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
 import {
+  PLATFORM,
   platformHasPendingWork,
   platformStandingPassRecentlyActive,
   recordPlatformStandingPassGateBeat,
@@ -219,11 +220,16 @@ export const platformDirectorCron = inngest.createFunction(
       let considered = 0;
       let enqueued = 0;
       let coached = 0;
+      // director-grades-only-own-charge (Phase 1) — Ada supervises only the PLATFORM-owned workers.
+      // Every grading + coaching call below is scoped to `PLATFORM` so this cron stops sweeping
+      // ticket-improve/triage-escalations/product-seed/migration-fix/storefront-optimizer (CS/CMO/
+      // Retention/Growth workers) — their own director will grade them once live.
+      const platformKinds = gradeableKindsForFunction(PLATFORM);
       for (const workspaceId of result.workspaceIds || []) {
         try {
-          const batch = await agentGradingBatchReady(admin, workspaceId);
+          const batch = await agentGradingBatchReady(admin, workspaceId, Date.now(), PLATFORM);
           if (batch.ready) {
-            const pool = await pickAgentGradeBatch({ workspaceId, admin });
+            const pool = await pickAgentGradeBatch({ workspaceId, admin, fn: PLATFORM });
             if (pool.length) {
               // Count the batch toward `considered` up front — regardless of dedup / insert-error —
               // so the grading-liveness heartbeat can distinguish "no work" (considered=0) from
@@ -248,7 +254,11 @@ export const platformDirectorCron = inngest.createFunction(
                   kind: "agent-grade",
                   status: "queued",
                   created_by: null,
-                  instructions: JSON.stringify({ agent_job_ids: pool.map((j) => j.id) }),
+                  // director-grades-only-own-charge Phase 1 — stamp the enqueuing director's function
+                  // on the payload so the box lane's post-batch `detectGradeDropCoaching` fan-out
+                  // stays scoped to this director's charge (defense-in-depth; the box also defaults
+                  // to 'platform' for a legacy row that predates this field).
+                  instructions: JSON.stringify({ agent_job_ids: pool.map((j) => j.id), fn: PLATFORM }),
                 });
                 if (!error) {
                   enqueued++;
@@ -262,9 +272,9 @@ export const platformDirectorCron = inngest.createFunction(
           // newly box-written grade is caught within one beat (idempotent + loop-guarded — a repeat
           // call on the same slip is a no-op after the coaching lands). Cheap: each call is a rollup
           // query + an LLM call ONLY when the rollup actually slipped. Best-effort per kind.
-          for (const agentKind of GRADEABLE_KINDS) {
+          for (const agentKind of platformKinds) {
             try {
-              const c = await detectGradeDropCoaching({ workspaceId, agentKind, admin });
+              const c = await detectGradeDropCoaching({ workspaceId, agentKind, admin, fn: PLATFORM });
               if (c.coached) coached++;
             } catch (e) {
               console.error(`[platform-director-cron] coach ${agentKind} ws=${workspaceId}:`, e instanceof Error ? e.message : e);
