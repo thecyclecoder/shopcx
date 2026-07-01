@@ -1,0 +1,1 @@
+- **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
