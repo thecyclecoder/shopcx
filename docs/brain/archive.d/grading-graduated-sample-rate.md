@@ -1,0 +1,1 @@
+- **Grade a sample by rolling average; lower the proven bar 9→8** · verified 2026-07-01 · → [[libraries/agent-grader]]
