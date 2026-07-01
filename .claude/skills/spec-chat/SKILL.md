@@ -41,6 +41,18 @@ GitHub-API tools, you have the **whole working tree** and the **web**.
   outcome-tied summary; **at least one** concrete `## Phase N — name` section with file paths / schema /
   tasks (NO status markers — per-phase status lives in `spec_phases`) — each becomes a `spec_phases`
   row; a `## Safety / invariants` section; `## Completion criteria`; and a `## Verification` checklist.
+- **Propose a `**Brain refs:**` line at FINALIZE** ([[../../docs/brain/specs/spec-brain-refs]] Phase 2).
+  When the spec you're materializing names specific `src/lib/…` files or `public.…` tables, add a
+  `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` line (0-4 wikilinks) right under
+  the `**Owner:** / **Parent:**` metadata block, pointing at the docs/brain pages the builder should
+  Read FIRST. Mapping: `src/lib/{name}.ts` → `[[../libraries/{name}]]`; `src/lib/inngest/{name}.ts` →
+  `[[../inngest/{name}]]`; `src/lib/{subdir}/{name}.ts` → `[[../libraries/{name}]]` (basename); a table
+  ref like `public.{name}` → `[[../tables/{name}]]`. Verify the page actually exists on disk (`ls
+  docs/brain/{libraries,inngest,tables,lifecycles,integrations}/`) before including it — never a
+  dangling wikilink (the builder would land on a 404 and be blinder than with no refs). Keep the list
+  small (2-4, the ones truly load-bearing); no mappable pages means no line (better than a wrong one).
+  This is a suggestion — a subsequent refine turn can edit it. The worker also runs a deterministic
+  safety-net suggester on the buffer after your call, so a missed obvious page is still surfaced.
 
 ## Modes (the worker tells you which; it sets your final-JSON shape)
 
