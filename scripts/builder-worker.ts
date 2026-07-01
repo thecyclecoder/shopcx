@@ -9020,6 +9020,12 @@ interface SpecReviewDecisionJson {
   verdict: "pass" | "needs_fix" | "approve" | "defer";
   reason: string;
   defects?: string[];
+  // vale-reasons-the-disposition Phase 1 — on a PASS, Vale ALSO recommends a reasoned planned/deferred
+  // disposition. The worker persists it on specs.vale_disposition + specs.vale_disposition_reason; Ada's
+  // Phase-2 sweep will consume it (retiring the trust-the-author stub). Absent on needs_fix + on legacy
+  // passes (the sweep falls back to intended_status).
+  disposition?: "planned" | "deferred";
+  disposition_reason?: string;
 }
 
 async function runSpecReviewJob(job: Job) {
@@ -9082,7 +9088,7 @@ async function runSpecReviewJob(job: Job) {
     const prompt = [
       `You are Vale, the box's Spec-Review agent — the meticulous reviewer who guards the build pipeline. Use the spec-review skill (cwd is the repo root). You are on Max (no ANTHROPIC_API_KEY, web search on), read-only against the repo + DB. The WORKER (deterministic Node) is the only component that mutates state — you investigate and emit verdicts.`,
       ``,
-      `Phase 3 (governance — CEO design): you check QUALITY only. The DIRECTOR (Ada) decides planned vs deferred — NOT you. So your verdict is a binary "is this spec well-formed?" — pass OR needs_fix. A passing spec stays in_review for Ada's disposition lane (she picks it up next); a malformed spec stays in_review with the diagnosis recorded.`,
+      `Phase 3 (governance — CEO design, refined by vale-reasons-the-disposition): you check QUALITY (pass/needs_fix) AND — on a PASS — ALSO recommend a reasoned planned/deferred disposition. Ada (the Platform/DevOps Director) still DISPOSES: she applies your recommendation through her existing asymmetric routing (same → autonomous, DOWNGRADE → autonomous + notify with YOUR reason, UPGRADE → CEO-gated Approval Request carrying YOUR reason). You PROPOSE; the director + the CEO gate still hold. A passing spec stays in_review for Ada's sweep; a malformed spec stays in_review with the diagnosis recorded and NO disposition (an ill-formed spec is not dispositionable yet).`,
       ``,
       `🗃️ DB-DRIVEN SPECS — specs now live in public.specs + public.spec_phases, NOT in docs/brain/specs/*.md (those files were DELETED in the db-driven-specs purge — do NOT try to read them, they don't exist). The worker has MATERIALIZED each in_review spec's DB row to a temp file under .box/. Read THAT file, never docs/brain/specs/….`,
       ``,
@@ -9098,14 +9104,14 @@ async function runSpecReviewJob(job: Job) {
       `  • A Verification block per phase — each phase in the materialized file should carry its "### Verification" section (spec_phases.verification) so the spec-test agent can grade it later. A phase with no verification is a defect; a one-shot spec needs at least one Verification block.`,
       ``,
       `Then route each spec with ONE quality verdict:`,
-      `  • pass — the CHECKLIST passes. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane (she'll decide planned vs deferred). You DO NOT decide that — even if the spec's own body says "park this," report pass; Ada reads the same signal and disposes.`,
-      `  • needs_fix — the CHECKLIST FAILS (mangled phases / missing Owner / missing Parent / no Verification / missing Blocked-by when prerequisites exist / customer-referenced table with no Sonnet data tool). The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Be SPECIFIC in defects — name the missing field / the mangled phase numbers.`,
+      `  • pass — the CHECKLIST passes. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane. ALSO emit disposition + disposition_reason (vale-reasons-the-disposition Phase 1): choose planned when the spec is small / unblocks other flagged work / fixes a live outage / carries a hot dependency signal in the body; choose deferred when scope is large or fuzzy, a stated prerequisite is unshipped, or the body explicitly parks itself. When you cannot tell, match the author's intent (a same disposition flips silently). Be concrete in disposition_reason (a named dependency, a goal member, a scope note — not vibes). Ada then applies your recommendation: same → autonomous, DOWNGRADE → autonomous + CEO notify, UPGRADE → CEO Approval Request. Your reason is what the CEO sees on DOWNGRADE/UPGRADE.`,
+      `  • needs_fix — the CHECKLIST FAILS (mangled phases / missing Owner / missing Parent / no Verification / missing Blocked-by when prerequisites exist / customer-referenced table with no Sonnet data tool). The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Be SPECIFIC in defects — name the missing field / the mangled phase numbers. DO NOT emit disposition on needs_fix.`,
       ``,
       `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating script. Your final message is ONE JSON object, no prose before/after (if fenced, the JSON is the last thing in the message):`,
-      `  {"status":"completed","decisions":[{"slug":"…","verdict":"pass|needs_fix","reason":"<one plain-text sentence>","defects":["…"]}]}`,
+      `  {"status":"completed","decisions":[{"slug":"…","verdict":"pass","reason":"…","defects":[],"disposition":"planned|deferred","disposition_reason":"…"},{"slug":"…","verdict":"needs_fix","reason":"…","defects":["…"]}]}`,
       `  {"status":"error","error":"<why you cannot proceed>"}`,
       ``,
-      `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix).`,
+      `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix). On pass, disposition (if set) MUST be "planned" or "deferred" and MUST be paired with disposition_reason; the worker IGNORES disposition on a needs_fix.`,
     ].join("\n");
 
     const { session, resultText, isError, raw, usage, model, configDir: reviewDir } = await runBoxLane(
@@ -9142,6 +9148,7 @@ async function runSpecReviewJob(job: Job) {
     const queuedSet = new Set(reviewable);
     let passed = 0;
     let needsFix = 0;
+    let dispositions = 0; // vale-reasons-the-disposition Phase 1 — how many passes carried a Vale rec
     const skipped: string[] = [];
     for (const d of parsed.decisions) {
       if (!d || typeof d.slug !== "string" || !queuedSet.has(d.slug)) { skipped.push(d?.slug ?? "(no-slug)"); continue; }
@@ -9151,14 +9158,25 @@ async function runSpecReviewJob(job: Job) {
       if (!verdict) { skipped.push(d.slug); continue; }
       const reason = String(d.reason || "").slice(0, 1000);
       const defects = Array.isArray(d.defects) ? d.defects.map((x) => String(x).slice(0, 300)).slice(0, 20) : [];
-      const result = await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects });
-      if (result.applied === "pass") passed++;
-      else needsFix++;
+      // vale-reasons-the-disposition Phase 1 — carry Vale's reasoned recommendation through to the
+      // applier ONLY on a pass (an ill-formed spec is not dispositionable) and ONLY when both fields
+      // are present. The applier is defensive; the worker just pipes.
+      const rawDisposition = verdict === "pass" && (d.disposition === "planned" || d.disposition === "deferred") ? d.disposition : undefined;
+      const rawDispositionReason = rawDisposition && typeof d.disposition_reason === "string" ? String(d.disposition_reason).slice(0, 1000) : undefined;
+      const disposition = rawDisposition && rawDispositionReason ? rawDisposition : undefined;
+      const disposition_reason = disposition ? rawDispositionReason : undefined;
+      const result = await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects, disposition, disposition_reason });
+      if (result.applied === "pass") {
+        passed++;
+        if (disposition) dispositions++;
+      } else {
+        needsFix++;
+      }
     }
     // Phase 3 — every Vale pass enqueues a candidate for Ada's disposition lane. Run the sweep INLINE
     // so a pass + dispose lands in one cron tick (no waiting for the next director pass).
     const dispo = await runAdaDispositionSweep(a, job.workspace_id);
-    const tail = `reviewed ${parsed.decisions.length}/${reviewable.length} — ✅${passed} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
+    const tail = `reviewed ${parsed.decisions.length}/${reviewable.length} — ✅${passed}${dispositions ? ` (${dispositions} w/ vale-rec)` : ""} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {

@@ -4,9 +4,9 @@ The **spec-review** library — the typed verdict-applier + enqueue helper behin
 
 **File:** `src/lib/agents/spec-review.ts`
 
-## Phase 3 — narrowed to QUALITY ONLY
+## Phase 3 — QUALITY + a reasoned disposition proposal (vale-reasons-the-disposition)
 
-The pipeline shape is **author → Spec Review (Vale, quality) → Director (Ada) disposes Planned vs Deferred → Build**. Vale's verdict is binary: `pass` or `needs_fix`. The planned/deferred call is Ada's (see [[agents-spec-dispose]]). The legacy `approve` / `defer` verdict strings still parse for back-compat (both auto-route as `pass`).
+The pipeline shape is **author → Spec Review (Vale, quality + disposition proposal) → Director (Ada) disposes Planned vs Deferred → Build**. Vale's verdict is binary: `pass` or `needs_fix`. On a `pass`, [[../specs/vale-reasons-the-disposition]] Phase 1 additionally has Vale emit a reasoned planned/deferred recommendation with a plain-text WHY (`disposition` + `disposition_reason`) — hydrated once, extra verdict free. The recommendation persists on `specs.vale_disposition` + `specs.vale_disposition_reason`; Ada's disposition sweep consumes it in Phase 2 (retiring the trust-the-author stub). Ada still DISPOSES via the asymmetric CEO-gated routing (see [[agents-spec-dispose]]) — Vale only PROPOSES. The legacy `approve` / `defer` verdict strings still parse for back-compat (both auto-route as `pass`).
 
 ## Exports
 
@@ -22,8 +22,8 @@ Insert ONE `agent_jobs` row `kind='spec-review'` for a workspace IFF there's ≥
 
 Apply ONE Vale quality verdict to `spec_card_state` + record the audit row. Two branches:
 
-- **pass** → `markSpecCardValePassed(ws, slug, { actor: 'spec-review', reason })` — sets `flags.vale_pass=true` so Ada's disposition lane can pick it up. Status STAYS `in_review`.
-- **needs_fix** → leaves the spec in `in_review` (the build hard-stop holds); the diagnosis (`reason` + `defects[]`) is recorded as a `director_activity` row (`actor=spec-review`, `action_kind='spec_review_needs_fix'`).
+- **pass** → `markSpecCardValePassed(ws, slug, { actor: 'spec-review', reason }, dispositionOpt?)` — sets `flags.vale_pass=true` so Ada's disposition lane can pick it up. When the decision carries a `disposition` + `disposition_reason` (vale-reasons-the-disposition Phase 1), they land on `flags.vale_disposition` + `flags.vale_disposition_reason` (mirrored to the same-named `specs` columns via [[spec-card-state]] `dualWriteSpecRow`). Status STAYS `in_review`.
+- **needs_fix** → leaves the spec in `in_review` (the build hard-stop holds); the diagnosis (`reason` + `defects[]`) is recorded as a `director_activity` row (`actor=spec-review`, `action_kind='spec_review_needs_fix'`). Any `disposition` on a needs_fix is IGNORED (an ill-formed spec is not dispositionable yet).
 
 Best-effort + idempotent — re-running the same verdict produces the same end state. Errors are swallowed (the box rerun catches them next cadence). Legacy `approve`/`defer` verdict strings auto-route as `pass`.
 
@@ -35,8 +35,10 @@ export type SpecReviewVerdict = "pass" | "needs_fix";
 export interface SpecReviewDecision {
   slug: string;
   verdict: SpecReviewVerdict;
-  reason: string;        // one plain-text sentence the CEO + grader read
-  defects?: string[];    // specific checklist failures — required when verdict='needs_fix'
+  reason: string;                          // one plain-text sentence the CEO + grader read
+  defects?: string[];                      // specific checklist failures — required when verdict='needs_fix'
+  disposition?: "planned" | "deferred";    // vale-reasons-the-disposition Phase 1 — recommendation on a PASS
+  disposition_reason?: string;             // plain-text WHY paired with disposition (CEO sees it verbatim on UPGRADE/DOWNGRADE)
 }
 ```
 
@@ -44,7 +46,7 @@ export interface SpecReviewDecision {
 
 The agent stamps one of these `action_kind` values per spec ([[../tables/director_activity]]):
 
-- `spec_review_passed` — well-formed (CHECKLIST cleared) → `flags.vale_pass=true`; spec stays in_review for Ada's disposition lane.
+- `spec_review_passed` — well-formed (CHECKLIST cleared) → `flags.vale_pass=true`; spec stays in_review for Ada's disposition lane. vale-reasons-the-disposition Phase 1 — when the pass carried a `disposition` + `disposition_reason`, both are recorded on the row's `metadata.vale_disposition` + `metadata.vale_disposition_reason` (the same reason surfaces on `specs.vale_disposition_reason` for Ada's sweep + CEO surfaces).
 - `spec_review_needs_fix` — checklist failed (the `defects[]` list lives on the row's `metadata`).
 - (legacy) `spec_review_approved` / `spec_review_deferred` — pre-Phase-3 Vale also routed planned/deferred; the writers are no longer emitted, but the enum values are retained for ledger continuity.
 

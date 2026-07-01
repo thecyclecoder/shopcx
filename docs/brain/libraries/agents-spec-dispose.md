@@ -31,7 +31,7 @@ Every Vale-passed `in_review` spec the lane hasn't touched. Reads `spec_card_sta
 
 ### `adaDispositionFor(candidate): AdaDecision`
 
-The POLICY seam. Phase 3 ships a TRUST-THE-AUTHOR default — Ada agrees with `intended_status`, so the asymmetric check always lands on `kind='same'` and the sweep flips the card silently. The UPGRADE / DOWNGRADE plumbing (writers + CEO inbox card + notification) is fully wired so a future heuristic (build capacity, criticality, blocker pressure) can drop in here and the rest of the lane keeps working — no policy change needed downstream.
+The POLICY seam. Phase 3 ships a TRUST-THE-AUTHOR default — Ada agrees with `intended_status`, so the asymmetric check always lands on `kind='same'` and the sweep flips the card silently. The UPGRADE / DOWNGRADE plumbing (writers + CEO inbox card + notification) is fully wired so a future heuristic (build capacity, criticality, blocker pressure) can drop in here and the rest of the lane keeps working — no policy change needed downstream. [[../specs/vale-reasons-the-disposition]] Phase 1 populates the seam's INPUT — `specs.vale_disposition` + `specs.vale_disposition_reason` now carry Vale's reasoned recommendation (set on her PASS by [[agents-spec-review]] `applySpecReviewDecision`). Phase 2 (a follow-up) will change `adaDispositionFor` to CONSUME them, retiring the stub — Phase 1 makes the seam DB-ready.
 
 ### `applyAdaDispositionDecision(admin, workspaceId, candidate, decision): Promise<{applied, ok}>`
 
