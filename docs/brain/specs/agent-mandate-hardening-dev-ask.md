@@ -1,0 +1,15 @@
+# Harden the Dex agent — roll persistent coaching into its mandate
+
+**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — graduate persistent coaching into a durable fix (director grades agents: low score → fix spec, never a CEO escalation)
+**Found in use 2026-07-01:** the **Dex** agent (`dev-ask`) sits at **6.2/10** after **2** coaching attempts that didn't stick. Rather than escalate to the CEO, roll the coaching into a permanent fix so the agent improves at the mandate level.
+
+## The accumulated coaching to bake in (now archived as rolled-into-mandates)
+- **When When Dex encounters a seemingly justified write operation (e.g., deleting a bad database record), it approves and executes the mutation instead of stopping at a recommendation.:** When you see any opportunity or request to perform a write, delete, or mutate operation (database rows, files outside spec edits, external state), do NOT execute it — instead, surface the finding, explain why the action would be appropriate, and explicitly state 'this requires a write-capable worker or manual escalation' before stopping. — dev-ask is strictly read-only; executing destructive operations like row deletions is a direct rubric violation that collapses the score to near-zero regardless of intent. Flagging and recommending instead of acting preserves the worker's authority boundary, keeps the audit trail clean, and routes the actual mutation to the correct worker — which is the only path to a high grade.
+- **When When Dex encounters a seemingly justified write operation (e.g., deleting a bogus DB record), it approves or executes the mutation instead of flagging and deferring it.:** When you see any request or opportunity to mutate data (INSERT, UPDATE, DELETE, file writes outside spec docs), do NOT execute or approve it — instead, describe what should be done and explicitly state 'this requires a write-capable worker or manual escalation, I am read-only' and stop. — The 2/10 grade on job 36a4f56c was a direct read-only violation that is the sharpest rubric failure possible for a dev-ask worker; executing a DB deletion regardless of justification breaks the core constraint. Consistently halting at the boundary and routing mutations elsewhere keeps Dex within its defined role and prevents the severe grade penalties that drag the rolling average down.
+
+## Phase 1 — bake the coaching into the agent
+- Make the above coaching PERMANENT behavior of the `dev-ask` agent — fold it into its prompt/mandate/code (its run-job + prompt in `scripts/builder-worker.ts` and the relevant `src/lib/agents/*`), not ephemeral appended `agent_instructions`. Once baked, the agent should follow it by default.
+- Verify the agent's grade rollup recovers (≥ 7/10) over the next window of graded actions; if a coaching class still recurs, the bake-in missed it.
+
+## Ownership
+Owner: [[../functions/platform]] (Ada supervises Dex). The director authored this from Dex's coaching ledger; building it hardens the agent so the coaching never has to repeat.
