@@ -47,7 +47,7 @@ interface FunnelTreeResponse {
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
   referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
-  breakdowns: { device: BreakdownRowT[]; country: BreakdownRowT[] };
+  breakdowns: { device: BreakdownRowT[]; country: BreakdownRowT[]; language: BreakdownRowT[] };
 }
 interface BreakdownRowT { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
 
@@ -1049,9 +1049,10 @@ export default function StorefrontFunnelPage() {
           <SurveyFunnelCard data={survey} loading={surveyLoading} dest={surveyDest} onDest={setSurveyDest} destOptions={chapter?.availableDestinations ?? []} />
 
           {tree && (
-            <div className="mb-8 grid gap-4 lg:grid-cols-2">
+            <div className="mb-8 grid gap-4 lg:grid-cols-3">
               <BreakdownPanel title="Device" rows={tree.breakdowns.device} />
               <BreakdownPanel title="Country" rows={tree.breakdowns.country} />
+              <BreakdownPanel title="Language" rows={tree.breakdowns.language} />
             </div>
           )}
 

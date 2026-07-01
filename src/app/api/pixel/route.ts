@@ -105,6 +105,7 @@ const VALID_ARMS = new Set<SessionArm>(["control", "variant", "holdout"]);
 interface SessionContext {
   landing_url?: string;
   referrer?: string;
+  language?: string;
   viewport_width?: number;
   viewport_height?: number;
   utm_source?: string;
@@ -479,6 +480,7 @@ async function persistEvents({
         ip_city: ipCity,
         landing_url: sessionContext.landing_url ?? null,
         referrer: sessionContext.referrer ?? null,
+        browser_language: sessionContext.language ?? null,
         utm_source: sessionContext.utm_source ?? null,
         utm_medium: sessionContext.utm_medium ?? null,
         utm_campaign: sessionContext.utm_campaign ?? null,

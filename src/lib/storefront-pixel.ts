@@ -48,6 +48,8 @@ interface QueuedEvent {
 interface SessionContext {
   landing_url?: string;
   referrer?: string;
+  /** navigator.language (e.g. es-PR / en-US) — to size the Spanish-speaking share. */
+  language?: string;
   viewport_width?: number;
   viewport_height?: number;
   utm_source?: string;
@@ -394,6 +396,7 @@ function buildSessionContext(): SessionContext {
   const ctx: SessionContext = {
     landing_url: window.location.href,
     referrer: document.referrer || undefined,
+    language: (typeof navigator !== "undefined" ? navigator.language : "") || undefined,
     viewport_width: window.innerWidth,
     viewport_height: window.innerHeight,
   };

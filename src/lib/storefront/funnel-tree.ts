@@ -1203,7 +1203,13 @@ export async function computeBottlenecks(args: {
 // is visible. Slice-aware (Product × Source × Referrer). Source is NOT a
 // breakdown here — it's a page slice.
 export interface BreakdownRow { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
-export interface BreakdownsResult { device: BreakdownRow[]; country: BreakdownRow[]; }
+export interface BreakdownsResult { device: BreakdownRow[]; country: BreakdownRow[]; language: BreakdownRow[]; }
+
+const LANG_LABEL: Record<string, string> = { es: "Spanish (es)", en: "English (en)", pt: "Portuguese (pt)", fr: "French (fr)" };
+function languageBucket(raw: string | null): string {
+  const p = (raw || "").split("-")[0].toLowerCase();
+  return p ? (LANG_LABEL[p] || p) : "(not captured)";
+}
 
 export async function computeBreakdowns(args: {
   admin: Admin; workspaceId: string; startIso: string; endIso: string;
@@ -1258,6 +1264,7 @@ export async function computeBreakdowns(args: {
   type Agg = { visits: number; orders: number; ltv: number };
   const device = new Map<string, Agg>();
   const country = new Map<string, Agg>();
+  const language = new Map<string, Agg>();
   const bump = (map: Map<string, Agg>, key: string, ordered: boolean, ltv: number) => {
     const a = map.get(key) || { visits: 0, orders: 0, ltv: 0 };
     a.visits++; if (ordered) a.orders++; a.ltv += ltv; map.set(key, a);
@@ -1265,7 +1272,7 @@ export async function computeBreakdowns(args: {
 
   for (let i = 0; i < sessionIds.length; i += 300) {
     const { data } = await admin.from("storefront_sessions")
-      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer, device_type, ip_country")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer, device_type, ip_country, browser_language")
       .in("id", sessionIds.slice(i, i + 300));
     for (const s of data || []) {
       if (s.is_internal || s.is_bot) continue;
@@ -1281,6 +1288,7 @@ export async function computeBreakdowns(args: {
       const ltv = ov?.ltv || 0;
       bump(device, (s.device_type as string) || "unknown", ordered, ltv);
       bump(country, (s.ip_country as string) || "—", ordered, ltv);
+      bump(language, languageBucket((s.browser_language as string) ?? null), ordered, ltv);
     }
   }
 
@@ -1291,7 +1299,7 @@ export async function computeBreakdowns(args: {
       ltv_per_visit_cents: a.visits > 0 ? Math.round(a.ltv / a.visits) : 0,
     })).sort((x, y) => y.visits - x.visits);
 
-  return { device: toRows(device), country: toRows(country) };
+  return { device: toRows(device), country: toRows(country), language: toRows(language) };
 }
 
 // ───────────────── Cart + lead analytics (summary, slice-aware) ─────────────────
