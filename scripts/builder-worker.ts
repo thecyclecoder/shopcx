@@ -14905,8 +14905,13 @@ async function dispatchJob(job: Job) {
           const { getSpec: getRoadmapSpec } = await import("../src/lib/brain-roadmap");
           const got = await getRoadmapSpec(slug, job.workspace_id);
           const phases = got?.card.phases ?? [];
-          // First phase whose DERIVED status is neither shipped nor rejected = the next planned phase to build.
-          const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected");
+          // First phase not yet shipped/rejected AND not already BUILT (build_sha set) = the next phase to build.
+          // The `!build_sha` clause is REQUIRED (mirrors finalizeBuiltPhase's derivation): without it, once P1 is
+          // `in_progress` (built, unshipped) this findIndex returns P1 for EVERY subsequent phase build — so the
+          // commit message + stamp always resolve to "phase 1", P1's build_sha is overwritten each time, and
+          // P2/P3 never get stamped (accumulation wedges at "positions 2,3 not built"). Title-scoped instructions
+          // (no "Phase N") always fall to this branch, so the omission silently broke every multi-phase spec.
+          const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha);
           if (idx >= 0 && phases.length > 1) {
             phasePosition = idx + 1; // M1 provenance: stamp the next-planned phase's position on the commit
             // Only scope when there's MORE than one phase — a single-phase spec IS the whole thing in one PR,
