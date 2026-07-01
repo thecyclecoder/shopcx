@@ -1,0 +1,1 @@
+- **Make spec-chat's DB authoring explicit — the .md is a scratch buffer, public.specs is the spec** · verified 2026-07-01 · → [[lifecycles/spec-goal-branch-pm-flow]]
