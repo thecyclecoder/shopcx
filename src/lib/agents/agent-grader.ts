@@ -94,10 +94,38 @@ const AGENT_INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "job_not_found"]);
 export const ROLLUP_WINDOW = 10;
 
 /** A worker is "proven" once its last-ROLLUP_WINDOW average is ≥ this — it then gets graded WAY less often
- *  (only a small spot-check of its successes) so the grading budget flows to unproven/struggling workers. */
-export const PROVEN_AVG = 9;
-/** How often a PROVEN worker's successes still get spot-checked (≈1 in 5 beats). Its FAILURES always grade. */
+ *  (only a small spot-check of its successes) so the grading budget flows to unproven/struggling workers.
+ *  Lowered 9→8 (grading-graduated-sample-rate) — 9.0 was so high it almost never engaged, so nearly every
+ *  action got graded. 8.0 is the "strong" tier at which spot-checking starts (the 6-7 acceptable / 8-9 strong
+ *  break in the SCORING rubric). Failures short-circuit any sample rate — see gradeSampleRateForAvg. */
+export const PROVEN_AVG = 8;
+/** How often a PROVEN worker's successes still get spot-checked (≈1 in 5 beats). Its FAILURES always grade.
+ *  Reused as the 8 ≤ avg < 9 tier of gradeSampleRateForAvg (graduated sample rate). */
 export const GRADE_PROVEN_SAMPLE = 0.2;
+/**
+ * Graduated per-worker success sample rate keyed to its rolling average — the share of a worker's
+ * SUCCESSFUL jobs to grade this beat. Replaces the old binary proven/not throttle so that a worker
+ * that slips one tier is caught by heavier grading on the very next beat (self-re-arm), while a
+ * consistently-excellent worker still gets a light-touch spot-check floor (never 0 — a regression
+ * would otherwise be invisible until failures start landing). FAILURES are always graded and short-
+ * circuit this rate — see selectGradingBatch (isFail).
+ *
+ * Grading is a statistical read: sampling a batch of a worker's good work is enough to detect drift;
+ * grading every single action is over-measurement (Goodhart — [[../operational-rules]] § North star).
+ *
+ *   count < COACH_MIN_SAMPLE-ish OR avg == null → 1.0  (too little data — grade all until we have a read)
+ *   avg < 7                                     → 1.0  (learning zone — full grading; the coaching signal lives here)
+ *   7 ≤ avg < 8                                 → 0.5  ("sample, not all" begins)
+ *   8 ≤ avg < 9                                 → GRADE_PROVEN_SAMPLE  (proven — spot-check)
+ *   avg ≥ 9                                     → 0.1  (excellent — light-touch floor; never 0)
+ */
+export function gradeSampleRateForAvg(avg: number | null, count: number): number {
+  if (avg === null || count < 5) return 1.0; // insufficient data — grade all until we have a read
+  if (avg < 7) return 1.0; // learning zone
+  if (avg < 8) return 0.5; // sampling begins
+  if (avg < 9) return GRADE_PROVEN_SAMPLE; // proven — spot-check
+  return 0.1; // excellent — light-touch floor (never 0 so a regression is still catchable)
+}
 /** Batched grading cadence (the spec's locked config): grade when ≥ BATCH_MIN ungraded concluded jobs
  *  have accumulated, OR a BATCH_FALLBACK_MS fallback once any are ungraded — keeps the LLM cost bounded
  *  (one session per batch, not one per job). */
@@ -466,12 +494,25 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
  * a round-robin-by-worker random sample of the successes — so a noisy worker (fold/pr-resolve) can't crowd
  * out a spot-check of a quieter one. Un-selected jobs stay ungraded and ride a later beat. Math.random is
  * fine here (this is library code, not a workflow script).
+ *
+ * Per-kind throttling is GRADUATED (grading-graduated-sample-rate): the caller passes each active kind's
+ * rolling {average,count} and the sample rate comes from gradeSampleRateForAvg — a slip pulls the sampled
+ * average into a heavier tier next beat (self-re-arm), so we never lock a worker into a binary "proven"
+ * state that only re-arms on failures.
  */
-function selectGradingBatch(pool: UngradedJob[], cap: number, provenKinds: Set<string> = new Set()): UngradedJob[] {
+function selectGradingBatch(
+  pool: UngradedJob[],
+  cap: number,
+  rollupByKind: Map<string, { average: number | null; count: number }> = new Map(),
+): UngradedJob[] {
   if (pool.length <= cap) return pool;
   const chosen: UngradedJob[] = [];
   const taken = new Set<string>();
   const isFail = (j: UngradedJob) => FAILED_JOB_STATUSES.has(j.status);
+  const sampleRate = (kind: string): number => {
+    const r = rollupByKind.get(kind);
+    return gradeSampleRateForAvg(r?.average ?? null, r?.count ?? 0);
+  };
   // Group by kind; within a kind, failures first (high-signal), then newest-first.
   const byKind = new Map<string, UngradedJob[]>();
   for (const j of pool) {
@@ -486,33 +527,35 @@ function selectGradingBatch(pool: UngradedJob[], cap: number, provenKinds: Set<s
   // graded each beat. The old order (all failures first, then a round-robin of the leftover room) let noisy,
   // high-failure kinds (spec-test/build) eat the whole cap and STARVE quiet, success-heavy workers — that's
   // why Remi (regression) had 0 grades despite a long-standing rubric, and Vault (security) was never graded.
-  // A PROVEN worker (≥ PROVEN_AVG rollup) is THROTTLED here — its top job is taken only GRADE_PROVEN_SAMPLE of
-  // the time UNLESS that top job is a FAILURE (a slip from a 9-avg worker is exactly what we must catch). So a
-  // proven worker is graded way less often, freeing the budget for unproven/struggling workers.
+  // Each SUCCESSFUL top job is taken with probability = the kind's graduated sample rate (excellent → 0.1,
+  // proven → 0.2, sampling → 0.5, learning/unknown → 1.0). FAILURES short-circuit the sample — a slip from a
+  // high-avg worker is exactly what we must catch. So a proven worker's successes are graded way less often,
+  // freeing the budget for unproven/struggling workers, but its failures still surface promptly.
   const queues = Array.from(byKind.entries());
   queues.sort(() => Math.random() - 0.5);
   for (const [kind, q] of queues) {
     if (chosen.length >= cap) break;
     const top = q[0];
     if (!top) continue;
-    if (provenKinds.has(kind) && !isFail(top) && Math.random() >= GRADE_PROVEN_SAMPLE) continue; // throttle the proven worker's successes
+    if (!isFail(top) && Math.random() >= sampleRate(kind)) continue; // throttle successes by the graduated rate
     q.shift();
     chosen.push(top);
     taken.add(top.id);
   }
   // FAILURE FILL: every remaining failure, newest-first (a worker mistake is always worth learning from —
-  // including a proven worker's, which is the signal that may end its "proven" status).
+  // including a high-average worker's, which is the signal that may pull its rollup back into a heavier tier).
   const failures = pool.filter((j) => !taken.has(j.id) && isFail(j)).sort((a, b) => b.created_at.localeCompare(a.created_at));
   for (const f of failures) { if (chosen.length >= cap) break; chosen.push(f); taken.add(f.id); }
-  // ROUND-ROBIN FILL: remaining successes, one per kind — but SKIP proven kinds (already throttled above), so
-  // their reliably-good successes don't soak up spot-check budget meant for the rest.
-  const rq = Array.from(byKind.entries()).filter(([k, q]) => !provenKinds.has(k) && q.length).map(([, q]) => q);
+  // ROUND-ROBIN FILL: remaining successes, one per kind — each still subject to the kind's graduated sample
+  // rate, so a proven worker's leftover successes don't soak up spot-check budget meant for the rest.
+  const rq = Array.from(byKind.entries()).filter(([, q]) => q.length);
   let progressed = true;
   while (chosen.length < cap && progressed) {
     progressed = false;
-    for (const q of rq) {
+    for (const [kind, q] of rq) {
       const j = q.shift();
       if (!j || taken.has(j.id)) continue;
+      if (!isFail(j) && Math.random() >= sampleRate(kind)) continue; // throttle successes by the graduated rate
       chosen.push(j);
       taken.add(j.id);
       progressed = true;
@@ -559,12 +602,13 @@ export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: A
   try {
     const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
     if (!pool.length) return [];
-    const proven = new Set<string>();
+    // Per-kind rolling {average,count} → each kind's graduated sample rate (gradeSampleRateForAvg).
+    const rollupByKind = new Map<string, { average: number | null; count: number }>();
     for (const kind of new Set(pool.map((j) => j.kind))) {
       const r = await computeAgentRollup(admin, opts.workspaceId, kind);
-      if (r.count >= ROLLUP_WINDOW && (r.average ?? 0) >= PROVEN_AVG) proven.add(kind);
+      rollupByKind.set(kind, { average: r.average, count: r.count });
     }
-    return selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, proven);
+    return selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, rollupByKind);
   } catch (e) {
     console.warn(`[worker-grader] pickAgentGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
     return [];
@@ -594,16 +638,17 @@ export async function gradeConcludedAgentActions(opts: { workspaceId: string; ad
 
   try {
     const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
-    // A PROVEN worker (≥ PROVEN_AVG over a full window) is graded way less often — compute which kinds in the
-    // pool are proven so selectGradingBatch can throttle them and spend the budget on unproven/struggling ones.
-    const proven = new Set<string>();
+    // Graduated sample rate per kind — compute each active kind's rolling {average,count} so
+    // selectGradingBatch can throttle its successes by the tier (learning=1.0 · sampling=0.5 · proven=0.2 ·
+    // excellent=0.1). Failures always grade regardless (isFail short-circuits the sample).
+    const rollupByKind = new Map<string, { average: number | null; count: number }>();
     for (const kind of new Set(pool.map((j) => j.kind))) {
       const r = await computeAgentRollup(admin, opts.workspaceId, kind);
-      if (r.count >= ROLLUP_WINDOW && (r.average ?? 0) >= PROVEN_AVG) proven.add(kind);
+      rollupByKind.set(kind, { average: r.average, count: r.count });
     }
     // Bounded session: ≤ GRADE_BATCH_CAP jobs — a coverage pass (every active worker), then failures, then a
-    // fair sample, with proven workers throttled; the rest stay ungraded for a later beat.
-    const batch = selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, proven);
+    // fair sample, with each kind's successes throttled by its graduated rate; the rest stay ungraded for a later beat.
+    const batch = selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, rollupByKind);
     for (const j of batch) {
       considered++;
       const r = await gradeAgentAction({ agentJobId: j.id, admin });
