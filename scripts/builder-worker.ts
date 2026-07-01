@@ -581,6 +581,32 @@ const USAGE_CAP_COOLDOWN_MS = 5 * 60 * 60 * 1000;
 // account is back within CAP_MAX_MS instead of hours. This also un-sticks a stale over-estimate on restart
 // (restoreAccountCapsOnBoot clamps the same way), so a self-update restart can't cement a wrong reset time.
 const CAP_MAX_MS = 20 * 60 * 1000;
+// EXCEPTION — a WEEKLY (seven-day) / monthly wall is NOT the 5-hour rolling window: its stated reset is
+// authoritative and hours-to-a-day out, so clamping it to a 20-min re-probe just hammered all accounts
+// every ~20 min for hours (2026-07-01: 17:00→19:00+ journal spam cycling .claude/.claude-third/.claude-
+// personal). For a weekly wall we HONOR the parsed reset and only cap re-probe at this coarse ceiling
+// (the hour-only "resets 2am (UTC)" weekly message is always ≤24h out, so this never over-holds). Session
+// (5-hour) walls keep the tight CAP_MAX_MS re-probe — they DO free early.
+const WEEKLY_CAP_MAX_MS = 25 * 60 * 60 * 1000;
+// A weekly/seven-day/monthly usage wall (vs a 5-hour session wall). The CLI text says "weekly limit"; the
+// structured rate_limit shape says seven_day / opus_weekly / monthly. Keyed so the reset clamp above knows
+// NOT to re-probe a far-out weekly every 20 min. Session limits fall through → tight re-probe.
+function isWeeklyWall(text: string): boolean {
+  return /weekly limit|\bseven[_-]?day\b|\b7[_-]?day\b|opus_weekly|monthly limit|\bthirty[_-]?day\b/i.test(text || "");
+}
+// Reset time in AST (America/Puerto_Rico, UTC-4, no DST) — the CEO's local clock — for human-facing logs +
+// events. The parse-to-epoch is tz-agnostic (the wall message is UTC, the box is UTC); AST is display only.
+function astTime(ms: number): string {
+  return (
+    new Date(ms).toLocaleString("en-US", {
+      timeZone: "America/Puerto_Rico",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }) + " AST"
+  );
+}
 
 interface AccountState {
   configDir: string;
@@ -663,11 +689,11 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
     let restored = 0;
     for (let i = 0; i < accounts.length && i < pool.length; i++) {
       const rawUntil = pool[i]?.capped_until ? new Date(pool[i].capped_until as string).getTime() : 0;
-      // A restored cap BEYOND the re-probe horizon is an UNTRUSTWORTHY over-estimate (a pre-fix +5h guess, or a
-      // rolling window that already freed up) — probe it IMMEDIATELY on boot rather than trusting it (→ 0). A fresh
-      // cap (already clamped to ≤ now+CAP_MAX_MS by markAccountCapped) is preserved so we don't re-probe every
-      // restart. Net: pre-fix stale caps un-stick on the first boot; steady-state caps ride out their short window.
-      const until = rawUntil > now && rawUntil <= now + CAP_MAX_MS ? rawUntil : 0;
+      // A restored cap BEYOND the weekly horizon is an UNTRUSTWORTHY over-estimate (a pre-fix +5h guess, or a
+      // rolling window that already freed up) — probe it IMMEDIATELY on boot rather than trusting it (→ 0). A
+      // fresh cap (session clamped ≤ now+CAP_MAX_MS, weekly ≤ now+WEEKLY_CAP_MAX_MS by markAccountCapped) is
+      // preserved so a self-update restart doesn't re-probe a known-good far-out weekly reset every time.
+      const until = rawUntil > now && rawUntil <= now + WEEKLY_CAP_MAX_MS ? rawUntil : 0;
       if (until > now) { accounts[i].cappedUntil = until; accounts[i].capEventLogged = true; restored++; }
     }
     if (restored) console.log(`[multi-account] restored ${restored} capped account(s) from heartbeat — re-probe within ${Math.round(CAP_MAX_MS / 60000)}m`);
@@ -742,16 +768,21 @@ function parseResetTime(text: string, now: number): number | null {
     if (!Number.isNaN(parsed) && parsed > now && parsed < now + 30 * 24 * 60 * 60 * 1000) return parsed;
   }
 
-  // (3) Legacy UTC clock-hour phrase ("resets 7pm (UTC)"). Only when the message says UTC (the box's tz).
+  // (3) UTC clock-hour phrase — the actual Max wall shape: "You've hit your weekly limit · resets 2am
+  // (UTC)" / "session limit · resets 7:50pm (UTC)". The CLI localizes to the running env's tz; the box is
+  // UTC so it always reads "(UTC)". Only parse when the message says UTC (the box's tz). MUST capture the
+  // optional ":MM" — SESSION resets land on non-round minutes ("7:50pm"), and the old hour-only regex
+  // silently failed to match them (→ null → the box never learned the reset and re-probed every 20 min).
   if (t.includes("utc")) {
-    const m = t.match(/resets?\s+(\d{1,2})\s*(am|pm)/);
+    const m = t.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
     if (m) {
       let hour = parseInt(m[1], 10) % 12;
-      if (m[2] === "pm") hour += 12;
+      if (m[3] === "pm") hour += 12;
+      const minute = m[2] ? parseInt(m[2], 10) : 0;
       const d = new Date(now);
-      d.setUTCHours(hour, 0, 0, 0);
+      d.setUTCHours(hour, minute, 0, 0);
       let resetAt = d.getTime();
-      while (resetAt <= now) resetAt += 24 * 60 * 60 * 1000; // next future occurrence of that UTC hour
+      while (resetAt <= now) resetAt += 24 * 60 * 60 * 1000; // next future occurrence of that UTC clock time
       return resetAt;
     }
   }
@@ -760,13 +791,17 @@ function parseResetTime(text: string, now: number): number | null {
 function markAccountCapped(dir: string, now: number, errorText?: string) {
   const a = accountByDir.get(dir);
   if (!a) return;
-  // The parsed/fallback reset is an estimate; never trust it past CAP_MAX_MS without a re-probe (rolling
-  // window frees up early; a null-parse fallback of +5h is a gross over-estimate). Clamp the re-probe horizon.
+  // The parsed/fallback reset is an estimate. For a SESSION (5-hour) wall never trust it past CAP_MAX_MS
+  // without a re-probe (rolling window frees up early; a null-parse fallback of +5h is a gross over-estimate).
+  // For a WEEKLY wall the stated reset is authoritative and far out — clamping it to 20 min just re-probed
+  // every account every ~20 min for hours, so honor the parsed reset up to the coarse WEEKLY_CAP_MAX_MS.
   const estimate = (errorText && parseResetTime(errorText, now)) || now + USAGE_CAP_COOLDOWN_MS;
-  a.cappedUntil = Math.min(estimate, now + CAP_MAX_MS);
+  const clampMax = isWeeklyWall(errorText || "") ? WEEKLY_CAP_MAX_MS : CAP_MAX_MS;
+  a.cappedUntil = Math.min(estimate, now + clampMax);
   if (!a.capEventLogged) {
     a.capEventLogged = true; // record the `cap` once per window; noteAccountRecoveries logs the matching `recovered`
-    recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ${new Date(a.cappedUntil).toISOString()}`);
+    recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ${astTime(a.cappedUntil)}`);
+    console.warn(`[multi-account] ${dir} capped → back at ${astTime(a.cappedUntil)}${isWeeklyWall(errorText || "") ? " (weekly wall — honoring stated reset)" : ""}`);
   }
 }
 // Distinguish a Max usage-WALL (pull the account from rotation) from a transient 529/overloaded (which
@@ -900,7 +935,7 @@ async function withAccountFailover<T extends { isError: boolean; raw: string; re
       acct.inFlight--;
     }
     if (r.isError && isUsageCapError(`${r.resultText ?? ""}\n${r.raw}`)) {
-      markAccountCapped(configDir, Date.now(), r.raw); // DB-driven: real reset parsed from the wall message
+      markAccountCapped(configDir, Date.now(), `${r.resultText ?? ""}\n${r.raw}`); // parse reset + weekly-vs-session from the full wall text
       const next = pickNewSessionAccount(Date.now());
       if (!next) return { result: null, configDir, allCapped: true };
       recordAccountEvent("failover", configDir, `failing over — re-running on ${accountLabel(next.configDir, accounts.indexOf(next))}`);
