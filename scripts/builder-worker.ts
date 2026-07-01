@@ -11981,6 +11981,8 @@ async function runAgentCoachJob(job: Job) {
     `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
     ``,
     `errorClass MUST be short kebab-case. reasoning MUST reference a concrete file:line or observed pattern from the diffs — never a paraphrase of the grader reasoning.`,
+    ``,
+    `guidance MUST name the ACTUAL artifact the worker produces (a DB row via a named SDK, an Inngest event, a persisted rollup, etc.), not the transport buffer or scratchpad it happens to write on the way there. Read the worker's rubric above for the ground truth (e.g. for the \`spec-chat\` worker the artifact is a row in public.specs + public.spec_phases authored by the deterministic worker via the author-spec SDK's upsertSpec — the docs/brain/specs/{slug}.md the box writes is a throwaway scratch buffer in a worktree that the worker discards after parsing, never committed and never the source of truth). A learning that says "write the .md" for spec-chat is exactly the MD-based-spec framing this phase exists to eliminate — say "write the scratch buffer THIS turn — the worker authors it to public.specs via the SDK" instead.`,
   ].join("\n");
 
   try {

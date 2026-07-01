@@ -50,6 +50,7 @@ const { data } = await admin.from("agent_instructions")
 
 - Only `status='active'` rows are loaded into a worker's prompt — a `superseded`/`reverted` row is history, not guidance.
 - The write path is **director-gated** at the library (`coachAgent` requires `coachedBy`) AND at RLS (service-role only). Don't add a client write path.
+- **`guidance` must name the ACTUAL artifact the worker produces**, not the transport buffer / scratchpad it writes on the way there ([[../specs/spec-chat-db-authoring-clarity]] Phase 2). E.g. for the `spec-chat` worker the artifact is a row in `public.specs` + `public.spec_phases` authored by the deterministic worker via the author-spec SDK's `upsertSpec` — the `docs/brain/specs/{slug}.md` the box writes is a throwaway scratch buffer in a worktree the worker discards after parsing, **never committed and never the source of truth**. A learning that reads "write the md" for spec-chat is exactly the MD-based-spec framing that phase exists to eliminate. When you supersede such a row, go through `coachAgent` (never a raw update) — the mechanism (write the scratch buffer THIS turn) stays; only the wording changes. One-off: `scripts/supersede-spec-chat-md-coaching.ts` (`--apply` to write).
 
 ## Related
 

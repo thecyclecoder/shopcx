@@ -10,6 +10,8 @@ One **concluded `agent_jobs` row** (terminal status `completed｜merged｜failed
 ## Per-worker rubrics
 `AGENT_RUBRICS` (exported) maps each `agent_jobs.kind` → `{name, criteria}` (the spec's locked config): `build`→Bo (spec phases · `tsc` · clean merge), `repair`→Rafa (root-cause · fix held), `regression`→Remi, `db_health`→Devi, `spec-test`→Vera, `migration-fix`→Mira, `pr-resolve`→Pax, `fold`→Fenn, `coverage-register`→Cole, `monitor`→Tao, `plan`→Pia, `product-seed`→Sol, `spec-chat`→Sage, `dev-ask`→Dex. `GRADEABLE_KINDS` = its keys — only rubric-backed kinds are graded (the Director's own + non-worker kinds are excluded).
 
+The rubric must **name the worker's actual artifact**, not the transport buffer / scratchpad it happens to write on the way there ([[../specs/spec-chat-db-authoring-clarity]] Phase 2 — the rubric is embedded in both the grader system prompt and the box coach synthesis prompt, so its wording propagates directly into future coaching guidance). E.g. `spec-chat`'s "correct DB spec authoring on finalize" clause explicitly names `public.specs` + `public.spec_phases` via `upsertSpec` as the artifact and frames the `docs/brain/specs/{slug}.md` the box writes as a throwaway scratch buffer the worker discards. Rubric wording that names the transport buffer instead of the DB row lets a coaching learning inherit MD-based-spec framing.
+
 ## Exports
 
 | Symbol | Signature | Notes |
