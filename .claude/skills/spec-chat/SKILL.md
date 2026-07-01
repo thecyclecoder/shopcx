@@ -25,11 +25,14 @@ GitHub-API tools, you have the **whole working tree** and the **web**.
   in a turn). Max ~2 sentences per paragraph. Ask clarifying questions only for genuine **product**
   decisions — resolve everything technical yourself from the tree.
 - **Do NOT edit files** in `turn` mode. You are speccing, not building. In `finalize`/`verify` you
-  WRITE exactly one file under `docs/brain/specs/` into the working tree (never run `git`) **as a
-  scratch buffer** — the worker reads that file and AUTHORS the spec to the **DB** (`public.specs` +
-  `public.spec_phases` via the author-spec SDK). The DB row is the authored output; **no `.md` is
-  committed to `main`** (specs live in the DB now — spec-pm-markdown-purge / retire-md-reads). Touch no
-  other file.
+  WRITE exactly one file under `docs/brain/specs/` into a **throwaway worktree** (never run `git`) **as
+  a scratch buffer transport** — after your call returns, the deterministic worker parses that buffer
+  and AUTHORS the spec to the **DB** (`public.specs` + `public.spec_phases` via the author-spec SDK's
+  `upsertSpec`), then **removes the worktree** (`git worktree remove`). The DB row is the artifact;
+  the `.md` you wrote is **never committed to `main`** and is **never the source of truth** — it
+  exists only to carry your body across process boundaries without JSON-escaping fragility (specs
+  live in the DB now — spec-pm-markdown-purge / retire-md-reads). Write the buffer anyway — the
+  worker needs it as its input. Touch no other file.
 - **Never the Anthropic API; never a nested `claude`.** All reasoning happens here, on Max.
 - **A good spec** (per `docs/brain/project-management.md`) — the worker parses these into the DB row +
   `spec_phases` — has: an H1 `# <Title>` (NO status emoji — status is DB-driven); directly under it
@@ -48,15 +51,19 @@ directly (the worker appends/commits it). Output ONLY the one JSON object asked 
   On turn 1 you get the full transcript + framing; on later turns you `--resume` this same session and
   get just the new message (you already hold the accumulated context — reference earlier turns, don't
   re-state them). Final: `{"status":"replied","reply":"<your plain-text answer>"}`.
-- **finalize** — WRITE `docs/brain/specs/{slug}.md` as the scratch buffer for the feature you've shaped;
-  the worker authors it to `public.specs` + `public.spec_phases` (no `.md` is committed). Refine: edit
-  the worker-materialized existing file, preserve shipped phases unless told otherwise. New: pick a
-  SHORT **kebab-case** slug derived from the title (lowercase words joined by hyphens — NEVER a UUID or
-  random id). Final: `{"status":"finalized","slug":"<the kebab slug you wrote>"}`.
-- **verify** — Read the named spec + its brain homes and WRITE the file back with a concrete,
-  prod-facing `## Verification` section upserted (each bullet `- On {where}, {do what} → expect
-  {observable result}`, real routes/tables/CLI, never vague), preserving the rest byte-for-byte.
-  Final: `{"status":"verified","slug":"<slug>"}`.
+- **finalize** — WRITE `docs/brain/specs/{slug}.md` as the **transport scratch buffer** for the feature
+  you've shaped; when your call returns, the worker parses it, authors it to `public.specs` +
+  `public.spec_phases` via `upsertSpec`, and discards the worktree (no `.md` is committed — the DB
+  row is the artifact). Refine: edit the worker-materialized existing file, preserve shipped phases
+  unless told otherwise. New: pick a SHORT **kebab-case** slug derived from the title (lowercase
+  words joined by hyphens — NEVER a UUID or random id). Final:
+  `{"status":"finalized","slug":"<the kebab slug you wrote>"}`.
+- **verify** — Read the named spec (the worker materialized its DB body into your throwaway worktree
+  as grounding) + its brain homes, then WRITE the buffer back with a concrete, prod-facing
+  `## Verification` section upserted (each bullet `- On {where}, {do what} → expect {observable
+  result}`, real routes/tables/CLI, never vague), preserving the rest byte-for-byte. The worker
+  re-authors the body to `public.specs` and discards the worktree. Final:
+  `{"status":"verified","slug":"<slug>"}`.
 
 ## Notes
 
