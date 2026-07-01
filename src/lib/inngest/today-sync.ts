@@ -96,11 +96,14 @@ export const todaySyncCron = inngest.createFunction(
           // permissions 200/10/803, disabled account) still hit console.error
           // and surface. Mirrors isTransientGraphError in
           // src/lib/meta/graph-retry.ts.
-          const metaErr = err as { metaCode?: number; metaSubcode?: number } | null;
+          const metaErr = err as { metaCode?: number; metaSubcode?: number; httpStatus?: number } | null;
           const isHandledTransient =
             metaErr?.metaCode === 1 ||
             metaErr?.metaCode === 2 ||
-            metaErr?.metaSubcode === 1504018;
+            metaErr?.metaSubcode === 1504018 ||
+            // Facebook-edge 5xx (e.g. 504 gateway timeout) — graphFetchJson already
+            // retried 4× before surfacing; the 5-min cron self-heals on the next tick.
+            (typeof metaErr?.httpStatus === "number" && metaErr.httpStatus >= 500);
           const log = isHandledTransient ? console.warn : console.error;
           log(`[Today Sync] Meta error for ${acct.meta_account_id}:`, err);
         }

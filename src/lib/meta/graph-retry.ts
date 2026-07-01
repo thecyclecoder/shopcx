@@ -23,15 +23,26 @@ const RETRY_ATTEMPTS = 4; // total attempts (1 initial + 3 retries)
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 8000;
 
-/** Build the canonical `meta_<status>: <detail>` error, preserving Meta's code/subcode. */
-export function graphError(status: number, error: any): Error & { metaCode?: number; metaSubcode?: number } {
+/** Build the canonical `meta_<status>: <detail>` error, preserving Meta's code/subcode + HTTP status. */
+export function graphError(
+  status: number,
+  error: any,
+): Error & { metaCode?: number; metaSubcode?: number; httpStatus?: number } {
   // Meta's useful detail is in error_user_title/msg, falling back to the terse `message`.
   const detail = error?.error_user_title
     ? `${error.error_user_title}: ${error.error_user_msg || ""}`
     : error?.message || "graph_error";
-  const e = new Error(`meta_${status}: ${detail}`.trim()) as Error & { metaCode?: number; metaSubcode?: number };
+  const e = new Error(`meta_${status}: ${detail}`.trim()) as Error & {
+    metaCode?: number;
+    metaSubcode?: number;
+    httpStatus?: number;
+  };
   e.metaCode = error?.code;
   e.metaSubcode = error?.error_subcode;
+  // Attach the HTTP status so callers can classify edge 5xx (e.g. Facebook 504 gateway
+  // timeout — Facebook returns HTML, no JSON body, so metaCode/subcode are undefined and
+  // only httpStatus distinguishes it from a fatal 400 validation error).
+  e.httpStatus = status;
   return e;
 }
 
