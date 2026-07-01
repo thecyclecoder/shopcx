@@ -12,11 +12,21 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
 - **Add storefront pixel tracking to the blog pages** · verified 2026-07-01 · → [[../lifecycles/blog-resources]]
+- **Fix the phase-accumulation stamp gap that wedges multi-phase builds + guard deploy-rollback against laggy monthly KPIs** · verified 2026-07-01 · → [[../lifecycles/spec-goal-branch-pm-flow]]
 - **Lag the monthly scorecard snapshot to the previous complete UTC day** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
+- **A director grades only the workers in its own charge** · verified 2026-07-01 · → [[libraries/agent-grader]]
+- **Scope GoTrue 'context canceled' auth errors as transient noise in the Supabase log poller** · verified 2026-07-01 · → [[../libraries/control-tower]]
+- **Move every grader onto Max box sessions that read the real diff** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
+- **Grade a sample by rolling average; lower the proven bar 9→8** · verified 2026-07-01 · → [[libraries/agent-grader]]
 - **Weekly KPI readers skip pre-lag-fix stale (non-Sunday) snapshot rows** · verified 2026-07-01 · → [[libraries/kpi-review]]
 - **Extend kpi-review's in-flight window guard from daily to weekly + monthly** · verified 2026-07-01 · → [[libraries/kpi-review]]
 - **Downgrade Sonnet v2 parse-fallback log from error to warn (stop false Control Tower incident)** · verified 2026-07-01 · → [[libraries/sonnet-orchestrator-v2]]
+- **Make spec-chat's DB authoring explicit — the .md is a scratch buffer, public.specs is the spec** · verified 2026-07-01 · → [[lifecycles/spec-goal-branch-pm-flow]]
+- **An errored pre-merge spec-test must be visible + re-runnable** · verified 2026-07-01 · → [[../libraries/agent-jobs]] + [[../libraries/spec-test-runs]]
+- **Seed + sharpen Cleo's lever selection from the funnel-tree / chapter-diagnostics / bottleneck SDKs** · verified 2026-07-01 · → [[libraries/storefront-lever-memory]]
+- **Route Meta ad-spend sync through graphFetchJson so Facebook edge 504s self-heal instead of feeding Control Tower** · verified 2026-07-01 · → [[../inngest/today-sync]]
 - **appstleAttemptBilling: coerce numeric billing-attempt id to string** · verified 2026-06-30 · → [[libraries/appstle]]
 - **Coerce Appstle billing-attempt id to string before the internal-prefix guard** · verified 2026-06-30 · → [[../libraries/appstle]]
 - **Downgrade appstle-heal per-line PUT failure to warn** · verified 2026-06-30 · → [[lifecycles/subscription-billing]]
