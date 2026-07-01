@@ -13,11 +13,23 @@ Append-only storefront event log (pdp_view, pack_selected, order_placed, etc.). 
 | `session_id` | `uuid` | — | → [[storefront_sessions]].id |
 | `anonymous_id` | `text` | — |  |
 | `customer_id` | `uuid` | ✓ | → [[customers]].id |
-| `event_type` | `text` | — |  |
+| `event_type` | `text` | — | See **Event types** below for the canonical list |
 | `product_id` | `uuid` | ✓ | → [[products]].id |
 | `meta` | `jsonb` | — | default: `'{}'` |
 | `url` | `text` | ✓ |  |
 | `created_at` | `timestamptz` | — | default: `now()` |
+
+## Event types
+
+The canonical list (kept in sync with `src/app/api/pixel/route.ts` ALLOWED_EVENT_TYPES):
+
+**Product funnel:** `pdp_view` (product page load) → `pdp_engaged` (scroll/interact) → `pack_selected` → `add_to_cart` → `checkout_view` → `order_placed`
+
+**Chapter/content funnel:** `chapter_view` → `chapter_dwell` → `scroll_depth` → `cta_click`
+
+**Blog:** `blog_view` (mounted on blog index/article) → `blog_engaged` (first of scroll-50% / 30s-dwell)
+
+**Other:** `lead_captured` · `experiment_exposure`
 
 ## Foreign keys
 

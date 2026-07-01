@@ -39,10 +39,11 @@ Registers the server-resolved experiment arm(s) for the page so EVERY `/api/pixe
 
 ## Callers
 
-- `src/app/(storefront)/_components/StorefrontPixelInit.tsx`
-- `src/app/(storefront)/checkout/_components/CheckoutClient.tsx`
-- `src/app/(storefront)/customize/_components/CustomizeClient.tsx`
-- `src/app/(storefront)/thank-you/_components/ThankYouClient.tsx`
+- `src/app/(storefront)/_components/StorefrontPixelInit.tsx` — PDP/core storefront pixel init (pdp_view, pack_selected, add_to_cart, experiments)
+- `src/app/(storefront)/_components/BlogPixelInit.tsx` — blog-specific pixel init (blog_view + blog_engaged on scroll-50% / 30s-dwell; excludes product funnel events)
+- `src/app/(storefront)/checkout/_components/CheckoutClient.tsx` — checkout progress tracking
+- `src/app/(storefront)/customize/_components/CustomizeClient.tsx` — customization events
+- `src/app/(storefront)/thank-you/_components/ThankYouClient.tsx` — order confirmation telemetry
 
 ## Gotchas
 

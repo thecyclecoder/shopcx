@@ -33,9 +33,11 @@ The public blog is SSG'd + edge-served exactly like the PDP (no `headers()`/`coo
 - Preview: `shopcx.ai/store/{ws}/blog[/handle]` — `x-robots-tag: noindex` via middleware.
 
 **Routes** (`src/app/(storefront)/store/[workspace]/`):
-- `blog/page.tsx` — index. Renders **every** published post into the initial HTML (crawler + LLM friendly); header topic tabs filter client-side via `?topic=` (read from `window.location`, no `useSearchParams` → stays static). Branded hero band + 3-col card grid.
-- `blog/[handle]/page.tsx` — article. Breadcrumb → grouping pill → `<h1>` → `<time>` → featured image → `content_html` in a `prose` container → "Shop" CTA → related-posts strip (same grouping first).
+- `blog/page.tsx` — index. Renders **every** published post into the initial HTML (crawler + LLM friendly); header topic tabs filter client-side via `?topic=` (read from `window.location`, no `useSearchParams` → stays static). Branded hero band + 3-col card grid. Mounts [[../libraries/storefront-pixel]]'s `BlogPixelInit` to instrument.
+- `blog/[handle]/page.tsx` — article. Breadcrumb → grouping pill → `<h1>` → `<time>` → featured image → `content_html` in a `prose` container → "Shop" CTA → related-posts strip (same grouping first). Mounts `BlogPixelInit` to instrument.
 - The static `blog` segment sits beside the dynamic `[slug]` PDP route; Next gives the static segment precedence.
+
+**Instrumentation** — `BlogPixelInit` (non-PDP): fires `blog_view` on mount (logs blog session to `storefront_sessions` + `storefront_events`) + fires `blog_engaged` once on first of scroll-50% / 30s-dwell (see [[../tables/storefront_events]] for event types). Meta base PageView fires automatically when `metaPixelId` is configured, enabling retargeting. Blog sessions land with `landing_url /blog/…` (no product_handle), appearing in funnel-tree as unattributed non-product traffic.
 
 **Shared building blocks** (`src/app/(storefront)/`): `_lib/blog-data.ts` (data + `BLOG_GROUPINGS` + generateStaticParams/sitemap helpers, admin client) · `_lib/storefront-theme.ts` (per-workspace CSS-var theming) · `_components/BlogHeader.tsx` (logo → `/blog`, topic tabs, "Shop" → main brand site) · `BlogIndexGrid.tsx` · `BlogPostCard.tsx` · `BlogJsonLd.tsx`. Footer reuses `StorefrontFooter`.
 

@@ -1,0 +1,1 @@
+- **Add storefront pixel tracking to the blog pages** · verified 2026-07-01 · → [[../lifecycles/blog-resources]]
