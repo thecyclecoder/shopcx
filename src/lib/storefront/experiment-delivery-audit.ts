@@ -128,7 +128,7 @@ async function countStampedSessions(
     .eq("is_internal", false)
     .eq("is_bot", false)
     .gte("created_at", since)
-    .contains("experiment_assignments", [{ experiment_id: experimentId }]);
+    .contains("experiment_assignments", JSON.stringify([{ experiment_id: experimentId }]));
   return count ?? 0;
 }
 

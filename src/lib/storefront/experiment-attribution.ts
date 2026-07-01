@@ -92,7 +92,7 @@ async function fetchStampedSessions(
       .eq("workspace_id", workspaceId)
       .eq("is_internal", false)
       .eq("is_bot", false)
-      .contains("experiment_assignments", [{ experiment_id: experimentId }])
+      .contains("experiment_assignments", JSON.stringify([{ experiment_id: experimentId }]))
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(page * PAGE, page * PAGE + PAGE - 1);
