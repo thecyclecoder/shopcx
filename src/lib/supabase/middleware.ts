@@ -39,6 +39,22 @@ type ShortlinkCacheEntry = { workspaceId: string | null; expiresAt: number };
 const shortlinkCache = new Map<string, ShortlinkCacheEntry>();
 const SHORTLINK_CACHE_TTL_MS = 60_000;
 
+// The ONLY query params that legitimately vary the storefront PDP render (and thus
+// belong in its cache key). Everything else — fbclid, fbc, fbp, gclid, ttclid,
+// msclkid, every utm_*, mc_eid, … — is client-only ad-tracking noise that must NOT
+// fragment the server render cache. `_sxv` (the edge experiment arm) is added by the
+// proxy AFTER this strip, so it isn't in the whitelist.
+const CACHE_RELEVANT_PARAMS = new Set(["variant", "angle", "sx_preview"]);
+
+/** Rewrite `url.search` in place to keep only cache-relevant params (see above). */
+function keepOnlyCacheParams(url: URL): void {
+  const kept = new URLSearchParams();
+  for (const [k, v] of url.searchParams) {
+    if (CACHE_RELEVANT_PARAMS.has(k)) kept.set(k, v);
+  }
+  url.search = kept.toString();
+}
+
 async function resolveShortlinkWorkspaceByDomain(
   hostname: string,
 ): Promise<string | null> {
@@ -313,6 +329,15 @@ export async function updateSession(
           ) {
             const url = request.nextUrl.clone();
             url.pathname = `/store/${storefrontSlug}/${segs[0]}`;
+            // ── Cache-key canonicalization ──
+            // Strip every non-cache-relevant query param from the ORIGIN request so a
+            // unique per-click `fbclid` / `utm_*` / `gclid` never fragments the render
+            // cache — only `variant`, `angle`, `sx_preview` (the params the page reads
+            // server-side) survive; `_sxv` is added below. This is a REWRITE, so the
+            // browser URL keeps the tracking params intact and the client pixel still
+            // reads them from window.location. Result: a bare Meta click collapses to
+            // the prerendered PDP shell (CDN HIT) instead of a per-fbclid dynamic render.
+            keepOnlyCacheParams(url);
             // ── PDP edge-served experiment (pdp-edge-served-experiments) ──
             // Sticky-assign the variant at the edge: set the `sx_variant` cookie
             // and rewrite served arms to a variant-keyed URL (`?_sxv=<variantId>`)

@@ -8,7 +8,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeChapterDiagnostics } from "@/lib/storefront/funnel-tree";
+import { computeChapterDiagnostics, computeBottlenecks } from "@/lib/storefront/funnel-tree";
 
 function todayCentral(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
@@ -53,15 +53,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     if (start < launchDate) start = launchDate;
   }
 
-  const result = await computeChapterDiagnostics({
-    admin, workspaceId,
-    startIso: centralBoundary(start, false),
-    endIso: centralBoundary(end, true),
-    productHandle: url.searchParams.get("product") || null,
-    utmSource: url.searchParams.get("utm_source") || null,
-    referrer: url.searchParams.get("referrer") || null,
-    destination: url.searchParams.get("destination") || null,
-  });
+  const startIso = centralBoundary(start, false);
+  const endIso = centralBoundary(end, true);
+  const productHandle = url.searchParams.get("product") || null;
+  const utmSource = url.searchParams.get("utm_source") || null;
+  const referrer = url.searchParams.get("referrer") || null;
+  const [result, bottlenecks] = await Promise.all([
+    computeChapterDiagnostics({ admin, workspaceId, startIso, endIso, productHandle, utmSource, referrer, destination: url.searchParams.get("destination") || null }),
+    computeBottlenecks({ admin, workspaceId, startIso, endIso, productHandle, utmSource, referrer }),
+  ]);
 
-  return NextResponse.json({ range: { start, end }, ...result });
+  return NextResponse.json({ range: { start, end }, ...result, bottlenecks });
 }

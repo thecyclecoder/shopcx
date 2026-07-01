@@ -55,6 +55,13 @@ const ALLOWED_EVENT_TYPES = new Set([
   "checkout_view",
   "checkout_step_completed",
   "order_placed",
+  // Survey chapter (in-page quiz after the hero). These were being SILENTLY
+  // DROPPED (not allowlisted), so the survey funnel + step-answer analytics read
+  // zero even though the survey renders. survey_step carries the per-step answer.
+  "survey_shown",
+  "survey_step",
+  "survey_completed",
+  "survey_discount_applied",
   // Storefront experiment framework — sticky-assigned arm exposure.
   // Carries { experiment_id, variant_id, is_holdout } in meta. Dropped for
   // is_internal/is_bot sessions below (experiment attribution must stay clean).
@@ -101,6 +108,7 @@ const VALID_ARMS = new Set<SessionArm>(["control", "variant", "holdout"]);
 interface SessionContext {
   landing_url?: string;
   referrer?: string;
+  language?: string;
   viewport_width?: number;
   viewport_height?: number;
   utm_source?: string;
@@ -475,6 +483,7 @@ async function persistEvents({
         ip_city: ipCity,
         landing_url: sessionContext.landing_url ?? null,
         referrer: sessionContext.referrer ?? null,
+        browser_language: sessionContext.language ?? null,
         utm_source: sessionContext.utm_source ?? null,
         utm_medium: sessionContext.utm_medium ?? null,
         utm_campaign: sessionContext.utm_campaign ?? null,

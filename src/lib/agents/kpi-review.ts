@@ -115,6 +115,17 @@ function toleranceFor(metricKey: string): number {
 const todayUtc = (): string => new Date().toISOString().slice(0, 10);
 
 /**
+ * True when `snapshot_date` (YYYY-MM-DD) is a Sunday in UTC. Under the post-fix weekly writer
+ * ([[../specs/devops-kpi-weekly-snapshot-date-lag-fix]]) every valid weekly snapshot_date is the
+ * previous ISO Sunday — any other day-of-week is a pre-fix stale in-flight row that must be
+ * discarded before picking "latest". Clears loop signature
+ * `loop:kpi_drift:approvals_untouched_pct:weekly` (a stale 2026-06-29 Monday row was outsorting
+ * the valid 2026-06-28 Sunday row).
+ */
+const isSundayUtc = (snapshotDate: string): boolean =>
+  new Date(snapshotDate + "T00:00:00Z").getUTCDay() === 0;
+
+/**
  * Read the persisted snapshot row for `(workspace_id, metric_key, cadence)` — either at the exact
  * `snapshotDate` (when given) or the latest **closed** snapshot.
  *
@@ -139,8 +150,16 @@ async function readPersistedSnapshot(
     .eq("cadence", cadence);
   if (snapshotDate) q = q.eq("snapshot_date", snapshotDate);
   else if (cadence === "daily") q = q.lt("snapshot_date", todayUtc());
-  const { data } = await q.order("snapshot_date", { ascending: false }).limit(1).maybeSingle();
-  return (data as ScorecardSnapshotRow | null) ?? null;
+  // Weekly-Sunday reader guard: fetch a small window (not just top-1) so that if the latest row is
+  // a pre-lag-fix stale non-Sunday snapshot_date we can skip over it and land on the newest valid
+  // Sunday. See `isSundayUtc` above — clears `loop:kpi_drift:approvals_untouched_pct:weekly`.
+  const isWeeklyLatest = cadence === "weekly" && !snapshotDate;
+  const { data } = await q
+    .order("snapshot_date", { ascending: false })
+    .limit(isWeeklyLatest ? 20 : 1);
+  const rows = (data ?? []) as ScorecardSnapshotRow[];
+  if (isWeeklyLatest) return rows.find((r) => isSundayUtc(r.snapshot_date)) ?? null;
+  return rows[0] ?? null;
 }
 
 function buildReport(
@@ -268,7 +287,15 @@ export async function auditAllKpis(
   // row-count and reads it as drift. Audit only closed days when caller didn't pin a date.
   else if (cadence === "daily") q = q.lt("snapshot_date", todayUtc());
   const { data } = await q;
-  const rows = (data ?? []) as ScorecardSnapshotRow[];
+  let rows = (data ?? []) as ScorecardSnapshotRow[];
+
+  // Weekly-Sunday reader guard: discard pre-lag-fix stale non-Sunday snapshot_dates BEFORE the
+  // latest-per-metric pass, so a stale Monday row can't outsort the valid Sunday row. See
+  // `isSundayUtc` above — clears `loop:kpi_drift:approvals_untouched_pct:weekly`. Skipped when the
+  // caller pinned an explicit `snapshotDate` (they know which window they want).
+  if (cadence === "weekly" && !snapshotDate) {
+    rows = rows.filter((r) => isSundayUtc(r.snapshot_date));
+  }
 
   // Latest snapshot per metric_key (rows are already snapshot_date desc).
   const latestByMetric = new Map<string, ScorecardSnapshotRow>();

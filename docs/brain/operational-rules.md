@@ -30,6 +30,33 @@ The invariant — every non-human defer goes through the ONE helper [[libraries/
 
 Ada's dispose-downgrade ([[libraries/agents-spec-dispose]]) was the original good shape and now reuses the same `emitDeferNotification` surface. The **only exempt** defer is the CEO's own dashboard action (`POST /api/roadmap/priority` → actor `owner:{user.id}`) — a deliberate human action already provenanced via `spec_status_history`. No bare `markSpecCardDeferred` / `setSpecStatus(…, "deferred")` may remain on a programmatic path without both the audit row and the surface.
 
+## ⭐ Compute tiers — where an agent's work runs (and what it costs)
+
+**The rule that decides, for every step of every agent, whether it runs as free deterministic code, a flat-rate subscription box session, or a metered API call.** Set the runtime by asking one question: *does this step need Claude to reason or generate?*
+
+Three runtimes, in cost order:
+
+| Tier | Runtime | Billing | For |
+|---|---|---|---|
+| **0 — Deterministic** | Inngest cron / function / API route | **free** | analysis, math, DB writes, scheduling, guardrail checks — **no model at all** |
+| **Box session** | `claude -p` on the build box (repo checkout + tools) | **Max subscription (flat)** | **any Claude reasoning or Claude-authored generation** — hypotheses, copy, spec drafting, and code |
+| **Metered API** | direct provider call | **$ per token — avoid** | only a model with **no subscription seat** (image/video/audio gen), kept low-volume + gated |
+
+The invariants:
+
+1. **Reasoning ⇒ box session, never a metered Claude API call.** The box `claude -p` sessions authenticate via the **Max subscription** (flat cost), and the worker **strips the API key** off them (`runDirectorClaude` / `runStorefrontOptimizerJob` — read-only DB creds, API key removed, config dir `/home/builder/.claude-personal`) *specifically so inference can't silently fall back to metered billing*. A direct Anthropic API call for Claude inference is the thing that runs up the bill — don't add one. (Enforcement is physical: the API key isn't present on the box.)
+
+2. **Push maximal work into Tier 0.** Box lanes are the scarce, **serialized (concurrency-1)** resource. The efficiency lever is not "avoid the box" — it's keeping the box *kernel* small: do everything you can deterministically (Tier 0) so the box only ever runs the irreducible reasoning/generation. Minimize box *time*, not box *usage*.
+
+3. **Read-only vs read-write box lanes = the org boundary.** Every agent that needs Claude reasoning gets a box lane; what separates them is **repo permission**:
+   - **Read-write** (author code, run build/tests, git) — **only** the code-owning function: Platform/Ada + `build` / `repair` / `security` / `spec-review`.
+   - **Read-only** (reason over a brief + SDK data, emit *data* — a proposal, copy, a spec draft) — **everyone else**: Storefront Optimizer, Competitor Research, the Growth/Platform directors' supervision passes.
+   A read-only agent reaches code **only** by drafting a spec (`upsertSpec`) that routes to a read-write Platform box lane. This is the same "operate + author, never build" boundary as [[functions/growth]] — the compute model *falls out of* the org boundary, it doesn't define a new one.
+
+4. **The one sanctioned metered call is non-Claude media generation** (Nano Banana Pro / Veo / Lyria via Gemini, Higgsfield Soul for ad faces) — there's no subscription seat for these, so they're inherently $-per-asset. Keep them **low-volume and gated** (e.g. one hero per experiment behind the hero-preview gate).
+
+Worked instance: the [[goals/storefront-optimizer|Storefront Optimizer]] runs a Tier-0 deterministic loop (funnel read → bandit → materialize → learn → guardrails, all Inngest) + a **read-only** box lane for its reasoning kernel (hypothesis / content / spec-draft) + image-gen as the single metered exception. It never holds a read-write box lane; a structural test becomes a spec for Platform. Full mechanics: [[libraries/storefront-optimizer-agent]].
+
 ## Database join discipline
 
 - **Internal joins use the UUID.** Every `shopify_*_id`, `appstle_*_id`, etc. is a boundary field — only for crossing into the external API, never for joining between our tables. Shopify is being sunset; every `shopify_contract_id`, `shopify_customer_id`, `shopify_order_id` will be deprecated.

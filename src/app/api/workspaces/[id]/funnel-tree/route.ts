@@ -14,7 +14,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeFunnelTree, listSliceOptions } from "@/lib/storefront/funnel-tree";
+import { computeFunnelTree, listSliceOptions, computeBreakdowns, computeRunningExperiments } from "@/lib/storefront/funnel-tree";
 
 function todayCentral(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
@@ -74,10 +74,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     : daysAgoCentral(90);
 
   const dropdownStartIso = centralBoundary(dropdownStart, false);
-  const [tree, sliceOptions] = await Promise.all([
+  const [tree, sliceOptions, breakdowns, runningExperiments] = await Promise.all([
     computeFunnelTree({ admin, workspaceId, startIso, endIso, productHandle, utmSource, referrer }),
-    // Faceted: each dropdown's options reflect the OTHER selected slices.
     listSliceOptions({ admin, workspaceId, startIso: dropdownStartIso, endIso, product: productHandle, utmSource, referrer }),
+    computeBreakdowns({ admin, workspaceId, startIso, endIso, productHandle, utmSource, referrer }),
+    computeRunningExperiments({ admin, workspaceId }),
   ]);
 
   return NextResponse.json({
@@ -89,8 +90,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     unattributedEntry: tree.unattributedEntry,
     blogEntry: tree.blogEntry,
     grandTotal: tree.grandTotal,
+    ltvBasis: tree.ltvBasis,
     productOptions: sliceOptions.productOptions,
     utmSourceOptions: sliceOptions.utmSourceOptions,
     referrerOptions: sliceOptions.referrerOptions,
+    breakdowns,
+    runningExperiments,
   });
 }

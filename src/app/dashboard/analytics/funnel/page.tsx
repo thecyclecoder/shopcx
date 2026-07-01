@@ -24,8 +24,11 @@ import { useWorkspace } from "@/lib/workspace-context";
 // below, so reworked cards are visually distinguishable from the old ones.
 interface TreeMetrics {
   visit: number; engaged: number; pack_selected: number; checkout_started: number;
-  order_placed: number; add_to_cart: number;
-  engagement_rate: number; conversion_rate: number; atc_rate: number;
+  order_placed: number; add_to_cart: number; sub_orders: number;
+  engagement_rate: number; pack_rate: number; checkout_rate: number; conversion_rate: number;
+  atc_rate: number; sub_attach_rate: number; aov_cents: number;
+  revenue_cents: number; ltv_cents: number;
+  revenue_per_visit_cents: number; ltv_per_visit_cents: number;
 }
 interface TreeNode {
   level: "product" | "pdp" | "all_landers" | "variant" | "angle";
@@ -41,9 +44,269 @@ interface FunnelTreeResponse {
   unattributedEntry: TreeNode | null;
   blogEntry: TreeNode | null;
   grandTotal: TreeMetrics;
+  ltvBasis: { monthly_churn: number; sub_lifetime_orders: number; months_used: number; window: string };
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
   referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
+  breakdowns: { device: BreakdownRowT[]; country: BreakdownRowT[]; language: BreakdownRowT[] };
+  runningExperiments: RunningExperimentT[];
+}
+interface BreakdownRowT { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
+interface RunningExperimentArmT { variant_id: string; label: string; is_control: boolean; sessions: number; conversions: number; sub_attach: number; cvr: number; win_prob: number | null }
+interface RunningExperimentT { experiment_id: string; product_id: string; lever: string; lander_type: string; status: string; holdout_pct: number; arms: RunningExperimentArmT[] }
+
+interface PopupVariantRow { variant: string; label: string; shown: number; engaged: number; email: number; phone: number }
+interface CartAnalyticsResponse {
+  range: { start: string; end: string };
+  abandoned: { open_with_email: number; carts_reminded: number; followups_sent: number; recovered: number; recovery_rate_pct: number; revenue_recovered_cents: number; misfired_reminders: number; fast_converted_in_session: number };
+  leads: { emails: number; phones: number };
+  popupFunnel: { byVariant: PopupVariantRow[]; totals: { shown: number; engaged: number; email: number; phone: number } };
+  surveyFunnel: { shown: number; steps: Array<{ step: string; label: string; reached: number; pct_of_shown: number }>; completed: number; email: number; answers: { cups_per_day: Array<{ value: string; count: number }>; health_goal: Array<{ value: string; count: number }>; coffee_style: Array<{ value: string; count: number }> } };
+  packBreakdown: { rows: Array<{ label: string; count: number; pct: number }> };
+}
+
+/** SDK-driven, slice + destination aware pack-size breakdown (AOV / decoy lens). */
+function PackBreakdownCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const rows = data?.packBreakdown?.rows ?? [];
+  const max = Math.max(...rows.map((r) => r.count), 1);
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Pack size chosen</h2>
+          <p className="mt-1 text-xs text-zinc-400">The mix behind AOV — reorder the price table / tune the decoy to shift it.</p>
+        </div>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+      </div>
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+      {data && rows.length === 0 && <p className="text-xs text-zinc-400">No pack selections in this range.</p>}
+      {rows.length > 0 && (
+        <div className="space-y-2">
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-center gap-3">
+              <span className="w-28 shrink-0 text-sm text-zinc-700 dark:text-zinc-300">{r.label}</span>
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${(r.count / max) * 100}%` }} /></div>
+              <span className="w-20 shrink-0 text-right text-sm tabular-nums"><strong className="text-zinc-900 dark:text-zinc-100">{r.count}</strong> <span className="text-zinc-400">{r.pct.toFixed(0)}%</span></span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** SDK-driven survey-chapter funnel + answer distributions, slice + destination
+ *  aware. (Survey events were dropped by the pixel allowlist — fixed 2026-06-30.) */
+function SurveyFunnelCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const sf = data?.surveyFunnel;
+  const AnswerBlock = ({ title, rows }: { title: string; rows: Array<{ value: string; count: number }> }) => {
+    const max = Math.max(...rows.map((r) => r.count), 1);
+    return (
+      <div>
+        <p className="mb-1 text-[10px] uppercase tracking-wide text-zinc-400">{title}</p>
+        {rows.length === 0 ? <p className="text-xs text-zinc-400">—</p> : rows.map((r) => (
+          <div key={r.value} className="mb-1 flex items-center gap-2 text-xs">
+            <span className="w-28 shrink-0 truncate text-zinc-700 dark:text-zinc-300">{r.value}</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.count / max) * 100}%` }} /></div>
+            <span className="w-8 shrink-0 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{r.count}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Survey chapter</h2>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+      </div>
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+      {sf && sf.shown === 0 && <p className="text-xs text-zinc-400">No survey impressions yet — survey event tracking was just enabled, so this will populate with new traffic.</p>}
+      {sf && sf.shown > 0 && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div>
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <StatCard label="Shown" value={sf.shown.toLocaleString()} />
+              <StatCard label="Completed" value={`${sf.completed} (${sf.shown > 0 ? ((sf.completed / sf.shown) * 100).toFixed(0) : 0}%)`} tone={sf.completed > 0 ? "good" : "neutral"} />
+            </div>
+            {sf.steps.map((s) => (
+              <div key={s.step} className="mb-1 flex items-center gap-2 text-xs">
+                <span className="w-24 shrink-0 text-zinc-600 dark:text-zinc-400">{s.label}</span>
+                <div className="h-2 flex-1 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-full bg-emerald-500" style={{ width: `${s.pct_of_shown}%` }} /></div>
+                <span className="w-16 shrink-0 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{s.reached} · {s.pct_of_shown.toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-3">
+            <AnswerBlock title="Cups per day (Q1)" rows={sf.answers.cups_per_day} />
+            <AnswerBlock title="Health goal (Q2)" rows={sf.answers.health_goal} />
+            <AnswerBlock title="Coffee style (Q3)" rows={sf.answers.coffee_style} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** SDK-driven, slice + destination aware lead-capture popup funnel. */
+function PopupFunnelCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const pf = data?.popupFunnel;
+  const rows = pf ? [...pf.byVariant, { variant: "total", label: "Total", ...pf.totals }] : [];
+  const rate = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Lead-capture popup</h2>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+      {pf && (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[620px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-[10px] uppercase tracking-wide text-zinc-400 dark:border-zinc-800">
+                <th className="py-2 text-left font-medium">Variant</th>
+                <th className="py-2 text-right font-medium">Shown</th>
+                <th className="py-2 text-right font-medium">Engaged</th>
+                <th className="py-2 text-right font-medium">Email (step 1)</th>
+                <th className="py-2 text-right font-medium">Phone (step 2)</th>
+                <th className="py-2 text-right font-medium">Email→Phone</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.variant} className={"border-b border-zinc-100 last:border-0 dark:border-zinc-800/50 " + (r.variant === "total" ? "font-semibold" : "")}>
+                  <td className="py-1.5 text-zinc-700 dark:text-zinc-300">{r.label === "Offer" ? "Offer (discount)" : r.label === "Survey" ? "Survey (quiz)" : r.label}</td>
+                  <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{r.shown.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums">{r.engaged.toLocaleString()} <span className="text-[10px] text-zinc-400">{rate(r.engaged, r.shown)}</span></td>
+                  <td className="py-1.5 text-right tabular-nums">{r.email.toLocaleString()} <span className="text-[10px] text-zinc-400">{rate(r.email, r.shown)}</span></td>
+                  <td className="py-1.5 text-right tabular-nums">{r.phone.toLocaleString()} <span className="text-[10px] text-zinc-400">{rate(r.phone, r.shown)}</span></td>
+                  <td className="py-1.5 text-right tabular-nums font-medium text-emerald-600 dark:text-emerald-400">{rate(r.phone, r.email)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Abandoned-cart + lead capture SUMMARY (no per-cart logs), slice + destination
+ *  aware. Recovery is corrected (credits returns-via-new-cart) + flags mis-fires. */
+function CartAnalyticsCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const a = data?.abandoned;
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Abandoned carts &amp; lead capture</h2>
+          <p className="mt-1 text-xs text-zinc-400">Reminder is a 2-step sequence (step 1 + follow-up). Recovery credits a reminded customer who orders afterward, even via a new cart.</p>
+        </div>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+
+      {a && data && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard label="Open (has email)" value={a.open_with_email.toLocaleString()} />
+          <StatCard label="Carts reminded (×2 steps)" value={`${a.carts_reminded} / ${a.followups_sent}`} />
+          <StatCard label="Recovered" value={a.recovered.toLocaleString()} tone={a.recovered > 0 ? "good" : "neutral"} />
+          <StatCard label="Recovery rate" value={`${a.recovery_rate_pct.toFixed(1)}%`} tone={a.recovery_rate_pct >= 10 ? "good" : "neutral"} />
+          <StatCard label="Revenue recovered" value={money(a.revenue_recovered_cents)} tone={a.revenue_recovered_cents > 0 ? "good" : "neutral"} />
+          <StatCard label="Fast in-session buys" value={a.fast_converted_in_session.toLocaleString()} />
+          <StatCard label="Mis-fired reminders" value={a.misfired_reminders.toLocaleString()} tone={a.misfired_reminders > 0 ? "bad" : "neutral"} />
+          <StatCard label="Leads (email / phone)" value={`${data.leads.emails} / ${data.leads.phones}`} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** SDK-driven, slice-aware dimension breakdown with CVR + LTV/visit per row —
+ *  surfaces a high-traffic segment that doesn't convert (tablet layout bug,
+ *  PR shipping friction, …). */
+function BreakdownPanel({ title, rows }: { title: string; rows: BreakdownRowT[] }) {
+  const max = Math.max(...rows.map((r) => r.visits), 1);
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
+        <ReworkedPills />
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[10px] uppercase tracking-wide text-zinc-400">
+            <th className="pb-1 text-left font-medium">{title}</th>
+            <th className="pb-1 text-right font-medium">Sessions</th>
+            <th className="pb-1 text-right font-medium">CVR</th>
+            <th className="pb-1 text-right font-medium">LTV/visit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={4} className="py-2 text-xs text-zinc-400">No sessions.</td></tr>}
+          {rows.map((r) => (
+            <tr key={r.value} className="border-t border-zinc-100 dark:border-zinc-800/50">
+              <td className="py-1.5 pr-2 text-zinc-700 dark:text-zinc-300">{r.value}</td>
+              <td className="py-1.5 text-right">
+                <div className="flex items-center justify-end gap-2">
+                  <div className="hidden h-1.5 w-16 overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800 sm:block">
+                    <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.visits / max) * 100}%` }} />
+                  </div>
+                  <span className="tabular-nums text-zinc-900 dark:text-zinc-100">{r.visits.toLocaleString()}</span>
+                </div>
+              </td>
+              <td className={"py-1.5 text-right tabular-nums " + (r.cvr > 0 ? "font-medium text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{r.cvr.toFixed(1)}%</td>
+              <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{money(r.ltv_per_visit_cents)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 /** The badge pair marking a card as rebuilt onto the SDK + slice. */
@@ -122,6 +385,18 @@ function flattenTree(nodes: TreeNode[], expanded: Set<string>, depth = 0, parent
   return rows;
 }
 function pctStr(x: number) { return (x * 100).toFixed(1) + "%"; }
+function money(cents: number) { return "$" + (cents / 100).toFixed(2); }
+
+/** A funnel-step cell: the count with its rate-from-visit beneath, so each
+ *  step's % is visible for period-over-period drift comparison. */
+function StepCell({ count, rate, strong, rateGood }: { count: number; rate: number; strong?: boolean; rateGood?: boolean }) {
+  return (
+    <td className="py-1.5 text-right">
+      <div className={"tabular-nums " + (strong ? "font-medium text-zinc-900 dark:text-zinc-100" : "text-zinc-700 dark:text-zinc-300")}>{count.toLocaleString()}</div>
+      <div className={"text-[10px] tabular-nums " + (rateGood && rate > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{pctStr(rate)}</div>
+    </td>
+  );
+}
 
 // ── Chapter diagnostics (the "why") — per-destination chapter sequence ──────
 interface ChapterDiagRow {
@@ -130,12 +405,64 @@ interface ChapterDiagRow {
   cta_origin: number; cta_origin_pct: number;
   view_to_pricing_pct: number; view_to_pack_pct: number;
 }
+interface FunnelStepDatum { step: string; label: string; count: number; conv_from_prev_pct: number; conv_from_top_pct: number; drop_from_prev: number; }
 interface ChapterDiagResponse {
   range: { start: string; end: string };
   destination: { key: string; label: string } | null;
   availableDestinations: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number; parent?: string }>;
   summary: { visits: number; reached_pricing: number; carry_to_pricing_pct: number; packed: number; close_pct: number; jumped_to_pricing: number; scrolled_to_pricing: number } | null;
+  funnelSteps: FunnelStepDatum[];
   chapters: ChapterDiagRow[];
+  bottlenecks?: { destinations: Array<{ key: string; label: string; bottleneck: string; recommendation: string; confidence: string }> };
+}
+
+/** SDK-driven, slice-aware funnel waterfall (vertical bars) with a card-local
+ *  destination selector — the same controls as the chapter-diagnostics card. */
+function FunnelWaterfallCard({ data, loading, dest, onDest }: {
+  data: ChapterDiagResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+}) {
+  const steps = data?.funnelSteps ?? [];
+  const top = steps[0]?.count || 1;
+  const effectiveDest = dest || data?.destination?.key || "";
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Funnel</h2>
+        <ReworkedPills />
+      </div>
+      <div className="mb-5 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={effectiveDest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          {(data?.availableDestinations ?? []).map((d) => (
+            <option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label} ({d.visits.toLocaleString()})</option>
+          ))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+
+      {steps.length > 0 && (
+        <div className="flex items-end gap-3 sm:gap-5" style={{ height: 200 }}>
+          {steps.map((s, i) => {
+            const h = Math.max(2, Math.round((s.count / top) * 100));
+            const isLast = i === steps.length - 1;
+            return (
+              <div key={s.step} className="flex h-full flex-1 flex-col items-center justify-end text-center">
+                <div className="mb-1 text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{s.count.toLocaleString()}</div>
+                <div className={"w-full rounded-t " + (isLast ? "bg-emerald-500" : "bg-zinc-800 dark:bg-zinc-200")} style={{ height: `${h}%` }} />
+                <div className="mt-2 text-[11px] font-medium leading-tight text-zinc-600 dark:text-zinc-300">{s.label}</div>
+                <div className="text-[10px] tabular-nums text-zinc-400">
+                  {i === 0 ? "top" : `${s.conv_from_prev_pct.toFixed(0)}% prev`}
+                  {i > 0 && s.drop_from_prev > 0 && <span className="ml-1 text-rose-400">↓{s.drop_from_prev}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function dwellStr(ms: number) { return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`; }
@@ -178,6 +505,20 @@ function ChapterDiagnosticsCard({ data, loading, dest, onDest }: {
           <StatCard label="Jump / scroll to price" value={`${s.jumped_to_pricing} / ${s.scrolled_to_pricing}`} />
         </div>
       )}
+
+      {(() => {
+        const v = data?.bottlenecks?.destinations?.find((d) => d.key === data?.destination?.key);
+        if (!v || v.bottleneck === "insufficient_data") return null;
+        const tone = v.bottleneck === "close" ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
+          : v.bottleneck === "carry" ? "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300"
+          : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300";
+        return (
+          <div className={`mb-4 rounded-md border px-3 py-2 text-xs ${tone}`}>
+            <strong className="uppercase tracking-wide">Bottleneck: {v.bottleneck}</strong> — {v.recommendation}
+            <span className="ml-1 opacity-60">(confidence: {v.confidence})</span>
+          </div>
+        );
+      })()}
 
       {data && data.chapters.length > 0 && (
         <div className="overflow-x-auto">
@@ -255,7 +596,8 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
           <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Funnel by product &amp; concept</h2>
           {tree && (
             <p className="mt-1 text-xs text-zinc-400">
-              Bare PDP vs targeted landers, rolled up per product. {tree.grandTotal.visit.toLocaleString()} visits · {pctStr(tree.grandTotal.conversion_rate)} CVR · {tree.range.start} → {tree.range.end}
+              Bare PDP vs targeted landers, rolled up per product. {tree.grandTotal.visit.toLocaleString()} visits · {pctStr(tree.grandTotal.conversion_rate)} CVR · <strong className="text-zinc-500 dark:text-zinc-300">{money(tree.grandTotal.ltv_per_visit_cents)} LTV/visit</strong> · {tree.range.start} → {tree.range.end}
+              <span className="ml-1 text-zinc-400">· LTV: subs ×{tree.ltvBasis.sub_lifetime_orders.toFixed(1)} ({(tree.ltvBasis.monthly_churn * 100).toFixed(1)}% churn, {tree.ltvBasis.window})</span>
             </p>
           )}
         </div>
@@ -275,13 +617,18 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                 <th className="py-2 text-right font-medium">Pack</th>
                 <th className="py-2 text-right font-medium">Checkout</th>
                 <th className="py-2 text-right font-medium">Orders</th>
-                <th className="py-2 text-right font-medium">Eng %</th>
-                <th className="py-2 text-right font-medium">CVR</th>
+                <th className="py-2 text-right font-medium">Sub-attach</th>
+                <th className="py-2 text-right font-medium">AOV</th>
+                <th className="py-2 text-right font-medium">Rev/visit</th>
+                <th className="py-2 text-right font-medium">LTV/visit</th>
+              </tr>
+              <tr className="text-[9px] uppercase tracking-wide text-zinc-300 dark:text-zinc-600">
+                <th /><th /><th className="text-right font-normal">n · rate</th><th className="text-right font-normal">n · rate</th><th className="text-right font-normal">n · rate</th><th className="text-right font-normal">n · CVR</th><th /><th /><th />
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={8} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
+                <tr><td colSpan={10} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
               )}
               {rows.map(({ node, depth, path, hasChildren, isOpen }) => {
                 const m = node.metrics;
@@ -308,12 +655,14 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                       </div>
                     </td>
                     <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.visit.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.engaged.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.pack_selected.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.checkout_started.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{m.order_placed.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{pctStr(m.engagement_rate)}</td>
-                    <td className={"py-1.5 text-right tabular-nums font-medium " + (m.conversion_rate > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-400")}>{pctStr(m.conversion_rate)}</td>
+                    <StepCell count={m.engaged} rate={m.engagement_rate} />
+                    <StepCell count={m.pack_selected} rate={m.pack_rate} />
+                    <StepCell count={m.checkout_started} rate={m.checkout_rate} />
+                    <StepCell count={m.order_placed} rate={m.conversion_rate} strong rateGood />
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.order_placed > 0 ? pctStr(m.sub_attach_rate) : "—"}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{m.order_placed > 0 ? money(m.aov_cents) : "—"}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{money(m.revenue_per_visit_cents)}</td>
+                    <td className={"py-1.5 text-right tabular-nums font-semibold " + (m.ltv_per_visit_cents > 0 ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-400")}>{money(m.ltv_per_visit_cents)}</td>
                   </tr>
                 );
               })}
@@ -519,6 +868,22 @@ export default function StorefrontFunnelPage() {
   const [chapterDest, setChapterDest] = useState("");
   const [chapter, setChapter] = useState<ChapterDiagResponse | null>(null);
   const [chapterLoading, setChapterLoading] = useState(true);
+  // The rebuilt funnel waterfall — its own card-local destination (chapter-diagnostics endpoint).
+  const [waterfallDest, setWaterfallDest] = useState("");
+  const [waterfall, setWaterfall] = useState<ChapterDiagResponse | null>(null);
+  const [waterfallLoading, setWaterfallLoading] = useState(true);
+  const [cartDest, setCartDest] = useState("");
+  const [cart, setCart] = useState<CartAnalyticsResponse | null>(null);
+  const [cartLoading, setCartLoading] = useState(true);
+  const [popupDest, setPopupDest] = useState("");
+  const [popup, setPopup] = useState<CartAnalyticsResponse | null>(null);
+  const [popupLoading, setPopupLoading] = useState(true);
+  const [surveyDest, setSurveyDest] = useState("");
+  const [survey, setSurvey] = useState<CartAnalyticsResponse | null>(null);
+  const [surveyLoading, setSurveyLoading] = useState(true);
+  const [packDest, setPackDest] = useState("");
+  const [pack, setPack] = useState<CartAnalyticsResponse | null>(null);
+  const [packLoading, setPackLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -568,8 +933,83 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end, product, utmSource, referrer, chapterDest]);
 
   useEffect(() => { loadChapter(); }, [loadChapter]);
-  // A page-slice change can change which destinations exist → re-default the card.
-  useEffect(() => { setChapterDest(""); }, [product, utmSource, referrer]);
+
+  const loadWaterfall = useCallback(async () => {
+    if (!start || !end) return;
+    setWaterfallLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (waterfallDest) q.set("destination", waterfallDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/chapter-diagnostics?${q.toString()}`);
+    if (res.ok) setWaterfall(await res.json());
+    setWaterfallLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, waterfallDest]);
+
+  useEffect(() => { loadWaterfall(); }, [loadWaterfall]);
+
+  const loadCart = useCallback(async () => {
+    if (!start || !end) return;
+    setCartLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (cartDest) q.set("destination", cartDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setCart(await res.json());
+    setCartLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, cartDest]);
+
+  useEffect(() => { loadCart(); }, [loadCart]);
+
+  const loadPopup = useCallback(async () => {
+    if (!start || !end) return;
+    setPopupLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (popupDest) q.set("destination", popupDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setPopup(await res.json());
+    setPopupLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, popupDest]);
+
+  useEffect(() => { loadPopup(); }, [loadPopup]);
+
+  const loadSurvey = useCallback(async () => {
+    if (!start || !end) return;
+    setSurveyLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (surveyDest) q.set("destination", surveyDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setSurvey(await res.json());
+    setSurveyLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, surveyDest]);
+
+  useEffect(() => { loadSurvey(); }, [loadSurvey]);
+
+  const loadPack = useCallback(async () => {
+    if (!start || !end) return;
+    setPackLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (packDest) q.set("destination", packDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setPack(await res.json());
+    setPackLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, packDest]);
+
+  useEffect(() => { loadPack(); }, [loadPack]);
+  // A page-slice change can change which destinations exist → re-default the cards.
+  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); setPopupDest(""); setSurveyDest(""); setPackDest(""); }, [product, utmSource, referrer]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -602,7 +1042,11 @@ export default function StorefrontFunnelPage() {
 
       <FunnelTreeCard tree={tree} loading={treeLoading} />
 
+      <FunnelWaterfallCard data={waterfall} loading={waterfallLoading} dest={waterfallDest} onDest={setWaterfallDest} />
+
       <ChapterDiagnosticsCard data={chapter} loading={chapterLoading} dest={chapterDest} onDest={setChapterDest} />
+
+      <RunningExperimentsCard rows={tree?.runningExperiments ?? []} loading={treeLoading} />
 
       {loading && !data && (
         <p className="text-sm text-zinc-400">Loading…</p>
@@ -610,55 +1054,19 @@ export default function StorefrontFunnelPage() {
 
       {data && (
         <>
-          <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            <StatCard label="Total sessions" value={data.total_sessions.toLocaleString()} />
-            <StatCard label="PDP visits" value={topOfFunnel.toLocaleString()} />
-            <StatCard label="Add-to-cart rate" value={`${atcRate.toFixed(1)}%`} tone={atcRate >= 5 ? "good" : "neutral"} />
-            <StatCard label="Leads generated" value={(data.leads_generated ?? 0).toLocaleString()} tone={(data.leads_generated ?? 0) > 0 ? "good" : "neutral"} />
-            <StatCard label="Orders" value={orderPlaced.toLocaleString()} />
-            <StatCard
-              label="PDP → order"
-              value={`${overallCvr.toFixed(2)}%`}
-              tone={overallCvr >= 2 ? "good" : "neutral"}
-            />
-          </div>
 
-          <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-            <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-              Funnel — {data.range.start} to {data.range.end}
-            </h2>
-            <FunnelChart funnel={data.funnel} topOfFunnel={topOfFunnel} />
-          </section>
+          <PopupFunnelCard data={popup} loading={popupLoading} dest={popupDest} onDest={setPopupDest} destOptions={chapter?.availableDestinations ?? []} />
+          <SurveyFunnelCard data={survey} loading={surveyLoading} dest={surveyDest} onDest={setSurveyDest} destOptions={chapter?.availableDestinations ?? []} />
 
-          {data.popupFunnel && <PopupFunnelPanel data={data.popupFunnel} />}
-          {data.surveyFunnel && <SurveyFunnelPanel data={data.surveyFunnel} />}
-
-          <div className="mb-8 grid gap-4 lg:grid-cols-3">
-            <BreakdownCard
-              title="Device"
-              rows={data.deviceBreakdown.map(d => ({ label: d.device_type, value: d.sessions }))}
-            />
-            <BreakdownCard
-              title="Source"
-              rows={data.sourceBreakdown.map(s => ({ label: s.utm_source, value: s.sessions }))}
-            />
-            <BreakdownCard
-              title="Country"
-              rows={data.countryBreakdown.map(c => ({ label: c.ip_country, value: c.sessions }))}
-            />
-          </div>
-
-          {data.abandonedCarts && (
-            <AbandonedCartsPanel block={data.abandonedCarts} />
+          {tree && (
+            <div className="mb-8 grid gap-4 lg:grid-cols-3">
+              <BreakdownPanel title="Device" rows={tree.breakdowns.device} />
+              <BreakdownPanel title="Country" rows={tree.breakdowns.country} />
+              <BreakdownPanel title="Language" rows={tree.breakdowns.language} />
+            </div>
           )}
 
-          {data.predictedLtv && data.predictedLtv.length > 0 && (
-            <PredictedLtvPanel rows={data.predictedLtv} />
-          )}
-
-          {data.runningExperiments && data.runningExperiments.length > 0 && (
-            <RunningExperimentsPanel rows={data.runningExperiments} />
-          )}
+          <CartAnalyticsCard data={cart} loading={cartLoading} dest={cartDest} onDest={setCartDest} destOptions={chapter?.availableDestinations ?? []} />
 
           {data.leverImportance && (
             <LeverImportancePanel rows={data.leverImportance} />
@@ -668,110 +1076,8 @@ export default function StorefrontFunnelPage() {
             <CampaignGradesPanel block={data.campaignGrades} workspaceId={workspace.id} onChange={load} />
           )}
 
-          <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-              Top products (by pack_selected)
-            </h2>
-            {data.topProducts.length === 0 ? (
-              <p className="text-xs text-zinc-400">No pack selections in this range yet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                      <th className="py-2 pr-2">Product</th>
-                      <th className="py-2 pr-2 text-right">Selections</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.topProducts.map(p => (
-                      <tr key={p.product_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                        <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{p.title}</td>
-                        <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                          {p.pack_selected_count.toLocaleString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
+          <PackBreakdownCard data={pack} loading={packLoading} dest={packDest} onDest={setPackDest} destOptions={chapter?.availableDestinations ?? []} />
 
-          {data.packBreakdown && data.packBreakdown.length > 0 && (
-            <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-                Pack size chosen
-              </h2>
-              {(() => {
-                const total = data.packBreakdown.reduce((s, b) => s + b.count, 0) || 1;
-                return (
-                  <div className="space-y-2">
-                    {data.packBreakdown.map(b => (
-                      <div key={b.label} className="flex items-center gap-3">
-                        <div className="w-28 shrink-0 text-sm text-zinc-700 dark:text-zinc-300">{b.label}</div>
-                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
-                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.round((b.count / total) * 100)}%` }} />
-                        </div>
-                        <div className="w-20 shrink-0 text-right text-sm tabular-nums text-zinc-900 dark:text-zinc-100">
-                          <span className="font-semibold">{b.count}</span>
-                          <span className="ml-1 text-xs text-zinc-400">{Math.round((b.count / total) * 100)}%</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </section>
-          )}
-
-          <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-              Recent events (last 30)
-            </h2>
-            {data.recentEvents.length === 0 ? (
-              <p className="text-xs text-zinc-400">No events in this range.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[640px] text-xs">
-                  <thead>
-                    <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                      <th className="py-2 pr-2">Time</th>
-                      <th className="py-2 pr-2">Event</th>
-                      <th className="py-2 pr-2">Session</th>
-                      <th className="py-2 pr-2">URL</th>
-                      <th className="py-2 pr-2">Meta</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.recentEvents.map(e => (
-                      <tr key={e.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                        <td className="whitespace-nowrap py-2 pr-2 text-zinc-500">
-                          {new Date(e.created_at).toLocaleString()}
-                        </td>
-                        <td className="py-2 pr-2">
-                          <EventChip type={e.event_type} />
-                        </td>
-                        <td className="py-2 pr-2 font-mono text-[10px] text-zinc-400">
-                          {e.anonymous_id.slice(0, 8)}…
-                        </td>
-                        <td className="py-2 pr-2 text-zinc-600 dark:text-zinc-400" title={e.url || ""}>
-                          <div className="max-w-[260px] truncate">
-                            {e.url ? new URL(e.url).pathname + new URL(e.url).search : "—"}
-                          </div>
-                        </td>
-                        <td className="py-2 pr-2 font-mono text-[10px] text-zinc-500" title={JSON.stringify(e.meta)}>
-                          <div className="max-w-[260px] truncate">
-                            {e.meta && Object.keys(e.meta).length > 0 ? JSON.stringify(e.meta) : "—"}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
         </>
       )}
     </div>
@@ -823,384 +1129,91 @@ function DateRangePicker({
   );
 }
 
-function StatCard({ label, value, tone }: { label: string; value: string; tone?: "good" | "neutral" }) {
+function StatCard({ label, value, tone }: { label: string; value: string; tone?: "good" | "neutral" | "bad" }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{label}</p>
-      <p className={`mt-1 text-2xl font-bold tabular-nums ${tone === "good" ? "text-emerald-600" : "text-zinc-900 dark:text-zinc-100"}`}>
+      <p className={`mt-1 text-2xl font-bold tabular-nums ${tone === "good" ? "text-emerald-600" : tone === "bad" ? "text-rose-600" : "text-zinc-900 dark:text-zinc-100"}`}>
         {value}
       </p>
     </div>
   );
 }
 
-function FunnelChart({ funnel, topOfFunnel }: { funnel: FunnelStepRow[]; topOfFunnel: number }) {
-  return (
-    <div className="space-y-1.5">
-      {funnel.map((row, i) => {
-        const pctOfTop = topOfFunnel > 0 ? (row.sessions / topOfFunnel) * 100 : 0;
-        const isFirst = i === 0;
-        const isLast = i === funnel.length - 1;
-        const dropPct = isFirst ? null : 100 - row.conv_from_prev_pct;
-        return (
-          <div key={row.step}>
-            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-sm">
-              <span className="min-w-0 truncate font-semibold text-zinc-900 dark:text-zinc-100">
-                {STEP_LABELS[row.step] || row.step}
-              </span>
-              <div className="flex flex-wrap items-center justify-end gap-x-3 tabular-nums">
-                <span className="text-zinc-900 dark:text-zinc-100 font-semibold">
-                  {row.sessions.toLocaleString()}
-                </span>
-                {!isFirst && (
-                  <span className="text-xs text-zinc-500" title="Conversion from previous step">
-                    {row.conv_from_prev_pct.toFixed(1)}% from prev
-                  </span>
-                )}
-                {!isFirst && (
-                  <span className="text-xs text-zinc-400" title="Conversion from top of funnel">
-                    {row.conv_from_top_pct.toFixed(1)}% from top
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="mt-1 h-7 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
-              <div
-                className={`h-full rounded transition-all ${
-                  isLast ? "bg-emerald-500" : "bg-zinc-900 dark:bg-zinc-100"
-                }`}
-                style={{ width: `${Math.max(pctOfTop, 0.5)}%` }}
-              />
-            </div>
-            {!isFirst && row.drop_from_prev > 0 && (
-              <p className="mt-0.5 text-[11px] text-rose-600">
-                ↓ {row.drop_from_prev.toLocaleString()} dropped ({dropPct?.toFixed(1)}%)
-              </p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
-function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"]> }) {
-  const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
-  const rows = [
-    ...data.byVariant.map((v) => ({ ...v, isTotal: false })),
-    { variant: "total", label: "Total", ...data.totals, isTotal: true },
-  ];
-  // A cell shows the count and, beneath it, its share of that row's "shown".
-  const Cell = ({ n, shown, pctLabel }: { n: number; shown: number; pctLabel?: string }) => (
-    <td className="py-2 pr-2 text-right tabular-nums">
-      <span className="font-semibold text-zinc-900 dark:text-zinc-100">{n.toLocaleString()}</span>
-      {pctLabel !== "" && <span className="ml-1.5 text-xs text-zinc-400">{pctLabel ?? pct(n, shown)}</span>}
-    </td>
-  );
+
+
+
+
+
+/** SDK-driven running-experiments card. Cross-variant by nature, so no PDP/variant
+ *  slice selector — the rollup is stamped-session attribution across all arms.
+ *  Numbers come straight from [[libraries/funnel-tree]] computeRunningExperiments. */
+function RunningExperimentsCard({ rows, loading }: { rows: RunningExperimentT[]; loading: boolean }) {
+  const fmtLever = (s: string) => s.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
   return (
     <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Lead-capture popup
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          Offer = discount variant · Survey = quiz variant · % is of that row&apos;s shown
-        </span>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[600px] text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-              <th className="py-2 pr-2">Variant</th>
-              <th className="py-2 pr-2 text-right">Shown</th>
-              <th className="py-2 pr-2 text-right">Engaged</th>
-              <th className="py-2 pr-2 text-right">Email (step 1)</th>
-              <th className="py-2 pr-2 text-right">Phone (step 2)</th>
-              <th className="py-2 pr-2 text-right">Email→Phone</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr
-                key={r.variant}
-                className={`border-b border-zinc-100 last:border-0 dark:border-zinc-800/50 ${r.isTotal ? "font-semibold" : ""}`}
-              >
-                <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{r.label}</td>
-                <Cell n={r.shown} shown={r.shown} pctLabel="" />
-                <Cell n={r.engaged} shown={r.shown} />
-                <Cell n={r.email} shown={r.shown} />
-                <Cell n={r.phone} shown={r.shown} />
-                <td className="py-2 pr-2 text-right tabular-nums">
-                  <span className={r.email > 0 ? "font-semibold text-emerald-600" : "text-zinc-400"}>
-                    {pct(r.phone, r.email)}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunnel"]> }) {
-  const { shown, completed, email, phone } = data;
-  const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
-  const steps = [
-    { label: "Shown", n: shown, of: shown },
-    { label: "Completed survey", n: completed, of: shown },
-    { label: "Email (step 1)", n: email, of: shown },
-    { label: "Phone (step 2)", n: phone, of: shown },
-  ];
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Survey chapter</h2>
-        <span className="text-[11px] text-zinc-400">In-page survey after the hero · % is of shown</span>
-      </div>
-      {shown === 0 ? (
-        <p className="text-xs text-zinc-400">No survey impressions in this range yet.</p>
-      ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {steps.map((s, i) => (
-            <div key={s.label} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-              <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-400">{s.label}</p>
-              <p className="mt-1 text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">{s.n.toLocaleString()}</p>
-              {i > 0 && <p className="text-xs text-zinc-400">{pct(s.n, s.of)} of shown</p>}
-            </div>
-          ))}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Running experiments</h2>
+          <p className="mt-1 text-xs text-zinc-400">Live A/B arms — session-stamped attribution, Thompson win-probability vs control.</p>
         </div>
+        <ReworkedPills />
+      </div>
+      {loading && rows.length === 0 && <p className="text-sm text-zinc-400">Loading…</p>}
+      {!loading && rows.length === 0 && (
+        <p className="text-xs text-zinc-400">No experiments running — nothing to read yet.</p>
       )}
-    </section>
-  );
-}
-
-function BreakdownCard({
-  title,
-  rows,
-}: {
-  title: string;
-  rows: Array<{ label: string; value: number }>;
-}) {
-  const max = rows[0]?.value || 1;
-  return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
-      {rows.length === 0 ? (
-        <p className="text-xs text-zinc-400">No data.</p>
-      ) : (
-        <ul className="space-y-1.5">
-          {rows.slice(0, 6).map((r) => (
-            <li key={r.label} className="text-xs">
-              <div className="flex items-center justify-between">
-                <span className="min-w-0 truncate text-zinc-700 dark:text-zinc-300">{r.label}</span>
-                <span className="ml-2 shrink-0 tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">{r.value}</span>
-              </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
-                <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${(r.value / max) * 100}%` }} />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function AbandonedCartsPanel({ block }: { block: AbandonedCartsBlock }) {
-  const recoveredPct = block.recovery_rate_pct;
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Abandoned carts
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          Reminder fires after 30 min idle, once per cart.
-        </span>
-      </div>
-      <div className="mb-5 grid gap-3 sm:grid-cols-4">
-        <StatCard label="Open now (has email)" value={block.open_with_email.toLocaleString()} />
-        <StatCard label="Reminders sent" value={block.emailed.toLocaleString()} />
-        <StatCard
-          label="Recovered"
-          value={block.recovered.toLocaleString()}
-          tone={block.recovered > 0 ? "good" : "neutral"}
-        />
-        <StatCard
-          label="Recovery rate"
-          value={`${recoveredPct.toFixed(1)}%`}
-          tone={recoveredPct >= 5 ? "good" : "neutral"}
-        />
-      </div>
-      <div className="mb-4 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-300">
-        Revenue recovered:&nbsp;
-        <strong>${(block.revenue_recovered_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
-      </div>
-      {block.recent.length === 0 ? (
-        <p className="text-xs text-zinc-400">No abandoned carts in this range yet.</p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm">
-            <thead>
-              <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                <th className="py-2 pr-2">Created</th>
-                <th className="py-2 pr-2">Email</th>
-                <th className="py-2 pr-2">Items</th>
-                <th className="py-2 pr-2 text-right">Subtotal</th>
-                <th className="py-2 pr-2">Reminder</th>
-                <th className="py-2 pr-2">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {block.recent.map(c => (
-                <tr key={c.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                  <td className="whitespace-nowrap py-2 pr-2 text-zinc-500">
-                    {new Date(c.created_at).toLocaleString()}
-                  </td>
-                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{c.email}</td>
-                  <td className="py-2 pr-2 tabular-nums text-zinc-700 dark:text-zinc-300">{c.item_count}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
-                    ${(c.subtotal_cents / 100).toFixed(2)}
-                  </td>
-                  <td className="whitespace-nowrap py-2 pr-2 text-xs text-zinc-500">
-                    {c.abandoned_email_sent_at
-                      ? new Date(c.abandoned_email_sent_at).toLocaleString()
-                      : <span className="text-amber-600">pending</span>}
-                  </td>
-                  <td className="py-2 pr-2">
-                    {c.status === "converted" ? (
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800">recovered</span>
-                    ) : c.status === "abandoned" ? (
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-zinc-100 text-zinc-600">abandoned</span>
-                    ) : (
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-800">open</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function PredictedLtvPanel({ rows }: { rows: NonNullable<FunnelData["predictedLtv"]> }) {
-  // The M3 reward the bandit optimizes: predicted lifetime MARGIN per exposed visitor per
-  // (product × lander × audience), shown week-over-week. While uncalibrated the proxy hasn't
-  // been truth-checked by the 4-month reconciler, so the bandit bets conservatively.
-  const money = (cents: number) => "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const anyUncalibrated = rows.some((r) => !r.calibrated);
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Predicted LTV per visitor
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          The reward the agent optimizes — predicted lifetime margin per visitor, week-over-week.
-          {anyUncalibrated && (
-            <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
-              uncalibrated — betting conservatively
-            </span>
-          )}
-        </span>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[680px] text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-              <th className="py-2 pr-2">Cohort</th>
-              <th className="py-2 pr-2 text-right">Visitors</th>
-              <th className="py-2 pr-2 text-right">Sub-attach</th>
-              <th className="py-2 pr-2 text-right">Est sub-LTV</th>
-              <th className="py-2 pr-2 text-right">Pred. LTV/visitor</th>
-              <th className="py-2 pr-2 text-right">vs last wk</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => {
-              const wow = r.wow_delta_pct;
-              return (
-                <tr key={`${r.product_id}-${r.lander_type}-${r.audience}-${i}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                  <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">
-                    {r.product_title}
-                    <span className="ml-1 text-[10px] uppercase text-zinc-400">{r.lander_type} · {r.audience}</span>
-                  </td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{r.visitors.toLocaleString()}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{Math.round(r.sub_attach_rate * 1000) / 10}%</td>
-                  <td className="py-2 pr-2 text-right tabular-nums text-zinc-500">{money(r.est_sub_ltv_cents)}</td>
-                  <td className="py-2 pr-2 text-right font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{money(r.predicted_ltv_per_visitor_cents)}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums font-semibold">
-                    {wow === null ? (
-                      <span className="text-zinc-400">—</span>
-                    ) : (
-                      <span className={wow > 0.1 ? "text-emerald-600" : wow < -0.1 ? "text-rose-600" : "text-zinc-400"}>
-                        {wow > 0 ? "+" : ""}{wow}%
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function RunningExperimentsPanel({ rows }: { rows: NonNullable<FunnelData["runningExperiments"]> }) {
-  const cvr = (a: { conversions: number; sessions: number }) =>
-    a.sessions > 0 ? `${Math.round((a.conversions / a.sessions) * 1000) / 10}%` : "—";
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-        Running experiments
-      </h2>
       <div className="space-y-5">
-        {rows.map((exp) => (
-          <div key={exp.experiment_id} className="rounded-md border border-zinc-100 p-3 dark:border-zinc-800/60">
-            <div className="mb-2 flex items-center justify-between text-xs">
-              <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                {exp.lever} <span className="text-zinc-400">· {exp.lander_type}</span>
-              </span>
-              <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
-                {exp.status} · {Math.round(exp.holdout_pct * 100)}% holdout
-              </span>
-            </div>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                  <th className="py-1 pr-2">Arm</th>
-                  <th className="py-1 pr-2 text-right">Sessions</th>
-                  <th className="py-1 pr-2 text-right">CVR</th>
-                  <th className="py-1 pr-2 text-right">Sub-attach</th>
-                  <th className="py-1 pr-2 text-right">Win-prob vs control</th>
-                </tr>
-              </thead>
-              <tbody>
-                {exp.arms.map((a) => (
-                  <tr key={a.variant_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                    <td className="py-1 pr-2 text-zinc-900 dark:text-zinc-100">
-                      {a.label}
-                      {a.is_control && <span className="ml-1 text-[10px] uppercase text-zinc-400">control</span>}
-                    </td>
-                    <td className="py-1 pr-2 text-right tabular-nums">{a.sessions.toLocaleString()}</td>
-                    <td className="py-1 pr-2 text-right tabular-nums">{cvr(a)}</td>
-                    <td className="py-1 pr-2 text-right tabular-nums">{a.sub_attach.toLocaleString()}</td>
-                    <td className="py-1 pr-2 text-right font-semibold tabular-nums">
-                      {a.win_prob === null ? "—" : `${Math.round(a.win_prob * 100)}%`}
-                    </td>
+        {rows.map((exp) => {
+          const leader = exp.arms
+            .filter((a) => !a.is_control && a.win_prob !== null)
+            .sort((a, b) => (b.win_prob ?? 0) - (a.win_prob ?? 0))[0];
+          return (
+            <div key={exp.experiment_id} className="rounded-md border border-zinc-100 p-3 dark:border-zinc-800/60">
+              <div className="mb-2 flex items-center justify-between text-xs">
+                <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                  {fmtLever(exp.lever)} <span className="text-zinc-400">· {exp.lander_type}</span>
+                </span>
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
+                  {exp.status} · {Math.round(exp.holdout_pct * 100)}% holdout
+                </span>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+                    <th className="py-1 pr-2">Arm</th>
+                    <th className="py-1 pr-2 text-right">Sessions</th>
+                    <th className="py-1 pr-2 text-right">Conv.</th>
+                    <th className="py-1 pr-2 text-right">CVR</th>
+                    <th className="py-1 pr-2 text-right">Sub-attach</th>
+                    <th className="py-1 pr-2 text-right">Win-prob vs control</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ))}
+                </thead>
+                <tbody>
+                  {exp.arms.map((a) => {
+                    const winner = leader && a.variant_id === leader.variant_id && (leader.win_prob ?? 0) >= 0.9;
+                    return (
+                      <tr key={a.variant_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                        <td className="py-1 pr-2 text-zinc-900 dark:text-zinc-100">
+                          {a.label}
+                          {a.is_control && <span className="ml-1 text-[10px] uppercase text-zinc-400">control</span>}
+                        </td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.sessions.toLocaleString()}</td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.conversions.toLocaleString()}</td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.sessions > 0 ? `${a.cvr}%` : "—"}</td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.sub_attach.toLocaleString()}</td>
+                        <td className={`py-1 pr-2 text-right font-semibold tabular-nums ${winner ? "text-emerald-600" : ""}`}>
+                          {a.win_prob === null ? "—" : `${Math.round(a.win_prob * 100)}%`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -1502,26 +1515,3 @@ function CampaignGradesPanel({
   );
 }
 
-function EventChip({ type }: { type: string }) {
-  const tone: Record<string, string> = {
-    pdp_view: "bg-zinc-100 text-zinc-700",
-    pdp_engaged: "bg-amber-100 text-amber-800",
-    chapter_view: "bg-sky-50 text-sky-700",
-    chapter_dwell: "bg-sky-50 text-sky-600",
-    scroll_depth: "bg-zinc-100 text-zinc-600",
-    cta_click: "bg-orange-100 text-orange-800",
-    add_to_cart: "bg-blue-100 text-blue-800",
-    pack_selected: "bg-blue-100 text-blue-800",
-    customize_view: "bg-indigo-100 text-indigo-800",
-    upsell_added: "bg-emerald-100 text-emerald-800",
-    upsell_skipped: "bg-zinc-100 text-zinc-600",
-    checkout_view: "bg-violet-100 text-violet-800",
-    checkout_redirect: "bg-violet-100 text-violet-800",
-    order_placed: "bg-emerald-200 text-emerald-900 font-bold",
-  };
-  return (
-    <span className={`inline-flex whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold ${tone[type] || "bg-zinc-100 text-zinc-700"}`}>
-      {type}
-    </span>
-  );
-}

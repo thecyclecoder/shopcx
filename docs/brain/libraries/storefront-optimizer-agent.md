@@ -35,6 +35,20 @@ The session emits ONE JSON object. `propose` (a reversible-lever campaign — co
 - **Surfaces its reasoning.** Every proposal cites the funnel signal + the lever posterior; a silent optimizer is invisible to its supervisor.
 - **Build-or-request, never fake.** A missing capability becomes a scoped spec committed to main + a surfaced Build card (owner-gated) — the agent never edits product code or auto-builds (mirror [[repair-agent]]).
 
+## Compute model (per [[../operational-rules]] § Compute tiers)
+The optimizer is a **Tier-0 deterministic loop + a read-only box lane**, never a read-write one:
+- **Tier 0 (Inngest, free, no model):** the whole mechanical loop — `loadOptimizerBrief` (funnel + lever posteriors + calibration), the bandit ([[storefront-experiment-refresh]] promote/kill/rollback), `materializeCampaign` (the variant-patch write), lever learning + decay, attribution, guardrails, scheduling. Maximize this — it's the free, parallel substrate.
+- **Box lane (Max subscription, flat) — READ-ONLY:** the irreducible reasoning kernel only — form the hypothesis, author copy, draft a `needs_build` spec. The `claude -p` runs with the API key stripped (subscription-billed, can't fall back to metered), read-only DB creds, and **no write to the repo**. This is why the propose step is a box session and not a metered API call — reasoning goes on the subscription, per the ops rule.
+- **Metered API (the one exception):** hero/image generation (Nano Banana Pro) — no subscription seat exists for image models; kept to ~one hero per experiment behind the preview gate.
+- **Code hand-off:** a structural lever never runs on this agent's box lane — it emits a spec that routes to a **Platform read-write** box lane (Ada). The optimizer holds no read-write access, ever.
+
+## Scope — the whole conversion surface is levers under one objective
+Every DB-driven surface on the funnel is patch-testable through the same bandit against predicted-LTV-per-visitor — so all of it is the optimizer's, and none of it is hand-tuned blind:
+- **Chapters** (PDP + 4 lander types) — the component-level lever map (hero/copy/chips/social-proof/pricing/badges).
+- **Chapter reorganization is an experiment, not a standing behavior** — a chapter-*order* lever (`lever_class:'reversible'`) that runs vs a holdout and auto-rolls-back on regression, exactly like a copy/hero lever. Never a silent reorder.
+- **Cart-recovery flows, lead-capture popup (offer vs survey variant), and the survey chapter** — all DB-driven → content/config changes are Tier-0 patch levers (no code hand-off); the optimizer A/B-tests them rather than tuning them blind.
+- **Competitive gap intake (consumed, not operated):** a peer Competitor Research agent operates the competitor tool ([[landing-page-scout]]) and writes `lander_recommendations` — `route:"optimizer"` for structural-rearrange/copy gaps the optimizer can A/B test, `route:"build"` for gaps needing a new component (→ spec). The optimizer never operates that tool itself — two peer proxies under one director. **Open wire (not yet built):** `analyzeLanderGaps` already *produces* `route:"optimizer"` rows, but `loadOptimizerBrief` does **not** read `lander_recommendations` yet — surfacing them as candidate hypotheses in the brief is the pending integration (a Growth-owned spec).
+
 ## Gotchas
 - **Read-only session, worker write.** The `claude -p` keeps read-only DB secrets and never mutates; the worker (`materializeCampaign` / `generateCampaignHero` / `proposeRenewalOfferCampaign` / `activateRenewalOfferCampaign`) does every write — the gate's verdict decides auto-run vs surfaced-for-approval.
 - **One atomic lever per campaign.** Clean attribution; never bundle two changes into one experiment.
