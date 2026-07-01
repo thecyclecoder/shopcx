@@ -52,6 +52,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getMonthlyChurn, type ChurnBasis } from "@/lib/ltv";
+import { winProbabilityVsControl } from "@/lib/storefront/bandit";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -1523,6 +1524,42 @@ export interface SurveyFunnelResult {
 }
 
 const SURVEY_STEP_LABEL: Record<string, string> = { q1: "Q1 · Cups/day", q2: "Q2 · Goal", q3: "Q3 · Style", result: "Result" };
+
+// ───────────────── Running experiments (bandit arms, SDK) ─────────────────
+// Reads the persisted per-arm rollup (storefront_experiment_variants) — now
+// correct after the jsonb .contains() fix — + win-prob vs control. Cross-variant
+// by nature (no product/destination slice — the arms ARE the comparison).
+export interface RunningExperimentArm { variant_id: string; label: string; is_control: boolean; sessions: number; conversions: number; sub_attach: number; cvr: number; win_prob: number | null }
+export interface RunningExperiment { experiment_id: string; product_id: string; lever: string; lander_type: string; status: string; holdout_pct: number; arms: RunningExperimentArm[] }
+
+export async function computeRunningExperiments(args: { admin: Admin; workspaceId: string }): Promise<RunningExperiment[]> {
+  const { admin, workspaceId } = args;
+  const { data: exps } = await admin.from("storefront_experiments")
+    .select("id, product_id, lever, lander_type, status, holdout_pct")
+    .eq("workspace_id", workspaceId).in("status", ["running", "promoted"]).order("created_at", { ascending: false });
+  if (!exps || exps.length === 0) return [];
+  const { data: variants } = await admin.from("storefront_experiment_variants")
+    .select("id, experiment_id, label, is_control, sessions, conversions, sub_attach, alpha, beta")
+    .in("experiment_id", exps.map((e) => e.id));
+  const byExp = new Map<string, typeof variants>();
+  for (const v of variants || []) { const a = byExp.get(v.experiment_id as string) || []; a!.push(v); byExp.set(v.experiment_id as string, a!); }
+
+  return exps.map((e) => {
+    const vs = byExp.get(e.id as string) || [];
+    const control = vs.find((v) => v.is_control);
+    const arms: RunningExperimentArm[] = vs.map((v) => {
+      const sessions = Number(v.sessions) || 0;
+      const conversions = Number(v.conversions) || 0;
+      return {
+        variant_id: v.id as string, label: v.label as string, is_control: !!v.is_control,
+        sessions, conversions, sub_attach: Number(v.sub_attach) || 0,
+        cvr: sessions > 0 ? round1((100 * conversions) / sessions) : 0,
+        win_prob: v.is_control || !control ? null : Math.round(winProbabilityVsControl(v as never, control as never, 2000) * 100) / 100,
+      };
+    }).sort((a, b) => (a.is_control ? -1 : 1) - (b.is_control ? -1 : 1));
+    return { experiment_id: e.id as string, product_id: e.product_id as string, lever: e.lever as string, lander_type: e.lander_type as string, status: e.status as string, holdout_pct: Number(e.holdout_pct) || 0, arms };
+  });
+}
 
 // ───────────────── Pack-size breakdown (AOV / decoy analysis, slice-aware) ─────────────────
 export interface PackBreakdownRow { label: string; count: number; pct: number }

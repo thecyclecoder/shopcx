@@ -48,8 +48,11 @@ interface FunnelTreeResponse {
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
   referrerOptions: Array<{ referrer: string; label: string; sessions: number }>;
   breakdowns: { device: BreakdownRowT[]; country: BreakdownRowT[]; language: BreakdownRowT[] };
+  runningExperiments: RunningExperimentT[];
 }
 interface BreakdownRowT { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
+interface RunningExperimentArmT { variant_id: string; label: string; is_control: boolean; sessions: number; conversions: number; sub_attach: number; cvr: number; win_prob: number | null }
+interface RunningExperimentT { experiment_id: string; product_id: string; lever: string; lander_type: string; status: string; holdout_pct: number; arms: RunningExperimentArmT[] }
 
 interface PopupVariantRow { variant: string; label: string; shown: number; engaged: number; email: number; phone: number }
 interface CartAnalyticsResponse {
@@ -1038,6 +1041,8 @@ export default function StorefrontFunnelPage() {
 
       <ChapterDiagnosticsCard data={chapter} loading={chapterLoading} dest={chapterDest} onDest={setChapterDest} />
 
+      <RunningExperimentsCard rows={tree?.runningExperiments ?? []} loading={treeLoading} />
+
       {loading && !data && (
         <p className="text-sm text-zinc-400">Loading…</p>
       )}
@@ -1057,10 +1062,6 @@ export default function StorefrontFunnelPage() {
           )}
 
           <CartAnalyticsCard data={cart} loading={cartLoading} dest={cartDest} onDest={setCartDest} destOptions={chapter?.availableDestinations ?? []} />
-
-          {data.runningExperiments && data.runningExperiments.length > 0 && (
-            <RunningExperimentsPanel rows={data.runningExperiments} />
-          )}
 
           {data.leverImportance && (
             <LeverImportancePanel rows={data.leverImportance} />
@@ -1140,54 +1141,74 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
 
 
 
-function RunningExperimentsPanel({ rows }: { rows: NonNullable<FunnelData["runningExperiments"]> }) {
-  const cvr = (a: { conversions: number; sessions: number }) =>
-    a.sessions > 0 ? `${Math.round((a.conversions / a.sessions) * 1000) / 10}%` : "—";
+/** SDK-driven running-experiments card. Cross-variant by nature, so no PDP/variant
+ *  slice selector — the rollup is stamped-session attribution across all arms.
+ *  Numbers come straight from [[libraries/funnel-tree]] computeRunningExperiments. */
+function RunningExperimentsCard({ rows, loading }: { rows: RunningExperimentT[]; loading: boolean }) {
+  const fmtLever = (s: string) => s.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
   return (
     <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-        Running experiments
-      </h2>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Running experiments</h2>
+          <p className="mt-1 text-xs text-zinc-400">Live A/B arms — session-stamped attribution, Thompson win-probability vs control.</p>
+        </div>
+        <ReworkedPills />
+      </div>
+      {loading && rows.length === 0 && <p className="text-sm text-zinc-400">Loading…</p>}
+      {!loading && rows.length === 0 && (
+        <p className="text-xs text-zinc-400">No experiments running — nothing to read yet.</p>
+      )}
       <div className="space-y-5">
-        {rows.map((exp) => (
-          <div key={exp.experiment_id} className="rounded-md border border-zinc-100 p-3 dark:border-zinc-800/60">
-            <div className="mb-2 flex items-center justify-between text-xs">
-              <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                {exp.lever} <span className="text-zinc-400">· {exp.lander_type}</span>
-              </span>
-              <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
-                {exp.status} · {Math.round(exp.holdout_pct * 100)}% holdout
-              </span>
-            </div>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-                  <th className="py-1 pr-2">Arm</th>
-                  <th className="py-1 pr-2 text-right">Sessions</th>
-                  <th className="py-1 pr-2 text-right">CVR</th>
-                  <th className="py-1 pr-2 text-right">Sub-attach</th>
-                  <th className="py-1 pr-2 text-right">Win-prob vs control</th>
-                </tr>
-              </thead>
-              <tbody>
-                {exp.arms.map((a) => (
-                  <tr key={a.variant_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
-                    <td className="py-1 pr-2 text-zinc-900 dark:text-zinc-100">
-                      {a.label}
-                      {a.is_control && <span className="ml-1 text-[10px] uppercase text-zinc-400">control</span>}
-                    </td>
-                    <td className="py-1 pr-2 text-right tabular-nums">{a.sessions.toLocaleString()}</td>
-                    <td className="py-1 pr-2 text-right tabular-nums">{cvr(a)}</td>
-                    <td className="py-1 pr-2 text-right tabular-nums">{a.sub_attach.toLocaleString()}</td>
-                    <td className="py-1 pr-2 text-right font-semibold tabular-nums">
-                      {a.win_prob === null ? "—" : `${Math.round(a.win_prob * 100)}%`}
-                    </td>
+        {rows.map((exp) => {
+          const leader = exp.arms
+            .filter((a) => !a.is_control && a.win_prob !== null)
+            .sort((a, b) => (b.win_prob ?? 0) - (a.win_prob ?? 0))[0];
+          return (
+            <div key={exp.experiment_id} className="rounded-md border border-zinc-100 p-3 dark:border-zinc-800/60">
+              <div className="mb-2 flex items-center justify-between text-xs">
+                <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                  {fmtLever(exp.lever)} <span className="text-zinc-400">· {exp.lander_type}</span>
+                </span>
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] uppercase tracking-wider text-zinc-500 dark:bg-zinc-800">
+                  {exp.status} · {Math.round(exp.holdout_pct * 100)}% holdout
+                </span>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
+                    <th className="py-1 pr-2">Arm</th>
+                    <th className="py-1 pr-2 text-right">Sessions</th>
+                    <th className="py-1 pr-2 text-right">Conv.</th>
+                    <th className="py-1 pr-2 text-right">CVR</th>
+                    <th className="py-1 pr-2 text-right">Sub-attach</th>
+                    <th className="py-1 pr-2 text-right">Win-prob vs control</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ))}
+                </thead>
+                <tbody>
+                  {exp.arms.map((a) => {
+                    const winner = leader && a.variant_id === leader.variant_id && (leader.win_prob ?? 0) >= 0.9;
+                    return (
+                      <tr key={a.variant_id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/50">
+                        <td className="py-1 pr-2 text-zinc-900 dark:text-zinc-100">
+                          {a.label}
+                          {a.is_control && <span className="ml-1 text-[10px] uppercase text-zinc-400">control</span>}
+                        </td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.sessions.toLocaleString()}</td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.conversions.toLocaleString()}</td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.sessions > 0 ? `${a.cvr}%` : "—"}</td>
+                        <td className="py-1 pr-2 text-right tabular-nums">{a.sub_attach.toLocaleString()}</td>
+                        <td className={`py-1 pr-2 text-right font-semibold tabular-nums ${winner ? "text-emerald-600" : ""}`}>
+                          {a.win_prob === null ? "—" : `${Math.round(a.win_prob * 100)}%`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
