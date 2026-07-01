@@ -13,7 +13,6 @@ import { storefrontThemeStyle } from "../../../_lib/storefront-theme";
 import { BlogHeader } from "../../../_components/BlogHeader";
 import { BlogIndexGrid } from "../../../_components/BlogIndexGrid";
 import { BlogIndexJsonLd } from "../../../_components/BlogJsonLd";
-import { BlogPixelInit } from "../../../_components/BlogPixelInit";
 import { StorefrontFooter } from "../../../_components/StorefrontFooter";
 
 /**
@@ -98,12 +97,6 @@ export default async function BlogIndexPage({
 
   return (
     <div className={font.className} style={themeStyle}>
-      <BlogPixelInit
-        workspaceId={ws.id}
-        metaPixelId={ws.meta_pixel_id}
-        blogHandle={null}
-        title="Blog index"
-      />
       <BlogIndexJsonLd
         brand={ws.name}
         logoUrl={ws.design.logo_url}

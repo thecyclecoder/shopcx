@@ -74,7 +74,6 @@ export interface BlogWorkspace {
   storefront_slug: string | null;
   storefront_domain: string | null;
   support_email: string | null;
-  meta_pixel_id: string | null;
   design: {
     font_key: string | null;
     primary_color: string | null;
@@ -105,7 +104,7 @@ export interface BlogPostFull extends BlogPostCard {
 }
 
 const WORKSPACE_COLS =
-  "id, name, storefront_slug, storefront_domain, support_email, meta_pixel_id, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url";
+  "id, name, storefront_slug, storefront_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url";
 
 type WorkspaceRow = {
   id: string;
@@ -113,7 +112,6 @@ type WorkspaceRow = {
   storefront_slug: string | null;
   storefront_domain: string | null;
   support_email: string | null;
-  meta_pixel_id: string | null;
   storefront_font: string | null;
   storefront_primary_color: string | null;
   storefront_accent_color: string | null;
@@ -128,7 +126,6 @@ function shapeWorkspace(ws: WorkspaceRow): BlogWorkspace {
     storefront_slug: ws.storefront_slug,
     storefront_domain: ws.storefront_domain,
     support_email: ws.support_email,
-    meta_pixel_id: ws.meta_pixel_id || null,
     design: {
       font_key: ws.storefront_font || null,
       primary_color: ws.storefront_primary_color || null,

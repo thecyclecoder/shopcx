@@ -42,16 +42,6 @@
  *   double-counting. Rates are RECOMPUTED at every node from the summed
  *   counts; we never average the children's percentages.
  *
- * ── Blog as a top-level entry bucket ──────────────────────────────────────
- *   A session whose first-touch landing_url path starts with `/blog` and does
- *   NOT resolve to a product handle lands in the synthetic top-level "Blog"
- *   node (same level as product nodes) — so blog→bounce vs blog→product is
- *   legible instead of getting lumped into "Unattributed entry". Blog events
- *   (`blog_view`, `blog_engaged`) are intentionally NOT in `STEP_OF_EVENT`, so
- *   they never increment any product's engaged/pack/etc; a blog session
- *   contributes only a Visit on the Blog node. Blog→product session flow is
- *   ALSO surfaced via the composing "Blog" referrer slice on product nodes.
- *
  * ── Real-traffic exclusion ────────────────────────────────────────────────
  *   Mirrors the legacy funnel route: drop is_internal, is_bot, and sessions
  *   stitched to an internal customer. So the tree reflects real shoppers only
@@ -213,16 +203,8 @@ export interface FunnelTreeResult {
    *  on /checkout). Surfaced separately, never folded into a product — but
    *  INCLUDED in grandTotal so it reconciles with the legacy funnel. */
   unattributedEntry: FunnelNode | null;
-  /** Sessions whose first-touch landing_url path starts with /blog and does
-   *  NOT resolve to a product handle — the blog itself. Same shape as
-   *  unattributedEntry: a synthetic top-level node so blog→bounce vs blog→product
-   *  is legible in the funnel (blog→product still surfaces via the "Blog"
-   *  referrer slice on product nodes; this node is blog-as-entry-point).
-   *  Visits count here; blog_view / blog_engaged never inflate any product's
-   *  visit / pdp_view / engaged (blog events aren't in STEP_OF_EVENT). */
-  blogEntry: FunnelNode | null;
-  /** All included sessions combined (products + unattributed + blog). Reconciles
-   *  with the legacy funnel route's top line for the same window. */
+  /** All included sessions combined (products + unattributed). Reconciles with
+   *  the legacy funnel route's top line for the same window. */
   grandTotal: FunnelNodeMetrics;
   /** The churn basis used for the LTV multiplier — surfaced for auditability
    *  (which window, what churn, the 1/churn sub multiplier applied). */
@@ -295,15 +277,6 @@ export function parseLanding(landingUrl: string | null): {
 function resolveHandle(segments: string[], handleSet: Set<string>): string | null {
   for (const seg of segments) if (handleSet.has(seg)) return seg;
   return null;
-}
-
-/** True when the landing path is a blog page (`/blog`, `/blog/{handle}`, or
- *  the workspace-prefixed forms `/store/{workspace}/blog[/…]`). Combined with a
- *  null product-handle check to yield the Blog top-level bucket — so the rare
- *  blog URL that ALSO happens to contain a product handle segment still routes
- *  to that product (preserves first-touch attribution + no double-counting). */
-function isBlogLanding(segments: string[]): boolean {
-  return segments.includes("blog");
 }
 
 async function fetchAllRows<T>(
@@ -453,8 +426,6 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
   const products = new Map<string, ProductAcc>();
   const unattributed = zero();
   let unattributedHasAny = false;
-  const blog = zero();
-  let blogHasAny = false;
 
   const NO_ANGLE = "(no angle)";
 
@@ -480,18 +451,9 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     const addRevLtv = (t: FunnelStepCounts) => { if (ov) { t.revenue_cents += ov.rev; t.ltv_cents += Math.round(ov.ltv); t.sub_orders += ov.subs; } };
 
     if (!handle) {
-      // /blog landings that DIDN'T resolve to a product → first-class Blog bucket.
-      // The rare blog URL whose path happens to contain a product-handle segment
-      // still routes to that product above (preserves first-touch + no double-count).
-      if (isBlogLanding(segments)) {
-        addInto(blog, reached);
-        addRevLtv(blog);
-        blogHasAny = true;
-      } else {
-        addInto(unattributed, reached);
-        addRevLtv(unattributed);
-        unattributedHasAny = true;
-      }
+      addInto(unattributed, reached);
+      addRevLtv(unattributed);
+      unattributedHasAny = true;
       continue;
     }
     if (slice && handle !== slice) continue; // product slice filter
@@ -602,17 +564,6 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     };
   }
 
-  let blogEntry: FunnelNode | null = null;
-  if (blogHasAny && !slice) {
-    sumInto(grand, blog);
-    blogEntry = {
-      level: "product",
-      key: "(blog)",
-      label: "Blog",
-      metrics: metricsOf(blog),
-    };
-  }
-
   return {
     startIso,
     endIso,
@@ -621,7 +572,6 @@ export async function computeFunnelTree(args: FunnelTreeArgs): Promise<FunnelTre
     referrer: refWanted,
     products: productNodes,
     unattributedEntry,
-    blogEntry,
     grandTotal: metricsOf(grand),
     ltvBasis,
   };
