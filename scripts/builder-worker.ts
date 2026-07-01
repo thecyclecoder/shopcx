@@ -172,6 +172,33 @@ const MAX_SECURITY_REVIEW = Number(process.env.AGENT_TODO_MAX_SECURITY_REVIEW ||
 // One security pass: read-only review of a merged diff (or an `npm audit` dep-watch scan) + a verdict,
 // and (for a real finding) authoring the fix/upgrade spec doc. Minutes, like repair/regression.
 const SECURITY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
+// Agent-grade lane (grading-cascade-to-box-sessions Phase 1): the box-hosted worker-action grader —
+// one Max `claude -p` session per batch that reads the graded jobs' REAL merged diff / touched files /
+// tsc / CI status and emits per-job grades against AGENT_RUBRICS + approved agent_grader_prompts
+// calibration rules. Writes agent_action_grades via `applyBoxGrade` (same UNIQUE(agent_job_id) upsert
+// + human-override invariant as the deployed gradeAgentAction path). Concurrency-1 own lane; no
+// ANTHROPIC_API_KEY billed (Max plan). Replaces the deployed Sonnet sweep that couldn't see the diff
+// and repeatedly capped grades at 7-9 "because I can't see the diff" — the CEO's evidence-based grading
+// directive (2026-06-30). See docs/brain/libraries/agent-grader.md.
+const MAX_AGENT_GRADE = Number(process.env.AGENT_TODO_MAX_AGENT_GRADE || 1);
+// One agent-grade pass: read-only Max session reading a batch (≤ GRADE_BATCH_CAP=12) of concluded
+// worker actions' real diffs + running quick tsc/CI probes. Build-sized ceiling — a chatty batch (12
+// merged builds each with a non-trivial diff to walk) can take longer than a repair/regression turn.
+const AGENT_GRADE_TIMEOUT_MS = 25 * 60 * 1000;
+// Agent-coach lane (grading-cascade-to-box-sessions Phase 2): the box-hosted coaching synthesis —
+// one Max `claude -p` session per slipped (workspace, agent_kind) reads the low-graded jobs' REAL
+// merged diffs (git-show / git-diff origin/main...origin/<branch>), distills the recurring code
+// mistake into ONE durable coaching learning, then writes agent_coaching_log + agent_instructions
+// via `applyBoxCoaching` (which reuses the deterministic `coachAgent` DB write + loop-guard). Same
+// board post the deployed synthesizeCoaching path emitted. Concurrency-1 own lane; no
+// ANTHROPIC_API_KEY billed (Max plan). Retires the deployed synthesizeCoaching call — no more
+// `ai_token_usage` rows with `purpose='agent_coaching_synthesis'`. Enqueued by
+// `detectGradeDropCoaching` on slip (dedup: skips re-enqueue while an agent-coach job for this
+// (workspace, agent_kind) is already queued/building). See docs/brain/libraries/agent-grader.md.
+const MAX_AGENT_COACH = Number(process.env.AGENT_TODO_MAX_AGENT_COACH || 1);
+// One agent-coach pass: read-only Max session reading up to ROLLUP_WINDOW (=10) low-graded jobs'
+// diffs to synthesize ONE durable learning. Repair-sized ceiling; much lighter than a grade batch.
+const AGENT_COACH_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -358,7 +385,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -11760,7 +11787,395 @@ async function runRegressionJob(job: Job) {
   }
 }
 
+// ── Box-hosted coaching synthesis (grading-cascade-to-box-sessions Phase 2) ─────
+// A kind='agent-coach' job runs read-only on Max — one session per slipped (workspace, agent_kind).
+// It replaces the deployed `synthesizeCoaching` API call in `src/lib/agents/agent-grader.ts` (retired
+// per the CEO's grading-cascade directive: EVERY grader/coach that emits an LLM call runs box-side
+// so it reads the REAL diffs, not a paraphrase of the stored grade reasoning). The session:
+//   1. Reads the low-graded agent_action_grades rows the enqueuer passed (`low_grade_ids`), then their
+//      agent_jobs' merge SHA / branch / PR.
+//   2. `git fetch origin main` + `git show <merge_sha>` (or `git diff origin/main...origin/<branch>`)
+//      per job — the ACTUAL code the worker shipped — and Reads the touched files for context.
+//   3. Distills ONE durable coaching learning ("when you see X, do Y instead, because Z"), matched to
+//      the recurring code pattern in the diffs, not to the grader's prose.
+//   4. Emits a single JSON verdict {errorClass, triggeringPattern, guidance, reasoning}.
+// The worker (deterministic) then calls `applyBoxCoaching` — which re-checks the rollup + loop-guard
+// (a slip may have recovered while the coach job sat queued; open coachings may have crossed the max
+// and need `rollCoachingIntoFixSpec` instead) and writes agent_coaching_log + agent_instructions via
+// the unchanged `coachAgent`. No API bill (Max), no `ai_token_usage` `agent_coaching_synthesis` rows.
+async function runAgentCoachClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "agent-coach", sandbox: "max", timeout: AGENT_COACH_TIMEOUT_MS });
+}
+
+interface AgentCoachVerdictJson {
+  status?: string;
+  error?: string;
+  errorClass?: string;
+  triggeringPattern?: string;
+  guidance?: string;
+  reasoning?: string;
+}
+
+async function runAgentCoachJob(job: Job) {
+  const tag = `[agent-coach:${job.id.slice(0, 8)}]`;
+  let instr: {
+    agent_kind?: string;
+    low_grade_ids?: unknown;
+    low_agent_job_ids?: unknown;
+    rollup_average?: number | null;
+    rollup_drop?: number | null;
+    open_coaching_count?: number;
+  } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  const agentKind = typeof instr.agent_kind === "string" ? instr.agent_kind : "";
+  const lowGradeIds = Array.isArray(instr.low_grade_ids) ? instr.low_grade_ids.filter((x): x is string => typeof x === "string") : [];
+  if (!agentKind) {
+    await update(job.id, { status: "completed", log_tail: "no agent_kind in instructions — nothing to coach" });
+    console.log(`${tag} no agent_kind → no-op`);
+    return;
+  }
+  if (!lowGradeIds.length) {
+    await update(job.id, { status: "completed", log_tail: "no low_grade_ids in instructions — nothing to coach" });
+    console.log(`${tag} no low_grade_ids → no-op`);
+    return;
+  }
+
+  const { applyBoxCoaching, AGENT_RUBRICS, COACH_LOW_ROLLUP } = await import("../src/lib/agents/agent-grader");
+  const rubric = AGENT_RUBRICS[agentKind];
+  if (!rubric) {
+    await update(job.id, { status: "completed", log_tail: `no rubric for kind=${agentKind} — nothing to coach` });
+    console.log(`${tag} no rubric → no-op`);
+    return;
+  }
+
+  const a = await admin();
+  const { data: gradeRows } = await a
+    .from("agent_action_grades")
+    .select("id, grade, reasoning, spec_slug, agent_job_id")
+    .in("id", lowGradeIds);
+  interface GradeRow { id: string; grade: number; reasoning: string | null; spec_slug: string | null; agent_job_id: string }
+  const grades = (gradeRows as GradeRow[] | null) ?? [];
+  if (!grades.length) {
+    await update(job.id, { status: "completed", log_tail: "low grades no longer exist — coach no-op" });
+    console.log(`${tag} grades missing → no-op`);
+    return;
+  }
+
+  const jobIds = Array.from(new Set(grades.map((g) => g.agent_job_id)));
+  const { data: jobRows } = await a
+    .from("agent_jobs")
+    .select("id, kind, spec_slug, status, error, log_tail, pr_url, pr_number, spec_branch, pending_actions, created_at")
+    .in("id", jobIds);
+  interface CoachJobRow {
+    id: string;
+    kind: string;
+    spec_slug: string | null;
+    status: string;
+    error: string | null;
+    log_tail: string | null;
+    pr_url: string | null;
+    pr_number: number | null;
+    spec_branch: string | null;
+    pending_actions: Array<{ status?: string; type?: string; summary?: string }> | null;
+    created_at: string;
+  }
+  const jobsById = new Map<string, CoachJobRow>();
+  for (const j of ((jobRows as CoachJobRow[]) || [])) jobsById.set(j.id, j);
+
+  // Per-slip block: the grade + its reasoning + the job's PR/branch — the box session opens the diff.
+  const slipBlocks = grades
+    .map((g) => {
+      const j = jobsById.get(g.agent_job_id);
+      const lines = [
+        `LOW_GRADE grade=${g.grade}/10${g.spec_slug ? ` spec=${g.spec_slug}` : ""} (agent_action_grades.id=${g.id})`,
+        `  agent_job: ${g.agent_job_id}${j?.kind ? ` · kind=${j.kind}` : ""}${j?.status ? ` · status=${j.status}` : ""}`,
+        j?.spec_branch ? `  branch: ${j.spec_branch}` : "",
+        j?.pr_url ? `  PR: ${j.pr_url}${j?.pr_number ? ` (#${j.pr_number})` : ""}` : "",
+        j?.error ? `  job error: ${j.error.slice(0, 300)}` : "",
+        `  grader's reasoning: ${(g.reasoning ?? "(none)").slice(0, 600)}`,
+      ].filter((l) => l !== "");
+      return lines.join("\n");
+    })
+    .join("\n\n");
+
+  const rollupAvg = typeof instr.rollup_average === "number" ? instr.rollup_average : null;
+  const rollupDrop = typeof instr.rollup_drop === "number" ? instr.rollup_drop : null;
+  const openCount = typeof instr.open_coaching_count === "number" ? instr.open_coaching_count : 0;
+
+  const prompt = [
+    `You are Ada (the box's Platform/DevOps Director) on Max, coaching your worker ${rubric.name} (the \`${agentKind}\` worker) using the agent-coach skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
+    ``,
+    `Your job: synthesize ONE durable coaching learning from ${grades.length} low-graded action(s) by ${rubric.name}. UNLIKE the deployed synthesizeCoaching call that saw only the paraphrased grader reasoning, you can SEE THE REAL DIFF each low grade is about — first \`git fetch origin main\`, then for each PR-carrying agent_job below run \`git show <merge_sha>\` OR \`git diff origin/main...origin/<branch>\` and READ the touched files. The learning must reference the RECURRING CODE MISTAKE you can point at in the diffs (a specific anti-pattern, file, or check the worker keeps missing), not a paraphrase.`,
+    ``,
+    `The worker's rubric (what a 10 looks like): ${rubric.criteria}`,
+    ``,
+    `Current rollup: avg=${rollupAvg?.toFixed(1) ?? "?"}/10${rollupDrop != null ? ` (down ${rollupDrop.toFixed(1)} pts vs prior window)` : ""}. Bar for slip: < ${COACH_LOW_ROLLUP}/10. Open coaching attempts so far: ${openCount}.`,
+    ``,
+    `THE LOW-GRADED ACTIONS — ${grades.length} slip(s):`,
+    ``,
+    slipBlocks,
+    ``,
+    `Investigation protocol:`,
+    `  1. \`git fetch origin main\` (one fetch per session).`,
+    `  2. For each PR-carrying LOW_GRADE: \`git show <merge_sha>\` (merged) OR \`git diff origin/main...origin/<branch>\` (unmerged). \`git diff --stat\` to size, then Read the touched files. Cite \`path.ts:LINE\` in your reasoning when possible.`,
+    `  3. Look ACROSS the diffs for the recurring pattern — the specific mistake ${rubric.name} keeps making (a wrong helper called, a check skipped, a file consistently mis-modified). One class only.`,
+    `  4. Frame the learning as an actionable rule the worker can apply at the START of every future job — "when you see X, do Y instead, because Z". Never generic encouragement.`,
+    ``,
+    `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+    `  {"status":"completed","errorClass":"<kebab-case class of the recurring mistake, e.g. symptom-not-root-cause>","triggeringPattern":"<1 sentence: the recurring mistake the low-graded diffs share>","guidance":"<the learning: when you see X, do Y instead>","reasoning":"<1-2 sentences citing file:line from the diffs: why this fixes the slip>"}`,
+    `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ``,
+    `errorClass MUST be short kebab-case. reasoning MUST reference a concrete file:line or observed pattern from the diffs — never a paraphrase of the grader reasoning.`,
+  ].join("\n");
+
+  try {
+    const { session, resultText, isError, raw, usage, model, configDir: coachDir } = await runBoxLane(
+      (cfg, sid) => runAgentCoachClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, coachDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<AgentCoachVerdictJson>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `agent-coach error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !parsed.errorClass || !parsed.guidance) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "agent-coach produced no parseable learning", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable learning`);
+      return;
+    }
+
+    const sourceGradeId = grades[0]?.id ?? null;
+    const result = await applyBoxCoaching({
+      workspaceId: job.workspace_id,
+      agentKind,
+      learning: {
+        errorClass: parsed.errorClass,
+        triggeringPattern: parsed.triggeringPattern ?? "",
+        guidance: parsed.guidance,
+        reasoning: parsed.reasoning ?? "",
+      },
+      sourceGradeId,
+      admin: a,
+    });
+    const tail = result.coached
+      ? `coached ${agentKind}: [${parsed.errorClass}] attempt=${result.attempt ?? "?"}`
+      : `did not coach ${agentKind}: ${result.reason ?? "unknown"}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // ── Box-hosted Security / Dependency agent (security-dependency-agent) ───────
+// ── Box-hosted worker-action grader (grading-cascade-to-box-sessions Phase 1) ───
+// A kind='agent-grade' job runs read-only on Max, one level DOWN the CEO→Director→Worker cascade.
+// It grades a BATCH of concluded worker actions (agent_jobs) against their per-kind AGENT_RUBRICS +
+// approved agent_grader_prompts calibration rules — but crucially, the box session reads the REAL
+// merged diff (git-show / git-diff origin/main...origin/<branch>) + touched files + tsc/CI status,
+// instead of only the job-row metadata + log_tail the deployed Sonnet sweep sees. Writes
+// agent_action_grades via applyBoxGrade — same UNIQUE(agent_job_id) upsert + human-override invariant
+// as the deployed gradeAgentAction path, so the rollup + detectGradeDropCoaching cascade still fires
+// off the box-written grades. No API bill (Max), reasoning cites file:line, not a paraphrase.
+// Enqueued by platform-director-cron's grade-and-coach-workers step in batches (gated on
+// agentGradingBatchReady — ≥5 ungraded OR oldest >~3h). instructions = JSON {agent_job_ids: [...]}.
+async function runAgentGradeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "agent-grade", sandbox: "max", timeout: AGENT_GRADE_TIMEOUT_MS });
+}
+
+interface AgentGradeDecisionJson {
+  agent_job_id: string;
+  grade: number;
+  reasoning: string;
+}
+
+async function runAgentGradeJob(job: Job) {
+  const tag = `[agent-grade:${job.id.slice(0, 8)}]`;
+  let instr: { agent_job_ids?: unknown } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  const ids = Array.isArray(instr.agent_job_ids) ? instr.agent_job_ids.filter((x): x is string => typeof x === "string") : [];
+  if (!ids.length) {
+    await update(job.id, { status: "completed", log_tail: "no agent_job_ids in instructions — nothing to grade" });
+    console.log(`${tag} no ids → no-op`);
+    return;
+  }
+
+  const { applyBoxGrade, detectGradeDropCoaching, AGENT_RUBRICS } = await import("../src/lib/agents/agent-grader");
+  const a = await admin();
+  const { data: rows } = await a
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, error, log_tail, pr_url, pr_number, spec_branch, pending_actions, created_at")
+    .in("id", ids);
+  interface BatchJobRow {
+    id: string;
+    workspace_id: string;
+    kind: string;
+    spec_slug: string | null;
+    status: string;
+    error: string | null;
+    log_tail: string | null;
+    pr_url: string | null;
+    pr_number: number | null;
+    spec_branch: string | null;
+    pending_actions: Array<{ status?: string; type?: string; summary?: string; cmd?: string }> | null;
+    created_at: string;
+  }
+  const jobs = ((rows as BatchJobRow[]) || []).filter((r) => AGENT_RUBRICS[r.kind]);
+  if (!jobs.length) {
+    await update(job.id, { status: "completed", log_tail: `no rubric-backed jobs in batch (${ids.length} ids)` });
+    console.log(`${tag} no gradeable jobs in batch`);
+    return;
+  }
+
+  const workspaceId = jobs[0].workspace_id;
+  const kinds = Array.from(new Set(jobs.map((j) => j.kind)));
+
+  // Per-kind rubric block (only the rubrics represented in this batch).
+  const rubricLines = kinds
+    .map((k) => {
+      const r = AGENT_RUBRICS[k];
+      return `  • ${k} (${r.name}): ${r.criteria}`;
+    })
+    .join("\n");
+
+  // Approved calibration rules — cross-cutting (agent_kind IS NULL) + per-worker (in this batch).
+  const kindsCsv = kinds.map((k) => `"${k}"`).join(",");
+  const { data: rules } = await a
+    .from("agent_grader_prompts")
+    .select("title, content, agent_kind")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "approved")
+    .or(`agent_kind.in.(${kindsCsv}),agent_kind.is.null`)
+    .order("sort_order", { ascending: true });
+  const calibrationBlock = (rules || []).length
+    ? "\n\nCALIBRATION RULES (CEO-approved adjustments to the rubric — apply them):\n" +
+      (rules || [])
+        .map((r) => `  • [${(r as { agent_kind: string | null }).agent_kind ?? "ALL"}] ${(r as { title: string }).title}: ${(r as { content: string }).content}`)
+        .join("\n")
+    : "";
+
+  // Compact per-job pointer. The session runs git-show / git-diff / reads touched files itself.
+  const jobBlocks = jobs
+    .map((j) => {
+      const pa = Array.isArray(j.pending_actions) ? j.pending_actions : [];
+      const approved = pa.find((x) => x.status === "approved") || pa[0] || {};
+      const parts = [
+        `AGENT_JOB ${j.id}`,
+        `  worker: ${AGENT_RUBRICS[j.kind]?.name ?? "?"} · kind=${j.kind}`,
+        `  spec/target: ${j.spec_slug ?? "—"}`,
+        `  concluded status: ${j.status}`,
+        j.spec_branch ? `  branch: ${j.spec_branch}` : "",
+        j.pr_url ? `  PR: ${j.pr_url}${j.pr_number ? ` (#${j.pr_number})` : ""}` : "",
+        approved.type ? `  gated action: type=${approved.type} · ${approved.summary ?? "(no summary)"}` : "",
+        approved.cmd ? `  command: ${approved.cmd}` : "",
+        j.error ? `  error: ${j.error.slice(0, 400)}` : "",
+        j.log_tail ? `  log_tail:\n${j.log_tail.slice(-1200)}` : "",
+      ].filter((l) => l !== "");
+      return parts.join("\n");
+    })
+    .join("\n\n");
+
+  const prompt = [
+    `You are Ada (the box's Platform/DevOps Director) on Max, grading your workers using the agent-grade skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
+    ``,
+    `Your job: grade each concluded worker action below 1–10 against its rubric. UNLIKE the deployed Sonnet sweep that only sees the job-row metadata + log_tail (and repeatedly caps grades at 7-9 "because I can't see the diff"), you can SEE THE REAL DIFF — first \`git fetch origin main\`, then for each PR-carrying job \`git show <merge_sha>\` OR \`git diff origin/main...origin/<branch>\` and READ the touched files. Cite concrete file:line in your reasoning — that is why we moved grading box-side.`,
+    ``,
+    `THE DEFINING RULE — GRADE THE WORK, NOT OUTCOME LUCK. A sound, well-scoped action that hit a rare reversible bump still grades HIGH if the reasoning was right. A careless action that happened to land grades LOW. Reward correct judgment within the rubric, not luck.`,
+    ``,
+    `PER-WORKER RUBRICS in this batch:`,
+    rubricLines,
+    calibrationBlock,
+    ``,
+    `SCORING: 10 exemplary · 8-9 strong · 6-7 acceptable · 4-5 mediocre · 2-3 poor · 1 indefensible.`,
+    ``,
+    `THE BATCH — ${jobs.length} concluded worker action(s) to grade:`,
+    ``,
+    jobBlocks,
+    ``,
+    `Investigation protocol per job:`,
+    `  1. If PR/branch present: \`git fetch origin main\`; then \`git show <merge_sha>\` (or \`git diff origin/main...origin/<branch>\` for an unmerged branch) to read EXACTLY what changed.`,
+    `  2. Read the touched files in the working tree for context. For a build/repair/regression: check the spec (docs/brain/specs/ or .box/spec-<slug>.md if materialized) and confirm the diff actually implements it — this is where the "spec phases satisfied" rubric bit is scored.`,
+    `  3. If you're unsure whether it compiles, sample \`npx tsc --noEmit\` (bounded — don't run the full suite). If you're unsure whether CI passed, check \`gh pr view <PR#> --json statusCheckRollup\` or \`gh run list --branch <branch> --limit 5\`.`,
+    `  4. For a non-PR job (a fix/dismiss/verify — e.g., spec-review / spec-test / db_health): read the pending_action + log_tail + the referenced spec/rule; the "real defect vs false-positive" rubric bit is scored here.`,
+    ``,
+    `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+    `  {"status":"completed","decisions":[{"agent_job_id":"…","grade":<1-10>,"reasoning":"<2-4 sentences citing file:line from the diff when possible, and what would have made it a 10>"}]}`,
+    `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ``,
+    `Every agent_job_id in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based (concrete file/line or observed status) — never a paraphrase of the log_tail.`,
+  ].join("\n");
+
+  try {
+    const { session, resultText, isError, raw, usage, model, configDir: gradeDir } = await runBoxLane(
+      (cfg, sid) => runAgentGradeClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, gradeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; decisions?: AgentGradeDecisionJson[] }>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `agent-grade error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.decisions)) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "agent-grade produced no parseable decisions", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable decisions`);
+      return;
+    }
+
+    const idSet = new Set(jobs.map((j) => j.id));
+    const kindsToRecheck = new Set<string>();
+    let applied = 0;
+    let skipped = 0;
+    for (const d of parsed.decisions) {
+      if (!d || typeof d.agent_job_id !== "string" || !idSet.has(d.agent_job_id) || typeof d.grade !== "number") {
+        skipped++;
+        continue;
+      }
+      const r = await applyBoxGrade({ agentJobId: d.agent_job_id, grade: d.grade, reasoning: String(d.reasoning ?? ""), admin: a });
+      if (r.ok) {
+        applied++;
+        if (r.agent_kind && !r.idempotent_update) kindsToRecheck.add(r.agent_kind);
+      } else {
+        skipped++;
+      }
+    }
+    // The rollup + detectGradeDropCoaching cascade — fire per newly graded worker kind. Phase 2
+    // moved the coaching SYNTHESIS box-side too: detectGradeDropCoaching now ENQUEUES an agent-coach
+    // box job on slip (instead of the deployed synthesizeCoaching API call) and applyBoxCoaching does
+    // the coachAgent DB write. detectGradeDropCoaching is idempotent + loop-guarded + dedup-gated (a
+    // repeat call on the same slip is a no-op after the coach job is queued/landed).
+    for (const kind of kindsToRecheck) {
+      try {
+        await detectGradeDropCoaching({ workspaceId, agentKind: kind, admin: a });
+      } catch (e) {
+        console.error(`${tag} coach ${kind}:`, e instanceof Error ? e.message : e);
+      }
+    }
+    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · kinds=${Array.from(kindsToRecheck).join(",") || "—"}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // A kind='security-review' job runs read-only on Max, the supervisor on the auto-merge proxy. Two modes
 // (instructions.mode): 'diff' — a per-merged-diff security pass (injection / secret-leak / authz / RLS /
 // unsafe admin-client / _encrypted handling) over the merged claude/* commit; 'dep-watch' — the daily
@@ -13009,6 +13424,8 @@ async function dispatchJob(job: Job) {
   if (job.kind === "repair") return runRepairJob(job);
   if (job.kind === "regression") return runRegressionJob(job);
   if (job.kind === "security-review") return runSecurityReviewJob(job);
+  if (job.kind === "agent-grade") return runAgentGradeJob(job);
+  if (job.kind === "agent-coach") return runAgentCoachJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
   if (job.kind === "coverage-register") return runCoverageRegisterJob(job);
@@ -13936,7 +14353,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -13991,6 +14408,8 @@ async function main() {
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
   const countRegression = () => [...active.values()].filter((v) => v.kind === "regression").length;
   const countSecurityReview = () => [...active.values()].filter((v) => v.kind === "security-review").length;
+  const countAgentGrade = () => [...active.values()].filter((v) => v.kind === "agent-grade").length;
+  const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
   // director-trust-phase-pr-provenance Phase 2: audit-spec-shipped-state shares the coverage-register
@@ -14250,6 +14669,34 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed security-review ${job.id.slice(0, 8)} → ${countSecurityReview() + 1}/${MAX_SECURITY_REVIEW} security-review lane`);
+        launch(job);
+      }
+      // Fill the agent-grade lane (grading-cascade-to-box-sessions Phase 1): the box-hosted worker-action
+      // grader — one Max session per batch reads each graded job's REAL merged diff (via git-show / git-diff
+      // origin/main...origin/<branch>) + spec + touched files + tsc/CI status, then emits per-job grades
+      // against AGENT_RUBRICS + approved agent_grader_prompts calibration rules. Writes agent_action_grades
+      // via applyBoxGrade (same UNIQUE(agent_job_id) upsert + human-override invariant as the deployed
+      // gradeAgentAction path). Concurrency-1, read-only on Max. Enqueued by platform-director-cron's
+      // grade-and-coach-workers step in batches (gated on agentGradingBatchReady — ≥5 ungraded OR oldest >~3h).
+      while (!claudeDown && countAgentGrade() < MAX_AGENT_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["agent-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed agent-grade ${job.id.slice(0, 8)} → ${countAgentGrade() + 1}/${MAX_AGENT_GRADE} agent-grade lane`);
+        launch(job);
+      }
+      // Fill the agent-coach lane (grading-cascade-to-box-sessions Phase 2): the box-hosted coaching
+      // synthesis — one Max session per slipped (workspace, agent_kind) reads the low-graded jobs'
+      // REAL merged diffs (via git-show / git-diff origin/main...origin/<branch>), distills the
+      // recurring code mistake into ONE durable coaching learning, then writes agent_coaching_log +
+      // agent_instructions via `applyBoxCoaching` (which re-checks the rollup + loop-guard and calls
+      // `coachAgent` — pure DB write is unchanged). Concurrency-1, read-only on Max. Enqueued by
+      // `detectGradeDropCoaching` (agent-grader.ts) on slip, with dedup — one box session per slip.
+      while (!claudeDown && countAgentCoach() < MAX_AGENT_COACH) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["agent-coach"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed agent-coach ${job.id.slice(0, 8)} → ${countAgentCoach() + 1}/${MAX_AGENT_COACH} agent-coach lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

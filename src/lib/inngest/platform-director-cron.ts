@@ -30,7 +30,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
-import { agentGradingBatchReady, gradeConcludedAgentActions, detectGradeDropCoaching } from "@/lib/agents/agent-grader";
+import { agentGradingBatchReady, detectGradeDropCoaching, pickAgentGradeBatch, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 import { computePlatformScorecard, getRegisteredMetrics } from "@/lib/agents/platform-scorecard";
 import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
 import {
@@ -149,26 +149,75 @@ export const platformDirectorCron = inngest.createFunction(
       return { considered, graded };
     });
 
-    // The WORKER grading + coaching loop (worker-grading-and-director-management Phase 2): one level
-    // DOWN the cascade — on the same beat, the Director grades each recently-CONCLUDED worker action
-    // (agent_action_grades) and coaches any worker whose rollup slipped (<7 or >1.5-pt drop →
-    // coachAgent). BATCHED: a workspace is graded only when ≥5 ungraded concluded jobs have
-    // accumulated OR the oldest is >~3h old (agentGradingBatchReady) — keeps the LLM spend to one
-    // session per batch. Runs HERE in the deployed runtime (it needs the API key), best-effort +
-    // idempotent. A no-op while no worker has concluded an ungraded action.
+    // The WORKER grading + coaching loop (worker-grading-and-director-management Phase 2 +
+    // grading-cascade-to-box-sessions Phase 1): one level DOWN the cascade — on the same beat, the
+    // Director grades each recently-CONCLUDED worker action (agent_action_grades) and coaches any
+    // worker whose rollup slipped (<7 or >1.5-pt drop → coachAgent). BATCHED: a workspace is graded
+    // only when ≥5 ungraded concluded jobs have accumulated OR the oldest is >~3h old
+    // (agentGradingBatchReady) — keeps the LLM spend to one session per batch.
+    //
+    // GRADING COMPUTE MOVED BOX-SIDE (grading-cascade-to-box-sessions Phase 1, CEO directive
+    // 2026-06-30). Instead of calling gradeConcludedAgentActions inline (which grades from the job-row
+    // metadata + log_tail — the deployed runtime can't see the real diff, so grades cap at 7-9
+    // "because I can't see the diff"), the cron ENQUEUES ONE `agent-grade` `agent_jobs` row per
+    // batch-ready workspace carrying the picked batch of `agent_job_ids`. The box's agent-grade lane
+    // (scripts/builder-worker.ts → runAgentGradeJob) then reads each id's REAL merged diff via
+    // git-show / git-diff, applies AGENT_RUBRICS + approved calibration rules, and writes
+    // agent_action_grades via applyBoxGrade (same UNIQUE(agent_job_id) upsert + human-override
+    // invariant). The coaching cascade (detectGradeDropCoaching) fires per beat over ALL rubric-backed
+    // kinds so a slip caused by newly box-written grades is caught within one beat of the box job
+    // landing — idempotent, loop-guarded, a no-op when nothing slipped.
+    //
+    // Best-effort + idempotent. Same-workspace dedup: skip re-enqueueing while an agent-grade job for
+    // this workspace is already queued/building (one batched box session at a time, no daily pileup).
     const workerGrading = await step.run("grade-and-coach-workers", async () => {
       let considered = 0;
-      let graded = 0;
+      let enqueued = 0;
       let coached = 0;
       for (const workspaceId of result.workspaceIds || []) {
         try {
           const batch = await agentGradingBatchReady(admin, workspaceId);
-          if (!batch.ready) continue;
-          const r = await gradeConcludedAgentActions({ workspaceId, admin });
-          considered += r.considered;
-          graded += r.graded;
-          // Coach exactly the workers this batch newly graded (a slip → a coachAgent amendment).
-          for (const agentKind of r.gradedKinds) {
+          if (batch.ready) {
+            const pool = await pickAgentGradeBatch({ workspaceId, admin });
+            if (pool.length) {
+              // Count the batch toward `considered` up front — regardless of dedup / insert-error —
+              // so the grading-liveness heartbeat can distinguish "no work" (considered=0) from
+              // "work exists but nothing dispatched" (considered>0, enqueued=0) → the starvation
+              // gate trips after ≥2 consecutive such beats. A dedup skip (an in-flight `agent-grade`
+              // job for this workspace already covers the batch) also raises `enqueued` so the
+              // gate stays green — dispatch happened; it's just carried by the prior beat's job.
+              considered += pool.length;
+              const { data: inflight } = await admin
+                .from("agent_jobs")
+                .select("id")
+                .eq("workspace_id", workspaceId)
+                .eq("kind", "agent-grade")
+                .in("status", ["queued", "queued_resume", "building", "claimed"])
+                .limit(1);
+              if (inflight && inflight.length) {
+                enqueued++; // already dispatched on a prior beat — grading IS flowing box-side
+              } else {
+                const { error } = await admin.from("agent_jobs").insert({
+                  workspace_id: workspaceId,
+                  spec_slug: "agent-grade",
+                  kind: "agent-grade",
+                  status: "queued",
+                  created_by: null,
+                  instructions: JSON.stringify({ agent_job_ids: pool.map((j) => j.id) }),
+                });
+                if (!error) {
+                  enqueued++;
+                } else {
+                  console.error(`[platform-director-cron] agent-grade enqueue failed ws=${workspaceId}: ${error.message}`);
+                }
+              }
+            }
+          }
+          // Coaching cascade: fires per beat over all rubric-backed kinds so a slip triggered by a
+          // newly box-written grade is caught within one beat (idempotent + loop-guarded — a repeat
+          // call on the same slip is a no-op after the coaching lands). Cheap: each call is a rollup
+          // query + an LLM call ONLY when the rollup actually slipped. Best-effort per kind.
+          for (const agentKind of GRADEABLE_KINDS) {
             try {
               const c = await detectGradeDropCoaching({ workspaceId, agentKind, admin });
               if (c.coached) coached++;
@@ -180,7 +229,11 @@ export const platformDirectorCron = inngest.createFunction(
           console.error(`[platform-director-cron] worker-grade sweep failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
         }
       }
-      return { considered, graded, coached };
+      // `graded` here == "grading dispatched box-side"; the actual DB write happens in runAgentGradeJob
+      // within a few minutes. Keeps the grading-liveness heartbeat starvation gate correct — a
+      // considered>0 (real ungraded backlog) with enqueued=0 (box lane broken / dedupe blocked twice)
+      // is a legitimate STARVED state and pages after ≥2 consecutive sweeps.
+      return { considered, graded: enqueued, coached };
     });
 
     // The Platform Department Scorecard daily pulse (platform-scorecard-engine Phase 3): on the same

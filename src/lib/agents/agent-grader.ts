@@ -289,12 +289,17 @@ function formatJobForGrading(job: JobRow): string {
     .join("\n");
 }
 
+/** The `model` stamp for a grade produced by the box-hosted grader (Max session — no API bill). Keeps
+ *  agent_action_grades.model queryable so a box-grade vs API-grade split is visible in dashboards, and
+ *  a stale-cost audit can spot the deployed sweep re-firing after Phase 1. */
+const BOX_GRADE_MODEL = "box-max-session";
+
 /** Persist one agent grade — UPDATE in place if a row exists, else INSERT. Never clobbers a human grade. */
 async function upsertGrade(
   admin: Admin,
   existing: ExistingGradeRow | null,
   job: JobRow,
-  graded: { json: GraderJson; costCents: number; usage: { input_tokens?: number; output_tokens?: number } },
+  graded: { json: GraderJson; costCents: number; usage: { input_tokens?: number; output_tokens?: number }; modelOverride?: string },
 ): Promise<AgentGradeResult> {
   if (existing && existing.graded_by === "human") {
     // The CEO/Director owns this grade — the agent never re-writes a human override.
@@ -310,7 +315,7 @@ async function upsertGrade(
     grade,
     reasoning: graded.json.reasoning,
     graded_by: "agent" as const,
-    model: GRADER_MODEL,
+    model: graded.modelOverride ?? GRADER_MODEL,
     input_tokens: graded.usage?.input_tokens || 0,
     output_tokens: graded.usage?.output_tokens || 0,
     cost_cents: graded.costCents,
@@ -323,6 +328,45 @@ async function upsertGrade(
   const { data: ins, error } = await admin.from("agent_action_grades").insert(payload).select("id").single();
   if (error) return { ok: false, reason: error.message };
   return { ok: true, grade_id: ins?.id, agent_job_id: job.id, agent_kind: job.kind, grade };
+}
+
+/**
+ * Apply a grade produced by the box-hosted grading session (grading-cascade-to-box-sessions Phase 1)
+ * — a Max `claude -p` that reads the REAL merged diff. Reuses the same UNIQUE(agent_job_id) upsert +
+ * human-override invariant as the deployed gradeAgentAction path, so the rollup + coaching cascade
+ * fire identically off box-written grades. Concluded-only + rubric-gated + idempotent. `model` is
+ * stamped `box-max-session` so a per-source split stays queryable; no `ai_token_usage` write (Max sub
+ * has no per-token API bill — the CEO directive was $0 marginal grading).
+ */
+export async function applyBoxGrade(opts: { agentJobId: string; grade: number; reasoning: string; admin?: Admin }): Promise<AgentGradeResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, error, log_tail, pr_url, pending_actions, created_at")
+    .eq("id", opts.agentJobId)
+    .maybeSingle();
+  if (!data) return { ok: false, reason: "job_not_found" };
+  const job = data as JobRow;
+
+  if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
+  if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
+
+  const { data: existing } = await admin
+    .from("agent_action_grades")
+    .select("id, grade, graded_by")
+    .eq("agent_job_id", job.id)
+    .maybeSingle();
+  const existingRow = (existing as ExistingGradeRow) ?? null;
+  if (existingRow && existingRow.graded_by === "human") {
+    return { ok: true, grade_id: existingRow.id, agent_job_id: job.id, agent_kind: job.kind, grade: existingRow.grade ?? undefined, idempotent_update: true };
+  }
+
+  return upsertGrade(admin, existingRow, job, {
+    json: { grade: opts.grade, reasoning: opts.reasoning },
+    costCents: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    modelOverride: BOX_GRADE_MODEL,
+  });
 }
 
 // ── grade one concluded worker action ───────────────────────────────────────────────────────────────
@@ -504,6 +548,30 @@ export async function agentGradingBatchReady(
 }
 
 /**
+ * Pick the batch of agent_job_ids for the box-hosted grader to grade (grading-cascade-to-box-sessions
+ * Phase 1). Same selection logic as the deployed sweep — failures first, then a fair round-robin sample
+ * of successes, proven workers throttled — but returns the IDs for platform-director-cron to hand off to
+ * a new `agent-grade` `agent_jobs` row. The box lane reads each id's REAL diff and writes the grade via
+ * applyBoxGrade. A no-op (empty array) while nothing is ungraded.
+ */
+export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<UngradedJob[]> {
+  const admin = opts.admin ?? createAdminClient();
+  try {
+    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
+    if (!pool.length) return [];
+    const proven = new Set<string>();
+    for (const kind of new Set(pool.map((j) => j.kind))) {
+      const r = await computeAgentRollup(admin, opts.workspaceId, kind);
+      if (r.count >= ROLLUP_WINDOW && (r.average ?? 0) >= PROVEN_AVG) proven.add(kind);
+    }
+    return selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, proven);
+  } catch (e) {
+    console.warn(`[worker-grader] pickAgentGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
+  }
+}
+
+/**
  * The batched grading pass: grade a BOUNDED slice (≤ `cap`, default GRADE_BATCH_CAP) of the recently-
  * CONCLUDED, ungraded worker actions across the rubric-backed kinds, in one session — failures first, then
  * a fair round-robin sample of the successes (selectGradingBatch), so a chatty worker can't jam the run and
@@ -511,6 +579,11 @@ export async function agentGradingBatchReady(
  * gradeAgentAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
  * concluded an ungraded action. Returns the distinct worker kinds it newly graded so the caller can run
  * detectGradeDropCoaching on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
+ *
+ * NOTE: as of grading-cascade-to-box-sessions Phase 1 the primary grade path moved to the box-hosted
+ * `agent-grade` lane (which reads the REAL diff). This deployed-runtime sweep stays as a fallback the
+ * caller can invoke when a workspace's box lane can't be reached; retire it once the box lane is proven
+ * green for a full rollup window (worker-grading-and-director-management Phase 2 review).
  */
 export async function gradeConcludedAgentActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
   const admin = opts.admin ?? createAdminClient();
@@ -601,53 +674,17 @@ export interface CoachingTriggerResult {
   reason?: string;
 }
 
-interface CoachingJson {
+/**
+ * Coaching learning shape — the durable rule the box coach session distills from the low-graded jobs'
+ * REAL diffs, then hands to coachAgent via applyBoxCoaching. Was returned by the deployed synthesizeCoaching
+ * API call (retired in grading-cascade-to-box-sessions Phase 2 — no more `agent_coaching_synthesis`
+ * `ai_token_usage` rows). See docs/brain/libraries/agent-grader.md.
+ */
+export interface CoachingLearning {
   errorClass: string;
   triggeringPattern: string;
   guidance: string;
   reasoning: string;
-}
-
-/** Ask the LLM to turn the worker's recent low grades into one durable coaching learning. */
-async function synthesizeCoaching(
-  workspaceId: string,
-  agentKind: string,
-  rollup: AgentRollup,
-  lowGrades: Array<{ grade: number; reasoning: string | null; spec_slug: string | null }>,
-): Promise<CoachingJson | { error: string }> {
-  const rubric = AGENT_RUBRICS[agentKind];
-  const worker = rubric ? `${rubric.name} (the \`${agentKind}\` worker)` : `the \`${agentKind}\` worker`;
-  const system = `You are the autonomous DevOps Director of ShopCX coaching ${worker} after its rolling grade slipped (avg ${rollup.average?.toFixed(1) ?? "?"}/10${rollup.drop !== null ? `, down ${rollup.drop.toFixed(1)} pts` : ""}). Read its recent low-graded actions and distill ONE durable learning the worker should apply before every future job — "when you see X, do Y instead, because Z". Make it specific and actionable, never generic encouragement.
-
-${rubric ? `The worker's rubric (what good = 10 means):\n  ${rubric.criteria}\n\n` : ""}OUTPUT (JSON only):
-{
-  "errorClass": "<short kebab-case class of the recurring mistake, e.g. symptom-not-root-cause>",
-  "triggeringPattern": "<1 sentence: the recurring mistake the low grades share>",
-  "guidance": "<the learning: 'when you see X, do Y instead'>",
-  "reasoning": "<1-2 sentences: why this fixes the slip (the Z)>"
-}`;
-  const userMsg = `The worker's recent low-graded actions (grade + the grader's why):\n\n${lowGrades
-    .map((g) => `• [${g.grade}/10]${g.spec_slug ? ` ${g.spec_slug}` : ""}: ${g.reasoning ?? "(no reasoning)"}`)
-    .join("\n")}\n\nDistill the coaching learning. Return the JSON only.`;
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": ANTHROPIC_API_KEY as string, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-    body: JSON.stringify({ model: GRADER_MODEL, max_tokens: 800, system, messages: [{ role: "user", content: userMsg }] }),
-  });
-  if (!res.ok) return { error: `coach_http_${res.status}` };
-  const data = await res.json();
-  await logAiUsage({ workspaceId, model: GRADER_MODEL, usage: data.usage, purpose: "agent_coaching_synthesis" });
-  const text = (data.content?.[0] as { text?: string })?.text?.trim() || "";
-  try {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) return { error: "parse_failed" };
-    const parsed = JSON.parse(m[0]) as CoachingJson;
-    if (!parsed.errorClass || !parsed.guidance) return { error: "parse_failed" };
-    return parsed;
-  } catch {
-    return { error: "parse_failed" };
-  }
 }
 
 const GRADER_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
@@ -742,11 +779,16 @@ export async function rollCoachingIntoFixSpec(
 }
 
 /**
- * Detect a worker's grade slip and, when it has slipped, run a coaching pass (coachAgent). Slip =
- * the rolling average fell below COACH_LOW_ROLLUP (≥ COACH_MIN_SAMPLE grades in the window) OR dropped
- * more than DROP_THRESHOLD vs the prior window. The Director (PLATFORM) is the coachedBy gate. After
- * PLATFORM_DIRECTOR_LOOP_GUARD_MAX coaching attempts that never stuck the slip stops re-coaching and the
- * coaching is ROLLED INTO A FIX SPEC that hardens the agent (rollCoachingIntoFixSpec) — never a CEO escalation.
+ * Detect a worker's grade slip and, when it has slipped, ENQUEUE a box-hosted coaching synthesis pass
+ * (grading-cascade-to-box-sessions Phase 2: an `agent-coach` `agent_jobs` row → runAgentCoachJob →
+ * `applyBoxCoaching`, which reads the low-graded jobs' REAL diffs on Max and calls `coachAgent`).
+ * Slip = the rolling average fell below COACH_LOW_ROLLUP (≥ COACH_MIN_SAMPLE grades in the window) OR
+ * dropped more than DROP_THRESHOLD vs the prior window. The Director (PLATFORM) is the coachedBy gate
+ * (applied by `applyBoxCoaching`). After PLATFORM_DIRECTOR_LOOP_GUARD_MAX coaching attempts that never
+ * stuck, the slip stops re-coaching and the coaching is ROLLED INTO A FIX SPEC that hardens the agent
+ * (rollCoachingIntoFixSpec — deterministic, still inline here) — never a CEO escalation. `coached=true`
+ * on the return now means "the box coach lane has been dispatched (or was already in flight)" — the
+ * actual coachAgent DB write lands from the box job within a few minutes.
  */
 export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin }): Promise<CoachingTriggerResult> {
   const admin = opts.admin ?? createAdminClient();
@@ -782,7 +824,9 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
     }
     return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "no_slip" };
   }
-  if (!ANTHROPIC_API_KEY) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: "no_api_key" };
+  // grading-cascade-to-box-sessions Phase 2: the coaching synthesis LLM call moved off Anthropic's API
+  // to a box `agent-coach` session on Max, so the deployed cron no longer needs an ANTHROPIC_API_KEY to
+  // drive the coaching cascade — it just enqueues the box job.
 
   // Loop-guard: too many coaching attempts that never STUCK for this worker → escalate, don't re-coach
   // (recheck_status ∈ pending｜stuck｜recurred — a 'stuck' learning is resolved; pending/recurred is open).
@@ -811,41 +855,156 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
     return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: false, reason: roll.reason || "roll_skipped" };
   }
 
-  // The low-graded recent actions that prompted the slip — the coaching material.
+  // The low-graded recent actions that prompted the slip — the coaching material the box session will
+  // read. Pass the agent_action_grades row ids (`source_grade_id` on the resulting coaching_log row) +
+  // the agent_job_ids so the box coach lane can git-show each merged diff.
   const { data: lows } = await admin
     .from("agent_action_grades")
-    .select("id, grade, reasoning, spec_slug")
+    .select("id, grade, reasoning, spec_slug, agent_job_id")
     .eq("workspace_id", opts.workspaceId)
     .eq("agent_kind", opts.agentKind)
     .lt("grade", COACH_LOW_ROLLUP)
     .order("created_at", { ascending: false })
     .limit(ROLLUP_WINDOW);
-  const lowRows = (lows as Array<{ id: string; grade: number; reasoning: string | null; spec_slug: string | null }>) ?? [];
+  const lowRows = (lows as Array<{ id: string; grade: number; reasoning: string | null; spec_slug: string | null; agent_job_id: string }>) ?? [];
   if (!lowRows.length) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: "no_low_grades" };
 
-  const coaching = await synthesizeCoaching(opts.workspaceId, opts.agentKind, rollup, lowRows);
-  if ("error" in coaching) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: coaching.error };
+  // grading-cascade-to-box-sessions Phase 2: the coaching synthesis LLM call moved to a box session on
+  // Max that reads the REAL diffs (git-show / git-diff origin/main...origin/<branch>) instead of the
+  // paraphrased stored grade reasoning the deployed synthesizeCoaching used. This function no longer
+  // calls the Anthropic API — it ENQUEUES ONE `agent-coach` `agent_jobs` row per (workspace,
+  // agent_kind) slip. The box coach lane (scripts/builder-worker.ts → runAgentCoachJob) synthesizes
+  // the durable learning from the diffs, then writes agent_coaching_log via `applyBoxCoaching` (which
+  // re-checks the loop-guard + rollup + calls coachAgent — the pure DB write is unchanged). No API
+  // bill; ai_token_usage purpose=agent_coaching_synthesis rows stop accruing.
+  //
+  // Dedup: skip re-enqueue while an agent-coach job for this (workspace, agent_kind) is already
+  // queued/building/needs_input — one box session per slip at a time, no daily pileup. `instructions`
+  // is stored as a JSON-encoded TEXT column (not jsonb), so a simple ilike against the encoded
+  // agent_kind field matches (the payload uses double-quotes, matching JSON.stringify).
+  const kindNeedle = `%"agent_kind":"${opts.agentKind}"%`;
+  const { data: inflight } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("kind", "agent-coach")
+    .ilike("instructions", kindNeedle)
+    .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval"])
+    .limit(1);
+  if (inflight && inflight.length) {
+    return { agentKind: opts.agentKind, rollup, slipped, coached: true, reason: "coach_job_in_flight" };
+  }
+
+  const payload = {
+    agent_kind: opts.agentKind,
+    low_grade_ids: lowRows.map((r) => r.id),
+    low_agent_job_ids: lowRows.map((r) => r.agent_job_id),
+    rollup_average: rollup.average,
+    rollup_drop: rollup.drop,
+    open_coaching_count: openCoachings ?? 0,
+  };
+  const { error: insErr } = await admin.from("agent_jobs").insert({
+    workspace_id: opts.workspaceId,
+    spec_slug: "agent-coach",
+    kind: "agent-coach",
+    status: "queued",
+    created_by: null,
+    instructions: JSON.stringify(payload),
+  });
+  if (insErr) {
+    console.error(`[worker-grader] agent-coach enqueue failed ws=${opts.workspaceId} kind=${opts.agentKind}: ${insErr.message}`);
+    return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: `enqueue_failed:${insErr.message}` };
+  }
+  return { agentKind: opts.agentKind, rollup, slipped, coached: true, reason: "coach_job_enqueued" };
+}
+
+// ── grading-cascade-to-box-sessions Phase 2: box-hosted coaching synthesis ─────────────────────────────
+
+/**
+ * Apply a coaching learning produced by the box-hosted synthesis session (grading-cascade-to-box-sessions
+ * Phase 2) — a Max `claude -p` that read the low-graded jobs' REAL merged diffs and distilled the
+ * recurring code mistake into ONE durable rule. Reuses `coachAgent` (the same DIRECTOR-GATED DB write
+ * the deployed path used) so `agent_coaching_log` + `agent_instructions` versioning + the loop-guard
+ * cascade fire identically. Idempotent + rollup-safe:
+ *
+ *   • Rollup RE-CHECK: the slip may have recovered while the coach job sat queued (a fresh batch of
+ *     high grades landed) — bail with reason='recovered_before_coach' instead of writing a stale rule.
+ *   • Loop-guard RE-CHECK: open coachings may have climbed past PLATFORM_DIRECTOR_LOOP_GUARD_MAX
+ *     while queued — hand back to rollCoachingIntoFixSpec instead of adding attempt N+1.
+ *
+ * Announces the coaching on #directors + logs a `coached_agent` activity row — same board post the
+ * deployed path emitted. Returns the coachAgent write metadata so the box lane can log the attempt.
+ * See docs/brain/libraries/agent-grader.md · docs/brain/tables/agent_coaching_log.md.
+ */
+export async function applyBoxCoaching(opts: {
+  workspaceId: string;
+  agentKind: string;
+  learning: CoachingLearning;
+  sourceGradeId?: string | null;
+  admin?: Admin;
+}): Promise<{ ok: boolean; coached?: boolean; attempt?: number; instructionId?: string; reason?: string }> {
+  const admin = opts.admin ?? createAdminClient();
+  const rollup = await computeAgentRollup(admin, opts.workspaceId, opts.agentKind);
+
+  // Recovery re-check — the slip may have healed while the coach job sat queued.
+  const lowByAvg = rollup.average !== null && rollup.count >= COACH_MIN_SAMPLE && rollup.average < COACH_LOW_ROLLUP;
+  const lowByDrop = rollup.drop !== null && rollup.drop > DROP_THRESHOLD;
+  if (!(lowByAvg || lowByDrop)) {
+    return { ok: true, coached: false, reason: "recovered_before_coach" };
+  }
+
+  // Loop-guard re-check — attempts may have crossed the max while queued.
+  const { count: openCoachings } = await admin
+    .from("agent_coaching_log")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", opts.workspaceId)
+    .eq("agent_kind", opts.agentKind)
+    .eq("kind", "coaching")
+    .not("recheck_status", "in", "(stuck,rolled_in)");
+  if ((openCoachings ?? 0) >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+    const roll = await rollCoachingIntoFixSpec(admin, { workspaceId: opts.workspaceId, agentKind: opts.agentKind, rollupAvg: rollup.average, attempts: openCoachings ?? 0 });
+    if (roll.ok) {
+      await announceOnBoard(
+        admin,
+        opts.workspaceId,
+        `🛠️ ${nm(PLATFORM)} rolled ${nm(opts.agentKind)}'s coaching into a fix spec [[${roll.slug}]] — coached ${openCoachings}× without it sticking (${rollup.average?.toFixed(1)}/10), so it's now a build that hardens the agent at the mandate level; the coaching is archived as rolled-into-mandates.`,
+        "rolled_coaching_into_spec",
+        { agent_kind: opts.agentKind, slug: roll.slug, average: rollup.average, attempts: openCoachings },
+      );
+    }
+    return { ok: true, coached: false, reason: roll.ok ? "rolled_into_fix_spec" : roll.reason || "roll_skipped" };
+  }
+
+  if (!opts.learning?.errorClass || !opts.learning?.guidance) {
+    return { ok: false, reason: "invalid_learning" };
+  }
 
   try {
     const result = await coachAgent(admin, {
       workspaceId: opts.workspaceId,
       agentKind: opts.agentKind,
       coachedBy: PLATFORM,
-      errorClass: coaching.errorClass,
-      guidance: coaching.guidance,
-      triggeringPattern: coaching.triggeringPattern,
-      reasoning: coaching.reasoning,
-      sourceGradeId: lowRows[0]?.id ?? null,
+      errorClass: opts.learning.errorClass,
+      guidance: opts.learning.guidance,
+      triggeringPattern: opts.learning.triggeringPattern,
+      reasoning: opts.learning.reasoning,
+      sourceGradeId: opts.sourceGradeId ?? null,
     });
     await announceOnBoard(
       admin,
       opts.workspaceId,
-      `🛠️ ${nm(PLATFORM)} coached ${nm(opts.agentKind)}: ${coaching.guidance}`,
+      `🛠️ ${nm(PLATFORM)} coached ${nm(opts.agentKind)}: ${opts.learning.guidance}`,
       "coached_agent",
-      { agent_kind: opts.agentKind, error_class: coaching.errorClass, kind: "coaching", rollup_avg: rollup.average },
+      {
+        agent_kind: opts.agentKind,
+        error_class: opts.learning.errorClass,
+        kind: "coaching",
+        rollup_avg: rollup.average,
+        model: "box-max-session",
+      },
     );
-    return { agentKind: opts.agentKind, rollup, slipped, coached: true, attempt: result.attempt, instructionId: result.instruction.id };
+    return { ok: true, coached: true, attempt: result.attempt, instructionId: result.instruction.id };
   } catch (e) {
-    return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }
 }
