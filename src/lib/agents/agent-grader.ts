@@ -40,6 +40,7 @@ import { coachAgent } from "@/lib/agents/agent-instructions";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { getPersona } from "@/lib/agents/personas";
+import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
 
 /** The director (Ada) + an agent's persona name for board lines. */
 function nm(kind: string): string {
@@ -146,6 +147,27 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
 
 /** The agent_jobs `kind`s the worker grader scores (rubric-backed). */
 export const GRADEABLE_KINDS = Object.keys(AGENT_RUBRICS);
+
+/**
+ * The rubric-backed kinds a given DIRECTOR's grading sweep is allowed to grade — the ones whose
+ * owning function in the Control Tower registry (via [[approval-inbox]] `ownerFunctionForKind`) is
+ * that director's function. Enforces the north-star cascade rule "a director grades only its own
+ * charge" ([[../specs/director-grades-only-own-charge]], [[../operational-rules]] § North star):
+ * a supervisor owns the layer BELOW it, not adjacent departments. So Ada (`fn='platform'`) grades
+ * the platform-owned workers (build/fold/spec-test/repair/pr-resolve/security-review/spec-review/
+ * plan/dev-ask/spec-chat/coverage-register/db_health) but NOT the CS/CMO/Retention/Growth workers
+ * (ticket-improve, triage-escalations, product-seed, migration-fix, storefront-optimizer). A kind
+ * unmapped by `ownerFunctionForKind` is treated as NOT owned (never graded by a reaching-in
+ * director) — a cross-function worker stays UNGRADED until its own director runs its own sweep.
+ * Grading is a DIRECTOR-tier supervisory function; no director → no worker grading. Never a
+ * CEO reach-in fail-safe (ungraded-until-their-director-is-live is the intended behavior).
+ *
+ * Mirrors [[approval-inbox]] `ownerFunctionForKind` — the same owner-scoping the approval router
+ * already enforces. Same source of truth (Control Tower registry), no second copy.
+ */
+export function gradeableKindsForFunction(fn: string): string[] {
+  return GRADEABLE_KINDS.filter((k) => ownerFunctionForKind(k) === fn);
+}
 
 export interface AgentGradeResult {
   ok: boolean;
@@ -430,7 +452,7 @@ interface UngradedJob {
  *     so the already-graded set (one row per ever-graded job — thousands over time) must be PAGINATED.
  *     A truncated graded set would falsely re-surface old graded jobs as "ungraded" and waste LLM spend.
  */
-async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000): Promise<UngradedJob[]> {
+async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 1000, fn: string = PLATFORM): Promise<UngradedJob[]> {
   // Paginate the graded set past the 1000-row PostgREST response cap (thousands of grades accumulate).
   const gradedJobs = new Set<string>();
   for (let from = 0; ; from += 1000) {
@@ -444,6 +466,13 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
     if (rows.length < 1000) break;
   }
 
+  // director-grades-only-own-charge: a director's sweep grades only the kinds ITS function owns —
+  // so the pool is filtered to `gradeableKindsForFunction(fn)`, not the full GRADEABLE_KINDS. An
+  // empty owned set for a function is a legitimate NO-OP (that director has no workers to grade
+  // yet), never a fall-through to another function's charge.
+  const ownedKinds = gradeableKindsForFunction(fn);
+  if (!ownedKinds.length) return [];
+
   // Fetch the NEWEST `limit` gradeable concluded jobs (descending), then re-sort ascending so callers
   // still get oldest-first (the batch-ready gate reads ungraded[0] as the oldest). Descending is what
   // keeps the window on the recent tail instead of the long-graded head.
@@ -451,7 +480,7 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
     .from("agent_jobs")
     .select("id, created_at, kind, status")
     .eq("workspace_id", workspaceId)
-    .in("kind", GRADEABLE_KINDS)
+    .in("kind", ownedKinds)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -532,9 +561,10 @@ export async function agentGradingBatchReady(
   admin: Admin,
   workspaceId: string,
   now: number = Date.now(),
+  fn: string = PLATFORM,
 ): Promise<{ ready: boolean; ungraded: number }> {
   try {
-    const ungraded = await ungradedConcludedJobs(admin, workspaceId);
+    const ungraded = await ungradedConcludedJobs(admin, workspaceId, 1000, fn);
     if (!ungraded.length) return { ready: false, ungraded: 0 };
     const oldestAgeMs = now - new Date(ungraded[0].created_at).getTime();
     // A failure is high-signal (a worker mistake to coach on) → grade it promptly, don't wait for the batch.
@@ -554,10 +584,11 @@ export async function agentGradingBatchReady(
  * a new `agent-grade` `agent_jobs` row. The box lane reads each id's REAL diff and writes the grade via
  * applyBoxGrade. A no-op (empty array) while nothing is ungraded.
  */
-export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<UngradedJob[]> {
+export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number; fn?: string }): Promise<UngradedJob[]> {
   const admin = opts.admin ?? createAdminClient();
+  const fn = opts.fn ?? PLATFORM;
   try {
-    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
+    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500, fn);
     if (!pool.length) return [];
     const proven = new Set<string>();
     for (const kind of new Set(pool.map((j) => j.kind))) {
@@ -585,15 +616,16 @@ export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: A
  * caller can invoke when a workspace's box lane can't be reached; retire it once the box lane is proven
  * green for a full rollup window (worker-grading-and-director-management Phase 2 review).
  */
-export async function gradeConcludedAgentActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
+export async function gradeConcludedAgentActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number; fn?: string }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
   const admin = opts.admin ?? createAdminClient();
+  const fn = opts.fn ?? PLATFORM;
   let considered = 0;
   let graded = 0;
   const gradedKinds = new Set<string>();
   if (!ANTHROPIC_API_KEY) return { considered, graded, gradedKinds: [] };
 
   try {
-    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
+    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500, fn);
     // A PROVEN worker (≥ PROVEN_AVG over a full window) is graded way less often — compute which kinds in the
     // pool are proven so selectGradingBatch can throttle them and spend the budget on unproven/struggling ones.
     const proven = new Set<string>();
@@ -790,8 +822,19 @@ export async function rollCoachingIntoFixSpec(
  * on the return now means "the box coach lane has been dispatched (or was already in flight)" — the
  * actual coachAgent DB write lands from the box job within a few minutes.
  */
-export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin }): Promise<CoachingTriggerResult> {
+export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin; fn?: string }): Promise<CoachingTriggerResult> {
   const admin = opts.admin ?? createAdminClient();
+  const fn = opts.fn ?? PLATFORM;
+  // director-grades-only-own-charge: a director coaches ONLY the workers its function owns. If a stale
+  // caller iterates past a cross-function kind (e.g. platform-director-cron before Phase 1's loop-scope
+  // fix), refuse to coach — a slip in a CS/CMO/Retention/Growth worker never triggers THIS director's
+  // fix-spec + coaching. An unmapped kind (`ownerFunctionForKind` returns null) is also NOT owned — no
+  // reach-in. `computeAgentRollup` is still returned (so a dashboard view of "what would slip" is
+  // faithful — this function is the ACTION gate, not a rollup gate).
+  if (ownerFunctionForKind(opts.agentKind) !== fn) {
+    const rollup: AgentRollup = { agentKind: opts.agentKind, count: 0, average: null, priorAverage: null, drop: null };
+    return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "not_owned_by_director" };
+  }
   const rollup = await computeAgentRollup(admin, opts.workspaceId, opts.agentKind);
 
   const lowByAvg = rollup.average !== null && rollup.count >= COACH_MIN_SAMPLE && rollup.average < COACH_LOW_ROLLUP;
@@ -902,6 +945,9 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
     rollup_average: rollup.average,
     rollup_drop: rollup.drop,
     open_coaching_count: openCoachings ?? 0,
+    // director-grades-only-own-charge: the enqueuing director's function — so `applyBoxCoaching`
+    // on the box side re-verifies the coach applies only within THIS director's charge.
+    fn,
   };
   const { error: insErr } = await admin.from("agent_jobs").insert({
     workspace_id: opts.workspaceId,
@@ -942,8 +988,17 @@ export async function applyBoxCoaching(opts: {
   learning: CoachingLearning;
   sourceGradeId?: string | null;
   admin?: Admin;
+  fn?: string;
 }): Promise<{ ok: boolean; coached?: boolean; attempt?: number; instructionId?: string; reason?: string }> {
   const admin = opts.admin ?? createAdminClient();
+  const fn = opts.fn ?? PLATFORM;
+  // director-grades-only-own-charge: refuse to write coaching for a kind this director doesn't own.
+  // detectGradeDropCoaching already enforces this on the enqueue side; belt-and-suspenders here so a
+  // stale `agent-coach` job queued before the Phase-1 fix (or a hand-rolled apply) can't quietly
+  // write a cross-function learning through PLATFORM.
+  if (ownerFunctionForKind(opts.agentKind) !== fn) {
+    return { ok: false, reason: "not_owned_by_director" };
+  }
   const rollup = await computeAgentRollup(admin, opts.workspaceId, opts.agentKind);
 
   // Recovery re-check — the slip may have healed while the coach job sat queued.

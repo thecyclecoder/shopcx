@@ -11893,6 +11893,7 @@ async function runAgentCoachJob(job: Job) {
     rollup_average?: number | null;
     rollup_drop?: number | null;
     open_coaching_count?: number;
+    fn?: string;
   } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
@@ -12020,6 +12021,10 @@ async function runAgentCoachJob(job: Job) {
     }
 
     const sourceGradeId = grades[0]?.id ?? null;
+    // director-grades-only-own-charge: the enqueuing director's function (default 'platform' for a
+    // legacy row that predates the field). `applyBoxCoaching` re-verifies the coach applies only to
+    // a kind THIS director's function owns.
+    const coachFn = typeof instr.fn === "string" && instr.fn ? instr.fn : "platform";
     const result = await applyBoxCoaching({
       workspaceId: job.workspace_id,
       agentKind,
@@ -12031,6 +12036,7 @@ async function runAgentCoachJob(job: Job) {
       },
       sourceGradeId,
       admin: a,
+      fn: coachFn,
     });
     const tail = result.coached
       ? `coached ${agentKind}: [${parsed.errorClass}] attempt=${result.attempt ?? "?"}`
@@ -12068,13 +12074,18 @@ interface AgentGradeDecisionJson {
 
 async function runAgentGradeJob(job: Job) {
   const tag = `[agent-grade:${job.id.slice(0, 8)}]`;
-  let instr: { agent_job_ids?: unknown } = {};
+  let instr: { agent_job_ids?: unknown; fn?: unknown } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
     /* not JSON — degrade */
   }
   const ids = Array.isArray(instr.agent_job_ids) ? instr.agent_job_ids.filter((x): x is string => typeof x === "string") : [];
+  // director-grades-only-own-charge: the enqueuing director's function ('platform' today — the only
+  // live sweep). Threaded through the post-batch `detectGradeDropCoaching` fan-out so a slip in a
+  // cross-function worker never triggers THIS director's coaching. Falls back to 'platform' for a
+  // legacy row that predates the payload change.
+  const enqueuingFn = typeof instr.fn === "string" && instr.fn ? instr.fn : "platform";
   if (!ids.length) {
     await update(job.id, { status: "completed", log_tail: "no agent_job_ids in instructions — nothing to grade" });
     console.log(`${tag} no ids → no-op`);
@@ -12229,7 +12240,7 @@ async function runAgentGradeJob(job: Job) {
     // repeat call on the same slip is a no-op after the coach job is queued/landed).
     for (const kind of kindsToRecheck) {
       try {
-        await detectGradeDropCoaching({ workspaceId, agentKind: kind, admin: a });
+        await detectGradeDropCoaching({ workspaceId, agentKind: kind, admin: a, fn: enqueuingFn });
       } catch (e) {
         console.error(`${tag} coach ${kind}:`, e instanceof Error ? e.message : e);
       }
