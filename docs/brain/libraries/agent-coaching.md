@@ -28,4 +28,6 @@ The director optimizes a bounded proxy (worker decision quality) and answers to 
 
 ## Related
 
-[[worker-instructions]] · [[../tables/agent_instructions]] · [[../tables/agent_coaching_log]] · [[../tables/director_activity]] · [[director-board]] · [[repair-agent]] · [[../specs/worker-coaching-loop]] · [[../specs/platform-director-agent]] · [[../specs/director-loop-grading]] · [[../goals/devops-director]]
+**Above this layer:** [[agent-kpis]] surfaces coaching activity in every agent's **Quality** tier (a coaching-count card) and — for Cleo (`storefront-optimizer`) — is what the KPI page uses to answer *"is this agent LEARNING?"* alongside the grade rollup. See `/dashboard/agents/[role]/kpi`.
+
+[[worker-instructions]] · [[../tables/agent_instructions]] · [[../tables/agent_coaching_log]] · [[../tables/director_activity]] · [[director-board]] · [[repair-agent]] · [[agent-kpis]] · [[../specs/worker-coaching-loop]] · [[../specs/platform-director-agent]] · [[../specs/director-loop-grading]] · [[../goals/devops-director]]

@@ -323,6 +323,17 @@ function ProfileCard({
               reports to {reportsTo.name} · {reportsTo.role} →
             </Link>
           )}
+          {/* agent-kpi-pages-cleo-first Phase 3 — the second supervision layer above grades + coaching.
+              Rendered for every director/worker via computeAgentKpis (bespoke def for Cleo, generic
+              fallback for the rest). CEO isn't an agent, so no link. */}
+          {resolved.kind !== "ceo" && (
+            <Link
+              href={`/dashboard/agents/${encodeURIComponent(role)}/kpi`}
+              className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+            >
+              KPIs →
+            </Link>
+          )}
         </div>
       </div>
 
