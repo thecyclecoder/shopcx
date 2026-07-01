@@ -12101,6 +12101,16 @@ interface AgentGradeDecisionJson {
   reasoning: string;
 }
 
+// consolidate-grade-coach-one-session (Phase 1): the coaching learnings the grade session emits inline
+// for slipped batch workers (fields mirror agent-grader `CoachingLearning`). Applied via applyBoxCoaching.
+interface AgentCoachingJson {
+  agent_kind: string;
+  errorClass: string;
+  triggeringPattern?: string;
+  guidance: string;
+  reasoning?: string;
+}
+
 async function runAgentGradeJob(job: Job) {
   const tag = `[agent-grade:${job.id.slice(0, 8)}]`;
   let instr: { agent_job_ids?: unknown; fn?: unknown } = {};
@@ -12121,7 +12131,7 @@ async function runAgentGradeJob(job: Job) {
     return;
   }
 
-  const { applyBoxGrade, detectGradeDropCoaching, AGENT_RUBRICS } = await import("../src/lib/agents/agent-grader");
+  const { applyBoxGrade, detectGradeDropCoaching, applyBoxCoaching, computeAgentRollup, AGENT_RUBRICS, COACH_LOW_ROLLUP } = await import("../src/lib/agents/agent-grader");
   const a = await admin();
   const { data: rows } = await a
     .from("agent_jobs")
@@ -12150,6 +12160,30 @@ async function runAgentGradeJob(job: Job) {
 
   const workspaceId = jobs[0].workspace_id;
   const kinds = Array.from(new Set(jobs.map((j) => j.kind)));
+
+  // consolidate-grade-coach-one-session (Phase 1): coaching is now a FOLLOW-ON of THIS grade session,
+  // not a separate `agent-coach` lane per slipped kind. The session already read every diff to grade —
+  // synthesizing a coaching learning off the same in-context diffs costs ~no extra tokens, whereas a
+  // separate agent-coach box job would re-hydrate ~550K of context + re-read the same diffs. So we hand
+  // the agent each batch-kind's CURRENT rolling average + the coaching bar, and ask it to emit a durable
+  // learning for any worker at/below the bar. The worker then applies those via `applyBoxCoaching`
+  // (which re-checks ownership + recovery + loop-guard→roll-into-fix-spec — the full decision core).
+  const rollupByKind = new Map<string, { average: number | null; count: number; drop: number | null }>();
+  for (const k of kinds) {
+    try {
+      const r = await computeAgentRollup(a, workspaceId, k);
+      rollupByKind.set(k, { average: r.average, count: r.count, drop: r.drop });
+    } catch {
+      /* best-effort — a missing rollup just means the agent coaches off the batch grades alone */
+    }
+  }
+  const coachingBlock = kinds
+    .map((k) => {
+      const r = rollupByKind.get(k);
+      const avg = r?.average != null ? `${r.average.toFixed(1)}/10 over last ${r.count}` : "no prior grades";
+      return `  • ${k} (${AGENT_RUBRICS[k]?.name ?? "?"}): rolling ${avg}${r?.drop != null && r.drop > 0 ? ` (down ${r.drop.toFixed(1)} vs prior window)` : ""}`;
+    })
+    .join("\n");
 
   // Per-kind rubric block (only the rubrics represented in this batch).
   const rubricLines = kinds
@@ -12219,11 +12253,17 @@ async function runAgentGradeJob(job: Job) {
     `  3. If you're unsure whether it compiles, sample \`npx tsc --noEmit\` (bounded — don't run the full suite). If you're unsure whether CI passed, check \`gh pr view <PR#> --json statusCheckRollup\` or \`gh run list --branch <branch> --limit 5\`.`,
     `  4. For a non-PR job (a fix/dismiss/verify — e.g., spec-review / spec-test / db_health): read the pending_action + log_tail + the referenced spec/rule; the "real defect vs false-positive" rubric bit is scored here.`,
     ``,
+    ``,
+    `COACHING (follow-on, SAME session — you already read the diffs above, so this is near-free):`,
+    `After grading, look at each worker's CURRENT rolling average below. For ANY worker whose rolling average is at/below ${COACH_LOW_ROLLUP}/10 (or that you graded poorly across this batch), distill ONE durable coaching learning from the RECURRING mistake you saw in its diffs — "when you see X, do Y instead, because Z". Specific and actionable, tied to concrete code you read; never generic encouragement. Emit one entry per such worker in \`coachings[]\`. A worker comfortably above the bar needs NO coaching (omit it).`,
+    `  Rolling averages for this batch's workers:`,
+    coachingBlock,
+    ``,
     `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
-    `  {"status":"completed","decisions":[{"agent_job_id":"…","grade":<1-10>,"reasoning":"<2-4 sentences citing file:line from the diff when possible, and what would have made it a 10>"}]}`,
+    `  {"status":"completed","decisions":[{"agent_job_id":"…","grade":<1-10>,"reasoning":"<2-4 sentences citing file:line from the diff when possible, and what would have made it a 10>"}],"coachings":[{"agent_kind":"<kind>","errorClass":"<short slug>","triggeringPattern":"<when the worker sees X>","guidance":"<do Y instead>","reasoning":"<why, citing the recurring diff evidence>"}]}`,
     `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
     ``,
-    `Every agent_job_id in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based (concrete file/line or observed status) — never a paraphrase of the log_tail.`,
+    `Every agent_job_id in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based (concrete file/line or observed status) — never a paraphrase of the log_tail. \`coachings\` MAY be empty (nobody slipped); include an entry ONLY for a slipped batch worker, with agent_kind being one of this batch's kinds.`,
   ].join("\n");
 
   try {
@@ -12233,7 +12273,7 @@ async function runAgentGradeJob(job: Job) {
     await meterAgentJob(job, gradeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
 
-    const parsed = extractJson<{ status?: string; error?: string; decisions?: AgentGradeDecisionJson[] }>(resultText);
+    const parsed = extractJson<{ status?: string; error?: string; decisions?: AgentGradeDecisionJson[]; coachings?: AgentCoachingJson[] }>(resultText);
     if (parsed?.status === "error") {
       await update(job.id, { status: "needs_attention", error: `agent-grade error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
       console.error(`${tag} agent reported error: ${parsed.error}`);
@@ -12262,19 +12302,44 @@ async function runAgentGradeJob(job: Job) {
         skipped++;
       }
     }
-    // The rollup + detectGradeDropCoaching cascade — fire per newly graded worker kind. Phase 2
-    // moved the coaching SYNTHESIS box-side too: detectGradeDropCoaching now ENQUEUES an agent-coach
-    // box job on slip (instead of the deployed synthesizeCoaching API call) and applyBoxCoaching does
-    // the coachAgent DB write. detectGradeDropCoaching is idempotent + loop-guarded + dedup-gated (a
-    // repeat call on the same slip is a no-op after the coach job is queued/landed).
+    // consolidate-grade-coach-one-session (Phase 1): apply the coachings the SAME session synthesized
+    // off the diffs it just read — no separate `agent-coach` lane, no re-hydration. `applyBoxCoaching`
+    // is the full decision core (ownership + recovery re-check + loop-guard → roll-into-fix-spec + the
+    // coachAgent DB write), so a coaching the agent proposed for a kind that already recovered, isn't
+    // owned, or is over the loop-guard is safely gated/rolled — it can't corrupt the cascade.
+    const inlineCoached = new Set<string>();
+    const coachings = Array.isArray(parsed.coachings) ? parsed.coachings : [];
+    for (const c of coachings) {
+      if (!c || typeof c.agent_kind !== "string" || !kinds.includes(c.agent_kind)) continue;
+      if (!c.guidance || !c.errorClass) continue;
+      try {
+        const r = await applyBoxCoaching({
+          workspaceId,
+          agentKind: c.agent_kind,
+          learning: { errorClass: String(c.errorClass), triggeringPattern: String(c.triggeringPattern ?? ""), guidance: String(c.guidance), reasoning: String(c.reasoning ?? "") },
+          fn: enqueuingFn,
+        });
+        // Mark it coached-this-beat whenever applyBoxCoaching took ownership of the decision (wrote a
+        // learning, rolled into a fix spec, or found it already recovered) — so the fallback below
+        // never opens a redundant agent-coach lane for the same kind.
+        if (r.ok) inlineCoached.add(c.agent_kind);
+      } catch (e) {
+        console.error(`${tag} inline-coach ${c.agent_kind}:`, e instanceof Error ? e.message : e);
+      }
+    }
+    // Recovery-announce + FALLBACK safety net — fire per newly graded worker kind. For a kind coached
+    // inline above, `alreadyCoachedKinds` makes this a no-op (no second lane); for a kind the agent
+    // MISSED (graded low but proposed no coaching), detectGradeDropCoaching self-gates on slip/dedup/
+    // loop-guard and enqueues at most one deduped agent-coach job — so coverage never silently drops.
+    const alreadyCoachedKinds = Array.from(inlineCoached);
     for (const kind of kindsToRecheck) {
       try {
-        await detectGradeDropCoaching({ workspaceId, agentKind: kind, admin: a, fn: enqueuingFn });
+        await detectGradeDropCoaching({ workspaceId, agentKind: kind, admin: a, fn: enqueuingFn, alreadyCoachedKinds });
       } catch (e) {
         console.error(`${tag} coach ${kind}:`, e instanceof Error ? e.message : e);
       }
     }
-    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · kinds=${Array.from(kindsToRecheck).join(",") || "—"}`;
+    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · coached-inline=${alreadyCoachedKinds.join(",") || "—"} · kinds=${Array.from(kindsToRecheck).join(",") || "—"}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {

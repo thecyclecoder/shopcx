@@ -33,7 +33,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { pickDirectorGradeBatch } from "@/lib/agents/director-grader";
-import { agentGradingBatchReady, detectGradeDropCoaching, pickAgentGradeBatch, gradeableKindsForFunction } from "@/lib/agents/agent-grader";
+import { agentGradingBatchReady, pickAgentGradeBatch } from "@/lib/agents/agent-grader";
 import { computePlatformScorecard, getRegisteredMetrics } from "@/lib/agents/platform-scorecard";
 import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
 import {
@@ -219,12 +219,14 @@ export const platformDirectorCron = inngest.createFunction(
     const workerGrading = await step.run("grade-and-coach-workers", async () => {
       let considered = 0;
       let enqueued = 0;
-      let coached = 0;
+      // consolidate-grade-coach-one-session (Phase 1): coaching moved INTO the agent-grade box session,
+      // so the cron no longer coaches per-kind here. `coached` stays in the return shape (always 0 now)
+      // for the grading-liveness heartbeat + KPI readers that reference it.
+      const coached = 0;
       // director-grades-only-own-charge (Phase 1) — Ada supervises only the PLATFORM-owned workers.
-      // Every grading + coaching call below is scoped to `PLATFORM` so this cron stops sweeping
-      // ticket-improve/triage-escalations/product-seed/migration-fix/storefront-optimizer (CS/CMO/
-      // Retention/Growth workers) — their own director will grade them once live.
-      const platformKinds = gradeableKindsForFunction(PLATFORM);
+      // Every grading call below is scoped to `PLATFORM` (via agentGradingBatchReady/pickAgentGradeBatch),
+      // so this cron stops sweeping ticket-improve/triage-escalations/product-seed/migration-fix/
+      // storefront-optimizer (CS/CMO/Retention/Growth workers) — their own director will grade them once live.
       for (const workspaceId of result.workspaceIds || []) {
         try {
           const batch = await agentGradingBatchReady(admin, workspaceId, Date.now(), PLATFORM);
@@ -268,18 +270,14 @@ export const platformDirectorCron = inngest.createFunction(
               }
             }
           }
-          // Coaching cascade: fires per beat over all rubric-backed kinds so a slip triggered by a
-          // newly box-written grade is caught within one beat (idempotent + loop-guarded — a repeat
-          // call on the same slip is a no-op after the coaching lands). Cheap: each call is a rollup
-          // query + an LLM call ONLY when the rollup actually slipped. Best-effort per kind.
-          for (const agentKind of platformKinds) {
-            try {
-              const c = await detectGradeDropCoaching({ workspaceId, agentKind, admin, fn: PLATFORM });
-              if (c.coached) coached++;
-            } catch (e) {
-              console.error(`[platform-director-cron] coach ${agentKind} ws=${workspaceId}:`, e instanceof Error ? e.message : e);
-            }
-          }
+          // consolidate-grade-coach-one-session (Phase 1): the coaching cascade NO LONGER fans out here.
+          // It used to loop every platform kind each beat, and detectGradeDropCoaching enqueued a
+          // SEPARATE `agent-coach` box job per slipped kind — each re-hydrating ~550K of context + re-
+          // reading diffs the grade session already read (the "4 agent-coach queued" pileup, live 2026-
+          // 07-01). Coaching now runs as a FOLLOW-ON inside the ONE `agent-grade` box session
+          // (runAgentGradeJob), off the diffs it already read — one lane per director, no re-hydration.
+          // A slip is only actionable when a NEW low grade lands, which is exactly when the grade session
+          // runs; so tying coaching to that session (not a blind per-beat sweep) loses no coverage.
         } catch (e) {
           console.error(`[platform-director-cron] worker-grade sweep failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
         }

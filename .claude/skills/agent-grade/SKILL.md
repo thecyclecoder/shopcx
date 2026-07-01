@@ -128,9 +128,31 @@ thing in the message:
       "grade": 4,
       "reasoning": "Rafa flagged the wrong root cause: the failing_check in the log_tail says pricing_preserved, but the diff at src/lib/migration-fix.ts:411 patches items_on_uuids — an adjacent but different check. The fix is scoped and tsc clean, so it isn't a 1, but it's a mis-diagnosis that will re-fail on the next verifyMigration. A 10 would have re-run verifyMigration to confirm the class."
     }
+  ],
+  "coachings": [
+    {
+      "agent_kind": "migration-fix",
+      "errorClass": "misattributed-failing-check",
+      "triggeringPattern": "when the failing_check names one field but the obvious fix is an adjacent field",
+      "guidance": "map the failing_check to the EXACT column it asserts and patch that field, then re-run verifyMigration before concluding — never patch the neighbouring field because it looks related",
+      "reasoning": "seen twice this batch (src/lib/migration-fix.ts:411 patched items_on_uuids while the check was pricing_preserved) — the fix lands, tsc passes, but verifyMigration re-fails on the untouched check"
+    }
   ]
 }
 ```
+
+### Coaching (follow-on — same session)
+
+After grading, you already have every diff in context, so distilling a coaching learning costs ~no
+extra tokens (a fresh `agent-coach` session would re-hydrate ~550K + re-read these diffs). For **any
+worker whose rolling average is at/below the coaching bar** (the prompt lists each batch worker's
+current rolling average) **or that you graded poorly across this batch**, add ONE entry to
+`coachings[]` distilling the **recurring** mistake into a durable "when you see X, do Y instead,
+because Z" rule tied to the concrete code you read. A worker comfortably above the bar gets **no**
+entry — `coachings` MAY be empty. `agent_kind` must be one of the batch's kinds. The worker applies
+each via `applyBoxCoaching`, which re-checks ownership + recovery + the loop-guard (rolling a
+too-often-coached worker into a fix spec) — so a coaching for a kind that already recovered or isn't
+owned is safely dropped.
 
 Or, if you genuinely cannot proceed:
 

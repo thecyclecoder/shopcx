@@ -867,7 +867,7 @@ export async function rollCoachingIntoFixSpec(
  * on the return now means "the box coach lane has been dispatched (or was already in flight)" — the
  * actual coachAgent DB write lands from the box job within a few minutes.
  */
-export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin; fn?: string }): Promise<CoachingTriggerResult> {
+export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin; fn?: string; alreadyCoachedKinds?: string[] }): Promise<CoachingTriggerResult> {
   const admin = opts.admin ?? createAdminClient();
   const fn = opts.fn ?? PLATFORM;
   // director-grades-only-own-charge: a director coaches ONLY the workers its function owns. If a stale
@@ -912,6 +912,14 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
     }
     return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "no_slip" };
   }
+  // consolidate-grade-coach-one-session: the grade session already synthesized + applied this kind's
+  // coaching INLINE (same context, no extra hydration) via applyBoxCoaching. Skip the redundant separate
+  // `agent-coach` enqueue — this call is now only the recovery-announce + fallback path. A slipped kind
+  // that WAS coached inline this beat needs no second lane.
+  if (opts.alreadyCoachedKinds?.includes(opts.agentKind)) {
+    return { agentKind: opts.agentKind, rollup, slipped, coached: true, reason: "coached_inline" };
+  }
+
   // grading-cascade-to-box-sessions Phase 2: the coaching synthesis LLM call moved off Anthropic's API
   // to a box `agent-coach` session on Max, so the deployed cron no longer needs an ANTHROPIC_API_KEY to
   // drive the coaching cascade — it just enqueues the box job.
