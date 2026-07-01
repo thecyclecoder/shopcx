@@ -1,0 +1,1 @@
+- **Route Meta ad-spend sync through graphFetchJson so Facebook edge 504s self-heal instead of feeding Control Tower** · verified 2026-07-01 · → [[../inngest/today-sync]]
