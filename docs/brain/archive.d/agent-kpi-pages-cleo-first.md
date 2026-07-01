@@ -1,0 +1,1 @@
+- **Agent KPI pages — a per-agent KPI layer on top of grading/coaching (Cleo/Storefront-Optimizer first)** · verified 2026-07-01 · → [[../libraries/agent-kpis]] · [[../libraries/storefront-optimizer-agent]] · [[../dashboard/agents]]
