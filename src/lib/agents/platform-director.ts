@@ -3365,6 +3365,187 @@ export async function backstopPhaseProgression(admin: Admin): Promise<PhaseProgr
   return result;
 }
 
+/** What the stuck-accumulation backstop did this pass (per-spec unwedge outcomes). */
+export interface StuckAccumulationResult {
+  /** spec slugs whose un-stamped, branch-committed phases were stamped this pass (accumulation now completes). */
+  unwedged: { slug: string; branch: string; positions: number[]; headSha: string }[];
+  /** candidate specs scanned (multi-phase, partially built, driver-scoped, ≥1 planned phase without build_sha). */
+  scanned: number;
+  /** the read failed (no GH token, list-open-PRs API blip) — we skipped this pass. */
+  aborted: boolean;
+}
+
+/**
+ * accumulation-stamp-gap-and-rollback-guard P2 — DEFENSE-IN-DEPTH BACKSTOP for the stamp-gap wedge P1 fixes at
+ * the FINALIZE-time seam. Root cause recap: a multi-phase spec accumulates onto ONE `claude/build-{slug}`
+ * branch; the PR only opens when every phase carries a `build_sha` (`isSpecAccumulationComplete`). If a phase
+ * committed during a `needs_input`/`needs_approval` PAUSE and the finalize path never derived that position
+ * to stamp, the branch holds ALL the code but the DB says the accumulation is incomplete FOREVER — the PR
+ * never opens, the auto-merge gate can't fire, and the director re-grooms into the same trap ('no new edits …
+ * PR deferred — positions N not built'). This exact wedge held cleo-lever-priors, ada-standing-pass, and
+ * grading-cascade on 2026-07-01 until a human hand-stamped each.
+ *
+ * P1's finalize-time writer catches the wedge the moment the CURRENT run stamps its own phase (it also stamps
+ * every OTHER `Phase: N` trailer on the branch, from `git log origin/main..HEAD`). This standing-pass
+ * backstop covers the case that P1 CAN'T: a run that ALREADY TERMINATED (completed/needs_input/needs_approval)
+ * with the wedge in place — for those, the finalize scan doesn't fire again until someone re-queues a build,
+ * which the director's groom is refusing to do because the derived status shows nothing new to add.
+ *
+ * WEDGE SIGNATURE (all four are required — deliberately narrow):
+ *   1. multi-phase spec Ada drives (>1 phase, `platformDrivesSpec`, Vale-passed, `autoBuild!=false`);
+ *   2. NOT already fully shipped / deferred / folded;
+ *   3. at least one phase built-on-branch (branchBuiltCount ≥ 1 — the spec is genuinely started);
+ *   4. at least one non-terminal phase carries NO `build_sha` (an "unstamped" position — the wedge slot);
+ *   5. `claude/build-{slug}` is NOT the head of any open claude/build-* PR (the M4 auto-merge / auto-open path
+ *      is NOT waiting on a green check — the PR simply never opened);
+ *   6. the branch has a `Phase: N` trailer for each unstamped position (the code is genuinely on the branch);
+ *   7. `isSpecAccumulationComplete` still reports FALSE in the DB (the wedge is live right now).
+ *
+ * The intersection stamps `stampPhaseBuilt(pos, {build_sha: branchHeadSha})` for each unstamped position whose
+ * trailer proves the code is on the branch — the SAME leaf write P1 uses at finalize time. The NEXT tick of
+ * the finalize/promote path (Gate A backstop, `queueNextChainedPhase` retry, or any subsequent runBuildJob)
+ * reads accumulation as complete and opens the PR autonomously. Bounded to acts ONLY on the precise wedge
+ * shape — a legitimately in-progress build has an active job, a happy multi-phase spec's PR is open, a spec
+ * with an in-flight resolve is on someone else's plate — so this NEVER touches a healthy spec.
+ *
+ * IDEMPOTENT + FAIL-CLOSED: `stampPhaseBuilt` is a no-op on a terminal phase and harmless when the same SHA is
+ * re-stamped; the fetch helpers return `null` on ANY GitHub failure so a blind guess never stamps a phase.
+ * SURFACES the heal (never silent — north star) via a `director_activity` row per spec unwedged so the CEO
+ * sees each self-heal ("unwedged stuck accumulation: {slug}"). DORMANT until Platform is live+autonomous.
+ */
+export async function backstopStuckAccumulation(admin: Admin): Promise<StuckAccumulationResult> {
+  const empty: StuckAccumulationResult = { unwedged: [], scanned: 0, aborted: false };
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return empty;
+  const chart = await buildOrgChartGraph();
+
+  let specs: SpecCard[];
+  try {
+    ({ specs } = await getRoadmap());
+  } catch {
+    return empty; // a PM-read blip — the other backstops carry us; never throw
+  }
+
+  // Candidate wedge signature (steps 1-4 above) — every spec Ada drives that could be wedged. The PR-check +
+  // trailer-check (steps 5-6) + accumulation re-read (step 7) run per-candidate below (GitHub call cost).
+  const candidates = specs.filter(
+    (s) =>
+      !isCardFullyShippedWithProvenance(s) &&
+      s.status !== "deferred" &&
+      s.status !== "shipped" &&
+      specReviewDone(s) &&
+      s.autoBuild !== false &&
+      platformDrivesSpec(s.owner, chart, autonomy) &&
+      s.phases.length > 1 && // multi-phase — a one-shot spec cannot wedge on accumulation (trivially complete)
+      branchBuiltCount(s) >= 1 && // ≥1 phase already built on the branch (the spec is genuinely started)
+      s.phases.some(
+        (p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha,
+      ), // ≥1 non-terminal phase without a build_sha — the unstamped position(s) we might stamp
+  );
+  const result: StuckAccumulationResult = { unwedged: [], scanned: candidates.length, aborted: false };
+  if (!candidates.length) return result;
+
+  // Step 5 (read once): the set of branch refs already surfaced as an OPEN claude/build-* PR. A candidate whose
+  // branch is in this set is NOT wedged (a PR exists — its auto-merge gate is being evaluated elsewhere).
+  // Fail CLOSED — a GitHub list failure never gets treated as "no open PRs" (that would over-stamp), so we
+  // abort this pass and let the next one retry with a healthy GH connection.
+  const { listOpenClaudeBuildBranches, readBranchPhaseTrailers } = await import("@/lib/github-pr-resolve");
+  let openBuildBranches: Set<string> | null;
+  try {
+    openBuildBranches = await listOpenClaudeBuildBranches();
+  } catch {
+    openBuildBranches = null;
+  }
+  if (!openBuildBranches) {
+    result.aborted = true;
+    return result;
+  }
+
+  const { stampPhaseBuilt, isSpecAccumulationComplete, getSpec } = await import("@/lib/specs-table");
+
+  for (const s of candidates) {
+    try {
+      const branch = `claude/build-${s.slug}`;
+      // Step 5: an open PR on this branch means the promote path OWNS it — don't cross-stamp.
+      if (openBuildBranches.has(branch)) continue;
+
+      // Step 6: read the branch's head SHA + Phase: trailer positions from GitHub. `null` = the branch doesn't
+      // exist / GitHub blipped / no token → fail CLOSED (never stamp on absence of a positive read).
+      let trailers: { headSha: string; positions: Set<number> } | null;
+      try {
+        trailers = await readBranchPhaseTrailers(branch);
+      } catch {
+        trailers = null;
+      }
+      if (!trailers || !trailers.positions.size) continue;
+
+      // The un-stamped, non-terminal positions on the DB side. Refetch through the specs-table SDK — SpecCard's
+      // `SpecPhase` drops the `position` column (it's an ordered array), and `stampPhaseBuilt` keys off the
+      // canonical DB `position` (positions may be non-contiguous after a phase drop/re-authoring, so index+1
+      // isn't safe). One extra read per candidate, and the candidate set is already narrowly filtered above.
+      let specRow: Awaited<ReturnType<typeof getSpec>>;
+      try {
+        specRow = await getSpec(workspaceId, s.slug);
+      } catch {
+        continue;
+      }
+      if (!specRow) continue; // spec vanished between the roadmap read and now — leave it
+      const unstamped = specRow.phases
+        .filter((p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha)
+        .map((p) => p.position);
+      const toStamp = unstamped.filter((pos) => trailers!.positions.has(pos));
+      if (!toStamp.length) continue;
+
+      // Step 7 (final gate): re-read isSpecAccumulationComplete NOW. It fails OPEN on a PM-read error (returns
+      // complete:true) — that's fine here: an "open" reads as "not the wedge shape" and we skip. A live wedge
+      // reads complete:false with the offending positions in `reason` — that's the shape we act on.
+      let acc: { complete: boolean; reason: string };
+      try {
+        acc = await isSpecAccumulationComplete(workspaceId, s.slug);
+      } catch {
+        continue;
+      }
+      if (acc.complete) continue; // not wedged in the DB (or the read failed → fail-open) — leave it alone
+
+      // Stamp each wedged position from the branch head — the SAME leaf write P1 uses at finalize time.
+      const stamped: number[] = [];
+      for (const pos of toStamp.sort((a, b) => a - b)) {
+        try {
+          await stampPhaseBuilt(workspaceId, s.slug, pos, { build_sha: trailers.headSha });
+          stamped.push(pos);
+        } catch {
+          /* per-position best-effort — a single-phase write failing must not block the rest; next pass retries */
+        }
+      }
+      if (!stamped.length) continue;
+      result.unwedged.push({ slug: s.slug, branch, positions: stamped, headSha: trailers.headSha });
+
+      // Surface the heal — one director_activity row per unwedged spec (never silent — supervisable autonomy).
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "unwedged_stuck_accumulation",
+        specSlug: s.slug,
+        reason: `Unwedged stuck accumulation: ${s.slug} — branch ${branch} carried Phase: trailer(s) for position(s) ${stamped.join(", ")} but their build_sha was NULL and NO open PR existed, so isSpecAccumulationComplete permanently reported the spec incomplete and the PR never opened (the P1 wedge signature). Stamped ${stamped.length} phase(s) built from branch head ${trailers.headSha.slice(0, 8)} so the next finalize/promote tick opens the PR autonomously. Defense-in-depth for the accumulation-stamp-gap: P1 catches this at finalize time; this catches a run that already terminated with the wedge in place.`,
+        metadata: {
+          lane: "stuck_accumulation_backstop",
+          branch,
+          head_sha: trailers.headSha,
+          stamped_positions: stamped,
+          autonomous: true,
+        },
+      }).catch(() => {
+        /* audit is best-effort — the stamp already landed */
+      });
+    } catch {
+      // per-spec best-effort — one spec's failure never blocks the rest (the reactive chain + P1 finalize)
+    }
+  }
+  return result;
+}
+
 /** The Max `claude -p` grooming prompt — read-only assess one partially-shipped spec → one JSON verdict. */
 export function groomInvestigationPrompt(c: GroomCandidate): string {
   return [

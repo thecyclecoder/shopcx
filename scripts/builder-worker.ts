@@ -3587,6 +3587,33 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing phase-progression backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // STUCK-ACCUMULATION backstop (accumulation-stamp-gap-and-rollback-guard P2) — DEFENSE-IN-DEPTH for the
+    // P1 stamp-gap fix. P1 catches the wedge at FINALIZE time (stamps every `Phase: N` trailer on
+    // origin/main..HEAD, so a paused-phase commit never leaves the branch with an unstamped position). This
+    // covers the case P1 CAN'T: a run that ALREADY TERMINATED with the wedge in place (needs_input/completed
+    // before the fix landed) — for those, finalize never re-fires until someone re-queues the build, which the
+    // director's groom refuses to do because the derived status shows nothing new to add. Precise wedge
+    // signature (all required — see backstopStuckAccumulation for the full list): multi-phase spec Ada drives,
+    // partially built on branch, ≥1 non-terminal phase without a build_sha, NO open claude/build-* PR, branch
+    // carries a `Phase: N` trailer for each unstamped position, isSpecAccumulationComplete=false. The
+    // intersection is stamped from the branch head SHA — the SAME leaf write P1 uses — and the next
+    // finalize/promote tick opens the PR autonomously. FAIL-CLOSED on any GitHub read blip (no token, list
+    // failed, branch missing) so a blind guess never stamps a phase. Every unwedged spec surfaces as a
+    // `director_activity` row (never silent — supervisable autonomy).
+    const stuck = await lib.backstopStuckAccumulation(db);
+    if (stuck.unwedged.length) {
+      const list = stuck.unwedged.map((u) => `${u.slug} (P${u.positions.join(",P")})`).join(", ");
+      notes.push(`stuck-accumulation backstop → unwedged ${stuck.unwedged.length} spec(s): ${list}`);
+    } else if (stuck.aborted) {
+      // A transient GitHub blip (list-open-PRs failed) — not actionable this pass; log it but don't post to the
+      // board (that would flood on every token/network hiccup). The next pass retries with a fresh GH read.
+      console.warn(`${tag} standing stuck-accumulation backstop aborted (${stuck.scanned} candidate(s), GitHub read failed — retry next pass)`);
+    }
+  } catch (e) {
+    notes.push(`stuck-accumulation backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing stuck-accumulation backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
     // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
     // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
