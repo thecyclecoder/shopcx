@@ -564,7 +564,7 @@ const SECRET_RE = /SERVICE_ROLE|PASSWORD|SECRET|_TOKEN|PRIVATE|BRAINTREE|TWILIO|
 // dir is persisted per-job (claude_session_config_dir) so a later resume knows which account to pin to.
 const ACCOUNT_POOL: string[] = (
   process.env.CLAUDE_CONFIG_DIRS ||
-  "/home/builder/.claude,/home/builder/.claude-personal,/home/builder/.claude-third"
+  "/home/builder/.claude,/home/builder/.claude-personal,/home/builder/.claude-third,/home/builder/.claude-fourth"
 )
   .split(",")
   .map((s) => s.trim())
