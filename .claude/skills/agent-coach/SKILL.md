@@ -71,6 +71,17 @@ the worker can apply at the START of every future job.
 - **Class as short kebab-case.** e.g. `symptom-not-root-cause`, `missing-recheck-after-mutation`,
   `wrong-helper-called`. This is the DB key; the same `error_class` from a future coaching pass
   supersedes the current active instruction (versioned in `agent_instructions`).
+- **Name the actual artifact, not the transport buffer.** `guidance` must reference the real thing
+  the worker produces (a DB row via a named SDK, an Inngest event, a persisted rollup), not a
+  scratchpad it writes on the way there. Read the rubric above to know what the worker's artifact
+  actually IS. Example: for the `spec-chat` worker the artifact is a row in `public.specs` +
+  `public.spec_phases` authored by the deterministic worker via the author-spec SDK's `upsertSpec` —
+  the `docs/brain/specs/{slug}.md` the box writes is a **throwaway scratch buffer** in a worktree the
+  worker discards after parsing, **never committed and never the source of truth**. A coaching
+  learning that says "write the md" for spec-chat is exactly the MD-based-spec framing this line of
+  the rule exists to eliminate — say "write the scratch buffer THIS turn — the worker authors it to
+  `public.specs` via the SDK" instead. The same principle applies to every worker: name the DB /
+  event / SDK the worker's action lands on, not the intermediate file it writes.
 
 ## Investigation protocol
 
