@@ -91,6 +91,17 @@ export interface SpecCardFlags {
    * it (dedupe). Cleared when the spec leaves in_review (the lane is consumed).
    */
   ada_disposition?: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade";
+  /**
+   * vale-reasons-the-disposition Phase 1 — Vale's reasoned planned/deferred recommendation on a PASS.
+   * Set alongside `vale_pass` by `markSpecCardValePassed` when the review pass carries a disposition;
+   * absent for a legacy pass (the sweep falls back to `intended_status` in Phase 2). Ada's disposition
+   * sweep (`adaDispositionFor`) will consume it in Phase 2 — retiring the trust-the-author stub.
+   * Cleared on send-back / re-author alongside `vale_pass`.
+   */
+  vale_disposition?: "planned" | "deferred";
+  /** vale-reasons-the-disposition Phase 1 — plain-text WHY paired with `vale_disposition`. Surfaced by
+   *  Ada's asymmetric routing on the CEO Approval Request (UPGRADE) / notification (DOWNGRADE). */
+  vale_disposition_reason?: string;
   [k: string]: boolean | string | number | undefined;
 }
 
@@ -323,6 +334,10 @@ async function upsertCardState(
  *                                    'pending_upgrade'; cleared on dispose).
  *  - patch.flags.merged_pr         → specs.merged_pr         (one-shot card-level shipping PR — multi-
  *                                    phase specs use spec_phases.pr instead).
+ *  - patch.flags.vale_disposition        → specs.vale_disposition        (vale-reasons-the-disposition
+ *                                    Phase 1 — 'planned' / 'deferred'; cleared on send-back).
+ *  - patch.flags.vale_disposition_reason → specs.vale_disposition_reason (Vale's plain-text WHY paired
+ *                                    with vale_disposition).
  *
  * A flag key whose value is `undefined` in the incoming flags object is treated as a CLEAR (writes null
  * for nullable columns) — this matches the spec_card_state writers' convention of setting flags to
@@ -382,6 +397,17 @@ async function dualWriteSpecRow(
         const v = f.ada_disposition;
         updateFields.ada_disposition =
           v === "autonomous_same" || v === "autonomous_downgrade" || v === "pending_upgrade" ? v : null;
+      }
+      // vale-reasons-the-disposition Phase 1 — Vale's reasoned planned/deferred recommendation +
+      // its plain-text WHY. Written by markSpecCardValePassed on a PASS; cleared alongside vale_pass on
+      // a send-back (markSpecCardBackToReview). Ada's sweep will consume both in Phase 2.
+      if (Object.prototype.hasOwnProperty.call(f, "vale_disposition")) {
+        const v = f.vale_disposition;
+        updateFields.vale_disposition = v === "planned" || v === "deferred" ? v : null;
+      }
+      if (Object.prototype.hasOwnProperty.call(f, "vale_disposition_reason")) {
+        const v = f.vale_disposition_reason;
+        updateFields.vale_disposition_reason = typeof v === "string" && v.length ? v : null;
       }
       if (Object.prototype.hasOwnProperty.call(f, "merged_pr")) {
         const v = f.merged_pr;
@@ -568,13 +594,25 @@ export async function markSpecCardForReview(
  * `specs.vale_review_passed_at`). UNLIKE `vale_pass` (consumed by Ada's disposition), this survives the spec
  * leaving in_review, so the claim-time build gate can still tell — at build time — that the spec passed
  * review. Cleared only by `markSpecCardBackToReview` (a send-back / re-author must re-review).
+ *
+ * vale-reasons-the-disposition Phase 1 — when the review pass ALSO carried a reasoned planned/deferred
+ * recommendation (Vale hydrated once + emitted the disposition alongside quality — 'extra verdict
+ * free'), persist it on `flags.vale_disposition` + `flags.vale_disposition_reason`. Ada's disposition
+ * sweep will consume both in Phase 2 (replacing the trust-the-author stub). Absent on a legacy pass —
+ * the sweep falls back to `intended_status`.
  */
 export async function markSpecCardValePassed(
   workspaceId: string,
   slug: string,
   audit: { actor: string; reason?: string },
+  disposition?: { disposition: "planned" | "deferred"; disposition_reason: string },
 ): Promise<void> {
-  await upsertCardState(workspaceId, slug, { flags: { vale_pass: true, vale_review_passed: true } }, [
+  const flags: SpecCardFlags = { vale_pass: true, vale_review_passed: true };
+  if (disposition) {
+    flags.vale_disposition = disposition.disposition;
+    flags.vale_disposition_reason = disposition.disposition_reason;
+  }
+  await upsertCardState(workspaceId, slug, { flags }, [
     { field: "status", actor: audit.actor, reason: audit.reason ?? "vale: pass (quality check cleared)" },
   ]);
 }
@@ -677,6 +715,11 @@ export async function markSpecCardBackToReview(
         ada_disposition: undefined,
         intended_status: undefined,
         deferred: false,
+        // vale-reasons-the-disposition Phase 1 — clear the recommendation alongside vale_pass so a
+        // materially-changed spec must be re-reviewed AND re-disposed (Ada's Phase-2 sweep won't reuse
+        // the stale rec).
+        vale_disposition: undefined,
+        vale_disposition_reason: undefined,
       },
     },
     [
