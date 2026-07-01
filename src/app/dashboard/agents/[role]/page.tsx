@@ -139,12 +139,17 @@ function ProfileCard({
       return () => setNav(null);
     }
     if (isWorker) {
-      // Workers get the Director-style takeover for the first time (Phase 1) — a minimal
-      // Overview + KPIs pair. Phase 2 will move the currently-stacked Grades/Coaching/Activity/
-      // Model-tier off the Overview into their own sections; this phase only opens the surface.
+      // Workers get the Director-style takeover (Phase 1 opened the surface with a minimal
+      // Overview + KPIs pair). Phase 2 promotes each heavy element that used to stack on the
+      // Overview into its own sidebar sub-page — Grades / Coaching / Activity / Model tier —
+      // mirroring the Director section-switch shape (one component per activeSection).
       const sections: SectionNavItem[] = [
         { key: "overview", label: "Overview" },
         { key: "kpi", label: "KPIs" },
+        { key: "grades", label: "Grades" },
+        { key: "coaching", label: "Coaching" },
+        { key: "activity", label: "Activity" },
+        { key: "model", label: "Model tier" },
       ];
       setNav({ title: getPersona(workerKind, workerLabel).name, basePath: `/dashboard/agents/${encodeURIComponent(role)}`, backHref: "/dashboard/agents", backLabel: "Agents", sections });
       return () => setNav(null);
@@ -288,11 +293,14 @@ function ProfileCard({
     scopeLine = worker.description;
     const dp = getPersona(director.slug, director.title);
     reportsTo = { name: dp.name, role: dp.role, href: `/dashboard/agents/${encodeURIComponent(director.slug)}` };
+    // Sidebar-takeover IA — Phase 2 mirrors the Director section-switch shape: render ONE section
+    // component per activeSection (default = overview). Overview is persona-only (avatar + name +
+    // reports-to + scope + Responsibilities + box-lane footer); Grades / Coaching / Activity /
+    // Model tier each moved off the single scrolling page into their own sidebar sub-page. The
+    // faint 'KPIs →' corner link is retired — KPIs is a real sidebar tab as of Phase 1.
     if (activeSection === "kpi") {
-      // agents-sidebar-kpis-and-profile-redesign Phase 1 — KPIs is a first-class sidebar tab for
-      // workers (the fix for "I can't see Cleo's KPIs"). When active, swap the whole stacked body
-      // for the shared KPI view; suppress the Responsibilities block since KPIs answers the
-      // liveness+outcome question directly.
+      // KPIs is a first-class sidebar tab for workers (the fix for "I can't see Cleo's KPIs").
+      // Suppress the Responsibilities block since KPIs answers the liveness + outcome question.
       tierLabel = "";
       responsibilities = [];
       extra = (
@@ -300,43 +308,64 @@ function ProfileCard({
           <AgentKpiView role={worker.kind} />
         </div>
       );
+    } else if (activeSection === "grades") {
+      // worker-grading Phase 3 — the director's grade rollup + this worker's recent graded actions.
+      tierLabel = "";
+      responsibilities = [];
+      extra = (
+        <div className="mt-6">
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Grades · from {dp.name} ({dp.role})
+          </h2>
+          <AgentGradePanel kind={worker.kind} />
+        </div>
+      );
+    } else if (activeSection === "coaching") {
+      // worker-coaching-loop — the director's messages to this worker over time.
+      tierLabel = "";
+      responsibilities = [];
+      extra = (
+        <div className="mt-6">
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Coaching history · from {dp.name} ({dp.role})
+          </h2>
+          <AgentCoachingHistory kind={worker.kind} />
+        </div>
+      );
+    } else if (activeSection === "activity") {
+      // Recent actions this worker filed under its supervising director (metadata.actor).
+      // Not gated by hideIfEmpty here: this is the dedicated Activity tab, so an empty state
+      // is the honest answer (no `hideIfEmpty` — the tab shouldn't collapse silently).
+      tierLabel = "";
+      responsibilities = [];
+      extra = (
+        <div className="mt-6">
+          <DirectorActivity
+            fn={director.slug}
+            actor={worker.kind}
+            heading={`Recent activity · under ${dp.name} (${dp.role})`}
+          />
+        </div>
+      );
+    } else if (activeSection === "model") {
+      // box-agent-model-tiers Phase 4 — the worker's current model tier + governed change history.
+      tierLabel = "";
+      responsibilities = [];
+      extra = (
+        <div className="mt-6">
+          <ModelTierCard kind={worker.kind} />
+        </div>
+      );
     } else {
+      // Overview (default) — persona-only: Responsibilities from the personas config +
+      // a small box-lane routing footer. Nothing else stacked here.
       tierLabel = "Responsibilities";
       responsibilities = (wp.responsibilities ?? []).map((r) => ({ primary: r }));
       extra = (
-        <>
-          <p className="mt-6 text-[12px] text-zinc-400">
-            Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
-            up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
-          </p>
-          {/* Recent actions this worker filed under its supervising director (filtered by metadata.actor).
-              Hidden when the worker doesn't tag activity — keeps non-actor workers' profiles uncluttered.
-              Surfaces Reva's auto-rollbacks (deploy-health-rollback-guardian) + Reese's reconcile heals. */}
-          <div className="mt-6">
-            <DirectorActivity
-              fn={director.slug}
-              actor={worker.kind}
-              hideIfEmpty
-              heading={`Recent activity · under ${dp.name} (${dp.role})`}
-            />
-          </div>
-          {/* box-agent-model-tiers Phase 4: the worker's current model tier + governed change history. */}
-          <ModelTierCard kind={worker.kind} />
-          {/* worker-grading Phase 3: the Director's grade rollup + the worker's recent graded actions. */}
-          <div className="mt-6">
-            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-              Grades · from {dp.name} ({dp.role})
-            </h3>
-            <AgentGradePanel kind={worker.kind} />
-          </div>
-          {/* worker-coaching-loop: the director's messages to this worker over time (its coaching history). */}
-          <div className="mt-6">
-            <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-              Coaching history · from {dp.name} ({dp.role})
-            </h3>
-            <AgentCoachingHistory kind={worker.kind} />
-          </div>
-        </>
+        <p className="mt-6 text-[12px] text-zinc-400">
+          Box lane <span className="font-mono text-zinc-500 dark:text-zinc-400">{worker.kind}</span> — its requests route
+          up to the CEO inbox until {dp.name} ({dp.role}) goes live (approval-routing engine, M2).
+        </p>
       );
     }
   }
@@ -361,17 +390,8 @@ function ProfileCard({
               reports to {reportsTo.name} · {reportsTo.role} →
             </Link>
           )}
-          {/* agent-kpi-pages-cleo-first Phase 3 — the second supervision layer above grades + coaching.
-              Rendered for every director/worker via computeAgentKpis (bespoke def for Cleo, generic
-              fallback for the rest). CEO isn't an agent, so no link. */}
-          {resolved.kind !== "ceo" && (
-            <Link
-              href={`/dashboard/agents/${encodeURIComponent(role)}/kpi`}
-              className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
-            >
-              KPIs →
-            </Link>
-          )}
+          {/* agents-sidebar-kpis-and-profile-redesign Phase 2 — the faint 'KPIs →' corner link is
+              retired. KPIs is a real sidebar tab for every director + worker profile as of Phase 1. */}
         </div>
       </div>
 
