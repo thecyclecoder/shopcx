@@ -51,10 +51,67 @@ interface FunnelTreeResponse {
 }
 interface BreakdownRowT { value: string; visits: number; orders: number; cvr: number; ltv_per_visit_cents: number; }
 
+interface PopupVariantRow { variant: string; label: string; shown: number; engaged: number; email: number; phone: number }
 interface CartAnalyticsResponse {
   range: { start: string; end: string };
   abandoned: { open_with_email: number; carts_reminded: number; followups_sent: number; recovered: number; recovery_rate_pct: number; revenue_recovered_cents: number; misfired_reminders: number; fast_converted_in_session: number };
   leads: { emails: number; phones: number };
+  popupFunnel: { byVariant: PopupVariantRow[]; totals: { shown: number; engaged: number; email: number; phone: number } };
+}
+
+/** SDK-driven, slice + destination aware lead-capture popup funnel. */
+function PopupFunnelCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const pf = data?.popupFunnel;
+  const rows = pf ? [...pf.byVariant, { variant: "total", label: "Total", ...pf.totals }] : [];
+  const rate = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Lead-capture popup</h2>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+        <span className="text-xs text-zinc-400">Re-scopes this card only.</span>
+      </div>
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+      {pf && (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[620px] text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-[10px] uppercase tracking-wide text-zinc-400 dark:border-zinc-800">
+                <th className="py-2 text-left font-medium">Variant</th>
+                <th className="py-2 text-right font-medium">Shown</th>
+                <th className="py-2 text-right font-medium">Engaged</th>
+                <th className="py-2 text-right font-medium">Email (step 1)</th>
+                <th className="py-2 text-right font-medium">Phone (step 2)</th>
+                <th className="py-2 text-right font-medium">Email→Phone</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.variant} className={"border-b border-zinc-100 last:border-0 dark:border-zinc-800/50 " + (r.variant === "total" ? "font-semibold" : "")}>
+                  <td className="py-1.5 text-zinc-700 dark:text-zinc-300">{r.label === "Offer" ? "Offer (discount)" : r.label === "Survey" ? "Survey (quiz)" : r.label}</td>
+                  <td className="py-1.5 text-right tabular-nums text-zinc-900 dark:text-zinc-100">{r.shown.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums">{r.engaged.toLocaleString()} <span className="text-[10px] text-zinc-400">{rate(r.engaged, r.shown)}</span></td>
+                  <td className="py-1.5 text-right tabular-nums">{r.email.toLocaleString()} <span className="text-[10px] text-zinc-400">{rate(r.email, r.shown)}</span></td>
+                  <td className="py-1.5 text-right tabular-nums">{r.phone.toLocaleString()} <span className="text-[10px] text-zinc-400">{rate(r.phone, r.shown)}</span></td>
+                  <td className="py-1.5 text-right tabular-nums font-medium text-emerald-600 dark:text-emerald-400">{rate(r.phone, r.email)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 /** Abandoned-cart + lead capture SUMMARY (no per-cart logs), slice + destination
@@ -107,7 +164,10 @@ function BreakdownPanel({ title, rows }: { title: string; rows: BreakdownRowT[] 
   const max = Math.max(...rows.map((r) => r.visits), 1);
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
+        <ReworkedPills />
+      </div>
       <table className="w-full text-sm">
         <thead>
           <tr className="text-[10px] uppercase tracking-wide text-zinc-400">
@@ -700,6 +760,9 @@ export default function StorefrontFunnelPage() {
   const [cartDest, setCartDest] = useState("");
   const [cart, setCart] = useState<CartAnalyticsResponse | null>(null);
   const [cartLoading, setCartLoading] = useState(true);
+  const [popupDest, setPopupDest] = useState("");
+  const [popup, setPopup] = useState<CartAnalyticsResponse | null>(null);
+  const [popupLoading, setPopupLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -779,8 +842,23 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end, product, utmSource, referrer, cartDest]);
 
   useEffect(() => { loadCart(); }, [loadCart]);
+
+  const loadPopup = useCallback(async () => {
+    if (!start || !end) return;
+    setPopupLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (popupDest) q.set("destination", popupDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setPopup(await res.json());
+    setPopupLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, popupDest]);
+
+  useEffect(() => { loadPopup(); }, [loadPopup]);
   // A page-slice change can change which destinations exist → re-default the cards.
-  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); }, [product, utmSource, referrer]);
+  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); setPopupDest(""); }, [product, utmSource, referrer]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -824,7 +902,7 @@ export default function StorefrontFunnelPage() {
       {data && (
         <>
 
-          {data.popupFunnel && <PopupFunnelPanel data={data.popupFunnel} />}
+          <PopupFunnelCard data={popup} loading={popupLoading} dest={popupDest} onDest={setPopupDest} destOptions={chapter?.availableDestinations ?? []} />
           {data.surveyFunnel && <SurveyFunnelPanel data={data.surveyFunnel} />}
 
           {tree && (
@@ -968,65 +1046,6 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
 }
 
 
-function PopupFunnelPanel({ data }: { data: NonNullable<FunnelData["popupFunnel"]> }) {
-  const pct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "—");
-  const rows = [
-    ...data.byVariant.map((v) => ({ ...v, isTotal: false })),
-    { variant: "total", label: "Total", ...data.totals, isTotal: true },
-  ];
-  // A cell shows the count and, beneath it, its share of that row's "shown".
-  const Cell = ({ n, shown, pctLabel }: { n: number; shown: number; pctLabel?: string }) => (
-    <td className="py-2 pr-2 text-right tabular-nums">
-      <span className="font-semibold text-zinc-900 dark:text-zinc-100">{n.toLocaleString()}</span>
-      {pctLabel !== "" && <span className="ml-1.5 text-xs text-zinc-400">{pctLabel ?? pct(n, shown)}</span>}
-    </td>
-  );
-  return (
-    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-          Lead-capture popup
-        </h2>
-        <span className="text-[11px] text-zinc-400">
-          Offer = discount variant · Survey = quiz variant · % is of that row&apos;s shown
-        </span>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[600px] text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-left text-[10px] uppercase tracking-wider text-zinc-500 dark:border-zinc-800">
-              <th className="py-2 pr-2">Variant</th>
-              <th className="py-2 pr-2 text-right">Shown</th>
-              <th className="py-2 pr-2 text-right">Engaged</th>
-              <th className="py-2 pr-2 text-right">Email (step 1)</th>
-              <th className="py-2 pr-2 text-right">Phone (step 2)</th>
-              <th className="py-2 pr-2 text-right">Email→Phone</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr
-                key={r.variant}
-                className={`border-b border-zinc-100 last:border-0 dark:border-zinc-800/50 ${r.isTotal ? "font-semibold" : ""}`}
-              >
-                <td className="py-2 pr-2 text-zinc-900 dark:text-zinc-100">{r.label}</td>
-                <Cell n={r.shown} shown={r.shown} pctLabel="" />
-                <Cell n={r.engaged} shown={r.shown} />
-                <Cell n={r.email} shown={r.shown} />
-                <Cell n={r.phone} shown={r.shown} />
-                <td className="py-2 pr-2 text-right tabular-nums">
-                  <span className={r.email > 0 ? "font-semibold text-emerald-600" : "text-zinc-400"}>
-                    {pct(r.phone, r.email)}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
 
 function SurveyFunnelPanel({ data }: { data: NonNullable<FunnelData["surveyFunnel"]> }) {
   const { shown, completed, email, phone } = data;

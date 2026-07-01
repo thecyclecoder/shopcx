@@ -1426,3 +1426,74 @@ export async function computeCartAnalytics(args: {
     leads: { emails: emailsCount, phones: phonesCount },
   };
 }
+
+// ───────────────── Lead-capture popup funnel (slice-aware) ─────────────────
+// Per popup variant (discount=Offer, quiz=Survey): shown→engaged→email(step1)→
+// phone(step2), from popup_decisions + storefront_leads, sliceable by
+// Product × Source × Referrer + a lander destination (via session_id → session).
+export interface PopupFunnelResult {
+  byVariant: Array<{ variant: string; label: string; shown: number; engaged: number; email: number; phone: number }>;
+  totals: { shown: number; engaged: number; email: number; phone: number };
+}
+
+export async function computePopupFunnel(args: {
+  admin: Admin; workspaceId: string; startIso: string; endIso: string;
+  productHandle?: string | null; utmSource?: string | null; referrer?: string | null; destination?: string | null;
+}): Promise<PopupFunnelResult> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+  const destWanted = args.destination && args.destination.trim() ? args.destination.trim() : null;
+  const sliced = !!(product || utmWanted || refWanted || destWanted);
+
+  const [{ data: productRows }, { data: internalCustomerRows }, { data: decisions }, { data: leads }] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+    admin.from("popup_decisions").select("variant, shown, engaged, converted, session_id").eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso),
+    admin.from("storefront_leads").select("source, email, session_id").eq("workspace_id", workspaceId).gte("created_at", startIso).lte("created_at", endIso),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+
+  // scope by session_id (uuid) → session
+  const sids = [...new Set([...(decisions || []).map((d) => d.session_id), ...(leads || []).map((l) => l.session_id)].filter(Boolean) as string[])];
+  const scope = new Map<string, boolean>();
+  for (let i = 0; i < sids.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer")
+      .in("id", sids.slice(i, i + 300));
+    for (const s of data || []) {
+      let ok = !s.is_internal && !s.is_bot && !(s.customer_id && internalCustomerIds.has(s.customer_id as string));
+      ok = ok && matchUtm((s.utm_source as string) ?? null, utmWanted) && matchRef((s.referrer as string) ?? null, refWanted);
+      const { segments, variant } = parseLanding((s.landing_url as string) ?? null);
+      if (ok && product && resolveHandle(segments, handleSet) !== product) ok = false;
+      if (ok && destWanted) ok = destWanted === "pdp" ? !variant : variant === destWanted;
+      scope.set(s.id as string, ok);
+    }
+  }
+  const inScope = (sid: string | null) => !sliced ? !(sid && scope.get(sid) === false && sids.includes(sid)) : !!(sid && scope.get(sid));
+  // when NOT sliced we still exclude internal/bot: treat unknown as ok, known-false as excluded
+  const okUnsliced = (sid: string | null) => !sid || scope.get(sid) !== false;
+
+  const byVariant = new Map([
+    ["discount", { variant: "discount", label: "Offer", shown: 0, engaged: 0, email: 0, phone: 0 }],
+    ["quiz", { variant: "quiz", label: "Survey", shown: 0, engaged: 0, email: 0, phone: 0 }],
+  ]);
+  const pass = (sid: string | null) => (sliced ? inScope(sid) : okUnsliced(sid));
+  for (const r of (decisions || []) as { variant: string; shown: boolean; engaged: boolean; converted: boolean; session_id: string | null }[]) {
+    if (!pass(r.session_id)) continue;
+    const v = byVariant.get(r.variant); if (!v) continue;
+    if (r.shown) v.shown++;
+    if (r.engaged) v.engaged++;
+    if (r.converted) v.phone++;
+  }
+  const sourceToVariant: Record<string, string> = { popup_discount: "discount", popup_quiz: "quiz" };
+  for (const r of (leads || []) as { source: string | null; email: string | null; session_id: string | null }[]) {
+    if (!r.email || !pass(r.session_id)) continue;
+    const v = byVariant.get(sourceToVariant[r.source || ""] || ""); if (v) v.email++;
+  }
+  const rows = [...byVariant.values()];
+  const totals = rows.reduce((a, v) => ({ shown: a.shown + v.shown, engaged: a.engaged + v.engaged, email: a.email + v.email, phone: a.phone + v.phone }), { shown: 0, engaged: 0, email: 0, phone: 0 });
+  return { byVariant: rows, totals };
+}

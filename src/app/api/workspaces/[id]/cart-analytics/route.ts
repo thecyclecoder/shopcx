@@ -6,7 +6,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { computeCartAnalytics } from "@/lib/storefront/funnel-tree";
+import { computeCartAnalytics, computePopupFunnel } from "@/lib/storefront/funnel-tree";
 
 function todayCentral(): string { return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); }
 function daysAgoCentral(n: number): string {
@@ -39,13 +39,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const launchAt = (ws?.storefront_launch_at as string | null) || null;
   if (launchAt) { const d = new Date(launchAt).toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); if (start < d) start = d; }
 
-  const result = await computeCartAnalytics({
+  const common = {
     admin, workspaceId,
     startIso: centralBoundary(start, false), endIso: centralBoundary(end, true),
     productHandle: url.searchParams.get("product") || null,
     utmSource: url.searchParams.get("utm_source") || null,
     referrer: url.searchParams.get("referrer") || null,
     destination: url.searchParams.get("destination") || null,
-  });
-  return NextResponse.json({ range: { start, end }, ...result });
+  };
+  const [result, popupFunnel] = await Promise.all([computeCartAnalytics(common), computePopupFunnel(common)]);
+  return NextResponse.json({ range: { start, end }, ...result, popupFunnel });
 }
