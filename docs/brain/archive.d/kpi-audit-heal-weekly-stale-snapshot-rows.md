@@ -1,0 +1,1 @@
+- **Weekly KPI readers skip pre-lag-fix stale (non-Sunday) snapshot rows** · verified 2026-07-01 · → [[libraries/kpi-review]]
