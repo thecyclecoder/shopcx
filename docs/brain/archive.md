@@ -12,9 +12,15 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Add storefront pixel tracking to the blog pages** · verified 2026-07-01 · → [[../lifecycles/blog-resources]]
+- **Lag the monthly scorecard snapshot to the previous complete UTC day** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
+- **Weekly KPI readers skip pre-lag-fix stale (non-Sunday) snapshot rows** · verified 2026-07-01 · → [[libraries/kpi-review]]
+- **Extend kpi-review's in-flight window guard from daily to weekly + monthly** · verified 2026-07-01 · → [[libraries/kpi-review]]
+- **Downgrade Sonnet v2 parse-fallback log from error to warn (stop false Control Tower incident)** · verified 2026-07-01 · → [[libraries/sonnet-orchestrator-v2]]
 - **appstleAttemptBilling: coerce numeric billing-attempt id to string** · verified 2026-06-30 · → [[libraries/appstle]]
 - **Coerce Appstle billing-attempt id to string before the internal-prefix guard** · verified 2026-06-30 · → [[../libraries/appstle]]
 - **Downgrade appstle-heal per-line PUT failure to warn** · verified 2026-06-30 · → [[lifecycles/subscription-billing]]
+- **Lag weekly platform-scorecard snapshot_date to the previous closed ISO week** · verified 2026-06-30 · → [[../inngest/platform-director-cron]]
 - **Error feed: drop the bare Inngest middleware 'Inngest function error' log on /api/inngest** · verified 2026-06-30 · → [[../libraries/control-tower]]
 - **Ad-dollar budget ceiling + spend governor** · verified 2026-06-30 · → [[../libraries/ad-spend-governor]]
 - **Adopt creative makers under the Director (ready-to-test surface)** · verified 2026-06-30 · → [[../lifecycles/ad-publish]]
@@ -24,6 +30,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Blended new-customer CAC↔LTV objective + payback window** · verified 2026-06-30 · → [[libraries/blended-cac-ltv]]
 - **Customer-voice → ad-angles synthesizer** · verified 2026-06-30 · → [[../libraries/ads__customer-voice-mining]]
 - **Growth Director agent — supervision shell + leash** · verified 2026-06-30 · → [[libraries/growth-director]]
+- **Growth Director live + autonomous cutover** · verified 2026-06-30 · → [[functions/growth]]
 - **Storefront experiment delivery-verification** · verified 2026-06-30 · → [[../libraries/storefront-experiment-delivery-audit]]
 - **Winning-angle amplifier** · verified 2026-06-30 · → [[../libraries/winning-creative-detect]]
 - **Quiet single Slack-notify timeouts so they stop tripping the error feed** · verified 2026-06-30 · → [[../libraries/slack-notify]]
