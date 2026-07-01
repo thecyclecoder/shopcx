@@ -287,6 +287,54 @@ export function isTransientShopifyWebhookHmacFailure(
 }
 
 /**
+ * Browser network-abort TypeError noise — the CLIENT-feed companion to
+ * `isTransientInngestTransportError` / `isTransientShopifyWebhookHmacFailure`, factored
+ * here so `/api/client-errors` can reuse it
+ * ([[../specs/error-feed-drop-safari-load-failed-client-network-abort-noise]]).
+ *
+ * Every browser has a fixed TypeError message it throws when a `fetch()` is CANCELLED or
+ * the network drops mid-flight — Safari 'Load failed', Chrome/Firefox 'Failed to fetch' /
+ * 'NetworkError when attempting to fetch resource', iOS URLSession 'The network
+ * connection was lost'. These are the browser counterpart to the Node stream-abort +
+ * Inngest transport-reset noise the feed already tags as transient: the request never
+ * completed (mobile tab backgrounded, signal lost mid-navigation, page unload aborted an
+ * in-flight fetch), and the session recovers by itself. Minting a fresh OPEN incident
+ * on a first sighting pages Platform owners on a healthy browser that already recovered
+ * (Control Tower `client:fe00dcba3e396856`, one iPhone Safari 26.5 user on /dashboard/roadmap).
+ *
+ * `true` ONLY when BOTH: the message is EXACTLY one of the well-known network-abort
+ * TypeErrors AND the stack is empty/null. A real code-throw carrying the same literal
+ * string (e.g. `throw new TypeError('Load failed')` in our own code) would ship a stack
+ * with a frame in our code and stays captured. Wired in `/api/client-errors` as the
+ * `transient` flag to `recordError`, which auto-resolves a first sighting (recorded for
+ * visibility, NOT paged, no repair fan-out) and escalates to a real open+page only if
+ * the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a one-off browser
+ * hiccup is dropped while a burst from many browsers (chronic client outage) still
+ * surfaces on recurrence.
+ */
+const CLIENT_NETWORK_ABORT_MESSAGES = new Set([
+  "load failed",
+  "failed to fetch",
+  "networkerror when attempting to fetch resource",
+  "networkerror when attempting to fetch resource.",
+  "the network connection was lost",
+  "the network connection was lost.",
+]);
+
+export function isTransientClientNetworkAbort(
+  message: string | null | undefined,
+  stack: string | null | undefined,
+): boolean {
+  const text = (message ?? "").trim().toLowerCase();
+  if (!text) return false;
+  if (!CLIENT_NETWORK_ABORT_MESSAGES.has(text)) return false;
+  // A real code-throw carrying the same literal string ships a stack; a browser
+  // network-abort TypeError arrives with an empty/null stack from the reporter.
+  const s = (stack ?? "").trim();
+  return s === "";
+}
+
+/**
  * Transient Supabase-logs noise — the supabase-logs companion to `isBareLifecycle` /
  * `isTransientInngestTransportError`, factored here so the poller can reuse it
  * ([[../specs/error-feed-supabase-logs-transient-5xx-scoping]]).
