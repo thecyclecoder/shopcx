@@ -206,8 +206,24 @@ test("isTransientSupabaseLogNoise KEEPS a real Postgres bug (constraint ERROR / 
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "PANIC", message: "could not write to file" }), false);
 });
 
-test("isTransientSupabaseLogNoise never treats auth errors as transient", () => {
-  assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "anything" }), false);
+test("isTransientSupabaseLogNoise scopes GoTrue browser-abort noise as transient (context canceled / deadline exceeded)", () => {
+  // A signed-in browser unmounting mid-request logs the exact "timeout: context canceled"
+  // phrase against GET /user — that's the client going away, not a real auth failure.
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "Unhandled server error: timeout: context canceled" }),
+    true,
+  );
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "context deadline exceeded" }),
+    true,
+  );
+});
+
+test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate limit) — pages", () => {
+  assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "invalid JWT: signature mismatch" }), false);
+  assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "rate limit exceeded" }), false);
+  assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "" }), false);
+  assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: null }), false);
 });
 
 test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {
