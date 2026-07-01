@@ -8915,29 +8915,14 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
-    // consolidate-premerge-checks-one-session Phase 1 — FUSED SECURITY VERDICT. On the pre-merge
-    // path, the same session ALSO emitted a security review off the branch diff it already loaded
-    // (see prompt above). Apply it as the SECOND leg of a fused two-verdict envelope — into the
-    // SAME sinks the standalone security-review lane uses (agent_jobs row + director_activity +
-    // authored fix-spec + routed build), via the shared applySecurityVerdictToJob helper. The
-    // spec_test_runs row is ALREADY written above (partial-safety: a crash here still leaves the
-    // spec-test verdict recorded). Best-effort — never fail the spec-test run.
-    if (isPreMerge && branch && previewOrigin) {
-      try {
-        await applyFusedSecurityVerdict({
-          workspaceId: job.workspace_id,
-          slug, branch, previewOrigin,
-          prNumber: job.pr_number ?? null,
-          fusedSessionId: session,
-          parsed,
-          raw,
-          isError,
-          tag,
-        });
-      } catch (e) {
-        console.error(`${tag} fused security-verdict application failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
+    // ⭐ isolate-premerge-security-verdict Phase 1 — the pre-merge session's SECURITY envelope is NO LONGER
+    // applied here. Fusing it (consolidate-premerge-checks-one-session Phase 1) let this path synthesize a
+    // gate-satisfying `security-review` agent_jobs row from a self-declared `security.status="clean"` in the
+    // spec-test envelope — the standalone Vault lane (`runSecurityReviewJob`) is meant to be the ONLY producer
+    // of pre-merge security verdicts. Pre-merge security is now driven exclusively by
+    // `maybeEnqueuePreMergeSecurityOnAccumulation` → standalone branch-mode `enqueueSecurityReviewJob`,
+    // enqueued from the preview-ready hook + `backstopPreMergeChecks`. The prompt still asks the fused session
+    // for a security envelope, but its content is discarded — the standalone review is authoritative.
     // Mark THIS spec-test job terminal BEFORE the auto-fold gate runs. fold-guard-live-build (Phase 1)
     // makes a spec with a live build/spec-test job ineligible for auto-fold — and this very job is a live
     // spec-test job for `slug` until it's completed. Flipping it first means the gate sees no live job for
@@ -14004,133 +13989,6 @@ async function applySecurityVerdictToJob(
   }
   // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never auto-pass.
   await update(job.id, { status: "needs_attention", error: fallbackReason ?? "security review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
-}
-
-/**
- * consolidate-premerge-checks-one-session Phase 1 — apply the FUSED pre-merge security verdict on
- * behalf of runSpecTestJob. The fused session already emitted BOTH envelopes in one JSON; here we:
- *
- *   1. Extract `parsed.security` from the fused envelope.
- *   2. Guard against a race: if a standalone `security-review` job for the branch already exists
- *      (queued/claimed/building/needs_input/needs_approval/queued_resume/needs_attention), skip —
- *      let the standalone lane apply its own verdict. In steady state the Phase-1 enqueue dedup
- *      keeps this from happening; the check protects against transitional / edge cases.
- *   3. On a missing/malformed security envelope, fall back to the standalone `enqueueSecurityReviewJob`
- *      (branch mode) so the branch still gets a security signal. Dedup still holds.
- *   4. On a valid envelope, INSERT a synthetic `security-review` agent_jobs row for the branch
- *      (`status='claimed'` so the standalone poll never picks it) and call the shared
- *      `applySecurityVerdictToJob` helper — which writes the SAME sinks the standalone lane writes
- *      (agent_jobs terminal update + director_activity + authored fix-spec + routed build queue).
- *
- * The spec_test_runs row is ALREADY written by the caller before we're called (partial-safety: a
- * throw here still leaves the spec-test verdict recorded). The caller wraps us in try/catch so
- * a security-side failure never fails the spec-test run.
- */
-async function applyFusedSecurityVerdict(args: {
-  workspaceId: string;
-  slug: string;
-  branch: string;
-  previewOrigin: string;
-  prNumber: number | null;
-  fusedSessionId: string | null;
-  parsed: Record<string, unknown> | null;
-  raw: string;
-  isError: boolean;
-  tag: string;
-}): Promise<void> {
-  const { workspaceId, slug, branch, previewOrigin, prNumber, fusedSessionId, parsed, raw, isError, tag } = args;
-
-  const secObj = parsed && typeof parsed === "object" ? ((parsed as Record<string, unknown>).security as unknown) : null;
-  const sec = (secObj && typeof secObj === "object" && !Array.isArray(secObj)) ? (secObj as Record<string, unknown>) : null;
-  const rawStatus = sec ? String(sec.status || "") : "";
-  const RECOGNIZED = new Set(["clean", "false-positive", "needs-human", "real-vuln"]);
-  const hasValidSec = !!sec && RECOGNIZED.has(rawStatus);
-
-  const { LIVE_SECURITY_STATUSES } = await import("../src/lib/security-agent");
-  const { data: openStandalone } = await db
-    .from("agent_jobs")
-    .select("id, status")
-    .eq("kind", "security-review")
-    .eq("spec_branch", branch)
-    .in("status", LIVE_SECURITY_STATUSES as unknown as string[])
-    .limit(1);
-  if (openStandalone && openStandalone.length) {
-    console.log(`${tag} fused security skipped — standalone security-review already open for ${branch}`);
-    return;
-  }
-
-  if (!hasValidSec) {
-    console.warn(`${tag} fused security envelope missing/malformed on ${branch} — falling back to standalone enqueue`);
-    try {
-      const { enqueueSecurityReviewJob } = await import("../src/lib/security-agent");
-      const r = await enqueueSecurityReviewJob(db, {
-        branch, previewOrigin, specSlug: slug, prNumber, workspaceId,
-      });
-      console.log(`${tag} fused security fallback enqueue: ${r.enqueued ? "enqueued" : `skipped (${r.reason})`}`);
-    } catch (e) {
-      console.error(`${tag} fused security fallback enqueue failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    return;
-  }
-
-  const instr = {
-    mode: "branch" as const,
-    branch,
-    preview_origin: previewOrigin,
-    spec_slug: slug,
-    pr_number: prNumber ?? null,
-  };
-  const { data: insertData, error: insertErr } = await db
-    .from("agent_jobs")
-    .insert({
-      workspace_id: workspaceId,
-      spec_slug: slug,
-      spec_branch: branch,
-      kind: "security-review",
-      status: "claimed",
-      claude_session_id: fusedSessionId,
-      instructions: JSON.stringify(instr),
-      created_by: null,
-    })
-    .select("*")
-    .single();
-  if (insertErr || !insertData) {
-    console.error(`${tag} fused security-review row insert failed: ${insertErr?.message ?? "no data"}`);
-    return;
-  }
-  const secJob = insertData as Job;
-  const secTag = `[security:fused:${secJob.id.slice(0, 8)}]`;
-
-  const { recordDirectorActivity } = await import("../src/lib/director-activity");
-  const { SECURITY_DIRECTOR_FUNCTION } = await import("../src/lib/security-agent");
-
-  const source: SecurityFixSource = { kind: "branch", branch, previewOrigin };
-  const specLabel = `unmerged ${slug} (${branch})`;
-  const activityReason = (verdict: string, review: string) =>
-    `Security review of unmerged ${slug} (branch ${branch}, fused with spec-test): ${verdict} — ${review}`.slice(0, 4000);
-  const activityMetadata = { branch, preview_origin: previewOrigin, job_id: secJob.id, fused_with: "spec-test" };
-
-  try {
-    await applySecurityVerdictToJob(secJob, {
-      parsed: sec, verdict: rawStatus, raw, isError, fallbackReason: null,
-      source, specLabel, activityReason, activityMetadata,
-      parentSlug: slug, instr, mode: "branch", tag: secTag,
-      recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION,
-    });
-    console.log(`${tag} fused security applied → ${rawStatus} (job ${secJob.id.slice(0, 8)})`);
-  } catch (e) {
-    // The applier threw AFTER we inserted the synthetic row — mark it `failed` explicitly so it
-    // doesn't wedge (a stuck `claimed` row would block re-enqueue via the openStandalone dedup, and
-    // the standing-pass triggers are now inert for pre-merge, so no natural recovery). `failed` is
-    // NOT in `LIVE_SECURITY_STATUSES`, so a future re-fire (a fresh pre-merge spec-test run) can
-    // insert a new synthetic row cleanly.
-    const errMsg = e instanceof Error ? e.message : String(e);
-    console.error(`${tag} fused security applier threw — marking synthetic row failed: ${errMsg}`);
-    try {
-      await update(secJob.id, { status: "failed", error: `fused security applier threw: ${errMsg}`.slice(-2000) });
-    } catch { /* best-effort */ }
-    throw e; // re-throw so the outer catch in runSpecTestJob logs it too
-  }
 }
 
 async function runSecurityReviewJob(job: Job) {

@@ -687,18 +687,20 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
  * security-test-on-preview-pre-merge Phase 1 (the WIRING the spec never landed) — the pre-merge SECURITY
  * trigger, the security twin of `maybeEnqueuePreMergeSpecTestOnAccumulation`. Both pre-merge signals
  * (`isSpecTestGreenForBranch` ∧ `isSecurityGreenForBranch`) gate `isSpecPromoteEligible` + the M4 auto-merge
- * tests gate.
+ * tests gate; the spec-test leg was wired into the preview-ready hook, but the security leg's enqueue
+ * (`enqueueSecurityReviewJob` branch mode) was authored (Phase 1 lib) and its signal helper shipped
+ * (Phase 3) — yet NO caller ever invoked the branch-mode enqueue, so `isSecurityGreenForBranch` was
+ * ALWAYS false and the M4 gate could never pass (every one-off PR sat `in_testing`). This is that caller.
  *
- * ⭐ consolidate-premerge-checks-one-session Phase 1 — the pre-merge branch-mode security enqueue is now
- * FUSED into the pre-merge spec-test session (runSpecTestJob emits BOTH verdicts in one JSON off the same
- * loaded branch diff, halving pre-merge Codex sessions + skipping a full cold re-hydration). This trigger
- * is retained for its callers (preview-ready hook + `backstopPreMergeChecks`) but now no-ops: the fused
- * pre-merge spec-test session covers the security verdict for the branch. The standalone
- * `enqueueSecurityReviewJob` (branch mode) remains available as a SAFETY-NET fallback the fused session
- * calls when its own security envelope is missing/malformed — and the standalone lane still runs for the
- * post-merge `diff` mode (a per-merged-diff review) + on-demand use, unchanged.
+ * ⭐ isolate-premerge-security-verdict Phase 1 — the pre-merge security enqueue is the STANDALONE branch-mode
+ * `enqueueSecurityReviewJob` again (was briefly fused into the pre-merge spec-test session in
+ * consolidate-premerge-checks-one-session; that fusion let a fused session synthesize a gate-satisfying
+ * `security-review` row from a self-declared `security.status="clean"` envelope, which the standalone Vault
+ * lane is meant to be the ONLY producer of). runSpecTestJob no longer applies the fused security envelope;
+ * pre-merge security verdicts come exclusively from the standalone `runSecurityReviewJob` path.
  *
- * Best-effort + never throws. Returns a skip reason describing the fusion.
+ * Same accumulation predicate as the spec-test twin (test the WHOLE built spec on its branch preview, not a
+ * partial). Idempotent (branch-mode enqueue dedupes one open review per branch). Best-effort + never throws.
  */
 export async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
   workspaceId: string;
@@ -707,13 +709,24 @@ export async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
   previewUrl: string | null;
   prNumber?: number | null;
 }): Promise<{ enqueued: boolean; reason?: string }> {
-  const { branch, previewUrl } = args;
-  if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
-  const origin = (previewUrl || "").replace(/\/$/, "");
-  if (!origin) return { enqueued: false, reason: "no preview URL yet" };
-  // Retained call site — the fused pre-merge spec-test session (see runSpecTestJob) now emits both
-  // verdicts off the same loaded diff. Never enqueue a standalone branch-mode review here.
-  return { enqueued: false, reason: "fused into pre-merge spec-test session (consolidate-premerge-checks-one-session Phase 1)" };
+  const { workspaceId, slug, branch, previewUrl, prNumber } = args;
+  try {
+    if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
+    const origin = (previewUrl || "").replace(/\/$/, "");
+    if (!origin) return { enqueued: false, reason: "no preview URL yet" };
+    const acc = await isSpecAccumulationComplete(workspaceId, slug);
+    if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
+    const { enqueueSecurityReviewJob } = await import("@/lib/security-agent");
+    return await enqueueSecurityReviewJob(createAdminClient(), {
+      branch,
+      previewOrigin: origin,
+      specSlug: slug,
+      prNumber: prNumber ?? null,
+      workspaceId,
+    });
+  } catch (e) {
+    return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 /**
