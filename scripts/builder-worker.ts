@@ -186,10 +186,6 @@ const MAX_PROPOSED_MODEL_TIER = 1;
 // a verdict (auto-approve within the leash, else escalate). Minutes — same ballpark as a repair/
 // db-health turn. Re-claimable (a restart re-runs it). Stays on Max (KEEPS read-only DB creds).
 const PLATFORM_DIRECTOR_TIMEOUT_MS = 15 * 60 * 1000;
-// director-initiation-throughput Phase 2: how many per-candidate soundness investigations the initiation lane
-// runs CONCURRENTLY (instead of the old one-at-a-time loop, which trickled). Bounded to stay Max-safe — the
-// real ceiling is Max rate limits, so a 529 backs the whole batch off (Phase 4) rather than hammering harder.
-const DIRECTOR_INVEST_CONCURRENCY = Number(process.env.DIRECTOR_INVEST_CONCURRENCY || 4);
 // How many escalated tickets one hourly sweep processes (bound the cost; the rest are logged + deferred).
 const TRIAGE_CAP = Number(process.env.AGENT_TODO_TRIAGE_CAP || 5);
 // Worker safety net (build-lifecycle-hardening Phase 2): cap how often a resume may auto-settle the
@@ -2975,28 +2971,112 @@ async function directorDecisionPrompt(workspaceId: string, basePrompt: string): 
   return di.appendDirectorInstructions(db, workspaceId, "platform", `${basePrompt}\n\n${liveState}`);
 }
 
-// director-initiation-throughput Phase 2: a tiny bounded worker-pool so the per-candidate soundness
-// investigations run CONCURRENTLY (capped at `limit`) instead of sequentially — one slow Max call no longer
-// gates the next. `shift()` is single-threaded-safe; each task owns its own DB writes (distinct specs), so
-// there's no cross-task contention. Never throws — `fn` is expected to swallow its own per-item error.
-async function runWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  const queue = [...items];
-  const n = Math.max(1, Math.min(limit, queue.length));
-  const workers = Array.from({ length: n }, async () => {
-    for (;;) {
-      const item = queue.shift();
-      if (item === undefined) return;
-      await fn(item);
-    }
-  });
-  await Promise.all(workers);
-}
-
 // director-initiation-throughput Phase 4: detect a Max 529 / overloaded signal in a director investigation
 // result so the lane can BACK OFF (the real ceiling is Max rate limits, not the lane count) — don't hammer a
 // throttled API; resume on the next pass. Mirrors the build lane's transient-vs-usage-wall classifier.
 function isMaxOverloaded(text: string): boolean {
   return /\b529\b|overloaded/i.test(text || "");
+}
+
+// ada-standing-pass-reasoning-gate Phase 3 — batch every director reasoning lane into ONE Max session per
+// pass instead of one cold session per candidate. Each per-candidate `runDirectorClaude` cost ~600K all-in
+// tokens (13:1 overhead — ~550K is brain + tool context re-hydration paid ANEW every call, ~43K is real
+// judgment). Batching pays the hydration ONCE and reasons over every remaining candidate in the same
+// session — one lane, one session, N verdicts. Each candidate's own investigation prompt (built by
+// `groomInvestigationPrompt` / `initInvestigationPrompt` / `repairDismissalInvestigationPrompt` / the
+// drift ambiguous prompt) is preserved verbatim as a section — the verdict schema each lane already
+// parses is unchanged, just packaged as an array keyed by the candidate id.
+//
+// Preserves per-lane caps + `alreadyGroomed`/`alreadyInitiated`/`alreadyReviewedDismissal` dedup (filtered
+// BEFORE batching), and the sequential apply loop (each verdict → same per-verdict validators + DB writes
+// as before). A candidate absent from the batched array falls back to a synthetic `{}` verdict — the
+// lane's existing "unparseable → escalate" branch handles it exactly like today's parse miss.
+async function runBatchedDirectorSession<TVerdict extends Record<string, unknown>, TCandidate>(
+  job: Job,
+  tag: string,
+  lane: string,
+  candidates: TCandidate[],
+  keyOf: (c: TCandidate) => string,
+  buildSinglePrompt: (c: TCandidate) => string | Promise<string>,
+  laneOutcomeLegend: string,
+): Promise<{ verdicts: Map<string, TVerdict>; overloaded: boolean; isError: boolean; parseFailed: boolean; resultText: string }> {
+  const out = new Map<string, TVerdict>();
+  if (!candidates.length) return { verdicts: out, overloaded: false, isError: false, parseFailed: false, resultText: "" };
+
+  const sections: string[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const key = keyOf(c);
+    const single = await buildSinglePrompt(c);
+    sections.push(
+      `=== CANDIDATE ${i + 1} of ${candidates.length} [key="${key}"] ===\n` +
+      `${single}\n` +
+      `=== END CANDIDATE ${i + 1} [key="${key}"] ===`,
+    );
+  }
+
+  const batchHeader = [
+    "You are being asked to make MULTIPLE independent judgment calls in ONE batched Max session.",
+    `Lane: ${lane}. Candidates below: ${candidates.length}. Each candidate section is SELF-CONTAINED — treat it as if it were its own single-candidate investigation.`,
+    "Efficiency contract: the brain + repo + tools should be hydrated ONCE for this session, then reused across every candidate — do NOT re-read the same brain page or file for each candidate. The per-candidate reasoning is what varies.",
+    "Independence contract: each verdict is INDEPENDENT — one candidate's verdict must not sway another's. Read each section on its own merits.",
+    "",
+    `Verdict legend (per candidate): ${laneOutcomeLegend}`,
+    "",
+    "── CANDIDATES ──",
+  ].join("\n");
+
+  const finalInstruction = [
+    "── END CANDIDATES ──",
+    "",
+    `Final message = ONLY one JSON object (no markdown, no prose before or after):`,
+    `{"verdicts":[`,
+    `  {"key":"<candidate key exactly as declared above>", ...same fields the SINGLE-CANDIDATE final JSON that candidate's section specifies (verdict, reasoning, and any lane-specific fields like splits/followup/primary/disposition/alternatives/etc.)},`,
+    `  ...one object per candidate...`,
+    `]}`,
+    `Include EXACTLY ${candidates.length} verdict objects — one per candidate declared above, keyed by the candidate's exact "key". Do NOT omit any; do NOT invent extras. If you cannot confidently decide a candidate, emit its escalate verdict (per that candidate's section's legend) — never omit it.`,
+  ].join("\n");
+
+  const batchedPrompt = [batchHeader, sections.join("\n\n"), finalInstruction].join("\n\n");
+
+  let resultText = "";
+  let isError = false;
+  let overloaded = false;
+  let parseFailed = false;
+  try {
+    const r = await runBoxLane((cfg, sid) => runDirectorClaude(batchedPrompt, sid, REPO_DIR, cfg, job.id));
+    resultText = r.resultText || "";
+    isError = !!r.isError;
+    await meterAgentJob(job, job.claude_session_config_dir ?? undefined, r.usage, r.model);
+    if (isError && isMaxOverloaded(`${resultText} ${r.raw}`)) {
+      overloaded = true;
+      console.warn(`${tag} ${lane} batched → Max 529/overloaded — backing off (resume next pass; ${candidates.length} candidate(s) will re-surface).`);
+      return { verdicts: out, overloaded, isError, parseFailed, resultText };
+    }
+  } catch (e) {
+    console.error(`${tag} ${lane} batched session threw (falling back to per-candidate escalate):`, e instanceof Error ? e.message : e);
+    isError = true;
+    return { verdicts: out, overloaded, isError, parseFailed: true, resultText };
+  }
+
+  const parsed = extractJson<{ verdicts?: Array<Record<string, unknown>> }>(resultText);
+  const arr = Array.isArray(parsed?.verdicts) ? parsed.verdicts : null;
+  if (!arr) {
+    parseFailed = true;
+    console.error(`${tag} ${lane} batched → parse failed (no verdicts array) — each candidate will fall through to its lane's ambiguous/escalate branch.`);
+    return { verdicts: out, overloaded, isError, parseFailed, resultText };
+  }
+  const validKeys = new Set(candidates.map(keyOf));
+  for (const v of arr) {
+    const key = typeof v?.key === "string" ? String(v.key) : null;
+    if (!key || !validKeys.has(key) || out.has(key)) continue; // first-write-wins; foreign/dup keys ignored
+    out.set(key, v as TVerdict);
+  }
+  const missing = candidates.length - out.size;
+  if (missing > 0) {
+    console.warn(`${tag} ${lane} batched → ${missing}/${candidates.length} verdict(s) missing from batch — those candidates fall through to the lane's ambiguous/escalate branch.`);
+  }
+  return { verdicts: out, overloaded, isError, parseFailed, resultText };
 }
 
 // platform-director-agent (Phase 4): the standing director pass the daily platform-director-cron enqueues
@@ -3037,6 +3117,12 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   let dedupSkipped = 0;
   let autoResolved = 0;
   let sessionsSaved = 0; // pre-filter escalations / auto-resolves (each = one Max session avoided)
+
+  // ada-standing-pass-reasoning-gate Phase 3 — pre-filter first, then batch the ambiguous residual into
+  // ONE Max session per pass (was: one cold session per ambiguous row, each re-hydrating the brain).
+  type AmbiguousRow = { row: (typeof rows)[number]; prefilter: sd.DriftPreFilterVerdict | null };
+  const ambiguous: AmbiguousRow[] = [];
+
   for (const row of rows) {
     if (reviewed >= CAP) break;
     // ada-standing-pass-reasoning-gate Phase 1 — ledger dedup: skip a row we've already produced a
@@ -3088,48 +3174,56 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
       continue;
     }
 
-    // Residual reasoning case (`ambiguous` or pre-filter unavailable): fall through to the Max session.
-    // Ada confirms: is the code genuinely gone (real revert → escalate) or a false positive (moved/renamed
-    // → resolve)? She NEVER auto-downgrades the DB status (surface-don't-auto-correct).
-    let sessionVerdict = "unsure";
-    let sessionReason = "";
-    try {
-      const prompt = [
-        "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only main checkout + the brain, no API key).",
-        `Reese (the DB-vs-code backstop) flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): the DB marks this phase SHIPPED, but its code looks MISSING from main. Detail: ${row.detail}`,
-        prefilter ? `Deterministic pre-filter says AMBIGUOUS: ${prefilter.reasoning}. Symbols found on main: ${prefilter.symbolsFound.join(", ") || "(none)"} · Declared paths missing: ${prefilter.pathsMissing.join(", ") || "(none)"}.` : "",
-        "Investigate READ-ONLY: read the spec phase's declared files/functions and check whether that code actually exists on main right now (it may have been renamed/moved, or genuinely reverted/never-landed).",
-        "Final message = ONLY one JSON object:",
-        '{"verdict":"code-missing","reasoning":"<the code is genuinely NOT on main — a bad/reverted merge or wrong status; cite what is missing>"}',
-        '{"verdict":"code-present","reasoning":"<false positive — the code IS on main, just moved/renamed; cite where>"}',
-        '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
-      ].filter(Boolean).join("\n");
-      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
-      const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
-      sessionVerdict = String(parsed?.verdict);
-      sessionReason = String(parsed?.reasoning || "");
-      if (sessionVerdict === "code-present") {
-        await sd.resolveDriftRow(db, row.id); // false positive — code is there, just moved → clear it
-      } else if (sessionVerdict === "code-missing") {
-        // Genuine reverse-drift: a shipped spec's code vanished. Surface to the CEO — keep the row open +
-        // escalate (the CEO decides: re-merge, intentional revert, or downgrade). Never auto-mutate status.
-        confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${sessionReason.slice(0, 180)}`);
+    // Residual reasoning case (`ambiguous` or pre-filter unavailable) — queue for the batched session.
+    ambiguous.push({ row, prefilter });
+  }
+
+  // Batched residual reasoning (Phase 3) — one Max session for every ambiguous row this pass.
+  if (ambiguous.length) {
+    const buildDriftPrompt = ({ row, prefilter }: AmbiguousRow): string => [
+      "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only main checkout + the brain, no API key).",
+      `Reese (the DB-vs-code backstop) flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): the DB marks this phase SHIPPED, but its code looks MISSING from main. Detail: ${row.detail}`,
+      prefilter ? `Deterministic pre-filter says AMBIGUOUS: ${prefilter.reasoning}. Symbols found on main: ${prefilter.symbolsFound.join(", ") || "(none)"} · Declared paths missing: ${prefilter.pathsMissing.join(", ") || "(none)"}.` : "",
+      "Investigate READ-ONLY: read the spec phase's declared files/functions and check whether that code actually exists on main right now (it may have been renamed/moved, or genuinely reverted/never-landed).",
+      "Final message (per-candidate JSON object — the batch wrapper collects them into the `verdicts` array):",
+      '{"verdict":"code-missing","reasoning":"<the code is genuinely NOT on main — a bad/reverted merge or wrong status; cite what is missing>"}',
+      '{"verdict":"code-present","reasoning":"<false positive — the code IS on main, just moved/renamed; cite where>"}',
+      '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
+    ].filter(Boolean).join("\n");
+
+    const legend = "code-missing (escalate) | code-present (resolve) | unsure (leave open)";
+    const batched = await runBatchedDirectorSession<{ verdict?: string; reasoning?: string }, AmbiguousRow>(
+      job, tag, "drift-supervise", ambiguous, ({ row }) => `drift:${row.id}`, buildDriftPrompt, legend,
+    );
+
+    for (const item of ambiguous) {
+      const v = batched.verdicts.get(`drift:${item.row.id}`);
+      const sessionVerdict = String(v?.verdict ?? "unsure");
+      const sessionReason = String(v?.reasoning ?? "");
+      try {
+        if (sessionVerdict === "code-present") {
+          await sd.resolveDriftRow(db, item.row.id); // false positive — code is there, just moved → clear it
+        } else if (sessionVerdict === "code-missing") {
+          // Genuine reverse-drift: a shipped spec's code vanished. Surface to the CEO — keep the row open +
+          // escalate (the CEO decides: re-merge, intentional revert, or downgrade). Never auto-mutate status.
+          confirmed.push(`${item.row.spec_slug} P${item.row.phase_index + 1}: ${sessionReason.slice(0, 180)}`);
+        }
+        // unsure / missing-from-batch → leave the row open for the next pass (still deduped by the ledger).
+      } catch (e) {
+        console.error(`${tag} drift-supervise ${item.row.spec_slug} apply failed (continuing):`, e instanceof Error ? e.message : e);
       }
-      // unsure → leave the row open for the next pass (still deduped by the ledger — no thrash)
-    } catch (e) {
-      console.error(`${tag} drift-supervise ${row.spec_slug} failed (continuing):`, e instanceof Error ? e.message : e);
+      // Stamp the dedup ledger regardless of session verdict — never re-investigate the same row.id twice.
+      try {
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "drift_supervised",
+          specSlug: item.row.spec_slug,
+          reason: `Batched Max session ruled ${sessionVerdict} on ${item.row.spec_slug} P${item.row.phase_index + 1}${sessionReason ? `: ${sessionReason.slice(0, 180)}` : ""}`,
+          metadata: { actor: "drift-supervise:session", drift_row_id: item.row.id, verdict: sessionVerdict, source: "session:batched" },
+        });
+      } catch { /* audit is best-effort */ }
     }
-    // Stamp the dedup ledger regardless of session verdict — never re-investigate the same row.id twice.
-    try {
-      await recordDirectorActivity(db, {
-        workspaceId: job.workspace_id,
-        directorFunction: "platform",
-        actionKind: "drift_supervised",
-        specSlug: row.spec_slug,
-        reason: `Max session ruled ${sessionVerdict} on ${row.spec_slug} P${row.phase_index + 1}${sessionReason ? `: ${sessionReason.slice(0, 180)}` : ""}`,
-        metadata: { actor: "drift-supervise:session", drift_row_id: row.id, verdict: sessionVerdict, source: "session" },
-      });
-    } catch { /* audit is best-effort */ }
   }
   if (confirmed.length) {
     try {
@@ -3917,28 +4011,44 @@ async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<s
   let authoredFollowup = 0;
   let dismissed = 0;
   let skippedByBackstop = 0;
+
+  // ada-standing-pass-reasoning-gate Phase 2 — mechanical-advancer skip. The `backstopPhaseProgression`
+  // lane, earlier in this pass, deterministically queued this spec's next planned phase. A groom Max
+  // session that returns `continue` would just re-decide the same advance, so it's a burnt session.
+  // Skip WITHOUT firing a session. Note this filter is ADDITIONAL to `findGroomCandidates`'s existing
+  // `state.activeBuild` check — that check would ordinarily also exclude the just-queued spec, but the
+  // race between backstop's DB insert and grooming's read is closed by the explicit `prog.advanced`
+  // hand-off. If the queued phase turns out to be phantom/future (the build lands as a no-op), the next
+  // pass will re-surface the spec: `alreadyGroomed` is still false, backstop's dedup blocks a re-queue,
+  // and grooming's judgment lane then produces the fold_now/split verdict.
+  const toInvestigate: typeof candidates = [];
   for (const c of candidates) {
-    // ada-standing-pass-reasoning-gate Phase 2 — mechanical-advancer skip. The `backstopPhaseProgression`
-    // lane, earlier in this pass, deterministically queued this spec's next planned phase. A groom Max
-    // session that returns `continue` would just re-decide the same advance, so it's a burnt session.
-    // Skip WITHOUT firing a session. Note this filter is ADDITIONAL to `findGroomCandidates`'s existing
-    // `state.activeBuild` check — that check would ordinarily also exclude the just-queued spec, but the
-    // race between backstop's DB insert and grooming's read is closed by the explicit `prog.advanced`
-    // hand-off. If the queued phase turns out to be phantom/future (the build lands as a no-op), the next
-    // pass will re-surface the spec: `alreadyGroomed` is still false, backstop's dedup blocks a re-queue,
-    // and grooming's judgment lane then produces the fold_now/split verdict.
     if (backstopAdvanced.has(c.slug)) {
       skippedByBackstop++;
       console.log(`${tag} groom ${c.slug} → skipped (backstop advanced next phase this pass — continue redundant; no Max session spent)`);
       continue;
     }
+    toInvestigate.push(c);
+  }
+
+  // ada-standing-pass-reasoning-gate Phase 3 — batch the remaining groom candidates into ONE Max session
+  // per pass (was: one cold session per candidate). The `directorDecisionPrompt` seam still wraps live-state
+  // + coaching — but ONCE at the top of the batched prompt rather than per candidate. Per-verdict validators,
+  // escalations, and DB writes below are UNCHANGED — they now drive from the batched verdict map.
+  const groomLegend = "continue | split | escalate | fold_now | author_followup_spec | dismiss_candidate";
+  const batchedGroom = await runBatchedDirectorSession<import("../src/lib/agents/platform-director").GroomVerdict, typeof candidates[number]>(
+    job,
+    tag,
+    "groom",
+    toInvestigate,
+    (c) => `groom:${c.slug}`,
+    async (c) => directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c)),
+    groomLegend,
+  );
+
+  for (const c of toInvestigate) {
     try {
-      // Phase 2 live-state + P7 coaching: she decides on the authoritative function_autonomy flag, never on
-      // stale brain prose, and the CEO's grooming coaching ("continue these spec types") still steers her.
-      const groomPrompt = await directorDecisionPrompt(job.workspace_id, lib.groomInvestigationPrompt(c));
-      const { resultText, usage, model } = await runBoxLane((cfg, sid) => runDirectorClaude(groomPrompt, sid, REPO_DIR, cfg, job.id));
-      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-      const parsed = extractJson<import("../src/lib/agents/platform-director").GroomVerdict>(resultText) ?? {};
+      const parsed = batchedGroom.verdicts.get(`groom:${c.slug}`) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
 
@@ -4286,26 +4396,27 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
   let escalated = 0;
   let authoredFollowup = 0;
   let dismissed = 0;
-  // director-initiation-throughput Phase 4: a Max 529 / overloaded mid-batch backs off the REST of the pass
-  // (the real ceiling is Max rate limits, not the lane count). Set once, checked by every not-yet-started task.
-  let overloaded = false;
-  // director-initiation-throughput Phase 2: investigate the candidates CONCURRENTLY (bounded), not one-at-a-time,
-  // so one pass produces a full batch instead of a trickle. Each task owns its own spec's DB writes (no contention).
-  await runWithConcurrency(candidates, DIRECTOR_INVEST_CONCURRENCY, async (c) => {
-    if (overloaded) return; // Phase 4 — Max is throttled; stop investigating, resume next pass
+
+  // ada-standing-pass-reasoning-gate Phase 3 — batch every init candidate into ONE Max session per pass
+  // (was: per-candidate sessions running CONCURRENTLY via a bounded worker pool, each re-hydrating the
+  // brain). One session, N verdicts. A 529/overloaded on THE session backs off the whole batch — the
+  // candidates stay untouched and re-surface next pass (mirrors the pre-Phase-3 mid-batch backoff, just
+  // at session granularity). Each candidate's spec-owned DB writes still happen SEQUENTIALLY below.
+  const initLegend = "initiate | escalate | author_followup_spec | dismiss_candidate (with disposition fold_superseded|escalate_rework)";
+  const batchedInit = await runBatchedDirectorSession<import("../src/lib/agents/platform-director").InitVerdict, typeof candidates[number]>(
+    job,
+    tag,
+    "init",
+    candidates,
+    (c) => `init:${c.slug}`,
+    async (c) => directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c)),
+    initLegend,
+  );
+  const overloaded = batchedInit.overloaded;
+
+  const applyInit = async (c: (typeof candidates)[number]) => {
     try {
-      // Phase 2 live-state + P7 coaching: the soundness decision carries the authoritative function_autonomy
-      // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/approval).
-      const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.initInvestigationPrompt(c));
-      const { resultText, isError, raw, usage, model } = await runBoxLane((cfg, sid) => runDirectorClaude(investPrompt, sid, REPO_DIR, cfg, job.id));
-      await meterAgentJob(job, job.claude_session_config_dir ?? undefined, usage, model);
-      // Phase 4: a 529/overloaded is a transient throttle, NOT a spec problem — back off the batch, escalate nothing.
-      if (isError && isMaxOverloaded(`${resultText} ${raw}`)) {
-        overloaded = true;
-        console.warn(`${tag} init ${c.slug} → Max 529/overloaded — backing off the rest of this pass (resume next beat)`);
-        return;
-      }
-      const parsed = extractJson<import("../src/lib/agents/platform-director").InitVerdict>(resultText) ?? {};
+      const parsed = batchedInit.verdicts.get(`init:${c.slug}`) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
 
@@ -4487,7 +4598,16 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
     } catch (e) {
       console.error(`${tag} init ${c.slug} failed (continuing):`, e instanceof Error ? e.message : e);
     }
-  });
+  };
+
+  // With the batched session done, each candidate's DB apply runs SEQUENTIALLY (spec-scoped writes; no
+  // cross-candidate contention). If the batched call itself was overloaded (529), skip the apply loop and
+  // let every candidate re-surface next pass — matches the old mid-batch backoff, just at session grain.
+  if (!overloaded) {
+    for (const c of candidates) {
+      await applyInit(c);
+    }
+  }
 
   const parts: string[] = [];
   if (initiated) parts.push(`initiated ${initiated}`);
@@ -4524,13 +4644,25 @@ async function superviseRepairDismissals(job: Job, tag: string): Promise<string>
   let external = 0;
   let kept = 0;
   let authoredFollowup = 0;
+
+  // ada-standing-pass-reasoning-gate Phase 3 — batch every no-fix repair item into ONE Max session per
+  // pass (was: one cold session per item). `alreadyReviewedDismissal` dedup + `PLATFORM_DIRECTOR_DISMISS_CAP`
+  // are applied inside `findRepairDismissalCandidates` — nothing to filter here. Per-verdict validators +
+  // Dismiss/escalate/external/author DB writes are UNCHANGED — they now drive from the batched verdict map.
+  const dismissLegend = "dismiss | escalate | external | author_followup_spec | keep";
+  const batchedDismiss = await runBatchedDirectorSession<import("../src/lib/agents/platform-director").RepairDismissalVerdict, typeof candidates[number]>(
+    job,
+    tag,
+    "repair-supervise",
+    candidates,
+    (c) => `dismiss:${c.jobId}`,
+    async (c) => directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c)),
+    dismissLegend,
+  );
+
   for (const c of candidates) {
     try {
-      // Phase 2 live-state + P7 coaching: her supervision decision carries the authoritative function_autonomy
-      // flag (never stale brain prose) plus the CEO's active coaching (same as grooming/initiation/approval).
-      const investPrompt = await directorDecisionPrompt(job.workspace_id, lib.repairDismissalInvestigationPrompt(c));
-      const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(investPrompt, sid, REPO_DIR, cfg, job.id));
-      const parsed = extractJson<import("../src/lib/agents/platform-director").RepairDismissalVerdict>(resultText) ?? {};
+      const parsed = batchedDismiss.verdicts.get(`dismiss:${c.jobId}`) ?? {};
       const verdict = String(parsed.verdict || "");
       const reasoning = String(parsed.reasoning || "").slice(0, 4000);
 

@@ -71,6 +71,8 @@ Status is now DERIVED from `spec_phases`, so the reconciler **no longer writes**
 
 The Max session prompt now includes the pre-filter's reasoning + the specific symbols/paths it found or missed, so Ada judges the residual case with the full deterministic context — no re-derivation.
 
+**Batched residual reasoning ([[../specs/ada-standing-pass-reasoning-gate]] Phase 3):** the ambiguous rows that survive Phase 1's pre-filter are collected into ONE batched Max session per pass (via `runBatchedDirectorSession` in the worker), NOT one cold session per ambiguous row. Each ambiguous row is a keyed section in the batched prompt carrying its own detail + pre-filter output; the model returns a JSON `verdicts` array; the worker applies each verdict to its row (`resolveDriftRow` on `code-present`, escalate on `code-missing`, leave-open on `unsure`) and stamps the row-id ledger. Hydration is paid ONCE per pass regardless of how many rows are ambiguous.
+
 ## Related
 
 [[../specs/spec-drift-agent]] · [[../tables/spec_drift]] · [[../inngest/spec-drift-reconcile]] · [[agent-jobs]] · [[brain-roadmap]] · [[../dashboard/control-tower]] · [[../project-management]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-test-agent]] · [[../specs/ada-standing-pass-reasoning-gate]]
