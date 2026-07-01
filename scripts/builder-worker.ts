@@ -663,10 +663,11 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
     let restored = 0;
     for (let i = 0; i < accounts.length && i < pool.length; i++) {
       const rawUntil = pool[i]?.capped_until ? new Date(pool[i].capped_until as string).getTime() : 0;
-      // Clamp the restored estimate to the re-probe horizon so a stale/over-estimated cap (e.g. a pre-fix
-      // +5h guess) can't survive restarts and hold a recovered account out for hours — it gets re-probed
-      // within CAP_MAX_MS of boot. A fresh (already-clamped) cap restores unchanged; only a far estimate shrinks.
-      const until = rawUntil > now ? Math.min(rawUntil, now + CAP_MAX_MS) : 0;
+      // A restored cap BEYOND the re-probe horizon is an UNTRUSTWORTHY over-estimate (a pre-fix +5h guess, or a
+      // rolling window that already freed up) — probe it IMMEDIATELY on boot rather than trusting it (→ 0). A fresh
+      // cap (already clamped to ≤ now+CAP_MAX_MS by markAccountCapped) is preserved so we don't re-probe every
+      // restart. Net: pre-fix stale caps un-stick on the first boot; steady-state caps ride out their short window.
+      const until = rawUntil > now && rawUntil <= now + CAP_MAX_MS ? rawUntil : 0;
       if (until > now) { accounts[i].cappedUntil = until; accounts[i].capEventLogged = true; restored++; }
     }
     if (restored) console.log(`[multi-account] restored ${restored} capped account(s) from heartbeat — re-probe within ${Math.round(CAP_MAX_MS / 60000)}m`);
