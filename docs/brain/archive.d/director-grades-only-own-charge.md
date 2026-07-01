@@ -1,0 +1,1 @@
+- **A director grades only the workers in its own charge** · verified 2026-07-01 · → [[libraries/agent-grader]]

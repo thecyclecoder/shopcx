@@ -40,6 +40,7 @@ These can't live in a wiki page — they're project-wide invariants:
 - **Portal builds:** after editing `shopify-extension/portal-src/`, run `node scripts/build-all-portals.js`.
 - **Customer-referenced tables:** when adding a `customer_id` column, add a Sonnet data tool in `sonnet-orchestrator-v2.ts`.
 - **Journeys + cancel-flow + remedies + coupon mappings:** all DB-driven, never hardcoded.
+- **A director grades only the workers in its own charge.** Scoped by `ownerFunctionForKind(kind) === director.function`, enforced via `gradeableKindsForFunction` in [[docs/brain/libraries/agent-grader.md]]. A director never reaches across departments; a cross-function worker stays UNGRADED until its own director's sweep goes live. Same north-star principle as approval gates: a supervisor owns the layer below it, not adjacent departments. See [[docs/brain/operational-rules.md]] § North star.
 
 ## Next.js note
 
