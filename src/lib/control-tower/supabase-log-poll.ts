@@ -168,8 +168,10 @@ const LOG_QUERIES: LogQuery[] = [
         keyParts: ["auth", severity, message],
         title: `auth ${severity}: ${message}`,
         detail: message,
-        // Auth errors aren't part of the self-healing saturation class — page on first sighting.
-        transient: false,
+        // Auth errors mostly page on first sighting; the helper narrowly scopes GoTrue's
+        // `context canceled` / `context deadline exceeded` (browser-abort noise) into the
+        // transient class so ordinary page navigations don't mint incidents.
+        transient: isTransientSupabaseLogNoise("auth", { message }),
       };
     },
   },

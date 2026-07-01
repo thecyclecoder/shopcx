@@ -334,6 +334,18 @@ export function isTransientSupabaseLogNoise(
       msg.includes("could not serialize access")
     );
   }
+  if (kind === "auth") {
+    // GoTrue logs `Unhandled server error: timeout: context canceled` (and the sibling
+    // `context deadline exceeded`) when the CLIENT goes away mid-request — a signed-in
+    // browser unmounting while supabase.auth.getUser() is in-flight. That's a healthy
+    // browser-abort signal, not an auth failure; scope it into the transient class the
+    // same way the postgres branch scopes `canceling statement due to` / `statement
+    // timeout`. Anything else on auth (invalid JWT, rate limit, signature mismatch) still
+    // pages on first sighting.
+    const msg = String(ctx.message ?? "").toLowerCase();
+    if (!msg.trim()) return false;
+    return msg.includes("context canceled") || msg.includes("context deadline exceeded");
+  }
   return false;
 }
 
