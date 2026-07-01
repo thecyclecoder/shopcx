@@ -1,0 +1,1 @@
+- **Downgrade Sonnet v2 parse-fallback log from error to warn (stop false Control Tower incident)** · verified 2026-07-01 · → [[libraries/sonnet-orchestrator-v2]]
