@@ -11,7 +11,7 @@ How a storefront visitor becomes a tracked session, how their journey is logged,
 
 ## 2. Journey — `storefront_events`
 - Written via the same `/api/pixel` POST batch. Columns: `id · workspace_id · session_id (→ storefront_sessions.id) · anonymous_id · customer_id · event_type · product_id · **meta (jsonb)** · url · created_at`. **The jsonb column is `meta`, NOT `metadata`.** Idempotent upsert (`ignoreDuplicates`).
-- Event types (the funnel): `pdp_view → chapter_view/chapter_dwell/scroll_depth → pdp_engaged → pack_selected → add_to_cart → cta_click → checkout_view → order_placed` (+ `lead_captured`, `experiment_exposure`).
+- Event types (the funnel): see [[../tables/storefront_events]] for the canonical list. Primary: `pdp_view → pdp_engaged → pack_selected → add_to_cart → checkout_view → order_placed`. Secondary content: `chapter_view → chapter_dwell → scroll_depth → cta_click`. Blog: `blog_view → blog_engaged` (non-product top-of-funnel; doesn't increment product visit counts). Plus: `lead_captured`, `experiment_exposure`.
 
 ## 3. Order ↔ session link
 - `order_placed` event (emitted server-side at `/api/checkout`, ~1083-1098) carries `meta.{order_id, order_number, total_cents, cart_token, product_id}` + **`session_id` + `anonymous_id`**.
