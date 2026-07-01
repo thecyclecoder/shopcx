@@ -3007,42 +3007,129 @@ function isMaxOverloaded(text: string): boolean {
 // no build record, so it couldn't auto-flip). She investigates each READ-ONLY — if she confirms the code
 // implements the phase, she flips it ✅ + resolves the row; an unconfirmable one stays surfaced. Never escalates
 // to the CEO. Capped per pass. This is what the CEO asked for: Ada handles spec-drift's recommendations.
+// ada-standing-pass-reasoning-gate Phase 1 — ledger dedup for the drift supervision lane. Once we've
+// produced a TERMINAL verdict on a specific `spec_drift` row (whether from the deterministic pre-filter
+// or a Max session), don't re-investigate it every pass. The row stays open when the verdict is
+// `code-missing`/`unsure` (surface-don't-auto-correct), so without this ledger the lane would re-spawn
+// a session for the same row indefinitely. Content-change trigger = a NEW row.id: the reconciler creates
+// a fresh spec_drift row when it re-detects, so an unresolved row keeps its id and stays skipped, but a
+// resolved-then-re-surfaced case gets a new id and is re-investigated. Mirrors `alreadyGroomed` /
+// `alreadyInitiated` — read the recent audit rows, match on `metadata.drift_row_id`.
+async function alreadyDriftSupervised(rowId: string): Promise<boolean> {
+  const { data } = await db
+    .from("director_activity")
+    .select("metadata")
+    .eq("director_function", "platform")
+    .eq("action_kind", "drift_supervised")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  return (data ?? []).some((r) => (r.metadata as Record<string, unknown> | null)?.["drift_row_id"] === rowId);
+}
+
 async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   const sd = await import("../src/lib/spec-drift");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const rows = await sd.getOpenSpecDrift(job.workspace_id);
   if (!rows.length) return "drift: none open";
   const CAP = 5;
   const confirmed: string[] = []; // confirmed reverse-drift (DB shipped, code genuinely gone) → escalated
   let reviewed = 0;
-  for (const row of rows.slice(0, CAP)) {
+  let dedupSkipped = 0;
+  let autoResolved = 0;
+  let sessionsSaved = 0; // pre-filter escalations / auto-resolves (each = one Max session avoided)
+  for (const row of rows) {
+    if (reviewed >= CAP) break;
+    // ada-standing-pass-reasoning-gate Phase 1 — ledger dedup: skip a row we've already produced a
+    // terminal verdict on. Its content is unchanged (same row id ⇒ same reconciler-surfaced facts).
+    if (await alreadyDriftSupervised(row.id)) { dedupSkipped++; continue; }
     reviewed++;
+
+    // Deterministic pre-filter (ada-standing-pass-reasoning-gate Phase 1) — resolve most drift rows
+    // without spawning a Max session. Only a `ambiguous` verdict (path 404 + no symbols to grep) falls
+    // through to the session for the residual reasoning. Never throws.
+    let prefilter: sd.DriftPreFilterVerdict | null = null;
     try {
-      // Reese (DB-vs-code backstop) flagged a phase the DB marks SHIPPED whose code looks MISSING on main.
-      // Ada confirms: is the code genuinely gone (a real bad/reverted merge → escalate) or a false positive
-      // (moved/renamed → resolve)? She NEVER auto-downgrades the DB status (surface-don't-auto-correct).
+      prefilter = await sd.driftPreFilterPhase(job.workspace_id, row.spec_slug, row.phase_index);
+    } catch (e) {
+      console.error(`${tag} drift pre-filter ${row.spec_slug} failed (continuing to session):`, e instanceof Error ? e.message : e);
+    }
+
+    if (prefilter?.verdict === "code-present") {
+      await sd.resolveDriftRow(db, row.id); // moved/renamed (or stale surface) — clear without a session
+      autoResolved++; sessionsSaved++;
+      try {
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "drift_supervised",
+          specSlug: row.spec_slug,
+          reason: `pre-filter auto-resolved ${row.spec_slug} P${row.phase_index + 1} as code-present — ${prefilter.reasoning}`,
+          metadata: { actor: "drift-supervise:pre-filter", drift_row_id: row.id, verdict: "code-present", source: "pre-filter", symbols_found: prefilter.symbolsFound, paths_missing: prefilter.pathsMissing },
+        });
+      } catch { /* audit is best-effort — the resolve already landed */ }
+      continue;
+    }
+
+    if (prefilter?.verdict === "code-missing") {
+      // High-confidence revert: escalate immediately without a session. The row stays open + surfaces to
+      // the CEO exactly like the session's code-missing verdict does; the dedup ledger prevents re-firing.
+      confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${prefilter.reasoning.slice(0, 180)}`);
+      sessionsSaved++;
+      try {
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "drift_supervised",
+          specSlug: row.spec_slug,
+          reason: `pre-filter escalated ${row.spec_slug} P${row.phase_index + 1} as code-missing — ${prefilter.reasoning}`,
+          metadata: { actor: "drift-supervise:pre-filter", drift_row_id: row.id, verdict: "code-missing", source: "pre-filter", paths_missing: prefilter.pathsMissing },
+        });
+      } catch { /* audit is best-effort */ }
+      continue;
+    }
+
+    // Residual reasoning case (`ambiguous` or pre-filter unavailable): fall through to the Max session.
+    // Ada confirms: is the code genuinely gone (real revert → escalate) or a false positive (moved/renamed
+    // → resolve)? She NEVER auto-downgrades the DB status (surface-don't-auto-correct).
+    let sessionVerdict = "unsure";
+    let sessionReason = "";
+    try {
       const prompt = [
         "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only main checkout + the brain, no API key).",
         `Reese (the DB-vs-code backstop) flagged ${row.spec_slug} phase ${row.phase_index} ("${row.phase_title}"): the DB marks this phase SHIPPED, but its code looks MISSING from main. Detail: ${row.detail}`,
+        prefilter ? `Deterministic pre-filter says AMBIGUOUS: ${prefilter.reasoning}. Symbols found on main: ${prefilter.symbolsFound.join(", ") || "(none)"} · Declared paths missing: ${prefilter.pathsMissing.join(", ") || "(none)"}.` : "",
         "Investigate READ-ONLY: read the spec phase's declared files/functions and check whether that code actually exists on main right now (it may have been renamed/moved, or genuinely reverted/never-landed).",
         "Final message = ONLY one JSON object:",
         '{"verdict":"code-missing","reasoning":"<the code is genuinely NOT on main — a bad/reverted merge or wrong status; cite what is missing>"}',
         '{"verdict":"code-present","reasoning":"<false positive — the code IS on main, just moved/renamed; cite where>"}',
         '{"verdict":"unsure","reasoning":"<cannot confirm read-only>"}',
-      ].join("\n");
+      ].filter(Boolean).join("\n");
       const { resultText } = await runBoxLane((cfg, sid) => runDirectorClaude(prompt, sid, REPO_DIR, cfg, job.id));
       const parsed = extractJson<{ verdict?: string; reasoning?: string }>(resultText);
-      const verdict = String(parsed?.verdict);
-      if (verdict === "code-present") {
+      sessionVerdict = String(parsed?.verdict);
+      sessionReason = String(parsed?.reasoning || "");
+      if (sessionVerdict === "code-present") {
         await sd.resolveDriftRow(db, row.id); // false positive — code is there, just moved → clear it
-      } else if (verdict === "code-missing") {
+      } else if (sessionVerdict === "code-missing") {
         // Genuine reverse-drift: a shipped spec's code vanished. Surface to the CEO — keep the row open +
         // escalate (the CEO decides: re-merge, intentional revert, or downgrade). Never auto-mutate status.
-        confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${(parsed?.reasoning || "").slice(0, 180)}`);
+        confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${sessionReason.slice(0, 180)}`);
       }
-      // unsure → leave the row open for the next pass
+      // unsure → leave the row open for the next pass (still deduped by the ledger — no thrash)
     } catch (e) {
       console.error(`${tag} drift-supervise ${row.spec_slug} failed (continuing):`, e instanceof Error ? e.message : e);
     }
+    // Stamp the dedup ledger regardless of session verdict — never re-investigate the same row.id twice.
+    try {
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "drift_supervised",
+        specSlug: row.spec_slug,
+        reason: `Max session ruled ${sessionVerdict} on ${row.spec_slug} P${row.phase_index + 1}${sessionReason ? `: ${sessionReason.slice(0, 180)}` : ""}`,
+        metadata: { actor: "drift-supervise:session", drift_row_id: row.id, verdict: sessionVerdict, source: "session" },
+      });
+    } catch { /* audit is best-effort */ }
   }
   if (confirmed.length) {
     try {
@@ -3050,7 +3137,9 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
       await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `⚠️ Reese caught DB-vs-code drift — ${confirmed.length} spec phase(s) marked SHIPPED in the DB but their code is GONE from main (possible bad/reverted merge):\n${confirmed.map((c) => `• ${c}`).join("\n")}`, kind: "update", mentions: ["ceo"], metadata: { spec_drift_supervise: true, reverse_drift: true } });
     } catch { /* best-effort */ }
   }
-  return `drift-supervise: reviewed ${reviewed}, confirmed reverse-drift ${confirmed.length}${confirmed.length ? " → escalated" : ""}`;
+  const saveNote = sessionsSaved ? `, saved ${sessionsSaved} session(s) (${autoResolved} auto-resolved by pre-filter)` : "";
+  const dedupNote = dedupSkipped ? `, dedup-skipped ${dedupSkipped}` : "";
+  return `drift-supervise: reviewed ${reviewed}${saveNote}${dedupNote}, confirmed reverse-drift ${confirmed.length}${confirmed.length ? " → escalated" : ""}`;
 }
 
 async function runPlatformDirectorStandingPass(job: Job, tag: string) {

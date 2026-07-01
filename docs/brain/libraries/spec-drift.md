@@ -33,6 +33,8 @@ The spec's column then follows from `deriveStatus` over the corrected phases —
 - **`getOpenSpecDrift(workspaceId)`** → `SpecDriftRow[]` — open rows, newest-bumped first, for the [[../dashboard/control-tower]] surface.
 - **`resolveSpecDrift(workspaceId, slug, phaseIndex?)`** — resolve open rows after an owner flip/dismiss (one phase, or all for the slug).
 - **`extractCodePaths(body)`** — extract `src|supabase|scripts|remotion|shopify-extension|public|docs/.../*.{ext}` paths + bare migration filenames from a phase body. Used by both `reconcileSpecDrift` and `runSpecDriftReconciler` to decide "are this phase's named artifacts on `main`?"
+- **`extractSymbols(body)`** *(ada-standing-pass-reasoning-gate Phase 1)* — extract backtick-quoted identifiers (`` `runFoo` ``, `` `stampPhaseShipped` ``, `` `spec_drift` ``) plus each declared path's basename + stem (module name) from a phase body. Feeds the drift pre-filter's grep leg — a symbol hit anywhere on main distinguishes a moved/renamed artifact from a genuine revert. Length-4 minimum + a small stop-list filter out English filler.
+- **`driftPreFilterPhase(workspaceId, slug, phaseIndex)`** → `DriftPreFilterVerdict | null` *(ada-standing-pass-reasoning-gate Phase 1)* — the DETERMINISTIC pre-filter Ada's `runSpecDriftSupervision` runs BEFORE a Max session. Reads the surfaced phase's `body` from `spec_phases`, checks (a) every declared path via `pathExistsOnMain` — all present ⇒ `code-present` (stale surface, auto-resolve); (b) every declared symbol via GitHub code search — any hit ⇒ `code-present` (moved/renamed — the false-positive class the Max prompt itself names, auto-resolve); (c) paths 404 + zero symbols found anywhere ⇒ `code-missing` (high-confidence revert, escalate no-session). Only the residual partial case (paths gone + no symbols to grep) returns `ambiguous`, which the caller sends to the session. Returns `null` on missing token / spec / phase / declared paths. Best-effort — a read failure falls through to `ambiguous` (safer default: still session-verified).
 
 ## Two triggers
 
@@ -60,9 +62,18 @@ Status is now DERIVED from `spec_phases`, so the reconciler **no longer writes**
 - **GitHub Contents API per path**, cached per run. The sweep filters to non-shipped candidates to keep the call count bounded.
 - **`stampPhaseShipped` is the only writeback.** No more markdown emoji rewrite + commit ([[../specs/retire-md-reads-from-pm-flow]] Phase 2 retired the `flipPhaseToShipped` markdown writer). The leaf write advances the now-derived `specs.status` via the rollup readers.
 
+## Ada's supervision lane pre-filter ([[../specs/ada-standing-pass-reasoning-gate]] Phase 1)
+
+`runSpecDriftSupervision` (`scripts/builder-worker.ts`) reviews the open `spec_drift` rows this reconciler surfaces. It used to spawn a FRESH Max session per open row (cap 5) to answer "does this shipped phase's code still exist on main?" — Phase 1 gates that on a deterministic PRE-FILTER + a ROW-ID DEDUP so a session fires ONLY on the residual judgment case:
+
+1. **Pre-filter** — `driftPreFilterPhase` combines the reconciler's own path check (via `pathExistsOnMain`) with a repo-wide `extractSymbols` grep on main (GitHub code search). Symbol hit anywhere ⇒ auto-resolve `code-present` via `resolveDriftRow`; declared-path 404 + zero symbol hits ⇒ escalate `code-missing` (surface to the CEO + keep the row open) — both WITHOUT a session. Only a partial/ambiguous match (paths gone + no symbols to grep) falls through to the Max session.
+2. **Row-id dedup** — every terminal verdict (pre-filter OR session) stamps a `director_activity` row (`action_kind='drift_supervised'`, `metadata.drift_row_id=<row.id>`). The `alreadyDriftSupervised` reader skips a row the ledger already covers, so `code-missing` / `unsure` verdicts (which keep the row open) don't re-fire a session every pass. When the reconciler re-detects the same drift, it CREATES A NEW row with a NEW id → the ledger cleanly re-investigates it (content-change trigger).
+
+The Max session prompt now includes the pre-filter's reasoning + the specific symbols/paths it found or missed, so Ada judges the residual case with the full deterministic context — no re-derivation.
+
 ## Related
 
-[[../specs/spec-drift-agent]] · [[../tables/spec_drift]] · [[../inngest/spec-drift-reconcile]] · [[agent-jobs]] · [[brain-roadmap]] · [[../dashboard/control-tower]] · [[../project-management]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-test-agent]]
+[[../specs/spec-drift-agent]] · [[../tables/spec_drift]] · [[../inngest/spec-drift-reconcile]] · [[agent-jobs]] · [[brain-roadmap]] · [[../dashboard/control-tower]] · [[../project-management]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-test-agent]] · [[../specs/ada-standing-pass-reasoning-gate]]
 
 ---
 

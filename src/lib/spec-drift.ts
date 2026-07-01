@@ -102,6 +102,34 @@ export function extractCodePaths(body: string): string[] {
   return [...out];
 }
 
+// Backtick-quoted identifiers a phase body names — function/const/module/table names that a rename or
+// refactor tends to KEEP, so grepping for them on main distinguishes "moved/renamed" (still findable)
+// from "genuinely reverted" (nothing found anywhere). Length ≥ 4 keeps English filler out.
+const SYMBOL_RE = /`([A-Za-z_][A-Za-z0-9_]{3,})`/g;
+// Very common words that appear in every codebase and would light up as false positives on grep.
+const SYMBOL_STOP = new Set([
+  "true", "false", "null", "undefined", "main", "spec", "phase", "role", "code", "path",
+  "type", "kind", "status", "table", "row", "data", "text", "file", "job", "user", "self",
+]);
+
+/**
+ * Symbols named in a phase body — backtick-quoted identifiers referencing the code the phase claims
+ * to have shipped. Also includes each declared path's basename + stem (module name) so a moved-not-
+ * renamed file still registers. Feeds the drift pre-filter's grep leg — a symbol hit anywhere on main
+ * distinguishes a renamed/moved artifact from a genuine revert.
+ */
+export function extractSymbols(body: string): string[] {
+  const out = new Set<string>();
+  for (const m of body.matchAll(SYMBOL_RE)) out.add(m[1]);
+  for (const p of extractCodePaths(body)) {
+    const base = p.split("/").pop() ?? "";
+    if (base.length >= 4) out.add(base); // full basename (e.g. `spec-drift.ts`)
+    const stem = base.replace(/\.[a-z]{1,5}$/i, "");
+    if (stem.length >= 4) out.add(stem); // stem — the module name that survives a directory move
+  }
+  return [...out].filter((s) => !SYMBOL_STOP.has(s.toLowerCase()));
+}
+
 /** Does a path exist on `main`? Cached per-run so repeated paths across phases hit GitHub once. */
 async function pathExistsOnMain(path: string, cache: Map<string, boolean>): Promise<boolean> {
   const hit = cache.get(path);
@@ -134,6 +162,127 @@ export interface SpecDriftRow {
 /** Mark a spec_drift row resolved (e.g. after the director confirms the phase shipped + flips it ✅). */
 export async function resolveDriftRow(admin: ReturnType<typeof createAdminClient>, id: string): Promise<void> {
   await admin.from("spec_drift").update({ status: "resolved", last_seen_at: new Date().toISOString() }).eq("id", id);
+}
+
+// ── Drift pre-filter (ada-standing-pass-reasoning-gate Phase 1) ────────────────────────────────────
+
+/** Repo-wide grep on main via the GitHub code-search API — does `symbol` appear anywhere? Cached. */
+async function symbolExistsOnMain(symbol: string, cache: Map<string, boolean>): Promise<boolean> {
+  const hit = cache.get(symbol);
+  if (hit !== undefined) return hit;
+  const token = ghToken();
+  if (!token) { cache.set(symbol, false); return false; }
+  let exists = false;
+  try {
+    // Quote for an EXACT-phrase match — avoids tokenised false hits on short/common identifiers.
+    const q = encodeURIComponent(`"${symbol}" repo:${REPO}`);
+    const res = await fetch(`https://api.github.com/search/code?q=${q}&per_page=1`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      cache: "no-store",
+    });
+    if (res.ok) {
+      const j = (await res.json()) as { total_count?: number };
+      exists = (j.total_count ?? 0) > 0;
+    }
+  } catch { exists = false; }
+  cache.set(symbol, exists);
+  return exists;
+}
+
+export type DriftPreFilterVerdict =
+  | { verdict: "code-present"; reasoning: string; symbolsFound: string[]; pathsMissing: string[] }
+  | { verdict: "code-missing"; reasoning: string; symbolsFound: string[]; pathsMissing: string[] }
+  | { verdict: "ambiguous"; reasoning: string; symbolsFound: string[]; pathsMissing: string[] };
+
+/**
+ * DETERMINISTIC pre-filter for the spec-drift supervision lane (ada-standing-pass-reasoning-gate P1).
+ *
+ * The reconciler surfaces a `spec_drift` row when a shipped phase's declared paths look missing on main.
+ * Before spawning a Max session to re-decide it, resolve the two easy classes deterministically:
+ *
+ *   1. path check — all declared paths ARE on main? → `code-present` (stale surface, auto-resolve).
+ *   2. symbol grep — every backtick identifier / basename / stem still findable somewhere on main?
+ *      → `code-present` (moved/renamed — the false-positive class the Max prompt itself names).
+ *   3. path 404 + ZERO symbols found anywhere → `code-missing` (high-confidence revert, escalate no-session).
+ *
+ * Anything else (paths 404 + partial symbol survival, or no symbols to grep) returns `ambiguous` — the
+ * caller falls through to the Max session for the residual judgment. Returns `null` when we lack the
+ * inputs to decide (no token / no spec row / no phase / no declared paths).
+ *
+ * Best-effort — a read/grep failure falls through to `ambiguous` (the safer default: still verified
+ * by the session).
+ */
+export async function driftPreFilterPhase(
+  workspaceId: string,
+  slug: string,
+  phaseIndex: number,
+): Promise<DriftPreFilterVerdict | null> {
+  if (!ghToken()) return null;
+  const spec = await getSpec(workspaceId, slug);
+  if (!spec) return null;
+  const phase = driftPhasesFromRows(spec.phases).find((p) => p.index === phaseIndex);
+  if (!phase) return null;
+
+  const paths = extractCodePaths(phase.body);
+  if (!paths.length) return null; // nothing to verify → let the session decide (rare — reverse-drift phases usually name paths)
+  const symbols = extractSymbols(phase.body);
+
+  const pathCache = new Map<string, boolean>();
+  const pathChecks = await Promise.all(paths.map((p) => pathExistsOnMain(p, pathCache)));
+  const pathsMissing = paths.filter((_, i) => !pathChecks[i]);
+
+  // (1) All declared paths on main → the reverse-drift is stale; auto-resolve without a session.
+  if (pathsMissing.length === 0) {
+    return {
+      verdict: "code-present",
+      reasoning: `all ${paths.length} declared path(s) exist on main — reverse-drift is stale`,
+      symbolsFound: [],
+      pathsMissing: [],
+    };
+  }
+
+  // Only grep symbols when the path check DIDN'T settle it — saves GitHub search quota for the ambiguous case.
+  const symCache = new Map<string, boolean>();
+  const symChecks = symbols.length ? await Promise.all(symbols.map((s) => symbolExistsOnMain(s, symCache))) : [];
+  const symbolsFound = symbols.filter((_, i) => symChecks[i]);
+
+  const fmtPaths = (xs: string[]) => `${xs.slice(0, 3).join(", ")}${xs.length > 3 ? " …" : ""}`;
+  const fmtSyms = (xs: string[]) => `${xs.slice(0, 5).join(", ")}${xs.length > 5 ? " …" : ""}`;
+
+  // (2) Any declared symbol still surfaces on main → the file was moved/renamed (the very false-positive
+  //     class the Max prompt itself names). Auto-resolve without a session.
+  if (symbolsFound.length > 0) {
+    return {
+      verdict: "code-present",
+      reasoning: `moved/renamed: symbol(s) still found on main (${fmtSyms(symbolsFound)}); paths gone (${fmtPaths(pathsMissing)})`,
+      symbolsFound,
+      pathsMissing,
+    };
+  }
+
+  // (3) Paths 404 AND we DID have symbols to grep, but none survived → high-confidence code-missing.
+  //     Escalate without a session. If we had NO symbols to grep at all, fall through to `ambiguous`
+  //     (a body that names paths but no identifiers can't rule out a rename — let the session judge).
+  if (symbols.length > 0) {
+    return {
+      verdict: "code-missing",
+      reasoning: `paths not on main (${fmtPaths(pathsMissing)}) AND ${symbols.length} declared symbol(s) not found anywhere on main — high-confidence revert`,
+      symbolsFound: [],
+      pathsMissing,
+    };
+  }
+
+  // (4) Ambiguous — paths gone but no symbols to grep. Kick to the session (rare).
+  return {
+    verdict: "ambiguous",
+    reasoning: `paths gone (${pathsMissing.length}) but no backtick-declared symbols to grep — needs judgment`,
+    symbolsFound: [],
+    pathsMissing,
+  };
 }
 
 export interface ReconcileResult {
