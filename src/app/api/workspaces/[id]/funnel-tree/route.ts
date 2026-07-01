@@ -6,8 +6,10 @@
  * GET ?start=YYYY-MM-DD&end=YYYY-MM-DD&product={handle}
  *   - start/end interpreted in Central time (matches the legacy funnel route).
  *   - product omitted/blank = All products.
- * Returns { range, productHandle, products[], unattributedEntry, grandTotal,
- *           productOptions[] } — productOptions is the stable slice-dropdown list.
+ * Returns { range, productHandle, products[], unattributedEntry, blogEntry,
+ *           grandTotal, productOptions[] } — productOptions is the stable
+ *           slice-dropdown list. blogEntry is the synthetic top-level Blog
+ *           bucket for /blog first-touch sessions.
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
@@ -85,6 +87,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     referrer: tree.referrer,
     products: tree.products,
     unattributedEntry: tree.unattributedEntry,
+    blogEntry: tree.blogEntry,
     grandTotal: tree.grandTotal,
     productOptions: sliceOptions.productOptions,
     utmSourceOptions: sliceOptions.utmSourceOptions,

@@ -39,6 +39,7 @@ interface FunnelTreeResponse {
   referrer: string | null;
   products: TreeNode[];
   unattributedEntry: TreeNode | null;
+  blogEntry: TreeNode | null;
   grandTotal: TreeMetrics;
   productOptions: Array<{ handle: string; title: string; sessions: number }>;
   utmSourceOptions: Array<{ source: string; label: string; sessions: number }>;
@@ -239,7 +240,11 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
     });
 
   const allNodes: TreeNode[] = tree
-    ? [...tree.products, ...(tree.unattributedEntry ? [tree.unattributedEntry] : [])]
+    ? [
+        ...tree.products,
+        ...(tree.blogEntry ? [tree.blogEntry] : []),
+        ...(tree.unattributedEntry ? [tree.unattributedEntry] : []),
+      ]
     : [];
   const rows = flattenTree(allNodes, expanded);
 
