@@ -18,6 +18,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { enqueueDueCampaigns } from "@/lib/storefront/optimizer-agent";
+import { seedChapterPriorsFromFunnel } from "@/lib/storefront/lever-memory";
 
 export const storefrontOptimizerCron = inngest.createFunction(
   { id: "storefront-optimizer-cron", retries: 1, triggers: [{ cron: "30 14 * * *" }] },
@@ -30,6 +31,22 @@ export const storefrontOptimizerCron = inngest.createFunction(
         .eq("active", true);
       return [...new Set((data || []).map((r) => r.workspace_id as string))];
     });
+    // Tier-0: refresh chapter-level priors from the outcome-anchored (funnel-tree
+    // bottleneck) SDK BEFORE fan-out, so `enqueueDueCampaigns` → `nextLeverToTest`
+    // picks the day's next lever against fresh priors. Best-effort per workspace —
+    // a failure logs and lets the schedule fan-out proceed (the current chapter
+    // priors are then just from yesterday's run / the seeded CRO priors).
+    for (const workspaceId of workspaceIds) {
+      await step.run(`seed-chapter-priors-${workspaceId}`, async () => {
+        try {
+          const { updated } = await seedChapterPriorsFromFunnel({ workspaceId, apply: true, admin });
+          return { workspace_id: workspaceId, updated };
+        } catch (err) {
+          console.warn(`[storefront-optimizer-cron] seed-chapter-priors failed ws=${workspaceId}: ${(err as Error).message}`);
+          return { workspace_id: workspaceId, updated: 0, error: (err as Error).message };
+        }
+      });
+    }
     for (const workspaceId of workspaceIds) {
       await step.run(`trigger-${workspaceId}`, async () => {
         await inngest.send({ name: "storefront/optimizer-schedule", data: { workspace_id: workspaceId } });

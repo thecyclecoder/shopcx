@@ -803,7 +803,17 @@ export async function computeChapterPriorsFromDiagnostics(opts: {
 
 /**
  * Apply funnel-data-derived chapter priors onto the chapter-level [[storefront_levers]]
- * rows (Phase 1 seeding from real funnel data). Idempotent. Only mutates with apply=true.
+ * rows. Idempotent + apply-gated (apply=false is a dry run).
+ *
+ * Phase 2: SEEDING prefers the outcome-anchored `computeChapterPriorsFromDiagnostics`
+ * (per surface × product), transparently falling back per-surface to the coarse
+ * dwell+CTA prior (`computeChapterPriorsFromFunnel`) where phase-1 returned the
+ * fallback (balanced / insufficient / no matching lever row). The per-surface priors
+ * are AVERAGED into a single chapter map for the write, since `storefront_levers` is
+ * global (no per-product/lander columns) — the average is what an owner-tap opens a
+ * NEW cell against, and per-cell posteriors carry the surface-specific learning from
+ * there. When the workspace has no active policy / empty product_scope (nothing to
+ * anchor diagnostics on), degrades to the pre-phase-2 dwell+CTA path directly.
  */
 export async function seedChapterPriorsFromFunnel(opts: {
   workspaceId: string;
@@ -811,7 +821,45 @@ export async function seedChapterPriorsFromFunnel(opts: {
   admin?: Admin;
 }): Promise<{ priors: Record<string, number>; updated: number }> {
   const admin = opts.admin ?? createAdminClient();
-  const priors = await computeChapterPriorsFromFunnel({ workspaceId: opts.workspaceId, admin });
+
+  // Load the workspace's optimizer policy → product scope. No scope ⇒ no product to
+  // diagnose against; fall back to the coarse dwell+CTA prior directly.
+  const productIds = await loadPolicyProductScope(admin, opts.workspaceId);
+
+  let priors: Record<string, number>;
+  if (productIds.length === 0) {
+    priors = await computeChapterPriorsFromFunnel({ workspaceId: opts.workspaceId, admin });
+  } else {
+    // Per (product × lander_type) priors from phase-1. Each surface's map is already
+    // outcome-anchored OR dwell+CTA fallback (per-surface, decided inside phase-1).
+    // Average into a single chapter → prior map for the global storefront_levers write.
+    const contributions = new Map<string, number[]>();
+    for (const productId of productIds) {
+      const surfaces = await computeChapterPriorsFromDiagnostics({
+        workspaceId: opts.workspaceId, productId, admin,
+      });
+      for (const landerType of Object.keys(surfaces) as LanderType[]) {
+        for (const [chapter, value] of Object.entries(surfaces[landerType])) {
+          const arr = contributions.get(chapter) ?? [];
+          arr.push(value);
+          contributions.set(chapter, arr);
+        }
+      }
+    }
+    if (contributions.size === 0) {
+      // Every surface returned an empty map (no chapter-level lever taxonomy, no
+      // product handle, or funnel-tree found nothing). Coarse fallback preserves
+      // the pre-phase-2 behaviour rather than writing nothing.
+      priors = await computeChapterPriorsFromFunnel({ workspaceId: opts.workspaceId, admin });
+    } else {
+      priors = {};
+      for (const [chapter, values] of contributions) {
+        const avg = values.reduce((a, b) => a + b, 0) / values.length;
+        priors[chapter] = Math.round(avg * 1000) / 1000;
+      }
+    }
+  }
+
   let updated = 0;
   if (opts.apply) {
     for (const [chapter, prior] of Object.entries(priors)) {
@@ -825,6 +873,27 @@ export async function seedChapterPriorsFromFunnel(opts: {
     }
   }
   return { priors, updated };
+}
+
+/**
+ * Inline read of the optimizer policy's `product_scope` — kept local to avoid an
+ * import cycle through [[storefront-optimizer-agent]] (which itself imports this
+ * module for `nextLeverToTest`). Returns `[]` when the policy is absent / inactive
+ * / the table isn't present yet (pre-migration).
+ */
+async function loadPolicyProductScope(admin: Admin, workspaceId: string): Promise<string[]> {
+  try {
+    const { data } = await admin
+      .from("storefront_optimizer_policy")
+      .select("active, product_scope")
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    const row = data as { active: boolean; product_scope: string[] } | null;
+    if (!row?.active) return [];
+    return Array.isArray(row.product_scope) ? row.product_scope : [];
+  } catch {
+    return [];
+  }
 }
 
 // ── Dashboard read — "what the agent believes matters" ────────────────────────

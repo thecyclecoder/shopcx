@@ -6,7 +6,7 @@ The Phase-1 trigger of the [[../specs/storefront-optimizer-agent|Storefront Opti
 
 | Function | Trigger | Does |
 |---|---|---|
-| `storefrontOptimizerCron` | cron `30 14 * * *` (daily, after the M1 refresh at 12:00 + M2 decay at 13:00) | Fan-out: finds every workspace with an `active=true` [[../tables/storefront_optimizer_policy]] row and fires one `storefront/optimizer-schedule` event each. Heartbeats every tick. |
+| `storefrontOptimizerCron` | cron `30 14 * * *` (daily, after the M1 refresh at 12:00 + M2 decay at 13:00) | Fan-out: finds every workspace with an `active=true` [[../tables/storefront_optimizer_policy]] row. **Tier-0** (before the fan-out): runs [[../libraries/storefront-lever-memory]] `seedChapterPriorsFromFunnel({apply:true})` per workspace so the outcome-anchored chapter priors (funnel-tree bottleneck → GET-TO-PRICING vs DECISION boost, per-surface dwell+CTA fallback) are fresh for the day's lever pick. Best-effort per workspace — a seed failure logs and lets the schedule fan-out proceed. Then fires one `storefront/optimizer-schedule` event per workspace. Heartbeats every tick. |
 | `storefrontOptimizerSchedule` | event `storefront/optimizer-schedule` (concurrency 1 per `workspace_id`) | Per-workspace worker: `enqueueDueCampaigns` — insert one `storefront-optimizer` agent_jobs row per DUE surface (in-scope · no active campaign · no live job · next-best lever ≥ `MIN_LEVER_SCORE_TO_TEST`). |
 
 ## Events
@@ -14,8 +14,8 @@ The Phase-1 trigger of the [[../specs/storefront-optimizer-agent|Storefront Opti
 - **Sends:** `storefront/optimizer-schedule` (cron → worker fan-out).
 
 ## Tables
-- **Reads:** [[../tables/storefront_optimizer_policy]] (active + product_scope), [[../tables/storefront_lever_importance]] / [[../tables/storefront_levers]] (next-best lever), [[../tables/storefront_experiments]] (surface dedup), [[../tables/agent_jobs]] (queue dedup).
-- **Writes:** [[../tables/agent_jobs]] (`kind='storefront-optimizer'`, `spec_slug=product:lander:audience`, `instructions={workspace_id, product_id, lander_type, audience, lever_key, lever_reason}`).
+- **Reads:** [[../tables/storefront_optimizer_policy]] (active + product_scope), [[../tables/storefront_lever_importance]] / [[../tables/storefront_levers]] (next-best lever), [[../tables/storefront_experiments]] (surface dedup), [[../tables/agent_jobs]] (queue dedup), [[../tables/storefront_events]] + [[../tables/storefront_sessions]] (funnel-tree bottleneck signal for the Tier-0 chapter-prior seed).
+- **Writes:** [[../tables/agent_jobs]] (`kind='storefront-optimizer'`, `spec_slug=product:lander:audience`, `instructions={workspace_id, product_id, lander_type, audience, lever_key, lever_reason}`); [[../tables/storefront_levers]] `prior` (chapter-level rows, refreshed daily by the Tier-0 seed).
 
 ## Gotchas
 - **Cadence after the learning loop.** Scheduled after the daily M1 attribution refresh + M2 decay so the next-best lever reflects the day's committed learnings.
