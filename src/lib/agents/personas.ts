@@ -250,6 +250,15 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-lime-100 text-lime-800 border-lime-200 dark:bg-lime-900/30 dark:text-lime-300 dark:border-lime-900/40",
     dot: "bg-lime-500", ring: "bg-lime-50 dark:bg-lime-900/20", accent: "text-lime-600 dark:text-lime-400",
   },
+  // ── Growth workers (agent_jobs kinds) — report to Max/Growth ─────────────────
+  "storefront-optimizer": {
+    key: "storefront-optimizer", name: "Cleo", role: "Storefront CRO", emoji: "🎯",
+    personality: "Runs the storefront conversion loop — reads the funnel, forms one-lever hypotheses, runs bandit campaigns, learns, promotes/kills — to grow predicted-LTV-per-visitor. Autonomous within Max's leash; drafts a spec when a test needs new code.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}cleo-storefront-optimizer.jpg?v=1`,
+    chip: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-900/40",
+    dot: "bg-emerald-500", ring: "bg-emerald-50 dark:bg-emerald-900/20", accent: "text-emerald-600 dark:text-emerald-400",
+  },
 };
 
 /**
@@ -339,6 +348,13 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Answer read-only 'why / how / is it working' developer questions",
     "Investigate the code + live state to ground the answer",
     "Never mutate — surface findings back to the message center",
+  ],
+  "storefront-optimizer": [
+    "Read the funnel + lever-importance map and form one atomic, grounded hypothesis per campaign",
+    "Run it as a Thompson-sampling bandit vs a holdout; promote the winner, kill the loser, auto-rollback on an LTV-proxy or refund-spike regression",
+    "Optimize predicted-LTV-per-visitor across every DB-driven surface — chapters (incl. chapter reorder), cart-recovery flow, lead popup, survey",
+    "Stay within Max's leash — reversible levers auto-run within policy; offers + structural rewrites escalate for approval",
+    "Draft a spec (never write code) when a test needs a capability that doesn't exist; hand it to Platform to build",
   ],
 };
 
