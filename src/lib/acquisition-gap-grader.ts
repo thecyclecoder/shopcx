@@ -34,9 +34,17 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GRADER_MODEL = SONNET_MODEL;
+/** The `model` stamp for a grade produced by the box-hosted grader (Max session — no API bill).
+ *  Mirrors [[agent-grader]] BOX_GRADE_MODEL and [[campaign-grader]] BOX_CAMPAIGN_GRADE_MODEL so a
+ *  box-vs-API split stays queryable in dashboards. grading-cascade-to-box-sessions Phase 4. */
+const BOX_GAP_GRADE_MODEL = "box-max-session";
 
 /** A large initial-vs-revised grade gap at/above this magnitude proposes a calibration rule. */
 export const REVISED_GAP_RULE_THRESHOLD = 3;
+
+/** Cap on how many gaps one batched box grading session grades. Mirrors DIRECTOR_GRADE_BATCH_CAP —
+ *  each candidate needs a small DB read + a Sonnet-sized grade turn. */
+const GAP_GRADE_BATCH_CAP = 8;
 
 /** A gap_type is SUPPRESSED from re-surfacing once its avg grade falls at/below this … */
 export const SUPPRESS_GRADE_THRESHOLD = 4;
@@ -418,6 +426,212 @@ Output JSON:
     derived_from_gap_id: opts.gapId,
     derived_from_grade_id: opts.gradeId,
   });
+}
+
+// ── Box-hosted grading (grading-cascade-to-box-sessions Phase 4) ────────────────
+
+/** One ungraded / pending-revised gap the box grader will inspect. Discriminated on `mode`. */
+export interface GapGradeCandidate {
+  source: GapSource;
+  gap_id: string;
+  mode: GradeMode;
+}
+
+/**
+ * Pick the batch of ungraded / pending-revised gaps for the box-hosted grader. Mirrors
+ * [[campaign-grader]] `pickCampaignGradeBatch` — the caller enqueues ONE `gap-grade` `agent_jobs`
+ * row per batch-ready workspace with `instructions.candidates = [...]`; the box lane
+ * (scripts/builder-worker.ts → runGapGradeJob) grades each candidate and writes acquisition_gap_grades
+ * via `applyBoxGapGrade` (same UNIQUE(workspace_id, gap_source, gap_id) upsert + `graded_by='human'`
+ * override invariant). Best-effort — a no-op (empty array) while nothing is ungraded / awaiting-revision.
+ *
+ * Selection: (1) INITIAL — every acted-on gap (status ∈ approved｜rejected) that has no grade row
+ * yet, then (2) REVISED — every graded gap whose routed outcome has since resolved (won｜lost) and
+ * whose grade_revised is still null. Truncated to `cap`; the rest ride the next beat.
+ */
+export async function pickGapGradeBatch(opts: {
+  workspaceId: string;
+  admin?: Admin;
+  cap?: number;
+}): Promise<GapGradeCandidate[]> {
+  const admin = opts.admin ?? createAdminClient();
+  const cap = opts.cap ?? GAP_GRADE_BATCH_CAP;
+  const out: GapGradeCandidate[] = [];
+
+  try {
+    // ── Existing-grade set — paginated past the 1000-row PostgREST cap. ──
+    interface GradeRow { gap_source: string; gap_id: string; grade_initial: number | null; grade_revised: number | null; graded_by: string }
+    const graded = new Map<string, GradeRow>();
+    for (let from = 0; ; from += 1000) {
+      const { data } = await admin
+        .from("acquisition_gap_grades")
+        .select("gap_source, gap_id, grade_initial, grade_revised, graded_by")
+        .eq("workspace_id", opts.workspaceId)
+        .range(from, from + 999);
+      const rows = (data as GradeRow[]) || [];
+      for (const r of rows) graded.set(`${r.gap_source}:${r.gap_id}`, r);
+      if (rows.length < 1000) break;
+    }
+
+    // ── INITIAL candidates — acted-on gaps with no grade row yet. ──
+    const candidates: Array<{ source: GapSource; id: string }> = [];
+    for (const source of ["ad", "lander"] as GapSource[]) {
+      const table = source === "ad" ? "ad_gap_recommendations" : "lander_recommendations";
+      const { data } = await admin
+        .from(table)
+        .select("id")
+        .eq("workspace_id", opts.workspaceId)
+        .in("status", ["approved", "rejected"])
+        .order("created_at", { ascending: false })
+        .limit(500);
+      for (const r of (data as Array<{ id: string }>) || []) candidates.push({ source, id: r.id });
+    }
+
+    for (const c of candidates) {
+      if (out.length >= cap) break;
+      const key = `${c.source}:${c.id}`;
+      const g = graded.get(key);
+      if (g && g.grade_initial != null) continue; // already initial-graded
+      if (g && g.graded_by === "human") continue; // human ownership — never re-emit
+      out.push({ source: c.source, gap_id: c.id, mode: "initial" });
+    }
+
+    // ── REVISED candidates — grade_initial present, grade_revised null, outcome must have resolved. ──
+    // The applyBoxGapGrade + deriveOutcome path re-checks won/lost, so we just surface anything that
+    // MIGHT be ready. Truncated to `cap`.
+    if (out.length < cap) {
+      for (const [, g] of graded) {
+        if (out.length >= cap) break;
+        if (g.grade_initial != null && g.grade_revised == null && g.graded_by !== "human") {
+          out.push({ source: g.gap_source as GapSource, gap_id: g.gap_id, mode: "revised" });
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`[acquisition-gap-grader] pickGapGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return out;
+}
+
+interface ExistingGapGradeRow {
+  id: string;
+  grade_initial: number | null;
+  grade_revised: number | null;
+  outcome_state: OutcomeState;
+  graded_by: string;
+}
+
+/**
+ * Apply a gap grade produced by the box-hosted grading session
+ * (grading-cascade-to-box-sessions Phase 4) — a Max `claude -p` that reads the gap + its routed
+ * outcome from the DB and grades from concrete evidence. Reuses the same UNIQUE(workspace_id,
+ * gap_source, gap_id) upsert + `graded_by='human'` override invariant as the API path, so the
+ * training signal (loadGapTypeGradeSignal + loadSuppressedGapTypes) fires identically off
+ * box-written grades. `model` is stamped `box-max-session`; no `ai_token_usage` write (Max sub has
+ * no per-token API bill — the CEO directive was $0 marginal grading). A large initial-vs-revised
+ * gap proposes an `acquisition_grader_prompts` calibration rule via `proposeGapCalibrationRule`
+ * (Opus) — preserved so the calibration arc still fires from box grades.
+ */
+export async function applyBoxGapGrade(opts: {
+  workspaceId: string;
+  source: GapSource;
+  gapId: string;
+  mode: GradeMode;
+  grade: number;
+  gapQuality?: number;
+  outcomeQuality?: number;
+  reasoning: string;
+  admin?: Admin;
+}): Promise<GapGradeResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const mode = opts.mode;
+
+  const gap = await loadGapRow(admin, opts.source, opts.gapId);
+  if (!gap) return { ok: false, reason: "gap_not_found" };
+
+  const outcome = await deriveOutcome(admin, gap);
+  if (!outcome.state) return { ok: false, reason: "gap_not_acted_on" };
+
+  const { data: existing } = await admin
+    .from("acquisition_gap_grades")
+    .select("id, grade_initial, grade_revised, outcome_state, graded_by")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("gap_source", opts.source)
+    .eq("gap_id", opts.gapId)
+    .maybeSingle();
+  const existingRow = (existing as ExistingGapGradeRow) ?? null;
+
+  const grade = clampGrade(opts.grade);
+  const gapQuality = opts.gapQuality != null ? clampGrade(opts.gapQuality) : grade;
+  const outcomeQuality = opts.outcomeQuality != null ? clampGrade(opts.outcomeQuality) : grade;
+  const now = new Date().toISOString();
+
+  if (mode === "initial") {
+    if (existingRow && existingRow.graded_by === "human") {
+      return { ok: true, grade_id: existingRow.id, mode, grade: existingRow.grade_initial ?? grade, idempotent_update: true };
+    }
+    const payload = {
+      workspace_id: gap.workspace_id,
+      gap_source: opts.source,
+      gap_id: gap.id,
+      product_id: gap.product_id,
+      gap_type: gap.gap_type,
+      grade_initial: grade,
+      grade_initial_reasoning: opts.reasoning,
+      gap_quality: gapQuality,
+      outcome_quality: outcomeQuality,
+      outcome_state: outcome.state,
+      initial_graded_at: now,
+      graded_by: "agent" as const,
+      model: BOX_GAP_GRADE_MODEL,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_cents: 0,
+      updated_at: now,
+    };
+    let gradeId = existingRow?.id;
+    if (existingRow) {
+      await admin.from("acquisition_gap_grades").update(payload).eq("id", existingRow.id);
+    } else {
+      const { data: ins, error } = await admin.from("acquisition_gap_grades").insert(payload).select("id").single();
+      if (error) return { ok: false, reason: error.message };
+      gradeId = ins?.id;
+    }
+    return { ok: true, grade_id: gradeId, mode, grade, gap_quality: gapQuality, outcome_quality: outcomeQuality, outcome_state: outcome.state, idempotent_update: !!existingRow };
+  }
+
+  // mode === "revised"
+  if (!existingRow?.grade_initial) return { ok: false, reason: "no_initial_grade_yet" };
+  if (existingRow.grade_revised != null) return { ok: true, grade_id: existingRow.id, mode, grade: existingRow.grade_revised, idempotent_update: true };
+  if (existingRow.graded_by === "human") return { ok: true, grade_id: existingRow.id, mode, grade: existingRow.grade_revised ?? grade, idempotent_update: true };
+  if (outcome.state !== "won" && outcome.state !== "lost") return { ok: false, reason: "outcome_not_resolved" };
+
+  await admin
+    .from("acquisition_gap_grades")
+    .update({
+      grade_revised: grade,
+      grade_revised_reasoning: opts.reasoning,
+      outcome_state: outcome.state,
+      revised_graded_at: now,
+      updated_at: now,
+    })
+    .eq("id", existingRow.id);
+
+  const initial = existingRow.grade_initial ?? grade;
+  if (Math.abs(initial - grade) >= REVISED_GAP_RULE_THRESHOLD) {
+    await proposeGapCalibrationRule(admin, {
+      workspaceId: gap.workspace_id,
+      source: opts.source,
+      gapId: gap.id,
+      gradeId: existingRow.id,
+      gradeInitial: initial,
+      gradeRevised: grade,
+      revisedReasoning: opts.reasoning,
+      gapType: gap.gap_type,
+    }).catch((e) => console.warn(`[acquisition-gap-grader] gap-rule proposal failed gap=${gap.id}: ${e instanceof Error ? e.message : String(e)}`));
+  }
+
+  return { ok: true, grade_id: existingRow.id, mode, grade, gap_quality: gapQuality, outcome_quality: outcomeQuality, outcome_state: outcome.state };
 }
 
 /**

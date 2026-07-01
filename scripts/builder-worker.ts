@@ -217,6 +217,39 @@ const MAX_DIRECTOR_GRADE = Number(process.env.AGENT_TODO_MAX_DIRECTOR_GRADE || 1
 // sized ceiling — a chatty batch (8 calls each with a non-trivial approved diff to walk) can take
 // longer than a repair/regression turn.
 const DIRECTOR_GRADE_TIMEOUT_MS = 25 * 60 * 1000;
+// Campaign-grade lane (grading-cascade-to-box-sessions Phase 4): the box-hosted storefront campaign
+// grader — one Max `claude -p` session per batch reads each concluded campaign's REAL data (variant
+// rollups, lever posterior at design time, cohort reconciliation for revised mode) via read-only DB
+// probes + reads any referenced storefront-optimizer / lever code, then emits per-campaign grades
+// against the same rubric + approved `storefront_grader_prompts` calibration rules the API path used.
+// Writes storefront_campaign_grades via `applyBoxCampaignGrade` — same UNIQUE(experiment_id) upsert +
+// `graded_by='human'` override invariant as the deployed gradeCampaign path, so loadLeverGradeSignal
+// (the training signal back to the M4 optimizer + M2 lever selector) fires identically off box-written
+// grades. Concurrency-1 own lane; no ANTHROPIC_API_KEY billed (Max plan). Retires the deployed Sonnet
+// path — no more `ai_token_usage` rows with `purpose='storefront_campaign_grading'`. Enqueued by
+// experiment-refresh (initial mode) and storefront-ltv-reconcile (revised mode) — one batched box
+// session per beat, dedup-gated. CEO directive 2026-06-30: every grader box-side. See
+// docs/brain/libraries/campaign-grader.md.
+const MAX_CAMPAIGN_GRADE = Number(process.env.AGENT_TODO_MAX_CAMPAIGN_GRADE || 1);
+// One campaign-grade pass: read-only Max session reading a batch (≤ CAMPAIGN_GRADE_BATCH_CAP=8) of
+// concluded campaigns' rollups + variants + reconciliation. Lighter than a build — no code diff to
+// walk — but the Opus calibration-rule proposal on a large gap can extend the tail.
+const CAMPAIGN_GRADE_TIMEOUT_MS = 20 * 60 * 1000;
+// Gap-grade lane (grading-cascade-to-box-sessions Phase 4): the box-hosted acquisition-gap grader —
+// one Max `claude -p` session per batch reads each acted-on gap + its routed outcome (via
+// deriveOutcome on the routed experiment / build) and grades against the same rubric + approved
+// `acquisition_grader_prompts` calibration rules the API path used. Writes acquisition_gap_grades
+// via `applyBoxGapGrade` — same UNIQUE(workspace_id, gap_source, gap_id) upsert + `graded_by='human'`
+// override invariant as the deployed gradeGap path, so the scouts' training signal
+// (loadGapTypeGradeSignal + loadSuppressedGapTypes) fires identically off box-written grades.
+// Concurrency-1 own lane; no ANTHROPIC_API_KEY billed. Retires the deployed Sonnet path — no more
+// `ai_token_usage` rows with `purpose='acquisition_gap_grading'`. Enqueued by
+// acquisition-research-cadence — one batched box session per daily beat, dedup-gated. CEO directive
+// 2026-06-30: every grader box-side. See docs/brain/libraries/acquisition-gap-grader.md.
+const MAX_GAP_GRADE = Number(process.env.AGENT_TODO_MAX_GAP_GRADE || 1);
+// One gap-grade pass: read-only Max session reading a batch (≤ GAP_GRADE_BATCH_CAP=8) of acted-on
+// gaps + their routed outcomes. Similar shape / duration to campaign-grade.
+const GAP_GRADE_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -403,7 +436,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -12559,6 +12592,520 @@ async function runDirectorGradeJob(job: Job) {
   }
 }
 
+// ── Box-hosted storefront-campaign grader (grading-cascade-to-box-sessions Phase 4) ───
+// A kind='campaign-grade' job runs read-only on Max. It grades a BATCH of concluded storefront
+// campaigns (storefront_experiments status ∈ promoted｜killed｜rolled_back) against the storefront
+// campaign-grader rubric + approved storefront_grader_prompts calibration rules — reading the campaign
+// artifact (variant rollups + patch JSON + lever posterior at design time + optional M3 reconciliation
+// for revised mode) via read-only DB probes rather than a metadata summary. Writes
+// storefront_campaign_grades via `applyBoxCampaignGrade` — same UNIQUE(experiment_id) upsert +
+// `graded_by='human'` override invariant as the deployed gradeCampaign path. Retires the deployed
+// Sonnet path — no more `ai_token_usage` rows with `purpose='storefront_campaign_grading'`. Enqueued
+// from experiment-refresh (initial mode) and storefront-ltv-reconcile (revised mode).
+// instructions = JSON {candidates: CampaignGradeCandidate[]}.
+async function runCampaignGradeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "campaign-grade", sandbox: "max", timeout: CAMPAIGN_GRADE_TIMEOUT_MS });
+}
+
+interface CampaignGradeDecisionJson {
+  experiment_id: string;
+  mode: "initial" | "revised";
+  grade: number;
+  hypothesis_quality?: number;
+  result_quality?: number;
+  reasoning: string;
+}
+
+async function runCampaignGradeJob(job: Job) {
+  const tag = `[campaign-grade:${job.id.slice(0, 8)}]`;
+  let instr: { candidates?: unknown } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  interface Candidate { experiment_id: string; mode: "initial" | "revised" }
+  const rawCandidates = Array.isArray(instr.candidates) ? (instr.candidates as unknown[]) : [];
+  const candidates: Candidate[] = [];
+  for (const c of rawCandidates) {
+    if (!c || typeof c !== "object") continue;
+    const r = c as Record<string, unknown>;
+    if (typeof r.experiment_id === "string" && (r.mode === "initial" || r.mode === "revised")) {
+      candidates.push({ experiment_id: r.experiment_id, mode: r.mode });
+    }
+  }
+  if (!candidates.length) {
+    await update(job.id, { status: "completed", log_tail: "no candidates in instructions — nothing to grade" });
+    console.log(`${tag} no candidates → no-op`);
+    return;
+  }
+
+  const { applyBoxCampaignGrade } = await import("../src/lib/storefront/campaign-grader");
+  const a = await admin();
+
+  // Load per-candidate context: the experiment row + its variant rollups + design-time lever posterior +
+  // any cohort reconciliation (revised mode). The box session drives its evidence off these blocks + a
+  // read of any referenced storefront-optimizer code.
+  interface ExpRow {
+    id: string;
+    workspace_id: string;
+    product_id: string;
+    lander_type: string;
+    audience: string;
+    lever: string;
+    hypothesis: string | null;
+    status: string;
+    holdout_pct: number;
+    last_decision: Record<string, unknown> | null;
+  }
+  interface VariantRow {
+    label: string;
+    is_control: boolean;
+    patch: Record<string, unknown>;
+    sessions: number;
+    conversions: number;
+    sub_attach: number;
+    revenue_cents: number;
+    ltv_proxy_cents: number;
+  }
+
+  interface ContextBlock { candidate: Candidate; exp: ExpRow; variants: VariantRow[]; posterior: { importance: number; prior: number; n_tests: number } | null; reconciliation: { proxy_ltv_cents: number; actual_ltv_cents: number; error_pct: number } | null }
+
+  const blocks: ContextBlock[] = [];
+  let workspaceId: string | null = null;
+
+  for (const c of candidates) {
+    const { data: exp } = await a
+      .from("storefront_experiments")
+      .select("id, workspace_id, product_id, lander_type, audience, lever, hypothesis, status, holdout_pct, last_decision")
+      .eq("id", c.experiment_id)
+      .maybeSingle();
+    if (!exp) continue;
+    const experiment = exp as ExpRow;
+    workspaceId = workspaceId ?? experiment.workspace_id;
+
+    const { data: variantData } = await a
+      .from("storefront_experiment_variants")
+      .select("label, is_control, patch, sessions, conversions, sub_attach, revenue_cents, ltv_proxy_cents")
+      .eq("experiment_id", experiment.id);
+    const variants = (variantData as VariantRow[]) || [];
+
+    let posterior: { importance: number; prior: number; n_tests: number } | null = null;
+    try {
+      const { data: lever } = await a.from("storefront_levers").select("id").eq("lever_key", experiment.lever).maybeSingle();
+      if (lever) {
+        const { data } = await a
+          .from("storefront_lever_importance")
+          .select("importance, prior, n_tests")
+          .eq("lever_id", (lever as { id: string }).id)
+          .eq("product_id", experiment.product_id)
+          .eq("lander_type", experiment.lander_type)
+          .eq("audience", experiment.audience)
+          .maybeSingle();
+        posterior = (data as { importance: number; prior: number; n_tests: number }) ?? null;
+      }
+    } catch { /* best-effort */ }
+
+    let reconciliation: { proxy_ltv_cents: number; actual_ltv_cents: number; error_pct: number } | null = null;
+    if (c.mode === "revised") {
+      try {
+        const { data } = await a
+          .from("storefront_ltv_reconciliations")
+          .select("proxy_ltv_cents, actual_ltv_cents, error_pct, cohort_snapshot_date")
+          .eq("workspace_id", experiment.workspace_id)
+          .eq("product_id", experiment.product_id)
+          .eq("lander_type", experiment.lander_type)
+          .eq("audience", experiment.audience)
+          .order("cohort_snapshot_date", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        reconciliation = (data as { proxy_ltv_cents: number; actual_ltv_cents: number; error_pct: number }) ?? null;
+      } catch { /* best-effort */ }
+    }
+
+    blocks.push({ candidate: c, exp: experiment, variants, posterior, reconciliation });
+  }
+
+  if (!blocks.length) {
+    await update(job.id, { status: "completed", log_tail: `no resolvable candidates (${candidates.length} raw)` });
+    console.log(`${tag} candidates all resolved to nothing`);
+    return;
+  }
+
+  // Approved calibration rules — storefront_grader_prompts (Growth-director-approved rubric corrections).
+  const { data: rules } = await a
+    .from("storefront_grader_prompts")
+    .select("title, content")
+    .eq("workspace_id", workspaceId!)
+    .eq("status", "approved")
+    .order("sort_order", { ascending: true });
+  const calibrationBlock = ((rules as Array<{ title: string; content: string }>) || []).length
+    ? "\n\nCALIBRATION RULES (Growth-director-approved adjustments to the rubric — apply them):\n" +
+      ((rules as Array<{ title: string; content: string }>) || []).map((r) => `  • ${r.title}: ${r.content}`).join("\n")
+    : "";
+
+  const campaignBlocks = blocks
+    .map((b) => {
+      const ltvPerSession = (v: VariantRow) => (v.sessions > 0 ? Math.round(v.ltv_proxy_cents / v.sessions) : 0);
+      const cvr = (v: VariantRow) => (v.sessions > 0 ? Math.round((v.conversions / v.sessions) * 1000) / 10 : 0);
+      const control = b.variants.find((v) => v.is_control);
+      const arms = b.variants.filter((v) => !v.is_control);
+      const decision = b.exp.last_decision || {};
+      const reasoning = typeof decision.reasoning === "string" ? decision.reasoning : "(none recorded)";
+      const leverClass = typeof decision.lever_class === "string" ? decision.lever_class : "(unknown)";
+      const armLines = b.variants.map((v) => `    - ${v.label}${v.is_control ? " (control/holdout)" : ""}: sessions=${v.sessions}, cvr=${cvr(v)}%, sub_attach=${v.sub_attach}, ltv_proxy/session=${ltvPerSession(v)}¢`);
+      const controlLtv = control ? ltvPerSession(control) : 0;
+      const bestArm = arms.sort((x, y) => ltvPerSession(y) - ltvPerSession(x))[0];
+      const bestLtv = bestArm ? ltvPerSession(bestArm) : 0;
+      const relLift = controlLtv > 0 ? Math.round(((bestLtv - controlLtv) / controlLtv) * 1000) / 10 : null;
+      const parts = [
+        `CAMPAIGN — experiment ${b.exp.id} · mode=${b.candidate.mode}`,
+        `  surface: product=${b.exp.product_id} · lander=${b.exp.lander_type} · audience=${b.exp.audience}`,
+        `  lever under test: ${b.exp.lever} (class=${leverClass})`,
+        b.posterior
+          ? `  lever posterior at design time: importance=${b.posterior.importance} (prior=${b.posterior.prior}, n_tests=${b.posterior.n_tests})`
+          : `  lever posterior at design time: (no learned posterior — cold start on the CRO prior)`,
+        `  holdout: ${Math.round((b.exp.holdout_pct || 0) * 100)}%`,
+        ``,
+        `  HYPOTHESIS (the agent's bet): ${b.exp.hypothesis || "(none recorded)"}`,
+        `  CITED REASONING (funnel signal + lever posterior): ${reasoning}`,
+        ``,
+        `  VARIANT PRODUCED: ${arms.map((v) => `${v.label} → patch ${JSON.stringify(v.patch).slice(0, 300)}`).join(" | ") || "(none)"}`,
+        ``,
+        `  PROXY RESULT (the reward = predicted-LTV-per-visitor):`,
+        ...armLines,
+        `    best-arm vs control relative LTV-proxy lift: ${relLift === null ? "n/a" : `${relLift}%`}`,
+        `  BANDIT DECISION: status=${b.exp.status}, action=${String(decision.action ?? "?")}, rule=${String(decision.rule ?? "?")}, win_prob=${String(decision.win_prob ?? "n/a")}`,
+        b.reconciliation
+          ? `  ACTUAL 4-MONTH LTV (M3 reconciler): proxy=${b.reconciliation.proxy_ltv_cents}¢/visitor vs actual=${b.reconciliation.actual_ltv_cents}¢/visitor (error_pct=${b.reconciliation.error_pct} — ${b.reconciliation.error_pct < 0 ? "proxy OVER-predicted" : "proxy UNDER-predicted"})`
+          : ``,
+      ].filter((l) => l !== "");
+      return parts.join("\n");
+    })
+    .join("\n\n");
+
+  const prompt = [
+    `You are the Head of Growth of ShopCX on Max, grading concluded storefront optimizer campaigns using the campaign-grade skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
+    ``,
+    `Your job: grade each concluded campaign below 1–10 against the campaign-grader rubric. THE DEFINING RULE: grade HYPOTHESIS QUALITY separately from RESULT — a sound hypothesis that lost is good learning (score hypothesis_quality high), a lucky win from a sloppy hypothesis is low, do NOT reward outcome luck. UNLIKE the deployed Sonnet sweep that only saw a paraphrased summary through the Anthropic API, you can Read the storefront-optimizer code that generated the hypothesis (src/lib/storefront/) + probe the DB for context — cite concrete file:line + numeric evidence in your reasoning.`,
+    ``,
+    `RUBRIC:`,
+    `  • hypothesis_quality (1-10): was the bet sound at design time — did it cite a real funnel signal / lever posterior, target a high-leverage lever, form a falsifiable CRO hypothesis, size the holdout sensibly? A SOUND hypothesis that LOST scores HIGH.`,
+    `  • result_quality (1-10): how did the campaign actually perform on the reward (predicted-LTV-per-visitor lift vs control${" — for revised mode, reconciled against the 4-month actual LTV"})? Thin exposure / marginal win_prob caps this at 6.`,
+    `  • grade (1-10): overall. Weight hypothesis_quality ≥ result_quality — we're training an agent to make SOUND BETS, not to get lucky.`,
+    calibrationBlock,
+    ``,
+    `MODE PER CANDIDATE:`,
+    `  • initial — at significance, on the predicted-LTV proxy. Actual 4-month LTV is NOT known yet.`,
+    `  • revised — same campaign, ~4 months later once M3 landed the cohort's actual LTV. Judge whether the proxy-time call HELD UP. HYPOTHESIS quality rarely changes on revision — it was sound or sloppy at design time regardless of the number. RESULT quality is where the truth-check moves the score.`,
+    ``,
+    `SCORING: 10 exemplary · 8-9 strong · 6-7 acceptable · 4-5 mediocre · 2-3 poor · 1 indefensible.`,
+    ``,
+    `THE BATCH — ${blocks.length} campaign(s) to grade:`,
+    ``,
+    campaignBlocks,
+    ``,
+    `Investigation protocol per campaign (bounded):`,
+    `  1. Read the referenced lever's code in src/lib/storefront/ (the file that GENERATED the hypothesis — usually src/lib/storefront/optimizer-agent.ts, lever-memory.ts, or a lever-specific file) to check that the CITED REASONING actually matches how the code selects levers.`,
+    `  2. Sanity-check numbers: exposure (sessions), win probability, sub_attach uplift on top of LTV. A "win" at n=50 vs n=1000 is fundamentally different — call that out.`,
+    `  3. For revised mode: quote the reconciliation error_pct number — the initial grade was blind to this; your revised grade is the truth-check.`,
+    ``,
+    `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+    `  {"status":"completed","decisions":[{"experiment_id":"…","mode":"initial|revised","grade":<1-10>,"hypothesis_quality":<1-10>,"result_quality":<1-10>,"reasoning":"<2-4 sentences citing file:line where possible + numeric evidence>"}]}`,
+    `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ``,
+    `Every candidate in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based — never a paraphrase of the campaign's stored reasoning string.`,
+  ].join("\n");
+
+  try {
+    const { session, resultText, isError, raw, usage, model, configDir: gradeDir } = await runBoxLane(
+      (cfg, sid) => runCampaignGradeClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, gradeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; decisions?: CampaignGradeDecisionJson[] }>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `campaign-grade error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.decisions)) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "campaign-grade produced no parseable decisions", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable decisions`);
+      return;
+    }
+
+    const validKeys = new Set(blocks.map((b) => `${b.exp.id}:${b.candidate.mode}`));
+    let applied = 0;
+    let skipped = 0;
+    for (const d of parsed.decisions) {
+      if (!d || typeof d.experiment_id !== "string" || (d.mode !== "initial" && d.mode !== "revised") || typeof d.grade !== "number") {
+        skipped++; continue;
+      }
+      if (!validKeys.has(`${d.experiment_id}:${d.mode}`)) { skipped++; continue; }
+      const r = await applyBoxCampaignGrade({
+        workspaceId: workspaceId!,
+        experimentId: d.experiment_id,
+        mode: d.mode,
+        grade: d.grade,
+        hypothesisQuality: typeof d.hypothesis_quality === "number" ? d.hypothesis_quality : undefined,
+        resultQuality: typeof d.result_quality === "number" ? d.result_quality : undefined,
+        reasoning: String(d.reasoning ?? ""),
+        admin: a,
+      });
+      if (r.ok) applied++;
+      else skipped++;
+    }
+
+    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · candidates=${blocks.length}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
+// ── Box-hosted acquisition-gap grader (grading-cascade-to-box-sessions Phase 4) ───
+// A kind='gap-grade' job runs read-only on Max. It grades a BATCH of acted-on competitive gaps
+// (ad_gap_recommendations / lander_recommendations status ∈ approved｜rejected) against the
+// gap-grader rubric + approved acquisition_grader_prompts calibration rules — reading the gap +
+// its routed outcome (the routed experiment / build) via read-only DB probes, plus the scout code
+// that surfaced the gap when helpful. Writes acquisition_gap_grades via `applyBoxGapGrade` — same
+// UNIQUE(workspace_id, gap_source, gap_id) upsert + `graded_by='human'` override invariant as the
+// deployed gradeGap path. Retires the deployed Sonnet path — no more `ai_token_usage` rows with
+// `purpose='acquisition_gap_grading'`. Enqueued by acquisition-research-cadence.
+// instructions = JSON {candidates: GapGradeCandidate[]}.
+async function runGapGradeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "gap-grade", sandbox: "max", timeout: GAP_GRADE_TIMEOUT_MS });
+}
+
+interface GapGradeDecisionJson {
+  source: "ad" | "lander";
+  gap_id: string;
+  mode: "initial" | "revised";
+  grade: number;
+  gap_quality?: number;
+  outcome_quality?: number;
+  reasoning: string;
+}
+
+async function runGapGradeJob(job: Job) {
+  const tag = `[gap-grade:${job.id.slice(0, 8)}]`;
+  let instr: { candidates?: unknown } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  interface Candidate { source: "ad" | "lander"; gap_id: string; mode: "initial" | "revised" }
+  const rawCandidates = Array.isArray(instr.candidates) ? (instr.candidates as unknown[]) : [];
+  const candidates: Candidate[] = [];
+  for (const c of rawCandidates) {
+    if (!c || typeof c !== "object") continue;
+    const r = c as Record<string, unknown>;
+    if ((r.source === "ad" || r.source === "lander") && typeof r.gap_id === "string" && (r.mode === "initial" || r.mode === "revised")) {
+      candidates.push({ source: r.source, gap_id: r.gap_id, mode: r.mode });
+    }
+  }
+  if (!candidates.length) {
+    await update(job.id, { status: "completed", log_tail: "no candidates in instructions — nothing to grade" });
+    console.log(`${tag} no candidates → no-op`);
+    return;
+  }
+
+  const { applyBoxGapGrade } = await import("../src/lib/acquisition-gap-grader");
+  const a = await admin();
+
+  interface GapRow {
+    id: string;
+    workspace_id: string;
+    product_id: string | null;
+    gap_type: string;
+    title: string;
+    rationale: string;
+    status: string;
+    route: string;
+    route_result: Record<string, unknown> | null;
+    evidence: Record<string, unknown> | null;
+  }
+  interface OutcomeContext { state: string | null; detail: string }
+  interface ContextBlock { candidate: Candidate; gap: GapRow; outcome: OutcomeContext }
+
+  const blocks: ContextBlock[] = [];
+  let workspaceId: string | null = null;
+
+  for (const c of candidates) {
+    const table = c.source === "ad" ? "ad_gap_recommendations" : "lander_recommendations";
+    const { data: gapData } = await a
+      .from(table)
+      .select("id, workspace_id, product_id, gap_type, title, rationale, status, route, route_result, evidence")
+      .eq("id", c.gap_id)
+      .maybeSingle();
+    if (!gapData) continue;
+    const gap = gapData as GapRow;
+    workspaceId = workspaceId ?? gap.workspace_id;
+
+    // Derive outcome mirroring the library's deriveOutcome, inline (best-effort).
+    let outcome: OutcomeContext = { state: null, detail: "not acted-on yet" };
+    if (gap.status === "rejected") {
+      outcome = { state: "rejected", detail: "the owner rejected this gap" };
+    } else if (gap.status === "approved") {
+      const rr = gap.route_result || {};
+      const expId = typeof rr.experiment_id === "string" ? rr.experiment_id : null;
+      const jobId = typeof rr.agent_job_id === "string" ? rr.agent_job_id : null;
+      if (expId) {
+        const { data } = await a.from("storefront_experiments").select("status").eq("id", expId).maybeSingle();
+        const st = ((data as { status?: string } | null)?.status as string) || "draft";
+        if (st === "promoted") outcome = { state: "won", detail: "the routed experiment was promoted (a validated win)" };
+        else if (["killed", "rolled_back"].includes(st)) outcome = { state: "lost", detail: `the routed experiment was ${st}` };
+        else if (st !== "draft") outcome = { state: "shipped", detail: `the routed experiment is live (status=${st})` };
+        else outcome = { state: "approved", detail: "routed to an experiment still in draft" };
+      } else if (jobId) {
+        const { data } = await a.from("agent_jobs").select("status").eq("id", jobId).maybeSingle();
+        const st = ((data as { status?: string } | null)?.status as string) || "queued";
+        if (st === "completed" || st === "merged") outcome = { state: "shipped", detail: "the routed Build job completed (a PR landed)" };
+        else outcome = { state: "approved", detail: `routed to a Build job (status=${st})` };
+      } else {
+        outcome = { state: "approved", detail: "approved but not yet routed to an artifact" };
+      }
+    }
+
+    blocks.push({ candidate: c, gap, outcome });
+  }
+
+  if (!blocks.length) {
+    await update(job.id, { status: "completed", log_tail: `no resolvable candidates (${candidates.length} raw)` });
+    console.log(`${tag} candidates all resolved to nothing`);
+    return;
+  }
+
+  // Approved calibration rules — acquisition_grader_prompts (Growth-director-approved rubric corrections).
+  const { data: rules } = await a
+    .from("acquisition_grader_prompts")
+    .select("title, content")
+    .eq("workspace_id", workspaceId!)
+    .eq("status", "approved")
+    .order("sort_order", { ascending: true });
+  const calibrationBlock = ((rules as Array<{ title: string; content: string }>) || []).length
+    ? "\n\nCALIBRATION RULES (Growth-director-approved adjustments to the rubric — apply them):\n" +
+      ((rules as Array<{ title: string; content: string }>) || []).map((r) => `  • ${r.title}: ${r.content}`).join("\n")
+    : "";
+
+  const gapBlocks = blocks
+    .map((b) => {
+      const ev = b.gap.evidence || {};
+      const evidenceBits: string[] = [];
+      if (b.candidate.source === "ad") {
+        if (typeof ev.brandCount === "number") evidenceBits.push(`independent competitor brands: ${ev.brandCount}`);
+        if (Array.isArray(ev.brands)) evidenceBits.push(`brands: ${(ev.brands as string[]).slice(0, 6).join(", ")}`);
+        if (typeof ev.maxDaysRunning === "number") evidenceBits.push(`max days running: ${ev.maxDaysRunning}`);
+        if (typeof ev.totalEstimatedSpend === "number") evidenceBits.push(`total est. spend: $${ev.totalEstimatedSpend}`);
+        if (Array.isArray(ev.offers) && (ev.offers as string[]).length) evidenceBits.push(`offers: ${(ev.offers as string[]).join(", ")}`);
+      } else {
+        if (typeof ev.competitor_count === "number") evidenceBits.push(`competitor landers showing this: ${ev.competitor_count}`);
+        if (Array.isArray(ev.competitor_snapshot_ids)) evidenceBits.push(`backing snapshots: ${(ev.competitor_snapshot_ids as string[]).length}`);
+      }
+      return [
+        `GAP — ${b.candidate.source} gap ${b.gap.id} · mode=${b.candidate.mode}`,
+        `  type: ${b.gap.gap_type} · route: ${b.gap.route}`,
+        `  title: ${b.gap.title}`,
+        `  rationale (the scout's evidence sentence): ${b.gap.rationale}`,
+        `  supporting evidence: ${evidenceBits.length ? evidenceBits.join(" · ") : "(none recorded)"}`,
+        ``,
+        `  OWNER DECISION: ${b.gap.status}`,
+        `  OUTCOME: ${b.outcome.state} — ${b.outcome.detail}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+
+  const prompt = [
+    `You are the Head of Growth of ShopCX on Max, grading acted-on competitive gaps from the Ad Creative + Landing Page scouts using the gap-grade skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
+    ``,
+    `Your job: grade each acted-on gap below 1–10 against the gap-grader rubric. THE DEFINING RULE: grade GAP QUALITY separately from OUTCOME — a well-evidenced gap that lost is still good scouting, a flimsy gap the owner rejected scores low regardless. Do NOT reward outcome luck. UNLIKE the deployed Sonnet sweep that saw only a paraphrased summary, you can Read the scout code (src/lib/ads/, src/lib/acquisition-hub.ts, src/lib/competitors.ts) + probe the DB — cite concrete file:line + numeric evidence.`,
+    ``,
+    `RUBRIC:`,
+    `  • gap_quality (1-10): was the gap REAL and worth surfacing at proposal time — backed by strong, INDEPENDENT-brand evidence (multiple competitors, longevity, spend / multiple competitor landers), specific and actionable, not a duplicate? A well-evidenced gap that LOST still scores HIGH. Thin evidence (single brand, no longevity) caps this at 5.`,
+    `  • outcome_quality (1-10): how did the resulting ACTION perform — Rejected by owner = low, approved+shipped unresolved = middling, routed experiment WON = high, LOST = low. Account for decisiveness.`,
+    `  • grade (1-10): overall. Weight gap_quality ≥ outcome_quality — we're training scouts to surface SOUND, well-evidenced gaps.`,
+    calibrationBlock,
+    ``,
+    `MODE PER CANDIDATE:`,
+    `  • initial — the gap has just been acted-on (approved | rejected). Final outcome may not be known yet.`,
+    `  • revised — the routed action's outcome has resolved (won | lost). Gap quality rarely changes; outcome moves.`,
+    ``,
+    `SCORING: 10 exemplary · 8-9 strong · 6-7 acceptable · 4-5 mediocre · 2-3 poor · 1 indefensible.`,
+    ``,
+    `THE BATCH — ${blocks.length} gap(s) to grade:`,
+    ``,
+    gapBlocks,
+    ``,
+    `Investigation protocol per gap (bounded):`,
+    `  1. Read the scout code that surfaced this gap_type (src/lib/ads/*, src/lib/acquisition-hub.ts, src/lib/competitors.ts) to check that the rationale + supporting-evidence quality actually match what the scout should require for that gap_type.`,
+    `  2. Sanity-check the evidence numbers — a "trend across competitors" backed by 1 brand is not a trend.`,
+    `  3. If the outcome is won/lost, the routed experiment_id / agent_job_id can be looked up (agent_jobs / storefront_experiments) for confirmation of how decisively it landed.`,
+    ``,
+    `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+    `  {"status":"completed","decisions":[{"source":"ad|lander","gap_id":"…","mode":"initial|revised","grade":<1-10>,"gap_quality":<1-10>,"outcome_quality":<1-10>,"reasoning":"<2-4 sentences citing file:line where possible + numeric evidence>"}]}`,
+    `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ``,
+    `Every candidate in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based.`,
+  ].join("\n");
+
+  try {
+    const { session, resultText, isError, raw, usage, model, configDir: gradeDir } = await runBoxLane(
+      (cfg, sid) => runGapGradeClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, gradeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; decisions?: GapGradeDecisionJson[] }>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `gap-grade error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.decisions)) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "gap-grade produced no parseable decisions", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable decisions`);
+      return;
+    }
+
+    const validKeys = new Set(blocks.map((b) => `${b.candidate.source}:${b.gap.id}:${b.candidate.mode}`));
+    let applied = 0;
+    let skipped = 0;
+    for (const d of parsed.decisions) {
+      if (!d || (d.source !== "ad" && d.source !== "lander") || typeof d.gap_id !== "string" || (d.mode !== "initial" && d.mode !== "revised") || typeof d.grade !== "number") {
+        skipped++; continue;
+      }
+      if (!validKeys.has(`${d.source}:${d.gap_id}:${d.mode}`)) { skipped++; continue; }
+      const r = await applyBoxGapGrade({
+        workspaceId: workspaceId!,
+        source: d.source,
+        gapId: d.gap_id,
+        mode: d.mode,
+        grade: d.grade,
+        gapQuality: typeof d.gap_quality === "number" ? d.gap_quality : undefined,
+        outcomeQuality: typeof d.outcome_quality === "number" ? d.outcome_quality : undefined,
+        reasoning: String(d.reasoning ?? ""),
+        admin: a,
+      });
+      if (r.ok) applied++;
+      else skipped++;
+    }
+
+    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · candidates=${blocks.length}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // A kind='security-review' job runs read-only on Max, the supervisor on the auto-merge proxy. Two modes
 // (instructions.mode): 'diff' — a per-merged-diff security pass (injection / secret-leak / authz / RLS /
 // unsafe admin-client / _encrypted handling) over the merged claude/* commit; 'dep-watch' — the daily
@@ -13809,6 +14356,8 @@ async function dispatchJob(job: Job) {
   if (job.kind === "security-review") return runSecurityReviewJob(job);
   if (job.kind === "agent-grade") return runAgentGradeJob(job);
   if (job.kind === "director-grade") return runDirectorGradeJob(job);
+  if (job.kind === "campaign-grade") return runCampaignGradeJob(job);
+  if (job.kind === "gap-grade") return runGapGradeJob(job);
   if (job.kind === "agent-coach") return runAgentCoachJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
@@ -14737,7 +15286,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -14794,6 +15343,8 @@ async function main() {
   const countSecurityReview = () => [...active.values()].filter((v) => v.kind === "security-review").length;
   const countAgentGrade = () => [...active.values()].filter((v) => v.kind === "agent-grade").length;
   const countDirectorGrade = () => [...active.values()].filter((v) => v.kind === "director-grade").length;
+  const countCampaignGrade = () => [...active.values()].filter((v) => v.kind === "campaign-grade").length;
+  const countGapGrade = () => [...active.values()].filter((v) => v.kind === "gap-grade").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -15098,6 +15649,36 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed director-grade ${job.id.slice(0, 8)} → ${countDirectorGrade() + 1}/${MAX_DIRECTOR_GRADE} director-grade lane`);
+        launch(job);
+      }
+      // Fill the campaign-grade lane (grading-cascade-to-box-sessions Phase 4): the box-hosted
+      // storefront-campaign grader — one Max session per batch reads each concluded campaign's real
+      // rollups + variants + design-time lever posterior + (revised mode) M3 cohort reconciliation
+      // via read-only DB probes + reads any referenced storefront-optimizer code, then emits per-
+      // campaign grades against the storefront campaign rubric + approved storefront_grader_prompts
+      // calibration rules. Writes storefront_campaign_grades via applyBoxCampaignGrade (same
+      // UNIQUE(experiment_id) upsert + graded_by='human' override invariant as the deployed
+      // gradeCampaign path). Concurrency-1, read-only on Max. Enqueued from experiment-refresh
+      // (initial mode) and storefront-ltv-reconcile (revised mode).
+      while (!claudeDown && countCampaignGrade() < MAX_CAMPAIGN_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["campaign-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed campaign-grade ${job.id.slice(0, 8)} → ${countCampaignGrade() + 1}/${MAX_CAMPAIGN_GRADE} campaign-grade lane`);
+        launch(job);
+      }
+      // Fill the gap-grade lane (grading-cascade-to-box-sessions Phase 4): the box-hosted
+      // acquisition-gap grader — one Max session per batch reads each acted-on gap + its routed
+      // outcome (via deriveOutcome on the routed experiment / build), then emits per-gap grades
+      // against the gap-grader rubric + approved acquisition_grader_prompts calibration rules.
+      // Writes acquisition_gap_grades via applyBoxGapGrade (same UNIQUE(workspace_id, gap_source,
+      // gap_id) upsert + graded_by='human' override invariant as the deployed gradeGap path).
+      // Concurrency-1, read-only on Max. Enqueued from acquisition-research-cadence.
+      while (!claudeDown && countGapGrade() < MAX_GAP_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["gap-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed gap-grade ${job.id.slice(0, 8)} → ${countGapGrade() + 1}/${MAX_GAP_GRADE} gap-grade lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

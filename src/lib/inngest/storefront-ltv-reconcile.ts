@@ -20,7 +20,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { reconcileLtvProxy } from "@/lib/storefront/ltv-reconciler";
-import { gradeRevisedForReconciledCohorts } from "@/lib/storefront/campaign-grader";
+import { pickCampaignGradeBatch } from "@/lib/storefront/campaign-grader";
 
 export const storefrontLtvReconcileCron = inngest.createFunction(
   { id: "storefront-ltv-reconcile-cron", retries: 1, triggers: [{ cron: "0 14 * * *" }] },
@@ -60,16 +60,49 @@ export const storefrontLtvReconcile = inngest.createFunction(
     const result = await step.run("reconcile", () =>
       reconcileLtvProxy({ workspaceId: workspace_id, lagDays: lag_days, windowDays: window_days }),
     );
-    // M5 — once cohorts reconcile, land the REVISED campaign grade for any concluded campaign whose
-    // cohort now has its actual 4-month LTV (the proxy-time call truth-checked, [[storefront-campaign-grader]]).
-    // Best-effort + idempotent (skips already-revised + unreconciled cohorts).
-    const revised = await step.run("grade-revised", () => gradeRevisedForReconciledCohorts({ workspaceId: workspace_id }));
+    // M5 — once cohorts reconcile, dispatch the REVISED campaign grade box-side
+    // (grading-cascade-to-box-sessions Phase 4, CEO directive 2026-06-30): pick the batch of
+    // pending-revised campaigns whose cohort has now reconciled (pickCampaignGradeBatch surfaces
+    // both initial+revised candidates; here the reconciler just landed cohort data, so any
+    // pending-revised campaign whose cell reconciled becomes gradeable), and enqueue ONE
+    // `campaign-grade` `agent_jobs` row carrying the candidates. The box's campaign-grade lane
+    // (scripts/builder-worker.ts → runCampaignGradeJob) then reads each campaign + its reconciliation
+    // and writes storefront_campaign_grades via applyBoxCampaignGrade (same UNIQUE(experiment_id)
+    // upsert + human-override invariant as the deployed gradeCampaign path). Dedup-gated:
+    // skip re-enqueueing while a `campaign-grade` job for this workspace is already queued/building.
+    // Best-effort + idempotent.
+    const revised = await step.run("grade-revised", async () => {
+      const admin = createAdminClient();
+      const batch = await pickCampaignGradeBatch({ workspaceId: workspace_id, admin });
+      if (!batch.length) return { considered: 0, enqueued: 0 };
+      const { data: inflight } = await admin
+        .from("agent_jobs")
+        .select("id")
+        .eq("workspace_id", workspace_id)
+        .eq("kind", "campaign-grade")
+        .in("status", ["queued", "queued_resume", "building", "claimed"])
+        .limit(1);
+      if (inflight && inflight.length) return { considered: batch.length, enqueued: 1 };
+      const { error } = await admin.from("agent_jobs").insert({
+        workspace_id: workspace_id,
+        spec_slug: "campaign-grade",
+        kind: "campaign-grade",
+        status: "queued",
+        created_by: null,
+        instructions: JSON.stringify({ candidates: batch }),
+      });
+      if (error) {
+        console.error(`[storefront-ltv-reconcile] campaign-grade enqueue failed ws=${workspace_id}: ${error.message}`);
+        return { considered: batch.length, enqueued: 0 };
+      }
+      return { considered: batch.length, enqueued: 1 };
+    });
     console.log(
       `[storefront-ltv-reconcile] ws=${workspace_id} candidates=${result.candidates} ` +
         `reconciled=${result.reconciled.length} recalibrated=${result.recalibrated} ` +
         `weights_version=${result.weights_version} calibrated=${!!result.calibrated_at} ` +
-        `escalations=${result.escalations.length} revised_grades=${revised.revised}`,
+        `escalations=${result.escalations.length} revised_grade_batch=${revised.considered} enqueued=${revised.enqueued}`,
     );
-    return { status: "complete", ...result, revised_grades: revised.revised };
+    return { status: "complete", ...result, revised_grade_batch: revised.considered, revised_grade_enqueued: revised.enqueued };
   },
 );

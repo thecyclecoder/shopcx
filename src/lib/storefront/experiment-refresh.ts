@@ -20,7 +20,7 @@ import { isProxyCalibrated } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
 import { updatePosterior } from "@/lib/storefront/lever-memory";
-import { gradeCampaign } from "@/lib/storefront/campaign-grader";
+import { pickCampaignGradeBatch } from "@/lib/storefront/campaign-grader";
 import { republishExperimentManifest } from "@/lib/storefront/experiment-cache";
 import { isEdgeConfigWriteConfigured } from "@/lib/storefront/experiment-manifest";
 import {
@@ -135,17 +135,18 @@ export async function refreshStorefrontExperiments(opts: {
     }
   };
 
-  // M5 — grade the now-concluded campaign at significance (the Head-of-Growth feedback signal,
-  // [[storefront-campaign-grader]]). Best-effort: a grader failure never breaks the supervisable
-  // refresh; idempotent per campaign (gradeCampaign upserts the initial grade in place). Fired
-  // for every terminal outcome — promote (win), kill (loss), and rollback — so a sound hypothesis
-  // that lost is graded as much as a win.
-  const gradeInitialBestEffort = async (experimentId: string) => {
-    try {
-      await gradeCampaign({ experimentId, mode: "initial", admin });
-    } catch (e) {
-      console.warn(`[storefront-experiments] campaign-grade(initial) failed exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  // M5 — the initial-mode grade lands box-side (grading-cascade-to-box-sessions Phase 4, CEO
+  // directive 2026-06-30). We no longer call the API-based gradeCampaign inline; instead a single
+  // `campaign-grade` `agent_jobs` row is enqueued AFTER the refresh loop concludes any terminal
+  // experiments (promote / kill / rollback). The box's campaign-grade lane
+  // (scripts/builder-worker.ts → runCampaignGradeJob) then reads each concluded campaign's real
+  // rollups + variants + design-time lever posterior + storefront-optimizer source and writes
+  // storefront_campaign_grades via applyBoxCampaignGrade (same UNIQUE(experiment_id) upsert +
+  // human-override invariant). This function tracks whether ANY terminal outcome landed so the
+  // enqueue at the end of the refresh can dedup-gate. Best-effort per campaign.
+  let terminalCampaignSeen = false;
+  const noteTerminalCampaign = (_experimentId: string) => {
+    terminalCampaignSeen = true;
   };
 
   try {
@@ -275,7 +276,7 @@ export async function refreshStorefrontExperiments(opts: {
         // Commit the learning — a rollback is a loss, recorded as much as a win.
         await commitLearning(exp, rollups);
         // Grade the concluded campaign at significance (a rollback is a conclusion too).
-        await gradeInitialBestEffort(experimentId);
+        noteTerminalCampaign(experimentId);
         // storefront-renewal-offer-lever P2: roll back any persist-to-renewal offer linked to this
         // experiment too — a margin-bleeding offer touched real renewals, so rollback must un-touch
         // them. Expires the offer + nulls subscriptions.pricing_offer_id so the bleed stops within
@@ -357,7 +358,7 @@ export async function refreshStorefrontExperiments(opts: {
       // and gets graded at significance (the M5 Head-of-Growth feedback signal).
       if (terminal) {
         await commitLearning(exp, rollups);
-        await gradeInitialBestEffort(experimentId);
+        noteTerminalCampaign(experimentId);
         // Promote/kill changed the served arm set → re-publish the edge manifest +
         // purge the PDP render (pdp-edge-served-experiments). A promoted variant
         // serves all non-holdout traffic from its own cached render; a kill reverts
@@ -394,6 +395,40 @@ export async function refreshStorefrontExperiments(opts: {
         rule: decision.rule,
         posteriors: decision.posteriors,
       });
+    }
+
+    // grading-cascade-to-box-sessions Phase 4: dispatch the initial-mode campaign grade box-side.
+    // If any terminal outcome landed on this refresh, pick the batch of ungraded concluded campaigns
+    // for this workspace and enqueue ONE `campaign-grade` `agent_jobs` row carrying them; the box
+    // lane grades them and writes storefront_campaign_grades. Dedup-gated: skip re-enqueueing while
+    // a `campaign-grade` job for this workspace is already queued/building. Best-effort — a grader
+    // dispatch failure never breaks the supervisable refresh.
+    if (terminalCampaignSeen) {
+      try {
+        const batch = await pickCampaignGradeBatch({ workspaceId: opts.workspaceId, admin });
+        if (batch.length) {
+          const { data: inflight } = await admin
+            .from("agent_jobs")
+            .select("id")
+            .eq("workspace_id", opts.workspaceId)
+            .eq("kind", "campaign-grade")
+            .in("status", ["queued", "queued_resume", "building", "claimed"])
+            .limit(1);
+          if (!inflight || !inflight.length) {
+            const { error } = await admin.from("agent_jobs").insert({
+              workspace_id: opts.workspaceId,
+              spec_slug: "campaign-grade",
+              kind: "campaign-grade",
+              status: "queued",
+              created_by: null,
+              instructions: JSON.stringify({ candidates: batch }),
+            });
+            if (error) console.error(`[storefront-experiments] campaign-grade enqueue failed ws=${opts.workspaceId}: ${error.message}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[storefront-experiments] campaign-grade pick/enqueue failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
 
     // Self-heal the edge manifest on EVERY refresh tick (not only on a state change above).
