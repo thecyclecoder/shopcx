@@ -185,16 +185,11 @@ const MAX_AGENT_GRADE = Number(process.env.AGENT_TODO_MAX_AGENT_GRADE || 1);
 // worker actions' real diffs + running quick tsc/CI probes. Build-sized ceiling — a chatty batch (12
 // merged builds each with a non-trivial diff to walk) can take longer than a repair/regression turn.
 const AGENT_GRADE_TIMEOUT_MS = 25 * 60 * 1000;
-// Agent-coach lane (grading-cascade-to-box-sessions Phase 2): the box-hosted coaching synthesis —
-// one Max `claude -p` session per slipped (workspace, agent_kind) reads the low-graded jobs' REAL
-// merged diffs (git-show / git-diff origin/main...origin/<branch>), distills the recurring code
-// mistake into ONE durable coaching learning, then writes agent_coaching_log + agent_instructions
-// via `applyBoxCoaching` (which reuses the deterministic `coachAgent` DB write + loop-guard). Same
-// board post the deployed synthesizeCoaching path emitted. Concurrency-1 own lane; no
-// ANTHROPIC_API_KEY billed (Max plan). Retires the deployed synthesizeCoaching call — no more
-// `ai_token_usage` rows with `purpose='agent_coaching_synthesis'`. Enqueued by
-// `detectGradeDropCoaching` on slip (dedup: skips re-enqueue while an agent-coach job for this
-// (workspace, agent_kind) is already queued/building). See docs/brain/libraries/agent-grader.md.
+// Agent-coach lane (RETIRED as of box-grading-session-and-account-count-fixes Phase 1 — grading +
+// coaching now run in the SAME `agent-grade` box session per director pass, so no new agent-coach
+// rows are enqueued; the lane stays alive only to drain any in-flight rows carried over from the
+// prior fan-out cadence. The kind's rows keep the same shape + handler + `applyBoxCoaching` write
+// path). See docs/brain/libraries/agent-grader.md.
 const MAX_AGENT_COACH = Number(process.env.AGENT_TODO_MAX_AGENT_COACH || 1);
 // One agent-coach pass: read-only Max session reading up to ROLLUP_WINDOW (=10) low-graded jobs'
 // diffs to synthesize ONE durable learning. Repair-sized ceiling; much lighter than a grade batch.
@@ -12035,10 +12030,18 @@ async function runAgentCoachJob(job: Job) {
 // merged diff (git-show / git-diff origin/main...origin/<branch>) + touched files + tsc/CI status,
 // instead of only the job-row metadata + log_tail the deployed Sonnet sweep sees. Writes
 // agent_action_grades via applyBoxGrade — same UNIQUE(agent_job_id) upsert + human-override invariant
-// as the deployed gradeAgentAction path, so the rollup + detectGradeDropCoaching cascade still fires
-// off the box-written grades. No API bill (Max), reasoning cites file:line, not a paraphrase.
-// Enqueued by platform-director-cron's grade-and-coach-workers step in batches (gated on
-// agentGradingBatchReady — ≥5 ungraded OR oldest >~3h). instructions = JSON {agent_job_ids: [...]}.
+// as the deployed gradeAgentAction path.
+//
+// COMBINED WITH COACHING (box-grading-session-and-account-count-fixes Phase 1): the SAME session also
+// coaches any worker whose rollup slipped this pass. `instructions.slips=[…]` carries every slipped
+// worker's coaching material (low_grade_ids + low_agent_job_ids + rollup avg/drop + open-coaching
+// count); the session distills each learning off the same diffs it read for grading and returns them
+// in `coachings[]`; the worker (deterministic) calls applyBoxCoaching per slip — same rollup + loop-
+// guard re-check + coachAgent write path as the retired `agent-coach` fan-out. No API bill (Max),
+// reasoning cites file:line, not a paraphrase. Enqueued by platform-director-cron's
+// grade-and-coach-workers step (gated on agentGradingBatchReady — ≥5 ungraded OR oldest >~3h — plus
+// any per-beat slip detected by detectAgentCoachingSlips). instructions = JSON {agent_job_ids: [...],
+// slips: [{agent_kind, low_grade_ids, low_agent_job_ids, rollup_average, rollup_drop, open_coaching_count}]}.
 async function runAgentGradeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "agent-grade", sandbox: "max", timeout: AGENT_GRADE_TIMEOUT_MS });
 }
@@ -12049,27 +12052,65 @@ interface AgentGradeDecisionJson {
   reasoning: string;
 }
 
+interface AgentGradeSlipInstr {
+  agent_kind?: string;
+  low_grade_ids?: unknown;
+  low_agent_job_ids?: unknown;
+  rollup_average?: number | null;
+  rollup_drop?: number | null;
+  open_coaching_count?: number;
+}
+
+interface AgentGradeCoachingJson {
+  agent_kind: string;
+  errorClass: string;
+  triggeringPattern: string;
+  guidance: string;
+  reasoning: string;
+}
+
 async function runAgentGradeJob(job: Job) {
   const tag = `[agent-grade:${job.id.slice(0, 8)}]`;
-  let instr: { agent_job_ids?: unknown } = {};
+  let instr: { agent_job_ids?: unknown; slips?: unknown } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
     /* not JSON — degrade */
   }
   const ids = Array.isArray(instr.agent_job_ids) ? instr.agent_job_ids.filter((x): x is string => typeof x === "string") : [];
-  if (!ids.length) {
-    await update(job.id, { status: "completed", log_tail: "no agent_job_ids in instructions — nothing to grade" });
-    console.log(`${tag} no ids → no-op`);
+
+  interface SlipParsed {
+    agent_kind: string;
+    low_grade_ids: string[];
+    low_agent_job_ids: string[];
+    rollup_average: number | null;
+    rollup_drop: number | null;
+    open_coaching_count: number;
+  }
+  const slips: SlipParsed[] = Array.isArray(instr.slips)
+    ? (instr.slips as AgentGradeSlipInstr[])
+        .map((s) => ({
+          agent_kind: typeof s?.agent_kind === "string" ? s.agent_kind : "",
+          low_grade_ids: Array.isArray(s?.low_grade_ids) ? s.low_grade_ids.filter((x): x is string => typeof x === "string") : [],
+          low_agent_job_ids: Array.isArray(s?.low_agent_job_ids)
+            ? s.low_agent_job_ids.filter((x): x is string => typeof x === "string")
+            : [],
+          rollup_average: typeof s?.rollup_average === "number" ? s.rollup_average : null,
+          rollup_drop: typeof s?.rollup_drop === "number" ? s.rollup_drop : null,
+          open_coaching_count: typeof s?.open_coaching_count === "number" ? s.open_coaching_count : 0,
+        }))
+        .filter((s) => s.agent_kind && s.low_grade_ids.length)
+    : [];
+
+  if (!ids.length && !slips.length) {
+    await update(job.id, { status: "completed", log_tail: "no agent_job_ids AND no slips in instructions — nothing to grade or coach" });
+    console.log(`${tag} no ids or slips → no-op`);
     return;
   }
 
-  const { applyBoxGrade, detectGradeDropCoaching, AGENT_RUBRICS } = await import("../src/lib/agents/agent-grader");
+  const { applyBoxGrade, applyBoxCoaching, AGENT_RUBRICS, COACH_LOW_ROLLUP } = await import("../src/lib/agents/agent-grader");
   const a = await admin();
-  const { data: rows } = await a
-    .from("agent_jobs")
-    .select("id, workspace_id, kind, spec_slug, status, error, log_tail, pr_url, pr_number, spec_branch, pending_actions, created_at")
-    .in("id", ids);
+
   interface BatchJobRow {
     id: string;
     workspace_id: string;
@@ -12084,25 +12125,72 @@ async function runAgentGradeJob(job: Job) {
     pending_actions: Array<{ status?: string; type?: string; summary?: string; cmd?: string }> | null;
     created_at: string;
   }
-  const jobs = ((rows as BatchJobRow[]) || []).filter((r) => AGENT_RUBRICS[r.kind]);
-  if (!jobs.length) {
-    await update(job.id, { status: "completed", log_tail: `no rubric-backed jobs in batch (${ids.length} ids)` });
-    console.log(`${tag} no gradeable jobs in batch`);
+  let jobs: BatchJobRow[] = [];
+  if (ids.length) {
+    const { data: rows } = await a
+      .from("agent_jobs")
+      .select("id, workspace_id, kind, spec_slug, status, error, log_tail, pr_url, pr_number, spec_branch, pending_actions, created_at")
+      .in("id", ids);
+    jobs = ((rows as BatchJobRow[]) || []).filter((r) => AGENT_RUBRICS[r.kind]);
+  }
+
+  // Pull each slip's low-graded jobs (may overlap with the grading batch above — de-duped via
+  // Map) + grade rows for prompt context. Slip low_grade_ids point at agent_action_grades rows
+  // that carry the grader's prior reasoning; the session reads the diff for the recurring mistake.
+  interface CoachGradeRow { id: string; grade: number; reasoning: string | null; spec_slug: string | null; agent_job_id: string }
+  const coachGradesByKind = new Map<string, CoachGradeRow[]>();
+  const extraJobIds = new Set<string>();
+  if (slips.length) {
+    const allLowGradeIds = Array.from(new Set(slips.flatMap((s) => s.low_grade_ids)));
+    if (allLowGradeIds.length) {
+      const { data: coachGradeRows } = await a
+        .from("agent_action_grades")
+        .select("id, grade, reasoning, spec_slug, agent_job_id")
+        .in("id", allLowGradeIds);
+      const coachGradeById = new Map<string, CoachGradeRow>(
+        ((coachGradeRows as CoachGradeRow[] | null) ?? []).map((g) => [g.id, g]),
+      );
+      for (const s of slips) {
+        const rowsForKind = s.low_grade_ids.map((gid) => coachGradeById.get(gid)).filter((g): g is CoachGradeRow => !!g);
+        coachGradesByKind.set(s.agent_kind, rowsForKind);
+        for (const g of rowsForKind) {
+          if (!jobs.some((j) => j.id === g.agent_job_id)) extraJobIds.add(g.agent_job_id);
+        }
+      }
+    }
+    if (extraJobIds.size) {
+      const { data: extraRows } = await a
+        .from("agent_jobs")
+        .select("id, workspace_id, kind, spec_slug, status, error, log_tail, pr_url, pr_number, spec_branch, pending_actions, created_at")
+        .in("id", Array.from(extraJobIds));
+      for (const r of (extraRows as BatchJobRow[] | null) ?? []) {
+        if (AGENT_RUBRICS[r.kind]) jobs.push(r);
+      }
+    }
+  }
+
+  if (!jobs.length && !slips.length) {
+    await update(job.id, { status: "completed", log_tail: `no rubric-backed jobs in batch (${ids.length} ids) and no slips` });
+    console.log(`${tag} no gradeable jobs in batch and no slips`);
     return;
   }
 
-  const workspaceId = jobs[0].workspace_id;
-  const kinds = Array.from(new Set(jobs.map((j) => j.kind)));
+  const workspaceId = (jobs[0]?.workspace_id) || job.workspace_id;
+  const gradeIdSet = new Set(ids);
+  const gradeableJobs = jobs.filter((j) => gradeIdSet.has(j.id));
+  const contextJobs = jobs.filter((j) => !gradeIdSet.has(j.id));
+  const kinds = Array.from(new Set([...gradeableJobs.map((j) => j.kind), ...slips.map((s) => s.agent_kind)]));
 
-  // Per-kind rubric block (only the rubrics represented in this batch).
+  // Per-kind rubric block (only the rubrics represented in this session — grading batch + slips).
   const rubricLines = kinds
+    .filter((k) => AGENT_RUBRICS[k])
     .map((k) => {
       const r = AGENT_RUBRICS[k];
       return `  • ${k} (${r.name}): ${r.criteria}`;
     })
     .join("\n");
 
-  // Approved calibration rules — cross-cutting (agent_kind IS NULL) + per-worker (in this batch).
+  // Approved calibration rules — cross-cutting (agent_kind IS NULL) + per-worker (in this session).
   const kindsCsv = kinds.map((k) => `"${k}"`).join(",");
   const { data: rules } = await a
     .from("agent_grader_prompts")
@@ -12119,42 +12207,92 @@ async function runAgentGradeJob(job: Job) {
     : "";
 
   // Compact per-job pointer. The session runs git-show / git-diff / reads touched files itself.
-  const jobBlocks = jobs
-    .map((j) => {
-      const pa = Array.isArray(j.pending_actions) ? j.pending_actions : [];
-      const approved = pa.find((x) => x.status === "approved") || pa[0] || {};
-      const parts = [
-        `AGENT_JOB ${j.id}`,
-        `  worker: ${AGENT_RUBRICS[j.kind]?.name ?? "?"} · kind=${j.kind}`,
-        `  spec/target: ${j.spec_slug ?? "—"}`,
-        `  concluded status: ${j.status}`,
-        j.spec_branch ? `  branch: ${j.spec_branch}` : "",
-        j.pr_url ? `  PR: ${j.pr_url}${j.pr_number ? ` (#${j.pr_number})` : ""}` : "",
-        approved.type ? `  gated action: type=${approved.type} · ${approved.summary ?? "(no summary)"}` : "",
-        approved.cmd ? `  command: ${approved.cmd}` : "",
-        j.error ? `  error: ${j.error.slice(0, 400)}` : "",
-        j.log_tail ? `  log_tail:\n${j.log_tail.slice(-1200)}` : "",
-      ].filter((l) => l !== "");
-      return parts.join("\n");
+  const formatJobBlock = (j: BatchJobRow) => {
+    const pa = Array.isArray(j.pending_actions) ? j.pending_actions : [];
+    const approved = pa.find((x) => x.status === "approved") || pa[0] || {};
+    return [
+      `AGENT_JOB ${j.id}`,
+      `  worker: ${AGENT_RUBRICS[j.kind]?.name ?? "?"} · kind=${j.kind}`,
+      `  spec/target: ${j.spec_slug ?? "—"}`,
+      `  concluded status: ${j.status}`,
+      j.spec_branch ? `  branch: ${j.spec_branch}` : "",
+      j.pr_url ? `  PR: ${j.pr_url}${j.pr_number ? ` (#${j.pr_number})` : ""}` : "",
+      approved.type ? `  gated action: type=${approved.type} · ${approved.summary ?? "(no summary)"}` : "",
+      approved.cmd ? `  command: ${approved.cmd}` : "",
+      j.error ? `  error: ${j.error.slice(0, 400)}` : "",
+      j.log_tail ? `  log_tail:\n${j.log_tail.slice(-1200)}` : "",
+    ]
+      .filter((l) => l !== "")
+      .join("\n");
+  };
+  const gradeBlocks = gradeableJobs.map(formatJobBlock).join("\n\n");
+
+  // Per-slip block: rubric + rollup + the low-graded jobs (with the prior grader's reasoning) so
+  // the session can look ACROSS them for the recurring mistake in a single diff pass.
+  const slipBlocks = slips
+    .map((s) => {
+      const rubric = AGENT_RUBRICS[s.agent_kind];
+      const gradesForKind = coachGradesByKind.get(s.agent_kind) ?? [];
+      const lowLines = gradesForKind
+        .map((g) => {
+          const j = jobs.find((jj) => jj.id === g.agent_job_id);
+          return [
+            `  LOW_GRADE grade=${g.grade}/10${g.spec_slug ? ` spec=${g.spec_slug}` : ""} (agent_action_grades.id=${g.id})`,
+            `    agent_job: ${g.agent_job_id}${j?.kind ? ` · kind=${j.kind}` : ""}${j?.status ? ` · status=${j.status}` : ""}`,
+            j?.spec_branch ? `    branch: ${j.spec_branch}` : "",
+            j?.pr_url ? `    PR: ${j.pr_url}${j?.pr_number ? ` (#${j.pr_number})` : ""}` : "",
+            j?.error ? `    job error: ${j.error.slice(0, 300)}` : "",
+            `    grader's reasoning: ${(g.reasoning ?? "(none)").slice(0, 600)}`,
+          ]
+            .filter((l) => l !== "")
+            .join("\n");
+        })
+        .join("\n\n");
+      return [
+        `SLIP kind=${s.agent_kind} worker=${rubric?.name ?? "?"} · rollup_avg=${s.rollup_average?.toFixed(1) ?? "?"}/10${
+          s.rollup_drop != null ? ` (down ${s.rollup_drop.toFixed(1)} pts vs prior window)` : ""
+        } · open_coaching_attempts=${s.open_coaching_count}`,
+        `  rubric: ${rubric?.criteria ?? "(none)"}`,
+        `  low_graded_actions:`,
+        lowLines,
+      ].join("\n");
     })
     .join("\n\n");
 
+  const contextBlocks = contextJobs.length
+    ? "\n\nADDITIONAL CONTEXT — jobs referenced by slips but NOT in the grading batch (do NOT emit a grade for these):\n\n" +
+      contextJobs.map(formatJobBlock).join("\n\n")
+    : "";
+
   const prompt = [
-    `You are Ada (the box's Platform/DevOps Director) on Max, grading your workers using the agent-grade skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
+    `You are Ada (the box's Platform/DevOps Director) on Max, grading + coaching your workers using the agent-grade skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
     ``,
-    `Your job: grade each concluded worker action below 1–10 against its rubric. UNLIKE the deployed Sonnet sweep that only sees the job-row metadata + log_tail (and repeatedly caps grades at 7-9 "because I can't see the diff"), you can SEE THE REAL DIFF — first \`git fetch origin main\`, then for each PR-carrying job \`git show <merge_sha>\` OR \`git diff origin/main...origin/<branch>\` and READ the touched files. Cite concrete file:line in your reasoning — that is why we moved grading box-side.`,
+    `This is ONE combined session with TWO tasks: (A) GRADE each concluded worker action in the batch 1–10 against its rubric, and (B) for each SLIPPED worker, distill ONE durable coaching learning off the same diffs. UNLIKE the deployed Sonnet sweep that only sees the job-row metadata + log_tail (and repeatedly caps grades at 7-9 "because I can't see the diff"), you can SEE THE REAL DIFF — first \`git fetch origin main\`, then for each PR-carrying job \`git show <merge_sha>\` OR \`git diff origin/main...origin/<branch>\` and READ the touched files. Cite concrete file:line in your reasoning — that is why we moved grading + coaching box-side.`,
     ``,
     `THE DEFINING RULE — GRADE THE WORK, NOT OUTCOME LUCK. A sound, well-scoped action that hit a rare reversible bump still grades HIGH if the reasoning was right. A careless action that happened to land grades LOW. Reward correct judgment within the rubric, not luck.`,
     ``,
-    `PER-WORKER RUBRICS in this batch:`,
-    rubricLines,
+    `PER-WORKER RUBRICS in this session:`,
+    rubricLines || "  (none — no grading batch, coaching only)",
     calibrationBlock,
     ``,
     `SCORING: 10 exemplary · 8-9 strong · 6-7 acceptable · 4-5 mediocre · 2-3 poor · 1 indefensible.`,
     ``,
-    `THE BATCH — ${jobs.length} concluded worker action(s) to grade:`,
+    gradeableJobs.length
+      ? [
+          `TASK A — GRADE THE BATCH (${gradeableJobs.length} concluded worker action(s)):`,
+          ``,
+          gradeBlocks,
+        ].join("\n")
+      : `TASK A — GRADE THE BATCH: (empty this pass — coaching-only session)`,
+    contextBlocks,
     ``,
-    jobBlocks,
+    slips.length
+      ? [
+          `TASK B — COACH THE SLIPPED WORKER(S) (${slips.length}). Bar for slip: rollup < ${COACH_LOW_ROLLUP}/10 (≥3 grades in window) OR drop > 1.5 pts vs prior. For EACH slip below, look ACROSS its low-graded diffs and find the RECURRING code mistake the worker keeps making — a specific anti-pattern, wrong helper, or check skipped. Emit ONE durable learning per slip ("when you see X, do Y instead, because Z"). Never generic encouragement.`,
+          ``,
+          slipBlocks,
+        ].join("\n")
+      : `TASK B — COACH THE SLIPPED WORKERS: (no slips this pass)`,
     ``,
     `Investigation protocol per job:`,
     `  1. If PR/branch present: \`git fetch origin main\`; then \`git show <merge_sha>\` (or \`git diff origin/main...origin/<branch>\` for an unmerged branch) to read EXACTLY what changed.`,
@@ -12163,10 +12301,10 @@ async function runAgentGradeJob(job: Job) {
     `  4. For a non-PR job (a fix/dismiss/verify — e.g., spec-review / spec-test / db_health): read the pending_action + log_tail + the referenced spec/rule; the "real defect vs false-positive" rubric bit is scored here.`,
     ``,
     `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
-    `  {"status":"completed","decisions":[{"agent_job_id":"…","grade":<1-10>,"reasoning":"<2-4 sentences citing file:line from the diff when possible, and what would have made it a 10>"}]}`,
+    `  {"status":"completed","decisions":[{"agent_job_id":"…","grade":<1-10>,"reasoning":"<2-4 sentences citing file:line from the diff when possible, and what would have made it a 10>"}],"coachings":[{"agent_kind":"…","errorClass":"<kebab-case class, e.g. symptom-not-root-cause>","triggeringPattern":"<1 sentence: the recurring mistake shared across the low-graded diffs>","guidance":"<the learning: when you see X, do Y instead>","reasoning":"<1-2 sentences citing file:line from the low-graded diffs>"}]}`,
     `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
     ``,
-    `Every agent_job_id in the batch MUST appear once in decisions[]. reasoning MUST be evidence-based (concrete file/line or observed status) — never a paraphrase of the log_tail.`,
+    `Every agent_job_id in the GRADING BATCH MUST appear once in decisions[] (do NOT emit decisions for the additional-context jobs). Every slip MUST appear once in coachings[] with the same agent_kind. reasoning MUST be evidence-based (concrete file/line or observed status) — never a paraphrase of the log_tail. If there is no grading batch, decisions may be []. If there are no slips, coachings may be [].`,
   ].join("\n");
 
   try {
@@ -12176,48 +12314,76 @@ async function runAgentGradeJob(job: Job) {
     await meterAgentJob(job, gradeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session });
 
-    const parsed = extractJson<{ status?: string; error?: string; decisions?: AgentGradeDecisionJson[] }>(resultText);
+    const parsed = extractJson<{
+      status?: string;
+      error?: string;
+      decisions?: AgentGradeDecisionJson[];
+      coachings?: AgentGradeCoachingJson[];
+    }>(resultText);
     if (parsed?.status === "error") {
       await update(job.id, { status: "needs_attention", error: `agent-grade error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
       console.error(`${tag} agent reported error: ${parsed.error}`);
       return;
     }
-    if (!parsed || !Array.isArray(parsed.decisions)) {
-      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "agent-grade produced no parseable decisions", log_tail: raw.slice(-2000) });
-      console.error(`${tag} no parseable decisions`);
+    if (!parsed || (!Array.isArray(parsed.decisions) && !Array.isArray(parsed.coachings))) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "agent-grade produced no parseable decisions or coachings", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable decisions or coachings`);
       return;
     }
 
-    const idSet = new Set(jobs.map((j) => j.id));
-    const kindsToRecheck = new Set<string>();
+    const idSet = new Set(gradeableJobs.map((j) => j.id));
     let applied = 0;
     let skipped = 0;
-    for (const d of parsed.decisions) {
+    const decisions = Array.isArray(parsed.decisions) ? parsed.decisions : [];
+    for (const d of decisions) {
       if (!d || typeof d.agent_job_id !== "string" || !idSet.has(d.agent_job_id) || typeof d.grade !== "number") {
         skipped++;
         continue;
       }
       const r = await applyBoxGrade({ agentJobId: d.agent_job_id, grade: d.grade, reasoning: String(d.reasoning ?? ""), admin: a });
-      if (r.ok) {
-        applied++;
-        if (r.agent_kind && !r.idempotent_update) kindsToRecheck.add(r.agent_kind);
-      } else {
-        skipped++;
-      }
+      if (r.ok) applied++;
+      else skipped++;
     }
-    // The rollup + detectGradeDropCoaching cascade — fire per newly graded worker kind. Phase 2
-    // moved the coaching SYNTHESIS box-side too: detectGradeDropCoaching now ENQUEUES an agent-coach
-    // box job on slip (instead of the deployed synthesizeCoaching API call) and applyBoxCoaching does
-    // the coachAgent DB write. detectGradeDropCoaching is idempotent + loop-guarded + dedup-gated (a
-    // repeat call on the same slip is a no-op after the coach job is queued/landed).
-    for (const kind of kindsToRecheck) {
-      try {
-        await detectGradeDropCoaching({ workspaceId, agentKind: kind, admin: a });
-      } catch (e) {
-        console.error(`${tag} coach ${kind}:`, e instanceof Error ? e.message : e);
+
+    // Apply each slip's coaching in the SAME session (box-grading-session-and-account-count-fixes
+    // Phase 1). Uses the same applyBoxCoaching path the retired `agent-coach` fan-out used, so the
+    // rollup + loop-guard re-check + coachAgent write + board announce are unchanged. Each slip's
+    // sourceGradeId = its FIRST low_grade_id (matches what the retired path did).
+    const slipByKind = new Map<string, SlipParsed>();
+    for (const s of slips) slipByKind.set(s.agent_kind, s);
+    let coached = 0;
+    let coachSkipped = 0;
+    const coachings = Array.isArray(parsed.coachings) ? parsed.coachings : [];
+    for (const c of coachings) {
+      if (!c || typeof c.agent_kind !== "string" || !c.errorClass || !c.guidance) {
+        coachSkipped++;
+        continue;
       }
+      const slip = slipByKind.get(c.agent_kind);
+      if (!slip) {
+        coachSkipped++;
+        continue;
+      }
+      const sourceGradeId = slip.low_grade_ids[0] ?? null;
+      const r = await applyBoxCoaching({
+        workspaceId,
+        agentKind: c.agent_kind,
+        learning: {
+          errorClass: c.errorClass,
+          triggeringPattern: c.triggeringPattern ?? "",
+          guidance: c.guidance,
+          reasoning: c.reasoning ?? "",
+        },
+        sourceGradeId,
+        admin: a,
+      });
+      if (r.coached) coached++;
+      else coachSkipped++;
     }
-    const tail = `graded ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · kinds=${Array.from(kindsToRecheck).join(",") || "—"}`;
+
+    const tail = `graded ${applied}/${decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · coached ${coached}/${coachings.length}${
+      coachSkipped ? ` · coach-skipped ${coachSkipped}` : ""
+    }`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
@@ -15621,13 +15787,10 @@ async function main() {
         console.log(`claimed agent-grade ${job.id.slice(0, 8)} → ${countAgentGrade() + 1}/${MAX_AGENT_GRADE} agent-grade lane`);
         launch(job);
       }
-      // Fill the agent-coach lane (grading-cascade-to-box-sessions Phase 2): the box-hosted coaching
-      // synthesis — one Max session per slipped (workspace, agent_kind) reads the low-graded jobs'
-      // REAL merged diffs (via git-show / git-diff origin/main...origin/<branch>), distills the
-      // recurring code mistake into ONE durable coaching learning, then writes agent_coaching_log +
-      // agent_instructions via `applyBoxCoaching` (which re-checks the rollup + loop-guard and calls
-      // `coachAgent` — pure DB write is unchanged). Concurrency-1, read-only on Max. Enqueued by
-      // `detectGradeDropCoaching` (agent-grader.ts) on slip, with dedup — one box session per slip.
+      // Fill the agent-coach lane (RETIRED as of box-grading-session-and-account-count-fixes Phase 1
+      // — grading + coaching now run in the SAME agent-grade session per director pass). The lane
+      // stays alive only to drain any in-flight `agent-coach` rows carried over from the retired
+      // fan-out cadence; the runAgentCoachJob handler + applyBoxCoaching write path are unchanged.
       while (!claudeDown && countAgentCoach() < MAX_AGENT_COACH) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["agent-coach"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;

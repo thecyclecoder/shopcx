@@ -25,9 +25,11 @@
  * and never clobbers a human override.
  *
  * Phase 1 builds the STORE + GRADER LIBRARY; the batched box cadence (≥5 ungraded / ~3h) that wires
- * gradeConcludedAgentActions + detectGradeDropCoaching into platform-director-cron + the box runner
- * is Phase 2. The grader reads the job-row context (kind / spec / status / error / log tail / PR) it
- * has at runtime; the Max box session that reads the real diff is the Phase-2 cadence.
+ * grading + coaching into platform-director-cron + the box runner is Phase 2. As of
+ * box-grading-session-and-account-count-fixes Phase 1 the cron enqueues at most ONE combined
+ * `agent-grade` box session per director pass (`instructions.slips=[…]` carries the coaching work
+ * alongside `instructions.agent_job_ids=[…]`) via `detectAgentCoachingSlips` — the separate
+ * `agent-coach` fan-out is retired (kept only so any in-flight rows drain).
  *
  * See docs/brain/tables/agent_action_grades.md · docs/brain/tables/agent_grader_prompts.md ·
  * docs/brain/libraries/agent-grader.md.
@@ -578,7 +580,7 @@ export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: A
  * un-selected jobs ride a later beat. Best-effort + idempotent (an already-graded job is skipped;
  * gradeAgentAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
  * concluded an ungraded action. Returns the distinct worker kinds it newly graded so the caller can run
- * detectGradeDropCoaching on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
+ * slip detection on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
  *
  * NOTE: as of grading-cascade-to-box-sessions Phase 1 the primary grade path moved to the box-hosted
  * `agent-grade` lane (which reads the REAL diff). This deployed-runtime sweep stays as a fallback the
@@ -660,18 +662,6 @@ export async function computeAgentRollup(admin: Admin, workspaceId: string, agen
   const priorAverage = prior.length === ROLLUP_WINDOW ? mean(prior) : null;
   const drop = average !== null && priorAverage !== null ? priorAverage - average : null;
   return { agentKind, count: current.length, average, priorAverage, drop };
-}
-
-export interface CoachingTriggerResult {
-  agentKind: string;
-  rollup: AgentRollup;
-  slipped: boolean;
-  coached: boolean;
-  recovered?: boolean;
-  needsEscalation?: boolean;
-  attempt?: number;
-  instructionId?: string;
-  reason?: string;
 }
 
 /**
@@ -779,143 +769,169 @@ export async function rollCoachingIntoFixSpec(
 }
 
 /**
- * Detect a worker's grade slip and, when it has slipped, ENQUEUE a box-hosted coaching synthesis pass
- * (grading-cascade-to-box-sessions Phase 2: an `agent-coach` `agent_jobs` row → runAgentCoachJob →
- * `applyBoxCoaching`, which reads the low-graded jobs' REAL diffs on Max and calls `coachAgent`).
- * Slip = the rolling average fell below COACH_LOW_ROLLUP (≥ COACH_MIN_SAMPLE grades in the window) OR
- * dropped more than DROP_THRESHOLD vs the prior window. The Director (PLATFORM) is the coachedBy gate
- * (applied by `applyBoxCoaching`). After PLATFORM_DIRECTOR_LOOP_GUARD_MAX coaching attempts that never
- * stuck, the slip stops re-coaching and the coaching is ROLLED INTO A FIX SPEC that hardens the agent
- * (rollCoachingIntoFixSpec — deterministic, still inline here) — never a CEO escalation. `coached=true`
- * on the return now means "the box coach lane has been dispatched (or was already in flight)" — the
- * actual coachAgent DB write lands from the box job within a few minutes.
+ * A slipped-worker candidate for a combined grade+coach box session
+ * (box-grading-session-and-account-count-fixes Phase 1). Emitted by `detectAgentCoachingSlips` and
+ * consumed by the box's `agent-grade` lane: the box session runs coaching for each `slip` inline in
+ * the SAME session as grading, instead of the cron enqueueing a separate `agent-coach` job per kind.
+ * Recovery announces + `rollCoachingIntoFixSpec` still happen inline in the detector (they don't need
+ * a session — they are deterministic DB writes / board posts), so only actively coach-worthy slips
+ * flow forward.
  */
-export async function detectGradeDropCoaching(opts: { workspaceId: string; agentKind: string; admin?: Admin }): Promise<CoachingTriggerResult> {
-  const admin = opts.admin ?? createAdminClient();
-  const rollup = await computeAgentRollup(admin, opts.workspaceId, opts.agentKind);
+export interface AgentSlipCandidate {
+  agent_kind: string;
+  rollup: AgentRollup;
+  slipped: boolean;
+  recovered: boolean;
+  rolledIntoFixSpec: boolean;
+  /** Present iff this slip should be coached in the combined session (not recovered, not rolled). */
+  slip?: {
+    low_grade_ids: string[];
+    low_agent_job_ids: string[];
+    rollup_average: number | null;
+    rollup_drop: number | null;
+    open_coaching_count: number;
+  };
+  reason?: string;
+}
 
-  const lowByAvg = rollup.average !== null && rollup.count >= COACH_MIN_SAMPLE && rollup.average < COACH_LOW_ROLLUP;
-  const lowByDrop = rollup.drop !== null && rollup.drop > DROP_THRESHOLD;
-  const slipped = lowByAvg || lowByDrop;
-  if (!slipped) {
-    // RECOVERY: the agent was below the bar in the prior window and has climbed back above it — the
-    // coaching took. Announce it once (deduped vs a recent agent_recovered activity row).
-    const recovered = rollup.priorAverage != null && rollup.priorAverage < COACH_LOW_ROLLUP && rollup.average != null && rollup.average >= COACH_LOW_ROLLUP;
-    if (recovered) {
-      const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const { count: recent } = await admin
-        .from("director_activity")
+/**
+ * Detect grade slips for a set of worker kinds and — for each — either announce a recovery, roll
+ * accumulated coaching into a fix spec (when the loop-guard tripped), or return the slip payload for
+ * the caller to feed into the combined grade+coach box session.
+ *
+ * Consolidates the coaching cascade into ONE session per director pass
+ * (box-grading-session-and-account-count-fixes Phase 1): the cron used to enqueue a separate
+ * `agent-coach` box job per slipped kind (observed 4 queued at once). Now the cron enqueues at most
+ * ONE `agent-grade` job whose `instructions.slips=[…]` carries every slip's coaching material, and
+ * the box session distills each learning off the diffs it already read for grading. No `agent-coach`
+ * enqueue happens here; the `agent-coach` kind is retained only so any in-flight rows can drain.
+ *
+ * Slip semantics unchanged from the retired `detectGradeDropCoaching`: rolling average <
+ * COACH_LOW_ROLLUP (≥ COACH_MIN_SAMPLE grades in window) OR drop > DROP_THRESHOLD vs the prior
+ * window; loop-guard uses PLATFORM_DIRECTOR_LOOP_GUARD_MAX open coachings; recoveries are announced
+ * on the #directors board (deduped against a recent `agent_recovered` activity row); loop-guard trip
+ * calls `rollCoachingIntoFixSpec` (deterministic — a build spec that hardens the agent). Best-effort
+ * per kind: a per-kind failure is logged and the sweep continues.
+ */
+export async function detectAgentCoachingSlips(opts: {
+  workspaceId: string;
+  agentKinds: string[];
+  admin?: Admin;
+}): Promise<AgentSlipCandidate[]> {
+  const admin = opts.admin ?? createAdminClient();
+  const out: AgentSlipCandidate[] = [];
+  for (const agentKind of opts.agentKinds) {
+    try {
+      const rollup = await computeAgentRollup(admin, opts.workspaceId, agentKind);
+      const lowByAvg = rollup.average !== null && rollup.count >= COACH_MIN_SAMPLE && rollup.average < COACH_LOW_ROLLUP;
+      const lowByDrop = rollup.drop !== null && rollup.drop > DROP_THRESHOLD;
+      const slipped = lowByAvg || lowByDrop;
+      if (!slipped) {
+        // RECOVERY: the agent was below the bar in the prior window and has climbed back above it —
+        // the coaching took. Announce it once (deduped vs a recent agent_recovered activity row).
+        const recovered =
+          rollup.priorAverage != null &&
+          rollup.priorAverage < COACH_LOW_ROLLUP &&
+          rollup.average != null &&
+          rollup.average >= COACH_LOW_ROLLUP;
+        if (recovered) {
+          const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const { count: recent } = await admin
+            .from("director_activity")
+            .select("id", { count: "exact", head: true })
+            .eq("workspace_id", opts.workspaceId)
+            .eq("action_kind", "agent_recovered")
+            .eq("director_function", PLATFORM)
+            .gte("created_at", sinceIso)
+            .filter("metadata->>agent_kind", "eq", agentKind);
+          if (!recent) {
+            await announceOnBoard(
+              admin,
+              opts.workspaceId,
+              `📈 ${nm(PLATFORM)}'s coaching took — ${nm(agentKind)} (\`${agentKind}\`) recovered to ${rollup.average?.toFixed(1)}/10 (was ${rollup.priorAverage?.toFixed(1)}).`,
+              "agent_recovered",
+              { agent_kind: agentKind, average: rollup.average, prior: rollup.priorAverage },
+            );
+          }
+          out.push({ agent_kind: agentKind, rollup, slipped: false, recovered: true, rolledIntoFixSpec: false });
+          continue;
+        }
+        out.push({ agent_kind: agentKind, rollup, slipped: false, recovered: false, rolledIntoFixSpec: false, reason: "no_slip" });
+        continue;
+      }
+
+      // Loop-guard: too many coaching attempts that never STUCK for this worker → ROLL the coaching
+      // into a fix spec that hardens the agent's mandate (deterministic build). Never escalate to
+      // the CEO. `stuck` = the coaching took; `rolled_in` = already baked into a prior fix spec.
+      const { count: openCoachings } = await admin
+        .from("agent_coaching_log")
         .select("id", { count: "exact", head: true })
         .eq("workspace_id", opts.workspaceId)
-        .eq("action_kind", "agent_recovered")
-        .eq("director_function", PLATFORM)
-        .gte("created_at", sinceIso)
-        .filter("metadata->>agent_kind", "eq", opts.agentKind);
-      if (!recent) {
-        await announceOnBoard(
-          admin,
-          opts.workspaceId,
-          `📈 ${nm(PLATFORM)}'s coaching took — ${nm(opts.agentKind)} (\`${opts.agentKind}\`) recovered to ${rollup.average?.toFixed(1)}/10 (was ${rollup.priorAverage?.toFixed(1)}).`,
-          "agent_recovered",
-          { agent_kind: opts.agentKind, average: rollup.average, prior: rollup.priorAverage },
-        );
+        .eq("agent_kind", agentKind)
+        .eq("kind", "coaching")
+        .not("recheck_status", "in", "(stuck,rolled_in)");
+      if ((openCoachings ?? 0) >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+        const roll = await rollCoachingIntoFixSpec(admin, {
+          workspaceId: opts.workspaceId,
+          agentKind,
+          rollupAvg: rollup.average,
+          attempts: openCoachings ?? 0,
+        });
+        if (roll.ok) {
+          await announceOnBoard(
+            admin,
+            opts.workspaceId,
+            `🛠️ ${nm(PLATFORM)} rolled ${nm(agentKind)}'s coaching into a fix spec [[${roll.slug}]] — coached ${openCoachings}× without it sticking (${rollup.average?.toFixed(1)}/10), so it's now a build that hardens the agent at the mandate level; the coaching is archived as rolled-into-mandates.`,
+            "rolled_coaching_into_spec",
+            { agent_kind: agentKind, slug: roll.slug, average: rollup.average, attempts: openCoachings },
+          );
+          out.push({ agent_kind: agentKind, rollup, slipped: true, recovered: false, rolledIntoFixSpec: true, reason: "rolled_into_fix_spec" });
+          continue;
+        }
+        // Roll didn't author (fix-spec build already in flight, or no GitHub token) — still NEVER
+        // escalate to the CEO. Don't add a slip payload; the next beat re-checks.
+        out.push({ agent_kind: agentKind, rollup, slipped: true, recovered: false, rolledIntoFixSpec: false, reason: roll.reason || "roll_skipped" });
+        continue;
       }
-      return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, recovered: true };
+
+      // The low-graded recent actions that prompted the slip — the coaching material for the box
+      // session's coaching pass. Pass the agent_action_grades row ids (source_grade_id on the
+      // resulting coaching_log row) + the agent_job_ids so the box session can git-show each merged
+      // diff.
+      const { data: lows } = await admin
+        .from("agent_action_grades")
+        .select("id, grade, reasoning, spec_slug, agent_job_id")
+        .eq("workspace_id", opts.workspaceId)
+        .eq("agent_kind", agentKind)
+        .lt("grade", COACH_LOW_ROLLUP)
+        .order("created_at", { ascending: false })
+        .limit(ROLLUP_WINDOW);
+      const lowRows =
+        (lows as Array<{ id: string; grade: number; reasoning: string | null; spec_slug: string | null; agent_job_id: string }>) ?? [];
+      if (!lowRows.length) {
+        out.push({ agent_kind: agentKind, rollup, slipped: true, recovered: false, rolledIntoFixSpec: false, reason: "no_low_grades" });
+        continue;
+      }
+
+      out.push({
+        agent_kind: agentKind,
+        rollup,
+        slipped: true,
+        recovered: false,
+        rolledIntoFixSpec: false,
+        slip: {
+          low_grade_ids: lowRows.map((r) => r.id),
+          low_agent_job_ids: lowRows.map((r) => r.agent_job_id),
+          rollup_average: rollup.average,
+          rollup_drop: rollup.drop,
+          open_coaching_count: openCoachings ?? 0,
+        },
+      });
+    } catch (e) {
+      console.warn(`[worker-grader] slip detect failed ws=${opts.workspaceId} kind=${agentKind}: ${e instanceof Error ? e.message : String(e)}`);
     }
-    return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "no_slip" };
   }
-  // grading-cascade-to-box-sessions Phase 2: the coaching synthesis LLM call moved off Anthropic's API
-  // to a box `agent-coach` session on Max, so the deployed cron no longer needs an ANTHROPIC_API_KEY to
-  // drive the coaching cascade — it just enqueues the box job.
-
-  // Loop-guard: too many coaching attempts that never STUCK for this worker → escalate, don't re-coach
-  // (recheck_status ∈ pending｜stuck｜recurred — a 'stuck' learning is resolved; pending/recurred is open).
-  const { count: openCoachings } = await admin
-    .from("agent_coaching_log")
-    .select("id", { count: "exact", head: true })
-    .eq("workspace_id", opts.workspaceId)
-    .eq("agent_kind", opts.agentKind)
-    .eq("kind", "coaching")
-    .not("recheck_status", "in", "(stuck,rolled_in)"); // 'stuck' = took; 'rolled_in' = baked into a fix spec already
-  if ((openCoachings ?? 0) >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
-    // Coached too many times without it sticking → do NOT escalate to the CEO. ROLL the coaching into a fix
-    // spec that hardens the agent's mandate (a real build), and archive the coaching as rolled-into-mandates.
-    const roll = await rollCoachingIntoFixSpec(admin, { workspaceId: opts.workspaceId, agentKind: opts.agentKind, rollupAvg: rollup.average, attempts: openCoachings ?? 0 });
-    if (roll.ok) {
-      await announceOnBoard(
-        admin,
-        opts.workspaceId,
-        `🛠️ ${nm(PLATFORM)} rolled ${nm(opts.agentKind)}'s coaching into a fix spec [[${roll.slug}]] — coached ${openCoachings}× without it sticking (${rollup.average?.toFixed(1)}/10), so it's now a build that hardens the agent at the mandate level; the coaching is archived as rolled-into-mandates.`,
-        "rolled_coaching_into_spec",
-        { agent_kind: opts.agentKind, slug: roll.slug, average: rollup.average, attempts: openCoachings },
-      );
-      return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: false, reason: "rolled_into_fix_spec" };
-    }
-    // Roll didn't author (fix-spec build already in flight, or no GitHub token) — still NEVER escalate to the CEO.
-    return { agentKind: opts.agentKind, rollup, slipped, coached: false, needsEscalation: false, reason: roll.reason || "roll_skipped" };
-  }
-
-  // The low-graded recent actions that prompted the slip — the coaching material the box session will
-  // read. Pass the agent_action_grades row ids (`source_grade_id` on the resulting coaching_log row) +
-  // the agent_job_ids so the box coach lane can git-show each merged diff.
-  const { data: lows } = await admin
-    .from("agent_action_grades")
-    .select("id, grade, reasoning, spec_slug, agent_job_id")
-    .eq("workspace_id", opts.workspaceId)
-    .eq("agent_kind", opts.agentKind)
-    .lt("grade", COACH_LOW_ROLLUP)
-    .order("created_at", { ascending: false })
-    .limit(ROLLUP_WINDOW);
-  const lowRows = (lows as Array<{ id: string; grade: number; reasoning: string | null; spec_slug: string | null; agent_job_id: string }>) ?? [];
-  if (!lowRows.length) return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: "no_low_grades" };
-
-  // grading-cascade-to-box-sessions Phase 2: the coaching synthesis LLM call moved to a box session on
-  // Max that reads the REAL diffs (git-show / git-diff origin/main...origin/<branch>) instead of the
-  // paraphrased stored grade reasoning the deployed synthesizeCoaching used. This function no longer
-  // calls the Anthropic API — it ENQUEUES ONE `agent-coach` `agent_jobs` row per (workspace,
-  // agent_kind) slip. The box coach lane (scripts/builder-worker.ts → runAgentCoachJob) synthesizes
-  // the durable learning from the diffs, then writes agent_coaching_log via `applyBoxCoaching` (which
-  // re-checks the loop-guard + rollup + calls coachAgent — the pure DB write is unchanged). No API
-  // bill; ai_token_usage purpose=agent_coaching_synthesis rows stop accruing.
-  //
-  // Dedup: skip re-enqueue while an agent-coach job for this (workspace, agent_kind) is already
-  // queued/building/needs_input — one box session per slip at a time, no daily pileup. `instructions`
-  // is stored as a JSON-encoded TEXT column (not jsonb), so a simple ilike against the encoded
-  // agent_kind field matches (the payload uses double-quotes, matching JSON.stringify).
-  const kindNeedle = `%"agent_kind":"${opts.agentKind}"%`;
-  const { data: inflight } = await admin
-    .from("agent_jobs")
-    .select("id")
-    .eq("workspace_id", opts.workspaceId)
-    .eq("kind", "agent-coach")
-    .ilike("instructions", kindNeedle)
-    .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval"])
-    .limit(1);
-  if (inflight && inflight.length) {
-    return { agentKind: opts.agentKind, rollup, slipped, coached: true, reason: "coach_job_in_flight" };
-  }
-
-  const payload = {
-    agent_kind: opts.agentKind,
-    low_grade_ids: lowRows.map((r) => r.id),
-    low_agent_job_ids: lowRows.map((r) => r.agent_job_id),
-    rollup_average: rollup.average,
-    rollup_drop: rollup.drop,
-    open_coaching_count: openCoachings ?? 0,
-  };
-  const { error: insErr } = await admin.from("agent_jobs").insert({
-    workspace_id: opts.workspaceId,
-    spec_slug: "agent-coach",
-    kind: "agent-coach",
-    status: "queued",
-    created_by: null,
-    instructions: JSON.stringify(payload),
-  });
-  if (insErr) {
-    console.error(`[worker-grader] agent-coach enqueue failed ws=${opts.workspaceId} kind=${opts.agentKind}: ${insErr.message}`);
-    return { agentKind: opts.agentKind, rollup, slipped, coached: false, reason: `enqueue_failed:${insErr.message}` };
-  }
-  return { agentKind: opts.agentKind, rollup, slipped, coached: true, reason: "coach_job_enqueued" };
+  return out;
 }
 
 // ── grading-cascade-to-box-sessions Phase 2: box-hosted coaching synthesis ─────────────────────────────
