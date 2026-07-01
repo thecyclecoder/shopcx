@@ -289,12 +289,17 @@ function formatJobForGrading(job: JobRow): string {
     .join("\n");
 }
 
+/** The `model` stamp for a grade produced by the box-hosted grader (Max session — no API bill). Keeps
+ *  agent_action_grades.model queryable so a box-grade vs API-grade split is visible in dashboards, and
+ *  a stale-cost audit can spot the deployed sweep re-firing after Phase 1. */
+const BOX_GRADE_MODEL = "box-max-session";
+
 /** Persist one agent grade — UPDATE in place if a row exists, else INSERT. Never clobbers a human grade. */
 async function upsertGrade(
   admin: Admin,
   existing: ExistingGradeRow | null,
   job: JobRow,
-  graded: { json: GraderJson; costCents: number; usage: { input_tokens?: number; output_tokens?: number } },
+  graded: { json: GraderJson; costCents: number; usage: { input_tokens?: number; output_tokens?: number }; modelOverride?: string },
 ): Promise<AgentGradeResult> {
   if (existing && existing.graded_by === "human") {
     // The CEO/Director owns this grade — the agent never re-writes a human override.
@@ -310,7 +315,7 @@ async function upsertGrade(
     grade,
     reasoning: graded.json.reasoning,
     graded_by: "agent" as const,
-    model: GRADER_MODEL,
+    model: graded.modelOverride ?? GRADER_MODEL,
     input_tokens: graded.usage?.input_tokens || 0,
     output_tokens: graded.usage?.output_tokens || 0,
     cost_cents: graded.costCents,
@@ -323,6 +328,45 @@ async function upsertGrade(
   const { data: ins, error } = await admin.from("agent_action_grades").insert(payload).select("id").single();
   if (error) return { ok: false, reason: error.message };
   return { ok: true, grade_id: ins?.id, agent_job_id: job.id, agent_kind: job.kind, grade };
+}
+
+/**
+ * Apply a grade produced by the box-hosted grading session (grading-cascade-to-box-sessions Phase 1)
+ * — a Max `claude -p` that reads the REAL merged diff. Reuses the same UNIQUE(agent_job_id) upsert +
+ * human-override invariant as the deployed gradeAgentAction path, so the rollup + coaching cascade
+ * fire identically off box-written grades. Concluded-only + rubric-gated + idempotent. `model` is
+ * stamped `box-max-session` so a per-source split stays queryable; no `ai_token_usage` write (Max sub
+ * has no per-token API bill — the CEO directive was $0 marginal grading).
+ */
+export async function applyBoxGrade(opts: { agentJobId: string; grade: number; reasoning: string; admin?: Admin }): Promise<AgentGradeResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, kind, spec_slug, status, error, log_tail, pr_url, pending_actions, created_at")
+    .eq("id", opts.agentJobId)
+    .maybeSingle();
+  if (!data) return { ok: false, reason: "job_not_found" };
+  const job = data as JobRow;
+
+  if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
+  if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
+
+  const { data: existing } = await admin
+    .from("agent_action_grades")
+    .select("id, grade, graded_by")
+    .eq("agent_job_id", job.id)
+    .maybeSingle();
+  const existingRow = (existing as ExistingGradeRow) ?? null;
+  if (existingRow && existingRow.graded_by === "human") {
+    return { ok: true, grade_id: existingRow.id, agent_job_id: job.id, agent_kind: job.kind, grade: existingRow.grade ?? undefined, idempotent_update: true };
+  }
+
+  return upsertGrade(admin, existingRow, job, {
+    json: { grade: opts.grade, reasoning: opts.reasoning },
+    costCents: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    modelOverride: BOX_GRADE_MODEL,
+  });
 }
 
 // ── grade one concluded worker action ───────────────────────────────────────────────────────────────
@@ -504,6 +548,30 @@ export async function agentGradingBatchReady(
 }
 
 /**
+ * Pick the batch of agent_job_ids for the box-hosted grader to grade (grading-cascade-to-box-sessions
+ * Phase 1). Same selection logic as the deployed sweep — failures first, then a fair round-robin sample
+ * of successes, proven workers throttled — but returns the IDs for platform-director-cron to hand off to
+ * a new `agent-grade` `agent_jobs` row. The box lane reads each id's REAL diff and writes the grade via
+ * applyBoxGrade. A no-op (empty array) while nothing is ungraded.
+ */
+export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<UngradedJob[]> {
+  const admin = opts.admin ?? createAdminClient();
+  try {
+    const pool = await ungradedConcludedJobs(admin, opts.workspaceId, opts.limit ?? 500);
+    if (!pool.length) return [];
+    const proven = new Set<string>();
+    for (const kind of new Set(pool.map((j) => j.kind))) {
+      const r = await computeAgentRollup(admin, opts.workspaceId, kind);
+      if (r.count >= ROLLUP_WINDOW && (r.average ?? 0) >= PROVEN_AVG) proven.add(kind);
+    }
+    return selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, proven);
+  } catch (e) {
+    console.warn(`[worker-grader] pickAgentGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
+  }
+}
+
+/**
  * The batched grading pass: grade a BOUNDED slice (≤ `cap`, default GRADE_BATCH_CAP) of the recently-
  * CONCLUDED, ungraded worker actions across the rubric-backed kinds, in one session — failures first, then
  * a fair round-robin sample of the successes (selectGradingBatch), so a chatty worker can't jam the run and
@@ -511,6 +579,11 @@ export async function agentGradingBatchReady(
  * gradeAgentAction upserts if re-run, and never re-writes a human grade). A no-op while no worker has
  * concluded an ungraded action. Returns the distinct worker kinds it newly graded so the caller can run
  * detectGradeDropCoaching on exactly those. Mirror director-grader.gradeConcludedDirectorCalls.
+ *
+ * NOTE: as of grading-cascade-to-box-sessions Phase 1 the primary grade path moved to the box-hosted
+ * `agent-grade` lane (which reads the REAL diff). This deployed-runtime sweep stays as a fallback the
+ * caller can invoke when a workspace's box lane can't be reached; retire it once the box lane is proven
+ * green for a full rollup window (worker-grading-and-director-management Phase 2 review).
  */
 export async function gradeConcludedAgentActions(opts: { workspaceId: string; admin?: Admin; limit?: number; cap?: number }): Promise<{ considered: number; graded: number; gradedKinds: string[] }> {
   const admin = opts.admin ?? createAdminClient();
