@@ -103,8 +103,48 @@ export function isExcludedFromDeployRegression(r: { source: string; title: strin
 }
 
 /**
+ * Extract the cadence off a `kpi_drift:<metric>:<cadence>` loop_id (or null when it's not a kpi_drift loop).
+ * Used by the monthly-cadence exclusion below.
+ */
+function kpiDriftCadence(loopId: string): "daily" | "weekly" | "monthly" | null {
+  const m = /^kpi_drift:.+:(daily|weekly|monthly)$/.exec(loopId || "");
+  return (m ? (m[1] as "daily" | "weekly" | "monthly") : null);
+}
+
+/**
+ * Is this loop a MONTHLY-cadence `kpi_drift`? Monthly kpi_drift metrics are trailing-30-day AGGREGATES
+ * (`human_touch_per_build`, `deploy_reliability`, …) — a canary window is minutes to hours, so a single
+ * deploy CANNOT causally shift a 30-day trailing ratio inside its window. Attributing a monthly kpi_drift
+ * red loop to one deploy is a category error at the timescale level.
+ *
+ * False-positive class fixed: Reva auto-rolled back `blog-pixel-tracking` on a single
+ * `kpi_drift:human_touch_per_build:monthly` red loop — a BUILD-PIPELINE autonomy KPI a storefront pixel
+ * cannot causally affect, and the alert self-resolved 50 min later. Monthly kpi_drift is now excluded
+ * from `newRedLoops` regardless of the metric's registry classification.
+ */
+export function isMonthlyKpiDriftLoop(loopId: string): boolean {
+  return kpiDriftCadence(loopId) === "monthly";
+}
+
+/**
+ * Human-readable reason a newly-opened `loop_alerts` row is EXCLUDED from `newRedLoops` (or null when it's a
+ * signal we DO count). Surfaced on `deploy_watches.findings.excludedRedLoops` so the rollback decision is
+ * auditable — the supervisor can see which signals were considered and which were dropped, and why.
+ */
+export function reasonExcludedFromDeployRegressionLoop(loopId: string): string | null {
+  if (isMonthlyKpiDriftLoop(loopId)) {
+    return "monthly-cadence kpi_drift — trailing 30-day aggregate, not deploy-attributable inside a canary window";
+  }
+  if (isAuditSkippedKpiDriftLoop(loopId)) {
+    return "audit-skipped kpi_drift metric (liveSpecSetDependent/currentState) — PM volume / membership delta, not the deployed code";
+  }
+  return null;
+}
+
+/**
  * Is this newly-opened `loop_alerts` row a signal a Vercel CODE deploy has NO causal path to — the
- * loop-side twin of {@link isExcludedFromDeployRegression}? The third blast-radius filter:
+ * loop-side twin of {@link isExcludedFromDeployRegression}? Three classes are excluded from
+ * `newRedLoops`:
  *
  *  - `kpi_drift:<metric>:<cadence>` loops for an AUDIT-SKIPPED metric — the `liveSpecSetDependent`
  *    weekly-aggregate / live-spec-set meta-metrics (`specs_per_week`, `regression_coverage_pct`, …)
@@ -113,15 +153,20 @@ export function isExcludedFromDeployRegression(r: { source: string; title: strin
  *    regression coverage), NOT the deployed code — a no-op spec's deploy cannot move them. Reusing the
  *    SAME `liveSpecSetDependent`/`currentState` registry flags #848 introduced ([[platform-scorecard]]
  *    `isAuditSkippedKpiDriftLoop` — single source of truth) keeps the audit skip and the deploy-
- *    attribution gate from drifting apart. (Real per-deploy loops — a genuine kpi_drift on a windowed
- *    aggregate, an error-rate loop, a test/regression loop — are NOT excluded and still auto-revert.)
+ *    attribution gate from drifting apart.
+ *  - Any `kpi_drift:<metric>:monthly` loop (regardless of the metric's registry flags) — the cadence
+ *    itself makes the signal too laggy to attribute to one deploy inside a canary window
+ *    ({@link isMonthlyKpiDriftLoop}). This is the blog-pixel-tracking false-revert class.
  *
- * False-positive class fixed: Reva auto-reverted `noop-pipeline-test-6` (a no-op spec) because the two
- * weekly-aggregate kpi_drift loops (`specs_per_week`, `regression_coverage_pct`) flipped red in its
+ * Real per-deploy loops — a genuine DAILY windowed-aggregate kpi_drift, an error-rate loop, a
+ * test/regression loop — are NOT excluded and still trip `regressed`.
+ *
+ * Prior false-positive class fixed: Reva auto-reverted `noop-pipeline-test-6` (a no-op spec) because the
+ * two weekly-aggregate kpi_drift loops (`specs_per_week`, `regression_coverage_pct`) flipped red in its
  * canary window from a high-volume PM night — drift that had nothing to do with the deploy.
  */
 export function isExcludedFromDeployRegressionLoop(r: { loop_id: string }): boolean {
-  return isAuditSkippedKpiDriftLoop(r.loop_id);
+  return reasonExcludedFromDeployRegressionLoop(r.loop_id) !== null;
 }
 
 /** Cap the watches evaluated per cron tick so a backlog can't run the tick unbounded. */
@@ -319,6 +364,14 @@ export interface DeployWatchFindings {
   newErrorSignatures: Array<{ signature: string; source: string; title: string | null; count: number }>;
   /** loop_alerts that opened red AFTER the deploy (not pre-existing). */
   newRedLoops: Array<{ loop_id: string; reason: string; detail: string }>;
+  /**
+   * loop_alerts that opened in the canary window but were EXCLUDED as not causally deploy-scoped —
+   * monthly-cadence kpi_drift (30-day trailing aggregate) and audit-skipped kpi_drift metrics
+   * (liveSpecSetDependent/currentState). Surfaced so the rollback decision is auditable: the supervisor
+   * can see which signals were considered and which were dropped, and why (spec Phase 3 — the
+   * blog-pixel-tracking spurious-rollback root fix).
+   */
+  excludedRedLoops: Array<{ loop_id: string; excluded_reason: string }>;
   /** red loop count from the live Control-Tower snapshot (a cross-check; null if the snapshot failed). */
   redLoopCount: number | null;
   controlTowerOk: boolean;
@@ -359,9 +412,17 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
     .eq("status", "open")
     .gte("opened_at", deployedAt)
     .lte("opened_at", watch.window_ends_at);
-  const newRedLoops = ((alertRows as Array<{ loop_id: string; reason: string; detail: string }> | null) || [])
-    .filter((r) => r.loop_id && !baselineLoopIds.has(r.loop_id) && !isExcludedFromDeployRegressionLoop(r))
-    .map((r) => ({ loop_id: r.loop_id, reason: r.reason, detail: r.detail }));
+  const newRedLoops: Array<{ loop_id: string; reason: string; detail: string }> = [];
+  const excludedRedLoops: Array<{ loop_id: string; excluded_reason: string }> = [];
+  for (const r of ((alertRows as Array<{ loop_id: string; reason: string; detail: string }> | null) || [])) {
+    if (!r.loop_id || baselineLoopIds.has(r.loop_id)) continue;
+    const excluded = reasonExcludedFromDeployRegressionLoop(r.loop_id);
+    if (excluded) {
+      excludedRedLoops.push({ loop_id: r.loop_id, excluded_reason: excluded });
+      continue;
+    }
+    newRedLoops.push({ loop_id: r.loop_id, reason: r.reason, detail: r.detail });
+  }
 
   // Live Control-Tower snapshot — a cross-check on the current red-loop count (Tao's signals reused).
   let redLoopCount: number | null = null;
@@ -374,7 +435,7 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
     console.warn("[deploy-guardian] control-tower snapshot failed:", e instanceof Error ? e.message : e);
   }
 
-  return { newErrorSignatures, newRedLoops, redLoopCount, controlTowerOk };
+  return { newErrorSignatures, newRedLoops, excludedRedLoops, redLoopCount, controlTowerOk };
 }
 
 /**
@@ -612,6 +673,7 @@ export async function evaluateDeployWatch(admin: Admin, watch: DeployWatch): Pro
   const findingsJson: Record<string, unknown> = {
     newErrorSignatures: findings.newErrorSignatures,
     newRedLoops: findings.newRedLoops,
+    excludedRedLoops: findings.excludedRedLoops,
     redLoopCount: findings.redLoopCount,
     controlTowerOk: findings.controlTowerOk,
   };
@@ -700,6 +762,9 @@ function deployActivityMeta(watch: DeployWatch, verdict: DeployVerdict, findings
     verdict,
     new_error_signatures: findings.newErrorSignatures.length,
     new_red_loops: findings.newRedLoops.map((l) => l.loop_id),
+    // Which loops opened in the window but were dropped as not causally deploy-scoped (monthly kpi_drift,
+    // audit-skipped meta-metrics). Surfaced on the activity row so the supervisor can audit the reasoning.
+    excluded_red_loops: findings.excludedRedLoops,
     red_loop_count: findings.redLoopCount,
     ...(extra ?? {}),
   };

@@ -321,6 +321,64 @@ async function surfaceExhaustedPrResolve(
   }
 }
 
+/**
+ * accumulation-stamp-gap-and-rollback-guard P2 — list the set of branch refs backing an OPEN claude/build-*
+ * PR right now. The stuck-accumulation backstop uses this to decide "is a build branch NOT already visible as
+ * an open PR?" (the wedge signature). Returns `null` on ANY GitHub failure (no token, list failed, bad payload)
+ * so the caller fails CLOSED — never guess a wedge and never stamp a phase without a live PR read confirming
+ * absence. One page (per_page=100) matches the existing `detectAndEnqueueDirtyPrs` scan; the workspace's build
+ * volume sits well under that cap.
+ */
+export async function listOpenClaudeBuildBranches(): Promise<Set<string> | null> {
+  if (!ghToken()) return null;
+  const list = await gh("GET", `/repos/${GH_REPO}/pulls?state=open&per_page=100`);
+  if (!list.ok || !Array.isArray(list.json)) return null;
+  const out = new Set<string>();
+  for (const p of list.json as Array<Record<string, unknown>>) {
+    const ref = (p.head as { ref?: string } | undefined)?.ref;
+    if (typeof ref === "string" && ref.startsWith("claude/build-")) out.add(ref);
+  }
+  return out;
+}
+
+/**
+ * accumulation-stamp-gap-and-rollback-guard P2 — read the branch's head SHA + the set of `Phase: N` trailer
+ * positions committed on `main..branch`. Mirrors P1's finalize scan (line-anchored `Phase: N` per commit
+ * message on origin/main..HEAD) — the same trailer convention `queueNextChainedPhase` writes into every
+ * scoped-instruction commit — but over the GitHub compare API so it runs from the standing pass without a
+ * local checkout. Returns `null` on ANY failure (no token, missing branch, bad payload) so the caller fails
+ * CLOSED (no stamp without a positive branch read). Empty `positions` = branch exists but no Phase: trailers
+ * on the diff-only commits (= NOT the wedge signature — leave it alone).
+ */
+export async function readBranchPhaseTrailers(
+  branch: string,
+): Promise<{ headSha: string; positions: Set<number> } | null> {
+  if (!ghToken()) return null;
+  // compare(main...branch) returns ONLY commits on the branch and not on main (the same range P1 shells out to
+  // via `git log origin/main..HEAD`). GitHub trims commit lists at 250; a wedge with more phases would still
+  // land its trailer on the last-N commits (the finalize commit + queueNextChainedPhase's per-phase commit),
+  // which fall inside the returned window.
+  const r = await gh("GET", `/repos/${GH_REPO}/compare/main...${encodeURIComponent(branch)}`);
+  if (!r.ok) return null;
+  const body = (r.json || {}) as Record<string, unknown>;
+  const commits = Array.isArray(body.commits) ? (body.commits as Array<Record<string, unknown>>) : null;
+  // `body.head_commit.sha` is the branch tip; fall back to the last compare commit.
+  const headSha =
+    (body.head_commit as { sha?: string } | undefined)?.sha ??
+    (commits && commits.length ? ((commits[commits.length - 1].sha as string | undefined) ?? null) : null);
+  if (typeof headSha !== "string" || !headSha) return null;
+  const positions = new Set<number>();
+  for (const c of commits ?? []) {
+    const message = ((c.commit as { message?: string } | undefined)?.message ?? "") as string;
+    // Same regex as P1's finalize path (line-anchored, case-insensitive) — never matches a stray "Phase 2"
+    // reference in a commit body; only bona-fide `Phase: N` trailers.
+    const trailerRe = /^\s*Phase:\s*(\d+)\s*$/gim;
+    let m: RegExpExecArray | null;
+    while ((m = trailerRe.exec(message)) !== null) positions.add(parseInt(m[1], 10));
+  }
+  return { headSha, positions };
+}
+
 export interface DirtyPrResult {
   checked: number;
   conflicting: number;

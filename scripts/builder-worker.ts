@@ -3587,6 +3587,33 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing phase-progression backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // STUCK-ACCUMULATION backstop (accumulation-stamp-gap-and-rollback-guard P2) — DEFENSE-IN-DEPTH for the
+    // P1 stamp-gap fix. P1 catches the wedge at FINALIZE time (stamps every `Phase: N` trailer on
+    // origin/main..HEAD, so a paused-phase commit never leaves the branch with an unstamped position). This
+    // covers the case P1 CAN'T: a run that ALREADY TERMINATED with the wedge in place (needs_input/completed
+    // before the fix landed) — for those, finalize never re-fires until someone re-queues the build, which the
+    // director's groom refuses to do because the derived status shows nothing new to add. Precise wedge
+    // signature (all required — see backstopStuckAccumulation for the full list): multi-phase spec Ada drives,
+    // partially built on branch, ≥1 non-terminal phase without a build_sha, NO open claude/build-* PR, branch
+    // carries a `Phase: N` trailer for each unstamped position, isSpecAccumulationComplete=false. The
+    // intersection is stamped from the branch head SHA — the SAME leaf write P1 uses — and the next
+    // finalize/promote tick opens the PR autonomously. FAIL-CLOSED on any GitHub read blip (no token, list
+    // failed, branch missing) so a blind guess never stamps a phase. Every unwedged spec surfaces as a
+    // `director_activity` row (never silent — supervisable autonomy).
+    const stuck = await lib.backstopStuckAccumulation(db);
+    if (stuck.unwedged.length) {
+      const list = stuck.unwedged.map((u) => `${u.slug} (P${u.positions.join(",P")})`).join(", ");
+      notes.push(`stuck-accumulation backstop → unwedged ${stuck.unwedged.length} spec(s): ${list}`);
+    } else if (stuck.aborted) {
+      // A transient GitHub blip (list-open-PRs failed) — not actionable this pass; log it but don't post to the
+      // board (that would flood on every token/network hiccup). The next pass retries with a fresh GH read.
+      console.warn(`${tag} standing stuck-accumulation backstop aborted (${stuck.scanned} candidate(s), GitHub read failed — retry next pass)`);
+    }
+  } catch (e) {
+    notes.push(`stuck-accumulation backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing stuck-accumulation backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // spec-goal-branch-pm-flow M4 — promote every GOAL-BOUND, promote-eligible spec branch onto its goal
     // branch (`goal/{goal-slug}`, seeded from main by the first spec), sequenced by blocked_by so a dependency
     // lands before its dependent. Stamps `specs.goal_branch_sha` (the M5 seam). Does NOT touch main. Mirrors
@@ -14694,6 +14721,11 @@ async function dispatchJob(job: Job) {
       let phasePos = opts.phasePos;
       // Derive the phase to stamp when the session didn't carry one (generic/instruction-less resume): the
       // first phase whose DERIVED status is neither shipped nor rejected = the one this build session built.
+      // NB: even when this derivation succeeds, the branch-ground-truth scan below is still authoritative —
+      // it CATCHES phases whose commit trailer is on the branch but the single-position stamp would miss
+      // (accumulation-stamp-gap: the wedge where a resume-after-pause session stamps only its "current"
+      // phase, leaving an earlier committed-but-unstamped phase's `build_sha` NULL forever, so
+      // isSpecAccumulationComplete permanently reports it "not built" and the PR never opens).
       if (phasePos == null) {
         try {
           const { getSpec } = await import("../src/lib/specs-table");
@@ -14710,14 +14742,55 @@ async function dispatchJob(job: Job) {
           console.error(`${tag} finalize: phase-position derivation failed (proceeding unstamped):`, e instanceof Error ? e.message : e);
         }
       }
-      // STAMP — record this phase's branch-build provenance (build_sha + in_progress). Idempotent.
-      if (phasePos != null && opts.headSha) {
+      // ⭐ BRANCH GROUND-TRUTH STAMP (accumulation-stamp-gap-and-rollback-guard P1): "is this phase built?"
+      // now derives from the BRANCH, not only a build-time stamp. Every phase whose `Phase: N` trailer appears
+      // on a branch commit (origin/main..HEAD — the M1 `commitTrailers` convention below) is stamped BUILT
+      // from `headSha`, IN ADDITION to the derived `phasePos`. That closes the wedge where a prior phase was
+      // committed during a needs_input/needs_approval PAUSE but the current session's derivation / instructions
+      // named only its own phase — leaving the paused phase's `build_sha` NULL forever so
+      // `isSpecAccumulationComplete` reported it "not built", the PR never opened, and the director re-groomed
+      // the same trap indefinitely (live on 2026-07-01 wedged cleo-lever-priors / ada-standing-pass /
+      // grading-cascade). Idempotent + safe: `stampPhaseBuilt` no-ops a terminal (shipped/rejected) phase and
+      // re-stamping the same `build_sha` is harmless. The `Phase:` trailer scan is best-effort — a git failure
+      // falls back to the derived-position stamp so we never regress from the pre-fix behavior.
+      const positionsToStamp = new Set<number>();
+      if (phasePos != null) positionsToStamp.add(phasePos);
+      if (opts.headSha && branch) {
+        try {
+          sh("git", ["fetch", "origin", "main"], { cwd: wt });
+          const logOut = sh("git", ["log", "--format=%B%x1e", "origin/main..HEAD"], { cwd: wt }).out;
+          const commits = logOut.split("\x1e").map((c) => c.trim()).filter(Boolean);
+          for (const commit of commits) {
+            // Match only bona-fide `Phase: N` trailer lines (line-anchored, case-insensitive) — never a stray
+            // "Phase 2" mention in a commit body. Multiple commits with the same position are deduped.
+            const trailerRe = /^\s*Phase:\s*(\d+)\s*$/gim;
+            let m: RegExpExecArray | null;
+            while ((m = trailerRe.exec(commit)) !== null) positionsToStamp.add(parseInt(m[1], 10));
+          }
+          if (positionsToStamp.size > 1) {
+            const list = Array.from(positionsToStamp).sort((a, b) => a - b).join(",");
+            console.log(`${tag} finalize: branch ground-truth expanded stamp set to positions [${list}] (from Phase: trailers on origin/main..HEAD)`);
+          }
+        } catch (e) {
+          console.error(`${tag} finalize: branch-trailer scan failed (falling back to derived pos):`, e instanceof Error ? e.message : e);
+        }
+      }
+      // STAMP — record each phase's branch-build provenance (build_sha + in_progress). Idempotent (terminal
+      // phases are no-ops; same-SHA re-stamps are harmless). Every stamp is best-effort — a single failure
+      // must never fail an otherwise-good build.
+      if (opts.headSha && positionsToStamp.size) {
         try {
           const { stampPhaseBuilt } = await import("../src/lib/specs-table");
-          await stampPhaseBuilt(job.workspace_id, slug, phasePos, { build_sha: opts.headSha });
-          console.log(`${tag} stamped phase ${phasePos} BUILT (build_sha ${opts.headSha.slice(0, 8)}, in_progress — not shipped)`);
+          for (const pos of Array.from(positionsToStamp).sort((a, b) => a - b)) {
+            try {
+              await stampPhaseBuilt(job.workspace_id, slug, pos, { build_sha: opts.headSha });
+              console.log(`${tag} stamped phase ${pos} BUILT (build_sha ${opts.headSha.slice(0, 8)}, in_progress — not shipped)`);
+            } catch (e) {
+              console.error(`${tag} stampPhaseBuilt(pos=${pos}) failed (non-fatal, continuing):`, e instanceof Error ? e.message : e);
+            }
+          }
         } catch (e) {
-          console.error(`${tag} stampPhaseBuilt failed (non-fatal):`, e instanceof Error ? e.message : e);
+          console.error(`${tag} stampPhaseBuilt import failed (non-fatal):`, e instanceof Error ? e.message : e);
         }
       }
       // ACCUMULATION — the stamp above is now persisted, so this read reflects the just-built phase. Fails OPEN.
