@@ -31,21 +31,22 @@ Service ops (as **root**): `systemctl {status,restart,stop} shopcx-builder` · l
 
 ## Which Max accounts the box uses
 
-The box round-robins across three Max logins. The dashboard ([[../dashboard/roadmap]] `/dashboard/roadmap/box`) labels them **Round Robin 1/2/3** (it never shows the email — kept here, not in the UI):
+The box round-robins across four Max logins. The dashboard ([[../dashboard/roadmap]] `/dashboard/roadmap/box`) labels them **Round Robin 1/2/3/4** (it never shows the email — kept here, not in the UI):
 
 | Box slot (UI) | Config dir | Max account email |
 |---|---|---|
 | **Round Robin 1** | `/home/builder/.claude` | `dylan@superfoodscompany.com` |
 | **Round Robin 2** | `/home/builder/.claude-personal` | `dylanralston@gmail.com` |
 | **Round Robin 3** | `/home/builder/.claude-third` | `dylan@apptivi.com` |
+| **Round Robin 4** | `/home/builder/.claude-fourth` | `invoices@superfoodscompany.com` |
 
-Slot order = the `CLAUDE_CONFIG_DIRS` order (the default in `builder-worker.ts`, overridable in `/root/shopcx-worker.env`). A build card on the box view shows the **Round Robin N** it's running on, so you can see which account a live build is drawing down.
+Slot order = the `CLAUDE_CONFIG_DIRS` order — **this box sets it explicitly in `/root/shopcx-worker.env`** (the `builder-worker.ts` default is the fallback for an env-unset / fresh box). To add or remove an account, edit that env line + restart the worker (`systemctl restart shopcx-builder`); the login is a separate one-time op (below). A build card on the box view shows the **Round Robin N** it's running on, so you can see which account a live build is drawing down.
 
 **Cap reset times.** When an account hits its wall the CLI message carries the reset clock time, **localized to the running env's timezone** — the box runs in **UTC** so it always reads `resets 7pm (UTC)` / `resets 2am (UTC)` (the same limit shows `resets 10pm (America/Puerto_Rico)` in a PR-timezone terminal). `parseResetTime` (in `builder-worker.ts`) sets the account's `cappedUntil` to its REAL reset (not a flat now+5h guess), parsing in priority order: the **`resetsAt` unix-seconds epoch** in the structured `rate_limit_info` JSON → a "resets at &lt;ISO&gt;" / "try again at" phrase → that legacy UTC clock-hour ("resets 7pm (UTC)"); no parseable time → the default ~5h cooldown (never caps forever). The box view (`/dashboard/roadmap/box`) renders the reset as an **AST clock time** (`America/Puerto_Rico`, the CEO's tz) — e.g. "resets 10:00 PM AST (~9h)". (Future-time display uses a `until()` helper, not `elapsed()` — `elapsed()` clamps a future time to "~0s".)
 
 ## Multi-account round-robin + usage-cap failover (box-multi-account-failover)
 
-A single Max account hits a **5-hour usage wall**; with one account a burst of builds caps it and *everything* fails until the reset (the 2026-06-22 "12 builds failed at once"). So the box keeps a **pool of `CLAUDE_CONFIG_DIR`s** — each an isolated, once-logged-in Max account — round-robins **new** sessions across them (~2× sustained throughput, each account hits its wall ~2× slower), pulls a capped account from rotation until its estimated reset, **pins every resume to the account that created its session** (a cross-account `claude --resume` is a guaranteed "No conversation found"), and parks `blocked_on_usage` (auto-resumes, never a hard fail) only when **all** accounts are capped. The worker logic is in `scripts/builder-worker.ts` (the `ACCOUNT_POOL` / `accounts` block). The pool is `CLAUDE_CONFIG_DIRS` (comma-separated; default `/home/builder/.claude,/home/builder/.claude-personal`).
+A single Max account hits a **5-hour usage wall**; with one account a burst of builds caps it and *everything* fails until the reset (the 2026-06-22 "12 builds failed at once"). So the box keeps a **pool of `CLAUDE_CONFIG_DIR`s** — each an isolated, once-logged-in Max account — round-robins **new** sessions across them (~2× sustained throughput, each account hits its wall ~2× slower), pulls a capped account from rotation until its estimated reset, **pins every resume to the account that created its session** (a cross-account `claude --resume` is a guaranteed "No conversation found"), and parks `blocked_on_usage` (auto-resumes, never a hard fail) only when **all** accounts are capped. The worker logic is in `scripts/builder-worker.ts` (the `ACCOUNT_POOL` / `accounts` block). The pool is `CLAUDE_CONFIG_DIRS` (comma-separated; set explicitly in `/root/shopcx-worker.env`, four dirs as of 2026-07-01; the `builder-worker.ts` fallback lists the same four for an env-unset box).
 
 **Set up the second account (one-time, owner op — over the tailnet):**
 
@@ -60,13 +61,23 @@ claude2 -p "say hi"      # runs under account #2
 
 The **alias never reaches the worker** — it `spawn`s `claude` directly (no interactive shell), so the worker selects the config dir in the `env` object it builds for each lane (`runClaude(..., configDir)`). The alias is only for *your* manual runs. As with account #1: **no `ANTHROPIC_API_KEY`** in either login (still Max, never per-token).
 
-**Third+ account (same pattern — added 2026-06-24 after a weekly cap on account #2).** The pool default is now `/home/builder/.claude,/home/builder/.claude-personal,/home/builder/.claude-third` (override via `CLAUDE_CONFIG_DIRS` in `/root/shopcx-worker.env`). Log account #3 into its own dir, one-time:
+**Third+ account (same pattern — added 2026-06-24 after a weekly cap on account #2).** Log account #3 into its own dir, one-time:
 
 ```bash
 sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-third claude   # → /login → sign in with account #3
 echo "alias claude3='CLAUDE_CONFIG_DIR=/home/builder/.claude-third claude'" >> /home/builder/.bashrc
 sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-third claude -p "say hi"   # verify
 ```
+
+**Fourth account (`invoices@superfoodscompany.com` = Round Robin 4, added 2026-07-01).** Config dir `/home/builder/.claude-fourth` is created; the pool env is flipped to include it only AFTER the login (gated to avoid drawing work onto an unlogged account). Log it in, one-time:
+
+```bash
+sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-fourth claude   # → /login → sign in with invoices@superfoodscompany.com
+echo "alias claude4='CLAUDE_CONFIG_DIR=/home/builder/.claude-fourth claude'" >> /home/builder/.bashrc
+sudo -u builder CLAUDE_CONFIG_DIR=/home/builder/.claude-fourth claude -p "say hi"   # verify
+```
+
+Then activate: add `/home/builder/.claude-fourth` to the `CLAUDE_CONFIG_DIRS` line in `/root/shopcx-worker.env` and `systemctl restart shopcx-builder` — the box then round-robins across all four.
 
 A config dir that isn't logged in yet just fails its lanes (the failover pulls it / parks `blocked_on_usage`) — it never blocks the healthy accounts, so adding the dir before the login is authorized is safe.
 
