@@ -36,9 +36,21 @@ One **concluded `agent_jobs` row** (terminal status `completed｜merged｜failed
 | `CoachingLearning` | `{ errorClass, triggeringPattern, guidance, reasoning }` | The durable rule shape the box coach session produces — kebab-case class + 1-sentence pattern + "when you see X, do Y" guidance + evidence-grounded reasoning citing `path.ts:LINE` from the merged diffs. |
 | `buildAgentGraderSystemPrompt` | `(admin, workspaceId, agentKind) → Promise<string>` | The worker's rubric + approved [[../tables/agent_grader_prompts]] rules (worker-targeted + cross-cutting NULL). |
 
-**Constants:** `ROLLUP_WINDOW=10` · `COACH_LOW_ROLLUP=7` · `DROP_THRESHOLD=1.5` · `BATCH_MIN=5` · `BATCH_FALLBACK_MS=~3h` · `GRADE_BATCH_CAP=12`.
+**Constants:** `ROLLUP_WINDOW=10` · `COACH_LOW_ROLLUP=7` · `DROP_THRESHOLD=1.5` · `BATCH_MIN=5` · `BATCH_FALLBACK_MS=~3h` · `GRADE_BATCH_CAP=12` · `PROVEN_AVG=8` · `GRADE_PROVEN_SAMPLE=0.2`.
 
 **Bounded, prioritized cadence (CEO directive — don't jam the box).** A grading session grades **at most `GRADE_BATCH_CAP`** jobs. Selection (`selectGradingBatch`): **every failure** (`failed`/`needs_attention` — a worker mistake worth coaching on, newest first) up to the cap, then the remaining slots filled by a **round-robin-by-worker** random sample of the successes — so noisy routine workers (fold, pr-resolve) get spot-checked without crowding out quieter ones, and the rest stay ungraded for a later beat. A failure also makes `agentGradingBatchReady` true immediately (graded promptly, not on the ~3h fallback).
+
+**Graduated per-worker success sample rate ([[../specs/grading-graduated-sample-rate]]).** Grading is a statistical read — a worker whose rolling average is high enough only needs a SAMPLE of its good work, not every action. `gradeSampleRateForAvg(avg, count)` maps the last-`ROLLUP_WINDOW` rolling {average, count} → the share of that worker's successful jobs to grade this beat. Replaces the old binary proven/not throttle so that a slip pulls the sampled average into a heavier tier on the very next beat (self-re-arm), while a consistently-excellent worker still gets a light-touch spot-check floor (never 0 — a regression would otherwise be invisible until failures land). FAILURES are always graded and short-circuit the sample (see `selectGradingBatch` `isFail`) — the coaching signal isn't sampled.
+
+| Rolling avg | Sample rate | Meaning |
+|---|---|---|
+| `count < 5` OR `avg == null` | **1.0** | too little data — grade all until we have a read |
+| `avg < 7` | **1.0** | learning zone — full grading; where the coaching signal lives (`COACH_LOW_ROLLUP=7`) |
+| `7 ≤ avg < 8` | **0.5** | "sample, not all" begins |
+| `8 ≤ avg < 9` | **0.2** (`GRADE_PROVEN_SAMPLE`) | proven — spot-check |
+| `avg ≥ 9` | **0.1** | excellent — light-touch floor; never 0 so a regression is still catchable |
+
+`PROVEN_AVG` was lowered `9→8` in the same pass — the old 9.0 bar was so high it almost never engaged, so nearly every action got graded. `8.0` matches the 6-7 acceptable / 8-9 strong break in the SCORING rubric. Coaching thresholds (`COACH_LOW_ROLLUP=7`, `DROP_THRESHOLD=1.5`, `COACH_MIN_SAMPLE=3`) are unchanged — with fewer grades landing per beat, `detectGradeDropCoaching` fires less on its own, no separate throttle needed. Effective daily `agent_action_grades` volume falls materially while failure coverage stays at 100%.
 
 ## How it grades
 - **Inputs:** the concluded job's row — `kind` / `spec_slug` / `status` / `error` / `log_tail` / `pr_url` / the approved `pending_action`. (Phase 1 grades from the job-row context the runtime has; the Phase-2 Max box session that reads the real PR diff is the cadence layer.)
