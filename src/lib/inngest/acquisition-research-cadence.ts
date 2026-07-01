@@ -29,7 +29,7 @@ import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { promoteFromCategorySweep } from "@/lib/competitors";
 import { materializeAdGaps } from "@/lib/acquisition-hub";
-import { gradeActedGaps } from "@/lib/acquisition-gap-grader";
+import { pickGapGradeBatch } from "@/lib/acquisition-gap-grader";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 async function adToolWorkspaceIds(): Promise<string[]> {
@@ -43,14 +43,21 @@ interface WorkspaceCadenceResult {
   workspaceId: string;
   promoted: number;
   adGaps: number;
-  graded: { considered: number; initial: number; revised: number };
+  /**
+   * grading-cascade-to-box-sessions Phase 4: the inline API grader is gone. `considered` is the
+   * batch size picked by pickGapGradeBatch (0 = nothing to grade); `enqueued` is 1 when we
+   * dispatched a `gap-grade` box job for this workspace this beat, 0 when dedup skipped (already
+   * an in-flight `gap-grade` job for this workspace). Actual grades land on the box within a few
+   * minutes.
+   */
+  graded: { considered: number; enqueued: number };
 }
 
 /** One workspace's re-scan + grade pass. Best-effort per step — a failure never breaks the loop. */
 async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenceResult> {
   let promoted = 0;
   let adGaps = 0;
-  let graded = { considered: 0, initial: 0, revised: 0 };
+  const graded = { considered: 0, enqueued: 0 };
 
   try {
     const p = await promoteFromCategorySweep(workspaceId);
@@ -66,10 +73,42 @@ async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenc
     console.error(`[acquisition-cadence] ad-gap materialize failed ws=${workspaceId}:`, err);
   }
 
+  // Grading is dispatched box-side (grading-cascade-to-box-sessions Phase 4). Pick the batch
+  // here (a cheap DB read) and enqueue ONE `gap-grade` `agent_jobs` row per batch-ready workspace
+  // carrying the picked candidates. The box's gap-grade lane (scripts/builder-worker.ts →
+  // runGapGradeJob) then reads each gap + its routed outcome and writes acquisition_gap_grades
+  // via applyBoxGapGrade (same UNIQUE(workspace_id, gap_source, gap_id) upsert + human-override
+  // invariant as the deployed gradeGap path). Dedup: skip re-enqueueing while a `gap-grade` job
+  // for this workspace is already queued/building. Best-effort.
   try {
-    graded = await gradeActedGaps({ workspaceId });
+    const admin = createAdminClient();
+    const batch = await pickGapGradeBatch({ workspaceId, admin });
+    if (batch.length) {
+      graded.considered = batch.length;
+      const { data: inflight } = await admin
+        .from("agent_jobs")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "gap-grade")
+        .in("status", ["queued", "queued_resume", "building", "claimed"])
+        .limit(1);
+      if (inflight && inflight.length) {
+        graded.enqueued = 1; // already dispatched on a prior beat — grading IS flowing box-side
+      } else {
+        const { error } = await admin.from("agent_jobs").insert({
+          workspace_id: workspaceId,
+          spec_slug: "gap-grade",
+          kind: "gap-grade",
+          status: "queued",
+          created_by: null,
+          instructions: JSON.stringify({ candidates: batch }),
+        });
+        if (!error) graded.enqueued = 1;
+        else console.error(`[acquisition-cadence] gap-grade enqueue failed ws=${workspaceId}: ${error.message}`);
+      }
+    }
   } catch (err) {
-    console.error(`[acquisition-cadence] grade sweep failed ws=${workspaceId}:`, err);
+    console.error(`[acquisition-cadence] gap-grade pick/enqueue failed ws=${workspaceId}:`, err);
   }
 
   return { workspaceId, promoted, adGaps, graded };

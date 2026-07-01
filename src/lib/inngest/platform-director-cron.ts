@@ -18,18 +18,21 @@
  * Dedupe: skip a workspace that already has an in-flight platform-director job (queued / queued_resume
  * / building / claimed) — a standing pass must never pile up day over day.
  *
- * On the SAME beat it also runs the GRADING LOOP ([[../specs/director-loop-grading]] Phase 3): grade
- * every recently-CONCLUDED director call — each autonomous auto-approval + each escorted milestone that
- * landed — 1–10 with reasoning into director_decision_grades (src/lib/agents/director-grader.ts
- * `gradeConcludedDirectorCalls`). The grade sweep runs HERE, in the deployed runtime (it needs the
- * Anthropic API key), not on the box; the enqueue half is purely the box-job insert. Mirrors
- * daily-analysis-report-cron's daily cron shape + acquisition-research-cadence's grade sweep.
+ * On the SAME beat it also runs the GRADING LOOP ([[../specs/director-loop-grading]] Phase 3 +
+ * [[../specs/grading-cascade-to-box-sessions]] Phase 3): grade every recently-CONCLUDED director call
+ * — each autonomous auto-approval + each escorted milestone that landed — 1–10 with reasoning into
+ * director_decision_grades. GRADING COMPUTE MOVED BOX-SIDE (CEO directive 2026-06-30, every grader
+ * box-side): the cron picks candidates via director-grader.ts `pickDirectorGradeBatch` and enqueues
+ * ONE `director-grade` agent_jobs row per batch-ready workspace; the box's director-grade lane
+ * (scripts/builder-worker.ts → runDirectorGradeJob) git-shows the target build's approved merged
+ * commit + writes director_decision_grades via `applyBoxDirectorGrade`. Same shape as the Phase-1
+ * worker-grade cascade below. Mirrors daily-analysis-report-cron's daily cron shape.
  * See docs/brain/inngest/platform-director-cron.md · docs/brain/libraries/director-grader.md.
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
-import { gradeConcludedDirectorCalls } from "@/lib/agents/director-grader";
+import { pickDirectorGradeBatch } from "@/lib/agents/director-grader";
 import { agentGradingBatchReady, detectGradeDropCoaching, pickAgentGradeBatch, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
 import { computePlatformScorecard, getRegisteredMetrics } from "@/lib/agents/platform-scorecard";
 import { auditAllKpis, type KpiAuditReport } from "@/lib/agents/kpi-review";
@@ -129,24 +132,66 @@ export const platformDirectorCron = inngest.createFunction(
       return { workspaces: workspaceIds.length, workspaceIds, enqueued, gated, gateDecisions };
     });
 
-    // The grading loop (director-loop-grading Phase 3): on the SAME standing beat, grade every
-    // recently-CONCLUDED director call — each autonomous auto-approval + each escorted milestone that
-    // landed — 1–10 with reasoning (director_decision_grades). Mirrors the acquisition-research-cadence
-    // grade sweep; runs HERE (the deployed runtime has the API key) not on the box. Best-effort +
-    // idempotent (an already-graded call is skipped). A no-op while the director made no calls.
+    // The DIRECTOR grading loop (grading-cascade-to-box-sessions Phase 3, CEO directive 2026-06-30):
+    // GRADING COMPUTE MOVED BOX-SIDE — instead of calling gradeConcludedDirectorCalls inline (which
+    // grades from the director's own `reasoning` string + a repeat-failure count — the deployed
+    // runtime can't see the approved diff, so it has to trust the director), the cron ENQUEUES ONE
+    // `director-grade` `agent_jobs` row per workspace carrying the picked batch of candidates. The
+    // box's director-grade lane (scripts/builder-worker.ts → runDirectorGradeJob) then git-shows each
+    // target's approved merged commit (or each escorted milestone's member specs' merged shas),
+    // independently verifies the call was in-leash / diff-matches-reasoning, and writes
+    // director_decision_grades via applyBoxDirectorGrade (same partial-unique upsert + human-override
+    // invariant). Mirrors the Phase-1 pattern for worker grades. Best-effort + idempotent. Same-
+    // workspace dedup: skip re-enqueueing while a director-grade job for this workspace is already
+    // queued/building (one batched box session at a time, no daily pileup).
+    //
+    // `graded` here == "grading dispatched box-side"; the actual DB write happens in
+    // runDirectorGradeJob within a few minutes. Keeps the grading-liveness heartbeat starvation gate
+    // correct — a considered>0 (real ungraded backlog) with enqueued=0 (box lane broken / dedupe
+    // blocked twice) is a legitimate STARVED state and pages after ≥2 consecutive sweeps.
     const grading = await step.run("grade-concluded-director-calls", async () => {
       let considered = 0;
-      let graded = 0;
+      let enqueued = 0;
       for (const workspaceId of result.workspaceIds || []) {
         try {
-          const r = await gradeConcludedDirectorCalls({ workspaceId, admin });
-          considered += r.considered;
-          graded += r.graded;
+          const batch = await pickDirectorGradeBatch({ workspaceId, admin });
+          if (!batch.length) continue;
+          // Count the batch toward `considered` up front — regardless of dedup / insert error — so
+          // the grading-liveness heartbeat can distinguish "no work" (considered=0) from "work
+          // exists but nothing dispatched" (considered>0, enqueued=0) → the starvation gate trips
+          // after ≥2 consecutive such beats. A dedup skip (an in-flight `director-grade` job for
+          // this workspace already covers the batch) also raises `enqueued` so the gate stays green
+          // — dispatch happened; it's just carried by the prior beat's job.
+          considered += batch.length;
+          const { data: inflight } = await admin
+            .from("agent_jobs")
+            .select("id")
+            .eq("workspace_id", workspaceId)
+            .eq("kind", "director-grade")
+            .in("status", ["queued", "queued_resume", "building", "claimed"])
+            .limit(1);
+          if (inflight && inflight.length) {
+            enqueued++; // already dispatched on a prior beat — grading IS flowing box-side
+            continue;
+          }
+          const { error } = await admin.from("agent_jobs").insert({
+            workspace_id: workspaceId,
+            spec_slug: "director-grade",
+            kind: "director-grade",
+            status: "queued",
+            created_by: null,
+            instructions: JSON.stringify({ candidates: batch }),
+          });
+          if (!error) {
+            enqueued++;
+          } else {
+            console.error(`[platform-director-cron] director-grade enqueue failed ws=${workspaceId}: ${error.message}`);
+          }
         } catch (e) {
-          console.error(`[platform-director-cron] grade sweep failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
+          console.error(`[platform-director-cron] director-grade pick/enqueue failed ws=${workspaceId}:`, e instanceof Error ? e.message : e);
         }
       }
-      return { considered, graded };
+      return { considered, graded: enqueued };
     });
 
     // The WORKER grading + coaching loop (worker-grading-and-director-management Phase 2 +
@@ -527,6 +572,13 @@ export const platformDirectorCron = inngest.createFunction(
     // STARVED for ≥2 consecutive sweeps (considered>0 but graded==0 across both layers) — auto-resolving
     // the moment grading flows again. This closes the silent-starvation gap (the CEO's "make sure grading
     // actually happens + is observable" ask) without rebuilding the cadence. Best-effort + idempotent.
+    //
+    // Post-grading-cascade-to-box-sessions Phase 3: BOTH layers now report `graded` as "dispatched
+    // box-side" (director-grade + agent-grade `agent_jobs` inserts) rather than an inline sweep's
+    // in-line grade count — the actual DB writes land within a few minutes on the box lanes. The
+    // starvation gate is preserved: a considered>0 with enqueued=0 across both layers is a legitimate
+    // STARVED state (box lane broken / dedupe blocked twice / pick returned candidates but the insert
+    // errored), so `grading_starved:director-decision-grading` still trips after ≥2 consecutive sweeps.
     await step.run("emit-grading-liveness", async () => {
       const consideredTotal = grading.considered + workerGrading.considered;
       const gradedTotal = grading.graded + workerGrading.graded;
@@ -561,7 +613,7 @@ export const platformDirectorCron = inngest.createFunction(
           const prev = (prevBeats as Array<{ ok: boolean; produced: { starved?: boolean } | null }> | null)?.[1];
           const prevStarved = prev ? prev.ok === false || prev.produced?.starved === true : false;
           if (prevStarved) {
-            const detail = `Director/worker grading STARVED for ≥2 consecutive sweeps — considered ${consideredTotal} (director ${grading.considered} + worker ${workerGrading.considered}) but graded 0. A concluded-but-ungradeable status (e.g. a build stuck \`merged\` outside the grader's terminal set) is the usual cause.`;
+            const detail = `Director/worker grading STARVED for ≥2 consecutive sweeps — considered ${consideredTotal} (director ${grading.considered} + worker ${workerGrading.considered}) but dispatched box-side 0. A concluded-but-ungradeable status (e.g. a build stuck \`merged\` outside the grader's terminal set) or the box's director-grade / agent-grade lane not draining is the usual cause.`;
             const { data: open } = await admin
               .from("loop_alerts")
               .select("id")

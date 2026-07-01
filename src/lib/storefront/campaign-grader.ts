@@ -32,10 +32,19 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GRADER_MODEL = SONNET_MODEL;
+/** The `model` stamp for a grade produced by the box-hosted grader (Max session — no API bill).
+ *  Mirrors [[agent-grader]] BOX_GRADE_MODEL and [[director-grader]] BOX_DIRECTOR_GRADE_MODEL so a
+ *  box-vs-API split stays queryable in dashboards. grading-cascade-to-box-sessions Phase 4. */
+const BOX_CAMPAIGN_GRADE_MODEL = "box-max-session";
 
 /** An initial-vs-revised grade gap at/above this magnitude proposes a calibration rule —
  *  the proxy-time call diverged enough from reality that the rubric likely needs a correction. */
 export const REVISED_GAP_RULE_THRESHOLD = 3;
+
+/** Cap on how many campaigns one batched box grading session grades. Mirrors GRADE_BATCH_CAP /
+ *  DIRECTOR_GRADE_BATCH_CAP — kept small: a Max session reading each experiment's rollups + variants
+ *  + optional reconciliation row is roughly a build-sized read per campaign. */
+const CAMPAIGN_GRADE_BATCH_CAP = 8;
 
 export type GradeMode = "initial" | "revised";
 
@@ -451,6 +460,234 @@ Output JSON:
     derived_from_experiment_id: opts.experimentId,
     derived_from_grade_id: opts.gradeId,
   });
+}
+
+// ── Box-hosted grading (grading-cascade-to-box-sessions Phase 4) ────────────────
+
+/**
+ * One ungraded (or pending-revised) campaign the box grader will inspect. Discriminated on `mode`.
+ * The `experiment_id` keys back to storefront_experiments; the box session pulls the variants,
+ * lever posterior, and (for revised mode) cohort reconciliation from the DB itself.
+ */
+export interface CampaignGradeCandidate {
+  experiment_id: string;
+  mode: GradeMode;
+}
+
+/**
+ * Pick the batch of ungraded / pending-revised campaigns for the box-hosted grader. Mirrors
+ * [[director-grader]] `pickDirectorGradeBatch` — the caller enqueues ONE `campaign-grade`
+ * `agent_jobs` row per batch-ready workspace with `instructions.candidates = [...]`; the box lane
+ * (scripts/builder-worker.ts → runCampaignGradeJob) grades each candidate and writes
+ * storefront_campaign_grades via `applyBoxCampaignGrade` (same UNIQUE(experiment_id) upsert +
+ * `graded_by='human'` override invariant as the API path). A no-op (empty array) while nothing is
+ * ungraded / awaiting-revision. Best-effort.
+ *
+ * Selection: (1) INITIAL — concluded campaigns (status ∈ promoted｜killed｜rolled_back) with no
+ * grade row yet, then (2) REVISED — campaigns with a grade_initial but no grade_revised whose
+ * cohort has now reconciled. Truncated to `cap`; the rest ride the next beat.
+ */
+export async function pickCampaignGradeBatch(opts: {
+  workspaceId: string;
+  admin?: Admin;
+  cap?: number;
+}): Promise<CampaignGradeCandidate[]> {
+  const admin = opts.admin ?? createAdminClient();
+  const cap = opts.cap ?? CAMPAIGN_GRADE_BATCH_CAP;
+  const out: CampaignGradeCandidate[] = [];
+
+  try {
+    // ── Existing-grade set — paginated past the 1000-row PostgREST cap. ──
+    interface GradeRow { experiment_id: string; grade_initial: number | null; grade_revised: number | null; graded_by: string }
+    const graded = new Map<string, GradeRow>();
+    for (let from = 0; ; from += 1000) {
+      const { data } = await admin
+        .from("storefront_campaign_grades")
+        .select("experiment_id, grade_initial, grade_revised, graded_by")
+        .eq("workspace_id", opts.workspaceId)
+        .range(from, from + 999);
+      const rows = (data as GradeRow[]) || [];
+      for (const r of rows) graded.set(r.experiment_id, r);
+      if (rows.length < 1000) break;
+    }
+
+    // ── INITIAL candidates — concluded campaigns with no grade row yet. ──
+    const { data: expData } = await admin
+      .from("storefront_experiments")
+      .select("id, workspace_id, product_id, lander_type, audience, status")
+      .eq("workspace_id", opts.workspaceId)
+      .in("status", ["promoted", "killed", "rolled_back"])
+      .order("stopped_at", { ascending: false, nullsFirst: false })
+      .limit(500);
+    interface ExpLite { id: string; workspace_id: string; product_id: string; lander_type: string; audience: string; status: string }
+    const experiments = (expData as ExpLite[]) || [];
+
+    for (const e of experiments) {
+      if (out.length >= cap) break;
+      const g = graded.get(e.id);
+      if (g && g.grade_initial != null) continue; // already initial-graded (revised handled below)
+      // A human-graded row with grade_initial null (initial override cleared) is odd but respect it —
+      // never re-emit the initial candidate.
+      if (g && g.graded_by === "human") continue;
+      out.push({ experiment_id: e.id, mode: "initial" });
+    }
+
+    // ── REVISED candidates — grade_initial present, grade_revised null, cohort now reconciled. ──
+    if (out.length < cap) {
+      const pendingRevised: string[] = [];
+      for (const [expId, g] of graded) {
+        if (g.grade_initial != null && g.grade_revised == null && g.graded_by !== "human") pendingRevised.push(expId);
+      }
+      if (pendingRevised.length) {
+        // Resolve (product_id, lander_type, audience) per experiment to check reconciliation existence.
+        const { data: expForRevised } = await admin
+          .from("storefront_experiments")
+          .select("id, workspace_id, product_id, lander_type, audience")
+          .in("id", pendingRevised);
+        const expByIdLocal = new Map<string, ExpLite>();
+        for (const e of (expForRevised as ExpLite[]) || []) expByIdLocal.set(e.id, e);
+
+        for (const expId of pendingRevised) {
+          if (out.length >= cap) break;
+          const e = expByIdLocal.get(expId);
+          if (!e) continue;
+          const { data: rec } = await admin
+            .from("storefront_ltv_reconciliations")
+            .select("id")
+            .eq("workspace_id", e.workspace_id)
+            .eq("product_id", e.product_id)
+            .eq("lander_type", e.lander_type)
+            .eq("audience", e.audience)
+            .limit(1);
+          if (!rec || !rec.length) continue; // cohort not reconciled yet — revision pass no-ops anyway
+          out.push({ experiment_id: expId, mode: "revised" });
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`[campaign-grader] pickCampaignGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return out;
+}
+
+interface ExistingCampaignGradeRow {
+  id: string;
+  grade_initial: number | null;
+  grade_revised: number | null;
+  graded_by: string;
+}
+
+/**
+ * Apply a campaign grade produced by the box-hosted grading session
+ * (grading-cascade-to-box-sessions Phase 4) — a Max `claude -p` that reads the concluded campaign's
+ * REAL rollups + variants + (revised-mode) reconciliation from the DB and grades from concrete
+ * evidence. Reuses the same UNIQUE(experiment_id) upsert + `graded_by='human'` override invariant
+ * as the deployed gradeCampaign path — the training signal (loadLeverGradeSignal) fires identically
+ * off box-written grades. `model` is stamped `box-max-session`; no `ai_token_usage` write (Max sub
+ * has no per-token API bill — the CEO directive was $0 marginal grading).
+ *
+ * A large initial-vs-revised gap (≥ REVISED_GAP_RULE_THRESHOLD) proposes a `storefront_grader_prompts`
+ * calibration rule. The Opus-based proposal call is preserved here — the box session emits an
+ * observed gap, this helper drafts the rule with an LLM call ONLY when a real gap is present. The
+ * Opus proposal call may be retired in a follow-on once the box session itself carries the drafted
+ * title/content, but keeping it here means the caller doesn't need Opus availability.
+ */
+export async function applyBoxCampaignGrade(opts: {
+  workspaceId: string;
+  experimentId: string;
+  mode: GradeMode;
+  grade: number;
+  hypothesisQuality?: number;
+  resultQuality?: number;
+  reasoning: string;
+  admin?: Admin;
+}): Promise<CampaignGradeResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const mode = opts.mode;
+
+  const { data: exp } = await admin
+    .from("storefront_experiments")
+    .select("id, workspace_id, lever, status")
+    .eq("id", opts.experimentId)
+    .maybeSingle();
+  if (!exp) return { ok: false, reason: "experiment_not_found" };
+  const experiment = exp as { id: string; workspace_id: string; lever: string; status: string };
+  if (!["promoted", "killed", "rolled_back"].includes(experiment.status)) {
+    // A benign TOCTOU: the campaign concluded when the box picked it but has since been re-opened.
+    return { ok: false, reason: "not_concluded" };
+  }
+
+  const { data: existing } = await admin
+    .from("storefront_campaign_grades")
+    .select("id, grade_initial, grade_revised, graded_by")
+    .eq("experiment_id", experiment.id)
+    .maybeSingle();
+  const existingRow = (existing as ExistingCampaignGradeRow) ?? null;
+
+  const grade = clampGrade(opts.grade);
+  const hypothesisQuality = opts.hypothesisQuality != null ? clampGrade(opts.hypothesisQuality) : grade;
+  const resultQuality = opts.resultQuality != null ? clampGrade(opts.resultQuality) : grade;
+  const now = new Date().toISOString();
+
+  if (mode === "initial") {
+    if (existingRow && existingRow.graded_by === "human") {
+      return { ok: true, grade_id: existingRow.id, mode, grade: existingRow.grade_initial ?? grade, idempotent_update: true };
+    }
+    const payload = {
+      workspace_id: experiment.workspace_id,
+      experiment_id: experiment.id,
+      grade_initial: grade,
+      grade_initial_reasoning: opts.reasoning,
+      hypothesis_quality: hypothesisQuality,
+      result_quality: resultQuality,
+      initial_graded_at: now,
+      graded_by: "agent" as const,
+      model: BOX_CAMPAIGN_GRADE_MODEL,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_cents: 0,
+      updated_at: now,
+    };
+    let gradeId = existingRow?.id;
+    if (existingRow) {
+      await admin.from("storefront_campaign_grades").update(payload).eq("id", existingRow.id);
+    } else {
+      const { data: ins, error } = await admin.from("storefront_campaign_grades").insert(payload).select("id").single();
+      if (error) return { ok: false, reason: error.message };
+      gradeId = ins?.id;
+    }
+    return { ok: true, grade_id: gradeId, mode, grade, hypothesis_quality: hypothesisQuality, result_quality: resultQuality, idempotent_update: !!existingRow };
+  }
+
+  // mode === "revised"
+  if (!existingRow?.grade_initial) return { ok: false, reason: "no_initial_grade_yet" };
+  if (existingRow.grade_revised != null) return { ok: true, grade_id: existingRow.id, mode, grade: existingRow.grade_revised, idempotent_update: true };
+  if (existingRow.graded_by === "human") return { ok: true, grade_id: existingRow.id, mode, grade: existingRow.grade_revised ?? grade, idempotent_update: true };
+
+  await admin
+    .from("storefront_campaign_grades")
+    .update({
+      grade_revised: grade,
+      grade_revised_reasoning: opts.reasoning,
+      revised_graded_at: now,
+      updated_at: now,
+    })
+    .eq("id", existingRow.id);
+
+  const initial = existingRow.grade_initial ?? grade;
+  if (Math.abs(initial - grade) >= REVISED_GAP_RULE_THRESHOLD) {
+    await proposeGapCalibrationRule(admin, {
+      workspaceId: experiment.workspace_id,
+      experimentId: experiment.id,
+      gradeId: existingRow.id,
+      gradeInitial: initial,
+      gradeRevised: grade,
+      revisedReasoning: opts.reasoning,
+      lever: experiment.lever,
+    }).catch((e) => console.warn(`[campaign-grader] gap-rule proposal failed exp=${experiment.id}: ${e instanceof Error ? e.message : String(e)}`));
+  }
+
+  return { ok: true, grade_id: existingRow.id, mode, grade, hypothesis_quality: hypothesisQuality, result_quality: resultQuality };
 }
 
 /**

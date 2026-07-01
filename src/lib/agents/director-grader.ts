@@ -41,6 +41,12 @@ type Admin = ReturnType<typeof createAdminClient>;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GRADER_MODEL = SONNET_MODEL;
 
+/** The `model` stamp for a grade produced by the box-hosted grader (Max session — no API bill). Keeps
+ *  director_decision_grades.model queryable so a box-grade vs API-grade split is visible in dashboards,
+ *  and a stale-cost audit can spot the deployed sweep re-firing after Phase 3. Mirrors the same constant
+ *  in [[agent-grader]] for the worker cascade. */
+const BOX_DIRECTOR_GRADE_MODEL = "box-max-session";
+
 /**
  * agent_jobs statuses that mean a build CONCLUDED — only then is an auto-approval gradeable.
  *
@@ -212,7 +218,7 @@ async function upsertGrade(
     goalSlug?: string | null;
     milestone?: string | null;
   },
-  graded: { json: GraderJson; costCents: number; usage: unknown },
+  graded: { json: GraderJson; costCents: number; usage: unknown; modelOverride?: string },
 ): Promise<DirectorGradeResult> {
   if (existing && existing.graded_by === "human") {
     // The CEO owns this grade — the agent never re-writes a human override.
@@ -231,7 +237,7 @@ async function upsertGrade(
     grade,
     reasoning: graded.json.reasoning,
     graded_by: "agent" as const,
-    model: GRADER_MODEL,
+    model: graded.modelOverride ?? GRADER_MODEL,
     input_tokens: usage?.input_tokens || 0,
     output_tokens: usage?.output_tokens || 0,
     cost_cents: graded.costCents,
@@ -244,6 +250,119 @@ async function upsertGrade(
   const { data: ins, error } = await admin.from("director_decision_grades").insert(payload).select("id").single();
   if (error) return { ok: false, reason: error.message };
   return { ok: true, grade_id: ins?.id, dimension: key.dimension, grade };
+}
+
+/**
+ * Apply a director grade produced by the box-hosted grading session (grading-cascade-to-box-sessions
+ * Phase 3) — a Max `claude -p` that git-shows the approved diff (auto-approval) or the merged member
+ * specs (goal-escort) and grades from concrete file:line, not the director's own `reasoning` string.
+ * Mirrors [[agent-grader]] `applyBoxGrade`: reuses the same partial-unique upsert + `graded_by='human'`
+ * override invariant, so the leash-adjustment recommender + calibration-rule proposals + the report
+ * grid fire identically off box-written grades. Concluded-only + idempotent. `model` is stamped
+ * `box-max-session`; no `ai_token_usage` write (Max sub has no per-token API bill — the CEO directive
+ * was $0 marginal grading).
+ *
+ * For an auto-approval, the target build must still be terminal (`completed｜merged｜failed｜needs_attention`);
+ * an in-flight target returns `not_concluded` so a benign TOCTOU race (director triage re-queued the
+ * build between pick and apply) stays a no-op instead of a stale grade.
+ */
+export async function applyBoxDirectorGrade(opts: {
+  dimension: GradeDimension;
+  workspaceId: string;
+  directorFunction: string;
+  approvalDecisionId?: string;
+  goalSlug?: string;
+  milestone?: string;
+  grade: number;
+  reasoning: string;
+  admin?: Admin;
+}): Promise<DirectorGradeResult> {
+  const admin = opts.admin ?? createAdminClient();
+
+  if (opts.dimension === "auto-approval") {
+    if (!opts.approvalDecisionId) return { ok: false, reason: "missing_approval_decision_id" };
+    const { data: dec } = await admin
+      .from("approval_decisions")
+      .select("id, workspace_id, agent_job_id, decided_by, decision, autonomous")
+      .eq("id", opts.approvalDecisionId)
+      .maybeSingle();
+    if (!dec) return { ok: false, reason: "decision_not_found" };
+    const decision = dec as { id: string; workspace_id: string; agent_job_id: string | null; decided_by: string; decision: string; autonomous: boolean };
+    if (decision.decided_by !== "director" || decision.decision !== "approved") return { ok: false, reason: "not_a_director_approval" };
+
+    // Re-check the target build's terminal-status — a benign TOCTOU: the box picked while terminal,
+    // director triage re-queued it back to `queued` before the box's grade landed.
+    if (decision.agent_job_id) {
+      const { data: job } = await admin
+        .from("agent_jobs")
+        .select("status")
+        .eq("id", decision.agent_job_id)
+        .maybeSingle();
+      if (job && !TERMINAL_JOB_STATUSES.has((job as { status: string }).status)) {
+        return { ok: false, reason: "not_concluded" };
+      }
+    }
+
+    const { data: existing } = await admin
+      .from("director_decision_grades")
+      .select("id, grade, graded_by")
+      .eq("approval_decision_id", decision.id)
+      .maybeSingle();
+    const existingRow = (existing as ExistingGradeRow) ?? null;
+    if (existingRow && existingRow.graded_by === "human") {
+      return { ok: true, grade_id: existingRow.id, dimension: "auto-approval", grade: existingRow.grade ?? undefined, idempotent_update: true };
+    }
+
+    return upsertGrade(
+      admin,
+      existingRow,
+      {
+        dimension: "auto-approval",
+        workspaceId: decision.workspace_id,
+        directorFunction: opts.directorFunction || PLATFORM,
+        approvalDecisionId: decision.id,
+      },
+      {
+        json: { grade: opts.grade, soundness: opts.grade, outcome: opts.grade, reasoning: opts.reasoning },
+        costCents: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        modelOverride: BOX_DIRECTOR_GRADE_MODEL,
+      },
+    );
+  }
+
+  // goal-escort
+  if (!opts.goalSlug || !opts.milestone) return { ok: false, reason: "missing_goal_escort_key" };
+  const { data: existing } = await admin
+    .from("director_decision_grades")
+    .select("id, grade, graded_by")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("dimension", "goal-escort")
+    .eq("goal_slug", opts.goalSlug)
+    .eq("milestone", opts.milestone)
+    .maybeSingle();
+  const existingRow = (existing as ExistingGradeRow) ?? null;
+  if (existingRow && existingRow.graded_by === "human") {
+    return { ok: true, grade_id: existingRow.id, dimension: "goal-escort", grade: existingRow.grade ?? undefined, idempotent_update: true };
+  }
+
+  return upsertGrade(
+    admin,
+    existingRow,
+    {
+      dimension: "goal-escort",
+      workspaceId: opts.workspaceId,
+      directorFunction: opts.directorFunction || PLATFORM,
+      goalSlug: opts.goalSlug,
+      milestone: opts.milestone,
+    },
+    {
+      json: { grade: opts.grade, soundness: opts.grade, outcome: opts.grade, reasoning: opts.reasoning },
+      costCents: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      modelOverride: BOX_DIRECTOR_GRADE_MODEL,
+    },
+  );
 }
 
 // ── auto-approval dimension ───────────────────────────────────────────────────────────────────────
@@ -726,4 +845,127 @@ export async function gradeConcludedDirectorCalls(opts: { workspaceId: string; a
     console.warn(`[director-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
   }
   return state;
+}
+
+// ── grading-cascade-to-box-sessions Phase 3: pick the batch of director calls to grade box-side ──────
+
+/** Cap the number of director calls one box grading session grades in a batch. Mirrors GRADE_BATCH_CAP
+ *  in [[agent-grader]]. Kept small: a director grade turn reads the approved diff + touched files, which
+ *  is roughly a build-sized read per call. */
+const DIRECTOR_GRADE_BATCH_CAP = 8;
+
+/** One ungraded director call the box grader will inspect. Discriminated on `dimension`. */
+export type DirectorGradeCandidate =
+  | { dimension: "auto-approval"; approval_decision_id: string; director_function: string }
+  | { dimension: "goal-escort"; goal_slug: string; milestone: string; director_function: string; goal_title: string; milestone_name: string; spec_slugs: string[] };
+
+/**
+ * Pick the batch of ungraded, CONCLUDED director calls for the box-hosted grader (grading-cascade-to-
+ * box-sessions Phase 3). Mirrors [[agent-grader]] `pickAgentGradeBatch` for the director layer — the
+ * cron calls this, then inserts ONE `director-grade` `agent_jobs` row per batch-ready workspace with
+ * `instructions.candidates = […]`. The box lane (`scripts/builder-worker.ts` → `runDirectorGradeJob`)
+ * reads each call's REAL approved diff (or the merged member specs of an escorted milestone) and writes
+ * `director_decision_grades` via `applyBoxDirectorGrade` (same partial-unique upsert + human-override
+ * invariant as the deployed sweep's `upsertGrade`). A no-op (empty array) while nothing is ungraded.
+ *
+ * Selection: (1) auto-approvals whose target build is at a terminal status (`completed｜merged｜failed｜
+ * needs_attention`) and aren't already graded, then (2) concluded escorted milestones for both PLATFORM
+ * and GROWTH directors that aren't already graded. Truncated to DIRECTOR_GRADE_BATCH_CAP — the rest
+ * ride the next beat. `graded_by='human'` rows never re-appear (the deployed sweep's pagination logic
+ * is re-used verbatim: the graded set is a partial-unique key, and applyBoxDirectorGrade also skips
+ * a human override).
+ */
+export async function pickDirectorGradeBatch(opts: {
+  workspaceId: string;
+  admin?: Admin;
+  cap?: number;
+}): Promise<DirectorGradeCandidate[]> {
+  const admin = opts.admin ?? createAdminClient();
+  const cap = opts.cap ?? DIRECTOR_GRADE_BATCH_CAP;
+  const out: DirectorGradeCandidate[] = [];
+
+  try {
+    // Already-graded set — paginated past the 1000-row PostgREST cap (same trap the sweep hit, round
+    // 2 of fix-starved-grading). Skipping this would false-resurface settled grades and re-spend a box
+    // session.
+    const gradedApprovals = new Set<string>();
+    const gradedEscorts = new Set<string>();
+    for (let from = 0; ; from += 1000) {
+      const { data: gradeRows } = await admin
+        .from("director_decision_grades")
+        .select("dimension, approval_decision_id, goal_slug, milestone")
+        .eq("workspace_id", opts.workspaceId)
+        .range(from, from + 999);
+      const rows = (gradeRows as Array<{ dimension: string; approval_decision_id: string | null; goal_slug: string | null; milestone: string | null }>) || [];
+      for (const r of rows) {
+        if (r.dimension === "auto-approval" && r.approval_decision_id) gradedApprovals.add(r.approval_decision_id);
+        else if (r.dimension === "goal-escort" && r.goal_slug) gradedEscorts.add(`${r.goal_slug}:${r.milestone ?? ""}`);
+      }
+      if (rows.length < 1000) break;
+    }
+
+    // ── auto-approval candidates ─────────────────────────────────────────────────────────────────
+    const { data: decisions } = await admin
+      .from("approval_decisions")
+      .select("id, agent_job_id, routed_to_function")
+      .eq("workspace_id", opts.workspaceId)
+      .eq("decided_by", "director")
+      .eq("decision", "approved")
+      .eq("autonomous", true)
+      .order("created_at", { ascending: false })
+      .limit(500);
+
+    const ungradedDecisions = ((decisions as Array<{ id: string; agent_job_id: string | null; routed_to_function: string | null }>) || []).filter(
+      (d) => !gradedApprovals.has(d.id),
+    );
+
+    if (ungradedDecisions.length) {
+      // Pre-filter to CONCLUDED targets in one batched read — the sweep's per-row lookup is fine at
+      // its scale but here we want a compact skip so the batch isn't dominated by in-flight targets.
+      const targetIds = Array.from(new Set(ungradedDecisions.map((d) => d.agent_job_id).filter((x): x is string => !!x)));
+      const terminalTargets = new Set<string>();
+      if (targetIds.length) {
+        const { data: jobRows } = await admin
+          .from("agent_jobs")
+          .select("id, status")
+          .in("id", targetIds);
+        for (const j of ((jobRows as Array<{ id: string; status: string }>) || [])) {
+          if (TERMINAL_JOB_STATUSES.has(j.status)) terminalTargets.add(j.id);
+        }
+      }
+
+      for (const d of ungradedDecisions) {
+        if (out.length >= cap) break;
+        // A director approval with NO target job is a rare shape (a bare policy call); allow it —
+        // it's terminal by definition (nothing to wait on). Otherwise gate on target-terminal.
+        if (d.agent_job_id && !terminalTargets.has(d.agent_job_id)) continue;
+        out.push({
+          dimension: "auto-approval",
+          approval_decision_id: d.id,
+          director_function: d.routed_to_function || PLATFORM,
+        });
+      }
+    }
+
+    // ── goal-escort candidates ───────────────────────────────────────────────────────────────────
+    for (const fn of [PLATFORM, GROWTH]) {
+      if (out.length >= cap) break;
+      for (const ctx of await concludedEscortedMilestones(admin, opts.workspaceId, fn)) {
+        if (out.length >= cap) break;
+        if (gradedEscorts.has(`${ctx.goalSlug}:${ctx.milestoneId}`)) continue;
+        out.push({
+          dimension: "goal-escort",
+          goal_slug: ctx.goalSlug,
+          milestone: ctx.milestoneId,
+          director_function: ctx.directorFunction,
+          goal_title: ctx.goalTitle,
+          milestone_name: ctx.milestoneName,
+          spec_slugs: ctx.specs.map((s) => s.slug),
+        });
+      }
+    }
+  } catch (e) {
+    console.warn(`[director-grader] pickDirectorGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return out;
 }
