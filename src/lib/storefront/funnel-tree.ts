@@ -161,6 +161,8 @@ export interface FunnelNodeMetrics extends FunnelStepCounts {
   atc_rate: number;
   /** sub_orders / order_placed — % of orders that attach a subscription */
   sub_attach_rate: number;
+  /** revenue_cents / order_placed — average order value */
+  aov_cents: number;
   /** revenue_cents / visit — immediate $ per visit */
   revenue_per_visit_cents: number;
   /** ltv_cents / visit — predicted LTV per visit (Max's north-star metric) */
@@ -238,6 +240,7 @@ function metricsOf(c: FunnelStepCounts): FunnelNodeMetrics {
     conversion_rate: rate(c.order_placed, c.visit),
     atc_rate: rate(c.add_to_cart, c.visit),
     sub_attach_rate: rate(c.sub_orders, c.order_placed),
+    aov_cents: c.order_placed > 0 ? Math.round(c.revenue_cents / c.order_placed) : 0,
     revenue_per_visit_cents: c.visit > 0 ? Math.round(c.revenue_cents / c.visit) : 0,
     ltv_per_visit_cents: c.visit > 0 ? Math.round(c.ltv_cents / c.visit) : 0,
   };
@@ -1512,6 +1515,65 @@ export interface SurveyFunnelResult {
 }
 
 const SURVEY_STEP_LABEL: Record<string, string> = { q1: "Q1 · Cups/day", q2: "Q2 · Goal", q3: "Q3 · Style", result: "Result" };
+
+// ───────────────── Pack-size breakdown (AOV / decoy analysis, slice-aware) ─────────────────
+export interface PackBreakdownRow { label: string; count: number; pct: number }
+const PACK_ORDER = ["1-pack", "2-pack", "3-pack", "Single (qty n/a)", "Bundle 1×1", "Bundle 2×2", "Bundle"];
+
+export async function computePackBreakdown(args: {
+  admin: Admin; workspaceId: string; startIso: string; endIso: string;
+  productHandle?: string | null; utmSource?: string | null; referrer?: string | null; destination?: string | null;
+}): Promise<{ rows: PackBreakdownRow[] }> {
+  const { admin, workspaceId, startIso, endIso } = args;
+  const product = args.productHandle ? args.productHandle.toLowerCase() : null;
+  const utmWanted = args.utmSource && args.utmSource.trim() ? args.utmSource.trim().toLowerCase() : null;
+  const refWanted = args.referrer && args.referrer.trim() ? args.referrer.trim() : null;
+  const destWanted = args.destination && args.destination.trim() ? args.destination.trim() : null;
+  const sliced = !!(product || utmWanted || refWanted || destWanted);
+
+  const [{ data: productRows }, { data: internalCustomerRows }] = await Promise.all([
+    admin.from("products").select("handle").eq("workspace_id", workspaceId),
+    admin.from("customers").select("id").eq("workspace_id", workspaceId).eq("is_internal", true),
+  ]);
+  const handleSet = new Set<string>((productRows || []).map((p) => String(p.handle).toLowerCase()));
+  const internalCustomerIds = new Set<string>((internalCustomerRows || []).map((c) => c.id as string));
+
+  const events = await fetchAllRows<{ session_id: string; meta: Record<string, unknown> }>(() =>
+    admin.from("storefront_events").select("session_id, meta, id")
+      .eq("workspace_id", workspaceId).eq("event_type", "pack_selected")
+      .gte("created_at", startIso).lte("created_at", endIso).order("id", { ascending: true }),
+  );
+  const sids = [...new Set(events.map((e) => e.session_id).filter(Boolean))];
+  const scope = new Map<string, boolean>();
+  for (let i = 0; i < sids.length; i += 300) {
+    const { data } = await admin.from("storefront_sessions")
+      .select("id, landing_url, is_internal, is_bot, customer_id, utm_source, referrer").in("id", sids.slice(i, i + 300));
+    for (const s of data || []) {
+      let ok = !s.is_internal && !s.is_bot && !(s.customer_id && internalCustomerIds.has(s.customer_id as string));
+      ok = ok && matchUtm((s.utm_source as string) ?? null, utmWanted) && matchRef((s.referrer as string) ?? null, refWanted);
+      const { segments, variant } = parseLanding((s.landing_url as string) ?? null);
+      if (ok && product && resolveHandle(segments, handleSet) !== product) ok = false;
+      if (ok && destWanted) ok = destWanted === "pdp" ? !variant : variant === destWanted;
+      scope.set(s.id as string, ok);
+    }
+  }
+  const pass = (sid: string) => (sliced ? scope.get(sid) === true : scope.get(sid) !== false);
+
+  const counts = new Map<string, number>();
+  for (const e of events) {
+    if (!e.session_id || !pass(e.session_id)) continue;
+    const m = e.meta || {};
+    let label: string;
+    if (m.bundle) { const bs = typeof m.bundle_size === "number" ? m.bundle_size : null; label = bs ? `Bundle ${bs}×${bs}` : "Bundle"; }
+    else { const q = typeof m.quantity === "number" ? m.quantity : null; label = q ? `${q}-pack` : "Single (qty n/a)"; }
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  const total = [...counts.values()].reduce((a, b) => a + b, 0) || 1;
+  const rows = [...counts.entries()]
+    .map(([label, count]) => ({ label, count, pct: round1((100 * count) / total) }))
+    .sort((a, b) => (PACK_ORDER.indexOf(a.label) + 1 || 99) - (PACK_ORDER.indexOf(b.label) + 1 || 99) || b.count - a.count);
+  return { rows };
+}
 
 export async function computeSurveyFunnel(args: {
   admin: Admin; workspaceId: string; startIso: string; endIso: string;

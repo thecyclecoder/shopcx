@@ -26,7 +26,7 @@ interface TreeMetrics {
   visit: number; engaged: number; pack_selected: number; checkout_started: number;
   order_placed: number; add_to_cart: number; sub_orders: number;
   engagement_rate: number; pack_rate: number; checkout_rate: number; conversion_rate: number;
-  atc_rate: number; sub_attach_rate: number;
+  atc_rate: number; sub_attach_rate: number; aov_cents: number;
   revenue_cents: number; ltv_cents: number;
   revenue_per_visit_cents: number; ltv_per_visit_cents: number;
 }
@@ -58,6 +58,47 @@ interface CartAnalyticsResponse {
   leads: { emails: number; phones: number };
   popupFunnel: { byVariant: PopupVariantRow[]; totals: { shown: number; engaged: number; email: number; phone: number } };
   surveyFunnel: { shown: number; steps: Array<{ step: string; label: string; reached: number; pct_of_shown: number }>; completed: number; email: number; answers: { cups_per_day: Array<{ value: string; count: number }>; health_goal: Array<{ value: string; count: number }>; coffee_style: Array<{ value: string; count: number }> } };
+  packBreakdown: { rows: Array<{ label: string; count: number; pct: number }> };
+}
+
+/** SDK-driven, slice + destination aware pack-size breakdown (AOV / decoy lens). */
+function PackBreakdownCard({ data, loading, dest, onDest, destOptions }: {
+  data: CartAnalyticsResponse | null; loading: boolean; dest: string; onDest: (v: string) => void;
+  destOptions: Array<{ key: string; label: string; level: "pdp" | "variant" | "angle"; visits: number }>;
+}) {
+  const rows = data?.packBreakdown?.rows ?? [];
+  const max = Math.max(...rows.map((r) => r.count), 1);
+  return (
+    <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Pack size chosen</h2>
+          <p className="mt-1 text-xs text-zinc-400">The mix behind AOV — reorder the price table / tune the decoy to shift it.</p>
+        </div>
+        <ReworkedPills />
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Destination</span>
+        <select value={dest} onChange={(e) => onDest(e.target.value)} className={selectClass}>
+          <option value="">All destinations</option>
+          {destOptions.map((d) => (<option key={d.key} value={d.key}>{d.level === "angle" ? "— " : ""}{d.label}</option>))}
+        </select>
+      </div>
+      {loading && !data && <p className="text-sm text-zinc-400">Loading…</p>}
+      {data && rows.length === 0 && <p className="text-xs text-zinc-400">No pack selections in this range.</p>}
+      {rows.length > 0 && (
+        <div className="space-y-2">
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-center gap-3">
+              <span className="w-28 shrink-0 text-sm text-zinc-700 dark:text-zinc-300">{r.label}</span>
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${(r.count / max) * 100}%` }} /></div>
+              <span className="w-20 shrink-0 text-right text-sm tabular-nums"><strong className="text-zinc-900 dark:text-zinc-100">{r.count}</strong> <span className="text-zinc-400">{r.pct.toFixed(0)}%</span></span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 /** SDK-driven survey-chapter funnel + answer distributions, slice + destination
@@ -569,6 +610,7 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                 <th className="py-2 text-right font-medium">Checkout</th>
                 <th className="py-2 text-right font-medium">Orders</th>
                 <th className="py-2 text-right font-medium">Sub-attach</th>
+                <th className="py-2 text-right font-medium">AOV</th>
                 <th className="py-2 text-right font-medium">Rev/visit</th>
                 <th className="py-2 text-right font-medium">LTV/visit</th>
               </tr>
@@ -578,7 +620,7 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={9} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
+                <tr><td colSpan={10} className="py-3 text-sm text-zinc-400">No sessions in this window.</td></tr>
               )}
               {rows.map(({ node, depth, path, hasChildren, isOpen }) => {
                 const m = node.metrics;
@@ -610,6 +652,7 @@ function FunnelTreeCard({ tree, loading }: { tree: FunnelTreeResponse | null; lo
                     <StepCell count={m.checkout_started} rate={m.checkout_rate} />
                     <StepCell count={m.order_placed} rate={m.conversion_rate} strong rateGood />
                     <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{m.order_placed > 0 ? pctStr(m.sub_attach_rate) : "—"}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{m.order_placed > 0 ? money(m.aov_cents) : "—"}</td>
                     <td className="py-1.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{money(m.revenue_per_visit_cents)}</td>
                     <td className={"py-1.5 text-right tabular-nums font-semibold " + (m.ltv_per_visit_cents > 0 ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-400")}>{money(m.ltv_per_visit_cents)}</td>
                   </tr>
@@ -830,6 +873,9 @@ export default function StorefrontFunnelPage() {
   const [surveyDest, setSurveyDest] = useState("");
   const [survey, setSurvey] = useState<CartAnalyticsResponse | null>(null);
   const [surveyLoading, setSurveyLoading] = useState(true);
+  const [packDest, setPackDest] = useState("");
+  const [pack, setPack] = useState<CartAnalyticsResponse | null>(null);
+  const [packLoading, setPackLoading] = useState(true);
 
   // Seed dates from preset
   useEffect(() => {
@@ -939,8 +985,23 @@ export default function StorefrontFunnelPage() {
   }, [workspace.id, start, end, product, utmSource, referrer, surveyDest]);
 
   useEffect(() => { loadSurvey(); }, [loadSurvey]);
+
+  const loadPack = useCallback(async () => {
+    if (!start || !end) return;
+    setPackLoading(true);
+    const q = new URLSearchParams({ start, end });
+    if (product) q.set("product", product);
+    if (utmSource) q.set("utm_source", utmSource);
+    if (referrer) q.set("referrer", referrer);
+    if (packDest) q.set("destination", packDest);
+    const res = await fetch(`/api/workspaces/${workspace.id}/cart-analytics?${q.toString()}`);
+    if (res.ok) setPack(await res.json());
+    setPackLoading(false);
+  }, [workspace.id, start, end, product, utmSource, referrer, packDest]);
+
+  useEffect(() => { loadPack(); }, [loadPack]);
   // A page-slice change can change which destinations exist → re-default the cards.
-  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); setPopupDest(""); setSurveyDest(""); }, [product, utmSource, referrer]);
+  useEffect(() => { setChapterDest(""); setWaterfallDest(""); setCartDest(""); setPopupDest(""); setSurveyDest(""); setPackDest(""); }, [product, utmSource, referrer]);
 
   const topOfFunnel = data?.funnel[0]?.sessions ?? 0;
   const orderPlaced = data?.funnel.find(s => s.step === "order_placed")?.sessions ?? 0;
@@ -1008,32 +1069,7 @@ export default function StorefrontFunnelPage() {
             <CampaignGradesPanel block={data.campaignGrades} workspaceId={workspace.id} onChange={load} />
           )}
 
-          {data.packBreakdown && data.packBreakdown.length > 0 && (
-            <section className="mb-8 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-                Pack size chosen
-              </h2>
-              {(() => {
-                const total = data.packBreakdown.reduce((s, b) => s + b.count, 0) || 1;
-                return (
-                  <div className="space-y-2">
-                    {data.packBreakdown.map(b => (
-                      <div key={b.label} className="flex items-center gap-3">
-                        <div className="w-28 shrink-0 text-sm text-zinc-700 dark:text-zinc-300">{b.label}</div>
-                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
-                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.round((b.count / total) * 100)}%` }} />
-                        </div>
-                        <div className="w-20 shrink-0 text-right text-sm tabular-nums text-zinc-900 dark:text-zinc-100">
-                          <span className="font-semibold">{b.count}</span>
-                          <span className="ml-1 text-xs text-zinc-400">{Math.round((b.count / total) * 100)}%</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </section>
-          )}
+          <PackBreakdownCard data={pack} loading={packLoading} dest={packDest} onDest={setPackDest} destOptions={chapter?.availableDestinations ?? []} />
 
         </>
       )}
