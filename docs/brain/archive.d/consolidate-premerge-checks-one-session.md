@@ -1,0 +1,1 @@
+- **Fuse pre-merge spec-test + security into one session (hydrate once, two verdicts) + multi-persona lane** · verified 2026-07-01 · → [[../dashboard/roadmap]] · [[../libraries/agent-jobs]]
