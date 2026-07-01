@@ -5,7 +5,7 @@ The box that runs autonomous spec builds on the **Max subscription** for the [[.
 ## What it is
 
 - **Hetzner CCX33** — Ubuntu 26.04, 8 vCPU, 30 GiB RAM, name `claude-server`. Public IPv4 `178.156.246.235` (firewalled), tailnet IP `100.75.99.7`.
-- Runs `systemd` service **`shopcx-builder`** = `scripts/builder-worker.ts`, which polls [[../tables/agent_jobs]], claims a job via `claim_agent_job()`, runs `claude -p` (Max), tsc-gates, and opens a `claude/*` PR. See [[../dashboard/branches]] to merge.
+- Runs `systemd` service **`shopcx-builder`** = `scripts/builder-worker.ts`, which polls [[../tables/agent_jobs]], claims a job via `claim_agent_job()`, runs `claude -p` (Max) — or `codex exec` (ChatGPT plan) for the Codex-routed kinds, see [§ Second runtime: Codex](#second-runtime-codex-on-a-chatgpt-plan-box-codex-runner) — tsc-gates, and opens a `claude/*` PR. See [[../dashboard/branches]] to merge.
 
 ## Access (SSH) — how to get on the box
 
@@ -94,6 +94,50 @@ The worker once **deleted its own live repo** (`/home/builder/shopcx`): a build 
 **DB-driven health:** `restoreAccountCapsOnBoot()` restores each account's `cappedUntil` from the last heartbeat on boot, so a restart no longer resets accounts to healthy + re-probes the wall (the cap/failover-event spam after every restart is gone).
 
 **Surfaced (box-multi-account-failover Phase 2):** the worker writes a per-account snapshot onto its [[../tables/worker_heartbeats|heartbeat]] (`accounts` column — per-account in-flight load + capped state, healthy/all-capped flags, soonest-reset, and a recent cap/failover/recovery event ring). [[../dashboard/roadmap]] `/dashboard/roadmap/box` renders a **Max accounts** panel (per-account load + an all-capped banner + recent events) and the [[../dashboard/control-tower]] box tile flips **amber** "all Max accounts capped — builds parked, auto-resume" so a silent everything's-capped state is visible. See [[../libraries/control-tower]] (`evalWorker`).
+
+## Second runtime: Codex on a ChatGPT plan (box-codex-runner)
+
+The box runs a **second agent runtime** — OpenAI's `codex exec` on a **ChatGPT-plan device-code login** (NOT an API key — same "session billing, no per-token `$`" shape as `claude -p` on Max). A whitelist of job kinds runs on **Codex primary**; **Claude is the fallback** when Codex is capped or errors (reusing the existing account-failover machinery). This **offloads Max** — directly relieving the usage wall — while keeping customer-facing voice + the core build/plan on Claude.
+
+**The split (owner decision 2026-07-01).**
+
+| Runtime | Kinds |
+|---|---|
+| **Claude** (kept) | `build` (Bo), `plan` (Pia), Ada's chat/voice + her `director` standing pass, and the customer-voice kinds: `ticket-improve`, `product-seed`, `spec-chat`, `storefront-optimizer`, `triage-escalations` |
+| **Codex** (primary, Claude fallback) | grading + coaching (`agent-grade`, `agent-coach`, `director-grade`, `campaign-grade`, `gap-grade`), `spec-review`, `spec-test`, `repair`, `regression`, `security-review`, `pr-resolve`, `fold` |
+
+The routing lives entirely inside `runBoxSession` (`CODEX_KINDS` / `runtimeForKind` / `runCodexSession` in `builder-worker.ts`) — a Codex-routed kind runs `codex exec` first and, on a Codex cap/error/throw, **falls through to the Claude path** on the healthy account the failover wrapper already picked. Because a Codex run returns the **same `RunResult`** (session/text/isError/usage/model), caller metering (`meterAgentJob`, model tagged `codex/…`) and the failover wrappers are untouched — **no call site changed**.
+
+**Deferred:** the two *resumable* Codex-candidate kinds — `dev-ask` and `migration-fix` (answer-resume) — **stay on Claude** for now, because a Codex thread id can't `--resume` on Claude and vice-versa; moving them needs per-job **runtime pinning** (store the runtime beside `claude_session_config_dir`). Everything in the Codex column above is single-shot, so the fallback is trivially correct (start fresh on Claude). The in-app **Sonnet-API** agents (`db_health`, `coverage-register`, `deploy-guardian`, `spec-drift`, `monitor`) don't route through the box runner at all, so they're out of scope for this seam.
+
+**Set up Codex (one-time, owner op — over the tailnet):**
+
+```bash
+# 1. Install the CLI globally (as root, so `builder` gets it on PATH).
+sudo npm i -g @openai/codex        # → /usr/bin/codex
+
+# 2. Device-code login on the ChatGPT plan whose Codex credits the box should burn (NOT an API key).
+sudo -iu builder bash -lc 'CODEX_HOME=/home/builder/.codex codex login --device-auth'
+#   → prints a URL (auth.openai.com/codex/device) + a one-time code; approve in a browser.
+#   → writes /home/builder/.codex/auth.json. Verify: `codex login status` → "Logged in using ChatGPT".
+
+# 3. Provision headless full-auto — REQUIRED. In `codex exec` the sandbox modes (read-only /
+#    workspace-write) AUTO-DENY model-generated commands non-interactively, so Codex can't run
+#    git/cat/node and HALLUCINATES instead of reading the repo. approval_policy="never" +
+#    danger-full-access = run commands unattended (the box is itself the isolation boundary, same
+#    rationale as Claude's --dangerously-skip-permissions; per-lane secret stripping happens in the
+#    worker env). Written to CODEX_HOME/config.toml:
+cat > /home/builder/.codex/config.toml <<'TOML'
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+TOML
+```
+
+The worker also passes `--dangerously-bypass-approvals-and-sandbox` on every `codex exec` (belt-and-suspenders if the config is ever missing). Each lane's env drops **both** `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (an API key in env would flip Codex to per-token billing instead of the ChatGPT plan) and points Codex at `CODEX_HOME`.
+
+**Skill parity.** The box lanes are authored for Claude Code and several say "use the `<name>` skill" (auto-loaded from `.claude/skills/`). Codex has no skill system, so `runCodexSession` prepends a **preamble** teaching Codex the convention — it reads the referenced `.claude/skills/<name>/SKILL.md` itself (the skills are git-committed), honors the read-only contract, and ends with the single-JSON final message the worker parses. Verified 2026-07-01: Codex reads the real skill, runs `git`/`cat`, and emits the exact expected JSON.
+
+**Controls.** `BOX_CODEX_ENABLED=0` (in `/root/shopcx-worker.env`) is the kill-switch → every kind reverts to Claude. `BOX_CODEX_MODEL` overrides the model (default: codex's `gpt-5-codex`). On a Codex usage wall, `markCodexCapped` cools Codex down (re-probe clamped like a session account) and routes to Claude until it clears — logged in **AST** (`[runtime] codex usage wall — routing to Claude until …`).
 
 ## Day-to-day ops (over the tailnet)
 

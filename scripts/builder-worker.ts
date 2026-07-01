@@ -608,6 +608,93 @@ function astTime(ms: number): string {
   );
 }
 
+// ── Second runtime: Codex on a ChatGPT plan (box-codex-runner) ────────────────────────────────────
+// The box runs a SECOND agent runtime — OpenAI's `codex exec` on a ChatGPT-plan device-code login (NOT an
+// API key — same "session billing, no per-token $" shape as `claude -p` on Max). A whitelist of job kinds
+// runs on Codex PRIMARY; Claude is the FALLBACK when Codex is capped/errors. The split (owner decision
+// 2026-07-01): Claude keeps Pia (plan), Bo (build), Ada's chat/voice, and the customer-voice kinds
+// (ticket-improve, product-seed, spec-chat, storefront-optimizer, triage); Codex takes the graders +
+// coaching + mechanical reviewers/fixers. This OFFLOADS Max — directly relieving the usage wall — while
+// keeping customer-facing voice + the core build/plan on the proven model.
+//
+// WHY it slots in cleanly: EVERY box lane funnels through runBoxSession(); the runtime split + Codex→Claude
+// fallback live entirely INSIDE runBoxSession, so NO call site changes. A Codex run returns the SAME
+// RunResult shape (session/resultText/isError/raw/usage/model), so caller metering (meterAgentJob) and the
+// account-failover wrappers (runBoxLane/runBoxClaude) are untouched — on Codex failure we simply fall
+// through to the existing Claude path on the healthy account the wrapper already picked.
+const CODEX_ENABLED = (process.env.BOX_CODEX_ENABLED ?? "1") !== "0"; // kill-switch: BOX_CODEX_ENABLED=0
+const CODEX_HOME = process.env.CODEX_HOME || "/home/builder/.codex";  // the ChatGPT-plan auth.json lives here
+const CODEX_MODEL = process.env.BOX_CODEX_MODEL || "";                // "" → codex's default (gpt-5-codex)
+// Prepended to every Codex prompt. The box lanes are authored for Claude Code — several reference "the <name>
+// skill" (auto-loaded from .claude/skills/ by Claude Code) and rely on Claude Code's Skill/Task/TodoWrite
+// tools. Codex has NONE of that, so this preamble (a) tells Codex the skill-file naming convention so it READS
+// the referenced .claude/skills/<name>/SKILL.md itself — robust to every current + future kind without a
+// hardcoded map — and (b) restates the read-only + final-output (single JSON) contract the worker parses.
+const CODEX_PREAMBLE = [
+  "You are running under OpenAI Codex (`codex exec`), NOT Claude Code. You do NOT have Claude Code's Skill, Task, or TodoWrite tools — use plain shell (`git`, `cat`, `rg`/`grep`, `node`) and the repo's `scripts/_*.ts` probes. cwd is the repo root.",
+  "If the instructions below say to \"use the <name> skill\", that skill's full operating instructions are the Markdown file `.claude/skills/<name>/SKILL.md` in this repo — READ it FIRST and follow it exactly as your procedure.",
+  "Honor every read-only / never-mutate constraint below — the deterministic worker is the ONLY component that writes the DB or git; you investigate and report. End your turn with EXACTLY the final output the instructions specify (usually ONE JSON object, no prose before or after).",
+].join("\n");
+// The kinds that run on Codex PRIMARY (Claude = fallback). ONLY box-runBoxSession kinds appear here — the
+// in-app Sonnet-API agents (db_health / coverage-register / deploy-guardian / spec-drift / monitor) don't
+// route through the box runner, so they're out of scope for this seam. `director` (Ada's platform-director
+// standing pass — her supervisory brain) intentionally STAYS on Claude pending an owner call; only her
+// grading + coaching move, per "grading & coaching is codex too."
+//
+// PHASE-1 SCOPE = SINGLE-SHOT kinds only. A resumable kind (`dev-ask`, `migration-fix` answer-resume) can't
+// bounce runtimes cleanly — a Codex thread id can't `--resume` on Claude and vice-versa — so moving it needs
+// per-job runtime PINNING (store the runtime alongside claude_session_config_dir). Deferred: those two stay
+// on Claude until that lands. Everything below is single-shot (sessionId always null), so the fallback is
+// trivially correct — it just starts fresh on Claude.
+const CODEX_KINDS = new Set<string>([
+  "agent-grade", "agent-coach", "director-grade", "campaign-grade", "gap-grade", // grading + coaching
+  "spec-review", "spec-test",                                                    // review / QA
+  "repair", "regression", "security-review", "pr-resolve",                       // mechanical fixers/reviewers
+  "fold",                                                                        // brain fold
+]);
+// Codex has ONE ChatGPT-plan account (single device-code login), not the Claude multi-account pool. Its cap
+// state mirrors an AccountState's cappedUntil: on a Codex usage wall we cool it down (so we don't re-spawn
+// Codex on every job during a wall) and route straight to Claude until it clears. In-memory; a restart
+// re-derives on the next Codex wall — Claude is always the safety net so a lost cap just costs one probe.
+const codexState = { cappedUntil: 0, capLogged: false };
+// Codex is the primary runtime for a kind only while ENABLED and not currently capped; else → Claude.
+function runtimeForKind(kind: string | undefined, now: number): "codex" | "claude" {
+  if (CODEX_ENABLED && kind && CODEX_KINDS.has(kind) && codexState.cappedUntil <= now) return "codex";
+  return "claude";
+}
+// A Codex ChatGPT-plan usage wall (vs a transient task error). Codex's exact wall wording isn't documented,
+// so match the usage/rate-limit SIGNAL broadly — ANY match cools Codex down + routes to Claude. Because
+// Claude is always the fallback, a false negative just costs one Claude run; a false positive just parks
+// Codex briefly. Conservative on both sides.
+function isCodexUsageWall(text: string): boolean {
+  const t = (text || "").toLowerCase();
+  return /usage limit|rate limit|too many requests|quota|you've (?:hit|reached) your|plan limit|\b429\b|resets? (?:at|in|on)|try again (?:later|in)/.test(t);
+}
+// Pull the run's token usage off a Codex `turn.completed` event (`usage:{input_tokens, cached_input_tokens,
+// output_tokens, reasoning_output_tokens}`) → the shared RunUsage shape so metering is a straight pass.
+// reasoning_output_tokens folds into output (it's billed output); cached_input maps to cache_read.
+function extractCodexUsage(u: Record<string, unknown> | undefined): RunUsage {
+  if (!u || typeof u !== "object") return null;
+  const usage = {
+    input_tokens: Number(u.input_tokens || 0),
+    output_tokens: Number(u.output_tokens || 0) + Number(u.reasoning_output_tokens || 0),
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: Number(u.cached_input_tokens || 0),
+  };
+  return usage.input_tokens || usage.output_tokens || usage.cache_read_input_tokens ? usage : null;
+}
+// Cool Codex down on a wall so we don't re-spawn it every job until it resets. Reuses parseResetTime (the
+// wall message may carry a reset time) and clamps to CAP_MAX_MS re-probe — like a session account, Codex's
+// window may free early, and Claude covers the gap meanwhile so a short re-probe is cheap.
+function markCodexCapped(now: number, text?: string) {
+  const estimate = (text && parseResetTime(text, now)) || now + USAGE_CAP_COOLDOWN_MS;
+  codexState.cappedUntil = Math.min(estimate, now + CAP_MAX_MS);
+  if (!codexState.capLogged) {
+    codexState.capLogged = true;
+    console.warn(`[runtime] codex usage wall — routing to Claude until ${astTime(codexState.cappedUntil)}`);
+  }
+}
+
 interface AccountState {
   configDir: string;
   inFlight: number;       // builds currently running on this account — least-loaded wins the round-robin
@@ -1469,7 +1556,85 @@ interface RunResult {
   model: string | null;
 }
 
+// One `codex exec` turn on the ChatGPT plan (box-codex-runner). Mirrors runBoxSession's env discipline +
+// RunResult contract but spawns `codex exec --json` and parses Codex's JSONL event stream. Returns a
+// RunResult; runBoxSession decides success vs Claude fallback. Best-effort — a spawn/parse failure surfaces
+// as isError so the fallback fires.
+async function runCodexSession(prompt: string, sessionId: string | null, cwd: string, opts: RunBoxSessionOpts): Promise<RunResult> {
+  // Same env discipline as runBoxSession: "build" strips prod-write secrets (Codex must not push/mutate
+  // prod); "max" keeps read-only DB/crypto creds. In BOTH we drop ANTHROPIC_API_KEY (unused) AND — critically
+  // — OPENAI_API_KEY: an API key in env would make Codex bill PER-TOKEN instead of the ChatGPT plan. CODEX_HOME
+  // points Codex at the device-code plan auth.json.
+  const env: NodeJS.ProcessEnv = {};
+  if ((opts.sandbox ?? "max") === "build") {
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === "ANTHROPIC_API_KEY" || k === "OPENAI_API_KEY") continue;
+      if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
+      if (SECRET_RE.test(k)) continue;
+      env[k] = v;
+    }
+  } else {
+    Object.assign(env, process.env);
+    delete env.ANTHROPIC_API_KEY;
+    delete env.OPENAI_API_KEY;
+  }
+  env.CODEX_HOME = CODEX_HOME;
+  // `exec [resume <id>] --json [-m model] --bypass … prompt`. The box IS the isolation boundary (same
+  // rationale as Claude's --dangerously-skip-permissions), so we bypass Codex's OS sandbox/approvals; the env
+  // stripping above is the real guardrail. shAsync's stdio:["ignore",…] closes stdin so codex doesn't hang
+  // reading it. NO checklist directive is prepended — the box-session checklist uses Claude-Code Task tools
+  // Codex doesn't have; the heartbeat (per-line) is the liveness signal for Codex lanes.
+  const modelArgs = CODEX_MODEL ? ["-m", CODEX_MODEL] : [];
+  const codexPrompt = `${CODEX_PREAMBLE}\n\n${prompt}`;
+  const args = sessionId
+    ? ["exec", "resume", sessionId, "--json", ...modelArgs, "--dangerously-bypass-approvals-and-sandbox", codexPrompt]
+    : ["exec", "--json", ...modelArgs, "--dangerously-bypass-approvals-and-sandbox", codexPrompt];
+  const heartbeat = opts.jobId ? makeHeartbeatBumper(opts.jobId) : null;
+  const onLine = heartbeat ? (_line: string) => heartbeat.bump() : undefined;
+  const r = await shAsync("codex", args, { cwd, env, idleTimeout: opts.idleTimeout, timeout: opts.timeout, onLine });
+  // Parse the JSONL events: thread.started.thread_id → session; the LAST agent_message item.completed →
+  // result text; turn.completed.usage → metering; error / turn.failed → isError.
+  let session = sessionId;
+  let resultText = "";
+  let usage: RunUsage = null;
+  let sawError = false;
+  let sawResult = false;
+  for (const line of (r.out || "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let obj: { type?: string; thread_id?: string; item?: { type?: string; text?: string }; usage?: Record<string, unknown> };
+    try { obj = JSON.parse(trimmed); } catch { continue; }
+    if (obj.type === "thread.started" && typeof obj.thread_id === "string") session = obj.thread_id;
+    else if (obj.type === "item.completed" && obj.item?.type === "agent_message" && typeof obj.item.text === "string") { resultText = obj.item.text; sawResult = true; }
+    else if (obj.type === "turn.completed") { const u = extractCodexUsage(obj.usage); if (u) usage = u; }
+    else if (obj.type === "turn.failed" || obj.type === "error") sawError = true;
+  }
+  let isError = r.code !== 0 || sawError || !sawResult;
+  const kind = opts.kind || "session";
+  if (r.killed === "idle") { isError = true; resultText = `[${kind} killed: no output for ${Math.round((opts.idleTimeout || 0) / 60000)} min — treated as hung]\n` + resultText; }
+  else if (r.killed === "hardcap") { isError = true; resultText = `[${kind} killed: exceeded the ${Math.round(opts.timeout / 60000)} min hard cap]\n` + resultText; }
+  if (!resultText) resultText = (r.out || "") + (r.err || ""); // no agent_message — surface raw for the wall/error check
+  const model = usage ? `codex/${CODEX_MODEL || "gpt-5-codex"}` : null;
+  return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
+}
+
 async function runBoxSession(prompt: string, sessionId: string | null, cwd: string, opts: RunBoxSessionOpts): Promise<RunResult> {
+  // box-codex-runner: a Codex-primary kind runs on `codex exec` FIRST; on a Codex cap/error/throw we fall
+  // THROUGH to the Claude path below — on the healthy account the failover wrapper already picked. All
+  // Codex-routed kinds are single-shot, so nulling the session for the Claude fallback is a safe no-op.
+  if (runtimeForKind(opts.kind, Date.now()) === "codex") {
+    const cx = await runCodexSession(prompt, sessionId, cwd, opts).catch((e) => {
+      console.error(`[runtime] codex ${opts.kind} threw — Claude fallback:`, e);
+      return null;
+    });
+    if (cx && !cx.isError) return cx;
+    if (cx && isCodexUsageWall(cx.raw)) markCodexCapped(Date.now(), cx.raw);
+    else console.warn(`[runtime] codex ${opts.kind} errored (not a wall) → Claude fallback`);
+    sessionId = null; // a Codex thread can't --resume on Claude; fall back fresh
+  } else if (codexState.capLogged && codexState.cappedUntil <= Date.now()) {
+    codexState.capLogged = false; // Codex window cleared — allow the next cap to log again
+  }
+
   // Sandbox:
   //   "build" — strip SECRET_RE (prod-write creds). Keep NEXT_PUBLIC_*. Used by the feature-build
   //     sandbox + the pr-resolve worktree (the LLM must not be able to push, mutate prod DB, etc).
