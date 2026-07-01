@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Consolidate director grade+coach into one session, fix the Max-account in-flight count + show the acting director on grade/coach lanes** · folded 2026-07-01 · → [[../libraries/agent-grader]]
+
 - **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
 - **Add storefront pixel tracking to the blog pages** · verified 2026-07-01 · → [[../lifecycles/blog-resources]]
 - **Fix the phase-accumulation stamp gap that wedges multi-phase builds + guard deploy-rollback against laggy monthly KPIs** · verified 2026-07-01 · → [[../lifecycles/spec-goal-branch-pm-flow]]
