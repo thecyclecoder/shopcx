@@ -2,7 +2,10 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
-import { getMetaAccountId, metaGraphRequest } from "./api";
+import { getMetaAccountId } from "./api";
+import { graphFetchJson } from "@/lib/meta/graph-retry";
+
+const META_GRAPH_BASE = "https://graph.facebook.com/v18.0";
 
 interface InsightRow {
   date_start: string;
@@ -11,6 +14,20 @@ interface InsightRow {
   clicks: string;
   actions?: Array<{ action_type: string; value: string }>;
   action_values?: Array<{ action_type: string; value: string }>;
+}
+
+/**
+ * Mirror the `graphGet` pattern in meta/performance.ts: build the v18 Graph URL
+ * with access_token + params, hand the fetch thunk to graphFetchJson so
+ * transient Meta errors (code 1/2, is_transient, HTTP 429, HTTP 5xx incl.
+ * Facebook edge 504 gateway timeouts) are retried with bounded backoff before
+ * surfacing. Fatal errors (auth/permission/validation) still fail fast.
+ */
+async function graphGet(path: string, params: Record<string, string>, token: string): Promise<any> {
+  const url = new URL(`${META_GRAPH_BASE}${path}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  url.searchParams.set("access_token", token);
+  return graphFetchJson(() => fetch(url.toString()), `GET ${path}`);
 }
 
 export async function syncMetaAdSpend(params: {
@@ -38,7 +55,7 @@ export async function syncMetaAdSpend(params: {
     };
     if (afterCursor) queryParams.after = afterCursor;
 
-    const data = await metaGraphRequest(params.accessToken, `/${actId}/insights`, queryParams) as {
+    const data = (await graphGet(`/${actId}/insights`, queryParams, params.accessToken)) as {
       data: InsightRow[];
       paging?: { cursors?: { after?: string }; next?: string };
     };

@@ -40,6 +40,13 @@ escalates real problems:
   Meta-side outage, the next 5-min cron run self-heals, so they must not
   surface as open bugs. See [[../archive.d/today-sync-quiet-all-retry-exhausted-meta-transients]]
   (archived 2026-06-25).
+- `httpStatus >= 500` → `console.warn`. Facebook-edge 5xxs (e.g. a 504 gateway
+  timeout — Facebook returns HTML with no JSON body, so `metaCode`/`metaSubcode`
+  are undefined and only the raw HTTP status distinguishes it from a fatal 400).
+  [[../libraries/meta__sync-spend]] now routes through `graphFetchJson`, so an
+  edge 504 is retried in-line 4× before this catch even sees it; the surfaced
+  error is a genuinely sustained edge blip that the next 5-min cron self-heals.
+  Repair signature `vercel:9422061756e527f7`.
 - Everything else (auth 190, permissions 200/10/803, disabled account, any
   other error) → `console.error`, which Vercel routes into the error feed for
   Control Tower to escalate.

@@ -37,14 +37,20 @@ Everything else is fatal.
 ### `graphError` — function
 
 ```ts
-function graphError(status: number, error: any): Error & { metaCode?; metaSubcode? }
+function graphError(status: number, error: any): Error & { metaCode?; metaSubcode?; httpStatus? }
 ```
 Builds `meta_<status>: <detail>`, preferring `error_user_title`/`error_user_msg`
-over the terse `message`; stamps `metaCode`/`metaSubcode` on the Error.
+over the terse `message`; stamps `metaCode`/`metaSubcode` + `httpStatus` on the
+Error. `httpStatus` is the raw HTTP response status — set so callers can
+classify Facebook-edge 5xx (e.g. a 504 gateway timeout returns HTML with no JSON
+body, so `metaCode`/`metaSubcode` are undefined and only `httpStatus`
+distinguishes it from a fatal 400 validation error). [[../inngest/today-sync]]
+uses it to demote 5xx retry-exhaustion to `console.warn`.
 
 ## Callers
 
 - [[meta__performance]] `graphGet` (insights + structure ingest — the failing path)
+- [[meta__sync-spend]] `graphGet` (daily account-level spend rollup)
 - [[meta-ads]] `metaGet` / `metaPost`
 
 ## Gotchas
