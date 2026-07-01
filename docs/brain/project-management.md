@@ -82,6 +82,7 @@ Add a file under `docs/brain/specs/{kebab-name}.md`. The spec file is the contra
 **Owner:** [[../functions/{slug}]] · **Parent:** {mandate or goal-milestone}
 **Blocked-by:** [[prerequisite-spec]]   ← optional; omit if nothing must ship first
 **Auto-build:** off                      ← optional; opt OUT of auto-queue-on-unblock (manual Build only)
+**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]]   ← optional; 0-4 docs/brain pages the builder should Read FIRST
 
 One-paragraph summary of what we're building + why. Tie it to a
 business outcome.
@@ -107,6 +108,8 @@ business outcome.
 ```
 
 Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. The roadmap board reads it live, no deploy needed. Phase titles + the `## Phase N` headings stay in markdown as the durable record of what was planned.
+
+**`Brain refs:` — accuracy-first brain scoping ([[specs/spec-brain-refs]]).** A spec MAY carry a header line `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` — the 2-4 docs/brain pages actually relevant to the build. The [[../.claude/skills/build-spec|build-spec]] skill Reads these FIRST, before any grep or `docs/brain/README.md` sweep, and treats them as the authoritative context for the build (falling back to grep/README only if they're insufficient). The convention lives in the spec body — it's parsed by the skill from the materialized markdown ([[libraries/build-spec-materializer]]), not a new typed column. Optional (absence = today's grep-the-brain behavior). Wikilinks resolve relative to `docs/brain/specs/` — same convention as the brain index — so `[[../libraries/foo]]` → `docs/brain/libraries/foo.md`. Frame this as an ACCURACY improvement: the builder Reads the RIGHT pages instead of missing one or reading three wrong ones; the context trim is a modest bonus, not the point (the brain is Read on demand, not preloaded).
 
 **Phases ACCUMULATE on one spec branch → the spec ships ATOMICALLY (spec-goal-branch-pm-flow M1–M5).** A spec's phases build one-by-one onto ONE persistent branch `claude/build-{slug}` (phase per commit, `Spec:`/`Phase:` trailers). A built phase is stamped `spec_phases.build_sha` and stays `in_progress` (NOT shipped) — `shipped` is reserved for the atomic promotion. The accumulation gate ([[libraries/specs-table]] `isSpecAccumulationComplete`) blocks promotion until EVERY phase is built on the branch. Then:
 
