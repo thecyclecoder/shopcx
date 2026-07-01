@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
-import { getPersona } from "@/lib/agents/personas";
+import { getPersona, type AgentPersona } from "@/lib/agents/personas";
 import { PersonaAvatar } from "@/components/agents/persona-chip";
 import { SessionChecklist } from "@/components/agents/session-checklist";
 import type { SessionChecklistItem } from "@/lib/agent-jobs";
@@ -23,6 +23,10 @@ interface LaneRow {
   since: string;
   phase?: string | null; // "Phase N" for a chained/per-phase build, else null (box-lane-show-phase)
   intent?: string | null; // director-coach lanes only: "ask" | "coach" (the CEO's button) — for the label
+  // box-grading-session-and-account-count-fixes Phase 3: the ACTING director's function slug for a
+  // grade/coach lane (platform→Ada, ceo→Henry, growth→Cleo), so the card shows "Ada Grading" / "Henry
+  // Grading" instead of a generic label + default mascot. Enriched by /api/roadmap/box from the job.
+  director_function?: string | null;
   account?: string | null; // which Round Robin Max account this lane is running on (box-lane-show-account)
   // box-session-transparency Phase 2: the lane's live TodoWrite mirror — what its `claude -p` session is
   // doing right now. session_note = the compact one-line verb shown on the lane card; session_checklist =
@@ -74,6 +78,7 @@ interface Job {
   created_at: string;
   phase?: string | null; // queued-jobs-log: "Phase N" (from instructions, or the spec's next-unshipped phase)
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
+  director_function?: string | null; // box-grading-session-and-account-count-fixes Phase 3 (grade/coach kinds)
 }
 interface FailedJob {
   id: string;
@@ -177,8 +182,37 @@ const KIND_ACTION: Record<string, string> = {
   "ticket-improve": "improving ticket",
 };
 
+// box-grading-session-and-account-count-fixes Phase 3: the grade/coach lanes are a DIRECTOR supervising —
+// show that director (dynamic), not a generic 'Agent Grade' + default mascot. `director_function` is carried
+// on the job by the enqueue + surfaced by /api/roadmap/box; the verb is the supervisory action. Falls back
+// to platform/Ada (today's platform-worker grading) when the field is absent.
+const GRADE_COACH_VERB: Record<string, string> = {
+  "agent-grade": "Grading",
+  "agent-coach": "Coaching",
+  "director-grade": "Grading",
+  "campaign-grade": "Grading",
+  "gap-grade": "Grading",
+};
+// Fallback acting-director function per kind when the job didn't carry `director_function`.
+const GRADE_COACH_DEFAULT_FN: Record<string, string> = {
+  "agent-grade": "platform", // Ada grades platform workers
+  "agent-coach": "platform",
+  "director-grade": "ceo", // the CEO (Henry) grades directors
+  "campaign-grade": "growth", // Cleo grades storefront campaigns
+  "gap-grade": "growth", // Cleo grades acquisition gaps
+};
+/** For a grade/coach kind → the acting director's persona + verb ("Ada Grading"); null for any other kind. */
+function gradeCoachInfo(kind: string, directorFunction?: string | null): { persona: AgentPersona; verb: string } | null {
+  const verb = GRADE_COACH_VERB[kind];
+  if (!verb) return null;
+  const fn = (directorFunction && directorFunction.trim()) || GRADE_COACH_DEFAULT_FN[kind] || "platform";
+  return { persona: getPersona(fn), verb };
+}
+
 // The director kinds embody Ada (the Platform director) — her persona + avatar, not a generic label.
-function personaForKind(kind: string) {
+function personaForKind(kind: string, directorFunction?: string | null) {
+  const gc = gradeCoachInfo(kind, directorFunction);
+  if (gc) return gc.persona;
   return kind === "platform-director" || kind === "director-coach" ? getPersona("platform") : getPersona(kind);
 }
 
@@ -193,8 +227,13 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   // A director-coach lane is the CEO talking to Ada — show the SUBJECT (Ada)'s avatar + an Asking/Coaching
   // label by the button the CEO pushed (intent), and hide the meaningless thread-id slug.
   const isCoach = lane.kind === "director-coach";
-  const persona = personaForKind(lane.kind);
-  const title = isCoach ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`) : persona.name;
+  const persona = personaForKind(lane.kind, lane.director_function);
+  const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
+  const title = isCoach
+    ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
+    : gc
+      ? `${persona.name} ${gc.verb}`
+      : persona.name;
   const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
@@ -354,13 +393,14 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
       ) : (
         <ul className="divide-y divide-zinc-100 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900">
           {jobs.map((j) => {
-            const persona = personaForKind(j.kind);
+            const persona = personaForKind(j.kind, j.director_function);
+            const gc = gradeCoachInfo(j.kind, j.director_function); // grade/coach kinds → "Ada Grading" etc.
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
             return (
               <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
                 <PersonaAvatar persona={persona} size={20} />
-                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{persona.name}</span>
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
                 <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
                   {j.kind}
                 </span>

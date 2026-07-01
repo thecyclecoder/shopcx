@@ -92,6 +92,10 @@ interface LaneRow {
   // For a director-coach lane only: the turn's intent (ask|coach), enriched from the job instructions
   // below so the box shows "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
   intent?: string | null;
+  // box-grading-session-and-account-count-fixes Phase 3 — the acting director's function slug for a
+  // grade/coach lane (platform→Ada, ceo→Henry, growth→Cleo), enriched from the job below so the box shows
+  // "Ada Grading" / "Henry Grading" instead of a generic label + default mascot.
+  director_function?: string | null;
   // box-session-transparency Phase 2 — the lane's live TodoWrite mirror, enriched from the agent_jobs
   // row below so a lane card can show what its session is doing RIGHT NOW (compact: the one-line note;
   // expand: the full checklist). Phase 1's runner writes both onto the row; Phase 2 surfaces them here.
@@ -132,6 +136,27 @@ function failureDetail(logTail: string | null): string | null {
     /* not JSON (e.g. tsc output) — fall through to the tail */
   }
   return logTail.slice(-500).trim() || null;
+}
+
+// box-grading-session-and-account-count-fixes Phase 3 — the acting director's function slug for a grade/
+// coach lane. Prefer the `fn` the enqueue stamped on the job (dynamic), else a per-kind default. Returns
+// null for any non-grade/coach kind (the box page then falls back to its normal persona resolution).
+const GRADE_COACH_DEFAULT_FN: Record<string, string> = {
+  "agent-grade": "platform", // Ada grades platform workers
+  "agent-coach": "platform",
+  "director-grade": "ceo", // the CEO (Henry) grades directors
+  "campaign-grade": "growth", // Cleo grades storefront campaigns
+  "gap-grade": "growth", // Cleo grades acquisition gaps
+};
+function directorFunctionForGradeKind(kind: string, instructions: string | null): string | null {
+  if (!(kind in GRADE_COACH_DEFAULT_FN)) return null;
+  try {
+    const i = JSON.parse(instructions || "{}");
+    if (typeof i.fn === "string" && i.fn.trim()) return i.fn.trim();
+  } catch {
+    /* not JSON — fall through to the per-kind default */
+  }
+  return GRADE_COACH_DEFAULT_FN[kind];
 }
 
 export async function GET() {
@@ -196,6 +221,21 @@ export async function GET() {
         }
       }
       worker.lanes = worker.lanes.map((l) => (l.kind === "director-coach" && intentById.has(l.job_id) ? { ...l, intent: intentById.get(l.job_id) ?? null } : l));
+    }
+  }
+
+  // box-grading-session-and-account-count-fixes Phase 3 — enrich each grade/coach lane with its ACTING
+  // director's function slug (from the job's `instructions.fn`, else the per-kind default), so the box card
+  // renders "Ada Grading" / "Henry Grading" / "Cleo Grading" instead of a generic label + default mascot.
+  if (worker?.lanes?.length) {
+    const gcIds = worker.lanes.filter((l) => l.job_id && directorFunctionForGradeKind(l.kind, null) !== null).map((l) => l.job_id);
+    if (gcIds.length) {
+      const { data: gj } = await admin.from("agent_jobs").select("id, kind, instructions").in("id", gcIds);
+      const fnById = new Map<string, string | null>();
+      for (const j of (gj || []) as Array<{ id: string; kind: string; instructions: string | null }>) {
+        fnById.set(j.id, directorFunctionForGradeKind(j.kind, j.instructions));
+      }
+      worker.lanes = worker.lanes.map((l) => (fnById.has(l.job_id) ? { ...l, director_function: fnById.get(l.job_id) ?? null } : l));
     }
   }
 
@@ -301,6 +341,7 @@ export async function GET() {
       created_at: j.created_at,
       phase: phaseForJob(j.kind, j.spec_slug, j.instructions),
       spec_missing: specMissing(j.kind, j.spec_slug),
+      director_function: directorFunctionForGradeKind(j.kind, j.instructions),
     }));
   const paused = jobs
     .filter((j) => j.status === "needs_input" || j.status === "needs_approval")
