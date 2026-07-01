@@ -28,6 +28,20 @@ ssh root@<box> 'systemctl start shopcx-builder'      # resume — worker drains 
 
 After any restart that killed in-flight builds, `requeue-stale` re-queues the orphans. See [[../lifecycles/roadmap-build-console]] for the worker model + [[build-box-setup]] § Parallel builds for the gotchas (worktrees, `node_modules` symlink, async exec).
 
+## Killing ONE live `building` job — cancel the row, don't SIGKILL the process
+
+To stop a single in-flight build (e.g. an orphan build for an already-shipped/folded spec that resumed), **cancel the DB row and let the session wind down** — do NOT `kill -9` the `claude`/`codex` process on the box.
+
+```bash
+# Cancel the row terminally (no PR, no re-dispatch). Clear session creds so a resume can't re-pin.
+# status='completed' is terminal — requeueBlockedOnUsage / the reaper won't touch it.
+npx tsx scripts/queue-control.ts complete <slug>     # or a one-off .update({status:'completed', claude_session_id:null, ...})
+```
+
+The session finishes its current turn (usually a minute or two), the worker's `runJob().finally` frees the lane + `laneAccount` slot, and the finalize path is inert on a shipped/folded spec (`stampPhaseBuilt` no-ops a terminal phase; a stray PR is caught by `cancelJobsForArchivedSpecs`).
+
+**Why not SIGKILL the process** (learned 2026-07-01): killing the `claude -p` session mid-run makes the worker read the abnormal exit as a **usage wall** — `isUsageCapError` matches the killed session's output, so the account gets **falsely marked capped** (pulled from rotation until its ~20 min re-probe horizon) AND the job parks `blocked_on_usage`, which `requeueBlockedOnUsage` then **resurrects**. So a hard kill both takes a healthy Max account out of rotation and fails to actually stop the job. If you already hard-killed and tripped a false cap, clear it with the **stop → clear the account's `capped_until` in the `worker_heartbeats.accounts` snapshot → start** sequence (a running worker's final heartbeat will clobber a clear you do while it's up — clear it only while stopped). See [[build-box-setup]] § Multi-account round-robin.
+
 ## Fold-builds run in their own lane
 
 `kind='fold'` jobs (the batch fold-builds behind "Mark verified & archive", [[../specs/fold-build-batching]]) claim into a **concurrency-1 lane** separate from the 5 build/plan lanes — `claim_agent_job(['fold'])` vs `claim_agent_job(['build','plan'])`. A fold edits the generated index files (`archive.md` / `README.md` counts, via `scripts/brain-index.mjs`), so serializing it keeps the fleet mergeable. The specs a fold will retire live in [[../tables/pending_folds]] (status `pending|folding`), not on the job — `queue-control list` shows the fold job under the `fold-batch` sentinel slug. To clear a stuck fold batch, reset its `pending_folds` rows (`pending`, or `folded` if already done) and force the job via `complete`.
