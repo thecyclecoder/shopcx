@@ -129,11 +129,19 @@ const isSundayUtc = (snapshotDate: string): boolean =>
  * Read the persisted snapshot row for `(workspace_id, metric_key, cadence)` — either at the exact
  * `snapshotDate` (when given) or the latest **closed** snapshot.
  *
- * **In-flight daily window guard:** for `cadence='daily'` with no explicit `snapshotDate`, we
- * exclude today UTC. The daily cron writes the snapshot mid-day; a later same-day audit re-runs the
- * SAME `[today T00:00, today T23:59]` window math against a row-count that has GROWN since the
- * snapshot froze, surfacing legitimate intra-day enqueues as "drift" (signature
- * `kpi_drift:build_enqueue_rate:daily`). Auditing only closed days eliminates the false positive.
+ * **In-flight window guard (all cadences):** with no explicit `snapshotDate`, we exclude today UTC
+ * regardless of cadence. Every cadence writes its snapshot mid-day and reads a window whose end is
+ * TODAY UTC — a later same-UTC-day audit re-runs the SAME window math against a row-count that has
+ * GROWN since the snapshot froze, surfacing legitimate intra-window writes as "drift" that isn't
+ * drift. Canonical cases: `kpi_drift:build_enqueue_rate:daily` (every new `agent_jobs` enqueue
+ * inflates the ground-truth count against the frozen snapshot) AND `loop:kpi_drift:deploy_reliability:monthly`
+ * (the monthly snapshot writes on the 1st using a trailing 30-day window ending TODAY; more
+ * `director_activity` deploy rows land later that same day, so the ground-truth ratio drifts by
+ * >0.5% against the frozen ratio and trips the ≥2-consecutive-snapshot loop gate against a KPI that
+ * is actually healthy). Weekly has the same shape when a snapshot is read on its write-day. Auditing
+ * only **closed** windows (skipping today's still-in-flight snapshot) eliminates the entire
+ * false-positive class in one stroke — the monthly audit falls back to the previous month's
+ * closed-window snapshot, the weekly audit falls back to the prior Sunday's closed snapshot.
  */
 async function readPersistedSnapshot(
   admin: ReturnType<typeof createAdminClient>,
@@ -149,7 +157,7 @@ async function readPersistedSnapshot(
     .eq("metric_key", metric)
     .eq("cadence", cadence);
   if (snapshotDate) q = q.eq("snapshot_date", snapshotDate);
-  else if (cadence === "daily") q = q.lt("snapshot_date", todayUtc());
+  else q = q.lt("snapshot_date", todayUtc());
   // Weekly-Sunday reader guard: fetch a small window (not just top-1) so that if the latest row is
   // a pre-lag-fix stale non-Sunday snapshot_date we can skip over it and land on the newest valid
   // Sunday. See `isSundayUtc` above — clears `loop:kpi_drift:approvals_untouched_pct:weekly`.
@@ -255,6 +263,16 @@ export async function auditKpi(
 }
 
 /**
+ * Test-injection seams for `auditAllKpis`. Both default to the real prod dependencies; supplying
+ * either lets a unit test swap in a fake admin client / compute stub. Not part of the SDK contract
+ * — callers should keep using the 3-arg form.
+ */
+export interface AuditAllKpisDeps {
+  admin?: ReturnType<typeof createAdminClient>;
+  compute?: typeof computeScorecardValuesOnly;
+}
+
+/**
  * Audit every metric in the cadence's registry — runs `auditKpi` for each and returns a sorted
  * report. `driftPct` descending so the worst offenders surface first (null `driftPct` rows — the
  * `snapshotValue === 0` case — sort below any positive-drift row).
@@ -267,8 +285,10 @@ export async function auditAllKpis(
   workspaceId: string,
   cadence: Cadence,
   snapshotDate?: string,
+  deps: AuditAllKpisDeps = {},
 ): Promise<KpiAuditReport[]> {
-  const admin = createAdminClient();
+  const admin = deps.admin ?? createAdminClient();
+  const compute = deps.compute ?? computeScorecardValuesOnly;
   const registry = getRegisteredMetrics(cadence);
 
   // Pull the latest persisted rows in ONE read. When `snapshotDate` is omitted we want each metric's
@@ -282,10 +302,13 @@ export async function auditAllKpis(
     .order("snapshot_date", { ascending: false })
     .limit(1000);
   if (snapshotDate) q = q.eq("snapshot_date", snapshotDate);
-  // In-flight daily window guard — see `readPersistedSnapshot` for the rationale. The daily
-  // snapshot is taken mid-day; a same-UTC-day audit re-runs the SAME window math against a growing
-  // row-count and reads it as drift. Audit only closed days when caller didn't pin a date.
-  else if (cadence === "daily") q = q.lt("snapshot_date", todayUtc());
+  // In-flight window guard (all cadences) — see `readPersistedSnapshot` for the rationale. Every
+  // cadence writes mid-day into a window ending TODAY UTC; a same-UTC-day audit re-runs the SAME
+  // window math against a growing row-count and reads it as drift. Covers daily
+  // (`build_enqueue_rate`), monthly (`loop:kpi_drift:deploy_reliability:monthly` — trailing 30-day
+  // ratio inflated by later-in-the-day `director_activity` writes on the 1st), and weekly (same
+  // shape on the Sunday write). Audit only closed windows when the caller didn't pin a date.
+  else q = q.lt("snapshot_date", todayUtc());
   const { data } = await q;
   let rows = (data ?? []) as ScorecardSnapshotRow[];
 
@@ -308,7 +331,7 @@ export async function auditAllKpis(
   );
   const groundTruthByDate = new Map<string, ScorecardSnapshotRow[]>();
   for (const d of distinctDates) {
-    const gt = await computeScorecardValuesOnly(workspaceId, { cadence, snapshotDate: d });
+    const gt = await compute(workspaceId, { cadence, snapshotDate: d });
     groundTruthByDate.set(d, gt);
   }
 
