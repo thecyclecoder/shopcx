@@ -1,0 +1,1 @@
+- **Vale reasons the planned/deferred disposition in her review pass (retire the trust-the-author stub)** · verified 2026-07-01 · → [[../libraries/agents-spec-review]]
