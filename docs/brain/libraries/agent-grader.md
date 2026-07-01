@@ -100,4 +100,8 @@ The rubric must **name the worker's actual artifact**, not the transport buffer 
 
 ---
 
-[[../README]] · [[../tables/agent_action_grades]] · [[../tables/agent_grader_prompts]] · [[../tables/agent_coaching_log]] · [[../tables/agent_instructions]] · [[worker-instructions]] · [[director-grader]] · [[platform-director]] · [[../specs/worker-grading-and-director-management]] · [[../goals/devops-director]] · [[../../CLAUDE]]
+**Above this layer:** [[agent-kpis]] rolls per-action grades into the **Quality** tier of every agent's KPI page (the 2nd supervision layer) — one number over the last N actions, plus coaching-count and (for Cleo) hypothesis-quality sub-score. See `/dashboard/agents/[role]/kpi`.
+
+---
+
+[[../README]] · [[../tables/agent_action_grades]] · [[../tables/agent_grader_prompts]] · [[../tables/agent_coaching_log]] · [[../tables/agent_instructions]] · [[worker-instructions]] · [[director-grader]] · [[platform-director]] · [[agent-kpis]] · [[../specs/worker-grading-and-director-management]] · [[../goals/devops-director]] · [[../../CLAUDE]]
