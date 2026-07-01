@@ -598,6 +598,26 @@ function stampLaneAccount(jobId: string, configDir: string): void {
   const idx = accounts.findIndex((a) => a.configDir === configDir);
   if (idx >= 0) laneAccount.set(jobId, idx);
 }
+// reconcile-per-account-in-flight-count (Phase 2): `laneAccount` is the GROUND TRUTH of active lanes per
+// account — exactly one entry per running lane (stamped at dispatch, deleted in the single outer
+// runJob().finally, line ~15559, so it can't leak the way the free-running `acct.inFlight` counter does).
+// The counter drifts because (a) `inFlight--` is scattered across many bail paths and a reap/crash before
+// the right `finally` skips a decrement (drifts UP), and (b) a `runBoxLane` lane is DOUBLE-counted —
+// `withAccountFailover` and `runBoxSession` both `inFlight++` for the same session. So the counter showed
+// "Round Robin 2: 5 in flight" with only 3 real lanes. The ground-truth count fixes both.
+function activeLaneCountForAccount(idx: number): number {
+  let n = 0;
+  for (const v of laneAccount.values()) if (v === idx) n++;
+  return n;
+}
+// Reconcile the free-running per-account load counter to the ground-truth active-lane set. Called each
+// heartbeat tick so a leaked increment (missed decrement) or a transient double-count self-heals — the
+// round-robin least-loaded selection then works off an accurate load. SAFE: `stampLaneAccount` runs
+// synchronously before any await in the dispatch/session setup, so a heartbeat can never observe an
+// increment without its matching lane already in `laneAccount` (no under-count race).
+function reconcileAccountLoad(): void {
+  for (let i = 0; i < accounts.length; i++) accounts[i].inFlight = activeLaneCountForAccount(i);
+}
 
 // Box-view label for a Max account. We DON'T surface the underlying email or config-dir name in the UI
 // (the account↔email mapping lives in the brain runbook, not the dashboard) — just the round-robin slot
@@ -637,7 +657,9 @@ function accountsSnapshot(now: number) {
   return {
     pool: accounts.map((a, i) => ({
       label: accountLabel(a.configDir, i),
-      in_flight: a.inFlight,
+      // reconcile-per-account-in-flight-count (Phase 2): show the GROUND-TRUTH active-lane count, never the
+      // free-running (leak-prone + double-counting) `a.inFlight` counter.
+      in_flight: activeLaneCountForAccount(i),
       capped: a.cappedUntil > now,
       capped_until: a.cappedUntil > now ? new Date(a.cappedUntil).toISOString() : null,
     })),
@@ -691,7 +713,10 @@ function soonestReset(now: number): number {
 function pickNewSessionAccount(now: number): AccountState | null {
   const healthy = healthyAccounts(now);
   if (!healthy.length) return null;
-  healthy.sort((a, b) => a.inFlight - b.inFlight || a.lastAssignedAt - b.lastAssignedAt);
+  // Floor at 0: the reconcile can briefly leave a counter negative when both decrements of a just-ended
+  // double-counted lane land after a heartbeat reconciled it to the ground truth — a negative must not make
+  // an account look "emptiest". Self-heals on the next reconcile tick regardless.
+  healthy.sort((a, b) => Math.max(0, a.inFlight) - Math.max(0, b.inFlight) || a.lastAssignedAt - b.lastAssignedAt);
   return healthy[0];
 }
 
@@ -2123,6 +2148,10 @@ function derivePhase(instructions: string | null | undefined): string | null {
   return m ? `Phase ${m[1]}` : null;
 }
 async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
+  // reconcile-per-account-in-flight-count (Phase 2): heal the free-running load counter to the ground-truth
+  // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
+  // round-robin least-loaded selection reads. Belt-and-suspenders alongside the scattered `inFlight--`.
+  reconcileAccountLoad();
   try {
     await db.from("worker_heartbeats").upsert({
       id: WORKER_BOX_ID,
