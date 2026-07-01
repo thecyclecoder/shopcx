@@ -1,0 +1,1 @@
+- **Lag the monthly scorecard snapshot to the previous complete UTC day** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
