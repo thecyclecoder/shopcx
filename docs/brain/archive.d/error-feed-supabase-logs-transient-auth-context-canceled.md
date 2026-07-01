@@ -1,0 +1,1 @@
+- **Scope GoTrue 'context canceled' auth errors as transient noise in the Supabase log poller** · verified 2026-07-01 · → [[../libraries/control-tower]]
