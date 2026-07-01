@@ -40,9 +40,12 @@ import {
 import {
   nextLeverToTest,
   computeChapterPriorsFromFunnel,
+  LANDER_TO_DESTINATION,
+  DIAGNOSTICS_WINDOW_DAYS,
   type LeverCandidate,
   type LanderType,
 } from "@/lib/storefront/lever-memory";
+import { computeBottlenecks, type BottleneckVerdict } from "@/lib/storefront/funnel-tree";
 import { getCalibrationState } from "@/lib/storefront/calibration";
 import { loadLeverGradeSignal, type LeverGradeSignal } from "@/lib/storefront/campaign-grader";
 import type { VariantPatch } from "@/lib/storefront/experiments";
@@ -394,6 +397,32 @@ async function loadCurrentLanderSummary(admin: Admin, productId: string): Promis
   }
 }
 
+/** Outcome-anchored WHY signal for the surface — the [[funnel-tree]] `computeBottlenecks`
+ *  verdict for this surface's (product × lander_type→destination), same window the
+ *  chapter priors are seeded from. Read-only, degrades to `null` on any failure so
+ *  the brief is still useful when the events pipeline is empty / mid-migration. */
+async function loadSurfaceBottleneck(admin: Admin, s: OptimizerSurface): Promise<BottleneckVerdict | null> {
+  try {
+    const { data: prodRow } = await admin
+      .from("products")
+      .select("handle")
+      .eq("id", s.product_id)
+      .maybeSingle();
+    const productHandle = (prodRow as { handle: string | null } | null)?.handle?.toLowerCase() ?? null;
+    if (!productHandle) return null;
+    const now = new Date();
+    const endIso = now.toISOString();
+    const startIso = new Date(now.getTime() - DIAGNOSTICS_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const result = await computeBottlenecks({
+      admin, workspaceId: s.workspace_id, startIso, endIso, productHandle,
+    });
+    const dest = LANDER_TO_DESTINATION[s.lander_type];
+    return result.destinations.find((v) => v.key === dest) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Latest predicted-LTV-per-visitor snapshot for the surface (the reward the agent moves). */
 async function loadLatestLtv(admin: Admin, s: OptimizerSurface): Promise<Record<string, unknown> | null> {
   try {
@@ -453,8 +482,9 @@ export async function loadOptimizerBrief(opts: {
     admin,
   });
 
-  const [chapterPriors, ltv, calib, landerSummary] = await Promise.all([
+  const [chapterPriors, bottleneck, ltv, calib, landerSummary] = await Promise.all([
     computeChapterPriorsFromFunnel({ workspaceId: s.workspace_id, admin }).catch(() => ({}) as Record<string, number>),
+    loadSurfaceBottleneck(admin, s),
     loadLatestLtv(admin, s),
     getCalibrationState(s.workspace_id).catch(() => ({ calibrated: false, weights_version: 0, sub_ltv_factor: 1 })),
     loadCurrentLanderSummary(admin, s.product_id),
@@ -481,6 +511,19 @@ export async function loadOptimizerBrief(opts: {
     ...topCandidates.map((c) => `    - ${c.lever_key} · imp=${c.importance} · n=${c.n_tests} · ${c.reason} (score=${c.score})`),
     ``,
     `FUNNEL SIGNAL (chapter dwell+CTA share, normalized): ${chapterSignal || "(no funnel events yet)"}`,
+    ``,
+    `BOTTLENECK / WHY (outcome-anchored — WHERE the funnel actually breaks for this surface): ${
+      bottleneck
+        ? `verdict=${bottleneck.bottleneck} · confidence=${bottleneck.confidence}`
+        : "(no verdict — surface below the SDK's traffic floor / product handle unresolved)"
+    }`,
+    ...(bottleneck
+      ? [
+          `  visits=${bottleneck.visits} · reached_pricing=${bottleneck.reached_pricing}`,
+          `  carry-to-pricing=${bottleneck.carry_to_pricing_pct}% (gap-to-best=${bottleneck.carry_gap_pct}pp) · close=${bottleneck.close_pct}% (gap-to-best=${bottleneck.close_gap_pct}pp)`,
+          `  reading: ${bottleneck.recommendation}`,
+        ]
+      : []),
     ``,
     `CAMPAIGN GRADE HISTORY (M5 Head-of-Growth training signal — bias toward high-graded HYPOTHESIS patterns, not lucky wins): ${
       gradeSignal.graded > 0
