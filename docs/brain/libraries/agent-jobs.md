@@ -12,6 +12,23 @@ Server-side helpers over the [[../tables/agent_jobs]] build queue — the dashbo
 
 ## Exports
 
+### `enqueueBuildIfDue` — function  *(bo-reactive-gated-build-enqueue Phase 1)*
+
+```ts
+async function enqueueBuildIfDue(
+  workspaceId: string, slug: string,
+  opts?: { createdBy?: string | null; instructions?: string | null },
+): Promise<{ enqueued: boolean; reason?: string; jobId?: string }>
+```
+
+The **single gated chokepoint** for inserting a `kind='build'` [[../tables/agent_jobs]] row for a spec — parallel of Vale's `enqueueSpecReviewIfDue` ([[../specs/vale-reactive-spec-review]], src/lib/agents/spec-review.ts) and Bo's shipped-lane `enqueueSpecTestIfDue` (above). One cheap `getSpec` read + one **BUILD-ELIGIBILITY gate** matching Ada's `isBuildableSpec` predicate ([[platform-director]] `specReviewDone` + not deferred + not shipped + `auto_build!==false` + all `blocked_by` cleared) + a **one-in-flight guard** (no existing `kind='build'` job for `(workspace, slug)` in `queued/queued_resume/building/claimed`). Idempotent — a duplicate call no-ops instead of stacking.
+
+Every reactive/agent-driven enqueue path routes through here so Bo never gets a `queued` row for an un-Vale-passed / deferred / blocked spec — closing the CEO-visible bug where the reactive `autoQueueUnblockedBy` inserted a build row for an unblocked-but-unreviewed dependent, which the claim-gate then held indefinitely (the "premature row on the board" symptom). Distinct `reason` values so a cron/heartbeat log stays legible: `spec-not-found｜already-shipped｜deferred｜not-review-passed｜auto-build-off｜blocked｜in-flight`.
+
+**Callers.** `autoQueueUnblockedBy` (below — the fix); Phase-2 `buildOnEligible` Inngest consumer ([[../inngest/build-on-eligible]]); Ada's own lanes MAY collapse through here as an optional refactor. The claim-time backstops (`claimHeldForUnreviewedSpec` in `scripts/builder-worker.ts` + `evaluateClaimTimeBuildGate`) stay in place as the last line of defense.
+
+**Deliberate overrides** — raw `.insert({ kind:'build' })` sites that intentionally bypass the gate carry an inline `// intentional override:` comment: `pre-merge-fix.ts` (regression-fix ships fast, Vale reviews after), `director-directives.ts` `enqueuePriorityBuild` (CEO-approved directive), `needs-attention-route.ts` (auto-authored child spec from a parked build), this file's `queueNextChainedPhase` (chain continuation — prior phase already merged, spec has passed Vale by construction), `agents/agent-grader.ts` (director-authored coaching-hardening spec). Ada's own gated lanes in `platform-director.ts` already gate on `specReviewDone`, so their raw inserts are behaviorally equivalent.
+
 ### `enqueueSpecTestIfDue` — function  *(spec-test-on-ship)*
 
 ```ts
@@ -237,7 +254,9 @@ Closes the propose-fix loop: a just-merged build whose fix spec links back to an
 async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: string): Promise<string[]>
 ```
 
-Auto-queue on unblock. `shippedSlug` just shipped (its build PR merged + phases flipped ✅); this finds every **live** spec (via `getRoadmap`) that named it in `**Blocked-by:**` and, if that was its **last** uncleared blocker (`blockedBy.every(b => b.cleared || b.slug === shippedSlug)` — `shippedSlug` is treated as cleared so a deploy-stale disk snapshot of its status can't suppress the unblock), inserts a `queued` `kind='build'` row (`created_by=null`, instructions naming the prerequisite). The chain goes hands-off: merge the prerequisite, the dependent build fires itself. **Skips** a dependent that already has ANY `build` job (dedupe — *one auto-queue per spec*, so calling this on every board load no-ops), is itself `shipped`, or opted out via `**Auto-build:** off` (`SpecCard.autoBuild === false`). Returns the slugs queued. Called from `applyMergedBuildEffects` (on the shipped transition).
+Auto-queue on unblock. `shippedSlug` just shipped (its build PR merged + phases flipped ✅); this finds every **live** spec (via `getRoadmap`) that named it in `**Blocked-by:**` and, if that was its **last** uncleared blocker (`blockedBy.every(b => b.cleared || b.slug === shippedSlug)` — `shippedSlug` is treated as cleared so a deploy-stale disk snapshot of its status can't suppress the unblock), routes each dependent through **`enqueueBuildIfDue`** (above — the gated chokepoint). The chain goes hands-off: merge the prerequisite, the dependent build fires itself. **Skips** a dependent that already has ANY `build` job (dedupe — *one auto-queue per spec*, so calling this on every board load no-ops), is itself `shipped`, or opted out via `**Auto-build:** off` (`SpecCard.autoBuild === false`). Returns the slugs it actually queued. Called from `applyMergedBuildEffects` (on the shipped transition).
+
+**Gated as of [[../specs/bo-reactive-gated-build-enqueue]] Phase 1.** Before the fix, this path raw-inserted a `kind='build'` row and ONLY checked `autoBuild !== false` + blockers cleared + a build-row-exists dedupe — an unblocked-but-un-Vale-passed dependent got a premature build row that the claim-gate held indefinitely (the "premature row on the board" symptom the CEO reported). Now the raw insert is replaced by `enqueueBuildIfDue`, which re-checks the FULL eligibility gate (`specReviewDone` + not-deferred + not-shipped + `auto_build` + blockers + in-flight); if the dependent hasn't passed Vale yet the enqueue no-ops with `reason:'not-review-passed'` and Phase 2's reactive `build/spec-build-eligible` Inngest event re-fires when Vale passes.
 
 ### `findMergedSiblingBuild` — function  *(dirty-pr-resolver-duplicate-detection)*
 

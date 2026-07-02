@@ -257,6 +257,11 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
       return { spawned: true, escalated: false, fixSlug, alreadyAuthored: true, buildQueued: false, attempts };
     }
 
+    // intentional override of enqueueBuildIfDue (bo-reactive-gated-build-enqueue Phase 1): a pre-merge
+    // spec-test RED authored a regression fix spec ONE line above (authorSpecRowStructured), and the
+    // fix ships as fast as the box can build it — Vale reviews it after, not before. Routing through
+    // the gated chokepoint would return `not-review-passed` and drop the fix on the floor. The
+    // claim-time backstop (evaluateClaimTimeBuildGate) still holds if Vale hasn't caught up by claim.
     const { error: insertErr } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
       spec_slug: fixSlug,
