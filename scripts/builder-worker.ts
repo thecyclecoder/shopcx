@@ -11723,6 +11723,77 @@ function findSupersededExportedSymbolsOnMain(wt: string): Array<{ symbol: string
   return out;
 }
 
+// pr-resolve-supersede-action-authorization: shape of a PR head snapshot the worker locks its mutations
+// against. Captured ONCE at the top of runPrResolveJob after the initial GET; every subsequent PATCH /
+// DELETE / POST re-fetches and confirms these fields still match — a fork PR whose head ref happens to
+// be named claude/… (would delete OUR internal branch on DELETE), a push between analysis and mutation,
+// or a repo rename all cause a fail-closed no-op.
+type PrHeadSnapshot = {
+  prNumber: number;
+  branch: string;
+  headSha: string;
+  headRepoFullName: string;
+  baseRepoFullName: string;
+};
+
+// Verify the initial PR object belongs to REPO and its head.ref matches the branch this job claims to
+// resolve. Called ONCE at the top of runPrResolveJob before any mutation. A fork PR (head.repo !== REPO)
+// with a head ref named `claude/…` is rejected here — the resolver never touches it.
+function verifyPrHeadProvenance(
+  pr: {
+    head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
+    base?: { repo?: { full_name?: string } };
+  },
+  expectedBranch: string,
+): { ok: boolean; reason: string; snapshot?: PrHeadSnapshot } {
+  const headRepo = pr.head?.repo?.full_name;
+  const baseRepo = pr.base?.repo?.full_name;
+  if (headRepo !== REPO) return { ok: false, reason: `head.repo=${headRepo ?? "(missing)"} — expected ${REPO} (fork PR blocked)` };
+  if (baseRepo !== REPO) return { ok: false, reason: `base.repo=${baseRepo ?? "(missing)"} — expected ${REPO}` };
+  if (pr.head?.ref !== expectedBranch) return { ok: false, reason: `head.ref=${pr.head?.ref ?? "(missing)"} — expected ${expectedBranch}` };
+  const headSha = pr.head?.sha;
+  if (typeof headSha !== "string" || headSha.length < 40) return { ok: false, reason: `head.sha missing or malformed` };
+  return { ok: true, reason: "ok", snapshot: { prNumber: 0, branch: expectedBranch, headSha, headRepoFullName: headRepo, baseRepoFullName: baseRepo } };
+}
+
+// Confirm `origin/<branch>` in the local main-repo checkout resolves to the same SHA GitHub reports as
+// the PR head. If they diverge (a mid-analysis force-push, a stale local ref, or a REF hijacked by an
+// unauthorized push), refuse to run — the whole authorization contract assumes the local branch pointer
+// is the same tip GitHub reports.
+function verifyOriginBranchMatchesHeadSha(
+  branch: string,
+  expectedHeadSha: string,
+): { ok: boolean; reason: string; actualSha?: string } {
+  sh("git", ["fetch", "origin", branch]);
+  const r = sh("git", ["rev-parse", `origin/${branch}`]);
+  if (r.code !== 0) return { ok: false, reason: `git rev-parse origin/${branch} failed: ${r.err.trim().slice(0, 200) || "(no stderr)"}` };
+  const actual = r.out.trim();
+  if (actual !== expectedHeadSha) return { ok: false, reason: `origin/${branch}=${actual.slice(0, 8)} but PR head.sha=${expectedHeadSha.slice(0, 8)}`, actualSha: actual };
+  return { ok: true, reason: "ok", actualSha: actual };
+}
+
+// Immediately-before-mutation re-read. Fresh GET the PR, confirm state/ref/repo/sha still match the
+// snapshot we authorized against; ANY drift fails closed. Call BEFORE every PATCH / DELETE / POST that
+// mutates the PR or the internal branch — a stale close is a security incident, not a race to lose.
+async function reverifyPrHeadSnapshotForMutation(
+  snapshot: PrHeadSnapshot,
+): Promise<{ ok: boolean; reason: string }> {
+  const r = await gh("GET", `/repos/${REPO}/pulls/${snapshot.prNumber}`);
+  if (!r.ok) return { ok: false, reason: `pr fetch failed (${r.status})` };
+  const pr = r.json as {
+    state?: string;
+    merged?: boolean;
+    head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
+    base?: { repo?: { full_name?: string } };
+  };
+  if (pr.state !== "open" || pr.merged) return { ok: false, reason: `state=${pr.state} merged=${pr.merged}` };
+  if (pr.head?.repo?.full_name !== snapshot.headRepoFullName) return { ok: false, reason: `head.repo=${pr.head?.repo?.full_name} (expected ${snapshot.headRepoFullName})` };
+  if (pr.base?.repo?.full_name !== snapshot.baseRepoFullName) return { ok: false, reason: `base.repo=${pr.base?.repo?.full_name} (expected ${snapshot.baseRepoFullName})` };
+  if (pr.head?.ref !== snapshot.branch) return { ok: false, reason: `head.ref=${pr.head?.ref} (expected ${snapshot.branch})` };
+  if (pr.head?.sha !== snapshot.headSha) return { ok: false, reason: `head.sha=${pr.head?.sha?.slice(0, 8)} (expected ${snapshot.headSha.slice(0, 8)})` };
+  return { ok: true, reason: "ok" };
+}
+
 // Surface a PR that can't be auto-resolved (and isn't a re-buildable spec build) to the owner — a
 // Control Tower / Slack note per the North Star ("escalate, don't guess"). Best-effort.
 async function surfacePrToOwner(workspaceId: string, prNumber: number, prUrl: string, why: string) {
@@ -11777,6 +11848,37 @@ async function runPrResolveJob(job: Job) {
     await update(job.id, { status: "completed", error: "branch changed", log_tail: `PR #${prNumber} head is now ${pr.head.ref}, expected ${branch}` });
     return;
   }
+
+  // pr-resolve-supersede-action-authorization: load head.repo.full_name + head.sha and reject the job
+  // unless the PR belongs to REPO AND origin/<branch> resolves to that SHA. Fail-closed at the top: the
+  // rest of the job (comment / patch-close / branch-delete / push) will re-verify this snapshot right
+  // before every mutation, but nothing runs at all if the initial provenance can't be established.
+  const provenance = verifyPrHeadProvenance(pr as Parameters<typeof verifyPrHeadProvenance>[0], branch);
+  if (!provenance.ok || !provenance.snapshot) {
+    await update(job.id, {
+      status: "needs_attention",
+      pr_url: prUrl,
+      pr_number: prNumber,
+      error: `authorization: ${provenance.reason}`,
+      log_tail: `PR #${prNumber} failed head-provenance check: ${provenance.reason}\nRefusing to run — a fork PR whose head ref happens to match an internal claude/* branch (or a repo/branch rename) must not enter the resolver. Surfaced for a human.`,
+    });
+    console.log(`${tag} PR #${prNumber} refused: ${provenance.reason}`);
+    return;
+  }
+  const snapshot: PrHeadSnapshot = { ...provenance.snapshot, prNumber };
+  const originMatch = verifyOriginBranchMatchesHeadSha(branch, snapshot.headSha);
+  if (!originMatch.ok) {
+    await update(job.id, {
+      status: "needs_attention",
+      pr_url: prUrl,
+      pr_number: prNumber,
+      error: `authorization: ${originMatch.reason}`,
+      log_tail: `PR #${prNumber} head.sha does not match local origin/${branch}: ${originMatch.reason}\nRefusing to run — cannot authorize mutations against a branch tip we don't hold.`,
+    });
+    console.log(`${tag} PR #${prNumber} refused (origin mismatch): ${originMatch.reason}`);
+    return;
+  }
+
   let mergeable = pr.mergeable;
   for (let i = 0; mergeable == null && i < 3; i++) {
     await new Promise((r) => setTimeout(r, 1500));
@@ -11797,19 +11899,23 @@ async function runPrResolveJob(job: Job) {
     const dup = await findAlreadyMergedDuplicate(db, branch);
     if (dup) {
       const sib = dup.mergedPr ? `#${dup.mergedPr}` : (dup.mergedBranch ?? "a sibling build");
+      // pr-resolve-supersede-action-authorization: automatic closure is retained ONLY for the DB-backed
+      // merged-sibling proof — closeDuplicatePr re-reads state/ref/repo/sha immediately before PATCH and
+      // again before the branch DELETE, so a head drift between now and the mutation is a no-op.
       const closed = await closeDuplicatePr(
         prNumber,
         branch,
         `Closing as a duplicate: this spec (\`${dup.specSlug}\`) already shipped via ${sib}, so this PR's changes are already on \`main\`. There is nothing left to merge — rebasing would only re-conflict. Auto-closed by the dirty-PR resolver (dirty-pr-resolver-duplicate-detection).`,
+        { expectedHeadSha: snapshot.headSha },
       );
       await update(job.id, {
         status: "completed",
         pr_url: prUrl,
         pr_number: prNumber,
         error: `closed-as-duplicate: ${dup.specSlug} already merged via ${sib}`,
-        log_tail: `PR #${prNumber} is a duplicate of already-merged work (${dup.specSlug} via ${sib}) — ${closed ? "closed it + deleted the branch" : "close failed (left for the next event / human)"}; did NOT resolve.`,
+        log_tail: `PR #${prNumber} is a duplicate of already-merged work (${dup.specSlug} via ${sib}) — ${closed.ok ? `closed${closed.reason ? ` (${closed.reason})` : " + deleted the branch"}` : `close refused (${closed.reason})`}; did NOT resolve.`,
       });
-      console.log(`${tag} PR #${prNumber} duplicate of merged ${dup.specSlug} (${sib}) — ${closed ? "closed" : "close failed"}, no resolve`);
+      console.log(`${tag} PR #${prNumber} duplicate of merged ${dup.specSlug} (${sib}) — ${closed.ok ? "closed" : `refused: ${closed.reason}`}, no resolve`);
       return;
     }
   } catch (e) {
@@ -11834,11 +11940,13 @@ async function runPrResolveJob(job: Job) {
   }
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
-  // dirty-pr-resolver-supersede-detection (Pax durable mandate): before spending ANY resolve budget,
-  // check whether origin/main has ALREADY exported a symbol this branch is adding — the fix-of-fix
-  // pattern that produced pr-1004's duplicate `enqueueSecurityDiffIfDue` after #991/#993 merged. Such a
-  // PR is unresolvable by definition: merging main into the branch would leave two identical exports (a
-  // broken build). Close it with a citation instead of burning a Max resolve pass on an unwinnable merge.
+  // pr-resolve-supersede-action-authorization (was dirty-pr-resolver-supersede-detection): the static
+  // exported-symbol pre-flight over the branch diff can misfire on TypeScript declaration merging
+  // (interfaces, enums, function overloads legitimately share a name across files) — a match is NOT
+  // proof the PR is superseded. Under the authorization contract we DEMOTE this signal to ADVISORY:
+  // record the evidence, surface as needs_attention for a human, and refuse to close the PR or delete
+  // the internal branch. Automatic closure is retained ONLY for the DB-backed merged-sibling proof
+  // handled above (findAlreadyMergedDuplicate) — a claim rooted in the DB, not a text match.
   try {
     const superseded = findSupersededExportedSymbolsOnMain(wt);
     if (superseded.length > 0) {
@@ -11846,23 +11954,20 @@ async function runPrResolveJob(job: Job) {
         .slice(0, 10)
         .map((s) => `- \`export ${s.kind} ${s.symbol}\` — already on main in \`${s.file}\``)
         .join("\n");
-      const comment =
-        `Closing as superseded: origin/main already exports the symbol(s) this PR also defines, so merging main would produce duplicate exports (a broken build). It looks like another PR shipped a superseding implementation while this one sat in the queue.\n\n` +
-        `${list}\n\n` +
-        `Auto-closed by the dirty-PR resolver (dirty-pr-resolver-supersede-detection).`;
-      try { await gh("POST", `/repos/${REPO}/issues/${prNumber}/comments`, { body: comment }); } catch { /* best-effort comment */ }
-      const closed = await gh("PATCH", `/repos/${REPO}/pulls/${prNumber}`, { state: "closed" });
-      if (closed.ok) {
-        try { await gh("DELETE", `/repos/${REPO}/git/refs/heads/${branch}`); } catch { /* best-effort branch cleanup */ }
-      }
+      await surfacePrToOwner(
+        wsId,
+        prNumber,
+        prUrl,
+        `PR #${prNumber} has ${superseded.length} exported symbol(s) that also appear on main — likely superseded, but this is a text match (declaration merging can misfire on interfaces/enums/function overloads). Needs a human decision.`,
+      );
       await update(job.id, {
-        status: "completed",
+        status: "needs_attention",
         pr_url: prUrl,
         pr_number: prNumber,
-        error: `closed-as-superseded: ${superseded.length} exported symbol(s) already on main`,
-        log_tail: `PR #${prNumber} is superseded on main (duplicate exports would result):\n${list}\n${closed.ok ? "→ closed the PR + deleted the branch." : "→ close failed (left for the next event / human)."}`,
+        error: `advisory-supersede: ${superseded.length} exported symbol(s) also appear on main`,
+        log_tail: `PR #${prNumber} advisory: static exported-symbol overlap with origin/main:\n${list}\n\nRefusing automatic closure — the static match is advisory only under pr-resolve-supersede-action-authorization (declaration merging can produce false positives on interfaces/enums/function overloads). Surfaced for a human decision; the PR + branch are UNCHANGED.`,
       });
-      console.log(`${tag} PR #${prNumber} superseded on main (${superseded.length} duplicate export(s)) — ${closed.ok ? "closed" : "close failed"}, no resolve`);
+      console.log(`${tag} PR #${prNumber} advisory supersede (${superseded.length} overlap) — surfaced needs_attention, no mutation`);
       return;
     }
   } catch (e) {
@@ -11923,7 +12028,16 @@ async function runPrResolveJob(job: Job) {
       const specSlug = buildJob?.spec_slug as string | undefined;
       if (specSlug && buildJob) {
         // rebuild-on-main: close the dirty PR + re-queue the build off a clean main (deduped).
-        await gh("PATCH", `/repos/${REPO}/pulls/${prNumber}`, { state: "closed" });
+        // pr-resolve-supersede-action-authorization: re-verify head snapshot right before the PATCH-close
+        // (state/ref/repo/sha must still match what we authorized at the top of the job). Any drift → do
+        // NOT close; leave the PR + branch alone and only re-queue the build. The requeue is a workspace
+        // DB write that doesn't touch GitHub, so it's safe to keep even on authorization drift.
+        const reverify = await reverifyPrHeadSnapshotForMutation(snapshot);
+        if (!reverify.ok) {
+          console.log(`${tag} escalate: refused to PATCH-close PR #${prNumber}: ${reverify.reason}`);
+        } else {
+          await gh("PATCH", `/repos/${REPO}/pulls/${prNumber}`, { state: "closed" });
+        }
         const { data: existing } = await db
           .from("agent_jobs")
           .select("id")
