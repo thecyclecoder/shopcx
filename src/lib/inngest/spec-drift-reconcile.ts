@@ -14,7 +14,12 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { runSpecDriftReconciler, healBuiltUnstampedPhases, reconcileArchivedNotFolded } from "@/lib/spec-drift";
+import {
+  runSpecDriftReconciler,
+  healBuiltUnstampedPhases,
+  reconcileArchivedNotFolded,
+  reconcileMergedBuildBranchPrs,
+} from "@/lib/spec-drift";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // The canonical PM (build-console) workspace. The built-unstamped self-heal is SINGLE-WORKSPACE by
@@ -62,6 +67,17 @@ export const specDriftReconcileCron = inngest.createFunction(
       return { specs: rows.length, phases: rows.reduce((n, r) => n + r.phases.length, 0), detail: rows };
     });
 
+    // stamp-phases-on-github-pr-merged Phase 1: MANUAL squash/merge signal. When the owner manually
+    // squash-merges a `claude/build-*` PR (which the Branches page invites), the box's own merge flow
+    // never fires — the three job-log signals in `healBuiltUnstampedPhases` all miss, and the squash
+    // discards `build_sha` so SHA-ancestry misses too. Ask GitHub whether each unstamped spec's
+    // `claude/build-{slug}` PR is MERGED; if so, stamp its phases shipped with the PR # + merge_sha.
+    // Fail-closed: OPEN / CLOSED-unmerged / GitHub errors all short-circuit to no-stamp.
+    const manuallyMerged = await step.run("reconcile-merged-build-branch-prs", async () => {
+      const rows = await reconcileMergedBuildBranchPrs(PM_WORKSPACE_ID);
+      return { specs: rows.length, phases: rows.reduce((n, r) => n + r.phases.length, 0), detail: rows };
+    });
+
     // folded-spec-must-stay-folded: the SYMMETRIC backstop. A slug whose markdown is in docs/brain/archive.d/
     // but whose DB row reads a non-folded status (the db-reduce-calls split: a fold-race / re-author left it
     // NULL → the rollup derived `planned` → phantom on the active board + builds auto-cancelled as "spec
@@ -75,12 +91,26 @@ export const specDriftReconcileCron = inngest.createFunction(
     await step.run("emit-heartbeat", async () => {
       await emitCronHeartbeat("spec-drift-reconcile", {
         ok: true,
-        produced: { ...result, healedSpecs: healed.specs, healedPhases: healed.phases, refoldedSpecs: refolded.specs },
-        detail: `${result.flipped} flipped · ${result.surfaced} surfaced · ${result.specsScanned} scanned · ${healed.specs} healed (${healed.phases} phase) · ${refolded.specs} re-folded`,
+        produced: {
+          ...result,
+          healedSpecs: healed.specs,
+          healedPhases: healed.phases,
+          refoldedSpecs: refolded.specs,
+          manuallyMergedSpecs: manuallyMerged.specs,
+          manuallyMergedPhases: manuallyMerged.phases,
+        },
+        detail: `${result.flipped} flipped · ${result.surfaced} surfaced · ${result.specsScanned} scanned · ${healed.specs} healed (${healed.phases} phase) · ${manuallyMerged.specs} manually-merged (${manuallyMerged.phases} phase) · ${refolded.specs} re-folded`,
         durationMs: Date.now() - startedAt,
       });
     });
 
-    return { ...result, healedSpecs: healed.specs, healedPhases: healed.phases, refoldedSpecs: refolded.specs };
+    return {
+      ...result,
+      healedSpecs: healed.specs,
+      healedPhases: healed.phases,
+      refoldedSpecs: refolded.specs,
+      manuallyMergedSpecs: manuallyMerged.specs,
+      manuallyMergedPhases: manuallyMerged.phases,
+    };
   },
 );

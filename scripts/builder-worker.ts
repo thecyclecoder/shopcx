@@ -3748,6 +3748,23 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing archived-not-folded heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // MANUAL-SQUASH-MERGE heal backstop (stamp-phases-on-github-pr-merged Phase 1). Same rationale as
+    // the built-not-stamped heal above: the standing pass can't rely on the Inngest cron alone (a
+    // sync/deploy can reap it) — so re-run the manual-merge stamp every beat. Asks GitHub directly
+    // whether each unstamped spec's `claude/build-{slug}` PR is MERGED; if so, stamps its phases
+    // shipped with the PR # + merge_sha. Fail-closed: OPEN / CLOSED-unmerged / any GitHub error →
+    // no stamp (this pass); a later pass retries. Reports each heal as a `healed_built_unstamped`
+    // director_activity row so the manual-merge case is never silent.
+    const { reconcileMergedBuildBranchPrs } = await import("../src/lib/spec-drift");
+    const manuallyMerged = await reconcileMergedBuildBranchPrs(job.workspace_id);
+    if (manuallyMerged.length) {
+      notes.push(`manual-squash-merge heal → stamped ${manuallyMerged.reduce((n, h) => n + h.phases.length, 0)} phase(s) shipped across ${manuallyMerged.length} spec(s): ${manuallyMerged.map((h) => `${h.slug} (#${h.pr})`).join(", ")}`);
+    }
+  } catch (e) {
+    notes.push(`manual-squash-merge heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing manual-squash-merge heal failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // PRE-MERGE checks backstop (security-test-on-preview-pre-merge + spec-goal-branch-pm-flow M3). WHY a
     // standing-pass backstop is REQUIRED, not just nice-to-have: BOTH pre-merge enqueues (spec-test +
     // security) fire ONLY from the build's fire-and-forget preview-capture READY callback. The security leg
