@@ -1942,7 +1942,7 @@ async function gh(method: string, path: string, body?: unknown) {
 
 async function ensurePr(branch: string, title: string, draft: boolean, body?: string, base = "main"): Promise<{ url: string; number: number } | null> {
   const owner = REPO.split("/")[0];
-  const prBody = body ?? `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`;
+  const prBody = body ?? `Automated build of spec \`${title}\` by the box worker (the spec lives in public.specs + public.spec_phases — the DB is the spec). ${draft ? "**Draft — has open questions.**" : ""}`;
   // Retry `gh pr create` a few times with backoff — most failures are transient (GitHub 5xx / secondary
   // rate-limit), so the manual Create-PR recovery (build-recover-pr-create) is the rare fallback, not the
   // norm. Before each retry adopt an already-open PR for the branch (idempotent: a prior attempt may have
@@ -12500,9 +12500,11 @@ interface RegressionBriefInstr {
 
 // Load the read-only brief: the regressed spec slug, its failing `## Verification` checks (with the
 // evidence the spec-test agent captured), and a pointer to read the spec + trace what shipped.
+// retire-md-spec-writers-db-is-sole-spec Phase 3 — points the agent at the DB-materialized
+// `.box/spec-{slug}.md` (public.specs + spec_phases). The docs/brain/specs/*.md files were swept.
 function regressionBrief(instr: RegressionBriefInstr): string {
   const lines: string[] = [
-    `REGRESSED SPEC: docs/brain/specs/${instr.spec_slug}.md  (title: ${instr.title})`,
+    `REGRESSED SPEC: ${instr.spec_slug}  (title: ${instr.title})`,
     `SIGNATURE: ${instr.signature}  ·  spec-test run_at: ${instr.run_at}`,
     ``,
     `This spec is ✅ SHIPPED but its verification no longer holds — the box spec-test agent observed these check(s) FAILING (evidence-backed breakage of prior-working behaviour):`,
@@ -12513,7 +12515,7 @@ function regressionBrief(instr: RegressionBriefInstr): string {
   }
   lines.push(
     ``,
-    `Read docs/brain/specs/${instr.spec_slug}.md (esp. its "## Verification"), then trace what shipped that broke it (recent merges / the implicated src/ code) to decide whether this is a REAL regression and what the fix is.`,
+    `Read .box/spec-${instr.spec_slug}.md — the worker materialized it from public.specs + public.spec_phases (the docs/brain/specs/*.md files were DELETED in the DB cutover; do NOT try to read them). Read its "## Verification" section, then trace what shipped that broke it (recent merges / the implicated src/ code) to decide whether this is a REAL regression and what the fix is.`,
   );
   return lines.join("\n");
 }
@@ -12736,6 +12738,18 @@ async function runRegressionJob(job: Job) {
   // ── Fresh review — investigate read-only on Max → verdict → dismiss | author + route. ──
   console.log(`${tag} reviewing regression ${signature} (spec ${regressedSlug})`);
   try {
+    // retire-md-spec-writers-db-is-sole-spec Phase 3 — the regression brief tells the box to Read
+    // `.box/spec-${slug}.md`; materialize the DB row to that path first (spec-test does the same at
+    // line ~9075). Best-effort: a missing row leaves the file absent and the agent surfaces
+    // needs-human on the spec read failure — better than a stale docs/brain/specs/*.md read.
+    if (regressedSlug) {
+      try {
+        const { materializeSpec } = await import("../src/lib/build-spec-materializer");
+        await materializeSpec(job.workspace_id, regressedSlug, join(REPO_DIR, ".box"));
+      } catch (e) {
+        console.warn(`${tag} materializeSpec ${regressedSlug} failed (proceeding — agent will surface needs-human on read): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedRegressionPrompt = await appendAgentInstructions(db, job.workspace_id, "regression", regressionPrompt(regressionBrief(instr)));
