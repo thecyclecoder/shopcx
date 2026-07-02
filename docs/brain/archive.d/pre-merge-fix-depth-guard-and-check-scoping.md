@@ -1,0 +1,1 @@
+- **Stop the pre-merge-fix loop: depth-guard + production-state checks are advisory, not fail** · Phase 1 verified 2026-07-02 · → [[../libraries/pre-merge-fix]]
