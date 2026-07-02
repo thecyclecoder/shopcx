@@ -1,0 +1,1 @@
+- **Surface the exact out-of-leash command on the CEO approval card** · verified 2026-07-02 · → [[../libraries/platform-director]]
