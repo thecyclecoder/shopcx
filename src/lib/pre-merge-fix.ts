@@ -288,6 +288,17 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
 
     let authored = false;
     try {
+      // pm-structured-intent-and-refs Phase 1 — the chokepoint requires plain-language why + what on
+      // spec + every phase. A pre-merge-red auto-spawn has a deterministic intent (restore the failing
+      // verification checks the box's pre-merge spec-test recorded), so hardcode both here.
+      const specWhy =
+        `The pre-merge spec-test for the origin spec [[${originSlug}]] flipped RED on branch ${branch} — ` +
+        `${cleanFailing.length} previously-passing verification check${cleanFailing.length === 1 ? "" : "s"} now ` +
+        `fail${cleanFailing.length === 1 ? "s" : ""}. Without this fix the origin PR stays held under in_testing.`;
+      const specWhat =
+        `When this fix ships, the ${cleanFailing.length} failing verification check${cleanFailing.length === 1 ? "" : "s"} ` +
+        `re-flip to pass on the origin, the pre-merge gate clears for the origin's branch, and the origin PR ` +
+        `promotes to main.`;
       authored = await authorSpecRowStructured(
         workspaceId,
         fixSlug,
@@ -299,12 +310,16 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
           blocked_by: [],
           critical: false,
           autoBuild: false,
+          why: specWhy,
+          what: specWhat,
           phases: [
             {
               title: `Fix the pre-merge regression on ${originSlug}`,
               body: phaseBody,
               verification,
               status: "planned",
+              why: specWhy,
+              what: specWhat,
             },
           ],
         },

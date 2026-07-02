@@ -26,6 +26,7 @@ Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` 
 | `parent_goal_id` | `uuid?` | self-ref → `goals(id)` on delete cascade. **NULLABLE** — a SubGoal is just a goal with a parent (CEO-locked design contract) |
 | `is_parent` | `boolean` | NOT NULL · default `false` · [[../specs/spec-goal-branch-pm-flow]] M5. Explicit PARENT-goal flag — a parent CONTAINS sub-goals (not direct buildable specs) and is EXEMPT from the atomic goal→main promotion ([[../libraries/agent-jobs]] `promoteCompleteGoalsToMain` SKIPS it; its children promote independently). [[../libraries/goals-table]] `isGoalParentExempt` ORs this with two structural fallbacks (HAS child goals OR no buildable member specs), so CEO Mode is exempt TODAY via the has-children fallback even before the flag is set. Writer: `setGoalIsParent` |
 | `status` | `text` | `proposed ｜ greenlit ｜ complete ｜ folded` · CHECK-constrained · default `proposed`. Holds the CEO-greenlight INPUT (`proposed → greenlit` is the CEO-only path, [[../specs/goal-greenlight-button-and-author-writes-db]]; `* → folded` is the fold worker). `complete` is DERIVED by the reader — see Derived status |
+| `why` | `text?` | [[../specs/pm-structured-intent-and-refs]] Phase 1 — plain-language WHY this goal exists (the motivation the CEO, directors, humans and agents share). Chokepoint-gated at [[../libraries/goal-proposals]] `proposeGoal` — a proposal with an empty `why` is rejected. Reconcile-don't-duplicate: `outcome` IS the goal's WHAT (there is NO `goals.what` column). Rendered as `**Why:** …` on the mirror artifact and read at the top of the detail page |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | bumped every write · default `now()` |
 
@@ -63,6 +64,7 @@ Goals are now read from this table by [[../libraries/brain-roadmap]] `getGoals` 
 
 - `supabase/migrations/20260725130000_goals_and_goal_milestones.sql` — initial tables + rollup function + triggers + parent-cycle guard · apply: `scripts/apply-goals-tables-migration.ts` · verify: `scripts/_verify-goals-schema.ts`
 - `supabase/migrations/20260725160000_drop_rollup_triggers_and_milestone_status.sql` — `derive-rollup-status` P3: dropped the rollup triggers + functions (the parent-cycle guard is kept) so `goals.status` is no longer auto-written; `complete` is derived by the reader
+- `supabase/migrations/20260807140000_pm_intent_why_what.sql` ([[../specs/pm-structured-intent-and-refs]] Phase 1) — adds `goals.why` (the plain-language motivation). Reconcile-don't-duplicate: `outcome` is the WHAT — no `goals.what` column · apply: `scripts/apply-pm-intent-why-what-migration.ts`
 
 ## Related
 

@@ -209,6 +209,109 @@ export class EmptyPhaseBodyError extends Error {
 }
 
 /**
+ * Thrown when a spec / phase is authored with an empty (or plain-language-lint-failing) `why` or `what`
+ * (pm-structured-intent-and-refs Phase 1). The intent columns are the SHARED plain-language layer
+ * (humans + agents both read them) that leads the detail page; a spec that skips them is unreadable to
+ * humans + gives agents no motivational anchor. Sibling to `MissingVerificationError` +
+ * `EmptyPhaseBodyError` — same "fail-loud-at-the-parse-step" pattern.
+ */
+export class MissingIntentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingIntentError";
+  }
+}
+
+/**
+ * Plain-language lint for the intent columns (`why` / `what` / `outcome`). The intent fields are for a
+ * SHARED human+agent read — code fences and `file:line` refs belong in the technical body, not here. This
+ * check runs alongside `assertEveryNodeHasIntent` so a caller that stuffs code into `why` fails the same
+ * way an empty value does. Rejects:
+ *   - triple-backtick code fences (```…```)
+ *   - `file:line` refs (`src/foo.ts:123`)
+ *   - a bare `**Something:**` metadata line (belongs in the body headers, not the plain intent)
+ *
+ * Length is loose (a paragraph is fine); we only guard against "someone pasted the implementation into
+ * why/what".
+ */
+export function assertIntentIsPlainLanguage(slug: string, field: "why" | "what" | "outcome", value: string): void {
+  if (/```/.test(value)) {
+    throw new MissingIntentError(
+      `spec ${slug} — ${field} contains a code fence (\`\`\`). ${field} is a plain-language intent field ` +
+        `for humans + agents; put code snippets in the phase body instead.`,
+    );
+  }
+  if (/\b[\w./-]+\.(?:ts|tsx|js|jsx|sql|md|json|yml|yaml)\b:\d+/.test(value)) {
+    throw new MissingIntentError(
+      `spec ${slug} — ${field} contains a file:line reference. ${field} is a plain-language intent field ` +
+        `for humans + agents; leave file/line refs to the technical body.`,
+    );
+  }
+  if (/^\s*\*\*[A-Z][^:*]{0,40}:\*\*/m.test(value)) {
+    throw new MissingIntentError(
+      `spec ${slug} — ${field} looks like a metadata header line (\`**Something:**\`). ${field} is a ` +
+        `plain-language intent field, not a header block; put the metadata in the spec body.`,
+    );
+  }
+}
+
+/**
+ * Reject any spec / phase whose plain-language `why` or `what` is empty (or a lint failure). Throws
+ * `MissingIntentError` (loud, with the slug + which field + which phase). Called by
+ * `authorSpecRowStructured` BEFORE the DB write, mirroring `assertEveryPhaseHasVerification` — a spec that
+ * doesn't declare its intent never lands in `public.specs` / `public.spec_phases`.
+ *
+ * The input mirrors the shape a caller hands to `authorSpecRowStructured`: a spec-level `{ why, what }`
+ * plus `phases: [{ title, why, what }]`. A phase with an empty title is caught elsewhere — this gate is
+ * strictly for the intent columns.
+ */
+export function assertEveryNodeHasIntent(
+  slug: string,
+  spec: { why: string; what: string },
+  phases: { title: string; why: string; what: string }[],
+): void {
+  const specWhy = (spec.why ?? "").trim();
+  const specWhat = (spec.what ?? "").trim();
+  if (!specWhy) {
+    throw new MissingIntentError(
+      `spec ${slug} has no WHY — the plain-language "why this spec exists" is required (humans + agents ` +
+        `both read it as the intent header on the detail page).`,
+    );
+  }
+  if (!specWhat) {
+    throw new MissingIntentError(
+      `spec ${slug} has no WHAT — the plain-language "what changes when this ships" is required.`,
+    );
+  }
+  assertIntentIsPlainLanguage(slug, "why", specWhy);
+  assertIntentIsPlainLanguage(slug, "what", specWhat);
+  const missing = phases
+    .map((p, i) => ({
+      pos: i + 1,
+      title: p.title,
+      missingWhy: !((p.why ?? "").trim()),
+      missingWhat: !((p.what ?? "").trim()),
+    }))
+    .filter((p) => p.missingWhy || p.missingWhat);
+  if (missing.length) {
+    const which = missing
+      .map((m) => {
+        const bits = [m.missingWhy ? "no why" : null, m.missingWhat ? "no what" : null].filter(Boolean).join(" + ");
+        return `phase ${m.pos}${m.title ? ` (${m.title})` : ""} — ${bits}`;
+      })
+      .join("; ");
+    throw new MissingIntentError(
+      `spec ${slug} ${missing.length === 1 ? "has a phase" : "has phases"} with missing intent — ${which}. ` +
+        `Every phase needs a plain-language why + what (same rail as the verification gate).`,
+    );
+  }
+  for (const p of phases) {
+    if (p.why) assertIntentIsPlainLanguage(`${slug}#${p.title}`, "why", p.why);
+    if (p.what) assertIntentIsPlainLanguage(`${slug}#${p.title}`, "what", p.what);
+  }
+}
+
+/**
  * Reject any phase that has no non-empty Verification section. Throws `MissingVerificationError` (loud, with
  * the slug + the offending phase position + title) so the authoring path FAILS rather than writing an empty
  * verification column. This is the single enforcement chokepoint — `authorSpecRowFromMarkdown` runs it before
@@ -280,6 +383,41 @@ export function assertEveryPhaseHasBody(
         `buildable — no silently-empty specs.`,
     );
   }
+}
+
+/**
+ * Extract the plain-language `**Why:**` and `**What:**` header lines a markdown-authored spec may carry
+ * (pm-structured-intent-and-refs Phase 1). Both are optional in a markdown body today — the structured
+ * chokepoint is the HARD gate; the markdown path is SOFT (extract when present, else pass null through
+ * and log at the caller) so existing surfaces keep authoring while they migrate to the new shape.
+ *
+ * Accepts single-line headers (`**Why:** short reason`) and short multi-line paragraphs following the
+ * header (until the next `**Something:**` header, `##` heading, or blank line). Case-insensitive on the
+ * label. Returns cleaned-inline text (wikilinks resolved, bold stripped) so the intent column reads as
+ * plain prose.
+ */
+export function extractIntentHeaders(raw: string): { why: string | null; what: string | null } {
+  const lines = raw.split("\n");
+  const collect = (label: "Why" | "What"): string | null => {
+    const re = new RegExp(`^\\*\\*${label}:\\*\\*\\s*(.*)$`, "i");
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(re);
+      if (!m) continue;
+      let text = m[1].trim();
+      // Absorb short continuation lines (until a blank line, a `**Header:**`, or a `##` heading).
+      for (let k = i + 1; k < lines.length; k++) {
+        const l = lines[k];
+        if (!l.trim()) break;
+        if (/^\*\*[A-Za-z][^:*]{0,40}:\*\*/.test(l)) break;
+        if (/^#{1,6}\s+/.test(l)) break;
+        text = `${text} ${l.trim()}`;
+      }
+      const cleaned = cleanInline(text);
+      return cleaned || null;
+    }
+    return null;
+  };
+  return { why: collect("Why"), what: collect("What") };
 }
 
 /** `**Repair-signature:** `…`` line (box Repair-Agent specs). Returns the SIGNATURE TEXT, not just presence. */
@@ -354,6 +492,11 @@ export interface StructuredPhaseInput {
    *  a phase with no acceptance check. */
   verification: string;
   status?: Phase;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this phase exists. Must be non-empty —
+   *  `assertEveryNodeHasIntent` rejects a phase with no plain-language intent. */
+  why: string;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. */
+  what: string;
 }
 
 /** The structured spec a caller hands to `authorSpecRowStructured` (no markdown parse). */
@@ -366,6 +509,12 @@ export interface StructuredSpecInput {
   critical?: boolean;
   autoBuild?: boolean;
   phases: StructuredPhaseInput[];
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists (same value humans +
+   *  agents read as the detail page's intent header). Must be non-empty. */
+  why: string;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. Must be
+   *  non-empty. */
+  what: string;
 }
 
 /** The content shape a re-author compares against the existing row to decide "did the content change?" —
@@ -487,6 +636,14 @@ export async function authorSpecRowStructured(
   // spec-body-never-silently-empty Phase 1 — reject a phase with an empty body BEFORE the DB write. An
   // un-buildable spec (0-byte body) is exactly what silently completed the db-index-orders build.
   assertEveryPhaseHasBody(slug, phaseBodies);
+  // pm-structured-intent-and-refs Phase 1 — reject a spec / phase authored without the plain-language
+  // why + what. Same rail as the two gates above (throws before the DB write) so an unreadable spec never
+  // lands in `public.specs` / `public.spec_phases`.
+  assertEveryNodeHasIntent(
+    slug,
+    { why: spec.why, what: spec.what },
+    spec.phases.map((p) => ({ title: p.title, why: p.why, what: p.what })),
+  );
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
   // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
@@ -536,6 +693,10 @@ export async function authorSpecRowStructured(
       pr: undefined,
       merge_sha: undefined,
       verification: phaseBodies[i].verification,
+      // pm-structured-intent-and-refs Phase 1 — persist the per-phase intent columns. The gate above
+      // already ensured they're non-empty; here we simply pass them through to the SDK writer.
+      why: p.why.trim(),
+      what: p.what.trim(),
     }));
     await upsertSpec(
       workspaceId,
@@ -554,6 +715,9 @@ export async function authorSpecRowStructured(
         repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : null,
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : null,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : null,
+        // pm-structured-intent-and-refs Phase 1 — persist the spec-level intent columns.
+        why: spec.why.trim(),
+        what: spec.what.trim(),
         // auto-build-default-on: an autonomously-authored spec auto-builds by DEFAULT — only an EXPLICIT
         // `autoBuild: false` parks it (request-fix + pre-merge-fix opt out deliberately; Pia's planner
         // decomposition + spec-chat + director-authored specs pass nothing → on). Omitting it used to default
@@ -634,6 +798,19 @@ export async function authorSpecRowFromMarkdown(
   try {
     const card = parseSpec(slug, markdown);
     const regressionHeaders = extractRegressionHeaders(markdown);
+    // pm-structured-intent-and-refs Phase 1 — extract plain-language intent headers from the markdown
+    // (`**Why:**` / `**What:**`) when present. The markdown path is SOFT: if the surfaces haven't been
+    // updated to emit these headers yet the row lands with `why=null` / `what=null` (surfaces migrate
+    // incrementally). A single warn line surfaces the gap on the log so we can hunt down un-migrated
+    // callers. The structured chokepoint is the HARD gate.
+    const intent = extractIntentHeaders(markdown);
+    if (!intent.why || !intent.what) {
+      console.warn(
+        `[author-spec] ${slug} — markdown body has no ` +
+          `${!intent.why ? "**Why:**" : ""}${!intent.why && !intent.what ? " / " : ""}${!intent.what ? "**What:**" : ""}` +
+          ` header (pm-structured-intent-and-refs Phase 1 — soft warning; will HARD-gate once every surface emits them).`,
+      );
+    }
 
     // re-author-re-opens-dismissed: snapshot the PRE-upsert row (best-effort) for the content-changed compare.
     let existing: SpecRow | null = null;
@@ -677,6 +854,10 @@ export async function authorSpecRowFromMarkdown(
         repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : extractRepairSignature(markdown),
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : regressionHeaders.ofSlug,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : regressionHeaders.signature,
+        // pm-structured-intent-and-refs Phase 1 — persist the extracted intent (null when the markdown
+        // surface hasn't been migrated yet; the structured chokepoint is HARD-gated).
+        why: intent.why,
+        what: intent.what,
         // auto-build-default-on: HONOR the markdown parser's documented contract — "**Auto-build:** absent = on;
         // only off/no/false/manual/disabled flips it false" (brain-roadmap.ts ~307). `card.autoBuild` is
         // `undefined` when no line is present, which the parser MEANS as "on" — so `!== false` (undefined → on,

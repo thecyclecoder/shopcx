@@ -19,6 +19,8 @@ ONE ROW PER `### M{N} —` sub-section of the goal markdown's `## Decomposition`
 | `position` | `int` | 1-indexed — the milestone ordering surface. Unique per `(goal_id, position)` |
 | `title` | `text` | the milestone title (e.g. `M1 — The spec body in the DB`) |
 | `body` | `text?` | the `### M{N}` block content as the brain renders it — bullets, prose. Markdown-as-text |
+| `why` | `text?` | [[../specs/pm-structured-intent-and-refs]] Phase 1 — plain-language WHY this milestone exists inside its goal. Paired with `what`. Written when the authoring surface supplies it ([[../libraries/goals-table]] `upsertGoal` persists on non-undefined). Rendered on the detail page as the milestone's intent header |
+| `what` | `text?` | [[../specs/pm-structured-intent-and-refs]] Phase 1 — plain-language WHAT changes when this milestone lands. Paired with `why`. Distinct from the free-text `body` (implementation notes) |
 | `created_at` | `timestamptz` | default `now()` — preserved across reorders |
 | `updated_at` | `timestamptz` | default `now()` |
 
@@ -38,6 +40,7 @@ There are no rollup triggers on or feeding this table anymore. The original `goa
 
 - `supabase/migrations/20260725130000_goals_and_goal_milestones.sql` — initial table + rollup function + trigger · apply: `scripts/apply-goals-tables-migration.ts` · verify: `scripts/_verify-goals-schema.ts`
 - `supabase/migrations/20260725160000_drop_rollup_triggers_and_milestone_status.sql` — `derive-rollup-status` P3: dropped the rollup triggers + functions and `DROP COLUMN status` (status is now derived by the readers)
+- `supabase/migrations/20260807140000_pm_intent_why_what.sql` ([[../specs/pm-structured-intent-and-refs]] Phase 1) — adds `why` + `what` (both nullable) for the plain-language milestone intent. Written by [[../libraries/goals-table]] `upsertGoal` on non-undefined; the milestone-decomposition parser today doesn't yet produce them, so existing rows read NULL until re-authored · apply: `scripts/apply-pm-intent-why-what-migration.ts`
 - One-time backfill from markdown ([[../specs/goals-milestones-tables-and-backfill]] Phase 3): `scripts/backfill-goals-from-markdown.ts` (per [[../recipes/backfill-goals-from-markdown]])
 
 ## Related

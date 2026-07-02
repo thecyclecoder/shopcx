@@ -120,6 +120,16 @@ export async function POST(request: Request) {
 
   let authored: boolean;
   try {
+    // pm-structured-intent-and-refs Phase 1 — plain-language intent for the auto-authored regression fix.
+    // A request-fix has a deterministic why (previously-passing checks now fail on the shipped origin) and
+    // what (the checks re-flip to pass on the next spec-test run), so hardcode both.
+    const specWhy =
+      `The shipped spec [[${originSlug}]] FAILED its own \`## Verification\` when the box spec-test QA agent ` +
+      `last ran it — ${failing.length} previously-passing check${failing.length === 1 ? "" : "s"} now ` +
+      `fail${failing.length === 1 ? "s" : ""}. Without this fix the origin sits with an active regression.`;
+    const specWhat =
+      `When this fix ships, the ${failing.length} failing verification check${failing.length === 1 ? "" : "s"} ` +
+      `re-flip to pass on the origin's next spec-test run, and the origin's \`agent_verdict\` leaves \`issues\`.`;
     authored = await authorSpecRowStructured(
       workspaceId,
       fixSlug,
@@ -131,12 +141,16 @@ export async function POST(request: Request) {
         blocked_by: [],
         critical: false,
         autoBuild: false,
+        why: specWhy,
+        what: specWhat,
         phases: [
           {
             title: `Fix the regression on ${originSlug}`,
             body: phaseBody,
             verification,
             status: "planned",
+            why: specWhy,
+            what: specWhat,
           },
         ],
       },

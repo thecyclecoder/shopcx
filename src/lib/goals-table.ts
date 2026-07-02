@@ -37,6 +37,12 @@ export interface GoalMilestoneRow {
   position: number;
   title: string;
   body: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this milestone exists. Paired with `what`.
+   *  App-layer gate: the goal-authoring path warns when empty (upgrade to a HARD gate once decomposition
+   *  authoring paths supply it). */
+  why: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this milestone lands. */
+  what: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -57,6 +63,11 @@ export interface GoalRow {
    *  See `isGoalParentExempt`, which also OR's the structural fallbacks (has-children / no-buildable-specs). */
   is_parent: boolean;
   status: GoalRowStatus;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this goal exists (the motivation the CEO +
+   *  directors + humans + agents share). Reconcile-don't-duplicate: `outcome` IS the goal's WHAT — we did
+   *  NOT add a `goals.what` column; treat `outcome` as the what everywhere. The chokepoint (`proposeGoal`
+   *  and future goal-authoring surfaces) gates this non-empty going forward. */
+  why: string | null;
   created_at: string;
   updated_at: string;
   milestones: GoalMilestoneRow[];
@@ -78,6 +89,9 @@ export interface GoalRowInput {
   /** Optional explicit greenlight status (`proposed` / `greenlit` / `folded`). `complete` is DERIVED by
    *  the reader when every milestone rolls up complete — don't write it here for a still-proposed goal. */
   status?: GoalRowStatus;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this goal exists. Reconcile with the
+   *  existing `outcome` (which IS the WHAT — no duplicate column). PASS `null` to CLEAR; OMIT to PRESERVE. */
+  why?: string | null;
 }
 
 /** Field set callers pass per-milestone. The `upsertGoal` REPLACE-by-position rule preserves stable id. */
@@ -85,6 +99,10 @@ export interface GoalMilestoneInput {
   position: number;
   title: string;
   body: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this milestone exists. */
+  why?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this milestone lands. */
+  what?: string | null;
 }
 
 export interface UpsertGoalResult {
@@ -114,13 +132,14 @@ interface GoalRowDb {
   parent_goal_id: string | null;
   is_parent: boolean;
   status: GoalRowStatus;
+  why: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const GOAL_COLUMNS =
-  "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, is_parent, status, created_at, updated_at";
-const MILESTONE_COLUMNS = "id, goal_id, position, title, body, created_at, updated_at";
+  "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, is_parent, status, why, created_at, updated_at";
+const MILESTONE_COLUMNS = "id, goal_id, position, title, body, why, what, created_at, updated_at";
 
 function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
   return {
@@ -136,6 +155,7 @@ function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
     parent_goal_id: db.parent_goal_id,
     is_parent: db.is_parent,
     status: db.status,
+    why: db.why,
     created_at: db.created_at,
     updated_at: db.updated_at,
     milestones,
@@ -236,6 +256,10 @@ export async function upsertGoal(
   };
   if (row.status !== undefined) upsertRow.status = row.status;
   if (row.is_parent !== undefined) upsertRow.is_parent = row.is_parent;
+  // pm-structured-intent-and-refs Phase 1 — persist the plain-language WHY column (reconciled: `outcome`
+  // remains the WHAT). PASS through only when the caller explicitly touched it (idempotent re-authors leave
+  // it alone).
+  if (row.why !== undefined) upsertRow.why = row.why;
 
   const { data: upserted, error: upErr } = await admin
     .from("goals")
@@ -276,6 +300,10 @@ export async function upsertGoal(
         body: m.body,
         updated_at: new Date().toISOString(),
       };
+      // pm-structured-intent-and-refs Phase 1 — preserve on undefined (idempotent re-author), write on
+      // explicit string/null (real author-time update).
+      if (m.why !== undefined) updateRow.why = m.why;
+      if (m.what !== undefined) updateRow.what = m.what;
       const { error: uErr } = await admin.from("goal_milestones").update(updateRow).eq("id", existing.id);
       if (uErr) throw uErr;
       milestoneIds[m.position] = existing.id;
@@ -285,6 +313,11 @@ export async function upsertGoal(
         position: m.position,
         title: m.title,
         body: m.body,
+        // pm-structured-intent-and-refs Phase 1 — persist whatever the caller passed (null keeps the
+        // pre-intent shape; a string writes it through). Milestones from goal-decomposition parsing today
+        // hand `undefined` (backfill lands later), so an unstamped milestone reads as `null`.
+        why: m.why ?? null,
+        what: m.what ?? null,
       };
       const { data: inserted, error: iErr } = await admin
         .from("goal_milestones")

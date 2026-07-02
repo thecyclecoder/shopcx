@@ -18,8 +18,12 @@ import assert from "node:assert/strict";
 import {
   assertEveryPhaseHasBody,
   assertEveryPhaseHasVerification,
+  assertEveryNodeHasIntent,
+  assertIntentIsPlainLanguage,
+  extractIntentHeaders,
   EmptyPhaseBodyError,
   MissingVerificationError,
+  MissingIntentError,
 } from "./author-spec";
 import { unbuildableReason, specHasBuildableContent } from "./build-spec-materializer";
 import type { SpecRow } from "./specs-table";
@@ -93,6 +97,8 @@ test("unbuildableReason flags phases with empty titles + empty bodies", () => {
         merge_sha: null,
         build_sha: null,
         verification: null,
+        why: null,
+        what: null,
         created_at: "2026-07-02T00:00:00Z",
         updated_at: "2026-07-02T00:00:00Z",
       },
@@ -106,4 +112,128 @@ test("summary-only spec (one-shot) is buildable", () => {
   const row = makeRow({ summary: "The whole thing ships in one PR — the summary carries the intent." });
   assert.equal(specHasBuildableContent(row), true);
   assert.equal(unbuildableReason(row), "");
+});
+
+// ── pm-structured-intent-and-refs Phase 1 — intent gate + extractor + lint ──
+
+test("spec with empty why throws MissingIntentError", () => {
+  assert.throws(
+    () => assertEveryNodeHasIntent("no-why", { why: "", what: "when it ships, X changes" }, []),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingIntentError, `expected MissingIntentError, got ${e}`);
+      assert.match((e as Error).message, /no WHY/);
+      return true;
+    },
+  );
+});
+
+test("spec with empty what throws MissingIntentError", () => {
+  assert.throws(
+    () =>
+      assertEveryNodeHasIntent(
+        "no-what",
+        { why: "we need this because X", what: "   " },
+        [{ title: "P1", why: "w", what: "x" }],
+      ),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingIntentError);
+      assert.match((e as Error).message, /no WHAT/);
+      return true;
+    },
+  );
+});
+
+test("phase with missing intent fails with slug + position + title", () => {
+  assert.throws(
+    () =>
+      assertEveryNodeHasIntent(
+        "phase-no-intent",
+        { why: "spec why", what: "spec what" },
+        [
+          { title: "P1", why: "why 1", what: "what 1" },
+          { title: "P2", why: "", what: "" },
+        ],
+      ),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingIntentError);
+      assert.match((e as Error).message, /phase-no-intent/);
+      assert.match((e as Error).message, /phase 2 \(P2\)/);
+      assert.match((e as Error).message, /no why \+ no what/);
+      return true;
+    },
+  );
+});
+
+test("intent lint rejects code fences", () => {
+  assert.throws(
+    () => assertIntentIsPlainLanguage("spec", "why", "we need this ```code``` for reasons"),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingIntentError);
+      assert.match((e as Error).message, /code fence/);
+      return true;
+    },
+  );
+});
+
+test("intent lint rejects file:line refs", () => {
+  assert.throws(
+    () => assertIntentIsPlainLanguage("spec", "what", "we fix src/lib/foo.ts:123"),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingIntentError);
+      assert.match((e as Error).message, /file:line/);
+      return true;
+    },
+  );
+});
+
+test("intent lint rejects **Header:** lines", () => {
+  assert.throws(
+    () => assertIntentIsPlainLanguage("spec", "why", "**Owner:** platform\nintent here"),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingIntentError);
+      assert.match((e as Error).message, /metadata header/);
+      return true;
+    },
+  );
+});
+
+test("valid intent passes both gates", () => {
+  assert.doesNotThrow(() =>
+    assertEveryNodeHasIntent(
+      "ok",
+      {
+        why: "The board detail page is unreadable because the intent is buried.",
+        what: "When this ships, every spec's detail page leads with a plain-language intent header.",
+      },
+      [
+        {
+          title: "Add why/what columns",
+          why: "Every level of the PM tree needs the plain-language layer humans and agents share.",
+          what: "When this ships, the DB carries why + what on specs, phases, milestones, and goals.",
+        },
+      ],
+    ),
+  );
+});
+
+test("extractIntentHeaders pulls **Why:** + **What:** from markdown", () => {
+  const md = [
+    "# Spec title",
+    "",
+    "**Owner:** [[../functions/platform]]",
+    "**Why:** we need the shared intent layer so humans + agents both read the detail page",
+    "**What:** when this ships, the PM tree carries plain-language why + what everywhere",
+    "",
+    "## Phase 1 — Setup",
+  ].join("\n");
+  const got = extractIntentHeaders(md);
+  assert.match(got.why ?? "", /shared intent layer/);
+  assert.match(got.what ?? "", /plain-language why \+ what/);
+});
+
+test("extractIntentHeaders returns nulls when headers are absent", () => {
+  const md = "# Title\n\n**Owner:** platform\n\n## Phase 1 — Do it";
+  const got = extractIntentHeaders(md);
+  assert.equal(got.why, null);
+  assert.equal(got.what, null);
 });

@@ -41,11 +41,14 @@ test("rendered artifact carries Status: proposed + Proposed-by + Owner for the s
     outcome: "do the thing",
     successMetric: "metric up",
     target: "decompose via Pia",
+    // pm-structured-intent-and-refs Phase 1 — required plain-language intent.
+    why: "we're doing this so humans + agents share the goal's motivation",
   });
   assert.match(md, /^# A proposed goal/m);
   assert.match(md, /\*\*Status:\*\* proposed/);
   assert.match(md, /\*\*Proposed-by:\*\* \[\[\.\.\/functions\/platform\]\]/);
   assert.match(md, /\*\*Owner:\*\* \[\[\.\.\/functions\/platform\]\]/);
+  assert.match(md, /\*\*Why:\*\* we're doing this so/);
 });
 
 test("extractDecompositionMilestones: default placeholder body → zero milestones (Pia decomposes)", () => {
@@ -55,6 +58,8 @@ test("extractDecompositionMilestones: default placeholder body → zero mileston
     slug: "x",
     title: "T",
     outcome: "do it",
+    // pm-structured-intent-and-refs Phase 1 — required plain-language intent.
+    why: "we need it",
   });
   assert.deepEqual(extractDecompositionMilestones(md), []);
 });

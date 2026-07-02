@@ -46,6 +46,13 @@ export interface SpecPhaseRow {
    *  main-promotion stamp). A phase with `build_sha` set but `status !== 'shipped'` is built-on-branch. */
   build_sha: string | null;
   verification: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this phase exists. Paired with `what`.
+   *  HARD gate at the app-layer chokepoint (`author-spec.assertEveryNodeHasIntent`). NULL only for rows
+   *  authored BEFORE the intent columns landed. */
+  why: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. Paired
+   *  with `why`. HARD gate at the app-layer chokepoint. NULL only for pre-intent rows. */
+  what: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -109,6 +116,14 @@ export interface SpecRow {
    *  (a goal-mate never ships to main until M5's atomic goal promotion), and M5 reads "every spec in the goal
    *  has goal_branch_sha" to detect goal-complete. Null = not yet on the goal branch. */
   goal_branch_sha: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists. Paired with `what`.
+   *  HARD gate at the app-layer chokepoint (`author-spec.assertEveryNodeHasIntent`). NULL only for rows
+   *  authored BEFORE the intent columns landed. Not markdown — the plain-language lint (no code fences /
+   *  no `file:line`) rejects jargon that belongs in the technical body. */
+  why: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. Paired
+   *  with `why`. HARD gate at the app-layer chokepoint. Distinct from `summary`. */
+  what: string | null;
   created_at: string;
   updated_at: string;
   phases: SpecPhaseRow[];
@@ -138,6 +153,12 @@ export interface SpecRowInput {
   regression_signature?: string | null;
   auto_build?: boolean;
   milestone_id?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists. HARD gated at the
+   *  app-layer chokepoint; this SDK writer simply persists. PASS `null` to CLEAR; OMIT to PRESERVE. */
+  why?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. HARD
+   *  gated at the app-layer chokepoint; this SDK writer simply persists. */
+  what?: string | null;
 }
 
 /** Field set callers pass per-phase. `pr`/`merge_sha`/`verification` are optional — preserved when omitted. */
@@ -150,6 +171,11 @@ export interface SpecPhaseInput {
   pr?: number | null;
   merge_sha?: string | null;
   verification?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this phase exists. HARD gated at the
+   *  app-layer chokepoint. PASS `null` to CLEAR; OMIT to PRESERVE. */
+  why?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. */
+  what?: string | null;
 }
 
 export interface UpsertSpecResult {
@@ -193,14 +219,16 @@ interface SpecRowDb {
   merged_pr: number | null;
   last_merge_sha: string | null;
   goal_branch_sha: string | null;
+  why: string | null;
+  what: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, created_at, updated_at";
 const PHASE_COLUMNS =
-  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, created_at, updated_at";
+  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, created_at, updated_at";
 
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   return {
@@ -230,6 +258,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     merged_pr: db.merged_pr,
     last_merge_sha: db.last_merge_sha,
     goal_branch_sha: db.goal_branch_sha,
+    why: db.why,
+    what: db.what,
     created_at: db.created_at,
     updated_at: db.updated_at,
     phases,
@@ -332,6 +362,10 @@ export async function upsertSpec(
     milestone_id: row.milestone_id ?? null,
     updated_at: new Date().toISOString(),
   };
+  // pm-structured-intent-and-refs Phase 1 — persist the plain-language intent columns. `undefined` means
+  // "preserve" (the caller isn't touching them); an explicit `null` or a string is written through.
+  if (row.why !== undefined) upsertRow.why = row.why;
+  if (row.what !== undefined) upsertRow.what = row.what;
   // specs-status-override-only: `specs.status` is OVERRIDE-ONLY (in_review / deferred / folded). When a caller
   // passes an explicit status, persist it ONLY if it's a true override; a DERIVED value (planned /
   // in_progress / shipped) is normalized to NULL so the rollup derives it (never a leaked stored derived
@@ -406,6 +440,10 @@ export async function upsertSpec(
       if (phase.pr !== undefined) updateRow.pr = phase.pr;
       if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
       if (phase.verification !== undefined) updateRow.verification = phase.verification;
+      // pm-structured-intent-and-refs Phase 1 — preserve on undefined (an idempotent re-author that isn't
+      // touching intent), write on an explicit string/null (a real change from the author chokepoint).
+      if (phase.why !== undefined) updateRow.why = phase.why;
+      if (phase.what !== undefined) updateRow.what = phase.what;
       const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
       if (uErr) throw uErr;
       phaseIds[phase.position] = existing.id;
@@ -419,6 +457,10 @@ export async function upsertSpec(
         pr: phase.pr ?? null,
         merge_sha: phase.merge_sha ?? null,
         verification: phase.verification ?? null,
+        // pm-structured-intent-and-refs Phase 1 — the chokepoint gates non-empty; here we simply persist
+        // whatever the caller passed (null keeps the pre-intent shape, a string writes it through).
+        why: phase.why ?? null,
+        what: phase.what ?? null,
       };
       const { data: inserted, error: iErr } = await admin
         .from("spec_phases")
