@@ -1,0 +1,1 @@
+- **Founder-prompted escape valve: Ada raises an out-of-leash action to the CEO, approval executes it** · verified 2026-07-02 · → [[../libraries/platform-director]]
