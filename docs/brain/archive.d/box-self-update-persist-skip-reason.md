@@ -1,0 +1,1 @@
+- **Box worker: persist self-update skip reason into worker_heartbeats.detail** · verified 2026-07-02 · → [[../tables/worker_heartbeats]]
