@@ -10,6 +10,7 @@
  * invariants. docs/brain/specs/winning-static-creative-finder.md.
  */
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { fetchCreative } from "@/lib/adlibrary";
@@ -48,10 +49,23 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   try {
-    const { buffer, contentType } = await fetchCreative(u);
-    return new NextResponse(new Uint8Array(buffer), {
+    const { buffer } = await fetchCreative(u);
+    // AdLibrary serves full-res source creatives (routinely 6-22MB) with an unreliable content-type
+    // (reports jpeg for png bytes). A 22MB buffered response exceeds the serverless response-size limit
+    // → the browser <img> breaks. Downscale + re-encode JPEG for display: correct content-type, small
+    // body, crisp on the browse card. (Mirrors the vision-path normalize in creative-skeleton.ts.)
+    let out = buffer;
+    try {
+      out = await sharp(buffer)
+        .resize({ width: 1440, height: 1440, fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 82 })
+        .toBuffer();
+    } catch {
+      // Non-image / undecodable bytes: fall back to streaming the original (best-effort).
+    }
+    return new NextResponse(new Uint8Array(out), {
       status: 200,
-      headers: { "Content-Type": contentType, "Cache-Control": "private, max-age=3600" },
+      headers: { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=3600" },
     });
   } catch {
     return NextResponse.json({ error: "fetch failed" }, { status: 502 });
