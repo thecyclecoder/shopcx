@@ -3854,9 +3854,12 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     //      when the spec-review job that set vale_pass crashed before reaching its inline dispose tail.
     // Preserves the Vale quality gate + Ada disposition semantics — it never auto-passes; it just makes sure
     // the review actually RUNS. Best-effort; both helpers are idempotent.
-    const { enqueueSpecReviewIfDue, selectInReviewSpecs } = await import("../src/lib/agents/spec-review");
+    const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs } = await import("../src/lib/agents/spec-review");
     const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
-    const inReview = await selectInReviewSpecs(db, job.workspace_id);
+    // vale-reactive-spec-review Phase 1 — the selector now returns only in_review specs that LACK a current
+    // Vale review (vale_pass !== true), so the backstop skips workspaces whose in_review pool is fully
+    // Vale-passed (parked for Ada, not Vale). The disposition sweep below still runs regardless.
+    const inReview = await selectUnreviewedInReviewSpecs(db, job.workspace_id);
     if (inReview.length) {
       const enq = await enqueueSpecReviewIfDue(job.workspace_id);
       if (enq.enqueued) notes.push(`spec-review backstop → enqueued Vale over ${enq.pending} in_review spec(s)`);
@@ -9152,10 +9155,13 @@ interface SpecReviewDecisionJson {
 
 async function runSpecReviewJob(job: Job) {
   const tag = `[spec-review:${job.id.slice(0, 8)}]`;
-  const { selectInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
+  const { selectUnreviewedInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
   const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
   const a = await admin();
-  const pending = await selectInReviewSpecs(a, job.workspace_id);
+  // vale-reactive-spec-review Phase 1 — the selector returns only in_review specs LACKING a current Vale
+  // review, so Vale never re-reviews content she already cleared. A re-author / send-back NULLs vale_pass
+  // via markSpecCardBackToReview, re-admitting the spec.
+  const pending = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
   if (!pending.length) {
     // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
     // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
@@ -9188,7 +9194,7 @@ async function runSpecReviewJob(job: Job) {
     }
     if (!reviewable.length) {
       // planner-gates-build-queue-on-authored-specs Phase 2 — when EVERY drop was a missing public.specs
-      // row (selectInReviewSpecs returned a slug the row has since vanished from), stamp
+      // row (selectUnreviewedInReviewSpecs returned a slug the row has since vanished from), stamp
       // spec_row_missing so the parked-router dismisses it. Otherwise leave the class unstamped and let
       // the heuristic classifier handle a real materializer fault (DB outage, decoder bug, etc.).
       const allMissing = missingRowSlugs.length === pending.length;
@@ -9255,7 +9261,7 @@ async function runSpecReviewJob(job: Job) {
       // agent was handed nothing to decide), there is nothing to review — complete as a benign no-op instead
       // of parking a needs_attention job that Ada would then re-escalate forever on every standing pass. Only
       // a parse failure over a STILL-POPULATED queue parks (a real malformed-output failure on real input).
-      const stillInReview = await selectInReviewSpecs(a, job.workspace_id);
+      const stillInReview = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
       if (!stillInReview.length) {
         const tail = `spec-review no-op — in_review pool drained to 0 by run time (no parseable decisions over empty input; not parking)`;
         await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
