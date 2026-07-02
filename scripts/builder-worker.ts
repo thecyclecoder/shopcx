@@ -3838,6 +3838,28 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // POST-MERGE DIFF security backstop (vault-post-merge-diff-backstop Phase 1 + fix-vault-post-merge-diff-backstop-7fbde0
+    // cheap if-due cron backstop). Sibling of the pre-merge backstop above: Vault's post-merge `diff` review is fired
+    // ONCE from the merge hook (agent-jobs `applyMergedBuildEffects` → `enqueueSecurityReviewJob({mergeSha})`). If that
+    // fire-and-forget send drops (Vercel deploy reaps an in-flight Inngest sync, box down, transient error), the merged
+    // commit never gets its post-merge security pass and nothing re-checks. `enqueueSecurityDiffIfDue` re-sweeps
+    // recently-merged `claude/*` builds and (idempotently, via the existing 14d SHA dedup inside
+    // enqueueSecurityReviewJob) re-fires the diff-mode enqueue for any merge SHA that has no security-review row yet.
+    // Symmetry with enqueueSpecTestIfDue / enqueueSpecReviewIfDue for other dropped-event class gaps. The cheap
+    // security-diff-backstop-cron runs the SAME helper every 15 min so orphan windows can't outlive the platform-director's
+    // beat spacing either. Best-effort; the underlying enqueue is safe to run every pass.
+    const { enqueueSecurityDiffIfDue } = await import("../src/lib/security-agent");
+    const sec = await enqueueSecurityDiffIfDue(db, { workspaceId: job.workspace_id });
+    if (sec.enqueued.length) {
+      notes.push(
+        `post-merge diff security backstop → ${sec.enqueued.length} SHA(s) re-enqueued (${sec.resolved} resolved from ${sec.scanned} merged build(s))`,
+      );
+    }
+  } catch (e) {
+    notes.push(`post-merge diff security backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing post-merge diff security backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // SPEC-REVIEW backstop (spec-review-agent) — the reliable heartbeat that gets a newly-authored `in_review`
     // spec its Vale review + Ada disposition. WHY a standing-pass backstop is REQUIRED, not just nice-to-have:
     // before this, the ONLY enqueuers were (a) the Inngest `spec-review-cron` (`*/15`) and (b) the build

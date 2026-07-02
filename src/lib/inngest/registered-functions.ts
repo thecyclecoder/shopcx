@@ -134,6 +134,7 @@ import { deployGuardianCron } from "@/lib/inngest/deploy-guardian-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
+import { securityDiffBackstopCron } from "@/lib/inngest/security-diff-backstop-cron";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
 export const registeredInngestFunctions = [
@@ -277,6 +278,7 @@ export const registeredInngestFunctions = [
   dailyDigestCron,
   platformDirectorCron,
   securityDepWatch,
+  securityDiffBackstopCron,
 ];
 
 /** Our Inngest app id prefix (e.g. "shopcx-"), the form Inngest prepends to function ids across apps. */
