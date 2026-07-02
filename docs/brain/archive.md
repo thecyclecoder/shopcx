@@ -30,6 +30,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Specs carry a Brain refs list the builder reads first** · verified 2026-07-02 · → [[../project-management]]
 - **Owner squash/manual merges are detected + stamped shipped (GitHub PR-merged reconciler)** · verified 2026-07-02 · → [[inngest/spec-drift-reconcile]]
 - **Vale reviews reactively on spec mutation, cron becomes a gated backstop** · verified 2026-07-02 · → [[../inngest/spec-review-cron]]
+- **Auto-track whitelisted pages (affiliate/advertorial ads fronting a competitor)** · verified 2026-07-02 · → [[../tables/competitors]]
 - **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
 - **Agent KPI pages — a per-agent KPI layer on top of grading/coaching (Cleo/Storefront-Optimizer first)** · verified 2026-07-01 · → [[../libraries/agent-kpis]] · [[../libraries/storefront-optimizer-agent]] · [[../dashboard/agents]]
 - **Give Agents a Directors-style sidebar (surfacing KPIs) + redesign the agent profile page** · verified 2026-07-01 · → [[dashboard/agents]]

@@ -1,0 +1,1 @@
+- **Auto-track whitelisted pages (affiliate/advertorial ads fronting a competitor)** · verified 2026-07-02 · → [[../tables/competitors]]
