@@ -24,7 +24,8 @@ Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner
 - **Vision is mandatory** — AdLibrary `body` is thin, so the skeleton must come from the image. `parseSkeleton` defends against stray fences/prose.
 - **Dedup by `ad_key`** before vision → never re-vision/re-spend. `ingestAd` upserts on `(workspace_id, source, dedup_key)`.
 - **Independent-brand repetition is the signal** — `heat`/`days_running` are never the score, only tiebreakers.
-- Vision media type is coerced to a supported image mime (jpeg/png/gif/webp), defaulting to jpeg.
+- **Downscale before vision (`normalizeForVision`).** AdLibrary serves full-res source creatives (routinely 6–22MB) and its HTTP content-type is unreliable (reports jpeg for png bytes). Anthropic vision hard-rejects images >10MB (base64) — so EVERY creative is run through `sharp` (fit inside 1568px + re-encode JPEG) before the vision call, in BOTH `visionDeconstruct` (statics) and `visionDeconstructFrames` (video keyframes). This guarantees a supported `media_type` + under-limit bytes (a 22MB png → ~200KB jpeg, also slashing vision tokens). **Before this, every oversized static 400'd silently** (`vision_400`, swallowed) → `status='failed'` → the table stayed empty despite the cron running. The `contentType` arg to `visionDeconstruct` is no longer trusted. A creative sharp can't decode returns `null` (not visionable). Proven in `scripts/_raw-vision-fixed.ts`.
+- **The display proxy downscales too** ([[../../src/app/api/ads/creative-finder/media/route.ts]]) — a 22MB buffered response exceeds the serverless response-size limit → the browse-card `<img>` breaks. Same `sharp` fix (fit 1440px + JPEG + correct `Content-Type`).
 
 ## Callers
 - [[../inngest/creative-finder]] (`sweepSeed`).

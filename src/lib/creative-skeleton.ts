@@ -19,6 +19,7 @@
  *
  * See docs/brain/specs/winning-static-creative-finder.md.
  */
+import sharp from "sharp";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
@@ -41,12 +42,19 @@ export interface CreativeSkeleton {
   offer: string | null;
 }
 
-const SUPPORTED_VISION_MEDIA = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-]);
+// Anthropic vision rejects images > 10MB (base64) and downsamples anything over ~1568px on the long
+// edge anyway. AdLibrary serves full-res source creatives (routinely 6-22MB), and its HTTP content-type
+// is unreliable (reports jpeg for png bytes). So before EVERY vision call we normalize through sharp:
+// fit inside 1568px + re-encode JPEG — guaranteeing a supported media_type AND well-under-limit bytes
+// (a 22MB png → ~200KB jpeg, which also slashes vision tokens). See scripts/_raw-vision-fixed.ts.
+const VISION_MAX_EDGE = 1568;
+
+async function normalizeForVision(buffer: Buffer): Promise<Buffer> {
+  return sharp(buffer)
+    .resize({ width: VISION_MAX_EDGE, height: VISION_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer();
+}
 
 const VISION_SYSTEM = `You are a direct-response creative strategist. You reverse-engineer the STRUCTURE of a winning paid-social ad — never to copy it, only to learn the repeatable skeleton.
 
@@ -66,14 +74,24 @@ Return ONLY a JSON object, no prose, with these keys:
 }
 Keep each slot concise (a phrase, not a paragraph). Use null for a slot that is genuinely absent.`;
 
-/** Run Claude vision on the creative bytes → the four-slot skeleton. */
+/** Run Claude vision on the creative bytes → the four-slot skeleton.
+ *  `contentType` is accepted for signature compatibility but no longer trusted (AdLibrary mislabels
+ *  media types); the bytes are always normalized to JPEG under the vision size limit first. */
 export async function visionDeconstruct(
   workspaceId: string,
   imageBuffer: Buffer,
-  contentType: string,
+  _contentType?: string,
 ): Promise<CreativeSkeleton | null> {
   if (!ANTHROPIC_API_KEY) throw new Error("no_anthropic_key");
-  const mediaType = SUPPORTED_VISION_MEDIA.has(contentType) ? contentType : "image/jpeg";
+  let normalized: Buffer;
+  try {
+    normalized = await normalizeForVision(imageBuffer);
+  } catch (err) {
+    // A creative sharp can't decode (corrupt / non-image bytes) is not visionable.
+    console.error(`[creative-finder] image normalize failed:`, err);
+    return null;
+  }
+  const mediaType = "image/jpeg";
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -91,7 +109,7 @@ export async function visionDeconstruct(
           content: [
             {
               type: "image",
-              source: { type: "base64", media_type: mediaType, data: imageBuffer.toString("base64") },
+              source: { type: "base64", media_type: mediaType, data: normalized.toString("base64") },
             },
             { type: "text", text: "Extract this ad's skeleton as JSON." },
           ],
@@ -139,14 +157,26 @@ export async function visionDeconstructFrames(
   if (!ANTHROPIC_API_KEY) throw new Error("no_anthropic_key");
   if (!frames.length) return null;
 
-  const imageBlocks = frames.map((f, i) => [
+  // Normalize each keyframe the same way as the static path (fit 1568px + JPEG) — keeps every frame
+  // well under the per-image limit and the multi-frame request small. Undecodable frames are dropped.
+  const normalizedFrames: Buffer[] = [];
+  for (const f of frames) {
+    try {
+      normalizedFrames.push(await normalizeForVision(f.buffer));
+    } catch (err) {
+      console.error(`[creative-finder] video keyframe normalize failed:`, err);
+    }
+  }
+  if (!normalizedFrames.length) return null;
+
+  const imageBlocks = normalizedFrames.map((buf, i) => [
     { type: "text", text: `Keyframe ${i + 1}:` },
     {
       type: "image",
       source: {
         type: "base64",
-        media_type: SUPPORTED_VISION_MEDIA.has(f.contentType) ? f.contentType : "image/jpeg",
-        data: f.buffer.toString("base64"),
+        media_type: "image/jpeg",
+        data: buf.toString("base64"),
       },
     },
   ]).flat();
