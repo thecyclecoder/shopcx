@@ -10,7 +10,7 @@ The **Research › Competitors** surface — the owner-facing, product-filtered,
 
 Nav plumbing lives in `src/app/dashboard/sidebar.tsx` — a new collapsible `NAV_STRUCTURE` section labeled "Research" (magnifying-glass icon), `ownerOnly: true`, with one child item `Competitors` at this route. Sibling items (Ad Gaps, Landers, Gap Queue) plug in as one-line additions to `section.items`. The segment layout `src/app/dashboard/research/layout.tsx` wraps children in `<Suspense fallback={null}>` so later dynamic-read siblings work under `cacheComponents: true`.
 
-## Phase 2 — competitors table + product filter (planned)
+## Phase 2 — competitors table + product filter (shipped)
 
 - Product filter defaulting to "All products", populated from the workspace's products (same source the [[marketing__acquisition]] hub uses).
 - Filter semantics: selecting a product shows rows WHERE `product_id = <selected> OR product_id IS NULL` — the workspace-level (null-scoped) seeds always stay visible. Otherwise the current all-null data reads as an empty list.
@@ -21,5 +21,9 @@ Nav plumbing lives in `src/app/dashboard/sidebar.tsx` — a new collapsible `NAV
 ## API endpoints called
 
 - Phase 2 → `GET /api/ads/competitors?workspaceId=&productId=` (read-only).
+
+## Status / open work
+
+✅ **Shipped (2026-07-02):** Phase 1 (shell + nav) + Phase 2 (table + product filter). The **Research** sidebar section is now live with the **Competitors** surface as surface 1 of N — sibling surfaces (Ad Creative gaps, Landing-page snapshots, unified gap queue) are extensible one-line additions to `src/app/dashboard/sidebar.tsx` under `section.items`.
 
 See [[../tables/competitors]] · [[../libraries/competitors]] · [[../libraries/acquisition-hub]] · [[marketing__acquisition]].
