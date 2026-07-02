@@ -42,18 +42,50 @@ export interface CreativeSkeleton {
   offer: string | null;
 }
 
-// Anthropic vision rejects images > 10MB (base64) and downsamples anything over ~1568px on the long
-// edge anyway. AdLibrary serves full-res source creatives (routinely 6-22MB), and its HTTP content-type
-// is unreliable (reports jpeg for png bytes). So before EVERY vision call we normalize through sharp:
-// fit inside 1568px + re-encode JPEG — guaranteeing a supported media_type AND well-under-limit bytes
-// (a 22MB png → ~200KB jpeg, which also slashes vision tokens). See scripts/_raw-vision-fixed.ts.
-const VISION_MAX_EDGE = 1568;
-
-async function normalizeForVision(buffer: Buffer): Promise<Buffer> {
+// AdLibrary serves full-res source creatives (routinely 6-22MB) with an unreliable HTTP content-type
+// (reports jpeg for png bytes). Raw bytes break two consumers: Anthropic vision hard-rejects images
+// >10MB (base64) and downsamples anything over ~1568px anyway; and a 22MB buffered proxy response
+// exceeds the serverless response-size limit (502). So we sharp-downscale + re-encode JPEG for each
+// use — guaranteeing a supported media_type AND small bytes. See scripts/_raw-vision-fixed.ts.
+async function downscaleImage(buffer: Buffer, maxEdge: number, quality: number): Promise<Buffer> {
   return sharp(buffer)
-    .resize({ width: VISION_MAX_EDGE, height: VISION_MAX_EDGE, fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 82 })
+    .resize({ width: maxEdge, height: maxEdge, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality })
     .toBuffer();
+}
+
+// Vision: 1568px is Anthropic's optimal (they downsample above it) — small + token-efficient.
+const normalizeForVision = (buffer: Buffer) => downscaleImage(buffer, 1568, 82);
+// Display/stored copy: kept HIGH-QUALITY so an operator can zoom in AND a future vision pass reads it
+// well (2048px > vision's 1568 need). ~0.5-1MB, served from our own storage (no serverless limit).
+const toDisplayImage = (buffer: Buffer) => downscaleImage(buffer, 2048, 88);
+
+// The private bucket holding OUR downscaled copy of each analyzed creative. The dashboard serves a
+// signed URL to this instead of live-proxying AdLibrary (which 502'd on the full-res fetch). Mirrors
+// the landing-page-scout `lander-shots` bucket. We never re-host publicly — private + signed reads.
+export const CREATIVE_SHOTS_BUCKET = "creative-shots";
+const CREATIVE_SHOT_TTL_SEC = 60 * 60; // 1h signed reads (the list route re-signs per request)
+
+export async function ensureCreativeShotsBucket(): Promise<void> {
+  const admin = createAdminClient();
+  const { data } = await admin.storage.getBucket(CREATIVE_SHOTS_BUCKET);
+  if (!data) await admin.storage.createBucket(CREATIVE_SHOTS_BUCKET, { public: false });
+}
+
+export async function uploadCreativeShot(path: string, buffer: Buffer): Promise<string> {
+  const admin = createAdminClient();
+  const { error } = await admin.storage
+    .from(CREATIVE_SHOTS_BUCKET)
+    .upload(path, buffer, { contentType: "image/jpeg", upsert: true });
+  if (error) throw error;
+  return path;
+}
+
+export async function signCreativeShot(path: string, ttlSec = CREATIVE_SHOT_TTL_SEC): Promise<string | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin.storage.from(CREATIVE_SHOTS_BUCKET).createSignedUrl(path, ttlSec);
+  if (error) return null;
+  return data?.signedUrl ?? null;
 }
 
 const VISION_SYSTEM = `You are a direct-response creative strategist. You reverse-engineer the STRUCTURE of a winning paid-social ad — never to copy it, only to learn the repeatable skeleton.
@@ -331,10 +363,20 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
   let skeleton: CreativeSkeleton | null = null;
   let status: string = ad.media_type === "video" ? "video_pending" : "analyzed";
   let visionedAt: string | null = null;
+  let thumbPath: string | null = null;
 
   if (ad.media_type === "static" && ad.creative_url) {
     try {
       const { buffer, contentType } = await fetchCreative(ad.creative_url);
+      // Host our own downscaled copy so the dashboard serves it (never live-proxies the full-res
+      // source — that 502'd). Best-effort: a failed upload must not fail the vision/ingest.
+      try {
+        await ensureCreativeShotsBucket();
+        const display = await toDisplayImage(buffer);
+        thumbPath = await uploadCreativeShot(`${workspaceId}/${ad.ad_key}.jpg`, display);
+      } catch (e) {
+        console.error(`[creative-finder] thumb upload failed for ${ad.ad_key}:`, e);
+      }
       skeleton = await visionDeconstruct(workspaceId, buffer, contentType);
       visionedAt = new Date().toISOString();
       if (!skeleton) status = "failed";
@@ -351,6 +393,7 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
     advertiser: ad.advertiser,
     title: ad.title,
     image_url: ad.creative_url,
+    thumb_path: thumbPath,
     media_type: ad.media_type,
     format: skeleton?.format ?? null,
     framework: skeleton?.framework ?? null,
