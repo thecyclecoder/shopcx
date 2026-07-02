@@ -9266,14 +9266,30 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
-    // ⭐ isolate-premerge-security-verdict Phase 1 — the pre-merge session's SECURITY envelope is NO LONGER
-    // applied here. Fusing it (consolidate-premerge-checks-one-session Phase 1) let this path synthesize a
-    // gate-satisfying `security-review` agent_jobs row from a self-declared `security.status="clean"` in the
-    // spec-test envelope — the standalone Vault lane (`runSecurityReviewJob`) is meant to be the ONLY producer
-    // of pre-merge security verdicts. Pre-merge security is now driven exclusively by
-    // `maybeEnqueuePreMergeSecurityOnAccumulation` → standalone branch-mode `enqueueSecurityReviewJob`,
-    // enqueued from the preview-ready hook + `backstopPreMergeChecks`. The prompt still asks the fused session
-    // for a security envelope, but its content is discarded — the standalone review is authoritative.
+    // ⭐ fused-premerge-security-authoritative-drop-standalone Phase 2 — the fused session's SECURITY
+    // envelope is now AUTHORITATIVE for the pre-merge branch path (reverses isolate-premerge-security-verdict
+    // Phase 1). The Phase-1 pure validator (classifyFusedSecurityEnvelope) enforces the structured
+    // per-check evidence contract: a bare/self-declared `clean` DOWNGRADES to needs_human here, so a
+    // rubber-stamp strands the PR for a human, exactly as a missing dedicated review would. Only a
+    // clean-WITH-evidence classification lands a `completed` security-review row for the branch, which is
+    // what `isSecurityGreenForBranch` / `getSecurityStateForBranch` (src/lib/security-agent.ts) reads. The
+    // `completedClean` definition the M4 promote gate + the post-ship fold gate share is satisfied by a
+    // fused clean-with-evidence verdict and ONLY that. Best-effort — never fails the spec-test run.
+    if (isPreMerge && branch && parsed && typeof parsed === "object") {
+      try {
+        await applyFusedSecurityAsBranchVerdict({
+          job,
+          slug,
+          branch,
+          previewOrigin: previewOrigin ?? "",
+          parsedFused: parsed as Record<string, unknown>,
+          raw,
+          tag,
+        });
+      } catch (e) {
+        console.error(`${tag} fused-security apply failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     // Mark THIS spec-test job terminal BEFORE the auto-fold gate runs. fold-guard-live-build (Phase 1)
     // makes a spec with a live build/spec-test job ineligible for auto-fold — and this very job is a live
     // spec-test job for `slug` until it's completed. Flipping it first means the gate sees no live job for
@@ -14764,6 +14780,106 @@ async function applySecurityVerdictToJob(
   }
   // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never auto-pass.
   await update(job.id, { status: "needs_attention", error: fallbackReason ?? "security review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
+}
+
+/**
+ * fused-premerge-security-authoritative-drop-standalone Phase 2 — insert a synthetic branch-mode
+ * security-review row for `branch` (pre-claimed so the standalone poll does NOT pick it) and reuse
+ * [[applySecurityVerdictToJob]] to apply the fused envelope's verdict. This is what makes the fused
+ * envelope AUTHORITATIVE: `isSecurityGreenForBranch` / `getSecurityStateForBranch` read exactly
+ * these `agent_jobs` rows scoped by `spec_branch`, so a `completed` row here satisfies the M4
+ * promote gate WITHOUT a separate standalone Vault session. The `completedClean` definition is
+ * shared with the post-ship fold gate — both are satisfied by a clean-with-evidence fused verdict
+ * and only that.
+ */
+async function applyFusedSecurityAsBranchVerdict(args: {
+  job: Job;
+  slug: string;
+  branch: string;
+  previewOrigin: string;
+  parsedFused: Record<string, unknown>;
+  raw: string;
+  tag: string;
+}): Promise<void> {
+  const { job, slug, branch, previewOrigin, parsedFused, raw, tag } = args;
+  const { classifyFusedSecurityEnvelope, mapFusedSecurityToVerdict } = await import("../src/lib/security-envelope");
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { SECURITY_DIRECTOR_FUNCTION } = await import("../src/lib/security-agent");
+
+  const fusedSecurity = parsedFused.security;
+  const verdictInfo = classifyFusedSecurityEnvelope(fusedSecurity);
+  const envAsObj: Record<string, unknown> | null =
+    fusedSecurity && typeof fusedSecurity === "object" && !Array.isArray(fusedSecurity)
+      ? (fusedSecurity as Record<string, unknown>)
+      : null;
+  const declaredStatus = String(envAsObj?.status ?? "");
+  const verdict = mapFusedSecurityToVerdict(verdictInfo.classification, declaredStatus);
+  const review = String(envAsObj?.review ?? "") || verdictInfo.reason;
+
+  const instrJson = {
+    mode: "branch" as const,
+    branch,
+    preview_origin: previewOrigin,
+    spec_slug: slug,
+    pr_number: null,
+    // Fused-provenance markers — the row is authored by the spec-test session, not a fresh Vault session.
+    fused_from_job_id: job.id,
+    fused_classification: verdictInfo.classification,
+  };
+
+  // Insert with status='claimed' so the standalone `claim_agent_job` RPC never picks it up (it only
+  // claims 'queued' rows). applySecurityVerdictToJob's `update()` calls flip it to the terminal state.
+  const { data: inserted, error: insErr } = await db
+    .from("agent_jobs")
+    .insert({
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      spec_branch: branch,
+      kind: "security-review",
+      status: "claimed",
+      instructions: JSON.stringify(instrJson),
+      log_tail: `fused pre-merge security verdict — classification=${verdictInfo.classification}, applied=${verdict}: ${verdictInfo.reason}`.slice(-2000),
+    })
+    .select("*")
+    .maybeSingle();
+
+  if (insErr || !inserted) {
+    console.warn(`${tag} could not insert fused security-review row for ${branch}: ${insErr?.message ?? "no row returned"}`);
+    return;
+  }
+
+  const syntheticJob = inserted as unknown as Job;
+  const parsedForApplier: Record<string, unknown> = {
+    review,
+    spec: envAsObj?.spec,
+  };
+  const specLabel = `unmerged ${slug} (${branch})`;
+  const activityMetadata: Record<string, unknown> = {
+    branch,
+    preview_origin: previewOrigin,
+    fused_from_job_id: job.id,
+    classification: verdictInfo.classification,
+    per_check: verdictInfo.perCheck,
+    finding_count: verdictInfo.findingCount,
+  };
+  await applySecurityVerdictToJob(syntheticJob, {
+    parsed: parsedForApplier,
+    verdict,
+    raw: raw.slice(-8000),
+    isError: false,
+    fallbackReason: null,
+    source: { kind: "branch", branch, previewOrigin },
+    specLabel,
+    activityReason: (v, r) =>
+      `Fused pre-merge security review of ${specLabel}: ${v} — ${r} (classification=${verdictInfo.classification})`.slice(0, 4000),
+    activityMetadata,
+    parentSlug: slug,
+    instr: instrJson as unknown as Record<string, unknown>,
+    mode: "branch",
+    tag: `[fused-security:${syntheticJob.id.slice(0, 8)}]`,
+    recordDirectorActivity,
+    SECURITY_DIRECTOR_FUNCTION,
+  });
 }
 
 async function runSecurityReviewJob(job: Job) {

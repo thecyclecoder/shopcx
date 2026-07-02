@@ -228,3 +228,30 @@ export function classifyFusedSecurityEnvelope(envelope: unknown): SecurityEnvelo
     findingMissingLocation,
   };
 }
+
+/**
+ * fused-premerge-security-authoritative-drop-standalone Phase 2 — pure MAPPING from the Phase-1
+ * classifier's output to the exact `verdict` string [[applySecurityVerdictToJob]] consumes. Extracted
+ * so the mapping is unit-testable without inserting a synthetic agent_jobs row (no DB, no network).
+ *
+ * Contract (matches the spec's `completedClean` rule — a bare/self-declared clean CAN NEVER read as
+ * green, so a rubber-stamp strands the PR for a human):
+ *   - classification="clean" → "clean" (the ONLY path to a `completed` gate-passing row).
+ *   - classification="needs_human" → "needs-human" (surfaces needs_attention; NOT clean).
+ *   - classification="not-clean" + declared status="real-vuln" → "real-vuln" (auto-fix route).
+ *   - classification="not-clean" + declared status="false-positive" → "false-positive".
+ *   - classification="not-clean" + other → "needs-human" (default fail-safe).
+ */
+export type SecurityAppliedVerdict = "clean" | "false-positive" | "needs-human" | "real-vuln";
+
+export function mapFusedSecurityToVerdict(
+  classification: SecurityEnvelopeClassification,
+  declaredStatus: string,
+): SecurityAppliedVerdict {
+  if (classification === "clean") return "clean";
+  if (classification === "needs_human") return "needs-human";
+  const s = String(declaredStatus || "").trim().toLowerCase();
+  if (s === "real-vuln") return "real-vuln";
+  if (s === "false-positive") return "false-positive";
+  return "needs-human";
+}

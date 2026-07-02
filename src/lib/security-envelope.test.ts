@@ -19,6 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyFusedSecurityEnvelope,
+  mapFusedSecurityToVerdict,
   REQUIRED_SECURITY_CHECKS,
   type FusedSecurityEnvelope,
 } from "./security-envelope";
@@ -158,4 +159,68 @@ test("REQUIRED_SECURITY_CHECKS: exactly 5 keys and matches the prompt's checklis
     [...REQUIRED_SECURITY_CHECKS],
     ["injection", "secret_leak", "authz_rls", "unsafe_admin_client", "crypto_encrypted"],
   );
+});
+
+// ── Phase 2 — mapFusedSecurityToVerdict (fused → applySecurityVerdictToJob verdict) ──
+//
+// The Phase-2 verification calls out this exact mapping — a clean-with-evidence classification MUST
+// map to the "clean" verdict (the ONLY path to a `completed` gate-passing security-review row),
+// and a needs_human downgrade MUST NOT map to "clean" (so a rubber-stamp strands the PR for a human,
+// exactly as a missing dedicated review would).
+
+test("mapFusedSecurityToVerdict: classification 'clean' → 'clean' (the only path to a `completedClean` row)", () => {
+  assert.equal(mapFusedSecurityToVerdict("clean", "clean"), "clean");
+  // Declared status is ignored when the classifier says clean — evidence, not the flag, wins.
+  assert.equal(mapFusedSecurityToVerdict("clean", ""), "clean");
+  assert.equal(mapFusedSecurityToVerdict("clean", "real-vuln"), "clean");
+});
+
+test("mapFusedSecurityToVerdict: classification 'needs_human' → 'needs-human' — NEVER 'clean' (rubber-stamp guard)", () => {
+  // A Phase-1 downgrade must NOT read as clean — regardless of what the session declared.
+  assert.equal(mapFusedSecurityToVerdict("needs_human", "clean"), "needs-human");
+  assert.equal(mapFusedSecurityToVerdict("needs_human", "needs-human"), "needs-human");
+  assert.equal(mapFusedSecurityToVerdict("needs_human", ""), "needs-human");
+});
+
+test("mapFusedSecurityToVerdict: classification 'not-clean' + declared 'real-vuln' → 'real-vuln' (auto-fix route)", () => {
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "real-vuln"), "real-vuln");
+  // Case-insensitive on declared.
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "REAL-VULN"), "real-vuln");
+});
+
+test("mapFusedSecurityToVerdict: classification 'not-clean' + declared 'false-positive' → 'false-positive'", () => {
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "false-positive"), "false-positive");
+});
+
+test("mapFusedSecurityToVerdict: classification 'not-clean' + unknown/empty declared → 'needs-human' (fail-safe)", () => {
+  assert.equal(mapFusedSecurityToVerdict("not-clean", ""), "needs-human");
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "gibberish"), "needs-human");
+  // A session claiming `clean` while findings exist is not trusted — the finding wins, surfaces to a human.
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "clean"), "needs-human");
+});
+
+test("mapFusedSecurityToVerdict + classifier: end-to-end mapping matches the Phase-2 verification bullets", () => {
+  // (a) clean-with-evidence envelope → applied verdict 'clean' → getSecurityStateForBranch reads 'completed'.
+  const cleanEnv: FusedSecurityEnvelope = {
+    status: "clean",
+    checks: REQUIRED_SECURITY_CHECKS.map((c) => ({
+      check: c,
+      verdict: "clean",
+      evidence: `inspected ${c}: safe`,
+    })),
+  };
+  const cleanClassification = classifyFusedSecurityEnvelope(cleanEnv);
+  assert.equal(cleanClassification.classification, "clean");
+  assert.equal(mapFusedSecurityToVerdict(cleanClassification.classification, String(cleanEnv.status)), "clean");
+
+  // (b) Phase-1-downgraded envelope (session says "clean" but no per-check evidence) → 'needs-human'.
+  const downgradedEnv = { status: "clean", review: "looks fine" };
+  const downgradedClassification = classifyFusedSecurityEnvelope(downgradedEnv);
+  assert.equal(downgradedClassification.classification, "needs_human");
+  const downgradedVerdict = mapFusedSecurityToVerdict(
+    downgradedClassification.classification,
+    String((downgradedEnv as { status?: string }).status ?? ""),
+  );
+  assert.equal(downgradedVerdict, "needs-human");
+  assert.notEqual(downgradedVerdict, "clean"); // ← the whole point of Phase 2.
 });
