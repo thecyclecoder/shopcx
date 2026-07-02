@@ -930,7 +930,14 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
       const mergedSibling = await findMergedSiblingBuild(j.workspace_id, slug, { admin });
       if (mergedSibling) continue;
       const specRow = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
-      if (specRow && (specRow.status === "shipped" || specRow.status === "folded")) continue;
+      // deleted-spec skip: a build job whose spec ROW is GONE (the CEO deleted a redundant/malformed spec —
+      // the pm-detail-page + pr-resolve dismissals on 2026-07-02) has nothing to pre-merge-test or promote,
+      // yet its `claude/build-*` branch lingers. Without this, the backstop re-enqueues a spec-test EVERY
+      // pass — each parks ("spec gone") → a fresh "Parked spec-test" card + wasted spec-test tokens (a
+      // contributor to the spec-test budget breach). getSpecFromDb null = deleted (or a transient read miss,
+      // in which case a one-tick skip is harmless — the next pass retries).
+      if (!specRow) continue;
+      if (specRow.status === "shipped" || specRow.status === "folded") continue;
 
       let previewUrl = j.preview_url;
       // ⭐ NO-CAPTURED-PREVIEW RECOVERY (fix: a resume-after-approval finalize never captures the branch tip's
