@@ -41,6 +41,80 @@ type Admin = ReturnType<typeof createAdminClient>;
 export const PRE_MERGE_FIX_LOOP_GUARD_MAX = Number(process.env.PRE_MERGE_FIX_LOOP_GUARD_MAX || 2);
 
 /**
+ * Depth cap on the `regression_of_slug` CHAIN — the fix-of-fix escalation rail. The existing breadth
+ * guard (`PRE_MERGE_FIX_LOOP_GUARD_MAX`) counts DIRECT siblings under ONE origin (`regression_of_slug =
+ * origin`), so when `fix-X`'s own pre-merge spec-test goes red the caller re-invokes `spawnPreMergeFix`
+ * with `originSlug=fix-X`, and `countPreMergeFixAttempts('fix-X')` counts `fix-fix-X` starting at 0 —
+ * DEPTH is never consulted and the fix→fix-fix→fix-fix-fix chain is unbounded (observed live 2026-07-02
+ * on `fix-vault-post-merge-diff-backstop` → `fix-fix-vault-post-merge-diff-backstop`). At depth 1 = allow
+ * ONE generation of fix (a fix of an origin); a fix-of-fix (depth ≥ 2) ESCALATES instead of authoring
+ * `fix-fix-...`. Env-overridable.
+ */
+export const PRE_MERGE_FIX_MAX_DEPTH = Number(process.env.PRE_MERGE_FIX_MAX_DEPTH || 1);
+
+/**
+ * Hard cap on the chain walk hops — even if the DB carries a cyclic `regression_of_slug` fixture,
+ * `preMergeFixChainDepth` never infinite-loops. 10 is an order of magnitude past the useful cap
+ * (`PRE_MERGE_FIX_MAX_DEPTH` = 1); a real chain never reaches this.
+ */
+const PRE_MERGE_FIX_CHAIN_HOP_CAP = 10;
+
+/**
+ * Walk the `regression_of_slug` chain from `originSlug` upward and return the number of hops until the
+ * column is null (a true origin) OR the chain self-references (`origin === slug`, the same stop
+ * `retestOriginIfFixMerged` uses at [[../libraries/agent-jobs]]:1975) OR a slug repeats (defensive
+ * against cyclic data) OR the hop cap fires. So for the chain `X ← fix-X ← fix-fix-X`:
+ *   - `preMergeFixChainDepth(admin, ws, 'X')` → 0 (no regression_of_slug)
+ *   - `preMergeFixChainDepth(admin, ws, 'fix-X')` → 1 (one hop to X)
+ *   - `preMergeFixChainDepth(admin, ws, 'fix-fix-X')` → 2 (two hops to X)
+ *
+ * Read-only + best-effort — a DB read error terminates the walk at the current depth (returns what it's
+ * counted so far) so a transient blip never blocks the first spawn AND never accidentally allows an
+ * unbounded chain by returning 0. Uses `admin` directly (one-column read) rather than `getSpec` (which
+ * would extra-round-trip the phases) — same underlying `specs` row.
+ */
+export async function preMergeFixChainDepth(
+  admin: Admin,
+  workspaceId: string,
+  originSlug: string,
+): Promise<number> {
+  if (!originSlug || !workspaceId) return 0;
+  let depth = 0;
+  let current = originSlug;
+  const seen = new Set<string>([current]);
+  for (let hop = 0; hop < PRE_MERGE_FIX_CHAIN_HOP_CAP; hop++) {
+    try {
+      const { data, error } = await admin
+        .from("specs")
+        .select("regression_of_slug")
+        .eq("workspace_id", workspaceId)
+        .eq("slug", current)
+        .maybeSingle();
+      if (error) {
+        console.warn(`[pre-merge-fix] preMergeFixChainDepth read failed for ${current}: ${error.message}`);
+        return depth;
+      }
+      const parent = (data?.regression_of_slug ?? null) as string | null;
+      // A true origin — the walk terminates naturally.
+      if (!parent) return depth;
+      // Self-referential stop: mirrors `retestOriginIfFixMerged` at agent-jobs.ts:1975 — a row whose
+      // `regression_of_slug` points at itself is not a fix, it's a data artifact; treat it as an origin.
+      if (parent === current) return depth;
+      // Defensive: a cyclic chain (A → B → A) that never self-references at a single hop; the hop cap
+      // would also catch this, but re-seeing a slug is a clearer signal to stop.
+      if (seen.has(parent)) return depth + 1;
+      seen.add(parent);
+      depth += 1;
+      current = parent;
+    } catch (e) {
+      console.warn(`[pre-merge-fix] preMergeFixChainDepth threw at ${current}: ${e instanceof Error ? e.message : e}`);
+      return depth;
+    }
+  }
+  return depth;
+}
+
+/**
  * Deterministic fix-spec slug = `fix-{origin}-{6hex of failing-check-key set}`. Same origin + same set
  * of failing checks → same slug → UPSERT (author) + dedup (enqueue) converge on a re-spawn (no churn).
  * A NEW failing check on the same origin → different hash → a new fix-spec (a genuinely new break gets
@@ -99,7 +173,9 @@ export interface SpawnPreMergeFixInput {
 
 export type SpawnPreMergeFixResult =
   | { spawned: true; escalated: false; fixSlug: string; alreadyAuthored: boolean; buildQueued: boolean; attempts: number }
-  | { spawned: false; escalated: true; attempts: number; reason: string }
+  // Escalated by EITHER the depth guard (`depth != null`) or the breadth guard (`depth` absent). The
+  // depth-guard case populates `attempts: 0` because it fires BEFORE the attempts read.
+  | { spawned: false; escalated: true; attempts: number; reason: string; depth?: number }
   | { spawned: false; escalated: false; reason: string };
 
 /**
@@ -122,6 +198,36 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
     const cleanFailing = (failing || []).filter((f) => f && f.check_key && f.text);
     if (cleanFailing.length === 0) {
       return { spawned: false, escalated: false, reason: "no evidence-backed failing checks — nothing to fix" };
+    }
+
+    // DEPTH guard FIRST — bounds the fix-of-fix chain (`X ← fix-X ← fix-fix-X`). The BREADTH guard
+    // below counts direct siblings under ONE origin (`regression_of_slug = origin`), so when `fix-X`'s
+    // own pre-merge spec-test goes red the caller re-invokes with `originSlug=fix-X` and the breadth
+    // count starts back at 0 — DEPTH was never consulted and the chain was unbounded (observed live
+    // 2026-07-02). At depth ≥ `PRE_MERGE_FIX_MAX_DEPTH` we ESCALATE (a `director_activity` `escalated`
+    // row with `metadata.signature='pre-merge-fix-depth-guard'`, differentiated from the breadth
+    // guard's `'pre-merge-fix-loop-guard'`) instead of authoring another fix. The origin PR stays held
+    // in_testing by the independent tests-gate above, so escalating-without-spawning never promotes a
+    // red build — it just stops the recursion + puts the call on the CEO's ledger.
+    const depth = await preMergeFixChainDepth(admin, workspaceId, originSlug);
+    if (depth >= PRE_MERGE_FIX_MAX_DEPTH) {
+      const reason = `Depth-guard: pre-merge fix-of-fix chain reached depth ${depth} (max ${PRE_MERGE_FIX_MAX_DEPTH}) at ${originSlug} — this is a DEEPER issue than another fix-of-fix can solve. Escalated to the owner; the build's PR stays held in_testing.`;
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "escalated",
+        specSlug: originSlug,
+        reason,
+        metadata: {
+          signature: "pre-merge-fix-depth-guard",
+          branch,
+          depth,
+          max_depth: PRE_MERGE_FIX_MAX_DEPTH,
+          failing_check_keys: cleanFailing.map((f) => f.check_key),
+        },
+      });
+      console.log(`[pre-merge-fix] DEPTH-GUARD escalation for ${originSlug} (branch ${branch}): chain depth ${depth} >= ${PRE_MERGE_FIX_MAX_DEPTH}`);
+      return { spawned: false, escalated: true, attempts: 0, depth, reason };
     }
 
     // Loop-guard FIRST — never even author the (N+1)th attempt.
