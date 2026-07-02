@@ -98,6 +98,12 @@ export interface InboxApprovalAction {
   /** set for a plan-proposed spec branch (type:'spec') — the DRI function + parent milestone. */
   specOwner?: string | null;
   specParent?: string | null;
+  /**
+   * out-of-leash-approval-show-exact-cmd — true on a `ceo-authorized-out-of-leash` pending action.
+   * The CEO approval card renders `$ ${cmd}` in addition to `preview` (not fallback) so the literal
+   * command runCeoAuthorizedOutOfLeashJob will execute is always visible, never just Ada's narrative.
+   */
+  outOfLeash?: boolean | null;
 }
 
 export interface InboxItem {

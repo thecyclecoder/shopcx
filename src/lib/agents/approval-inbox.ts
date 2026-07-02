@@ -51,6 +51,9 @@ interface PendingActionLike {
   // box-agent-model-tiers P3: on an apply_model_tier action, the agent kind whose tier changes — the
   // routing key (a worker's change routes to its director, a director's to the CEO).
   target_kind?: string;
+  // out-of-leash-approval-show-exact-cmd: true on a ceo-authorized-out-of-leash pending action so
+  // the inbox card renders the literal `$ ${cmd}` alongside preview (not as a fallback).
+  out_of_leash?: boolean;
 }
 
 /** The agent_jobs columns this emitter needs (a row that just entered, or sits in, needs_approval). */
@@ -215,6 +218,7 @@ export function inlineApproveActions(job: ApprovalJobRow): InboxApprovalAction[]
       cmd: a.cmd ?? null,
       specOwner: a.spec?.owner ?? null,
       specParent: a.spec?.parent ?? null,
+      outOfLeash: a.out_of_leash === true,
     }));
   return actions.length ? actions : null;
 }

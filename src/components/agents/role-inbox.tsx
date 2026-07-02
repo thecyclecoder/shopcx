@@ -831,7 +831,20 @@ function ApprovalRow({ item, onActed }: { item: InboxItem; onActed: () => void }
             )}
             {(a.preview || a.cmd) && (
               <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-zinc-50 p-1.5 font-sans text-[11px] leading-relaxed text-zinc-600 dark:bg-zinc-950/40 dark:text-zinc-300">
-                {a.preview || (a.cmd ? `$ ${a.cmd}` : "")}
+                {(() => {
+                  // out-of-leash-approval-show-exact-cmd — for a `ceo-authorized-out-of-leash` action, always
+                  // render the literal command (`$ ${a.cmd}`) IN ADDITION TO preview, so the CEO sees the byte-
+                  // identical cmd runCeoAuthorizedOutOfLeashJob will execute, not just Ada's narrative. The
+                  // preview builder already includes the cmd inline, but a defensive re-render here guarantees
+                  // the command surfaces even if the preview shape ever drifts.
+                  const parts: string[] = [];
+                  if (a.preview) parts.push(a.preview);
+                  const cmdLine = a.cmd ? `$ ${a.cmd}` : "";
+                  if (cmdLine && (a.outOfLeash || !a.preview) && !parts.some((p) => p.includes(cmdLine))) {
+                    parts.push(cmdLine);
+                  }
+                  return parts.join("\n\n");
+                })()}
               </pre>
             )}
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
