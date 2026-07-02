@@ -20,7 +20,7 @@ _None._
 
 ## Permissions
 
-All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.
+All workspace members can view. The **Exclude from stats / Include** control on each CSAT row is OWNER-only — non-owners never see the button, and a direct `POST action:'exclude'` returns 403. See [[../tables/ticket_csat]] `excluded_at` / `excluded_by` / `exclusion_reason`.
 
 ## Files touched
 

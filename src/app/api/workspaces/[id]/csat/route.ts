@@ -39,7 +39,7 @@ export async function GET(
 
   const [{ data: rated }, { count: sentCount }, { count: reopenCount }] = await Promise.all([
     admin.from("ticket_csat")
-      .select("id, rating, comment, submitted_at, points_awarded, customer_id, ticket_id, tickets(subject), customers(first_name, last_name, email)")
+      .select("id, rating, comment, submitted_at, points_awarded, customer_id, ticket_id, excluded_at, exclusion_reason, tickets(subject), customers(first_name, last_name, email)")
       .eq("workspace_id", workspaceId)
       .gte("submitted_at", since)
       .order("submitted_at", { ascending: false })
@@ -58,11 +58,15 @@ export async function GET(
   ]);
 
   const responses = rated || [];
-  const count = responses.length;
-  const sum = responses.reduce((s, r) => s + (r.rating as number), 0);
+  // Soft-excluded rows are dropped from every aggregate (count / avg /
+  // by_rating / response-rate numerator) but stay in the list payload so
+  // the owner can see + reverse them from the dashboard.
+  const counted = responses.filter(r => r.excluded_at == null);
+  const count = counted.length;
+  const sum = counted.reduce((s, r) => s + (r.rating as number), 0);
   const avg = count ? sum / count : 0;
   const byRating: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 };
-  for (const r of responses) byRating[String(r.rating)] = (byRating[String(r.rating)] || 0) + 1;
+  for (const r of counted) byRating[String(r.rating)] = (byRating[String(r.rating)] || 0) + 1;
 
   return NextResponse.json({
     stats: {
@@ -81,6 +85,8 @@ export async function GET(
       submitted_at: r.submitted_at,
       points_awarded: r.points_awarded,
       ticket_id: r.ticket_id,
+      excluded_at: r.excluded_at,
+      exclusion_reason: r.exclusion_reason,
       ticket_subject: (r.tickets as { subject?: string } | null)?.subject || null,
       customer_name: (() => {
         const c = r.customers as { first_name?: string; last_name?: string; email?: string } | null;

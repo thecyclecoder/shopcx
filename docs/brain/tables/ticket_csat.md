@@ -20,6 +20,9 @@ CSAT responses — one row per ticket that the customer completed the survey on.
 | `points_awarded` | `int4` | — | default: `0` — 500 once the survey is submitted |
 | `points_awarded_at` | `timestamptz` | ✓ |  |
 | `submitted_at` | `timestamptz` | — | default: `now()` |
+| `excluded_at` | `timestamptz` | ✓ | NULL = counted in stats; set = owner soft-excluded this response |
+| `excluded_by` | `uuid` | ✓ | → `auth.users`.id (ON DELETE SET NULL) — owner who excluded |
+| `exclusion_reason` | `text` | ✓ | free-text reason captured at exclude time |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
 
@@ -74,6 +77,7 @@ const { data } = await admin.from("ticket_csat")
 - **Send marker lives on tickets.** `tickets.csat_sent_at` is set by the cron when the email goes out — used for response-rate calcs.
 - **Cron is the trigger, not Inngest events.** `ticket-csat-cron` ([[../inngest/ticket-csat]]) runs every 15 min, finds closed tickets where `closed_at` is 48h-7d old AND `csat_sent_at IS NULL`, sends, stamps. Sleep-step pattern was replaced because long sleeps are fragile.
 - **Eligibility window: 48h-7d.** Tickets closed >7d ago with `csat_sent_at IS NULL` get auto-stamped as skipped (prevents the migration-day backlog from triggering blast emails on tickets from months ago, which read as spam). A ticket that closes and reopens before 48h doesn't get a CSAT this cycle; if it closes again later, the same 48h-7d window applies.
+- **Owner soft-exclude drops rows from the CS-quality stats.** `excluded_at IS NOT NULL` means the workspace OWNER flagged this CSAT as reflecting a product complaint, not service. The `/api/workspaces/:id/csat` GET filters excluded rows out of the count / avg / by_rating histogram / response-rate numerator, but the dashboard LIST still includes them (dimmed) so the owner can reverse. Include/exclude actions are OWNER-only (admin/agent get 403). Reversible + audited via `excluded_by` + `exclusion_reason` — never a hard delete.
 - **CSAT is only sent for tickets we actually answered.** The cron's eligibility guard skips (and stamps `csat_sent_at` on) any ticket with no customer-facing outbound message (`ticket_messages` has no `direction='outbound' AND visibility != 'internal'` row), `do_not_reply = true`, or a `SKIP_TAGS` tag (`outreach`/`cls:outreach`/`spam:bot`). OOF/auto-reply/spam/do_not_reply tickets the AI correctly ignored never get a "how did we do?" email — they were polluting the CSAT average with the auto-responder's 1-star. The `SKIP_TAGS` set lives in `src/lib/ticket-tags.ts`, shared with the ticket-analyzer.
 
 ## Related
