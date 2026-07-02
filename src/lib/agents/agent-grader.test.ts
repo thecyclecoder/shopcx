@@ -1,0 +1,215 @@
+/**
+ * Unit tests for ada-grading-sampled-adaptive-cadence Phase 1 — the sampled, cadenced, adaptive-by-
+ * rollup grader in `src/lib/agents/agent-grader.ts`. Node's built-in test runner, no Supabase / LLM
+ * stubs — the pure sampler + cadence gate + infra-cancel classifier are all directly exercised.
+ *
+ *   npm run test:agent-grader
+ *   (= tsx --test src/lib/agents/agent-grader.test.ts)
+ *
+ * Covers the spec's three Verification bullets:
+ *  1. Adaptive-by-rollup sampling — a high-average worker contributes strictly FEWER jobs to the
+ *     bounded sample than a low-average one at equal pool sizes.
+ *  2. Infra-cancel exclusion — a `runaway/zombie/cancelled/reaper` failure is NOT in the failure-
+ *     priority set; a genuine `tsc failed`/`build failed` is.
+ *  3. Cadence gate — within GRADE_CADENCE_MS of the last graded row → not-ready (a no-op).
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  GRADE_BATCH_CAP,
+  GRADE_CADENCE_MS,
+  isInfraCancelledError,
+  selectGradingBatch,
+  withinGradeCadence,
+  type UngradedJob,
+} from "./agent-grader";
+
+// ── infra-cancel classifier ─────────────────────────────────────────────────────────────────────
+
+test("isInfraCancelledError: spec-stated keywords (runaway/zombie/cancelled) match", () => {
+  assert.equal(isInfraCancelledError("runaway grading pass — killed by budget"), true);
+  assert.equal(isInfraCancelledError("box zombie session — reaped"), true);
+  assert.equal(isInfraCancelledError("build auto-cancelled: spec archived"), true);
+});
+
+test("isInfraCancelledError: box reaper stamps match (the actual prod strings)", () => {
+  assert.equal(
+    isInfraCancelledError("stale-session reaper: session died mid-run 2× (>= 3); escalating instead of re-queuing (heartbeat stale ~14m)"),
+    true,
+  );
+  assert.equal(isInfraCancelledError("stale-session reaper: escalated"), true);
+});
+
+test("isInfraCancelledError: genuine worker failures are NOT infra-cancels", () => {
+  assert.equal(isInfraCancelledError("tsc failed: 3 type errors in src/lib/foo.ts"), false);
+  assert.equal(isInfraCancelledError("build failed: next build exited 1"), false);
+  assert.equal(isInfraCancelledError("PR conflict — merge blocked"), false);
+  assert.equal(isInfraCancelledError("Vale: needs_fix — missing owner"), false);
+});
+
+test("isInfraCancelledError: empty/null error is never an infra-cancel", () => {
+  assert.equal(isInfraCancelledError(null), false);
+  assert.equal(isInfraCancelledError(undefined), false);
+  assert.equal(isInfraCancelledError(""), false);
+});
+
+// ── adaptive-by-rollup sampling (spec Verification #1) ──────────────────────────────────────────
+
+/** Build N synthetic successful jobs for a kind, with monotonically-decreasing `created_at`
+ *  (index 0 = newest). Status is `completed` (a success) so the sample-rate path applies. */
+function makeSuccessPool(kind: string, n: number, startIdx = 0): UngradedJob[] {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `${kind}-ok-${startIdx + i}`,
+    kind,
+    status: "completed",
+    error: null,
+    created_at: new Date(2026, 0, 1, 0, 0, 0, startIdx + i).toISOString(),
+  }));
+}
+
+test("selectGradingBatch: a high-avg worker contributes STRICTLY FEWER jobs than a low-avg one at equal pool sizes", () => {
+  // Two workers, equal pool sizes, wildly different rolling averages. gradeSampleRateForAvg:
+  //   avg=9.5 (excellent) → sample rate 0.1
+  //   avg=6.0 (learning)  → sample rate 1.0
+  // Expected: over many iterations, the learning worker contributes ~10× the sample count.
+  const N = 30;
+  const cap = 20; // > 1×N but < 2×N, so the sampler MUST throttle at least one kind
+  const rollupByKind = new Map([
+    ["excellent", { average: 9.5, count: 10 }],
+    ["learning", { average: 6.0, count: 10 }],
+  ]);
+  let excellentTotal = 0;
+  let learningTotal = 0;
+  const iterations = 200;
+  for (let i = 0; i < iterations; i++) {
+    const pool = [...makeSuccessPool("excellent", N), ...makeSuccessPool("learning", N)];
+    const chosen = selectGradingBatch(pool, cap, rollupByKind);
+    for (const j of chosen) {
+      if (j.kind === "excellent") excellentTotal++;
+      else if (j.kind === "learning") learningTotal++;
+    }
+  }
+  // The high-avg worker's share is a small fraction of the low-avg worker's share.
+  assert.ok(
+    excellentTotal < learningTotal,
+    `excellent (avg=9.5) contributed ${excellentTotal}; learning (avg=6.0) contributed ${learningTotal} — expected excellent < learning`,
+  );
+  // Adaptive floor: excellent is still sampled occasionally — never 0 across 200 iterations.
+  assert.ok(excellentTotal > 0, "excellent worker was NEVER sampled — the floor (0.1) must keep regression catchable");
+});
+
+test("selectGradingBatch: three tiers (excellent < proven < learning) — monotone inverse to avg", () => {
+  const N = 30;
+  const cap = 25;
+  const rollupByKind = new Map([
+    ["excellent", { average: 9.5, count: 10 }],
+    ["proven", { average: 8.3, count: 10 }],
+    ["learning", { average: 6.0, count: 10 }],
+  ]);
+  const totals: Record<string, number> = { excellent: 0, proven: 0, learning: 0 };
+  const iterations = 200;
+  for (let i = 0; i < iterations; i++) {
+    const pool = [
+      ...makeSuccessPool("excellent", N),
+      ...makeSuccessPool("proven", N, N),
+      ...makeSuccessPool("learning", N, 2 * N),
+    ];
+    for (const j of selectGradingBatch(pool, cap, rollupByKind)) totals[j.kind]++;
+  }
+  assert.ok(
+    totals.excellent < totals.proven && totals.proven < totals.learning,
+    `expected excellent < proven < learning; got ${JSON.stringify(totals)}`,
+  );
+});
+
+test("selectGradingBatch: pool ≤ cap → returns the whole pool (no throttling applied)", () => {
+  const pool = makeSuccessPool("excellent", GRADE_BATCH_CAP - 2);
+  const rollupByKind = new Map([["excellent", { average: 9.5, count: 10 }]]);
+  const chosen = selectGradingBatch(pool, GRADE_BATCH_CAP, rollupByKind);
+  assert.equal(chosen.length, pool.length, "when the pool fits under the cap, no throttling should drop anything");
+});
+
+// ── infra-cancel exclusion from the failure-priority set (spec Verification #2) ─────────────────
+
+test("selectGradingBatch: a genuine `failed` job is in the failure-priority set (always graded regardless of sample rate)", () => {
+  const genuineFail: UngradedJob = {
+    id: "excellent-fail-1",
+    kind: "excellent",
+    status: "failed",
+    error: "tsc failed: 5 type errors",
+    created_at: new Date(2026, 0, 2).toISOString(),
+  };
+  // Pack the pool with excellent successes (throttled to 0.1) so the sampler MUST throttle. A
+  // genuine failure must still land in the chosen set every iteration.
+  const rollupByKind = new Map([["excellent", { average: 9.5, count: 10 }]]);
+  for (let i = 0; i < 50; i++) {
+    const pool = [genuineFail, ...makeSuccessPool("excellent", 40)];
+    const chosen = selectGradingBatch(pool, GRADE_BATCH_CAP, rollupByKind);
+    assert.ok(chosen.find((j) => j.id === "excellent-fail-1"), "a genuine tsc failure must be in every batch (failure-priority set)");
+  }
+});
+
+test("selectGradingBatch: an INFRA-CANCELLED `failed` job is NOT in the failure-priority set (it flows through the success sample-rate path)", () => {
+  const reaperFail: UngradedJob = {
+    id: "excellent-reap-1",
+    kind: "excellent",
+    status: "failed",
+    error: "stale-session reaper: session died mid-run 3× (>= 3); escalating",
+    created_at: new Date(2026, 0, 2).toISOString(),
+  };
+  const rollupByKind = new Map([["excellent", { average: 9.5, count: 10 }]]);
+  let selectedCount = 0;
+  const iterations = 200;
+  for (let i = 0; i < iterations; i++) {
+    const pool = [reaperFail, ...makeSuccessPool("excellent", 40)];
+    const chosen = selectGradingBatch(pool, GRADE_BATCH_CAP, rollupByKind);
+    if (chosen.find((j) => j.id === "excellent-reap-1")) selectedCount++;
+  }
+  // Under the failure-priority rule this would be 200/200 (always graded). Under the fix, it's
+  // throttled by the 0.1 sample rate — so the observed selection rate is FAR below 100%. A generous
+  // ceiling (75%) still catches the regression while tolerating stochastic drift.
+  assert.ok(
+    selectedCount < iterations * 0.75,
+    `reaper-killed job was graded ${selectedCount}/${iterations} times — expected sample-rate-throttled, not always-graded`,
+  );
+});
+
+// ── cadence gate (spec Verification #3) ─────────────────────────────────────────────────────────
+
+test("withinGradeCadence: within window → true (a second pass is a no-op)", () => {
+  const now = new Date("2026-07-02T12:00:00Z").getTime();
+  const halfWindowAgo = new Date(now - GRADE_CADENCE_MS / 2).toISOString();
+  assert.equal(withinGradeCadence(halfWindowAgo, now), true);
+});
+
+test("withinGradeCadence: past window → false (the next pass is unblocked)", () => {
+  const now = new Date("2026-07-02T12:00:00Z").getTime();
+  const pastWindow = new Date(now - GRADE_CADENCE_MS - 60_000).toISOString();
+  assert.equal(withinGradeCadence(pastWindow, now), false);
+});
+
+test("withinGradeCadence: never-graded (null) → false (the FIRST pass is always allowed)", () => {
+  assert.equal(withinGradeCadence(null), false);
+});
+
+test("withinGradeCadence: right at the edge → false (window is strict <, not ≤ — a pass at exactly cadence is allowed)", () => {
+  const now = new Date("2026-07-02T12:00:00Z").getTime();
+  const exactly = new Date(now - GRADE_CADENCE_MS).toISOString();
+  assert.equal(withinGradeCadence(exactly, now), false);
+});
+
+test("withinGradeCadence: cadence override — a tighter cadence rejects sooner", () => {
+  const now = new Date("2026-07-02T12:00:00Z").getTime();
+  const oneMinAgo = new Date(now - 60_000).toISOString();
+  assert.equal(withinGradeCadence(oneMinAgo, now, 30_000), false); // past 30s override
+  assert.equal(withinGradeCadence(oneMinAgo, now, 120_000), true); // still within 2min override
+});
+
+test("GRADE_CADENCE_MS default is ~2h", () => {
+  // Env-overridable, but the default matches the spec's ~2h floor.
+  assert.equal(GRADE_CADENCE_MS, 2 * 60 * 60 * 1000);
+});
+
+test("GRADE_BATCH_CAP default is 12 (env-overridable)", () => {
+  assert.equal(GRADE_BATCH_CAP, 12);
+});

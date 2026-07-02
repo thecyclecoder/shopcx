@@ -137,10 +137,47 @@ export const BATCH_FALLBACK_MS = 3 * 60 * 60 * 1000;
  * worker (fold / pr-resolve conclude many routine jobs) can't jam a grading run. When more than this are
  * ungraded, the batch PRIORITIZES failures (always graded — a worker mistake to learn from), then fills
  * the rest with a round-robin-by-worker random sample of the successes (so every worker gets spot-checked,
- * not just the noisiest). The un-selected jobs stay ungraded and ride a later beat. */
-export const GRADE_BATCH_CAP = 12;
-/** agent_jobs statuses that mean the worker action FAILED — always graded (the high-signal mistakes). */
+ * not just the noisiest). The un-selected jobs stay ungraded and ride a later beat.
+ *
+ * ada-grading-sampled-adaptive-cadence (2026-07-02): env-overridable via AGENT_GRADE_BATCH_CAP so an
+ * operator can lower the per-pass ceiling (e.g. during a Max-budget squeeze) without a redeploy. */
+export const GRADE_BATCH_CAP = ((): number => {
+  const raw = Number(process.env.AGENT_GRADE_BATCH_CAP);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 12;
+})();
+/**
+ * ada-grading-sampled-adaptive-cadence Phase 1: PER-WORKSPACE grading cadence — a grading pass runs at
+ * most once per GRADE_CADENCE_MS (~2h). Enforced in `agentGradingBatchReady` via a MAX(created_at) read
+ * on `agent_action_grades` for the workspace: if the last-graded-at is within the cadence window, the
+ * pass is a no-op regardless of how many ungraded jobs have accumulated (they ride the next window).
+ * This decouples grading spend from the ~5-min cron beat — a workspace that just graded 12 jobs is
+ * silent for ~2h, so a runaway grading pass can't burn a Max session bank in minutes (the observed
+ * failure mode: 32 grades in minutes). Env-overridable via AGENT_GRADE_CADENCE_MS so an operator can
+ * tighten/loosen without a redeploy. */
+export const GRADE_CADENCE_MS = ((): number => {
+  const raw = Number(process.env.AGENT_GRADE_CADENCE_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2 * 60 * 60 * 1000;
+})();
+/** agent_jobs statuses that mean the worker action FAILED — always graded (the high-signal mistakes),
+ *  UNLESS the error text says the failure was an infra cancellation (see `INFRA_CANCEL_ERR_RE`). */
 const FAILED_JOB_STATUSES = new Set(["failed", "needs_attention"]);
+/**
+ * ada-grading-sampled-adaptive-cadence Phase 1: errors that mark the job as an INFRA CANCELLATION
+ * (the box reaper killed a stuck/zombied session; a Max session budget cap tripped; a spec was
+ * cancelled between claim and completion) — NOT a worker mistake to coach on. These are excluded
+ * from the failure-priority set (`isFail` returns false) so they flow through the SUCCESS sample-
+ * rate path — a runaway/reap doesn't drag a worker's rollup down (Vault fell to 2.0/10 on 2026-07-02
+ * from a string of reaper-killed security-review jobs the grader treated as real failures). Genuine
+ * `tsc failed` / `build failed` / conflict errors don't match this pattern and stay in the priority
+ * set. Spec-stated keywords (runaway/zombie/cancelled) + the actual box-reaper stamps
+ * (stale-session / session died / reaper) so this catches what prod stamps, not just the spec text. */
+export const INFRA_CANCEL_ERR_RE = /runaway|zombie|cancelled|stale-session|session died|reaper/i;
+/** Is this concluded-job error the mark of an infra cancellation (reaper kill / session budget)?
+ *  A `null`/empty error is never an infra cancellation — a genuine `failed` with no error text is
+ *  still a worker mistake to grade. Pure fn — exercised directly by the local sampler harness. */
+export function isInfraCancelledError(err: string | null | undefined): boolean {
+  return typeof err === "string" && err.length > 0 && INFRA_CANCEL_ERR_RE.test(err);
+}
 /** Coaching trigger: rollup below this, OR a drop larger than DROP_THRESHOLD vs the prior window. */
 export const COACH_LOW_ROLLUP = 7;
 export const DROP_THRESHOLD = 1.5;
@@ -459,11 +496,15 @@ export async function gradeAgentAction(opts: { agentJobId: string; admin?: Admin
 
 // ── the batched grading sweep (the box cadence calls this — Phase 2) ─────────────────────────────────
 
-interface UngradedJob {
+export interface UngradedJob {
   id: string;
   created_at: string;
   kind: string;
   status: string;
+  /** The concluded job's `error` string — used by `isInfraCancelledError` to KEEP infra-cancelled
+   *  failures out of the failure-priority set (they aren't worker mistakes). Nullable for legacy
+   *  callers/harnesses; a missing value is treated as "no infra cancellation". */
+  error?: string | null;
 }
 
 /**
@@ -506,7 +547,7 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
   // keeps the window on the recent tail instead of the long-graded head.
   const { data: jobs } = await admin
     .from("agent_jobs")
-    .select("id, created_at, kind, status")
+    .select("id, created_at, kind, status, error")
     .eq("workspace_id", workspaceId)
     .in("kind", ownedKinds)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
@@ -529,7 +570,7 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
  * average into a heavier tier next beat (self-re-arm), so we never lock a worker into a binary "proven"
  * state that only re-arms on failures.
  */
-function selectGradingBatch(
+export function selectGradingBatch(
   pool: UngradedJob[],
   cap: number,
   rollupByKind: Map<string, { average: number | null; count: number }> = new Map(),
@@ -537,7 +578,11 @@ function selectGradingBatch(
   if (pool.length <= cap) return pool;
   const chosen: UngradedJob[] = [];
   const taken = new Set<string>();
-  const isFail = (j: UngradedJob) => FAILED_JOB_STATUSES.has(j.status);
+  // ada-grading-sampled-adaptive-cadence Phase 1: an infra-cancelled failure is NOT a worker mistake
+  // (the box reaper killed a stuck session; a Max-budget cap tripped) — so it does NOT get failure-
+  // priority grading. It flows through the SUCCESS sample-rate path instead. Genuine tsc/build
+  // failures don't match the pattern and stay in the priority set. See `INFRA_CANCEL_ERR_RE`.
+  const isFail = (j: UngradedJob) => FAILED_JOB_STATUSES.has(j.status) && !isInfraCancelledError(j.error ?? null);
   const sampleRate = (kind: string): number => {
     const r = rollupByKind.get(kind);
     return gradeSampleRateForAvg(r?.average ?? null, r?.count ?? 0);
@@ -595,23 +640,80 @@ function selectGradingBatch(
 }
 
 /**
- * Is the worker-grading batch ready to run? True when ≥ BATCH_MIN ungraded concluded jobs have
- * accumulated, OR the oldest ungraded job is older than BATCH_FALLBACK_MS (the ~3h fallback so a small
- * trickle still gets graded). False when nothing is ungraded. Keeps the LLM spend to one session per
- * batch (the spec's locked cadence). Best-effort.
+ * The pure per-workspace cadence gate: given the last time a grade landed for this workspace and now,
+ * is a new grading pass allowed yet? A no-op if `< GRADE_CADENCE_MS` has elapsed since the last graded
+ * row. `null` last-graded (never graded) is always past cadence — the first pass is unrestricted.
+ * Exposed for the local sampler harness (spec Verification) so the ~2h floor is testable without a DB.
+ * ada-grading-sampled-adaptive-cadence Phase 1.
+ */
+export function withinGradeCadence(lastGradedAtIso: string | null, now: number = Date.now(), cadenceMs: number = GRADE_CADENCE_MS): boolean {
+  if (!lastGradedAtIso) return false;
+  const last = new Date(lastGradedAtIso).getTime();
+  if (!Number.isFinite(last)) return false;
+  return now - last < cadenceMs;
+}
+
+/**
+ * When did this workspace last land an `agent_action_grades` row (for a kind THIS director owns)? The
+ * cadence gate's heartbeat — bounded to the director's charge so a Growth/CS director's grade doesn't
+ * silence Ada's platform grading. Best-effort; a missing row / query error returns null (treated as
+ * past cadence — never blocks the FIRST pass). ada-grading-sampled-adaptive-cadence Phase 1.
+ */
+async function lastGradedAtForWorkspace(admin: Admin, workspaceId: string, fn: string): Promise<string | null> {
+  const ownedKinds = gradeableKindsForFunction(fn);
+  if (!ownedKinds.length) return null;
+  const { data } = await admin
+    .from("agent_action_grades")
+    .select("created_at")
+    .eq("workspace_id", workspaceId)
+    .in("agent_kind", ownedKinds)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const row = (data as { created_at: string } | null) ?? null;
+  return row?.created_at ?? null;
+}
+
+/**
+ * Is the worker-grading batch ready to run? Two gates, in order:
+ *  1. CADENCE (ada-grading-sampled-adaptive-cadence Phase 1): a pass runs at most once per
+ *     GRADE_CADENCE_MS (~2h) per workspace — a second call within the window is a hard no-op
+ *     (`reason: 'within_cadence'`), even if failures are queued. Prevents a runaway grader from
+ *     burning a Max session bank (32 grades in minutes).
+ *  2. BACKLOG: ≥ BATCH_MIN ungraded concluded jobs OR the oldest is older than BATCH_FALLBACK_MS
+ *     (the ~3h fallback so a small trickle still gets graded). Failures (`failed`/`needs_attention`
+ *     that aren't infra cancellations) also make the batch ready promptly — so real worker mistakes
+ *     don't have to wait for the batch fill. Infra-cancelled "failures" don't count here for the
+ *     same reason they don't count in `selectGradingBatch`: they aren't worker mistakes.
+ * False when nothing is ungraded. Best-effort — a query error yields `ready:false` (never a false-
+ * positive burn).
  */
 export async function agentGradingBatchReady(
   admin: Admin,
   workspaceId: string,
   now: number = Date.now(),
   fn: string = PLATFORM,
-): Promise<{ ready: boolean; ungraded: number }> {
+): Promise<{ ready: boolean; ungraded: number; reason?: string }> {
   try {
+    // Cadence gate FIRST — a workspace inside the window is a hard no-op regardless of backlog. A
+    // large backlog waits until the window opens; the next pass drains up to GRADE_BATCH_CAP.
+    const lastGradedAt = await lastGradedAtForWorkspace(admin, workspaceId, fn);
+    if (withinGradeCadence(lastGradedAt, now)) {
+      // Still fetch ungraded so the heartbeat can distinguish "cadence-suppressed with real backlog"
+      // from "cadence-suppressed and idle". Bounded and cheap; the pool query is already paginated.
+      const ungraded = await ungradedConcludedJobs(admin, workspaceId, 1000, fn);
+      return { ready: false, ungraded: ungraded.length, reason: "within_cadence" };
+    }
     const ungraded = await ungradedConcludedJobs(admin, workspaceId, 1000, fn);
     if (!ungraded.length) return { ready: false, ungraded: 0 };
     const oldestAgeMs = now - new Date(ungraded[0].created_at).getTime();
-    // A failure is high-signal (a worker mistake to coach on) → grade it promptly, don't wait for the batch.
-    const hasFailure = ungraded.some((j) => FAILED_JOB_STATUSES.has(j.status));
+    // A GENUINE failure is high-signal (a worker mistake to coach on) → grade it promptly, don't wait
+    // for the batch. An INFRA-cancelled failure (`isInfraCancelledError`) is NOT — mirrors the
+    // priority-set filter in `selectGradingBatch` so the batch-ready gate and the batch selection
+    // agree on what "failure" means. Otherwise a workspace churning reaper-killed jobs would grade
+    // continuously (every beat: hasFailure=true, ready=true, drain 12, repeat) — the exact runaway
+    // the cadence gate is preventing.
+    const hasFailure = ungraded.some((j) => FAILED_JOB_STATUSES.has(j.status) && !isInfraCancelledError(j.error ?? null));
     const ready = hasFailure || ungraded.length >= BATCH_MIN || oldestAgeMs >= BATCH_FALLBACK_MS;
     return { ready, ungraded: ungraded.length };
   } catch (e) {
