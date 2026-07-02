@@ -1,0 +1,52 @@
+-- Raise work_mem on the `authenticated` role — DB Health Agent surface-don't-apply fix for
+-- the `dbhealth:instance:temp_spill_pressure` signature. See docs/brain/recipes/raise-work-mem.md
+-- for the full sizing math + rollback + verification story.
+--
+-- ⚠️ OWNER-APPROVAL-ONLY: this migration is NOT auto-applied by the build worker (mirrors the
+-- surface-don't-apply stance in docs/brain/libraries/db-health.md § North star). It lands in the
+-- PR for owner review; the owner runs it after review with:
+--   npx tsx scripts/apply-raise-work-mem-migration.ts
+--
+-- ── Evidence quoted verbatim from the DB Health Agent instance-saturation pass ────────────────
+--   Signature: dbhealth:instance:temp_spill_pressure
+--   Impact:    908 GB spilled to temp files (95,077 files) — hash/sort work_mem is undersized.
+--   Threshold tripped: pg_stat_database.temp_bytes ≥ INSTANCE_TEMP_BYTES_WINDOW_FLAG (100 GB).
+-- The Supabase default `work_mem` is 4 MB; any hash/sort > 4 MB spills to disk, dragging every
+-- heavy query. The 2026-07-02 outage sat there for ~30 min while the per-query slow-query pass
+-- reported "healthy" — the instance pass surfaces the class this fix targets.
+--
+-- ── Sizing math (per docs/brain/libraries/db-health.md § buildFixSpecMarkdown temp_spill_pressure)
+--   max_connections × work_mem  ≤  RAM − shared_buffers − OS cache headroom
+-- The scope of this change is DELIBERATELY the `authenticated` role — the Supabase REST/SSR
+-- identity that serves the dashboard aggregates doing the spilling — NOT cluster-wide. That
+-- bounds the RAM math to concurrent authenticated sessions (steady-state ~20), not to every
+-- background worker / replication / cron backend that opens a connection.
+--   Worst-case: 20 authenticated sessions × 16 MB = 320 MB peak new usage.
+--   On Supabase Small (4 GB RAM, ~1 GB shared_buffers, ~1 GB OS headroom):
+--     available for work_mem ≈ 4 GB − 1 GB − 1 GB = 2 GB
+--     320 MB ≪ 2 GB  →  safe.
+--   Every larger tier has strictly more headroom.
+-- `hash_mem_multiplier = 2.0` (PG13+) additionally lets hash-node operations use 32 MB before
+-- spilling — the 2026-07-02 incident was dominated by hash spills, so this doubles the
+-- headroom on the exact operation class that tripped the flag while keeping SORTs at 16 MB.
+--
+-- ── Cheaper-win check (do this BEFORE bumping in prod) ───────────────────────────────────────
+-- The spec explicitly says: "sometimes an index on the ORDER BY / GROUP BY is the cheaper win."
+-- Confirm the top spillers via the slow-query pass (a Sort/Hash with `Sort Method: external
+-- merge` or `Disk: NkB`) — if one query dominates and an index would eliminate the sort, the
+-- fix is that index, not this bump. Reader: docs/brain/libraries/db-health.md § analyzeSlowQuery
+-- + the DB Health slow-query panel (DB_HEALTH_SLOWQ_LOOP_ID).
+--
+-- ── Verification (per the spec's `## Verification` bullet) ───────────────────────────────────
+-- After apply, on the DB Health Agent's next instance pass (~15 min, DB_HEALTH_INSTANCE_LOOP_ID)
+-- the signature `dbhealth:instance:temp_spill_pressure` is no longer flagged: cumulative
+-- pg_stat_database.temp_bytes stops climbing at the same rate; no duplicate proposal is created
+-- (the enqueue dedup honors DB_HEALTH_REPROPOSE_WINDOW_MS = 7d).
+--
+-- ── Rollback (reversible in a single statement, <1s each) ────────────────────────────────────
+--   alter role authenticated reset work_mem;
+--   alter role authenticated reset hash_mem_multiplier;
+-- Sessions opened AFTER the reset revert to the cluster defaults immediately.
+
+alter role authenticated set work_mem = '16MB';
+alter role authenticated set hash_mem_multiplier = '2.0';
