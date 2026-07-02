@@ -103,8 +103,8 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
 
   // Phase 3 (spec-test-maximize-machine-coverage): live per-bullet green state — green when the agent
-  // passed it OR the owner marked it ✓ Tested. Lets the founder watch the card fill in before the
-  // ✅ writeback's commit + next deploy reflects it on the markdown itself.
+  // passed it OR the owner marked it ✓ Tested. Rendered directly from the DB
+  // (spec_test_runs + spec_test_human_checks); no markdown commit under 'DB is the spec'.
   const greenBullets = deriveGreenBullets(
     parseVerificationBullets(spec.raw).map((b) => b.text),
     testRun,

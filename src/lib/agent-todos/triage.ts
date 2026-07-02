@@ -21,8 +21,6 @@ import type { AgentTodoActionType, AgentTodoUrgency } from "./constants";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
-
 /** The four action types a box-produced agent_todo may carry (post-prune). */
 const TRIAGE_TODO_ACTION_TYPES: AgentTodoActionType[] = [
   "customer_reply",
@@ -353,31 +351,11 @@ export async function loadTriageBrief(admin: Admin, workspaceId: string, ticketI
 
 // ── Materialization (worker runs this AFTER quorum) ──────────────────────────
 
-function ghToken() {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-async function gh(method: string, path: string, body?: unknown) {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${ghToken()}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
-}
-
-/** A ticket-derived analyzer/code fix → a spec committed to main (owner=cs), surfaced on Roadmap. */
-function triageSpecMarkdown(spec: TriageSpec, ticketId: string): string {
-  return [
-    `# ${spec.title}`,
-    ``,
-    `**Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** \`${ticketId}\``,
+/** Build the structured summary + phase body for a ticket-derived spec authored through the
+ *  authorSpecRowStructured chokepoint (retire-md-spec-writers-db-is-sole-spec Phase 1). */
+function triageSpecFields(spec: TriageSpec, ticketId: string): { summary: string; phaseBody: string; phaseVerification: string } {
+  const summary = [
+    `**Derived-from-ticket:** \`${ticketId}\``,
     ``,
     spec.intent.trim(),
     ``,
@@ -385,15 +363,21 @@ function triageSpecMarkdown(spec: TriageSpec, ticketId: string): string {
     spec.problem.trim(),
     spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
     ``,
-    `## Phases`,
-    `- **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on \`npx tsc --noEmit\`.`,
-    ``,
-    `## Verification`,
-    `- Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it would now be handled (or not mis-escalated).`,
-    ``,
     `> Authored by the box escalation-triage routine (solver+skeptic quorum) from escalated ticket \`${ticketId}\`. Commission the build from the Roadmap board (owner = cs).`,
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+  const phaseBody = [
+    `Implement the fix scoped from the problem above.`,
     ``,
-  ].join("\n");
+    `Land the code change + the matching brain page in the SAME PR (CLAUDE.md hard rule).`,
+    ``,
+    spec.target ? `Likely target: \`${spec.target}\`.` : ``,
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+  const phaseVerification = `Reproduce the escalation scenario → confirm the corrected behavior, and that the ticket that surfaced it (\`${ticketId}\`) would now be handled (or not mis-escalated). \`npx tsc --noEmit\` clean.`;
+  return { summary, phaseBody, phaseVerification };
 }
 
 export interface MaterializeResult {
@@ -504,27 +488,44 @@ export async function materializeTriageOutcome(
     }
   }
 
-  // 3. Ticket-derived spec committed to main (escalation_false_positive / system_gap) — owner=cs.
+  // 3. Ticket-derived spec authored to public.specs (escalation_false_positive / system_gap) — owner=cs.
+  //    retire-md-spec-writers-db-is-sole-spec Phase 1 — author THROUGH the authorSpecRowStructured
+  //    chokepoint (a real public.specs row + spec_phases). The DB is the spec; the old get-then-PUT
+  //    of docs/brain/specs/{slug}.md wrote an ORPHAN .md the build pipeline couldn't see.
   if (proposal.spec?.slug && proposal.spec.title) {
     const slug = proposal.spec.slug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
-    const path = `docs/brain/specs/${slug}.md`;
     try {
-      const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-      const sha = existing.ok ? (existing.json as { sha?: string }).sha : undefined;
-      const put = await gh("PUT", `/repos/${REPO}/contents/${path}`, {
-        message: `spec: ${slug} (from escalated ticket ${ticketId} via triage quorum)`,
-        content: Buffer.from(triageSpecMarkdown(proposal.spec, ticketId), "utf8").toString("base64"),
-        sha,
-        branch: "main",
-      });
-      if (put.ok) {
-        out.specPath = path;
-        parts.push(`spec committed: ${path} (owner=cs) — commission on Roadmap`);
+      const { authorSpecRowStructured } = await import("@/lib/author-spec");
+      const { summary: specSummary, phaseBody, phaseVerification } = triageSpecFields(proposal.spec, ticketId);
+      const authored = await authorSpecRowStructured(
+        workspaceId,
+        slug,
+        {
+          title: proposal.spec.title,
+          summary: specSummary,
+          owner: "cs",
+          parent: `[[../functions/cs]] — Ticket-derived product fixes`,
+          blocked_by: [],
+          phases: [
+            {
+              title: `P1 — implement the fix`,
+              body: phaseBody,
+              verification: phaseVerification,
+              status: "planned",
+            },
+          ],
+        },
+        "planned",
+        { intendedStatusSetBy: "box:escalation-triage" },
+      );
+      if (authored) {
+        out.specPath = slug;
+        parts.push(`spec authored: ${slug} (owner=cs) — commission on Roadmap`);
       } else {
-        parts.push(`spec commit failed (${put.status})`);
+        parts.push(`spec author failed for ${slug}`);
       }
     } catch (e) {
-      parts.push(`spec commit failed: ${e instanceof Error ? e.message : String(e)}`);
+      parts.push(`spec author failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

@@ -1,14 +1,15 @@
 /**
- * spec-green-writeback — used to commit a leading ✅ on each green `## Verification` bullet of
- * `docs/brain/specs/{slug}.md` (one of the six git-committing status writers). spec-status-db-driven
- * Phase 2 retired the commit: a bullet's "green" state is already derivable from spec_test_runs +
- * spec_test_human_checks (see `deriveGreenBullets` in spec-test-runs.ts), and the dashboard renders
- * that DB-derived state directly. So the writeback reports the computed counts (useful for the
- * "all-green → archive" hand-off) but never commits to `main`. Zero deploys.
+ * spec-green-writeback — computes the green state of a spec's `## Verification` bullets from the DB.
  *
- * spec-pm-markdown-purge (2026-06-25): the spec body is now read from the DB (`getSpec` →
- * `public.specs` + `public.spec_phases`, reconstructing the `## Verification` section) instead of
- * `docs/brain/specs/{slug}.md`. This was the LAST per-spec markdown reader; the .md files are gone.
+ * Historically ONE OF THE SIX git-committing status writers that PUT `docs/brain/specs/{slug}.md`
+ * to main; all six were retired to DB writes in `spec-status-db-driven` (Phases 1–4). This surface
+ * kept its name for callers but is COMPUTED-ONLY — a bullet's "green" state derives from
+ * `spec_test_runs` + `spec_test_human_checks` (see `deriveGreenBullets` in spec-test-runs.ts), and
+ * the dashboard renders that DB-derived state directly. Under retire-md-spec-writers-db-is-sole-spec
+ * Phase 2 the "DB is the spec" invariant is closed: this file has NO git write path.
+ *
+ * The spec body itself is read from the DB (`getSpec` → `public.specs` + `public.spec_phases`,
+ * reconstructing the `## Verification` section). No per-spec markdown reader survives.
  */
 import { getLatestSpecTestRuns, getHumanCheckResolutions, parseVerificationBullets, deriveGreenBullets } from "@/lib/spec-test-runs";
 import { getSpec } from "@/lib/brain-roadmap";

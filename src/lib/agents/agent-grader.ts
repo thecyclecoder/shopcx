@@ -764,33 +764,7 @@ export interface CoachingLearning {
   reasoning: string;
 }
 
-const GRADER_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GRADER_ACTIVE_BUILD = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage", "blocked_on_dependency"];
-function graderGhToken(): string | undefined {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-
-/** Commit a spec markdown to docs/brain/specs/{slug}.md on main via the GitHub Contents API (works from the
- *  deployed cron, unlike the box's putFileMain). Get-then-PUT so it updates in place. */
-async function ghCommitSpec(slug: string, content: string, message: string): Promise<boolean> {
-  const token = graderGhToken();
-  if (!token) return false;
-  const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
-  const path = `docs/brain/specs/${slug}.md`;
-  let sha: string | undefined;
-  try {
-    const get = await fetch(`https://api.github.com/repos/${GRADER_REPO}/contents/${path}?ref=main`, { headers, cache: "no-store" });
-    if (get.ok) sha = ((await get.json()) as { sha?: string }).sha;
-  } catch {
-    /* new file */
-  }
-  const put = await fetch(`https://api.github.com/repos/${GRADER_REPO}/contents/${path}`, {
-    method: "PUT",
-    headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ message, content: Buffer.from(content, "utf8").toString("base64"), sha, branch: "main" }),
-  });
-  return put.ok;
-}
 
 /**
  * director-grades-agents: when an agent persistently underperforms despite coaching, the Director does NOT

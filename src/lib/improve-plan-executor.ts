@@ -14,47 +14,30 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runImproveActions, type ImproveAction } from "@/lib/improve-actions";
 import type { ImprovePlanAction } from "@/lib/ticket-improve-chats";
 
-const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
-function ghToken() {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-async function gh(method: string, path: string, body?: unknown) {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${ghToken()}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
-}
-
-/** A code change → a ticket-sourced spec committed to main (owner=cs), surfaced on Roadmap to commission. */
-function ticketSpecMarkdown(spec: { title: string; intent: string; problem: string }, ticketId: string): string {
-  return [
-    `# ${spec.title} ⏳`,
-    ``,
-    `**Owner:** [[../functions/cs]] · **Parent:** CS mandate "Ticket-derived product fixes" · **Derived-from-ticket:** \`${ticketId}\``,
+/** A code change → a ticket-sourced spec authored to public.specs (owner=cs), surfaced on Roadmap to
+ *  commission. retire-md-spec-writers-db-is-sole-spec Phase 1 — authored through the
+ *  authorSpecRowStructured chokepoint (DB is the spec), not a docs/brain/specs/{slug}.md commit. */
+function ticketSpecFields(
+  spec: { title: string; intent: string; problem: string },
+  ticketId: string,
+): { summary: string; phaseBody: string; phaseVerification: string } {
+  const summary = [
+    `**Derived-from-ticket:** \`${ticketId}\``,
     ``,
     spec.intent.trim(),
     ``,
     `## Problem (from ticket \`${ticketId}\`)`,
     spec.problem.trim(),
     ``,
-    `## Phases`,
-    `- ⏳ **P1 — implement the fix** — scope from the problem above; land code + a brain page; gate on \`npx tsc --noEmit\`.`,
-    ``,
-    `## Verification`,
-    `- Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it would now be handled correctly.`,
-    ``,
     `> Authored by the box Improve agent from ticket \`${ticketId}\`. Commission the build from the Roadmap board (owner = cs).`,
-    ``,
   ].join("\n");
+  const phaseBody = [
+    `Implement the fix scoped from the problem above.`,
+    ``,
+    `Land the code change + the matching brain page in the SAME PR (CLAUDE.md hard rule).`,
+  ].join("\n");
+  const phaseVerification = `Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it (\`${ticketId}\`) would now be handled correctly. \`npx tsc --noEmit\` clean.`;
+  return { summary, phaseBody, phaseVerification };
 }
 
 export interface ExecutePlanResult {
@@ -172,25 +155,42 @@ export async function executeImprovePlan(
     }
   }
 
-  // 3. Commit ticket-sourced spec(s) to main (owner=cs). Never auto-builds — surfaced on Roadmap.
+  // 3. Author ticket-sourced spec(s) to public.specs (owner=cs). Never auto-builds — surfaced on
+  //    Roadmap. retire-md-spec-writers-db-is-sole-spec Phase 1 — through the authorSpecRowStructured
+  //    chokepoint (DB is the spec), not a docs/brain/specs/{slug}.md commit.
   for (const a of actions) {
     if (a.status !== "approved" || a.kind !== "ticket_spec" || !a.spec) continue;
     const slug = a.spec.slug.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
-    const path = `docs/brain/specs/${slug}.md`;
     try {
-      const existing = await gh("GET", `/repos/${REPO}/contents/${path}?ref=main`);
-      const sha = existing.ok ? (existing.json as { sha?: string }).sha : undefined;
-      const put = await gh("PUT", `/repos/${REPO}/contents/${path}`, {
-        message: `spec: ${slug} (from ticket ${ticketId} via Improve agent)`,
-        content: Buffer.from(ticketSpecMarkdown(a.spec, ticketId), "utf8").toString("base64"),
-        sha,
-        branch: "main",
-      });
-      a.status = put.ok ? "done" : "failed";
-      a.result = put.ok ? `Spec committed: ${path} (owner=cs) — commission on Roadmap` : `spec commit failed (${put.status})`;
+      const { authorSpecRowStructured } = await import("@/lib/author-spec");
+      const { summary, phaseBody, phaseVerification } = ticketSpecFields(a.spec, ticketId);
+      const authored = await authorSpecRowStructured(
+        workspaceId,
+        slug,
+        {
+          title: a.spec.title,
+          summary,
+          owner: "cs",
+          parent: `[[../functions/cs]] — Ticket-derived product fixes`,
+          blocked_by: [],
+          autoBuild: false, // improve-plan-executor: commission on Roadmap; do NOT auto-build.
+          phases: [
+            {
+              title: `P1 — implement the fix`,
+              body: phaseBody,
+              verification: phaseVerification,
+              status: "planned",
+            },
+          ],
+        },
+        "planned",
+        { intendedStatusSetBy: "box:ticket-improve" },
+      );
+      a.status = authored ? "done" : "failed";
+      a.result = authored ? `Spec authored: ${slug} (owner=cs) — commission on Roadmap` : `spec author failed for ${slug}`;
     } catch (e) {
       a.status = "failed";
-      a.result = `spec commit failed: ${e instanceof Error ? e.message : String(e)}`;
+      a.result = `spec author failed: ${e instanceof Error ? e.message : String(e)}`;
     }
     results.push(a.result!);
   }
