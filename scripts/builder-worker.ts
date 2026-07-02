@@ -2126,8 +2126,10 @@ const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations"
 // add is idempotent, and (c) sweep stale build worktrees in reapOrphans. All run as the worker's own
 // user (correct git ownership) and tolerate a worktree whose dir is already gone.
 
-// A build/plan/pr-resolve/fold worktree is `builds/<job.id>`; job.id is a UUID. spec-chat-*/dev-ask-*
-// lanes (non-UUID basenames) are session-stable + torn down each turn — never swept here.
+// A plan/pr-resolve/fold worktree is `builds/<job.id>` (UUID) — swept by job status below. A BUILD worktree
+// is the stable per-slug `builds/build-<slug>` (chained-phase-session-resume-worktree-fix) so every phase
+// shares one cwd for `claude --resume`; it's swept only when NO build job for that slug is still active.
+// spec-chat-*/dev-ask-*/director-* lanes are session-stable + torn down each turn — never swept here.
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Jobs whose worktree is sacrosanct — a live or paused build the owner may still resume. Anything else
 // (completed/failed/needs_attention, i.e. terminal) or a job that no longer exists ⇒ the tree is cruft.
@@ -2190,6 +2192,27 @@ function removeWorktreeForBranch(branch: string) {
 // longer exists, which is also how a merged-and-deleted branch surfaces — is cruft → force-remove it.
 // A live or paused job's worktree is NEVER touched (status in ACTIVE_JOB_STATUSES). Best-effort.
 async function reapOrphanWorktrees() {
+  // chained-phase-session-resume-worktree-fix: stable per-slug build worktrees (`builds/build-<slug>`) are not
+  // UUID-named, so the job-id sweep below skips them (as it does spec-chat-*). Reap one only when NO build job
+  // for its slug is still active — between chained phases a live/paused build keeps it; once the chain is
+  // terminal it's cruft. (Reaping mid-chain is harmless: the next phase re-adds the same path, and claude's
+  // session store lives OUTSIDE the worktree, so `--resume` still resolves.) Runs BEFORE the UUID early-return
+  // below so a box with only stable build worktrees still gets them cleaned.
+  for (const e of listWorktrees().filter((x) => x.path.startsWith(BUILDS_DIR + "/") && basename(x.path).startsWith("build-"))) {
+    const bslug = basename(e.path).slice("build-".length);
+    if (!bslug) continue;
+    const { data: active, error: aerr } = await db
+      .from("agent_jobs")
+      .select("id")
+      .eq("kind", "build")
+      .eq("spec_slug", bslug)
+      .in("status", Array.from(ACTIVE_JOB_STATUSES))
+      .limit(1);
+    if (aerr) { console.error(`[reaper] active-build check failed for ${bslug} (skipping):`, aerr.message); continue; }
+    if (active && active.length) continue; // a live/paused build for this slug — sacrosanct
+    removeWorktreeDir(e.path);
+    console.log(`[reaper] reaped stable build worktree ${e.path} (no active build job for ${bslug})`);
+  }
   const entries = listWorktrees().filter((e) => e.path.startsWith(BUILDS_DIR + "/") && JOB_ID_RE.test(basename(e.path)));
   if (entries.length === 0) {
     sh("git", ["worktree", "prune"]); // reconcile admin entries for already-deleted dirs
@@ -3831,9 +3854,12 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     //      when the spec-review job that set vale_pass crashed before reaching its inline dispose tail.
     // Preserves the Vale quality gate + Ada disposition semantics — it never auto-passes; it just makes sure
     // the review actually RUNS. Best-effort; both helpers are idempotent.
-    const { enqueueSpecReviewIfDue, selectInReviewSpecs } = await import("../src/lib/agents/spec-review");
+    const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs } = await import("../src/lib/agents/spec-review");
     const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
-    const inReview = await selectInReviewSpecs(db, job.workspace_id);
+    // vale-reactive-spec-review Phase 1 — the selector now returns only in_review specs that LACK a current
+    // Vale review (vale_pass !== true), so the backstop skips workspaces whose in_review pool is fully
+    // Vale-passed (parked for Ada, not Vale). The disposition sweep below still runs regardless.
+    const inReview = await selectUnreviewedInReviewSpecs(db, job.workspace_id);
     if (inReview.length) {
       const enq = await enqueueSpecReviewIfDue(job.workspace_id);
       if (enq.enqueued) notes.push(`spec-review backstop → enqueued Vale over ${enq.pending} in_review spec(s)`);
@@ -6505,16 +6531,17 @@ async function markNewSpecInReview(
     );
   }
   if (markdown && markdown.trim()) {
-    const { authorSpecRowFromMarkdown, MissingVerificationError } = await import("../src/lib/author-spec");
+    const { authorSpecRowFromMarkdown, MissingVerificationError, EmptyPhaseBodyError } = await import("../src/lib/author-spec");
     try {
       await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
         intendedStatusSetBy: actor,
       });
     } catch (e) {
-      // A missing-Verification authoring is NOT a best-effort warning — it's an untestable spec and must fail
-      // loudly so the author surface (planner / spec-chat finalize) surfaces it instead of persisting a row
-      // with an empty verification column. Every other (genuine DB) failure stays best-effort (logged).
-      if (e instanceof MissingVerificationError) throw e;
+      // A missing-Verification / empty-body authoring is NOT a best-effort warning — it's an untestable OR
+      // un-buildable spec and must fail loudly so the author surface (planner / spec-chat finalize / db-health
+      // Build resume) surfaces it instead of persisting a row that the builder will silently no-op on. Every
+      // other (genuine DB) failure stays best-effort (logged).
+      if (e instanceof MissingVerificationError || e instanceof EmptyPhaseBodyError) throw e;
       console.warn(
         `[author-spec] authorSpecRowFromMarkdown ${slug} failed:`,
         e instanceof Error ? e.message : e,
@@ -6903,10 +6930,11 @@ async function runPlanJob(job: Job) {
     const returnedBySlug = new Map<string, PlannerSpecOut>();
     for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
 
-    const { authorSpecRowStructured, MissingVerificationError } = await import("../src/lib/author-spec");
+    const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
     let authored = 0;
     const verificationFailures: string[] = [];
+    const emptyBodyFailures: string[] = [];
     const notReturned: string[] = [];
     const milestoneUnresolved: string[] = [];
     for (const a of approved) {
@@ -6959,19 +6987,24 @@ async function runPlanJob(job: Job) {
         );
         authored++;
       } catch (e) {
-        // A spec with no per-phase Verification is untestable — fail loudly instead of silently dropping it
-        // (and then queueing a build for a spec that never landed in public.specs).
+        // A spec with no per-phase Verification is untestable, and a spec with an empty-body phase is
+        // un-buildable — either way, fail loudly instead of silently dropping it (and then queueing a build
+        // for a spec that never landed in public.specs, or one that silently no-ops).
         if (e instanceof MissingVerificationError) {
           verificationFailures.push(e.message);
+          console.error(`${tag} author ${s.slug}: ${e.message}`);
+        } else if (e instanceof EmptyPhaseBodyError) {
+          emptyBodyFailures.push(e.message);
           console.error(`${tag} author ${s.slug}: ${e.message}`);
         } else {
           console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
         }
       }
     }
-    if (verificationFailures.length || notReturned.length || milestoneUnresolved.length) {
+    if (verificationFailures.length || emptyBodyFailures.length || notReturned.length || milestoneUnresolved.length) {
       const reasons: string[] = [];
       if (verificationFailures.length) reasons.push(`untestable (no "## Verification"): ${verificationFailures.join(" | ")}`);
+      if (emptyBodyFailures.length) reasons.push(`un-buildable (empty phase body): ${emptyBodyFailures.join(" | ")}`);
       if (notReturned.length) reasons.push(`planner did not return a spec body for: ${notReturned.join(", ")}`);
       if (milestoneUnresolved.length) reasons.push(`milestone did not resolve to a goal_milestones row: ${milestoneUnresolved.join(", ")}`);
       await update(job.id, {
@@ -9122,10 +9155,13 @@ interface SpecReviewDecisionJson {
 
 async function runSpecReviewJob(job: Job) {
   const tag = `[spec-review:${job.id.slice(0, 8)}]`;
-  const { selectInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
+  const { selectUnreviewedInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
   const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
   const a = await admin();
-  const pending = await selectInReviewSpecs(a, job.workspace_id);
+  // vale-reactive-spec-review Phase 1 — the selector returns only in_review specs LACKING a current Vale
+  // review, so Vale never re-reviews content she already cleared. A re-author / send-back NULLs vale_pass
+  // via markSpecCardBackToReview, re-admitting the spec.
+  const pending = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
   if (!pending.length) {
     // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
     // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
@@ -9158,7 +9194,7 @@ async function runSpecReviewJob(job: Job) {
     }
     if (!reviewable.length) {
       // planner-gates-build-queue-on-authored-specs Phase 2 — when EVERY drop was a missing public.specs
-      // row (selectInReviewSpecs returned a slug the row has since vanished from), stamp
+      // row (selectUnreviewedInReviewSpecs returned a slug the row has since vanished from), stamp
       // spec_row_missing so the parked-router dismisses it. Otherwise leave the class unstamped and let
       // the heuristic classifier handle a real materializer fault (DB outage, decoder bug, etc.).
       const allMissing = missingRowSlugs.length === pending.length;
@@ -9225,7 +9261,7 @@ async function runSpecReviewJob(job: Job) {
       // agent was handed nothing to decide), there is nothing to review — complete as a benign no-op instead
       // of parking a needs_attention job that Ada would then re-escalate forever on every standing pass. Only
       // a parse failure over a STILL-POPULATED queue parks (a real malformed-output failure on real input).
-      const stillInReview = await selectInReviewSpecs(a, job.workspace_id);
+      const stillInReview = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
       if (!stillInReview.length) {
         const tail = `spec-review no-op — in_review pool drained to 0 by run time (no parseable decisions over empty input; not parking)`;
         await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
@@ -15299,7 +15335,18 @@ async function dispatchJob(job: Job) {
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
-  const wt = join(BUILDS_DIR, job.id); // isolated worktree — parallel builds never collide
+  // chained-phase-session-resume-worktree-fix: key the BUILD worktree on the SLUG, not job.id, so every
+  // phase of a spec shares ONE stable cwd. `claude --resume <session>` resolves against the cwd's project
+  // store (~/.claude/projects/<cwd-slug>/, which lives OUTSIDE the worktree) — with the old per-job-id path,
+  // Phase 2 (a NEW job.id → NEW dir) ran `--resume` from a folder Phase 1's session was never created in, so
+  // claude emitted "No conversation found with session ID" and the chain died on EVERY multi-phase spec.
+  // Safe: the spec BRANCH is already the persistent per-slug `claude/build-${slug}` (below) and
+  // removeWorktreeForBranch already force-removes any tree holding it, so two same-slug builds could never
+  // coexist regardless of the dir name — keying on slug adds no new collision. Mirrors the spec-chat lane's
+  // proven stable-path resume (`builds/spec-chat-${key}`). The dir is disposable (wiped + re-added every
+  // dispatch); only the PATH must be stable for `--resume` to resolve. Empty slug → fall back to job.id.
+  const safeSlug = (slug || "").replace(/[^a-zA-Z0-9_-]/g, "");
+  const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
   // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
@@ -15400,7 +15447,14 @@ async function dispatchJob(job: Job) {
 
   // Set up the worktree (its own dir + branch).
   sh("git", ["fetch", "origin"]);
-  let branch = job.spec_branch;
+  // chained-phase-null-branch-fix: a chained-phase RESUME job (queued by queueNextChainedPhase) carries the
+  // claude session but NOT spec_branch, so job.spec_branch is null on Phase 2+. The resume worktree-add below
+  // then ran `git worktree add -B null … origin/null`, creating/colliding on a phantom branch literally named
+  // "null" (multiple chained resumes fought over it; one even pushed `null` to origin). The build branch is
+  // ALWAYS the persistent per-spec `claude/build-${slug}` (M1 model, set on the fresh path below), so DERIVE it
+  // when the row's spec_branch is missing — never fall through to a "null" branch. (#980 fixed the cwd half of
+  // the chained resume, which unmasked this branch half.)
+  let branch = job.spec_branch || (slug ? `claude/build-${slug}` : job.spec_branch);
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
     // ── M1: branch-accumulation model (spec-goal-branch-pm-flow) ──────────────────────────────
@@ -15553,12 +15607,18 @@ async function dispatchJob(job: Job) {
     }
     const why = unbuildableReason(specRow); // "" = the DB row carries buildable content (phases or summary)
     if (why) {
+      // spec-body-never-silently-empty Phase 1 — surface as `needs_attention` (a visible, actionable state
+      // the owner sees on the queue), NOT `failed` (which routes to the retry backstop and hides the reason
+      // from the operator queue). The proposal STAYS LIVE (the DB Health enqueue dedup counts
+      // `needs_attention` as a live status, so a subsequent DB Health pass won't re-propose the same
+      // signature — the operator's fix runs against this exact job). This is the belt-and-suspenders backstop
+      // behind db-index-orders's silent stall: an un-buildable spec must surface, never silently complete.
       await update(job.id, {
-        status: "failed",
-        error: `spec ${slug} ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
+        status: "needs_attention",
+        error: `spec ${slug} ${why} — refusing to build an empty spec (spec-body-never-silently-empty)`,
         log_tail: `build aborted — spec row ${slug} ${why}; no PR opened`,
       });
-      console.error(`${tag} spec row ${why} → failed (no silent empty merge)`);
+      console.error(`${tag} spec row ${why} → needs_attention (no silent empty merge)`);
       chosenAccount.inFlight--;
       sh("git", ["worktree", "remove", "--force", wt]);
       return;

@@ -23,6 +23,7 @@
 import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
+import { inngest } from "@/lib/inngest/client";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
 function isPhaseHeading(l: string): boolean {
@@ -194,6 +195,20 @@ export class MissingVerificationError extends Error {
 }
 
 /**
+ * Thrown when a spec is authored with a phase whose BODY is empty/whitespace (`spec-body-never-silently-empty`
+ * Phase 1). A 0-byte-body phase is un-buildable — Bo has no guidance to follow — so the build silently no-ops
+ * and the agent_job flips to `completed` with nothing merged (the db-index-orders class of stall). The
+ * authoring MUST fail LOUDLY at the parse step (before the DB write) rather than persisting a phase row with
+ * an empty body that the builder later has to refuse. Sibling to `MissingVerificationError`.
+ */
+export class EmptyPhaseBodyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmptyPhaseBodyError";
+  }
+}
+
+/**
  * Reject any phase that has no non-empty Verification section. Throws `MissingVerificationError` (loud, with
  * the slug + the offending phase position + title) so the authoring path FAILS rather than writing an empty
  * verification column. This is the single enforcement chokepoint — `authorSpecRowFromMarkdown` runs it before
@@ -224,6 +239,45 @@ export function assertEveryPhaseHasVerification(
         `has no "## Verification" / "### Verification" section (or it's empty). Every phase needs >=1 concrete ` +
         `acceptance check ("- On {where}, {do what} → expect {observable result}"). Add a Verification section ` +
         `so the spec is testable — no untestable specs.`,
+    );
+  }
+}
+
+/**
+ * spec-body-never-silently-empty Phase 1 — reject any phase whose BODY is empty/whitespace. A phase with no
+ * body carries no guidance for Bo to build against, so the build silently no-ops and the agent_job flips to
+ * `completed` with nothing merged (the db-index-orders class of stall). Enforcement lives at the author
+ * chokepoint so an un-buildable phase row never reaches `public.spec_phases`. Throws `EmptyPhaseBodyError`
+ * (loud, with slug + offending phase position + title).
+ *
+ * Sibling gate to `assertEveryPhaseHasVerification`: same shape (`{ title, body }[]`, throws before the DB
+ * write), enforces the OTHER half of "no un-buildable spec." Both author entry points
+ * (`authorSpecRowStructured` + `authorSpecRowFromMarkdown`) run it after the verification gate so every
+ * author surface (planner, spec-chat, triage, regression, repair, db-health, coverage-register, security…)
+ * inherits the check.
+ */
+export function assertEveryPhaseHasBody(
+  slug: string,
+  phaseBodies: { title: string; body: string }[],
+): void {
+  if (!phaseBodies.length) {
+    // Guard here too so a caller that skips the verification gate still hits a loud failure on a phaseless spec.
+    throw new EmptyPhaseBodyError(
+      `spec ${slug} has no phases — an un-buildable spec cannot be authored (spec-body-never-silently-empty)`,
+    );
+  }
+  const empty = phaseBodies
+    .map((p, i) => ({ pos: i + 1, title: p.title, ok: !!(p.body && p.body.trim()) }))
+    .filter((p) => !p.ok);
+  if (empty.length) {
+    const which = empty
+      .map((m) => `phase ${m.pos}${m.title ? ` (${m.title})` : ""}`)
+      .join(", ");
+    throw new EmptyPhaseBodyError(
+      `spec ${slug} ${empty.length === 1 ? "has a phase" : "has phases"} with an empty body — ${which} ` +
+        `carries no guidance for the builder to follow. An empty-body phase is un-buildable (Bo has nothing to ` +
+        `build), so the job would silently complete with no merged changes. Add the phase body so the spec is ` +
+        `buildable — no silently-empty specs.`,
     );
   }
 }
@@ -421,14 +475,18 @@ export async function authorSpecRowStructured(
   intendedStatus: "planned" | "deferred",
   opts: AuthorSpecOpts = {},
 ): Promise<boolean> {
-  // ENFORCEMENT before the DB write — reuse the SAME gate the markdown path runs so every author surface
-  // (markdown OR structured) inherits "no untestable spec." Map structured phases into the gate's shape.
+  // ENFORCEMENT before the DB write — reuse the SAME gates the markdown path runs so every author surface
+  // (markdown OR structured) inherits "no untestable spec" AND "no silently-empty spec." Map structured
+  // phases into the gate's shape.
   const phaseBodies = spec.phases.map((p) => ({
     title: p.title,
     body: p.body,
     verification: p.verification && p.verification.trim() ? p.verification.trim() : null,
   }));
   assertEveryPhaseHasVerification(slug, phaseBodies);
+  // spec-body-never-silently-empty Phase 1 — reject a phase with an empty body BEFORE the DB write. An
+  // un-buildable spec (0-byte body) is exactly what silently completed the db-index-orders build.
+  assertEveryPhaseHasBody(slug, phaseBodies);
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
   // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
@@ -514,6 +572,14 @@ export async function authorSpecRowStructured(
       summary: spec.summary,
       phases: phaseBodies,
     });
+    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (a fresh
+    // spec always lands in `in_review`; a re-author already re-opens through the writer above). The
+    // consumer routes through the SAME gated `enqueueSpecReviewIfDue`, so a re-author of already-passed
+    // content that leaves `vale_pass=true` no-ops for free (no Max session). Errors swallowed — the 15-min
+    // cron backstop covers a dropped send.
+    void inngest
+      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
+      .catch(() => {});
     return true;
   } catch (e) {
     console.warn(
@@ -539,13 +605,17 @@ export async function authorSpecRowFromMarkdown(
   intendedStatus: "planned" | "deferred",
   opts: AuthorSpecOpts = {},
 ): Promise<boolean> {
-  // ENFORCEMENT (reject before the DB write): every phase must carry a non-empty Verification. This runs
-  // OUTSIDE the best-effort try/catch below so a missing-Verification authoring FAILS LOUDLY (throws) rather
-  // than being swallowed into a `false` return — an untestable spec must never reach public.spec_phases. A
-  // genuine DB/upsert error stays best-effort (returns false, logged); only this structural defect is a hard
-  // error. ~13 specs shipped with empty verification columns because there was no gate here — this is that gate.
+  // ENFORCEMENT (reject before the DB write): every phase must carry a non-empty Verification AND a
+  // non-empty body. This runs OUTSIDE the best-effort try/catch below so an untestable OR un-buildable
+  // authoring FAILS LOUDLY (throws) rather than being swallowed into a `false` return — a bad spec must
+  // never reach public.spec_phases. A genuine DB/upsert error stays best-effort (returns false, logged);
+  // only these structural defects are hard errors. ~13 specs shipped with empty verification columns
+  // because there was no verification gate; db-index-orders shipped a 0-byte body because there was no
+  // body gate — both gates now guard the write path.
   const phaseBodies = extractPhaseBodies(markdown);
   assertEveryPhaseHasVerification(slug, phaseBodies);
+  // spec-body-never-silently-empty Phase 1 — reject a phase with an empty body (the db-index-orders class).
+  assertEveryPhaseHasBody(slug, phaseBodies);
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time. If the incoming markdown has no
   // `**Brain refs:**` line, scan the body for src/ files + tables + wikilinks it already names and
@@ -629,6 +699,12 @@ export async function authorSpecRowFromMarkdown(
         verification: phaseBodies[i]?.verification ?? null,
       })),
     });
+    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (same
+    // rationale as the structured path — the gated helper no-ops if the current content already carries
+    // vale_pass=true). Errors swallowed — the 15-min cron backstop covers a dropped send.
+    void inngest
+      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
+      .catch(() => {});
     return true;
   } catch (e) {
     console.warn(

@@ -19,13 +19,15 @@
  *
  * See docs/brain/specs/winning-static-creative-finder.md.
  */
+import sharp from "sharp";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import {
   searchAds,
   fetchCreative,
-  isLongRunner,
+  isWinner,
+  winnerScore,
   type NormalizedAd,
   type Seed,
 } from "@/lib/adlibrary";
@@ -41,12 +43,51 @@ export interface CreativeSkeleton {
   offer: string | null;
 }
 
-const SUPPORTED_VISION_MEDIA = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-]);
+// AdLibrary serves full-res source creatives (routinely 6-22MB) with an unreliable HTTP content-type
+// (reports jpeg for png bytes). Raw bytes break two consumers: Anthropic vision hard-rejects images
+// >10MB (base64) and downsamples anything over ~1568px anyway; and a 22MB buffered proxy response
+// exceeds the serverless response-size limit (502). So we sharp-downscale + re-encode JPEG for each
+// use — guaranteeing a supported media_type AND small bytes. See scripts/_raw-vision-fixed.ts.
+async function downscaleImage(buffer: Buffer, maxEdge: number, quality: number): Promise<Buffer> {
+  return sharp(buffer)
+    .resize({ width: maxEdge, height: maxEdge, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality })
+    .toBuffer();
+}
+
+// Vision: 1568px is Anthropic's optimal (they downsample above it) — small + token-efficient.
+const normalizeForVision = (buffer: Buffer) => downscaleImage(buffer, 1568, 82);
+// Display/stored copy: kept HIGH-QUALITY so an operator can zoom in AND a future vision pass reads it
+// well (2048px > vision's 1568 need). ~0.5-1MB, served from our own storage (no serverless limit).
+const toDisplayImage = (buffer: Buffer) => downscaleImage(buffer, 2048, 88);
+
+// The private bucket holding OUR downscaled copy of each analyzed creative. The dashboard serves a
+// signed URL to this instead of live-proxying AdLibrary (which 502'd on the full-res fetch). Mirrors
+// the landing-page-scout `lander-shots` bucket. We never re-host publicly — private + signed reads.
+export const CREATIVE_SHOTS_BUCKET = "creative-shots";
+const CREATIVE_SHOT_TTL_SEC = 60 * 60; // 1h signed reads (the list route re-signs per request)
+
+export async function ensureCreativeShotsBucket(): Promise<void> {
+  const admin = createAdminClient();
+  const { data } = await admin.storage.getBucket(CREATIVE_SHOTS_BUCKET);
+  if (!data) await admin.storage.createBucket(CREATIVE_SHOTS_BUCKET, { public: false });
+}
+
+export async function uploadCreativeShot(path: string, buffer: Buffer): Promise<string> {
+  const admin = createAdminClient();
+  const { error } = await admin.storage
+    .from(CREATIVE_SHOTS_BUCKET)
+    .upload(path, buffer, { contentType: "image/jpeg", upsert: true });
+  if (error) throw error;
+  return path;
+}
+
+export async function signCreativeShot(path: string, ttlSec = CREATIVE_SHOT_TTL_SEC): Promise<string | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin.storage.from(CREATIVE_SHOTS_BUCKET).createSignedUrl(path, ttlSec);
+  if (error) return null;
+  return data?.signedUrl ?? null;
+}
 
 const VISION_SYSTEM = `You are a direct-response creative strategist. You reverse-engineer the STRUCTURE of a winning paid-social ad — never to copy it, only to learn the repeatable skeleton.
 
@@ -66,14 +107,24 @@ Return ONLY a JSON object, no prose, with these keys:
 }
 Keep each slot concise (a phrase, not a paragraph). Use null for a slot that is genuinely absent.`;
 
-/** Run Claude vision on the creative bytes → the four-slot skeleton. */
+/** Run Claude vision on the creative bytes → the four-slot skeleton.
+ *  `contentType` is accepted for signature compatibility but no longer trusted (AdLibrary mislabels
+ *  media types); the bytes are always normalized to JPEG under the vision size limit first. */
 export async function visionDeconstruct(
   workspaceId: string,
   imageBuffer: Buffer,
-  contentType: string,
+  _contentType?: string,
 ): Promise<CreativeSkeleton | null> {
   if (!ANTHROPIC_API_KEY) throw new Error("no_anthropic_key");
-  const mediaType = SUPPORTED_VISION_MEDIA.has(contentType) ? contentType : "image/jpeg";
+  let normalized: Buffer;
+  try {
+    normalized = await normalizeForVision(imageBuffer);
+  } catch (err) {
+    // A creative sharp can't decode (corrupt / non-image bytes) is not visionable.
+    console.error(`[creative-finder] image normalize failed:`, err);
+    return null;
+  }
+  const mediaType = "image/jpeg";
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -91,7 +142,7 @@ export async function visionDeconstruct(
           content: [
             {
               type: "image",
-              source: { type: "base64", media_type: mediaType, data: imageBuffer.toString("base64") },
+              source: { type: "base64", media_type: mediaType, data: normalized.toString("base64") },
             },
             { type: "text", text: "Extract this ad's skeleton as JSON." },
           ],
@@ -139,14 +190,26 @@ export async function visionDeconstructFrames(
   if (!ANTHROPIC_API_KEY) throw new Error("no_anthropic_key");
   if (!frames.length) return null;
 
-  const imageBlocks = frames.map((f, i) => [
+  // Normalize each keyframe the same way as the static path (fit 1568px + JPEG) — keeps every frame
+  // well under the per-image limit and the multi-frame request small. Undecodable frames are dropped.
+  const normalizedFrames: Buffer[] = [];
+  for (const f of frames) {
+    try {
+      normalizedFrames.push(await normalizeForVision(f.buffer));
+    } catch (err) {
+      console.error(`[creative-finder] video keyframe normalize failed:`, err);
+    }
+  }
+  if (!normalizedFrames.length) return null;
+
+  const imageBlocks = normalizedFrames.map((buf, i) => [
     { type: "text", text: `Keyframe ${i + 1}:` },
     {
       type: "image",
       source: {
         type: "base64",
-        media_type: SUPPORTED_VISION_MEDIA.has(f.contentType) ? f.contentType : "image/jpeg",
-        data: f.buffer.toString("base64"),
+        media_type: "image/jpeg",
+        data: buf.toString("base64"),
       },
     },
   ]).flat();
@@ -251,7 +314,17 @@ function toDate(s: string | null): string | null {
 export async function sweepSeed(
   workspaceId: string,
   seed: Seed,
-  opts: { minDays?: number; maxPerSeed?: number; daysBack?: number; pageSize?: number } = {},
+  opts: {
+    minDays?: number;
+    minImpressions?: number;
+    minSpend?: number;
+    /** Max STATICS to vision this seed (bounds Opus spend). Ranked by winnerScore — keeps the best. */
+    visionCap?: number;
+    /** Max VIDEOS to capture as metadata (video_pending; deconstructed later by the video pipeline). */
+    videoCap?: number;
+    daysBack?: number;
+    pageSize?: number;
+  } = {},
 ): Promise<IngestResult> {
   const admin = createAdminClient();
   const result = EMPTY_RESULT();
@@ -263,12 +336,15 @@ export async function sweepSeed(
   });
   result.searched = ads.length;
 
-  const longRunners = ads.filter((a) => a.ad_key && isLongRunner(a, opts.minDays ?? 14));
-  result.longRunners = longRunners.length;
-  if (!longRunners.length) return result;
+  // Winner signal = reach/spend OR longevity (not longevity alone). See adlibrary.isWinner.
+  const winners = ads.filter((a) =>
+    a.ad_key && isWinner(a, { minDays: opts.minDays, minImpressions: opts.minImpressions, minSpend: opts.minSpend }),
+  );
+  result.longRunners = winners.length; // (field name kept for back-compat; now = winner count)
+  if (!winners.length) return result;
 
   // Dedup: which ad_keys do we already have for this workspace+source?
-  const keys = longRunners.map((a) => a.ad_key);
+  const keys = winners.map((a) => a.ad_key);
   const { data: existing } = await admin
     .from("creative_skeletons")
     .select("dedup_key")
@@ -277,11 +353,16 @@ export async function sweepSeed(
     .in("dedup_key", keys);
   const seen = new Set((existing || []).map((r) => r.dedup_key as string));
 
-  const fresh = longRunners.filter((a) => !seen.has(a.ad_key));
-  result.skippedExisting = longRunners.length - fresh.length;
+  const fresh = winners.filter((a) => !seen.has(a.ad_key));
+  result.skippedExisting = winners.length - fresh.length;
 
-  const cap = opts.maxPerSeed ?? 10;
-  for (const ad of fresh.slice(0, cap)) {
+  // Rank by winner score, then cap statics (vision cost) and videos (metadata) independently — always
+  // keeping the highest-signal creatives, not whatever order the API returned.
+  const ranked = [...fresh].sort((a, b) => winnerScore(b) - winnerScore(a));
+  const statics = ranked.filter((a) => a.media_type === "static").slice(0, opts.visionCap ?? 12);
+  const videos = ranked.filter((a) => a.media_type === "video").slice(0, opts.videoCap ?? 40);
+
+  for (const ad of [...statics, ...videos]) {
     try {
       await ingestAd(workspaceId, ad, seed);
       if (ad.media_type === "video") result.videos++;
@@ -301,10 +382,20 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
   let skeleton: CreativeSkeleton | null = null;
   let status: string = ad.media_type === "video" ? "video_pending" : "analyzed";
   let visionedAt: string | null = null;
+  let thumbPath: string | null = null;
 
   if (ad.media_type === "static" && ad.creative_url) {
     try {
       const { buffer, contentType } = await fetchCreative(ad.creative_url);
+      // Host our own downscaled copy so the dashboard serves it (never live-proxies the full-res
+      // source — that 502'd). Best-effort: a failed upload must not fail the vision/ingest.
+      try {
+        await ensureCreativeShotsBucket();
+        const display = await toDisplayImage(buffer);
+        thumbPath = await uploadCreativeShot(`${workspaceId}/${ad.ad_key}.jpg`, display);
+      } catch (e) {
+        console.error(`[creative-finder] thumb upload failed for ${ad.ad_key}:`, e);
+      }
       skeleton = await visionDeconstruct(workspaceId, buffer, contentType);
       visionedAt = new Date().toISOString();
       if (!skeleton) status = "failed";
@@ -321,6 +412,7 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
     advertiser: ad.advertiser,
     title: ad.title,
     image_url: ad.creative_url,
+    thumb_path: thumbPath,
     media_type: ad.media_type,
     format: skeleton?.format ?? null,
     framework: skeleton?.framework ?? null,

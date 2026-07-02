@@ -59,19 +59,24 @@ export interface SpecReviewDecision {
 }
 
 /**
- * Slugs parked in `in_review` for one workspace — Vale's queue per pass.
+ * Slugs parked in `in_review` for one workspace THAT LACK A CURRENT VALE REVIEW — Vale's queue per pass.
  *
  * Reads `public.specs` directly (the CANONICAL source post-db-driven-specs). The legacy `spec_card_state`
  * mirror is NOT populated with `in_review` for newly-authored specs — a fresh spec lands as a `public.specs`
  * row with `status='in_review'` and may never get a card-state row — so reading the mirror silently missed
- * the whole queue and Vale never enqueued (the bug this fixes). `specs.deferred=true` wins over status
- * (mirrors the readers' projection), so a deferred spec doesn't slip into the in_review pool by accident.
+ * the whole queue and Vale never enqueued (the bug that motivated reading `specs` directly).
+ * `specs.deferred=true` wins over status (mirrors the readers' projection), so a deferred spec doesn't slip
+ * into the pool by accident.
  *
- * Phase 3: this is the FULL `in_review` pool — Vale checks quality on every in_review spec, EVEN ones
- * already carrying `vale_pass=true` (a re-author can invalidate a prior pass). Ada's disposition lane reads
- * `specs.vale_pass` directly to skip its own re-check.
+ * vale-reactive-spec-review Phase 1: additionally filters `vale_pass !== true`. The durable review signal
+ * keys to spec CONTENT: `markSpecCardBackToReview` NULLs `vale_pass` on every re-open / re-author, and a
+ * fresh authoring leaves it null (`upsertSpec` DB default). So `vale_pass === true` reliably means "Vale
+ * already reviewed the CURRENT content" — those specs sit in `in_review` parked for Ada's disposition lane,
+ * not Vale's queue. Filtering them out here gates BOTH the 15-min cron backstop and the reactive
+ * `spec-review/spec-mutated` event through the same free predicate — an expensive box `claude -p` only spins
+ * up when there is real, unreviewed work.
  */
-export async function selectInReviewSpecs(
+export async function selectUnreviewedInReviewSpecs(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _admin: Admin,
   workspaceId: string,
@@ -80,21 +85,40 @@ export async function selectInReviewSpecs(
   const rows = await listSpecs(workspaceId, { status: "in_review" });
   return rows
     .filter((r) => !r.deferred) // a deferred spec is out of the in_review pool even if status still reads it
+    .filter((r) => r.vale_pass !== true) // and a Vale-passed spec is out of Vale's queue (parked for Ada)
     .map((r) => r.slug);
 }
 
 /**
- * Dedupe-aware enqueue: insert ONE `spec-review` job per workspace per cadence — only when there's ≥1
- * `in_review` spec AND no in-flight `spec-review` job already running. The Inngest cron + the on-ship
- * trigger both flow through here, so a cron tick that races an event no-ops the duplicate.
+ * Dedupe-aware enqueue: insert ONE `spec-review` job per workspace per cadence — only when ≥1 in_review spec
+ * LACKS a current Vale review AND no in-flight `spec-review` job is already running. The Inngest cron + the
+ * reactive `spec-review/spec-mutated` event both flow through here, so a cron tick that races an event no-ops
+ * the duplicate, and a mutation on a spec whose current content already passed Vale no-ops for free (never
+ * spinning up a Max session).
+ *
+ * `reason` disambiguates the empty-pool cases so the cron heartbeat + build claim-gate can log them apart:
+ *   • `no-in-review-specs`  — no non-deferred in_review specs exist at all.
+ *   • `no-unreviewed-specs` — in_review pool is non-empty but every spec already carries `vale_pass=true`
+ *                             (they are parked for Ada's disposition lane, not Vale's queue).
+ *   • `in-flight`           — a spec-review job is already queued/running for this workspace.
  */
 export async function enqueueSpecReviewIfDue(
   workspaceId: string,
 ): Promise<{ enqueued: boolean; reason?: string; pending?: number }> {
   const admin = createAdminClient();
 
-  const pending = await selectInReviewSpecs(admin, workspaceId);
-  if (!pending.length) return { enqueued: false, reason: "no-in-review-specs", pending: 0 };
+  // vale-reactive-spec-review Phase 1 — read the in_review pool ONCE so we can distinguish "nothing to
+  // review, nothing in_review at all" from "nothing to review, every in_review spec already passed Vale".
+  const rows = await listSpecs(workspaceId, { status: "in_review" });
+  const nonDeferred = rows.filter((r) => !r.deferred);
+  const pending = nonDeferred.filter((r) => r.vale_pass !== true).map((r) => r.slug);
+  if (!pending.length) {
+    return {
+      enqueued: false,
+      reason: nonDeferred.length ? "no-unreviewed-specs" : "no-in-review-specs",
+      pending: 0,
+    };
+  }
 
   // One-in-flight guard: don't pile up Vale passes.
   const { data: inflight } = await admin

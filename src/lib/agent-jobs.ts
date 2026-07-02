@@ -578,7 +578,8 @@ export async function enqueueSpecTestIfDue(
  *     are equivalent to routing through here.
  *
  * Distinct `reason` values so a cron/heartbeat log stays legible: 'spec-not-found', 'already-shipped',
- * 'deferred', 'not-review-passed', 'auto-build-off', 'blocked', 'in-flight'.
+ * 'deferred', 'in-review-pending-disposition', 'not-review-passed', 'auto-build-off', 'blocked',
+ * 'in-flight'.
  */
 export async function enqueueBuildIfDue(
   workspaceId: string,
@@ -596,6 +597,15 @@ export async function enqueueBuildIfDue(
   // check emits a distinct reason so the heartbeat log names the exact eligibility miss.
   if (card.status === "shipped") return { enqueued: false, reason: "already-shipped" };
   if (card.status === "deferred") return { enqueued: false, reason: "deferred" };
+  // fix-bo-reactive-gated-build-enqueue — `in_review` is the ONE lifecycle state where Vale has
+  // (or may have) passed but Ada hasn't yet made a disposition call (planned vs deferred). The
+  // Phase-2 reactive event fires from `markSpecCardValePassed` the moment Vale flips
+  // valeReviewPassed=true, but the spec's status STAYS `in_review` until Ada's disposition sweep
+  // writes `planned`/`deferred`. Without this gate the consumer would enqueue a build on the Vale
+  // pass alone — contradicting the whole "Vale reviews → Ada disposes → THEN build" flow that the
+  // spec-review lane is meant to enforce. `applyAdaDisposition('planned')` re-fires the event, so
+  // no eligibility signal is lost: the build enqueues once Ada actually dispositions the spec.
+  if (card.status === "in_review") return { enqueued: false, reason: "in-review-pending-disposition" };
   // MIRROR of specReviewDone(card) in src/lib/agents/platform-director.ts:209-211 — re-probed inline
   // here to avoid a circular import (platform-director already imports enqueueSpecTestIfDue from
   // this file). Keep the two in lockstep; the durable signal is `specs.vale_review_passed_at`

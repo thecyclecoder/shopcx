@@ -13,7 +13,7 @@ The **reactive companion** to the `*/5` [[platform-director-cron]] for the **bui
 
 ## Body
 
-Single call to [[../libraries/agent-jobs]] `enqueueBuildIfDue(workspace_id, slug)` — the same cheap-SDK-gate + one-in-flight chokepoint the cron uses. Because that helper re-checks the FULL build-eligibility gate (`specReviewDone` + `!deferred` + `auto_build !== false` + blockers cleared + not shipped + not in-flight), firing on the Vale pass alone is safe: if the spec still needs Ada's disposition the consumer no-ops for free with `reason:'not-review-passed'`, and the second event (from Ada) re-fires when it lands.
+Single call to [[../libraries/agent-jobs]] `enqueueBuildIfDue(workspace_id, slug)` — the same cheap-SDK-gate + one-in-flight chokepoint the cron uses. Because that helper re-checks the FULL build-eligibility gate (`specReviewDone` + `!deferred` + `!in_review` + `auto_build !== false` + blockers cleared + not shipped + not in-flight), firing on the Vale pass alone is safe: if the spec still needs Ada's disposition the consumer no-ops for free with `reason:'in-review-pending-disposition'` (fix-bo-reactive-gated-build-enqueue-a3f2e4), and the second event (from Ada) re-fires when it lands.
 
 ## Who fires the event
 

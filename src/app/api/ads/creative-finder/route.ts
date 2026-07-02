@@ -11,6 +11,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { signCreativeShot } from "@/lib/creative-skeleton";
 import { inngest } from "@/lib/inngest/client";
 
 async function authorize(workspaceId: string | null) {
@@ -45,7 +46,7 @@ export async function GET(req: Request) {
   let q = auth.admin
     .from("creative_skeletons")
     .select(
-      "id, advertiser, title, image_url, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, created_at",
+      "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, created_at",
     )
     .eq("workspace_id", workspaceId as string)
     .order("days_running", { ascending: false, nullsFirst: false })
@@ -57,7 +58,16 @@ export async function GET(req: Request) {
 
   const { data, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data || []);
+  // Attach a signed URL to OUR stored downscaled copy so the dashboard serves it directly from storage
+  // (no live AdLibrary proxy). Legacy rows without thumb_path get null → the client falls back to the proxy.
+  const rows = data || [];
+  const withThumbs = await Promise.all(
+    rows.map(async (r) => ({
+      ...r,
+      thumb_url: r.thumb_path ? await signCreativeShot(r.thumb_path as string) : null,
+    })),
+  );
+  return NextResponse.json(withThumbs);
 }
 
 export async function POST(req: Request) {
