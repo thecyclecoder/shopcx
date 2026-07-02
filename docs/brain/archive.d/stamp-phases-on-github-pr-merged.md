@@ -1,0 +1,1 @@
+- **Owner squash/manual merges are detected + stamped shipped (GitHub PR-merged reconciler)** · verified 2026-07-02 · → [[inngest/spec-drift-reconcile]]
