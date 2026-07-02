@@ -1,0 +1,1 @@
+- **Specs carry a Brain refs list the builder reads first** · verified 2026-07-02 · → [[../project-management]]
