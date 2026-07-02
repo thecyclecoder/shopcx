@@ -14,7 +14,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 | `running_sha` | `text?` | short SHA (`git rev-parse --short HEAD`) the worker process is running, captured at boot |
 | `status` | `text` | `healthy` (default) ｜ `draining` (queued restart: far behind + busy → claiming paused, finishing in-flight lanes before the idle self-update) ｜ `updating` (mid self-update, about to exit→restart) ｜ `needs_attention` (crash-loop guard tripped) |
 | `active_builds` | `int` | lanes busy at the last tick (`active.size`) · `0` = idle |
-| `detail` | `text?` | last note: `self-update <from>→<to>`, crash-loop reason, … |
+| `detail` | `text?` | last note. On a healthy poll tick it carries the **self-update skip reason** ([[../specs/box-self-update-persist-skip-reason]]) — `self-update skipped: git fetch failed …` \| `self-update skipped: watchdog quarantine on <sha> — holding on <sha>` \| `self-update deferred: busy w/ N active build(s), non-runtime change` \| `self-update skipped: git reset failed …` — so the [[../libraries/control-tower]] box tile flips from a bare `self-update stuck for Xh` red to `stuck for Xh · <cause>`. Cleared to null when the worker is fully current + on the successful update path. Also carries the one-off `self-update <from>→<to>` on the pre-exit `status='updating'` tick, `restart queued — <N> behind …` on the drain-request tick, and the crash-loop reason on `status='needs_attention'`. |
 | `build_lanes` | `int?` | total build/plan lanes (`MAX_CONCURRENT`) — the pool ceiling ([[../specs/build-box-status-view]]) |
 | `fold_lanes` | `int?` | total fold lanes (`MAX_FOLD`, concurrency-1) |
 | `lanes` | `jsonb` | default `'[]'` — `[{ kind, job_id, spec_slug, since, phase? }]` for every in-flight lane this tick (`phase` = `"Phase N"` for a chained/per-phase build, null otherwise — [[../specs/box-lane-show-phase]]) |
@@ -44,4 +44,4 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 
 ## Related
 
-[[../specs/worker-self-update]] · [[../recipes/build-box-setup]] · [[../dashboard/branches]] · [[agent_jobs]] · [[../lifecycles/roadmap-build-console]]
+[[../specs/worker-self-update]] · [[../specs/box-self-update-persist-skip-reason]] · [[../recipes/build-box-setup]] · [[../dashboard/branches]] · [[agent_jobs]] · [[../lifecycles/roadmap-build-console]]

@@ -295,6 +295,11 @@ const RUNNING_SHA = (() => {
   }
 })();
 let lastSelfUpdateCheck = 0;
+// box-self-update-persist-skip-reason: capture WHY maybeSelfUpdate skipped an update so the healthy-tick
+// heartbeat surfaces the cause on the Control Tower box tile (a red 'self-update stuck for Xh' otherwise
+// gives no cause without SSHing to the box). Set at every early-return branch below; cleared to null on
+// the fully-current fast-path + the successful update path. The poll loop passes this into writeHeartbeat.
+let selfUpdateSkipReason: string | null = null;
 
 // Control Tower migration-drift check (control-tower-migration-drift-check P1): a periodic box job
 // that diffs every migration-created table against the live public schema. Runs here (not as an
@@ -6334,11 +6339,15 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   const fetched = sh("git", ["fetch", "origin", "main"]);
   if (fetched.code !== 0) {
     console.error(`[self-update] git fetch failed: ${fetched.err.slice(0, 200)}`);
+    selfUpdateSkipReason = `self-update skipped: git fetch failed (${fetched.err.slice(0, 80).trim() || "unknown"})`;
     return;
   }
   const local = sh("git", ["rev-parse", "HEAD"]).out.trim();
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
-  if (!local || !remote || local === remote) return; // current → no-op (no thrash)
+  if (!local || !remote || local === remote) {
+    selfUpdateSkipReason = null; // fully current → no cause to surface
+    return;
+  }
 
   // HONOR the watchdog quarantine (worker-self-update-respects-quarantine): never advance ONTO a SHA the
   // watchdog has rolled away from. If origin/main's tip is the quarantined (known-bad) SHA, HOLD on the
@@ -6347,10 +6356,11 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // returns null on any missing/garbage marker, so this guard is a no-op unless a quarantine is clearly set.
   const pin = process.env.WORKER_PIN_SHA?.trim() || readQuarantinedSha();
   if (pin && shaMatches(remote, pin)) {
-    const via = process.env.WORKER_PIN_SHA?.trim() ? "WORKER_PIN_SHA" : "the watchdog";
+    const via = process.env.WORKER_PIN_SHA?.trim() ? "WORKER_PIN_SHA" : "watchdog";
     console.warn(
-      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via} — holding on ${local.slice(0, 8)} (good); fix main to release`,
+      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${local.slice(0, 8)} (good); fix main to release`,
     );
+    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${local.slice(0, 8)}`;
     return;
   }
 
@@ -6367,7 +6377,11 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // src/lib/) is FAR behind — then take the max-staleness override rather than let a saturated box run stale.
   if (activeBuilds !== 0) {
     const changed = sh("git", ["diff", "--name-only", local, remote]).out;
-    if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) return; // busy + (non-box OR small lag) → wait for idle
+    if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
+      const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
+      selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
+      return; // busy + (non-box OR small lag) → wait for idle
+    }
   }
 
   const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
@@ -6378,13 +6392,18 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   const reset = sh("git", ["reset", "--hard", "origin/main"]);
   if (reset.code !== 0) {
     console.error(`[self-update] git reset failed: ${reset.err.slice(0, 200)}`);
+    selfUpdateSkipReason = `self-update skipped: git reset failed (${reset.err.slice(0, 80).trim() || "unknown"})`;
     return;
   }
   if (depsChanged) {
     console.log("[self-update] package-lock.json changed → npm ci");
     const ci = sh("npm", ["ci"], { timeout: 10 * 60 * 1000 });
-    if (ci.code !== 0) console.error(`[self-update] npm ci failed (continuing): ${ci.err.slice(-300)}`);
+    if (ci.code !== 0) {
+      console.error(`[self-update] npm ci failed (continuing): ${ci.err.slice(-300)}`);
+      selfUpdateSkipReason = `self-update warning: npm ci failed on ${fromTo} (continuing anyway)`;
+    }
   }
+  selfUpdateSkipReason = null; // successful update → clear before exit (fresh worker starts with a clean slate)
   await writeHeartbeat(0, "updating", `self-update ${fromTo} (idle)`);
   console.log(`[self-update] reset to ${remote.slice(0, 8)} → exiting for systemd restart`);
   process.exit(0);
@@ -16742,7 +16761,10 @@ async function main() {
 
       // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
       const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since, phase: v.phase, account: laneAccount.has(job_id) ? accountLabel("", laneAccount.get(job_id)!) : null, resumed: v.resumed }));
-      await writeHeartbeat(active.size, "healthy", undefined, lanes);
+      // box-self-update-persist-skip-reason: surface WHY maybeSelfUpdate skipped on the box tile (Control
+      // Tower's evalWorker already puts row.detail into the red-tile payload). Null on the fully-current
+      // fast-path so a green tile stays green; a set reason flips 'stuck for 1h' → 'stuck for 1h · <cause>'.
+      await writeHeartbeat(active.size, "healthy", selfUpdateSkipReason ?? undefined, lanes);
 
       // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget
       // on its ~30 min cadence, with an in-flight guard so a slow DB read never overlaps or stalls the
