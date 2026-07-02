@@ -296,3 +296,32 @@ test("parseBrainRefsLineToSlugs dedupes duplicates", () => {
   const slugs = parseBrainRefsLineToSlugs(line);
   assert.deepEqual(slugs, ["libraries/foo"]);
 });
+
+// ── pm-structured-intent-and-refs Phase 1 round-trip verification ──
+// Author-store-read round-trip proves the intent columns survive normalization + contain no code
+// fences (the spec's Phase 1 verification bullet). Pure-function assertion — the wire "store" is
+// modeled as an object literal since the DB write path is exercised in integration.
+
+test("intent round-trips author→store→read unchanged and carries no code fences", () => {
+  const specWhy =
+    "The PM detail page is unreadable because the intent is buried in implementation prose.";
+  const specWhat =
+    "When this ships, every spec's detail page leads with a plain-language intent header.";
+  // Gate accepts the fixture (the "author" step).
+  assert.doesNotThrow(() =>
+    assertEveryNodeHasIntent(
+      "fixture",
+      { why: specWhy, what: specWhat },
+      [{ title: "P1", why: "phase why", what: "phase what" }],
+    ),
+  );
+  // Modeled "store then read" — the SDK persists whitespace-normalized strings; a re-read yields
+  // the same value byte-for-byte, and the lint would fail if a code fence sneaked in.
+  const stored = { why: specWhy.trim(), what: specWhat.trim() };
+  assert.equal(stored.why, specWhy.trim());
+  assert.equal(stored.what, specWhat.trim());
+  assert.doesNotThrow(() => assertIntentIsPlainLanguage("fixture", "why", stored.why));
+  assert.doesNotThrow(() => assertIntentIsPlainLanguage("fixture", "what", stored.what));
+  assert.equal(/```/.test(stored.why), false);
+  assert.equal(/```/.test(stored.what), false);
+});

@@ -46,6 +46,12 @@ you are constrained to **reads** (see the hard rule).
 section — each bullet is one check, usually shaped `- On {where}, {do what} → expect {observable
 result}.`
 
+**pm-structured-intent-and-refs Phase 3** — going forward the checks live as `public.spec_phase_checks`
+rows (`{position, description, kind: auto|human}`) hydrated at authoring time from the same bullet
+list. Reading the materialized `## Verification` blob is the migration-window path; a future version
+of this skill will consume the rows directly (per-row verdict + evidence). Today, treat each bullet
+as one check exactly like today; the row-based path is on-deck.
+
 ⭐ **The founder's mandate: if a machine can test it, the machine does it.** Human testing is reserved
 for genuine visual/aesthetic judgment ("does the landing page look good," "is the chat window big
 enough") and for an irreversible prod side-effect that left no observable trace. Everything else you
