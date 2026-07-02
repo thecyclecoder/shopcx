@@ -16,7 +16,9 @@ The DB-driven, supervisable competitor set — replaces the hardcoded `COMPETITO
 | `pdp_urls` | `text[]` | — | default: `'{}'` · canonical PDP/lander URLs (breadth source). |
 | `category` | `text` | ✓ | Category overlap. |
 | `spend_signal` | `text` | ✓ | Freeform ad-spend/longevity signal ('high', 'recurs in 3 sweeps', est. spend). |
-| `source` | `text` | — | default: `'manual'` · CHECK ∈ `llm` \| `category_sweep` \| `manual` |
+| `source` | `text` | — | default: `'manual'` · CHECK ∈ `llm` \| `category_sweep` \| `manual` \| `whitelisted` |
+| `search_keyword` | `text` | ✓ | The EXACT AdLibrary keyword the sweep searches (verbatim, NOT `normalizeBrand`-flattened). Whitelisted-page rows set this to the raw advertiser/page name (e.g. `Holistic Health Finds`) because the AdLibrary API matches page names literally. Normal competitors leave it null and the sweep falls back to `brand`. |
+| `runs_ads_for` | `uuid` | ✓ | For `source='whitelisted'` rows, the competitor whose store this page fronts (destination-domain join target) → `competitors.id` · ON DELETE SET NULL. Null for real brand competitors. |
 | `status` | `text` | — | default: `'proposed'` · CHECK ∈ `proposed` \| `approved` \| `rejected` |
 | `evidence` | `text` | ✓ | Why they compete — the supervisable evidence shown before approval. |
 | `reviewed_by` | `uuid` | ✓ | → `auth.users`.id · ON DELETE SET NULL (approve/reject audit). |
@@ -34,6 +36,7 @@ The DB-driven, supervisable competitor set — replaces the hardcoded `COMPETITO
 **Out (this → others):**
 - `workspace_id` → [[workspaces]].`id`
 - `product_id` → [[products]].`id`
+- `runs_ads_for` → `competitors`.`id` (self-FK; the fronted competitor for whitelisted pages)
 - `reviewed_by` → `auth.users`.`id`
 
 ## Common queries
@@ -57,6 +60,8 @@ const { data } = await admin.from("competitors")
 
 - **Only `status='approved'` rows enter the live sweep** (north-star: the discovery agent writes `proposed` only; the owner approves). A `proposed`/`rejected` competitor never silently sweeps.
 - **`brand` is the AdLibrary keyword** — keep it a compact lowercase handle (`everydaydose`, not `EverydayDose.com`). `normalizeBrand()` enforces this on writes; dedup is by this normalized value, so cross-naming variants (`RYZE Superfoods` vs `ryzesuperfoods`) may not collapse perfectly — the owner review catches strays.
+- **`search_keyword` overrides `brand` for the sweep read** — a `source='whitelisted'` row stores the EXACT advertiser/page name in `search_keyword` because the AdLibrary API matches literally (`"Holistic Health Finds"` → 59 ads; the normalized `holistichealthfinds` → 0). The sweep read uses `search_keyword ?? brand`. Normal (`llm`/`category_sweep`/`manual`) competitors leave `search_keyword` null.
+- **`source='whitelisted'`** = an affiliate/advertorial/creator page fronting a real competitor. `runs_ads_for` points at the fronted competitor row (the destination-domain join target). See [[../specs/whitelisted-page-auto-tracking]].
 - **The 11 legacy seeds** were migrated in as `source='manual'`, `status='approved'`, `product_id=null` for every ad-tool workspace (those with `ad_campaigns` rows).
 
 ## Read/written by
