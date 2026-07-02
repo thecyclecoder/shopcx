@@ -1,8 +1,12 @@
 # inngest/spec-review-cron
 
-The **periodic enqueuer** for the box-hosted **spec-review agent** ([[../specs/spec-review-agent]]). Every newly authored spec lands in the `in_review` column — BEFORE `planned` — and the build dispatch is hard-stopped behind it. This cron is the trigger that drains the queue: whenever ≥1 spec is parked in `in_review` (per workspace), it inserts one `agent_jobs` row `kind='spec-review'` so the box's spec-review lane (`scripts/builder-worker.ts → runSpecReviewJob`) picks it up and reviews every in-review spec on Max.
+The **periodic enqueuer** for the box-hosted **spec-review agent** ([[../specs/spec-review-agent]]). Every newly authored spec lands in the `in_review` column — BEFORE `planned` — and the build dispatch is hard-stopped behind it. This cron drains the queue: whenever ≥1 in_review spec LACKS a current Vale review (per workspace), it inserts one `agent_jobs` row `kind='spec-review'` so the box's spec-review lane (`scripts/builder-worker.ts → runSpecReviewJob`) picks it up and reviews every unreviewed spec on Max.
+
+[[../specs/vale-reactive-spec-review]] Phase 1 gated the enqueue on "lacks a current Vale review" (`status='in_review'` AND `deferred=false` AND `vale_pass !== true`): the durable review signal keys to spec CONTENT, so a tick that finds every in_review spec already Vale-passed no-ops for free and no Max session is spent re-reviewing content Vale already cleared. A re-author / send-back NULLs `vale_pass` via `markSpecCardBackToReview`, which re-admits the spec into the pool.
 
 Same enqueue-only shape as [[spec-test-cron]] / [[triage-escalations]] — the box has no internal ticker, so an Inngest cron is the trigger. **This cron does NO reasoning** — purely the enqueue. The box keeps its secrets so the agent can read the prod DB; the WORKER is the only component that mutates state.
+
+[[../specs/vale-reactive-spec-review]] Phase 2 added a REACTIVE partner — [[spec-review-on-mutate]] — that fires the SAME gated helper the moment a spec is authored or re-opened (via events sent from `author-spec.ts` and `spec-card-state.ts` `markSpecCardBackToReview`). This cron is now the **catch-up backstop** for dropped events / cold workspaces / a workspace's first-ever `agent_jobs` row — same relationship as [[spec-test-on-ship]] + [[spec-test-cron]].
 
 **File:** `src/lib/inngest/spec-review-cron.ts` (registered in `src/lib/inngest/registered-functions.ts`)
 
@@ -15,7 +19,9 @@ Same enqueue-only shape as [[spec-test-cron]] / [[triage-escalations]] — the b
 
 ## What it enqueues
 
-For each build-console workspace (any workspace with an [[../tables/agent_jobs]] row), the cron calls `enqueueSpecReviewIfDue(workspaceId)` ([[../libraries/agents-spec-review]]). That helper checks `spec_card_state` for rows with `status='in_review'` (the `effectiveStatusFromState` rollup honors `flags.deferred`, so a deferred row never slips into the pool). If there's ≥1 in_review spec AND no in-flight `spec-review` job for the workspace, it inserts a single `queued` `agent_jobs` row `kind='spec-review'` (`spec_slug='spec-review-sweep'`, a sentinel — Vale sweeps the queue, not one spec).
+For each build-console workspace (any workspace with an [[../tables/agent_jobs]] row), the cron calls `enqueueSpecReviewIfDue(workspaceId)` ([[../libraries/agents-spec-review]]). That helper reads `public.specs` for rows with `status='in_review'` AND `deferred=false` AND `vale_pass !== true` (the "unreviewed" pool — [[../specs/vale-reactive-spec-review]] Phase 1). If there's ≥1 unreviewed spec AND no in-flight `spec-review` job for the workspace, it inserts a single `queued` `agent_jobs` row `kind='spec-review'` (`spec_slug='spec-review-sweep'`, a sentinel — Vale sweeps the queue, not one spec).
+
+A workspace whose in_review pool is non-empty but fully Vale-passed gets `{enqueued:false, reason:'no-unreviewed-specs'}` — those specs are parked for Ada's disposition lane, not Vale's queue, so no Max session is spent re-reviewing content Vale already cleared. `no-in-review-specs` is the distinct "empty pool" reason.
 
 ## Dedupe
 
@@ -49,7 +55,7 @@ All three converge on `enqueueSpecReviewIfDue`'s one-in-flight dedupe, so they n
 ## Tables read (not written)
 
 - [[../tables/agent_jobs]] (workspace discovery + in-flight dedupe)
-- `spec_card_state` (the `in_review` queue per workspace)
+- [[../tables/specs]] (the in_review queue per workspace — `status='in_review'`, `deferred=false`, `vale_pass !== true`)
 
 ## Contrast with `spec-test-cron`
 
@@ -57,4 +63,4 @@ Same enqueue-only shape, but **shorter cadence** (15 min vs daily) because spec-
 
 ---
 
-[[../README]] · [[../integrations/inngest]] · [[../libraries/agents-spec-review]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]] · [[../specs/spec-review-agent]] · [[../project-management]]
+[[../README]] · [[../integrations/inngest]] · [[../libraries/agents-spec-review]] · [[spec-review-on-mutate]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]] · [[../specs/spec-review-agent]] · [[../specs/vale-reactive-spec-review]] · [[../project-management]]

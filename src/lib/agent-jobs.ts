@@ -552,6 +552,99 @@ export async function enqueueSpecTestIfDue(
 }
 
 /**
+ * bo-reactive-gated-build-enqueue Phase 1 — the SINGLE chokepoint for enqueueing a `kind='build'`
+ * agent_jobs row for a spec. Parallel of Vale's `enqueueSpecReviewIfDue` (src/lib/agents/spec-review.ts)
+ * and Bo's shipped-lane `enqueueSpecTestIfDue` (above): one cheap `getSpec` read, gate on the same
+ * BUILD-ELIGIBILITY predicate Ada's front-door lanes apply (`specReviewDone` + not deferred + not
+ * shipped + auto_build != false + blockers cleared), plus a one-in-flight guard so a duplicate call
+ * no-ops instead of stacking a redundant row.
+ *
+ * Every reactive/agent-driven enqueue path (autoQueueUnblockedBy, Phase-2 `buildOnEligible` consumer,
+ * Ada's own lanes as an optional collapse) MUST route through here so Bo never gets a `queued` row
+ * for an un-Vale-passed / deferred / blocked spec. The claim-time backstops (claimHeldForUnreviewedSpec
+ * in builder-worker.ts + evaluateClaimTimeBuildGate) stay in place as the last line of defense — but
+ * this stops the premature row from ever appearing on the CEO's board.
+ *
+ * DELIBERATE OVERRIDES (raw `.insert({ kind:'build' })`) that intentionally bypass this gate MUST
+ * carry an inline `// intentional override: <why>` comment. Known overrides today:
+ *   - pre-merge-fix.ts (regression-fix spec auto-authored on a pre-merge test RED — the fix ships fast
+ *     regardless of Vale, review lands after);
+ *   - director-directives.ts `enqueuePriorityBuild` (CEO-approved directive);
+ *   - needs-attention-route.ts (auto-authored child spec from a parked build — same fix-flow speed);
+ *   - agent-jobs.ts `queueNextChainedPhase` (chain continuation — the prior phase already merged, so
+ *     the spec has passed Vale by construction);
+ *   - agent-grader.ts (director-authored coaching-hardening spec);
+ *   - Ada's own lanes in platform-director.ts already gate on `specReviewDone`, so their raw inserts
+ *     are equivalent to routing through here.
+ *
+ * Distinct `reason` values so a cron/heartbeat log stays legible: 'spec-not-found', 'already-shipped',
+ * 'deferred', 'in-review-pending-disposition', 'not-review-passed', 'auto-build-off', 'blocked',
+ * 'in-flight'.
+ */
+export async function enqueueBuildIfDue(
+  workspaceId: string,
+  slug: string,
+  opts?: { createdBy?: string | null; instructions?: string | null },
+): Promise<{ enqueued: boolean; reason?: string; jobId?: string }> {
+  const admin = createAdminClient();
+
+  const spec = await getSpec(slug, workspaceId);
+  if (!spec) return { enqueued: false, reason: "spec-not-found" };
+  const card = spec.card;
+
+  // Order matches Ada's `isBuildableSpec` predicate (platform-director.ts:610) — a shipped spec is
+  // "already done", a deferred one is parked, and only THEN do we test the review-pass gate. Each
+  // check emits a distinct reason so the heartbeat log names the exact eligibility miss.
+  if (card.status === "shipped") return { enqueued: false, reason: "already-shipped" };
+  if (card.status === "deferred") return { enqueued: false, reason: "deferred" };
+  // fix-bo-reactive-gated-build-enqueue — `in_review` is the ONE lifecycle state where Vale has
+  // (or may have) passed but Ada hasn't yet made a disposition call (planned vs deferred). The
+  // Phase-2 reactive event fires from `markSpecCardValePassed` the moment Vale flips
+  // valeReviewPassed=true, but the spec's status STAYS `in_review` until Ada's disposition sweep
+  // writes `planned`/`deferred`. Without this gate the consumer would enqueue a build on the Vale
+  // pass alone — contradicting the whole "Vale reviews → Ada disposes → THEN build" flow that the
+  // spec-review lane is meant to enforce. `applyAdaDisposition('planned')` re-fires the event, so
+  // no eligibility signal is lost: the build enqueues once Ada actually dispositions the spec.
+  if (card.status === "in_review") return { enqueued: false, reason: "in-review-pending-disposition" };
+  // MIRROR of specReviewDone(card) in src/lib/agents/platform-director.ts:209-211 — re-probed inline
+  // here to avoid a circular import (platform-director already imports enqueueSpecTestIfDue from
+  // this file). Keep the two in lockstep; the durable signal is `specs.vale_review_passed_at`
+  // (surfaced as `card.valeReviewPassed`). The `status==='shipped'` half of specReviewDone is already
+  // covered by the early return above, so the local check reduces to the vale_pass flag.
+  if (card.valeReviewPassed !== true) return { enqueued: false, reason: "not-review-passed" };
+  if (card.autoBuild === false) return { enqueued: false, reason: "auto-build-off" };
+  if (card.blockedBy.some((b) => !b.cleared)) return { enqueued: false, reason: "blocked" };
+
+  // One-in-flight guard — mirrors enqueueSpecReviewIfDue's shape (spec-review.ts:100-107). A build
+  // already carrying this spec (queued / queued_resume / claimed / building) means a duplicate call
+  // is a no-op, never a stack.
+  const { data: inflight } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .in("status", ["queued", "queued_resume", "building", "claimed"])
+    .limit(1);
+  if (inflight && inflight.length) return { enqueued: false, reason: "in-flight" };
+
+  const { data: inserted, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "build",
+      status: "queued",
+      created_by: opts?.createdBy ?? null,
+      instructions: opts?.instructions ?? null,
+    })
+    .select("id")
+    .single();
+  if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
+  return { enqueued: true, jobId: inserted?.id };
+}
+
+/**
  * Pre-merge spec-test enqueue ([[../specs/spec-test-on-preview-pre-merge]] Phase 1) — the SIBLING of
  * `enqueueSpecTestIfDue` for the PRE-MERGE lane. When a `claude/*` build reaches a READY per-build
  * preview (its `preview_url` is set by [[per-build-vercel-preview-deploys]] Phase 2) and the branch
@@ -1781,6 +1874,8 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
   for (const dep of dependents) {
     // Dedupe: only auto-queue a spec with NO build job yet (any status). Once one exists — auto-queued
     // earlier, manually built, or in-flight — skip. This is the "one auto-queue per spec" guarantee.
+    // (The wider "any status" dedupe stays here as a superset of enqueueBuildIfDue's ACTIVE-only guard
+    //  — after this spec ships once, we don't re-queue on a re-run of the unblock reconcile.)
     const { data: existing } = await admin
       .from("agent_jobs")
       .select("id")
@@ -1790,15 +1885,17 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
       .limit(1);
     if (existing && existing.length) continue;
 
-    const { error } = await admin.from("agent_jobs").insert({
-      workspace_id: workspaceId,
-      spec_slug: dep.slug,
-      kind: "build",
-      status: "queued",
-      created_by: null,
+    // bo-reactive-gated-build-enqueue Phase 1: route through the gated chokepoint instead of a raw
+    // insert. Previously we filtered only `autoBuild!==false` + blockers cleared + dedup, so an
+    // unblocked-but-un-Vale-passed dependent got a `queued` build row that the claim-gate then held
+    // — the premature row the CEO saw on the board. enqueueBuildIfDue re-checks the FULL eligibility
+    // gate (specReviewDone + not-deferred + not-shipped + auto_build + blockers + in-flight); if the
+    // dependent hasn't passed Vale yet the enqueue no-ops here, and Phase 2's reactive
+    // `build/spec-build-eligible` event re-fires when Vale passes.
+    const res = await enqueueBuildIfDue(workspaceId, dep.slug, {
       instructions: `Auto-queued by spec-blockers: prerequisite ${shippedSlug} shipped, clearing the last blocker.`,
     });
-    if (!error) queued.push(dep.slug);
+    if (res.enqueued) queued.push(dep.slug);
   }
   return queued;
 }
@@ -1880,6 +1977,12 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
   // resume is purely an optimization.
   const resumeCandidate = await resolveChainedResumeCandidate(admin, workspaceId, slug, spec);
 
+  // intentional override of enqueueBuildIfDue (bo-reactive-gated-build-enqueue Phase 1): a chained
+  // phase continuation — the PRIOR phase just merged, so this spec passed Vale by construction (a
+  // build only merges after review + all gates). Routing through the gated chokepoint here would
+  // re-check the review-pass gate redundantly AND drop the session-resume/chain_phases fields the
+  // helper doesn't accept. The dedup + in-flight guards above are the enqueueBuildIfDue equivalents
+  // for this narrower "same phase already queued" case.
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: workspaceId,
     spec_slug: slug,

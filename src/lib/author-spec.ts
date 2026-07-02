@@ -23,6 +23,7 @@
 import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
+import { inngest } from "@/lib/inngest/client";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
 function isPhaseHeading(l: string): boolean {
@@ -571,6 +572,14 @@ export async function authorSpecRowStructured(
       summary: spec.summary,
       phases: phaseBodies,
     });
+    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (a fresh
+    // spec always lands in `in_review`; a re-author already re-opens through the writer above). The
+    // consumer routes through the SAME gated `enqueueSpecReviewIfDue`, so a re-author of already-passed
+    // content that leaves `vale_pass=true` no-ops for free (no Max session). Errors swallowed — the 15-min
+    // cron backstop covers a dropped send.
+    void inngest
+      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
+      .catch(() => {});
     return true;
   } catch (e) {
     console.warn(
@@ -690,6 +699,12 @@ export async function authorSpecRowFromMarkdown(
         verification: phaseBodies[i]?.verification ?? null,
       })),
     });
+    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (same
+    // rationale as the structured path — the gated helper no-ops if the current content already carries
+    // vale_pass=true). Errors swallowed — the 15-min cron backstop covers a dropped send.
+    void inngest
+      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
+      .catch(() => {});
     return true;
   } catch (e) {
     console.warn(

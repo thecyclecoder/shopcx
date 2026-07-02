@@ -428,6 +428,7 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
     // Full AdLibrary payload (ad-creative-scout Phase 1): destination (landing-page-scout bridge),
     // copy, CTA, spend, engagement, channel.
     destination_domain: ad.destination_domain,
+    landing_page_url: ad.landing_page_url,
     has_store_url: ad.has_store_url,
     call_to_action: ad.call_to_action,
     body: ad.body,

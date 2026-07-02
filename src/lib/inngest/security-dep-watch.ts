@@ -32,20 +32,24 @@ export const securityDepWatch = inngest.createFunction(
       return r;
     });
 
-    // vault-post-merge-diff-backstop Phase 1 — second net for the post-merge diff security review. The
-    // cheap [[security-diff-backstop-cron]] (every 15 min) is the PRIMARY re-sweep; the platform-director
-    // standing pass is a third net; this daily cron is the fallback so a full Inngest / box outage that
-    // takes both above out still can't leave merged commits unreviewed indefinitely. The enqueue itself is
-    // idempotent (14d SHA dedup inside enqueueSecurityReviewJob).
-    const diffBackstop = await step.run("enqueue-diff-if-due", async () => {
-      const admin = createAdminClient();
-      return await enqueueSecurityDiffIfDue(admin);
+    // fix-vault-post-merge-diff-backstop-7fbde0 — the POST-MERGE `diff` security backstop's daily leg
+    // (the platform-director standing pass is the fast leg). Walks `spec_status_history` for
+    // `actor='merge:<sha>'` rows in the 14d window (audit-authoritative, survives fold) and (idempotently
+    // via `enqueueSecurityReviewDiff`'s SHA dedup) enqueues the diff review for any merge SHA that has
+    // no security-review job yet. Best-effort — never breaks the heartbeat.
+    const diffBackstop = await step.run("enqueue-diff-backstop", async () => {
+      try {
+        const admin = createAdminClient();
+        return await enqueueSecurityDiffIfDue(admin);
+      } catch (err) {
+        return { enqueued: [], scanned: 0, resolved: 0, error: err instanceof Error ? err.message : String(err) };
+      }
     });
 
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("security-dep-watch", { ok: true, produced: { depWatch: result, diffBackstop } });
+      await emitCronHeartbeat("security-dep-watch", { ok: true, produced: { ...result, diff_backstop: diffBackstop } });
     });
 
-    return { depWatch: result, diffBackstop };
+    return { ...result, diff_backstop: diffBackstop };
   },
 );

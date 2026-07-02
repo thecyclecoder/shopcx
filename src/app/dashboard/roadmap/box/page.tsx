@@ -556,6 +556,10 @@ export default function BoxPage() {
   const [paused, setPaused] = useState<Job[]>([]);
   const [failed, setFailed] = useState<FailedJob[]>([]);
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
+  // box-failed-build-supersede-and-dismiss Phase 2 — per-jobId busy flag for the Dismiss button so
+  // a double-click doesn't fire two writes and the card can still be interacted with while another
+  // failed card is dismissing.
+  const [dismissing, setDismissing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [drain, setDrain] = useState<{ draining: boolean; requested_by: string | null } | null>(null);
   const [drainBusy, setDrainBusy] = useState(false);
@@ -598,6 +602,26 @@ export default function BoxPage() {
       /* leave it; the next poll reflects real state */
     } finally {
       setRetrying((r) => ({ ...r, [slug]: false }));
+    }
+  };
+
+  // box-failed-build-supersede-and-dismiss Phase 2 — clear a stuck failed card without a manual DB
+  // edit. Flips the target agent_jobs row to `completed` (see /api/roadmap/box/dismiss-failed); on
+  // success we drop it from the local `failed` array optimistically so the card disappears without
+  // waiting for the 5s poll.
+  const dismiss = async (jobId: string) => {
+    setDismissing((d) => ({ ...d, [jobId]: true }));
+    try {
+      const res = await fetch("/api/roadmap/box/dismiss-failed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      if (res.ok) setFailed((f) => f.filter((j) => j.id !== jobId));
+    } catch {
+      /* next poll reflects real state */
+    } finally {
+      setDismissing((d) => ({ ...d, [jobId]: false }));
     }
   };
 
@@ -770,6 +794,16 @@ export default function BoxPage() {
                         className="ml-auto inline-flex items-center rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
                       >
                         {retrying[j.spec_slug] ? "Retrying…" : "↻ Retry build"}
+                      </button>
+                      {/* box-failed-build-supersede-and-dismiss Phase 2 — one-tap Dismiss so a ghost
+                          card can be cleared without a manual DB edit. Flips the row to `completed`
+                          (see POST /api/roadmap/box/dismiss-failed), owner-gated. */}
+                      <button
+                        onClick={() => dismiss(j.id)}
+                        disabled={dismissing[j.id]}
+                        className="inline-flex items-center rounded-md border border-red-300 bg-white/70 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-900/60 dark:bg-transparent dark:text-red-300 dark:hover:bg-red-900/30"
+                      >
+                        {dismissing[j.id] ? "Dismissing…" : "Dismiss"}
                       </button>
                     </div>
                     {j.detail && (

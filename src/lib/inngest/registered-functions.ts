@@ -115,6 +115,7 @@ import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { triageEscalationsCron } from "@/lib/inngest/triage-escalations";
 import { specTestCron } from "@/lib/inngest/spec-test-cron";
 import { specReviewCron } from "@/lib/inngest/spec-review-cron";
+import { specReviewOnMutate } from "@/lib/inngest/spec-review-on-mutate";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
 import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
@@ -133,6 +134,7 @@ import { claudeStatusPollCron } from "@/lib/inngest/claude-status-poll-cron";
 import { deployGuardianCron } from "@/lib/inngest/deploy-guardian-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
+import { buildOnEligible } from "@/lib/inngest/build-on-eligible";
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
 import { securityDiffBackstopCron } from "@/lib/inngest/security-diff-backstop-cron";
 
@@ -257,6 +259,7 @@ export const registeredInngestFunctions = [
   triageEscalationsCron,
   specTestCron,
   specReviewCron,
+  specReviewOnMutate,
   portalActionHealer,
   slackRoadmapNotify,
   brainIndexRefresh,
@@ -277,6 +280,7 @@ export const registeredInngestFunctions = [
   loopHeartbeatsPrune,
   dailyDigestCron,
   platformDirectorCron,
+  buildOnEligible,
   securityDepWatch,
   securityDiffBackstopCron,
 ];

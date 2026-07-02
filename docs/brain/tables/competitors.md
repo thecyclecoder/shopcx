@@ -65,6 +65,7 @@ const { data } = await admin.from("competitors")
 - [[../inngest/creative-finder]] — reads approved seeds; writes category-sweep proposals.
 - [[../inngest/competitor-scout]] — the discovery pass writer.
 - `src/app/api/ads/competitors` (+ `[id]`) — owner list / discover trigger / approve-reject.
+- [[../dashboard/research__competitors]] — the owner-facing, product-filtered, read-only browse surface under Research › Competitors (reads the API above; never mutates).
 
 ---
 

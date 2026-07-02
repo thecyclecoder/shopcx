@@ -316,10 +316,13 @@ let migrationDriftInFlight = false;
 // rationale as migration-drift. In-flight-guarded + gated so they never overlap or stall the poll.
 const DB_HEALTH_SLOWQ_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const DB_HEALTH_SIZE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+const DB_HEALTH_INSTANCE_INTERVAL_MS = 15 * 60 * 1000; // ~15 min — active-incident cadence (db-health-instance-saturation-detector P1)
 let lastDbHealthSlowQ = 0; // 0 ⇒ run on first poll so there's a beat right away.
 let lastDbHealthSize = 0;
+let lastDbHealthInstance = 0;
 let dbHealthSlowQInFlight = false;
 let dbHealthSizeInFlight = false;
+let dbHealthInstanceInFlight = false;
 const DB_HEALTH_MAX_PROPOSALS_PER_PASS = 5; // don't flood: surface at most the top-N findings/pass.
 const DB_HEALTH_TREND_WINDOW_DAYS = 21; // Phase 2: trailing size-history window for the trend projection.
 
@@ -2936,6 +2939,205 @@ async function runDbHealthSizeJob(): Promise<void> {
   }
 }
 
+// The INSTANCE-saturation pass (db-health-instance-saturation-detector P1): pg_stat_database +
+// pg_stat_activity + pg_roles.rolconfig → analyzeInstanceHealth. Fills the blind spot the per-query
+// slow-query pass has for instance-level saturation (the 2026-07-02 incident: xact_rollback 7.43%,
+// 883 GB temp_bytes, MEMORY 79%, `authenticated` statement_timeout=8s catching queries under load).
+// Writes a kind:'cron' beat under DB_HEALTH_INSTANCE_LOOP_ID carrying the findings for the panel.
+// Zero DDL. NEVER throws — a pass failure must not break the poll loop. Phase 1 does NOT surface
+// findings through enqueueDbHealthProposal (Phase 2 wires that); the beat's `produced` carries them.
+async function runDbHealthInstanceJob(): Promise<void> {
+  const startedAt = Date.now();
+  const mod = await import("../src/lib/control-tower/db-health");
+  let c: import("pg").Client | null = null;
+  try {
+    c = await dbHealthPgClient();
+    if (!c) {
+      await writeCronHeartbeat(mod.DB_HEALTH_INSTANCE_LOOP_ID, false, { status: "skipped", reason: "no DB connection on this host" }, Date.now() - startedAt, "db-health instance pass skipped — no pooler");
+      return;
+    }
+
+    // 1) pg_stat_database — commit/rollback/deadlocks/temp/blocks for THIS database.
+    let statDb: {
+      xactCommit: number; xactRollback: number; deadlocks: number;
+      tempFiles: number; tempBytes: number; blksHit: number; blksRead: number;
+    };
+    try {
+      const res = await c.query(
+        `select coalesce(xact_commit, 0)::bigint  as xact_commit,
+                coalesce(xact_rollback, 0)::bigint as xact_rollback,
+                coalesce(deadlocks, 0)::bigint    as deadlocks,
+                coalesce(temp_files, 0)::bigint   as temp_files,
+                coalesce(temp_bytes, 0)::bigint   as temp_bytes,
+                coalesce(blks_hit, 0)::bigint     as blks_hit,
+                coalesce(blks_read, 0)::bigint    as blks_read
+           from pg_stat_database
+          where datname = current_database()`,
+      );
+      const r = (res.rows[0] ?? {}) as Record<string, unknown>;
+      statDb = {
+        xactCommit: Number(r.xact_commit ?? 0),
+        xactRollback: Number(r.xact_rollback ?? 0),
+        deadlocks: Number(r.deadlocks ?? 0),
+        tempFiles: Number(r.temp_files ?? 0),
+        tempBytes: Number(r.temp_bytes ?? 0),
+        blksHit: Number(r.blks_hit ?? 0),
+        blksRead: Number(r.blks_read ?? 0),
+      };
+    } catch (e) {
+      await writeCronHeartbeat(mod.DB_HEALTH_INSTANCE_LOOP_ID, false, { status: "skipped", reason: `pg_stat_database read failed: ${e instanceof Error ? e.message : String(e)}` }, Date.now() - startedAt, "db-health instance pass skipped — pg_stat_database unavailable");
+      return;
+    }
+
+    // 2) pg_roles.rolconfig — the `authenticated` role's statement_timeout (the 8s ceiling that
+    //    kills queries under load in the 2026-07-02 incident). null when unset.
+    let authenticatedStatementTimeoutMs: number | null = null;
+    try {
+      const res = await c.query(
+        `select rolconfig
+           from pg_roles
+          where rolname = 'authenticated'`,
+      );
+      const cfg = ((res.rows[0] ?? {}) as Record<string, unknown>).rolconfig as string[] | null;
+      if (Array.isArray(cfg)) {
+        for (const line of cfg) {
+          const m = /^statement_timeout=(.+)$/i.exec(line);
+          if (m) {
+            authenticatedStatementTimeoutMs = parseStatementTimeoutMs(m[1]);
+            break;
+          }
+        }
+      }
+    } catch {
+      /* best-effort: null when not readable */
+    }
+
+    // 3) pg_stat_activity — active + waiting backends, max_connections, and the count of live
+    //    queries past a fraction of the `authenticated` statement_timeout (the pressure signal
+    //    BEFORE the rollback lands). Excludes idle / this backend / autovacuum.
+    let activeBackends = 0, waitingBackends = 0, maxConnections = 0, statementsNearTimeout = 0;
+    try {
+      const actRes = await c.query(
+        `select
+           count(*) filter (where state = 'active' and pid <> pg_backend_pid())::int as active_backends,
+           count(*) filter (where wait_event_type = 'Lock' and pid <> pg_backend_pid())::int as waiting_backends
+         from pg_stat_activity`,
+      );
+      const a = (actRes.rows[0] ?? {}) as Record<string, unknown>;
+      activeBackends = Number(a.active_backends ?? 0);
+      waitingBackends = Number(a.waiting_backends ?? 0);
+      const mcRes = await c.query(`select current_setting('max_connections')::int as max_connections`);
+      maxConnections = Number(((mcRes.rows[0] ?? {}) as Record<string, unknown>).max_connections ?? 0);
+      if (authenticatedStatementTimeoutMs != null) {
+        const headroomMs = Math.round(authenticatedStatementTimeoutMs * (
+          (await import("../src/lib/control-tower/db-health")).INSTANCE_TIMEOUT_HEADROOM_FRACTION
+        ));
+        const nearRes = await c.query(
+          `select count(*)::int as n
+             from pg_stat_activity
+            where state = 'active'
+              and pid <> pg_backend_pid()
+              and query_start is not null
+              and now() - query_start > ($1 || ' milliseconds')::interval`,
+          [String(headroomMs)],
+        );
+        statementsNearTimeout = Number(((nearRes.rows[0] ?? {}) as Record<string, unknown>).n ?? 0);
+      }
+    } catch {
+      /* best-effort: partial signals are still worth beating */
+    }
+
+    const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
+      xactCommit: statDb.xactCommit,
+      xactRollback: statDb.xactRollback,
+      deadlocks: statDb.deadlocks,
+      tempFiles: statDb.tempFiles,
+      tempBytes: statDb.tempBytes,
+      blksHit: statDb.blksHit,
+      blksRead: statDb.blksRead,
+      activeBackends,
+      waitingBackends,
+      maxConnections,
+      statementsNearTimeout,
+      authenticatedStatementTimeoutMs,
+    };
+    const findings = mod.analyzeInstanceHealth(input);
+    const ranked = mod.rankFindings(findings);
+    const summary = mod.summarizeFindings(findings);
+    const findingsForPanel = ranked.slice(0, 10).map((f) => ({
+      signature: f.signature,
+      cause: f.cause,
+      impact: f.impact,
+      title: f.title,
+    }));
+    // Phase 2 — surface each ranked finding as a deduped `db_health` agent_jobs proposal via the
+    // same enqueueDbHealthProposal path the size/slow-query passes use. Dedup by
+    // `dbhealth:instance:<cause>` + DB_HEALTH_REPROPOSE_WINDOW_MS honors "don't flap while the
+    // condition resolves". Zero DDL; the owner still gates any change from the DB Health panel.
+    const proposed = await surfaceDbHealthFindings(findings);
+    // Phase 2 — instance saturation is an ACTIVE-incident signal (unlike growth/bloat, which are
+    // slow-burn). A live finding must redden the Control Tower DB Health tile so the CEO glance
+    // reflects a live outage, not just an advisory in the panel. `ok:false` on the heartbeat is the
+    // cron-freshness lever the monitor already uses to flip a tile red.
+    const heartbeatOk = findings.length === 0;
+    await writeCronHeartbeat(
+      mod.DB_HEALTH_INSTANCE_LOOP_ID,
+      heartbeatOk,
+      {
+        status: heartbeatOk ? "ok" : "active_incident",
+        findings: findings.length,
+        proposed,
+        top_findings: findingsForPanel,
+        signals: {
+          xact_commit: input.xactCommit,
+          xact_rollback: input.xactRollback,
+          rollback_ratio: (input.xactCommit + input.xactRollback) > 0
+            ? input.xactRollback / (input.xactCommit + input.xactRollback)
+            : 0,
+          deadlocks: input.deadlocks,
+          temp_files: input.tempFiles,
+          temp_bytes: input.tempBytes,
+          blks_hit: input.blksHit,
+          blks_read: input.blksRead,
+          cache_hit_ratio: (input.blksHit + input.blksRead) > 0
+            ? input.blksHit / (input.blksHit + input.blksRead)
+            : 1,
+          active_backends: input.activeBackends,
+          waiting_backends: input.waitingBackends,
+          max_connections: input.maxConnections,
+          statements_near_timeout: input.statementsNearTimeout,
+          authenticated_statement_timeout_ms: input.authenticatedStatementTimeoutMs,
+        },
+      },
+      Date.now() - startedAt,
+      `db-health instance pass — ${summary}, ${proposed} proposed`,
+    );
+    console.log(`[db-health] instance pass — ${findings.length} findings, ${proposed} proposed (${summary})`);
+  } catch (e) {
+    console.error("[db-health] instance pass failed:", e instanceof Error ? e.message : String(e));
+  } finally {
+    if (c) await c.end().catch(() => {});
+  }
+}
+
+/** Parse a `pg_roles.rolconfig` `statement_timeout` value ('8s', '8000', '8000ms', '1min') → ms. Returns null if unparseable. */
+function parseStatementTimeoutMs(raw: string): number | null {
+  const s = raw.trim().toLowerCase();
+  if (!s) return null;
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|min|h|d)?$/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return null;
+  switch (m[2]) {
+    case "ms": return n;
+    case "s": return n * 1000;
+    case "min": return n * 60_000;
+    case "h": return n * 3_600_000;
+    case "d": return n * 86_400_000;
+    default:  return n; // Postgres default unit for statement_timeout is ms.
+  }
+}
+
 // Append the agent's active coaching (agent_instructions for job.kind) to its LLM prompt — the
 // grade→coach→apply loop. Keyed on job.kind so any coachable agent (build/plan/fold/pr-resolve/dev-ask/
 // repair/regression…) automatically gets its learnings injected. Best-effort: never breaks a run.
@@ -3838,26 +4040,23 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
-    // POST-MERGE DIFF security backstop (vault-post-merge-diff-backstop Phase 1 + fix-vault-post-merge-diff-backstop-7fbde0
-    // cheap if-due cron backstop). Sibling of the pre-merge backstop above: Vault's post-merge `diff` review is fired
-    // ONCE from the merge hook (agent-jobs `applyMergedBuildEffects` → `enqueueSecurityReviewJob({mergeSha})`). If that
-    // fire-and-forget send drops (Vercel deploy reaps an in-flight Inngest sync, box down, transient error), the merged
-    // commit never gets its post-merge security pass and nothing re-checks. `enqueueSecurityDiffIfDue` re-sweeps
-    // recently-merged `claude/*` builds and (idempotently, via the existing 14d SHA dedup inside
-    // enqueueSecurityReviewJob) re-fires the diff-mode enqueue for any merge SHA that has no security-review row yet.
-    // Symmetry with enqueueSpecTestIfDue / enqueueSpecReviewIfDue for other dropped-event class gaps. The cheap
-    // security-diff-backstop-cron runs the SAME helper every 15 min so orphan windows can't outlive the platform-director's
-    // beat spacing either. Best-effort; the underlying enqueue is safe to run every pass.
+    // POST-MERGE `diff` SECURITY backstop (fix-vault-post-merge-diff-backstop-7fbde0). Symmetric with
+    // backstopPreMergeChecks above but for the OTHER leg: the reactive merge-hook enqueue in
+    // `applyMergedBuildEffects` is fire-and-forget — a dropped send (Inngest sync reaped mid-flight,
+    // box down, transient error) leaves the merged commit without its post-merge diff review, and the
+    // origin `getSpec`-based backstop gapped on FOLDED specs (their brain pages in `docs/brain/archive.d/`
+    // — e.g. `acquisition-research-hub`, `ad-creative-scout` — whose spec_phases.merge_sha lookup didn't
+    // resolve). This walks `spec_status_history` for `actor='merge:<sha>'` rows in the 14d window (the
+    // audit-authoritative source that survives fold, same source `audit-spec-shipped-state` uses) and
+    // (idempotently, via the SHA dedup inside `enqueueSecurityReviewDiff`) enqueues the missing reviews.
     const { enqueueSecurityDiffIfDue } = await import("../src/lib/security-agent");
-    const sec = await enqueueSecurityDiffIfDue(db, { workspaceId: job.workspace_id });
-    if (sec.enqueued.length) {
-      notes.push(
-        `post-merge diff security backstop → ${sec.enqueued.length} SHA(s) re-enqueued (${sec.resolved} resolved from ${sec.scanned} merged build(s))`,
-      );
+    const sd = await enqueueSecurityDiffIfDue(db);
+    if (sd.enqueued.length) {
+      notes.push(`post-merge diff backstop → security-review (re-)enqueued for ${sd.enqueued.length} SHA(s) of ${sd.scanned} scanned`);
     }
   } catch (e) {
-    notes.push(`post-merge diff security backstop failed: ${e instanceof Error ? e.message : String(e)}`);
-    console.error(`${tag} standing post-merge diff security backstop failed (continuing):`, e instanceof Error ? e.message : e);
+    notes.push(`post-merge diff backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing post-merge diff backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // SPEC-REVIEW backstop (spec-review-agent) — the reliable heartbeat that gets a newly-authored `in_review`
@@ -3876,9 +4075,12 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     //      when the spec-review job that set vale_pass crashed before reaching its inline dispose tail.
     // Preserves the Vale quality gate + Ada disposition semantics — it never auto-passes; it just makes sure
     // the review actually RUNS. Best-effort; both helpers are idempotent.
-    const { enqueueSpecReviewIfDue, selectInReviewSpecs } = await import("../src/lib/agents/spec-review");
+    const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs } = await import("../src/lib/agents/spec-review");
     const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
-    const inReview = await selectInReviewSpecs(db, job.workspace_id);
+    // vale-reactive-spec-review Phase 1 — the selector now returns only in_review specs that LACK a current
+    // Vale review (vale_pass !== true), so the backstop skips workspaces whose in_review pool is fully
+    // Vale-passed (parked for Ada, not Vale). The disposition sweep below still runs regardless.
+    const inReview = await selectUnreviewedInReviewSpecs(db, job.workspace_id);
     if (inReview.length) {
       const enq = await enqueueSpecReviewIfDue(job.workspace_id);
       if (enq.enqueued) notes.push(`spec-review backstop → enqueued Vale over ${enq.pending} in_review spec(s)`);
@@ -9174,10 +9376,13 @@ interface SpecReviewDecisionJson {
 
 async function runSpecReviewJob(job: Job) {
   const tag = `[spec-review:${job.id.slice(0, 8)}]`;
-  const { selectInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
+  const { selectUnreviewedInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
   const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
   const a = await admin();
-  const pending = await selectInReviewSpecs(a, job.workspace_id);
+  // vale-reactive-spec-review Phase 1 — the selector returns only in_review specs LACKING a current Vale
+  // review, so Vale never re-reviews content she already cleared. A re-author / send-back NULLs vale_pass
+  // via markSpecCardBackToReview, re-admitting the spec.
+  const pending = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
   if (!pending.length) {
     // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
     // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
@@ -9210,7 +9415,7 @@ async function runSpecReviewJob(job: Job) {
     }
     if (!reviewable.length) {
       // planner-gates-build-queue-on-authored-specs Phase 2 — when EVERY drop was a missing public.specs
-      // row (selectInReviewSpecs returned a slug the row has since vanished from), stamp
+      // row (selectUnreviewedInReviewSpecs returned a slug the row has since vanished from), stamp
       // spec_row_missing so the parked-router dismisses it. Otherwise leave the class unstamped and let
       // the heuristic classifier handle a real materializer fault (DB outage, decoder bug, etc.).
       const allMissing = missingRowSlugs.length === pending.length;
@@ -9277,7 +9482,7 @@ async function runSpecReviewJob(job: Job) {
       // agent was handed nothing to decide), there is nothing to review — complete as a benign no-op instead
       // of parking a needs_attention job that Ada would then re-escalate forever on every standing pass. Only
       // a parse failure over a STILL-POPULATED queue parks (a real malformed-output failure on real input).
-      const stillInReview = await selectInReviewSpecs(a, job.workspace_id);
+      const stillInReview = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
       if (!stillInReview.length) {
         const tail = `spec-review no-op — in_review pool drained to 0 by run time (no parseable decisions over empty input; not parking)`;
         await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
@@ -16864,6 +17069,14 @@ async function main() {
         lastDbHealthSize = Date.now();
         dbHealthSizeInFlight = true;
         void runDbHealthSizeJob().finally(() => { dbHealthSizeInFlight = false; });
+      }
+      // Instance-saturation pass (db-health-instance-saturation-detector P1): ~15 min cadence to
+      // catch an active incident (unlike the daily size sweep). Fills the blind spot the per-query
+      // slow-query pass has for instance-level saturation (rollback/timeout/temp-spill/cache/conn).
+      if (!dbHealthInstanceInFlight && Date.now() - lastDbHealthInstance > DB_HEALTH_INSTANCE_INTERVAL_MS) {
+        lastDbHealthInstance = Date.now();
+        dbHealthInstanceInFlight = true;
+        void runDbHealthInstanceJob().finally(() => { dbHealthInstanceInFlight = false; });
       }
       // Platform/DevOps Director enqueuer (platform-director-agent P1): queue a `platform-director` job
       // per open Platform-routed Approval Request for the lane above to decide. Dormant (a no-op) until
