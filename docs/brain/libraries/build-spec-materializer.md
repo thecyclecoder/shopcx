@@ -20,7 +20,7 @@ Phase 1 of [[../specs/spec-authoring-writes-db-and-worker-materialize]] dual-wro
 - `# {title}` — H1, NO status emoji ([[../specs/spec-status-db-driven]] rule: the materialized file is content-only).
 - `**Owner:** [[../functions/{owner}]] · **Parent:** {parent}` — metadata line (only the parts that exist).
 - `**Blocked-by:** [[slug-a]], [[slug-b]]` — when `blocked_by` is non-empty.
-- The `summary` paragraph as a single block.
+- The `summary` paragraph as a single block. **The summary MAY carry a `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` line ([[../specs/spec-brain-refs]] Phase 1)** — 0-4 wikilinks the [[../skills/build-spec]] skill parses out of the materialized body and Reads FIRST as the authoritative brain slice for the build. No SDK/column change: the convention rides in the summary text; the skill scans the rendered markdown for the `**Brain refs:**` line and resolves each wikilink to a `docs/brain/{path}.md` (relative to `docs/brain/specs/`, same as the brain index). Absent line = today's behavior.
 - `## Phase {N} — {phase.title}` per phase (1..N, ordered by `position`), followed by `phase.body`. When `phase.verification` is set the renderer emits `### Verification` under the phase. The `Phase N — ` prefix is added unless the stored title already leads with "Phase" (don't double it).
 
 The H1 + per-phase headings carry NO status emoji — `spec-status-db-driven` made status DB-driven, and this file is the BUILD-FACING body (not the board surface).

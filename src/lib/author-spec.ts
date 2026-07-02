@@ -21,6 +21,7 @@
  * returns false) per the historical defensive posture.
  */
 import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
+import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
@@ -420,6 +421,34 @@ export async function authorSpecRowStructured(
   }));
   assertEveryPhaseHasVerification(slug, phaseBodies);
 
+  // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
+  // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
+  // line to `spec.summary` when the author hasn't already provided one. Scan surface = summary + every phase
+  // body so an src/lib reference in a phase's task list still surfaces the right brain page. Best-effort:
+  // suggest none is fine (Phase 1's fallback covers it); the author's explicit refs always win.
+  {
+    const summaryText = spec.summary ?? "";
+    const bodyForScan = [summaryText, ...spec.phases.map((p) => p.body ?? "")].join("\n\n");
+    // fix-spec-brain-refs — a durable skip marker (either the `<!-- brain-refs: skip -->` comment or
+    // an empty `**Brain refs:**` header) anywhere on the scan surface means the author explicitly
+    // picked NONE; short-circuit so a subsequent structured re-author never re-injects.
+    if (!hasBrainRefsLine(summaryText) && !hasBrainRefsSkip(bodyForScan)) {
+      try {
+        const refs = deriveSuggestedBrainRefs(bodyForScan);
+        if (refs.length) {
+          const line = formatBrainRefsLine(refs);
+          spec = {
+            ...spec,
+            summary: summaryText ? `${line}\n\n${summaryText}` : line,
+          };
+          console.log(
+            `[author-spec] ${slug} — suggested Brain refs: ${refs.map((r) => r.wikilink).join(", ")}`,
+          );
+        }
+      } catch { /* best-effort */ }
+    }
+  }
+
   try {
     // re-author-re-opens-dismissed: snapshot the PRE-upsert row so we can tell a content-changing re-author
     // from a brand-new spec or a no-op re-author (the re-open decision compares old vs new content). Read is
@@ -508,6 +537,20 @@ export async function authorSpecRowFromMarkdown(
   // error. ~13 specs shipped with empty verification columns because there was no gate here — this is that gate.
   const phaseBodies = extractPhaseBodies(markdown);
   assertEveryPhaseHasVerification(slug, phaseBodies);
+
+  // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time. If the incoming markdown has no
+  // `**Brain refs:**` line, scan the body for src/ files + tables + wikilinks it already names and
+  // propose the top ≤4 as a `**Brain refs:**` line right under the last metadata header. Best-effort:
+  // if nothing maps, we suggest none (never break authoring); if the author already picked, we never
+  // override (their pick wins). Author-confirmable through the same spec-chat refine loop the rest of
+  // the body edits through — a subsequent refine turn can strip/replace the suggested refs.
+  const suggested = suggestBrainRefs(markdown);
+  if (suggested.refs.length && suggested.body !== markdown) {
+    markdown = suggested.body;
+    console.log(
+      `[author-spec] ${slug} — suggested Brain refs: ${suggested.refs.map((r) => r.wikilink).join(", ")}`,
+    );
+  }
 
   try {
     const card = parseSpec(slug, markdown);
