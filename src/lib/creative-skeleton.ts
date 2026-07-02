@@ -26,7 +26,8 @@ import { logAiUsage } from "@/lib/ai-usage";
 import {
   searchAds,
   fetchCreative,
-  isLongRunner,
+  isWinner,
+  winnerScore,
   type NormalizedAd,
   type Seed,
 } from "@/lib/adlibrary";
@@ -313,7 +314,17 @@ function toDate(s: string | null): string | null {
 export async function sweepSeed(
   workspaceId: string,
   seed: Seed,
-  opts: { minDays?: number; maxPerSeed?: number; daysBack?: number; pageSize?: number } = {},
+  opts: {
+    minDays?: number;
+    minImpressions?: number;
+    minSpend?: number;
+    /** Max STATICS to vision this seed (bounds Opus spend). Ranked by winnerScore — keeps the best. */
+    visionCap?: number;
+    /** Max VIDEOS to capture as metadata (video_pending; deconstructed later by the video pipeline). */
+    videoCap?: number;
+    daysBack?: number;
+    pageSize?: number;
+  } = {},
 ): Promise<IngestResult> {
   const admin = createAdminClient();
   const result = EMPTY_RESULT();
@@ -325,12 +336,15 @@ export async function sweepSeed(
   });
   result.searched = ads.length;
 
-  const longRunners = ads.filter((a) => a.ad_key && isLongRunner(a, opts.minDays ?? 14));
-  result.longRunners = longRunners.length;
-  if (!longRunners.length) return result;
+  // Winner signal = reach/spend OR longevity (not longevity alone). See adlibrary.isWinner.
+  const winners = ads.filter((a) =>
+    a.ad_key && isWinner(a, { minDays: opts.minDays, minImpressions: opts.minImpressions, minSpend: opts.minSpend }),
+  );
+  result.longRunners = winners.length; // (field name kept for back-compat; now = winner count)
+  if (!winners.length) return result;
 
   // Dedup: which ad_keys do we already have for this workspace+source?
-  const keys = longRunners.map((a) => a.ad_key);
+  const keys = winners.map((a) => a.ad_key);
   const { data: existing } = await admin
     .from("creative_skeletons")
     .select("dedup_key")
@@ -339,11 +353,16 @@ export async function sweepSeed(
     .in("dedup_key", keys);
   const seen = new Set((existing || []).map((r) => r.dedup_key as string));
 
-  const fresh = longRunners.filter((a) => !seen.has(a.ad_key));
-  result.skippedExisting = longRunners.length - fresh.length;
+  const fresh = winners.filter((a) => !seen.has(a.ad_key));
+  result.skippedExisting = winners.length - fresh.length;
 
-  const cap = opts.maxPerSeed ?? 10;
-  for (const ad of fresh.slice(0, cap)) {
+  // Rank by winner score, then cap statics (vision cost) and videos (metadata) independently — always
+  // keeping the highest-signal creatives, not whatever order the API returned.
+  const ranked = [...fresh].sort((a, b) => winnerScore(b) - winnerScore(a));
+  const statics = ranked.filter((a) => a.media_type === "static").slice(0, opts.visionCap ?? 12);
+  const videos = ranked.filter((a) => a.media_type === "video").slice(0, opts.videoCap ?? 40);
+
+  for (const ad of [...statics, ...videos]) {
     try {
       await ingestAd(workspaceId, ad, seed);
       if (ad.media_type === "video") result.videos++;
