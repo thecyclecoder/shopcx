@@ -1730,6 +1730,25 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
  * completed→merged once, so this normally fires once per phase; the guard covers concurrent board loads.
  * Returns the queued phase title, or null (chain done / nothing to queue). Best-effort; never throws.
  */
+/**
+ * chained-phase-session-resume Phase 1 — resume window: how fresh the prior phase's session must be to
+ * warrant a `--resume`. Anthropic's prompt-cache TTL is ~1h; a resume past that reads the whole transcript
+ * back at full price, so a fresh session is CHEAPER once we're out of the cache window. Sized under the
+ * TTL to leave headroom (a chain of ~10-15 min phases stays well inside 55 min). Sourced from the prior
+ * build job's `last_heartbeat_at` (or `updated_at` if never heartbeated).
+ */
+export const CHAINED_RESUME_WINDOW_MS = 55 * 60 * 1000;
+
+/**
+ * chained-phase-session-resume Phase 1 — transcript-size cap: after this many phases have already been
+ * built on the same session, start fresh instead of resuming. Each resumed phase compounds the transcript
+ * (Claude's context window + the 0.1x cache-read cost of re-serving the whole prior transcript), so past
+ * some depth a fresh reset is cheaper AND avoids context-window pressure. Proxy: the number of
+ * NON-`planned` phases in the spec BEFORE this next-phase queue (i.e. phases already built through this
+ * chain). Kept modest — a very-long / many-phase spec should reset the session periodically.
+ */
+export const CHAINED_RESUME_MAX_PRIOR_PHASES = 5;
+
 export async function queueNextChainedPhase(workspaceId: string, slug: string): Promise<string | null> {
   // Read the spec IN THE JOB'S workspace (not the default-workspace fallback): a built phase carries a
   // build_sha and reads `in_progress` in the DB, so the next ⏳ is the first phase that is still `planned`.
@@ -1767,17 +1786,84 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
     .limit(1);
   if (active && active.length) return null;
 
+  // chained-phase-session-resume Phase 1 — carry the just-merged phase's session onto the next phase's
+  // build job so `runBuildJob` `--resume`s it (prior transcript served from cache ~0.1x) instead of
+  // re-hydrating from scratch at full price. Guarded — if any guard fails we insert FRESH (`queued`, null
+  // session) which is a safe, correctness-equivalent fallback: the branch already carries the phase code,
+  // resume is purely an optimization.
+  const resumeCandidate = await resolveChainedResumeCandidate(admin, workspaceId, slug, spec);
+
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: workspaceId,
     spec_slug: slug,
     kind: "build",
-    status: "queued",
+    status: resumeCandidate ? "queued_resume" : "queued",
     created_by: null,
     chain_phases: true,
     instructions: scoped,
+    claude_session_id: resumeCandidate?.sessionId ?? null,
+    claude_session_config_dir: resumeCandidate?.sessionConfigDir ?? null,
   });
   if (error) return null;
   return next.title;
+}
+
+/**
+ * chained-phase-session-resume Phase 1 — the guarded decision: should the NEXT chained phase resume the
+ * PRIOR phase's session, or start fresh? Reads the most recent build job for this spec that carries a
+ * session id (typically the just-merged prior phase) and applies the spec's three guards:
+ *
+ *   (a) OWNING ACCOUNT HEALTHY — NOT enforced here. `resolveAccountForJob` already pins a resume to its
+ *       owner and starts fresh (canStartFresh=true for a build) when that owner is capped, so we honor
+ *       that path. Passing the session through even if the account is currently capped is safe: the
+ *       dispatcher clears it and starts fresh on a healthy account. Checking here would race the account
+ *       pool state (which lives only in the box worker process).
+ *   (b) WITHIN THE CACHE WINDOW — gap since the prior job's `last_heartbeat_at` (fallback `updated_at`)
+ *       must be under `CHAINED_RESUME_WINDOW_MS` (~55m, under the 1h prompt-cache TTL). Past it the
+ *       transcript is cold and re-served at full price, so fresh is cheaper.
+ *   (c) TRANSCRIPT NOT HUGE — count the phases already NON-`planned` in the spec (the chain depth so
+ *       far). Past `CHAINED_RESUME_MAX_PRIOR_PHASES` the accumulated session is big enough that 0.1x
+ *       cache-reads + context-window pressure argue for a fresh reset.
+ *
+ * Returns the session id + owning config dir to carry forward, or null to insert FRESH. Best-effort:
+ * on any DB read failure returns null (fresh is the safe fallback).
+ */
+async function resolveChainedResumeCandidate(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+  spec: NonNullable<Awaited<ReturnType<typeof getSpec>>>,
+): Promise<{ sessionId: string; sessionConfigDir: string | null } | null> {
+  // (c) transcript-size cap — proxy on phase depth so far. A spec whose chain has already produced N+
+  // phases resets the session; this counts BEFORE we insert the next phase, i.e. it's the depth of the
+  // chain the resume would be BUILDING ON.
+  const priorPhaseCount = spec.card.phases.filter((p) => p.status !== "planned").length;
+  if (priorPhaseCount > CHAINED_RESUME_MAX_PRIOR_PHASES) return null;
+
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("id, claude_session_id, claude_session_config_dir, last_heartbeat_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .not("claude_session_id", "is", null)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const sessionId = data.claude_session_id as string | null;
+  if (!sessionId) return null;
+  const sessionConfigDir = (data.claude_session_config_dir as string | null) ?? null;
+
+  // (b) cache-window guard — gap since the prior job last emitted a heartbeat (fall back to updated_at
+  // if the row predates the heartbeat column or never streamed).
+  const beatStr = (data.last_heartbeat_at as string | null) ?? (data.updated_at as string | null);
+  if (!beatStr) return null;
+  const beatMs = Date.parse(beatStr);
+  if (!Number.isFinite(beatMs)) return null;
+  if (Date.now() - beatMs >= CHAINED_RESUME_WINDOW_MS) return null;
+
+  return { sessionId, sessionConfigDir };
 }
 
 /**
