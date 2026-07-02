@@ -16,6 +16,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Resume the build session across chained phases (cache-warm, usage-wall savings)** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]]
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
+- **Surface the exact out-of-leash command on the CEO approval card** · verified 2026-07-02 · → [[../libraries/platform-director]]
 - **Pre-merge spec-tests re-run after a branch changes + are visible/re-runnable** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]] · [[../libraries/spec-test-runs]]
 - **Specs carry a Brain refs list the builder reads first** · verified 2026-07-02 · → [[../project-management]]
 - **Owner squash/manual merges are detected + stamped shipped (GitHub PR-merged reconciler)** · verified 2026-07-02 · → [[inngest/spec-drift-reconcile]]
