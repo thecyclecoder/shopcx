@@ -16,6 +16,7 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `title` | `text` | ✓ | AdLibrary `title` (often thin) |
 | `image_url` | `text` | ✓ | original AdLibrary creative link (analysis only; NOT the display source anymore — see `thumb_path`) |
 | `thumb_path` | `text` | ✓ | storage path in the private `creative-shots` bucket of OUR downscaled (2048px q88) analyzable copy — what the dashboard displays via a signed URL. NULL for legacy rows (they fall back to the proxy). Set by [[../libraries/creative-skeleton]] `ingestAd`; migration `20260807120000`. |
+| `landing_page_url` | `text` | ✓ | the FULL ad destination WITH path (AdLibrary `landing_page_url`, present on ~half of ads) — e.g. `https://learn.erthlabs.co/women50`, the real advertorial. The [[../libraries/landing-page-scout]] `adDestinationsForBrand` bridge PREFERS this over the bare `destination_domain` (whose root often 404s). Migration `20260807130000`. |
 | `media_type` | `text` | — | default `'static'` · `static` \| `video` (routed at ingestion) |
 | `format` | `text` | ✓ | `ugc` \| `studio` \| `text-card` \| `before_after` \| `demo` \| … (vision) |
 | `framework` | `text` | ✓ | `hook-promise-proof` \| `problem-pivot-payoff` \| variant (vision) |
