@@ -1,0 +1,1 @@
+- **Re-fuse pre-merge security into the spec-test session (rigor-hardened, authoritative) — drop the standalone Vault session** · verified 2026-07-02 · → [[lifecycles/spec-goal-branch-pm-flow]]
