@@ -15,9 +15,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   analyzeInstanceHealth,
+  buildFixSpecMarkdown,
+  enqueueDbHealthProposal,
+  getDbHealthPanel,
   type InstanceHealthInput,
   type DbHealthFinding,
 } from "./db-health";
+import type { createAdminClient } from "@/lib/supabase/admin";
 
 const GB = 1024 * 1024 * 1024;
 
@@ -138,4 +142,172 @@ test("connection_saturation fires when active+waiting cross the flag", () => {
   const conn = findings.find((f) => f.cause === "connection_saturation");
   assert.ok(conn, "expected connection_saturation over the 80% flag");
   assert.match(conn!.evidence, /85% utilization/);
+});
+
+// ── Phase 2 verification (advisory templating + surface + dedup + panel) ─────
+
+test("buildFixSpecMarkdown on an instance finding is non-empty, has ≥1 `## Phase`, and carries the DBHealth-signature + DBHealth-fix + owner-approval-only markers", () => {
+  const findings = analyzeInstanceHealth(incidentInput());
+  const f = findings.find((x) => x.cause === "temp_spill_pressure");
+  assert.ok(f, "expected a temp_spill_pressure finding on the incident fixture");
+
+  const body = buildFixSpecMarkdown(f!);
+  assert.ok(body.trim().length > 0, "spec body must be non-empty");
+  const phaseHeaders = body.match(/^## Phase\b/gm) ?? [];
+  assert.ok(phaseHeaders.length >= 1, `expected ≥1 '## Phase' header; got ${phaseHeaders.length}`);
+  assert.match(body, /\*\*DBHealth-signature:\*\* `dbhealth:instance:temp_spill_pressure`/);
+  assert.match(body, /\*\*DBHealth-fix:\*\* `raise_work_mem`/);
+  // "Owner-approval-only" language is the north-star advisory stance the spec requires.
+  assert.match(body, /owner-approval-only/i);
+  assert.match(body, /no auto-apply/i);
+  // The evidence numbers are quoted verbatim.
+  assert.match(body, /883 GB/);
+});
+
+test("buildFixSpecMarkdown resolves cause-specific guidance for statement_timeout_pressure (not the generic investigate_timeouts fallback)", () => {
+  const findings = analyzeInstanceHealth(incidentInput());
+  const f = findings.find((x) => x.cause === "statement_timeout_pressure");
+  assert.ok(f, "expected a statement_timeout_pressure finding");
+  const body = buildFixSpecMarkdown(f!);
+  // Cause-specific guidance includes the timeout headroom fraction phrasing (Phase 2 branch), not
+  // ONLY the coarser fix-kind fallback.
+  assert.match(body, /Live queries are running past 50% of the `authenticated` `statement_timeout`/i);
+  assert.match(body, /Impact quoted verbatim from the evidence/);
+});
+
+// ── Fake admin — a chainable in-memory Supabase double for the surface + panel tests ───
+
+interface FakeAgentJob {
+  id: string;
+  workspace_id: string;
+  spec_slug: string;
+  kind: string;
+  status: string;
+  log_tail: string | null;
+  instructions: string | null;
+  pending_actions: unknown;
+  created_at: string;
+  error: string | null;
+}
+interface FakeWorkspace { id: string; created_at: string }
+interface FakeHeartbeat { loop_id: string; ran_at: string; produced: unknown }
+interface FakeTableSizeRow { captured_at: string; table_name: string; total_bytes: number; row_estimate: number }
+
+function fakeAdmin(seed: {
+  agent_jobs?: FakeAgentJob[];
+  workspaces?: FakeWorkspace[];
+  loop_heartbeats?: FakeHeartbeat[];
+  db_table_size_history?: FakeTableSizeRow[];
+}): ReturnType<typeof createAdminClient> {
+  const state = {
+    agent_jobs: [...(seed.agent_jobs ?? [])],
+    workspaces: [...(seed.workspaces ?? [])],
+    loop_heartbeats: [...(seed.loop_heartbeats ?? [])],
+    db_table_size_history: [...(seed.db_table_size_history ?? [])],
+  };
+  let nextId = 1;
+
+  const build = (table: keyof typeof state) => {
+    let rows: unknown[] = state[table] as unknown[];
+    let filtered = [...rows];
+    let ordered = false;
+    let ascending = false;
+    let orderCol: string = "created_at";
+    let limitN = Infinity;
+
+    const eq = (col: string, val: unknown) => {
+      filtered = filtered.filter((r) => (r as Record<string, unknown>)[col] === val);
+      return chain;
+    };
+    const inFilter = (col: string, vals: unknown[]) => {
+      const set = new Set(vals);
+      filtered = filtered.filter((r) => set.has((r as Record<string, unknown>)[col]));
+      return chain;
+    };
+    const lt = (col: string, val: unknown) => {
+      filtered = filtered.filter((r) => ((r as Record<string, unknown>)[col] as string) < (val as string));
+      return chain;
+    };
+
+    const chain = {
+      select: (_cols?: string) => chain,
+      eq,
+      in: inFilter,
+      lt,
+      order: (col: string, opts: { ascending?: boolean } = {}) => {
+        ordered = true;
+        orderCol = col;
+        ascending = !!opts.ascending;
+        return chain;
+      },
+      limit: (n: number) => { limitN = n; return chain; },
+      maybeSingle: async () => {
+        applyOrderLimit();
+        return { data: (filtered[0] as unknown) ?? null, error: null };
+      },
+      insert: async (row: unknown) => {
+        const rec = row as Record<string, unknown>;
+        const withDefaults = { id: `job-${nextId++}`, created_at: new Date(2026, 6, 2).toISOString(), error: null, ...rec };
+        (state[table] as unknown[]).push(withDefaults);
+        return { data: null, error: null };
+      },
+      then: async (onFulfilled: (v: { data: unknown[]; error: null }) => unknown) => {
+        applyOrderLimit();
+        return onFulfilled({ data: filtered, error: null });
+      },
+    } as unknown as Record<string, unknown>;
+
+    function applyOrderLimit() {
+      if (ordered) {
+        filtered = [...filtered].sort((a, b) => {
+          const av = (a as Record<string, unknown>)[orderCol] as string;
+          const bv = (b as Record<string, unknown>)[orderCol] as string;
+          return ascending ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        });
+      }
+      if (Number.isFinite(limitN)) filtered = filtered.slice(0, limitN);
+    }
+    return chain;
+  };
+
+  return { from: (t: string) => build(t as keyof typeof state) } as unknown as ReturnType<typeof createAdminClient>;
+}
+
+const WORKSPACE_ID = "ws-1";
+
+function seedAdmin() {
+  return fakeAdmin({
+    agent_jobs: [], // needed so resolveDbHealthWorkspace can fall back to workspaces
+    workspaces: [{ id: WORKSPACE_ID, created_at: "2026-01-01T00:00:00Z" }],
+  });
+}
+
+test("Phase 2 dedup — two identical instance findings enqueue ONE proposal (second returns {enqueued:false})", async () => {
+  const findings = analyzeInstanceHealth(incidentInput());
+  const rollback = findings.find((f) => f.cause === "rollback_error_rate");
+  assert.ok(rollback, "expected a rollback_error_rate finding");
+
+  const admin = seedAdmin();
+  const first = await enqueueDbHealthProposal(admin, rollback!);
+  assert.equal(first.enqueued, true, `first enqueue must succeed, got ${JSON.stringify(first)}`);
+
+  const second = await enqueueDbHealthProposal(admin, rollback!);
+  assert.equal(second.enqueued, false, "second enqueue must be deduped");
+  assert.match(second.reason ?? "", /live proposal exists/);
+});
+
+test("Phase 2 panel — an enqueued instance proposal shows up in getDbHealthPanel({proposals})", async () => {
+  const findings = analyzeInstanceHealth(incidentInput());
+  const rollback = findings.find((f) => f.cause === "rollback_error_rate");
+  assert.ok(rollback, "expected a rollback_error_rate finding");
+
+  const admin = seedAdmin();
+  const first = await enqueueDbHealthProposal(admin, rollback!);
+  assert.equal(first.enqueued, true);
+
+  const panel = await getDbHealthPanel(admin, WORKSPACE_ID);
+  const match = panel.proposals.find((p) => p.signature === "dbhealth:instance:rollback_error_rate");
+  assert.ok(match, `expected the enqueued instance finding to appear in panel.proposals; got ${JSON.stringify(panel.proposals)}`);
+  assert.equal(match!.cause, "rollback_error_rate");
+  assert.equal(match!.category, "instance");
 });

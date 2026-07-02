@@ -3070,12 +3070,23 @@ async function runDbHealthInstanceJob(): Promise<void> {
       impact: f.impact,
       title: f.title,
     }));
+    // Phase 2 — surface each ranked finding as a deduped `db_health` agent_jobs proposal via the
+    // same enqueueDbHealthProposal path the size/slow-query passes use. Dedup by
+    // `dbhealth:instance:<cause>` + DB_HEALTH_REPROPOSE_WINDOW_MS honors "don't flap while the
+    // condition resolves". Zero DDL; the owner still gates any change from the DB Health panel.
+    const proposed = await surfaceDbHealthFindings(findings);
+    // Phase 2 — instance saturation is an ACTIVE-incident signal (unlike growth/bloat, which are
+    // slow-burn). A live finding must redden the Control Tower DB Health tile so the CEO glance
+    // reflects a live outage, not just an advisory in the panel. `ok:false` on the heartbeat is the
+    // cron-freshness lever the monitor already uses to flip a tile red.
+    const heartbeatOk = findings.length === 0;
     await writeCronHeartbeat(
       mod.DB_HEALTH_INSTANCE_LOOP_ID,
-      true,
+      heartbeatOk,
       {
-        status: "ok",
+        status: heartbeatOk ? "ok" : "active_incident",
         findings: findings.length,
+        proposed,
         top_findings: findingsForPanel,
         signals: {
           xact_commit: input.xactCommit,
@@ -3099,9 +3110,9 @@ async function runDbHealthInstanceJob(): Promise<void> {
         },
       },
       Date.now() - startedAt,
-      `db-health instance pass — ${summary}`,
+      `db-health instance pass — ${summary}, ${proposed} proposed`,
     );
-    console.log(`[db-health] instance pass — ${findings.length} findings (${summary})`);
+    console.log(`[db-health] instance pass — ${findings.length} findings, ${proposed} proposed (${summary})`);
   } catch (e) {
     console.error("[db-health] instance pass failed:", e instanceof Error ? e.message : String(e));
   } finally {

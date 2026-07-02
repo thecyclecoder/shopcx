@@ -979,12 +979,27 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     query_rewrite: `Rewrite the query to its diagnosed cause: bound the set (drive from a small list / add a LIMIT), add the predicate index, or restructure the aggregate. Land it where the query is issued + cite the before/after plan.`,
     reduce_calls: `This query is fast per call but HAMMERED — the win is fewer/cheaper calls, not a vacuum. Reduce how often it runs at the source (cache the result, batch, or widen the poll interval where the endpoint issues it), and/or add a hot-predicate index so each call is cheaper — a covering or partial index for the exact WHERE, or a **GIN index** if the predicate is an array/JSONB containment (\`@>\`). Cite the call count + mean from the evidence below; do NOT propose a VACUUM (the per-call time is already fine).`,
     vacuum_tuning: `Run a one-off \`VACUUM (ANALYZE)\` and set a tighter per-table \`autovacuum_vacuum_scale_factor\` so the bloat doesn't recur. No data is deleted.`,
-    // Escalation-shaped fix kinds (db-health-instance-saturation-detector Phase 1 wires these to
-    // FIX_KIND_BY_CAUSE; Phase 2 will refine the advisory templating + surface via enqueueDbHealthProposal).
-    raise_compute: `Instance-saturation signal — owner-approval-only. The evidence points at compute/memory tier pressure, not a per-query fix. Confirm the numbers below and evaluate raising the compute tier (or shared_buffers) rather than tuning a single query; the agent does NOT auto-apply.`,
-    raise_work_mem: `Instance-saturation signal — owner-approval-only. Hash/sort spill to disk implicates \`work_mem\` (a per-connection setting). Do the per-connection math (max_connections × the proposed work_mem must fit in RAM alongside shared_buffers) BEFORE raising; the agent does NOT auto-apply.`,
-    investigate_timeouts: `Instance-saturation signal — owner-approval-only. Rollback / timeout pressure means queries are being killed at the \`authenticated\` \`statement_timeout\` ceiling under load. Correlate with the slow-query pass's top offenders (Phase 2 wires this pointer) and address the offenders rather than raising the ceiling; the agent does NOT auto-apply.`,
+    // Escalation-shaped fix kinds (db-health-instance-saturation-detector). These are the FALLBACK
+    // — Phase 2 refines them further per-cause below via `instanceGuidanceByCause` so a
+    // `cache_pressure` vs `connection_saturation` finding (both map to `raise_compute`) gets its own
+    // advisory paragraph. Compute/timeout changes are HIGH-STAKES → owner-approval-only, never
+    // auto-appliable (mirrors the DDL/delete stance in [[../operational-rules]] § North star).
+    raise_compute: `**Owner-approval-only — instance-saturation signal, no auto-apply.** The evidence below points at compute/memory tier pressure, not a per-query fix. Evaluate raising the compute tier (or shared_buffers) rather than tuning a single query. The agent applies zero infra changes; a resize is an owner decision.`,
+    raise_work_mem: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Hash/sort spill to disk implicates \`work_mem\` (a per-connection setting). Do the per-connection math (\`max_connections × work_mem\` must fit in RAM alongside \`shared_buffers\`) BEFORE raising. The agent applies zero DB settings; a \`work_mem\` bump is an owner decision.`,
+    investigate_timeouts: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Rollback / timeout pressure means queries are being killed at the \`authenticated\` \`statement_timeout\` ceiling under load. Correlate with the slow-query pass's top offenders (\`DB_HEALTH_SLOWQ_LOOP_ID\` beats) and address the offenders rather than raising the ceiling. The agent applies zero query rewrites; the fix is an owner decision.`,
   };
+  // Cause-specific advisory guidance for instance findings (Phase 2). Resolved BEFORE the fixKind
+  // fallback so the operator sees language tied to the exact signal (statement_timeout / temp_spill /
+  // rollback / cache / connection), not just the coarser fix kind. Every entry MUST include the
+  // "owner-approval-only, no auto-apply" language + quote the evidence context verbatim.
+  const instanceGuidanceByCause: Partial<Record<DbHealthCause, string>> = {
+    statement_timeout_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Live queries are running past ${pct(INSTANCE_TIMEOUT_HEADROOM_FRACTION)} of the \`authenticated\` \`statement_timeout\` ceiling — they will be KILLED under load, becoming rollbacks. Correlate with the top offenders from the slow-query pass (\`DB_HEALTH_SLOWQ_LOOP_ID\` beats) and fix those queries (index / rewrite / reduce calls) rather than raising the ceiling. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero changes; the fix is an owner decision.`,
+    temp_spill_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Hash/sort operations are spilling to disk on the instance — every heavy query pays the temp-file cost. The lever is \`work_mem\` (a per-connection setting): raising it eats RAM per open session, so do the math \`max_connections × work_mem ≤ (RAM − shared_buffers − OS cache headroom)\` BEFORE proposing a bump. Confirm the top spillers via the slow-query pass (a Sort/Hash with \`Sort Method: external merge\` or \`Disk: NkB\`) — sometimes an index on the ORDER BY / GROUP BY is the cheaper win. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero DB settings; the fix is an owner decision.`,
+    rollback_error_rate: `**Owner-approval-only — instance-saturation signal, no auto-apply.** A high aggregate rollback ratio is a SYSTEMIC signal, not a per-query one — a single slow query can't move the aggregate. The two leading suspects (in order): (1) the \`authenticated\` \`statement_timeout\` ceiling is catching queries under load → address the top slow-query offenders; (2) the app is fighting itself (deadlocks) → check the \`deadlocks\` counter in the evidence and the concurrent-write hot spot. Do NOT raise the timeout ceiling as the reflex — it hides the real culprit. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero changes; the fix is an owner decision.`,
+    cache_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** The cache-hit ratio fell below the floor — the hot working set no longer fits in \`shared_buffers\`. Every miss is a disk read that competes for the same latency budget the \`statement_timeout\` enforces. The lever is compute tier (more RAM ⇒ larger \`shared_buffers\`), not a per-query fix. Confirm the working set has grown organically (not a runaway one-off scan) via the size sweep before proposing a tier bump. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
+    connection_saturation: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Active + waiting backends are eating a big fraction of \`max_connections\`. At this utilization, new sessions queue at the pooler or fail to connect (the customer-visible "DATABASE errors" class). The lever is compute tier (more max_connections + RAM headroom) OR a pgBouncer-style layer for short-lived sessions. Check whether the culprit is a genuine traffic spike vs a leaked pool before proposing a resize. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
+  };
+  const guidance = instanceGuidanceByCause[finding.cause] ?? fixGuidance[finding.fixKind];
   return [
     `# ${finding.specTitle} ⏳`,
     ``,
@@ -998,7 +1013,7 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     finding.evidence,
     ``,
     `## Phase 1 — ${finding.fixKind.replace(/_/g, " ")} ⏳`,
-    fixGuidance[finding.fixKind],
+    guidance,
     `Gate on \`npx tsc --noEmit\`; land the brain page in the same PR.`,
     ``,
     `## Verification`,
