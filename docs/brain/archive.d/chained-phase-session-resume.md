@@ -1,0 +1,1 @@
+- **Resume the build session across chained phases (cache-warm, usage-wall savings)** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]]
