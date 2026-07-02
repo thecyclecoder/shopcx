@@ -316,10 +316,13 @@ let migrationDriftInFlight = false;
 // rationale as migration-drift. In-flight-guarded + gated so they never overlap or stall the poll.
 const DB_HEALTH_SLOWQ_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const DB_HEALTH_SIZE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+const DB_HEALTH_INSTANCE_INTERVAL_MS = 15 * 60 * 1000; // ~15 min — active-incident cadence (db-health-instance-saturation-detector P1)
 let lastDbHealthSlowQ = 0; // 0 ⇒ run on first poll so there's a beat right away.
 let lastDbHealthSize = 0;
+let lastDbHealthInstance = 0;
 let dbHealthSlowQInFlight = false;
 let dbHealthSizeInFlight = false;
+let dbHealthInstanceInFlight = false;
 const DB_HEALTH_MAX_PROPOSALS_PER_PASS = 5; // don't flood: surface at most the top-N findings/pass.
 const DB_HEALTH_TREND_WINDOW_DAYS = 21; // Phase 2: trailing size-history window for the trend projection.
 
@@ -2933,6 +2936,194 @@ async function runDbHealthSizeJob(): Promise<void> {
     console.error("[db-health] size sweep failed:", e instanceof Error ? e.message : String(e));
   } finally {
     if (c) await c.end().catch(() => {});
+  }
+}
+
+// The INSTANCE-saturation pass (db-health-instance-saturation-detector P1): pg_stat_database +
+// pg_stat_activity + pg_roles.rolconfig → analyzeInstanceHealth. Fills the blind spot the per-query
+// slow-query pass has for instance-level saturation (the 2026-07-02 incident: xact_rollback 7.43%,
+// 883 GB temp_bytes, MEMORY 79%, `authenticated` statement_timeout=8s catching queries under load).
+// Writes a kind:'cron' beat under DB_HEALTH_INSTANCE_LOOP_ID carrying the findings for the panel.
+// Zero DDL. NEVER throws — a pass failure must not break the poll loop. Phase 1 does NOT surface
+// findings through enqueueDbHealthProposal (Phase 2 wires that); the beat's `produced` carries them.
+async function runDbHealthInstanceJob(): Promise<void> {
+  const startedAt = Date.now();
+  const mod = await import("../src/lib/control-tower/db-health");
+  let c: import("pg").Client | null = null;
+  try {
+    c = await dbHealthPgClient();
+    if (!c) {
+      await writeCronHeartbeat(mod.DB_HEALTH_INSTANCE_LOOP_ID, false, { status: "skipped", reason: "no DB connection on this host" }, Date.now() - startedAt, "db-health instance pass skipped — no pooler");
+      return;
+    }
+
+    // 1) pg_stat_database — commit/rollback/deadlocks/temp/blocks for THIS database.
+    let statDb: {
+      xactCommit: number; xactRollback: number; deadlocks: number;
+      tempFiles: number; tempBytes: number; blksHit: number; blksRead: number;
+    };
+    try {
+      const res = await c.query(
+        `select coalesce(xact_commit, 0)::bigint  as xact_commit,
+                coalesce(xact_rollback, 0)::bigint as xact_rollback,
+                coalesce(deadlocks, 0)::bigint    as deadlocks,
+                coalesce(temp_files, 0)::bigint   as temp_files,
+                coalesce(temp_bytes, 0)::bigint   as temp_bytes,
+                coalesce(blks_hit, 0)::bigint     as blks_hit,
+                coalesce(blks_read, 0)::bigint    as blks_read
+           from pg_stat_database
+          where datname = current_database()`,
+      );
+      const r = (res.rows[0] ?? {}) as Record<string, unknown>;
+      statDb = {
+        xactCommit: Number(r.xact_commit ?? 0),
+        xactRollback: Number(r.xact_rollback ?? 0),
+        deadlocks: Number(r.deadlocks ?? 0),
+        tempFiles: Number(r.temp_files ?? 0),
+        tempBytes: Number(r.temp_bytes ?? 0),
+        blksHit: Number(r.blks_hit ?? 0),
+        blksRead: Number(r.blks_read ?? 0),
+      };
+    } catch (e) {
+      await writeCronHeartbeat(mod.DB_HEALTH_INSTANCE_LOOP_ID, false, { status: "skipped", reason: `pg_stat_database read failed: ${e instanceof Error ? e.message : String(e)}` }, Date.now() - startedAt, "db-health instance pass skipped — pg_stat_database unavailable");
+      return;
+    }
+
+    // 2) pg_roles.rolconfig — the `authenticated` role's statement_timeout (the 8s ceiling that
+    //    kills queries under load in the 2026-07-02 incident). null when unset.
+    let authenticatedStatementTimeoutMs: number | null = null;
+    try {
+      const res = await c.query(
+        `select rolconfig
+           from pg_roles
+          where rolname = 'authenticated'`,
+      );
+      const cfg = ((res.rows[0] ?? {}) as Record<string, unknown>).rolconfig as string[] | null;
+      if (Array.isArray(cfg)) {
+        for (const line of cfg) {
+          const m = /^statement_timeout=(.+)$/i.exec(line);
+          if (m) {
+            authenticatedStatementTimeoutMs = parseStatementTimeoutMs(m[1]);
+            break;
+          }
+        }
+      }
+    } catch {
+      /* best-effort: null when not readable */
+    }
+
+    // 3) pg_stat_activity — active + waiting backends, max_connections, and the count of live
+    //    queries past a fraction of the `authenticated` statement_timeout (the pressure signal
+    //    BEFORE the rollback lands). Excludes idle / this backend / autovacuum.
+    let activeBackends = 0, waitingBackends = 0, maxConnections = 0, statementsNearTimeout = 0;
+    try {
+      const actRes = await c.query(
+        `select
+           count(*) filter (where state = 'active' and pid <> pg_backend_pid())::int as active_backends,
+           count(*) filter (where wait_event_type = 'Lock' and pid <> pg_backend_pid())::int as waiting_backends
+         from pg_stat_activity`,
+      );
+      const a = (actRes.rows[0] ?? {}) as Record<string, unknown>;
+      activeBackends = Number(a.active_backends ?? 0);
+      waitingBackends = Number(a.waiting_backends ?? 0);
+      const mcRes = await c.query(`select current_setting('max_connections')::int as max_connections`);
+      maxConnections = Number(((mcRes.rows[0] ?? {}) as Record<string, unknown>).max_connections ?? 0);
+      if (authenticatedStatementTimeoutMs != null) {
+        const headroomMs = Math.round(authenticatedStatementTimeoutMs * (
+          (await import("../src/lib/control-tower/db-health")).INSTANCE_TIMEOUT_HEADROOM_FRACTION
+        ));
+        const nearRes = await c.query(
+          `select count(*)::int as n
+             from pg_stat_activity
+            where state = 'active'
+              and pid <> pg_backend_pid()
+              and query_start is not null
+              and now() - query_start > ($1 || ' milliseconds')::interval`,
+          [String(headroomMs)],
+        );
+        statementsNearTimeout = Number(((nearRes.rows[0] ?? {}) as Record<string, unknown>).n ?? 0);
+      }
+    } catch {
+      /* best-effort: partial signals are still worth beating */
+    }
+
+    const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
+      xactCommit: statDb.xactCommit,
+      xactRollback: statDb.xactRollback,
+      deadlocks: statDb.deadlocks,
+      tempFiles: statDb.tempFiles,
+      tempBytes: statDb.tempBytes,
+      blksHit: statDb.blksHit,
+      blksRead: statDb.blksRead,
+      activeBackends,
+      waitingBackends,
+      maxConnections,
+      statementsNearTimeout,
+      authenticatedStatementTimeoutMs,
+    };
+    const findings = mod.analyzeInstanceHealth(input);
+    const ranked = mod.rankFindings(findings);
+    const summary = mod.summarizeFindings(findings);
+    const findingsForPanel = ranked.slice(0, 10).map((f) => ({
+      signature: f.signature,
+      cause: f.cause,
+      impact: f.impact,
+      title: f.title,
+    }));
+    await writeCronHeartbeat(
+      mod.DB_HEALTH_INSTANCE_LOOP_ID,
+      true,
+      {
+        status: "ok",
+        findings: findings.length,
+        top_findings: findingsForPanel,
+        signals: {
+          xact_commit: input.xactCommit,
+          xact_rollback: input.xactRollback,
+          rollback_ratio: (input.xactCommit + input.xactRollback) > 0
+            ? input.xactRollback / (input.xactCommit + input.xactRollback)
+            : 0,
+          deadlocks: input.deadlocks,
+          temp_files: input.tempFiles,
+          temp_bytes: input.tempBytes,
+          blks_hit: input.blksHit,
+          blks_read: input.blksRead,
+          cache_hit_ratio: (input.blksHit + input.blksRead) > 0
+            ? input.blksHit / (input.blksHit + input.blksRead)
+            : 1,
+          active_backends: input.activeBackends,
+          waiting_backends: input.waitingBackends,
+          max_connections: input.maxConnections,
+          statements_near_timeout: input.statementsNearTimeout,
+          authenticated_statement_timeout_ms: input.authenticatedStatementTimeoutMs,
+        },
+      },
+      Date.now() - startedAt,
+      `db-health instance pass — ${summary}`,
+    );
+    console.log(`[db-health] instance pass — ${findings.length} findings (${summary})`);
+  } catch (e) {
+    console.error("[db-health] instance pass failed:", e instanceof Error ? e.message : String(e));
+  } finally {
+    if (c) await c.end().catch(() => {});
+  }
+}
+
+/** Parse a `pg_roles.rolconfig` `statement_timeout` value ('8s', '8000', '8000ms', '1min') → ms. Returns null if unparseable. */
+function parseStatementTimeoutMs(raw: string): number | null {
+  const s = raw.trim().toLowerCase();
+  if (!s) return null;
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|min|h|d)?$/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return null;
+  switch (m[2]) {
+    case "ms": return n;
+    case "s": return n * 1000;
+    case "min": return n * 60_000;
+    case "h": return n * 3_600_000;
+    case "d": return n * 86_400_000;
+    default:  return n; // Postgres default unit for statement_timeout is ms.
   }
 }
 
@@ -16842,6 +17033,14 @@ async function main() {
         lastDbHealthSize = Date.now();
         dbHealthSizeInFlight = true;
         void runDbHealthSizeJob().finally(() => { dbHealthSizeInFlight = false; });
+      }
+      // Instance-saturation pass (db-health-instance-saturation-detector P1): ~15 min cadence to
+      // catch an active incident (unlike the daily size sweep). Fills the blind spot the per-query
+      // slow-query pass has for instance-level saturation (rollback/timeout/temp-spill/cache/conn).
+      if (!dbHealthInstanceInFlight && Date.now() - lastDbHealthInstance > DB_HEALTH_INSTANCE_INTERVAL_MS) {
+        lastDbHealthInstance = Date.now();
+        dbHealthInstanceInFlight = true;
+        void runDbHealthInstanceJob().finally(() => { dbHealthInstanceInFlight = false; });
       }
       // Platform/DevOps Director enqueuer (platform-director-agent P1): queue a `platform-director` job
       // per open Platform-routed Approval Request for the lane above to decide. Dormant (a no-op) until
