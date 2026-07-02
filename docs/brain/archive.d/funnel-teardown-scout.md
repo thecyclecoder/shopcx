@@ -1,0 +1,1 @@
+- **Funnel Teardown Scout — CTA follow-through + per-step lander skeleton** · verified 2026-07-02 · → [[libraries/landing-page-scout]]

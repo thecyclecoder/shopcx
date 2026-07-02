@@ -26,6 +26,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Fix: Document the PM-agent activation contract (reactive → cheap gate → cron backstop) in the brain** · verified 2026-07-02 · → [[../operational-rules#PM-agent activation contract]]
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
+- **Funnel Teardown Scout — CTA follow-through + per-step lander skeleton** · verified 2026-07-02 · → [[libraries/landing-page-scout]]
 - **Re-fuse pre-merge security into the spec-test session (rigor-hardened, authoritative) — drop the standalone Vault session** · verified 2026-07-02 · → [[lifecycles/spec-goal-branch-pm-flow]]
 - **Surface the exact out-of-leash command on the CEO approval card** · verified 2026-07-02 · → [[../libraries/platform-director]]
 - **A parked pr-resolve escalation must self-clear when its PR merges or closes** · verified 2026-07-02 · → [[lifecycles/approval-routing-and-inbox]]
