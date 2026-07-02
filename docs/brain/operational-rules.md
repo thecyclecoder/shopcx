@@ -17,7 +17,7 @@ Every autonomous tool/agent MUST be **supervisable**:
 
 A tool hitting a rail is **not an outcome — it's the trigger for the supervising agent's highest-value work** (diagnose root cause → set a guardrail + spawn the upstream fix). Same shape everywhere: ads down-scaling to zero, dunning over-dunning good customers, a content tool flooding low-quality posts, an autonomous build running an irreversible prod action ([[specs/build-approval-gates]]). Each needs an objective-owner above it.
 
-Full treatment: [[goals/ceo-mode]] § "Role agents own the objective"; worked example: [[functions/growth]].
+Full treatment: [[goals/ceo-mode]] § "Role agents own the objective"; worked example: [[functions/growth]]. The build-side sibling — the activation shape every autonomous box worker-agent inherits by default — is codified below in [[#PM-agent activation contract]] (a bounded-proxy gate that keeps reactive fires cheap).
 
 ### No silent spec defers
 
@@ -29,6 +29,16 @@ The invariant — every non-human defer goes through the ONE helper [[libraries/
 3. emits a CEO **"Spec deferred — <why>"** notification with a one-click un-defer deep-link (`emitDeferNotification`).
 
 Ada's dispose-downgrade ([[libraries/agents-spec-dispose]]) was the original good shape and now reuses the same `emitDeferNotification` surface. The **only exempt** defer is the CEO's own dashboard action (`POST /api/roadmap/priority` → actor `owner:{user.id}`) — a deliberate human action already provenanced via `spec_status_history`. No bare `markSpecCardDeferred` / `setSpecStatus(…, "deferred")` may remain on a programmatic path without both the audit row and the surface.
+
+### PM-agent activation contract
+
+**Sibling invariant to the North star, above.** Every autonomous box worker-agent that consumes a queue of DB-state work (`agent_jobs.kind` — build, spec-review, spec-test, fold, plan, repair, regression, coverage-register, db_health, ticket-improve, product-seed, security …) MUST be built to the same three-legged activation standard the roster shares today: **(A) REACTIVE + (B) GATED + (C) BACKSTOP**. A new kind is NOT considered complete until it satisfies all three, or explicitly documents why a leg is N/A.
+
+1. **REACTIVE — fire on the DB/GitHub state transition, not a cron alone.** The agent's job is enqueued the moment its triggering state transition happens, via a fire-and-forget Inngest event (untyped client `@/lib/inngest/client`, `inngest.send({ name, data }).catch(()=>{})`) fired from the mutation chokepoint, or a GitHub webhook. Not a cron as the primary path. Reference impls: the `spec-mutated` event fired from `src/lib/author-spec.ts` + `markSpecCardBackToReview` that drives Vale ([[libraries/agents-spec-review]]); the `pr-resolve` GitHub webhook at `src/app/api/webhooks/github/route.ts`; the spec-test on-ship enqueue at `src/lib/agent-jobs.ts:2136`.
+2. **GATED — one cheap `enqueueXIfDue` SDK check decides.** Before launching an expensive `claude -p` Max session, a cheap SDK `enqueueXIfDue` helper runs a **pending-pool predicate** (is there actually unprocessed work for this agent right now?) **AND** a **one-in-flight guard** (no queued / queued_resume / building / claimed job of this kind already covering the same target). It returns a legible `{ enqueued, reason }` so heartbeat logs distinguish "nothing due" from "in-flight". Canonical impls: `enqueueSpecReviewIfDue` (`src/lib/agents/spec-review.ts:91`) and `enqueueSpecTestIfDue` (`src/lib/agent-jobs.ts:503`); the fold predicate `getAutoFoldEligibleSlugs` + `autoFoldVerifiedSpecs` in `src/lib/spec-test-runs.ts` follows the same shape. The gate is what makes reactivity cheap — a reactive fire on an already-satisfied target no-ops for free, so wiring the send everywhere is safe.
+3. **BACKSTOP — the same gate on a cron / standing-pass cadence.** A cron and/or the [[libraries/platform-director]] standing pass re-runs the **same** `enqueueXIfDue` gate on a cadence, catching any target whose reactive event was dropped (a Vercel deploy reaping the Inngest sync mid-flight, the box down, a transient send failure). The backstop MUST route through the identical gate — never a raw `.insert({ kind })` — so it can never double-enqueue against a racing reactive fire. Examples: `src/lib/inngest/spec-test-cron.ts` + `src/lib/inngest/spec-review-cron.ts`; the platform-director standing-pass re-enqueue in `src/lib/agents/platform-director.ts`.
+
+**The rule, plainly:** REACTIVE + GATED + BACKSTOP, sharing one `enqueueXIfDue` chokepoint. Anti-patterns this retires: a raw `.insert({ kind })` at a mutation site with no gate (the ordering bug [[specs/bo-reactive-gated-build-enqueue]] fixed for build); a cron-only agent with up-to-cadence lag (the lag [[specs/vale-reactive-spec-review]] fixed for spec-review); a reactive fire with no backstop (the Vercel-reap gap [[specs/vault-post-merge-diff-backstop]] closed for the security lane). See the per-agent library pages for the audited roster — this section is the **contract**, not the roll-up.
 
 ## ⭐ Compute tiers — where an agent's work runs (and what it costs)
 
