@@ -760,6 +760,53 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
     }
   }
 
+  // ── Family 1b: spec-slug-keyed park cards WITHOUT a job_id ────────────────────
+  // Director "Parked {kind}" escalations (escalated_by_director, e.g. "Parked spec-test: {slug}") carry
+  // `spec_slug` + `escalation_kind` but NO job_id, so Family 1 (which keys on notifJobId) SKIPS them — they
+  // linger forever after their job resolves or their spec is deleted. This is what left week-old spec-test
+  // parks + the pm-detail-page deleted-spec parks in the CEO inbox (hand-dismissed 2026-07-02). REASON-GONE
+  // test on the SLUG: no agent_job for it is still `needs_attention` (the parked job resolved / was deleted
+  // with its spec), OR the spec has folded. CONSERVATIVE: a slug that STILL has a needs_attention job keeps
+  // its card, and a FAILED read of the live-park set leaves every card untouched (never clear on a null read).
+  const specKeyedParks: Array<{ card: ParkCardRow; specSlug: string }> = [];
+  for (const n of notifs) {
+    const m = n.metadata ?? {};
+    const escKind = typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : null;
+    if (escKind === null || !PARK_ESCALATION_KINDS.has(escKind)) continue;
+    if (notifJobId(m)) continue; // job-backed → Family 1 already handled it
+    const slug = typeof m["spec_slug"] === "string" && m["spec_slug"] ? (m["spec_slug"] as string) : null;
+    if (slug) specKeyedParks.push({ card: n, specSlug: slug });
+  }
+  if (specKeyedParks.length) {
+    const slugs = new Set(specKeyedParks.map((c) => c.specSlug));
+    const { data: liveParks, error: liveErr } = await admin
+      .from("agent_jobs")
+      .select("spec_slug")
+      .eq("status", "needs_attention")
+      .in("spec_slug", Array.from(slugs));
+    if (liveErr) {
+      // SAFETY: a failed live-park read would make every slug look "resolved" — bail so a transient error
+      // never mass-dismisses genuine parks. Next tick retries.
+      console.warn(`[approval-inbox] Family 1b live-park read failed — skipping spec-keyed auto-clear this tick: ${liveErr.message}`);
+    } else {
+      const liveParkedSlugs = new Set(
+        ((liveParks ?? []) as Array<{ spec_slug: string | null }>).map((j) => j.spec_slug).filter((s): s is string => Boolean(s)),
+      );
+      const specStatus = await loadSpecStatuses(admin, slugs);
+      for (const { card, specSlug } of specKeyedParks) {
+        if (liveParkedSlugs.has(specSlug)) continue; // a job for this slug is still parked — keep the card
+        const status = specStatus.get(specSlug);
+        const reason =
+          status === undefined
+            ? `spec ${specSlug} no longer exists — park superseded`
+            : status === "folded"
+              ? `spec ${specSlug} folded — park superseded`
+              : `no needs_attention job remains for ${specSlug} — park resolved`;
+        if (await dismissParkCard(admin, card.id, reason)) cleared++;
+      }
+    }
+  }
+
   // ── Family 2: Reva "Ambiguous post-deploy signal" cards ──────────────────────
   if (revaCards.length) {
     const slugs = new Set<string>();
