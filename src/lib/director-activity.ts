@@ -125,7 +125,20 @@ export type DirectorActionKind =
   // loop action is supervised by definition (north-star: "hitting a rail = escalate to the objective-owner").
   // She never widens her own leash; the CEO approves this ONE action, one-time, logged. metadata:
   // { thread_id, target_job_id, action_type, reversibility, autonomous:false }.
-  | "raised_out_of_leash_request";
+  | "raised_out_of_leash_request"
+  // ceo-authorized-out-of-leash-actions Phase 2 — the CEO-approved out-of-leash action was EXECUTED through
+  // the standard executor (`runCeoAuthorizedOutOfLeashJob` in `scripts/builder-worker.ts`). One row per action
+  // executed, whether the shell succeeded or failed. The leash was NOT widened — this is a scoped, one-time
+  // authorization tied to THIS action instance (`authorized_by='ceo'` on the pending action + this row); the
+  // next out-of-leash ask needs its OWN CEO approval. `function_autonomy` is UNCHANGED after execution.
+  // metadata: { thread_id, target_job_id, action_type, action_id, cmd, reversibility, irreversible,
+  // authorized_by:'ceo', outcome:'ok'|'failed', result_tail, autonomous:false }.
+  | "executed_ceo_authorized_out_of_leash"
+  // ceo-authorized-out-of-leash-actions Phase 2 — the CEO DECLINED the out-of-leash request; no execution
+  // happened. One row per declined action so the audit history is symmetric with the approve path. metadata:
+  // { thread_id, target_job_id, action_type, action_id, cmd, reversibility, irreversible,
+  // authorized_by:'ceo', autonomous:false }.
+  | "ceo_declined_out_of_leash_request";
 
 export interface DirectorActivityInput {
   workspaceId: string;

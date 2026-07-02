@@ -10757,7 +10757,7 @@ const DIRECTOR_COACH_OUTPUT = [
   `{"status":"replied","reply":"<acknowledge the dismiss in chat — no approval card is rendered>","pending_actions":[{"type":"dismiss-park","summary":"<one-line why>","jobId":"<agent_jobs.id of the parked row>","reason":"<written to director_activity>"}]}`,
   `  — when a PARKED \`agent_jobs\` row (status=\`needs_attention\`) you own is genuinely not worth pursuing (the underlying work is being short-circuited, a prereq won't be supplied, the park is stale and not auto-routable). **AUTO-APPLIED — no CEO approval, no inbox card.** Flips \`agent_jobs.status='dismissed'\`, stamps \`needs_attention_class='dismissed_by_director'\`, and writes a \`dismissed_park\` director_activity row carrying your reason + the original park's class + the underlying spec slug. Owner-only: the parked job's underlying spec slug must resolve to a spec whose \`Owner: [[../functions/{fn}]]\` matches your function; a dismiss on someone else's job is rejected as out-of-leash. Reversible: the CEO clicks Re-open from the activity feed and the job flips back to \`needs_attention\` (a wrongly-dismissed park is one tap away from re-routing). Use this for parks the [[no-parked-specs-auto-route-needs-attention]] router can't help with (no shipped target to fold to, no real_blocker to spec around — the blocker is "we changed our mind").`,
   `{"status":"replied","reply":"<acknowledge you're raising it to the CEO — no approval card is rendered in this chat>","pending_actions":[{"type":"out-of-leash-request","summary":"<one-line reason the CEO sees>","actionType":"<run_prod_script|apply_migration>","cmd":"<the exact shell/script command the executor runs on CEO approval>","preview":"<what it changes, e.g. the SQL / the rows touched>","reasoning":"<why this is right + WHY it's out of your leash>","reversibility":"<reversible via <how> | irreversible — <why>>","leashRail":"<which rail this hits, e.g. 'standalone run_prod_script (not the additive-migration bundle case)'>","founderAsk":"<the CEO's ask, verbatim or summarized>","irreversible":false}]}`,
-  `  — ceo-authorized-out-of-leash-actions Phase 1: when the CEO asks you in chat to do something OUTSIDE your leash and you INDEPENDENTLY AGREE it's sound + the right call. **AUTO-APPLIED — this raises a CEO-routed Approval Request the moment your reply is persisted; there is no approve/decline card in THIS chat.** The RAISED request surfaces in the CEO's normal Approvals inbox (routed_to_function='ceo'), showing your reasoning + the exact action, so the CEO approves with eyes open — that's the CEO's decision, and their approval EXECUTES the concrete action via the standard executor (Phase 2). Never widens your leash — one-time, this action only. If you DISAGREE with the founder's ask (unsound / risky / wrong), do NOT emit this action — reply in the chat with your reasoning + what you'd do instead. That's the supervisor gate: your INDEPENDENT AGREEMENT is required (necessary but the founder's ask is not sufficient). Flag \`irreversible:true\` when the action can't be undone (the CEO still decides, but they see the flag).`,
+  `  — ceo-authorized-out-of-leash-actions: when the CEO asks you in chat to do something OUTSIDE your leash and you INDEPENDENTLY AGREE it's sound + the right call. **AUTO-APPLIED — this raises a CEO-routed Approval Request the moment your reply is persisted; there is no approve/decline card in THIS chat.** The RAISED request surfaces in the CEO's normal Approvals inbox (routed_to_function='ceo'), showing your reasoning + the exact action, so the CEO approves with eyes open — that's the CEO's decision, and their APPROVAL runs the concrete \`cmd\` through the standard executor (\`runCeoAuthorizedOutOfLeashJob\` shell-runs \`run_prod_script\`/\`apply_migration\` in the repo root) as a SCOPED, ONE-TIME, \`authorized_by='ceo'\`-stamped execution; their DECLINE closes it cleanly with no execution. **NEVER widens your leash** — one-time, this action only; the leash config is untouched and the next out-of-leash ask needs its own CEO approval. If you DISAGREE with the founder's ask (unsound / risky / wrong), do NOT emit this action — reply in the chat with your reasoning + what you'd do instead. That's the supervisor gate: your INDEPENDENT AGREEMENT is required (necessary but the founder's ask is not sufficient). Flag \`irreversible:true\` when the action can't be undone (the CEO still decides, but they see the flag).`,
   `{"status":"replied","reply":"<acknowledge the audit request in chat — no approval card is rendered>","pending_actions":[{"type":"request-audit","summary":"<one-line why>","slug":"<existing-spec-slug>","reason":"<drift suspect | hand-flip cleanup | missing provenance — written to director_activity>"}]}`,
   `  — when a spec YOU OWN has \`phase_states\` you can't trust (a tagless ✅ phase / a director hand-flip / pre-provenance reconciler pass) and you need the audit to RE-VERIFY + re-stamp provenance from the merge ledger. **AUTO-APPLIED — no CEO approval, no inbox card.** Enqueues an \`audit-spec-shipped-state\` agent_jobs row scoped to this slug + writes a \`requested_audit\` director_activity row carrying your reason; the audit's verdict (per-phase {status, pr, merge_sha}) shows up in the activity feed when the job runs. The audit walks \`spec_status_history\` for \`merge:<sha>\` rows + the squash-merge subjects on origin/main to resolve SHA → PR #, then re-stamps \`phase_states\` with PROPER provenance (or REGRESSES a tagless ✅ phase to \`planned\` if no merge evidence exists — "we cannot prove this phase shipped" is better than "✅ ungrounded"). Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function — out-of-leash otherwise. This is the LEGITIMATE cleanup path; do NOT use a \`spec-status\` flip to "catch up" the board (that path now rejects shipped-flips that don't carry merge provenance).`,
 ].join("\n");
@@ -10790,31 +10790,191 @@ function renderCoachTranscript(messages: CoachThreadRow["messages"]): string {
 }
 
 /**
- * ceo-authorized-out-of-leash-actions Phase 1 — the dispatcher entry for a raised out-of-leash Approval
- * Request. Phase 1 SCOPE is the raise only: the row sits `needs_approval` until the CEO decides in the
- * standard Approvals inbox. If the CEO approves BEFORE Phase 2's executor is wired, the standard
- * `/api/roadmap/approve` flow flips the row to `queued_resume` and the dispatcher lands HERE. Rather than
- * dropping through to the build fallthrough (which would treat it as a build spec), we PARK the job with a
- * clear diagnosis so the CEO sees "Phase 2 executor not yet shipped" instead of a mysterious build error.
- * Phase 2 replaces this stub with the real executor path (executeSonnetDecision / directActionHandlers).
+ * ceo-authorized-out-of-leash-actions Phase 2 — the executor lane for a CEO-decided out-of-leash Approval
+ * Request. Phase 1 raises the row (`needs_approval`); the standard `/api/roadmap/approve` gate
+ * ([[../src/lib/roadmap-actions]] `approveRoadmapAction`) flips each `pending_action` to `approved` or
+ * `declined` and — once no action is still pending — the job to `queued_resume`. The dispatcher lands here.
+ *
+ * SCOPED + ONE-TIME: this runner executes only the specific `out_of_leash: true` pending action carried on
+ * THIS job — it never modifies `function_autonomy` / the leash categories / any standing rule (a permanent
+ * widening is a separate explicit leash-config change, not this path). The `authorized_by` marker on the
+ * pending action flips `'ceo-pending'` → `'ceo'` at execution time so the audit trail records the CEO
+ * authorized THIS action instance.
+ *
+ * AUDITED: `/api/roadmap/approve` already writes the routed decision to `approval_decisions` (decided_by='ceo',
+ * routed_to_function='ceo'). This runner additionally writes ONE `director_activity` row per action:
+ *   • `executed_ceo_authorized_out_of_leash` on an approved action — the executor ran the concrete `cmd`
+ *     (a bounded `run_prod_script` or `apply_migration`). metadata carries the action type/id/cmd, the
+ *     reversibility note, the CEO-authorized marker, and the outcome (ok|failed) + result tail so a failure
+ *     is one `git revert` / rollback away.
+ *   • `ceo_declined_out_of_leash_request` on a declined action — no execution ran; the row records that the
+ *     CEO closed the request cleanly (matches the approve path's audit shape).
+ *
+ * Safety: an `irreversible: true` action still executes on CEO approval (the CEO is the top authority), but
+ * the raised request already flags irreversibility so the CEO approves knowingly.
  */
 async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   const tag = `[out-of-leash:${job.id.slice(0, 8)}]`;
   if (job.status !== "queued_resume") {
-    console.log(`${tag} skip — status=${job.status} (Phase 1 only raises; execution is Phase 2)`);
+    console.log(`${tag} skip — status=${job.status} (only runs on CEO decision → queued_resume)`);
     return;
   }
-  const msg =
-    "ceo-authorized-out-of-leash-actions Phase 2 (executor wire-up) is not yet shipped. This Phase-1 row " +
-    "raised the request; execution lands in Phase 2 (standard executor via executeSonnetDecision / " +
-    "directActionHandlers). Re-open this job once Phase 2 is live.";
+
+  // Recover Ada's raise metadata (reasoning + thread + which director raised it) for the audit rows.
+  let instr: Record<string, unknown> = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch { /* malformed instructions — fall back to defaults */ }
+  const directorFunction =
+    typeof instr.director_function === "string" && instr.director_function ? instr.director_function : "platform";
+  const threadId = typeof instr.thread_id === "string" ? instr.thread_id : null;
+  const reasoning = typeof instr.reasoning === "string" ? instr.reasoning : "";
+  const reversibility = typeof instr.reversibility === "string" ? instr.reversibility : "";
+  const irreversibleFlag = instr.irreversible === true;
+
+  const actions = (job.pending_actions || []).map((a) => ({ ...a }));
+  const outOfLeashActions = actions.filter((a) => (a as unknown as Record<string, unknown>).out_of_leash === true);
+  if (!outOfLeashActions.length) {
+    await update(job.id, {
+      status: "needs_attention",
+      error: "ceo-authorized-out-of-leash job has no out_of_leash pending_action",
+      pending_actions: actions,
+      log_tail: `${tag} no out_of_leash pending action — parked needs_attention`.slice(-2000),
+    });
+    console.warn(`${tag} no out_of_leash pending action → needs_attention`);
+    return;
+  }
+
+  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+  const summaries: string[] = [];
+  let anyDeclined = false;
+  let anyFailed = false;
+  let anyExecuted = false;
+
+  for (const a of actions) {
+    const meta = a as unknown as Record<string, unknown>;
+    if (meta.out_of_leash !== true) continue;
+
+    // CEO DECLINE — no execution. Audited symmetrically with the approve path.
+    if (a.status === "declined") {
+      anyDeclined = true;
+      a.result = "declined by CEO — action not executed";
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction,
+        actionKind: "ceo_declined_out_of_leash_request",
+        specSlug: null,
+        reason: reasoning || a.summary || "",
+        metadata: {
+          target_job_id: job.id,
+          thread_id: threadId,
+          action_type: a.type,
+          action_id: a.id,
+          cmd: a.cmd ?? null,
+          reversibility: reversibility || null,
+          irreversible: irreversibleFlag,
+          authorized_by: "ceo",
+          autonomous: false,
+        },
+      });
+      summaries.push(`${a.summary} → declined by CEO (no execution)`);
+      console.log(`${tag} action ${a.id.slice(0, 8)} declined by CEO — no execution`);
+      continue;
+    }
+
+    // Not yet decided — approveRoadmapAction only flips to queued_resume when every action is decided, so
+    // reaching here on a still-pending action is a race we defensively no-op past.
+    if (a.status !== "approved") continue;
+
+    // Sanity-gate the concrete action type. Ada raises only `run_prod_script` | `apply_migration`; anything
+    // else is a malformed raise — fail-safe rather than shell-execute an unknown handler.
+    if (a.type !== "run_prod_script" && a.type !== "apply_migration") {
+      a.status = "failed";
+      a.result = `unsupported out_of_leash action type '${a.type}' (expected run_prod_script | apply_migration)`;
+      anyFailed = true;
+      summaries.push(`${a.summary} → failed (bad type)`);
+      continue;
+    }
+    if (!a.cmd) {
+      a.status = "failed";
+      a.result = "no cmd on out_of_leash action";
+      anyFailed = true;
+      summaries.push(`${a.summary} → failed (no cmd)`);
+      continue;
+    }
+
+    // Upgrade the authorization marker: 'ceo-pending' → 'ceo' — the CEO authorized THIS action now, at
+    // execution time. Scoped, one-time — the leash config is untouched.
+    meta.authorized_by = "ceo";
+    meta.ceo_authorized_at = new Date().toISOString();
+
+    let ok = false;
+    let resultText = "";
+    try {
+      const r = await shAsync("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd: REPO_DIR });
+      ok = r.code === 0;
+      resultText = (r.out + r.err).slice(-500);
+    } catch (e) {
+      resultText = e instanceof Error ? e.message : String(e);
+    }
+    a.status = ok ? "done" : "failed";
+    a.result = ok ? resultText || "executed" : resultText || "cmd failed";
+    if (ok) anyExecuted = true;
+    else anyFailed = true;
+
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction,
+      actionKind: "executed_ceo_authorized_out_of_leash",
+      specSlug: null,
+      reason: reasoning || a.summary || "",
+      metadata: {
+        target_job_id: job.id,
+        thread_id: threadId,
+        action_type: a.type,
+        action_id: a.id,
+        cmd: a.cmd,
+        reversibility: reversibility || null,
+        irreversible: irreversibleFlag,
+        authorized_by: "ceo",
+        outcome: ok ? "ok" : "failed",
+        result_tail: resultText.slice(-500) || null,
+        autonomous: false,
+      },
+    });
+
+    summaries.push(`${a.summary} → ${ok ? "done" : "failed"}`);
+    console.log(
+      `${tag} executed action ${a.id.slice(0, 8)} (${a.type}): ${ok ? "done" : "failed"}${
+        resultText ? ` (${resultText.slice(-200)})` : ""
+      }`,
+    );
+  }
+
+  // Terminal state. A failed execution → needs_attention so the CEO sees the failure (a genuine failure is
+  // one `git revert` / rollback away, per the audit spec); a clean approve or decline → completed.
+  const nextStatus = anyFailed ? "needs_attention" : "completed";
+  const errorNote = anyFailed
+    ? `out-of-leash execution failed: ${summaries.filter((s) => s.includes("failed")).join("; ")}`.slice(0, 500)
+    : null;
+  const logHeaderBits = [
+    anyExecuted ? "executed" : null,
+    anyDeclined ? "declined" : null,
+    anyFailed ? "failed" : null,
+  ].filter(Boolean);
   await update(job.id, {
-    status: "needs_attention",
-    needs_attention_class: "awaiting_phase_two_executor",
-    error: msg.slice(0, 500),
-    log_tail: msg.slice(-2000),
+    status: nextStatus,
+    pending_actions: actions,
+    error: errorNote,
+    log_tail: [
+      `Out-of-leash action(s) processed (${logHeaderBits.join(" · ") || "no-op"}):`,
+      ...summaries.map((s) => `• ${s}`),
+    ]
+      .join("\n")
+      .slice(-2000),
   });
-  console.warn(`${tag} parked needs_attention — Phase 2 executor not yet shipped`);
+  console.log(`${tag} finished → ${nextStatus} (${summaries.join(", ")})`);
 }
 
 async function runDirectorCoachJob(job: Job) {
@@ -16455,11 +16615,12 @@ async function main() {
       // both directors run read-only Max investigations against the SAME Anthropic account, so co-locating
       // them here avoids a second-director starvation lane and keeps director rate-limit cost bounded.
       while (countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
-        // ceo-authorized-out-of-leash rides this lane too: on CEO approval the /api/roadmap/approve gate
-        // flips the row to queued_resume, and the Phase-1 stub runner (`runCeoAuthorizedOutOfLeashJob`)
-        // parks it needs_attention with "Phase 2 executor not shipped" until Phase 2 lands the real
-        // executor path (executeSonnetDecision / directActionHandlers). Concurrency-1 is fine — the row
-        // barely spends any time claimed (a small deterministic write).
+        // ceo-authorized-out-of-leash rides this lane too: on CEO decision the /api/roadmap/approve gate
+        // flips the row to queued_resume, and `runCeoAuthorizedOutOfLeashJob` (Phase 2) executes the
+        // approved `run_prod_script`/`apply_migration` via `shAsync` (or logs the decline audit) — a scoped,
+        // one-time, `authorized_by='ceo'`-stamped run. The leash config is NEVER modified by this path (a
+        // permanent widening is a separate explicit leash-config change). Concurrency-1 is fine — one shell
+        // per job.
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["platform-director", "director-bounce-back", "growth-director", "ceo-authorized-out-of-leash"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
