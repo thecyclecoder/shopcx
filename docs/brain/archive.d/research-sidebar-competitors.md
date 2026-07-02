@@ -1,0 +1,1 @@
+- **Research sidebar → Competitors (product-filtered)** · verified 2026-07-02 · → [[../dashboard/research__competitors]]
