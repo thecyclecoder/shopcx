@@ -677,11 +677,11 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
     const jobIds = Array.from(new Set(jobCards.map((c) => c.jobId)));
     const { data: jobsData } = await admin
       .from("agent_jobs")
-      .select("id, status, spec_slug, kind, pr_number")
+      .select("id, workspace_id, status, spec_slug, kind, pr_number")
       .in("id", jobIds);
-    const jobs = new Map<string, { status: string; spec_slug: string | null; kind: string; pr_number: number | null }>();
-    for (const j of (jobsData ?? []) as Array<{ id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>) {
-      jobs.set(j.id, { status: j.status, spec_slug: j.spec_slug, kind: j.kind, pr_number: j.pr_number });
+    const jobs = new Map<string, { workspace_id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>();
+    for (const j of (jobsData ?? []) as Array<{ id: string; workspace_id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>) {
+      jobs.set(j.id, { workspace_id: j.workspace_id, status: j.status, spec_slug: j.spec_slug, kind: j.kind, pr_number: j.pr_number });
     }
     // Batch-fetch the spec statuses for jobs STILL needs_attention (to catch a CEO-folded park).
     const stillParkedSlugs = new Set<string>();
@@ -717,20 +717,43 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
       // later reconciler tick can't re-emit a card for the same job), THEN dismiss the card. CONSERVATIVE:
       // on any GitHub read failure `getPr` returns `{ok:false}` → we skip, keeping the card (never
       // silently clear on a null read). A still-open PR keeps its card too — a human needs to see it.
+      //
+      // pr-resolve-park-conditional-state-update — the update is CONDITIONAL on the state we observed:
+      //   (a) workspace_id-scoped — a card in workspace A must never flip a job that belongs to
+      //       workspace B (the read across `.in("id", jobIds)` is workspace-agnostic, so a stray metadata
+      //       pointer could otherwise cross workspaces here).
+      //   (b) status='needs_attention' + kind='pr-resolve' + pr_number-scoped — if the job left
+      //       needs_attention (was re-queued, dismissed, resolved by another path) between our read and
+      //       the update, or its kind/pr_number changed, the update matches ZERO rows and we DO NOT
+      //       dismiss the card; the next reconciliation pass re-evaluates against fresh state.
+      // `.select("id")` returns the updated rows so we can assert exactly ONE row transitioned; anything
+      // else (0 rows raced or filtered, >1 defensively impossible on a PK-scoped update) keeps the card.
       if (job.kind === "pr-resolve" && job.pr_number != null) {
+        if (job.workspace_id !== card.workspace_id) continue; // workspace mismatch — never cross workspaces
         const decision = prResolveParkOutcome(await getPr(job.pr_number));
         if (decision.action === "keep") continue; // read_failed or still_open — CONSERVATIVE keep
         const outcome = decision.outcome; // 'merged' | 'closed'
-        const { error: upErr } = await admin
+        const { data: updated, error: upErr } = await admin
           .from("agent_jobs")
           .update({
             status: "completed",
             log_tail: `pr-resolve sentinel auto-cleared: PR #${job.pr_number} ${outcome} on GitHub (reconciler-observed ${new Date().toISOString()})`.slice(-2000),
           })
-          .eq("id", jobId);
+          .eq("id", jobId)
+          .eq("workspace_id", job.workspace_id)
+          .eq("status", "needs_attention")
+          .eq("kind", "pr-resolve")
+          .eq("pr_number", job.pr_number)
+          .select("id");
         if (upErr) {
           console.warn(`[approval-inbox] pr-resolve sentinel flip failed for ${jobId.slice(0, 8)} (PR #${job.pr_number}): ${upErr.message}`);
           continue; // couldn't flip → don't drop the card
+        }
+        if (!updated || updated.length !== 1) {
+          // Concurrent transition (the job left needs_attention between the read and the update, or a
+          // kind/pr_number/workspace filter no longer matches) — leave the card active for the next
+          // reconciler pass. Never dismiss a card we didn't authoritatively flip.
+          continue;
         }
         if (await dismissParkCard(admin, card.id, `pr-resolve sentinel: PR #${job.pr_number} ${outcome} on GitHub — park superseded`)) cleared++;
       }
