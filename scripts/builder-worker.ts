@@ -11665,6 +11665,64 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "pr-resolve", sandbox: "build", timeout: PR_RESOLVE_TIMEOUT_MS });
 }
 
+// dirty-pr-resolver-supersede-detection (Pax durable mandate — baked from pr-resolve coaching #1):
+// detect the SUPERSEDED case where origin/main ALREADY exports a symbol this branch is ADDING (a
+// fix-of-fix landed via another PR while this one sat in the queue). The live incident was pr-1004
+// (e6f6af51): #991/#993 shipped a superseding `enqueueSecurityDiffIfDue` on main, so merging main into
+// the branch produced a duplicate `export async function enqueueSecurityDiffIfDue` + duplicate type,
+// the PR was left un-mergeable, and Pax burned its rolling grade rebuilding an already-shipped feature.
+// This pre-flight catches that case up front — read-only, no network — so the resolver can CLOSE the
+// PR as superseded (with a comment citing the duplicate symbols) instead of spending a Max resolve
+// budget on an unwinnable merge. Returns the overlapping symbols; empty means "safe to resolve".
+function findSupersededExportedSymbolsOnMain(wt: string): Array<{ symbol: string; kind: string; file: string }> {
+  const out: Array<{ symbol: string; kind: string; file: string }> = [];
+  const diff = sh("git", ["diff", "--unified=0", "--no-color", "origin/main...HEAD", "--", "*.ts", "*.tsx"], { cwd: wt });
+  if (diff.code !== 0 || !diff.out) return out;
+  type Key = { file: string; kind: string; symbol: string };
+  const adds: Key[] = [];
+  const removes = new Set<string>();
+  let currentFile: string | null = null;
+  const fileHeaderRe = /^\+\+\+ b\/(.+)$/;
+  const exportRe = /^([+-])\s*export\s+(?:default\s+)?(?:async\s+)?(function|const|let|var|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/;
+  for (const line of diff.out.split("\n")) {
+    const fh = fileHeaderRe.exec(line);
+    if (fh) { currentFile = fh[1]; continue; }
+    if (!currentFile) continue;
+    // Skip tests + test-adjacent files; only product code counts for a supersede.
+    if (currentFile.includes("/__tests__/") || currentFile.endsWith(".test.ts") || currentFile.endsWith(".test.tsx")) continue;
+    const m = exportRe.exec(line);
+    if (!m) continue;
+    const sign = m[1];
+    const kind = m[2];
+    const symbol = m[3];
+    const k = `${currentFile}::${kind}::${symbol}`;
+    if (sign === "+") adds.push({ file: currentFile, kind, symbol });
+    else removes.add(k);
+  }
+  if (adds.length === 0) return out;
+  // A `+ export ...` line paired with a matching `- export ...` line is a rename/move within the branch,
+  // NOT a NEW declaration — skip. Only genuine net-adds can be superseded.
+  const netAdds = adds.filter((a) => !removes.has(`${a.file}::${a.kind}::${a.symbol}`));
+  if (netAdds.length === 0) return out;
+  const showCache = new Map<string, string | null>();
+  for (const a of netAdds) {
+    let mainContent = showCache.get(a.file);
+    if (mainContent === undefined) {
+      const show = sh("git", ["show", `origin/main:${a.file}`], { cwd: wt });
+      mainContent = show.code === 0 ? show.out : null;
+      showCache.set(a.file, mainContent);
+    }
+    if (mainContent === null) continue; // new file on branch → main can't have superseded it
+    // Match the SAME KIND + SAME SYMBOL as an EXPORTED declaration on main. A supersede is only "duplicate
+    // export" — a plain non-exported helper doesn't count (it wouldn't compile-break the merge).
+    const re = new RegExp(`^\\s*export\\s+(?:default\\s+)?(?:async\\s+)?${a.kind}\\s+${a.symbol}\\b`, "m");
+    if (re.test(mainContent)) {
+      out.push({ symbol: a.symbol, kind: a.kind, file: a.file });
+    }
+  }
+  return out;
+}
+
 // Surface a PR that can't be auto-resolved (and isn't a re-buildable spec build) to the owner — a
 // Control Tower / Slack note per the North Star ("escalate, don't guess"). Best-effort.
 async function surfacePrToOwner(workspaceId: string, prNumber: number, prUrl: string, why: string) {
@@ -11776,21 +11834,63 @@ async function runPrResolveJob(job: Job) {
   }
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
 
+  // dirty-pr-resolver-supersede-detection (Pax durable mandate): before spending ANY resolve budget,
+  // check whether origin/main has ALREADY exported a symbol this branch is adding — the fix-of-fix
+  // pattern that produced pr-1004's duplicate `enqueueSecurityDiffIfDue` after #991/#993 merged. Such a
+  // PR is unresolvable by definition: merging main into the branch would leave two identical exports (a
+  // broken build). Close it with a citation instead of burning a Max resolve pass on an unwinnable merge.
+  try {
+    const superseded = findSupersededExportedSymbolsOnMain(wt);
+    if (superseded.length > 0) {
+      const list = superseded
+        .slice(0, 10)
+        .map((s) => `- \`export ${s.kind} ${s.symbol}\` — already on main in \`${s.file}\``)
+        .join("\n");
+      const comment =
+        `Closing as superseded: origin/main already exports the symbol(s) this PR also defines, so merging main would produce duplicate exports (a broken build). It looks like another PR shipped a superseding implementation while this one sat in the queue.\n\n` +
+        `${list}\n\n` +
+        `Auto-closed by the dirty-PR resolver (dirty-pr-resolver-supersede-detection).`;
+      try { await gh("POST", `/repos/${REPO}/issues/${prNumber}/comments`, { body: comment }); } catch { /* best-effort comment */ }
+      const closed = await gh("PATCH", `/repos/${REPO}/pulls/${prNumber}`, { state: "closed" });
+      if (closed.ok) {
+        try { await gh("DELETE", `/repos/${REPO}/git/refs/heads/${branch}`); } catch { /* best-effort branch cleanup */ }
+      }
+      await update(job.id, {
+        status: "completed",
+        pr_url: prUrl,
+        pr_number: prNumber,
+        error: `closed-as-superseded: ${superseded.length} exported symbol(s) already on main`,
+        log_tail: `PR #${prNumber} is superseded on main (duplicate exports would result):\n${list}\n${closed.ok ? "→ closed the PR + deleted the branch." : "→ close failed (left for the next event / human)."}`,
+      });
+      console.log(`${tag} PR #${prNumber} superseded on main (${superseded.length} duplicate export(s)) — ${closed.ok ? "closed" : "close failed"}, no resolve`);
+      return;
+    }
+  } catch (e) {
+    console.error(`${tag} supersede check failed (continuing to resolve):`, e instanceof Error ? e.message : e);
+  }
+
   try {
     const prompt = [
       `You are the box's dirty-PR resolver, on Max. You are in a git worktree at the repo root, checked out on branch \`${branch}\` — a build PR (#${prNumber}). \`origin/main\` has moved ahead and this PR is CONFLICTING. Resolve it so the PR compiles and goes green — OR decide it can't be safely auto-resolved and say so. Do NOT guess.`,
+      ``,
+      `⭐ DURABLE MANDATE (baked from pr-resolve coaching — always applies) ⭐`,
+      `  A) SUPERSEDE CHECK first. The worker already ran a static pre-flight over your added exported symbols; if any were duplicated on main it CLOSED this PR before you got here. Still, for any conflict that resists a clean additive union — or for any tsc error of the form "Duplicate identifier" / "Duplicate function implementation" — treat it as SUPERSEDED (a fix-of-fix landed on main while this PR sat in the queue). Do NOT try to unify: \`git merge --abort\` and \`status: "escalate"\` with \`reason: "superseded: <symbol/type> already on main; recommend closing this PR"\`. NEVER commit a merge that produces two identical exported declarations.`,
+      `  B) ANCESTRY hard gate. NEVER conclude \`"resolved"\` while \`git merge-base --is-ancestor origin/main HEAD\` returns non-zero — that is a FAILED merge (the worker will reject it and escalate). If you can't get main into the branch's ancestry, escalate with a plain one-line reason instead of forcing a wrong commit.`,
+      `  C) NO leftover conflict markers, NO retry-until-cap. Never leave \`<<<<<<<\` / \`=======\` / \`>>>>>>>\` in a tracked file. After 2 failed tsc attempts, STOP and diagnose: is the divergence a parallel rewrite? a supersede? a stale rebase foundation? Escalate with a one-line diagnosis rather than retrying blindly.`,
+      `  D) ADDITIVE UNION preferred, NEVER delete to "win". The vast majority of conflicts here are two builds appending to the same registry / enum / import list / doc section — KEEP BOTH. Deleting the other build's code to make the conflict go away is the recurring-mistake pattern that dropped the pr-resolve rolling grade; do not do it.`,
       ``,
       `Steps:`,
       `1. Run \`git merge origin/main\`. If it merges with NO conflicts, skip to step 4.`,
       `2. Resolve EVERY conflict. The vast majority are ADDITIVE — both sides appended a registry entry / enum case / list item / import / doc section → KEEP BOTH (the union of the two additions). For a doc add/add on the same heading, keep the SHIPPED (origin/main) side. NEVER resolve a conflict by deleting code to "win" — that destroys the other build's work.`,
       `3. \`git add\` each resolved file.`,
       `4. Commit the merge: \`git commit --no-edit\` (only if a merge is in progress; a clean merge auto-commits).`,
-      `5. Run \`npx tsc --noEmit\`. Fix ONLY errors the merge introduced and re-run — at most 2 attempts total. The merge MUST compile.`,
+      `5. Run \`npx tsc --noEmit\`. Fix ONLY errors the merge introduced and re-run — at most 2 attempts total. The merge MUST compile. A "Duplicate identifier" / "Duplicate function implementation" error means SUPERSEDED — abort and escalate per mandate (A); do NOT try to reconcile two copies of the same declaration.`,
       `6. Do NOT \`git push\` and do NOT open/modify any PR — the worker re-verifies and pushes. Leave the merge committed on \`${branch}\`.`,
       ``,
       `DECISION — never force a semantically-wrong merge:`,
-      `  • Simple/additive union that compiles → status "resolved".`,
-      `  • The two sides are heavily-diverged PARALLEL REWRITES of the same logic (not a clean union), OR tsc still fails after 2 attempts → do NOT guess: run \`git merge --abort\` to leave the branch clean, then status "escalate" with a one-line \`reason\` (what diverged / why it can't compile).`,
+      `  • Simple/additive union that compiles AND \`git merge-base --is-ancestor origin/main HEAD\` passes → status "resolved".`,
+      `  • SUPERSEDED (a duplicate exported symbol/type surfaces during resolve or tsc, or the branch's feature already appears on main) → \`git merge --abort\` + status "escalate" with reason "superseded: <what already exists on main>; recommend closing this PR".`,
+      `  • The two sides are heavily-diverged PARALLEL REWRITES of the same logic (not a clean union), OR tsc still fails after 2 attempts, OR ancestry is not achievable → do NOT guess: run \`git merge --abort\` to leave the branch clean, then status "escalate" with a one-line \`reason\` (what diverged / why it can't compile / why ancestry fails).`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"resolved","summary":"<what you merged + how you resolved each conflict + the files>"}`,
