@@ -304,6 +304,17 @@ export const MIGRATION_DRIFT_LOOP_ID = "migration-drift-check";
  */
 export const DB_HEALTH_SLOWQ_LOOP_ID = "db-health-slow-query";
 export const DB_HEALTH_SIZE_LOOP_ID = "db-health-size-sweep";
+/**
+ * loop_heartbeats.loop_id of the DB Health Agent's INSTANCE-saturation pass
+ * (db-health-instance-saturation-detector, Phase 1). The 2026-07-02 incident (86.8% DATABASE errors,
+ * dashboards timing out) was invisible to the per-query slow-query pass because it was
+ * instance-level (xact_rollback 7.43%, 883 GB temp_bytes, MEMORY 79%, `authenticated`
+ * statement_timeout=8s catching queries under load). This pass reads `pg_stat_database` +
+ * `pg_stat_activity` + `pg_roles.rolconfig` via the pooler, feeds them into `analyzeInstanceHealth`,
+ * and beats here. Liveness tile (green when beating) — Phase 2 surfaces findings as advisory
+ * proposals in the DB Health panel + lets a live instance finding redden the tile.
+ */
+export const DB_HEALTH_INSTANCE_LOOP_ID = "db-health-instance-saturation";
 
 export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ── The box build worker (worker_heartbeats) ──────────────────────────────
@@ -435,6 +446,24 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 2 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+  },
+  {
+    // BOX-EMITTED — the DB Health Agent's instance-saturation pass (db-health-instance-saturation-detector P1).
+    // Reads pg_stat_database (rollback ratio · temp spill · cache-hit) + pg_stat_activity (connection
+    // utilization · statements near the `authenticated` statement_timeout ceiling) + pg_roles.rolconfig
+    // (the 8s ceiling itself). Fills the blind spot the per-query slow-query pass has for the
+    // 2026-07-02-class instance-level saturation. Liveness only in Phase 1 (findings ride the beat's
+    // `produced` blob for the panel); Phase 2 surfaces them as advisory proposals. registeredAt graces
+    // the first-run window (newcron-grace).
+    id: DB_HEALTH_INSTANCE_LOOP_ID,
+    kind: "cron",
+    owner: "platform",
+    label: "DB Health — instance saturation",
+    description: "Box job: pg_stat_database + pg_stat_activity + pg_roles.rolconfig → classify instance-level saturation (statement_timeout / temp-spill / connection / cache / rollback pressure) the per-query pass can't see.",
+    expectedCadence: "every ~15 min (box job)",
+    livenessWindowMs: 45 * MIN,
+    registeredAt: "2026-07-02T00:00:00Z",
+    personaKind: "db_health", // Devi — all db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
   {
     // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
