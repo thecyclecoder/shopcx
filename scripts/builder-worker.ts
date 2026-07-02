@@ -1284,8 +1284,18 @@ function extractClaudeUsage(obj: Record<string, unknown>): { usage: RunUsage; mo
 // agent_job_costs row keyed to the job + its Max account / config-dir. NEVER throws into the build
 // path — a metering failure must never block / fail / slow a lane (mirrors emitLoopHeartbeat). Box
 // lanes carry NO ANTHROPIC_API_KEY → token + usage-window only, never a fabricated `$`.
+//
+// chained-phase-session-resume Phase 2 — stamps `resumed_session` on every row so a resumed turn
+// (cache-warm) is separable from a fresh one (cache-cold) in one WHERE clause. The signal is the
+// job's CLAIM-TIME `claude_session_id`: a job dispatched with a session id was resumed (either via
+// `queueNextChainedPhase`'s carried session or a needs_input/approval → queued_resume flip); a job
+// dispatched with null was fresh. runJob never mutates `job.claude_session_id` in-place — the DB
+// `update()` call that persists a NEW session for a fresh turn doesn't touch the local Job object,
+// so `!!job.claude_session_id` at every downstream `meterAgentJob` call still reflects claim-time
+// state. That keeps the marker correct for multi-turn jobs (e.g. the director sub-passes) that
+// call this after the first turn has already generated its own session id.
 async function meterAgentJob(
-  job: Pick<Job, "id" | "workspace_id" | "spec_slug" | "kind">,
+  job: Pick<Job, "id" | "workspace_id" | "spec_slug" | "kind" | "claude_session_id">,
   configDir: string | undefined,
   usage: RunUsage,
   model: string | null,
@@ -1311,6 +1321,7 @@ async function meterAgentJob(
       configDir: configDir ?? null,
       // Box lanes run on Max with NO ANTHROPIC_API_KEY → no per-token bill, never a `$`.
       apiBilled: false,
+      resumedSession: !!job.claude_session_id,
     });
   } catch (err) {
     console.error("[fleet-cost] meterAgentJob failed (swallowed — metering is best-effort):", err);
@@ -2353,7 +2364,20 @@ const WORKER_STARTED_AT = new Date().toISOString();
 // phase = which phase a chained/per-phase build is on (e.g. "Phase 2"), derived from the job's
 // instructions (the phaseScopedInstructions format embeds `"Phase N — <title>"`); null for a
 // whole-spec build or a non-build lane (box-lane-show-phase).
-interface LaneRow { kind: Job["kind"]; job_id: string; spec_slug: string; since: string; phase?: string | null; account?: string | null }
+interface LaneRow {
+  kind: Job["kind"];
+  job_id: string;
+  spec_slug: string;
+  since: string;
+  phase?: string | null;
+  account?: string | null;
+  // chained-phase-session-resume Phase 2 — true when this lane's job carried a `claude_session_id` at
+  // claim time (a chained-phase resume from the prior phase's session, OR a needs_input/needs_approval →
+  // queued_resume flip). The box view renders a small `resumed`/`fresh` chip per build lane so the
+  // savings are visible mid-chain (a silent resume regression would otherwise be invisible). Omitted
+  // (undefined) on kinds where the distinction doesn't apply / on legacy heartbeat rows.
+  resumed?: boolean;
+}
 
 // Derive the phase a build lane is on from its instructions. A per-phase/chained build's
 // instructions embed `"Phase N — <title>"` (phaseScopedInstructions); a whole-spec build (or any
@@ -16245,7 +16269,7 @@ async function main() {
   // kind='fold' gets its own concurrency-1 lane so a fold never races a feature build on the index files.
   // Per-lane detail (build-box-status-view): the value carries what the lane is building + when it
   // started, so each heartbeat tick can publish the full lane picture (kind/spec_slug/since).
-  interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string; phase: string | null }
+  interface LaneInfo { kind: Job["kind"]; spec_slug: string; since: string; phase: string | null; resumed: boolean }
   const active = new Map<string, LaneInfo>();
   // goal-fold shares the concurrency-1 fold lane: a goal fold is doc-only + touches the brain
   // index/cross-link files just like a spec fold, so it must never race a feature build (or another
@@ -16282,7 +16306,18 @@ async function main() {
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
   const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal").length;
   const launch = (job: Job) => {
-    active.set(job.id, { kind: job.kind, spec_slug: job.spec_slug, since: new Date().toISOString(), phase: derivePhase(job.instructions) });
+    active.set(job.id, {
+      kind: job.kind,
+      spec_slug: job.spec_slug,
+      since: new Date().toISOString(),
+      phase: derivePhase(job.instructions),
+      // chained-phase-session-resume Phase 2 — stamp the resumed-vs-fresh signal at claim so the
+      // heartbeat lanes projection can surface it per build lane on /dashboard/roadmap/box. The
+      // signal is the same one `dispatchJob` uses (`!!job.claude_session_id`): a job dispatched with
+      // a session id was resumed from a prior claude -p session (the chained-phase win, or a
+      // mid-run queued_resume flip); a job dispatched with null started fresh (cache-cold).
+      resumed: !!job.claude_session_id,
+    });
     // Stamp an initial heartbeat at claim time (stale-session-reaper) so a just-claimed job that hasn't
     // emitted its first stream-json line yet isn't immediately treated as stale — the reaper's N-minute
     // window starts now, and runBoxSession's per-line bumps keep it fresh while the session is alive.
@@ -16696,7 +16731,7 @@ async function main() {
       if (!steady) { clearStartupCrashCounter(); steady = true; }
 
       // Heartbeat for the dashboard, then self-update if no SACROSANCT lane is running.
-      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since, phase: v.phase, account: laneAccount.has(job_id) ? accountLabel("", laneAccount.get(job_id)!) : null }));
+      const lanes: LaneRow[] = [...active.entries()].map(([job_id, v]) => ({ kind: v.kind, job_id, spec_slug: v.spec_slug, since: v.since, phase: v.phase, account: laneAccount.has(job_id) ? accountLabel("", laneAccount.get(job_id)!) : null, resumed: v.resumed }));
       await writeHeartbeat(active.size, "healthy", undefined, lanes);
 
       // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget

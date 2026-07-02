@@ -39,6 +39,12 @@ interface LaneRow {
   // the security verdict in one JSON). The card renders TWO avatars (Vera + Vault) + a 'spec-test ·
   // security' label; a post-ship spec-test lane (no branch) still renders single-persona.
   fused_pre_merge?: boolean;
+  // chained-phase-session-resume Phase 2 — true when this lane's job started as a RESUME of a prior
+  // claude -p session (chained-phase carry-forward, or a mid-run queued_resume flip = cache-warm), false
+  // when it started FRESH (cache-cold). The card renders a small `resumed`/`fresh` chip on build lanes
+  // so a silent regression (resume quietly not firing) is visible mid-chain. Undefined on legacy rows
+  // (a pre-Phase-2 heartbeat) — the chip is skipped so nothing regresses.
+  resumed?: boolean;
 }
 interface AccountSlot {
   label: string;
@@ -297,6 +303,26 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
         {lane.account && (
           <span title={`Running on ${lane.account}`} className="shrink-0 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
             {lane.account}
+          </span>
+        )}
+        {/* chained-phase-session-resume Phase 2 — the resumed-vs-fresh indicator per BUILD lane so a
+            silent regression (resume quietly not firing) is visible mid-chain. Emerald when RESUMED
+            (cache-warm: prior transcript served from cache ~0.1x); zinc when FRESH (cache-cold). Only
+            renders on build lanes and when the field is defined (undefined = legacy heartbeat = silent). */}
+        {lane.kind === "build" && typeof lane.resumed === "boolean" && (
+          <span
+            title={
+              lane.resumed
+                ? "Resumed the prior phase's claude session — its transcript is served from prompt cache (~0.1x) instead of re-hydrated"
+                : "Started this phase's claude session fresh — spec + branch re-hydrated at full price"
+            }
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+              lane.resumed
+                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+            }`}
+          >
+            {lane.resumed ? "resumed" : "fresh"}
           </span>
         )}
       </div>
