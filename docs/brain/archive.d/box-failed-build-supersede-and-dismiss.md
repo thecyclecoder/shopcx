@@ -1,0 +1,1 @@
+- **Failed-build cards: correct supersede ordering + an owner dismiss button** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
