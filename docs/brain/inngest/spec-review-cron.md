@@ -6,6 +6,8 @@ The **periodic enqueuer** for the box-hosted **spec-review agent** ([[../specs/s
 
 Same enqueue-only shape as [[spec-test-cron]] / [[triage-escalations]] — the box has no internal ticker, so an Inngest cron is the trigger. **This cron does NO reasoning** — purely the enqueue. The box keeps its secrets so the agent can read the prod DB; the WORKER is the only component that mutates state.
 
+[[../specs/vale-reactive-spec-review]] Phase 2 added a REACTIVE partner — [[spec-review-on-mutate]] — that fires the SAME gated helper the moment a spec is authored or re-opened (via events sent from `author-spec.ts` and `spec-card-state.ts` `markSpecCardBackToReview`). This cron is now the **catch-up backstop** for dropped events / cold workspaces / a workspace's first-ever `agent_jobs` row — same relationship as [[spec-test-on-ship]] + [[spec-test-cron]].
+
 **File:** `src/lib/inngest/spec-review-cron.ts` (registered in `src/lib/inngest/registered-functions.ts`)
 
 ## Functions
@@ -61,4 +63,4 @@ Same enqueue-only shape, but **shorter cadence** (15 min vs daily) because spec-
 
 ---
 
-[[../README]] · [[../integrations/inngest]] · [[../libraries/agents-spec-review]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]] · [[../specs/spec-review-agent]] · [[../project-management]]
+[[../README]] · [[../integrations/inngest]] · [[../libraries/agents-spec-review]] · [[spec-review-on-mutate]] · [[../tables/agent_jobs]] · [[../recipes/build-box-setup]] · [[../specs/spec-review-agent]] · [[../specs/vale-reactive-spec-review]] · [[../project-management]]

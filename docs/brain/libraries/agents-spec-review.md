@@ -16,7 +16,7 @@ The current Vale queue for one workspace — every `public.specs` row with `stat
 
 ### `enqueueSpecReviewIfDue(workspaceId): Promise<{enqueued, reason?, pending?}>`
 
-Insert ONE `agent_jobs` row `kind='spec-review'` for a workspace IFF ≥1 in_review spec LACKS a current Vale review AND no in-flight spec-review job. The 15-min `[[../inngest/spec-review-cron]]` calls this per build-console workspace (backstop); the reactive `spec-review/spec-mutated` event consumer will also call it (Phase 2). Idempotent. The free SDK check inside this helper is the whole point of the gate — an expensive box `claude -p` only spins up when there is real, unreviewed work.
+Insert ONE `agent_jobs` row `kind='spec-review'` for a workspace IFF ≥1 in_review spec LACKS a current Vale review AND no in-flight spec-review job. Two triggers flow through here: the 15-min [[../inngest/spec-review-cron]] (catch-up backstop) and the reactive [[../inngest/spec-review-on-mutate]] consumer (fires within seconds of a fresh author / send-back — [[../specs/vale-reactive-spec-review]] Phase 2). Idempotent — the free SDK check inside this helper is the whole point of the gate; an expensive box `claude -p` only spins up when there is real, unreviewed work.
 
 `reason` disambiguates the empty-pool cases:
 
@@ -59,7 +59,9 @@ The agent stamps one of these `action_kind` values per spec ([[../tables/directo
 
 ## Callers
 
-- `src/lib/inngest/spec-review-cron.ts` — the 15-min periodic enqueuer.
+- `src/lib/inngest/spec-review-cron.ts` — the 15-min periodic enqueuer (catch-up backstop).
+- `src/lib/inngest/spec-review-on-mutate.ts` — the reactive `spec-review/spec-mutated` consumer that fires the same gated helper within seconds of a spec create / re-open ([[../specs/vale-reactive-spec-review]] Phase 2).
+- `src/lib/author-spec.ts` + `src/lib/spec-card-state.ts` `markSpecCardBackToReview` — fire the `spec-review/spec-mutated` event after the mutation writes ([[../specs/vale-reactive-spec-review]] Phase 2).
 - `scripts/builder-worker.ts` → `runSpecReviewJob` — claims the queued job, runs Vale on Max, applies every decision through `applySpecReviewDecision`, then runs Ada's disposition sweep ([[agents-spec-dispose]]) inline so a pass + dispose lands in one cron tick. The poll loop carries an OWN concurrency-1 `spec-review` claim lane (`MAX_SPEC_REVIEW=1`, `countSpecReview()`, Claude-down-gated like the other read-only Max agents — repair/regression/security-review/spec-test). Before this lane existed the cron's queued jobs sat unclaimed and `loop:agent:spec-review` went silent (Control Tower repair signature).
 
 ## Phase 4 — back-to-review (the shared mandate)
@@ -85,4 +87,4 @@ Every back-to-review write records a `director_activity` row with `action_kind='
 
 ## Brain links
 
-[[../specs/spec-review-agent]] · [[agents-spec-dispose]] · [[agent-grader]] (Vale's rubric in `AGENT_RUBRICS["spec-review"]`) · [[../inngest/spec-review-cron]] · [[../tables/director_activity]] · [[spec-card-state]] (the source of truth this library writes to) · [[../recipes/build-box-setup]]
+[[../specs/spec-review-agent]] · [[../specs/vale-reactive-spec-review]] · [[agents-spec-dispose]] · [[agent-grader]] (Vale's rubric in `AGENT_RUBRICS["spec-review"]`) · [[../inngest/spec-review-cron]] · [[../inngest/spec-review-on-mutate]] · [[../tables/director_activity]] · [[spec-card-state]] (the source of truth this library writes to) · [[../recipes/build-box-setup]]
