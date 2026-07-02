@@ -336,12 +336,29 @@ export interface ExplainClassification {
 }
 
 const SEQ_SCAN_RE = /Seq Scan on (?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?/gi;
+/** Any index-driven node in an EXPLAIN plan — a Bitmap Index Scan / Index Scan / Index Only Scan on
+ *  a table, plus a Bitmap Heap Scan (the fetch node that pairs with a Bitmap Index Scan). If the plan
+ *  is index-driven, a VACUUM never fixes it — the agent-mandate-hardening-dbhealth guardrail keys off
+ *  this predicate to refuse to fall back to `bloat_stale_stats` / `vacuum_tuning`. */
+const INDEX_SCAN_RE = /\b(Index Only Scan|Index Scan|Bitmap Index Scan|Bitmap Heap Scan)\b/i;
 
 /**
  * Classify an EXPLAIN (text) plan into a root cause. Pure string analysis over the plan text — the
  * box passes whatever EXPLAIN produced (plain, or EXPLAIN (ANALYZE, BUFFERS) for a confirmed-safe
  * SELECT). Order matters: a disk sort/spill and a full aggregate are more specific than a bare seq
  * scan, so they win when both appear.
+ *
+ * agent-mandate-hardening-dbhealth guardrail (rolled coaching): the "no Seq Scan isolated" fallback
+ * does NOT return `bloat_stale_stats` — that classification maps to `vacuum_tuning`, and a vacuum
+ * cannot fix an index-driven or unknown-shape plan. The rolled coaching (Devi 4.8/10 over 10 unstuck
+ * attempts, tickets `tags @> $3` at 4ms×1.27M dismissed as "vacuum won't help", sms
+ * `message_sid = $1` at 31ms×157k dismissed as "smells like missing index") is unambiguous: vacuum
+ * belongs to the size-sweep bloat path (analyzeBloat / analyzeBloatTrend — real dead-tuple + stale
+ * autovacuum evidence), never here. So:
+ *  - Index-driven plan (Bitmap/Index Scan present, no Seq Scan) → `no_index_match` — a covering /
+ *    composite / GIN index (for `@>`/`<@`) is what stabilizes the plan; NEVER a vacuum.
+ *  - No scan-node bottleneck could be isolated at all → `high_call_volume` — the safe framing is
+ *    call-volume pressure (reduce calls / cache / widen the poll). NEVER a vacuum.
  */
 export function classifyExplainPlan(planText: string): ExplainClassification {
   const plan = planText || "";
@@ -364,8 +381,26 @@ export function classifyExplainPlan(planText: string): ExplainClassification {
     const detail = removed ? ` (${removed[1]} rows removed by filter)` : "";
     return { cause: "seq_scan", seqScanTables, hint: `Seq Scan on ${seqScanTables.join(", ")}${detail} — add an index on the WHERE/JOIN predicate column(s)` };
   }
-  // Stale-stats / bad-row-estimate plan (a wildly-off estimate, no scan target identified).
-  return { cause: "bloat_stale_stats", seqScanTables, hint: "the plan looks off but no Seq Scan was isolated — likely stale stats; run ANALYZE and re-check before adding an index" };
+  // Index-driven plan (Bitmap Index Scan / Index Scan / Index Only Scan present, no Seq Scan) — the
+  // plan already uses an index, so a VACUUM cannot help. This is plan instability from a MISSING
+  // covering/composite/GIN index (or the existing index doesn't fully cover the predicate). Cited by
+  // owner dismissals: tickets q6690… Bitmap Index Scan on idx_tickets_tags_gin ("vacuum won't help
+  // — needs a GIN"), sms_campaign_recipients q7780… Index Scan on sms_campaign_recipients_message_sid_idx
+  // ("smells like a missing index, not vacuum/bloat"). Never emit bloat_stale_stats here.
+  if (INDEX_SCAN_RE.test(plan)) {
+    return {
+      cause: "no_index_match",
+      seqScanTables,
+      hint: "the plan is index-driven (Bitmap/Index Scan present) — the residual filter / plan instability points at a MISSING covering or composite index (or a GIN index for an array/JSONB `@>` predicate). A VACUUM cannot help an index-driven plan; vacuum belongs to the size-sweep bloat path (real dead-tuple + stale autovacuum evidence).",
+    };
+  }
+  // No scan bottleneck could be isolated at all (pure Aggregate / Limit / Sort / etc.). The safe
+  // read is call-volume pressure — NEVER stale stats / vacuum, which this path has no evidence for.
+  return {
+    cause: "high_call_volume",
+    seqScanTables,
+    hint: "no scan bottleneck could be isolated in the plan — treat as call-volume pressure (reduce calls / cache / widen the poll interval). A vacuum is only correct with a real dead-tuple signal (analyzeBloat / analyzeBloatTrend), NEVER as the ambiguous no-Seq-Scan fallback.",
+  };
 }
 
 /**
@@ -395,9 +430,10 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
   let cause: DbHealthCause;
   let hint: string;
   let planBlock: string;
+  const arrayPredicate = /@>|<@/.test(row.query); // array/JSONB containment (e.g. `tags @> …`) → GIN
+  const erraticPlan = row.stddev_exec_time > row.mean_exec_time;
   if (highCallVolume) {
     cause = "high_call_volume";
-    const arrayPredicate = /@>|<@/.test(row.query); // array/JSONB containment (e.g. `tags @> …`) → GIN
     const meanMs = Math.round(row.mean_exec_time);
     const calls = row.calls.toLocaleString();
     hint = arrayPredicate
@@ -410,9 +446,23 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
     cause = cls.cause;
     hint = cls.hint;
     planBlock = planText!.trim();
+    // agent-mandate-hardening-dbhealth guardrail (rolled coaching): stddev > mean is the "erratic
+    // plan" tell — plan instability from a MISSING covering/composite/GIN index, never bloat. A
+    // vacuum cannot fix plan instability. Upgrade any bloat_stale_stats classification to
+    // no_index_match under erratic-stddev, and add the GIN framing when the predicate uses `@>`.
+    // (classifyExplainPlan no longer emits bloat_stale_stats as its fallback, but this belt-and-
+    // -suspenders catches the case where a caller passes an already-classified plan.)
+    if (erraticPlan && (cause === "bloat_stale_stats" || cause === "no_index_match")) {
+      cause = "no_index_match";
+      hint = arrayPredicate
+        ? `erratic plan (stddev ${Math.round(row.stddev_exec_time)}ms > mean ${Math.round(row.mean_exec_time)}ms) with an array/JSONB containment predicate (\`@>\`) — add a GIN index on that column so the plan is stable. A vacuum cannot fix plan instability.`
+        : `erratic plan (stddev ${Math.round(row.stddev_exec_time)}ms > mean ${Math.round(row.mean_exec_time)}ms) — plan instability from a MISSING covering or composite index on the hot predicate. Do NOT propose a vacuum — vacuum cannot fix plan instability.`;
+    }
   } else {
-    // No plan (couldn't EXPLAIN). Conservative classification from the text: an aggregate/DISTINCT
-    // with no LIMIT → full_aggregate; otherwise a generic rewrite-review.
+    // No plan (couldn't EXPLAIN). agent-mandate-hardening-dbhealth guardrail: the no-plan branch
+    // NEVER falls back to bloat_stale_stats/vacuum_tuning either — a vacuum without a real dead-
+    // tuple signal is always the wrong fix. Prefer high_call_volume (reduce calls / cache) as the
+    // safe fallback; a real aggregate-without-LIMIT still becomes full_aggregate.
     const q = row.query.toLowerCase();
     if (/\b(count|sum|avg|min|max|group by|distinct)\b/.test(q) && !/\blimit\b/.test(q)) {
       cause = "full_aggregate";
@@ -421,13 +471,31 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
       cause = "missing_limit";
       hint = "an unbounded SELECT (no plan available) — review whether a LIMIT or a tighter predicate applies";
     } else {
-      cause = "seq_scan";
-      hint = "slow query (no EXPLAIN plan available — parameterized statement) — review the predicate for an index";
+      cause = "high_call_volume";
+      hint = arrayPredicate
+        ? "slow query without an EXPLAIN plan (parameterized statement, plan blocked) — it uses an array/JSONB containment predicate (`@>`), so a GIN index is the likely lever. Treat as call-volume pressure (reduce calls / cache) rather than a vacuum — vacuum belongs to the size-sweep bloat path (real dead-tuple + stale autovacuum evidence), not here."
+        : "slow query without an EXPLAIN plan (parameterized statement, plan blocked) — treat as call-volume pressure (reduce calls / cache / widen the poll interval). A vacuum is only correct with a real dead-tuple signal, which this path never measures.";
     }
     planBlock = "(EXPLAIN unavailable — pg_stat_statements normalized text could not be planned)";
   }
 
-  const fixKind = cause === "seq_scan" || cause === "sort_spill" ? "add_index" : FIX_KIND_BY_CAUSE[cause];
+  // agent-mandate-hardening-dbhealth guardrail: from the slow-query path, ROUTE no_index_match →
+  // add_index. The rolled coaching's example dismissals ("smells like a missing index, not vacuum",
+  // "needs a GIN on tags") all resolve to add_index; a plain query_rewrite (the FIX_KIND_BY_CAUSE
+  // default for no_index_match) buries the actionable "which index" lever. Also enforce the
+  // invariant that the slow-query path NEVER emits vacuum_tuning — the size-sweep bloat path
+  // (analyzeBloat / analyzeBloatTrend) is the only source of a vacuum proposal.
+  let fixKind: DbHealthFixKind;
+  if (cause === "seq_scan" || cause === "sort_spill" || cause === "no_index_match") fixKind = "add_index";
+  else fixKind = FIX_KIND_BY_CAUSE[cause];
+  if (fixKind === "vacuum_tuning") {
+    // Belt-and-suspenders: if some future edit reintroduces a vacuum path here, snap it back to the
+    // safe fallback (high_call_volume / reduce_calls) rather than surface a rolled-coaching-class
+    // regression. The tests below assert this invariant so a regression fails loudly.
+    cause = "high_call_volume";
+    hint = "coaching guardrail: the slow-query path never proposes a vacuum. Vacuum belongs to the size-sweep bloat path (real dead-tuple + stale autovacuum). Treat this as call-volume pressure and re-evaluate on the size sweep.";
+    fixKind = "reduce_calls";
+  }
   const table = (cls ? cls.seqScanTables[0] : "") || "";
   const sigTable = table ? `:${table}` : "";
   const signature = `dbhealth:slowq:${row.queryid}${sigTable}`;

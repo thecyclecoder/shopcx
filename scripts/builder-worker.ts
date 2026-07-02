@@ -2707,6 +2707,14 @@ async function surfaceDbHealthFindings(findings: import("../src/lib/control-towe
 // The FREQUENT slow-query root-cause pass: top pg_stat_statements offenders → EXPLAIN → classify →
 // propose. Writes a kind:'cron' beat (loop_id = DB_HEALTH_SLOWQ_LOOP_ID) carrying the slow-query list
 // for the panel. NEVER throws (guarded) — a pass failure must not break the poll loop. Zero DDL.
+//
+// agent-mandate-hardening-dbhealth guardrail (rolled coaching): the classification lives inside
+// classifyExplainPlan + analyzeSlowQuery in [[../src/lib/control-tower/db-health]]. Per the baked-in
+// invariant, this run-job's calls to `mod.analyzeSlowQuery` NEVER produce a `vacuum_tuning` fixKind
+// — vacuum belongs to the size-sweep bloat path (analyzeBloat / analyzeBloatTrend), never the
+// slow-query path. The 4.8/10 grade over 10 unstuck coaching attempts came from the classifier
+// falling through to bloat_stale_stats on erratic/index-driven/no-scan plans; the guardrail baked
+// into the pure classifier fixes that for every call site, this run-job included.
 async function runDbHealthSlowQueryJob(): Promise<void> {
   const startedAt = Date.now();
   const mod = await import("../src/lib/control-tower/db-health");
