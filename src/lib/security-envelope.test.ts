@@ -188,15 +188,56 @@ test("mapFusedSecurityToVerdict: classification 'not-clean' + declared 'real-vul
   assert.equal(mapFusedSecurityToVerdict("not-clean", "REAL-VULN"), "real-vuln");
 });
 
-test("mapFusedSecurityToVerdict: classification 'not-clean' + declared 'false-positive' → 'false-positive'", () => {
-  assert.equal(mapFusedSecurityToVerdict("not-clean", "false-positive"), "false-positive");
+// Fix 1 (check 0c7d55607fb43955) — regression: a finding + declared 'false-positive' USED TO map
+// to 'false-positive', which applySecurityVerdictToJob records as `completed` (branch green). That
+// violates the completedClean invariant (only clean-with-evidence may satisfy it). A session cannot
+// find a real vulnerability and then wave it off as false-positive in the same envelope — the two
+// contradict, so the safe answer is a human review, never a completed-green row.
+test("mapFusedSecurityToVerdict: classification 'not-clean' + declared 'false-positive' → 'needs-human' (Fix 1 — completedClean invariant)", () => {
+  // The heart of Fix 1: even when the session emits BOTH a real `finding` entry AND a top-level
+  // status of "false-positive", we must NOT map to false-positive (which lands `completed`/green).
+  // The finding + false-positive combination is either a session mistake or a rubber-stamp attempt;
+  // the safe classification is needs-human.
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "false-positive"), "needs-human");
+  // Case-insensitive on declared.
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "FALSE-POSITIVE"), "needs-human");
 });
 
-test("mapFusedSecurityToVerdict: classification 'not-clean' + unknown/empty declared → 'needs-human' (fail-safe)", () => {
+test("mapFusedSecurityToVerdict: classification 'not-clean' + unknown/empty/self-contradicting declared → 'needs-human' (fail-safe)", () => {
   assert.equal(mapFusedSecurityToVerdict("not-clean", ""), "needs-human");
   assert.equal(mapFusedSecurityToVerdict("not-clean", "gibberish"), "needs-human");
   // A session claiming `clean` while findings exist is not trusted — the finding wins, surfaces to a human.
   assert.equal(mapFusedSecurityToVerdict("not-clean", "clean"), "needs-human");
+  // Same principle for needs-human declared — a finding is still a finding.
+  assert.equal(mapFusedSecurityToVerdict("not-clean", "needs-human"), "needs-human");
+});
+
+test("Fix 1 end-to-end: envelope with a high-severity structured finding + declared 'false-positive' cannot satisfy completedClean", () => {
+  // Exact scenario from the failing check evidence: a structured high-severity finding classified
+  // `not-clean` by the pure validator, but the session declared status="false-positive". Before Fix 1,
+  // the mapping returned "false-positive" (→ applySecurityVerdictToJob writes status='completed' →
+  // getSecurityStateForBranch reports the branch green). After Fix 1, the mapping must return
+  // "needs-human" so the branch is HELD for a human.
+  const env: FusedSecurityEnvelope = {
+    status: "false-positive",
+    review: "session waved it off",
+    checks: [
+      {
+        check: "injection",
+        verdict: "finding",
+        evidence: "raw string interpolation into a SQL fragment",
+        location: "src/app/api/foo/route.ts:42",
+        severity: "high",
+      },
+      ...REQUIRED_SECURITY_CHECKS.filter((k) => k !== "injection").map((c) => cleanCheck(c, `inspected ${c}: safe`)),
+    ],
+  };
+  const info = classifyFusedSecurityEnvelope(env);
+  assert.equal(info.classification, "not-clean");
+  const applied = mapFusedSecurityToVerdict(info.classification, String(env.status));
+  assert.notEqual(applied, "false-positive"); // ← the regression: cannot map to completed-green
+  assert.notEqual(applied, "clean");
+  assert.equal(applied, "needs-human"); // ← surfaces for a human, branch NOT green
 });
 
 test("mapFusedSecurityToVerdict + classifier: end-to-end mapping matches the Phase-2 verification bullets", () => {

@@ -234,13 +234,17 @@ export function classifyFusedSecurityEnvelope(envelope: unknown): SecurityEnvelo
  * classifier's output to the exact `verdict` string [[applySecurityVerdictToJob]] consumes. Extracted
  * so the mapping is unit-testable without inserting a synthetic agent_jobs row (no DB, no network).
  *
- * Contract (matches the spec's `completedClean` rule — a bare/self-declared clean CAN NEVER read as
- * green, so a rubber-stamp strands the PR for a human):
+ * Contract (matches the spec's `completedClean` rule — ONLY a clean-with-evidence classification may
+ * satisfy completedClean; a rubber-stamp / session-contradicting-evidence combination strands the PR
+ * for a human, exactly as a missing dedicated review would):
  *   - classification="clean" → "clean" (the ONLY path to a `completed` gate-passing row).
  *   - classification="needs_human" → "needs-human" (surfaces needs_attention; NOT clean).
  *   - classification="not-clean" + declared status="real-vuln" → "real-vuln" (auto-fix route).
- *   - classification="not-clean" + declared status="false-positive" → "false-positive".
- *   - classification="not-clean" + other → "needs-human" (default fail-safe).
+ *   - classification="not-clean" + ANY other declared status (incl. "false-positive") → "needs-human"
+ *     (Fix 1 — the finding + false-positive combination is a session-contradiction and cannot land
+ *     as `completed`/green; `applySecurityVerdictToJob` treats "false-positive" identically to
+ *     "clean" (both write status='completed'), so mapping a structured finding to false-positive
+ *     would satisfy completedClean off a REAL finding, violating the invariant).
  */
 export type SecurityAppliedVerdict = "clean" | "false-positive" | "needs-human" | "real-vuln";
 
@@ -250,8 +254,13 @@ export function mapFusedSecurityToVerdict(
 ): SecurityAppliedVerdict {
   if (classification === "clean") return "clean";
   if (classification === "needs_human") return "needs-human";
+  // classification === "not-clean" — the envelope carried a real structured `finding` (or a legacy
+  // flat findings array). ONLY the session-declared status "real-vuln" is honored (routes to fix
+  // authoring). Every other declared value — including "false-positive", which
+  // applySecurityVerdictToJob would land as `completed` and thereby satisfy completedClean —
+  // surfaces for a human instead. This is the Fix-1 invariant: a rubber-stamp / contradiction
+  // CANNOT satisfy completedClean off a real finding.
   const s = String(declaredStatus || "").trim().toLowerCase();
   if (s === "real-vuln") return "real-vuln";
-  if (s === "false-positive") return "false-positive";
   return "needs-human";
 }
