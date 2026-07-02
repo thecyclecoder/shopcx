@@ -20,6 +20,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **DB Health agent: instance-saturation & timeout detector** · verified 2026-07-02 · → [[../libraries/db-health]]
 - **Fix: Bo builds reactively on the review-pass transition, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
 - **Fix: Vault post-merge security review cron backstop** · verified 2026-07-02 · → [[../inngest/vault-post-merge-diff-backstop]]
+- **Fix: Document the PM-agent activation contract (reactive → cheap gate → cron backstop) in the brain** · verified 2026-07-02 · → [[../operational-rules#PM-agent activation contract]]
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
 - **Surface the exact out-of-leash command on the CEO approval card** · verified 2026-07-02 · → [[../libraries/platform-director]]
