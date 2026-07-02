@@ -25,7 +25,12 @@ import {
   promoteFromCategorySweep,
   promoteWhitelistedPages,
 } from "@/lib/competitors";
-import { sweepSeed, type IngestResult } from "@/lib/creative-skeleton";
+import {
+  sweepSeed,
+  filterSeedsByFreshness,
+  adlibraryFreshnessDays,
+  type IngestResult,
+} from "@/lib/creative-skeleton";
 import { hasFfmpeg, processVideoPending, type VideoProcessResult } from "@/lib/video-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
@@ -73,16 +78,25 @@ export const creativeFinderDailyCron = inngest.createFunction(
     const result = await (async () => {
       if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
       const workspaceIds = await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-      if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals() };
+      if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals(), skipped: 0, freshnessDays: adlibraryFreshnessDays() };
 
+      const freshnessDays = adlibraryFreshnessDays();
       let totals = emptyTotals();
+      let totalSkipped = 0;
       for (const workspaceId of workspaceIds) {
         const seeds = await step.run(`seeds-${workspaceId}`, () => workspaceSeeds(workspaceId));
-        for (let i = 0; i < seeds.length; i++) {
-          const seed = seeds[i];
+        // Phase 2 freshness gate: skip seeds searched inside the window WITHOUT a
+        // searchAds call. Fresh seeds (never searched) always pass — a newly-approved
+        // competitor / whitelisted page runs on the very next cron regardless of others.
+        const { kept, skipped } = await step.run(`freshness-${workspaceId}`, () =>
+          filterSeedsByFreshness(workspaceId, seeds, freshnessDays),
+        );
+        totalSkipped += skipped.length;
+        for (let i = 0; i < kept.length; i++) {
+          const seed = kept[i];
           const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
           totals = addTotals(totals, r);
-          if (i < seeds.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
+          if (i < kept.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
         }
         // Category-sweep promotion (competitor-scout): heavy advertisers that recurred in this
         // workspace's sweep output surface as 'proposed' competitors for owner approval.
@@ -91,7 +105,7 @@ export const creativeFinderDailyCron = inngest.createFunction(
         // competitor (destination_domain join) surface as 'proposed' whitelisted rows.
         await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
       }
-      return { workspaces: workspaceIds.length, totals };
+      return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, freshnessDays };
     })();
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
@@ -107,23 +121,38 @@ export const creativeFinderManualSweep = inngest.createFunction(
   { id: "creative-finder-manual-sweep", retries: 1, triggers: [{ event: "ads/creative-finder.sweep" }] },
   async ({ event, step }) => {
     if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
-    const wsArg = (event.data as { workspaceId?: string } | undefined)?.workspaceId;
+    const data = event.data as { workspaceId?: string; force?: boolean } | undefined;
+    const wsArg = data?.workspaceId;
+    // Explicit user action = intentional spend — force=true BYPASSES the freshness gate.
+    // Default respects it (parity with the cron), so re-clicking "Run sweep now" without
+    // force doesn't burn quota re-searching already-fresh seeds.
+    const force = data?.force === true;
     const workspaceIds = wsArg ? [wsArg] : await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-    if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals() };
+    if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals(), skipped: 0, forced: force };
 
+    const freshnessDays = adlibraryFreshnessDays();
     let totals = emptyTotals();
+    let totalSkipped = 0;
     for (const workspaceId of workspaceIds) {
       const seeds = await step.run(`seeds-${workspaceId}`, () => workspaceSeeds(workspaceId));
-      for (let i = 0; i < seeds.length; i++) {
-        const seed = seeds[i];
+      let kept: Seed[] = seeds;
+      if (!force) {
+        const gated = await step.run(`freshness-${workspaceId}`, () =>
+          filterSeedsByFreshness(workspaceId, seeds, freshnessDays),
+        );
+        kept = gated.kept;
+        totalSkipped += gated.skipped.length;
+      }
+      for (let i = 0; i < kept.length; i++) {
+        const seed = kept[i];
         const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
         totals = addTotals(totals, r);
-        if (i < seeds.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
+        if (i < kept.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
       }
       await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
       await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
     }
-    return { workspaces: workspaceIds.length, totals };
+    return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, forced: force, freshnessDays };
   },
 );
 

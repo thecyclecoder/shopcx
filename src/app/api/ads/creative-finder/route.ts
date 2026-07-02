@@ -71,7 +71,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as { workspaceId?: string; mode?: string };
+  const body = (await req.json().catch(() => ({}))) as {
+    workspaceId?: string;
+    mode?: string;
+    force?: boolean;
+  };
   const workspaceId = body.workspaceId || null;
   const auth = await authorize(workspaceId);
   if (auth.error) return auth.error;
@@ -82,6 +86,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, queued: true, mode: "video" });
   }
 
-  await inngest.send({ name: "ads/creative-finder.sweep", data: { workspaceId } });
-  return NextResponse.json({ ok: true, queued: true });
+  // force=true bypasses the freshness gate (explicit user action = intentional spend);
+  // default respects it so re-clicking the button doesn't burn AdLibrary quota.
+  const force = body.force === true;
+  await inngest.send({ name: "ads/creative-finder.sweep", data: { workspaceId, force } });
+  return NextResponse.json({ ok: true, queued: true, forced: force });
 }
