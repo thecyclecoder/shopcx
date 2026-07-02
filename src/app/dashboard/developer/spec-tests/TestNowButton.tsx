@@ -8,25 +8,24 @@ import { useRouter } from "next/navigation";
  * POST /api/roadmap/spec-test; the box claims it on its concurrency-1 lane and writes a spec_test_runs
  * row. Owner-only (the API enforces it). The run appears here after the box finishes + a refresh.
  *
- * Two modes (spectest-error-visible-and-rerunnable Phase 2):
+ * Two modes:
  *  - post-ship (default): no `branch` prop → API enqueues a standing-lane `kind='spec-test'` job that hits
  *    prod (the original behavior — shipped-unverified specs). Deduped by [[hasActiveSpecTestJob]].
- *  - pre-merge (branch + previewUrl props): API delegates to [[enqueuePreMergeSpecTest]], stamping
- *    `spec_branch` + `preview_url` so the runner probes the per-build `*.vercel.app` preview instead of
- *    prod. Dedupe is per-branch (a real approved/needs_human/issues verdict blocks; an `error` verdict
- *    falls through so a reaped session can re-run). The re-run affordance for the "Pre-merge / errored"
- *    surface on the Developer → Spec Tests page.
+ *  - pre-merge (branch prop; premerge-spectest-rerun-and-visibility Phase 3): API looks up the branch's
+ *    latest build, fresh-captures its Vercel preview, then force-enqueues via
+ *    [[enqueuePreMergeSpecTest]] so a stale terminal verdict (approved/needs_human/issues) does NOT
+ *    block the manual re-run. Only an in-flight spec-test on the same branch or a non-READY preview
+ *    refuses the re-run. The re-run affordance for the "Pre-merge" surface on the Developer → Spec
+ *    Tests page. The server owns the preview capture — the button never passes a preview URL.
  */
 export default function TestNowButton({
   slug,
   compact = false,
   branch,
-  previewUrl,
 }: {
   slug: string;
   compact?: boolean;
   branch?: string | null;
-  previewUrl?: string | null;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -44,7 +43,6 @@ export default function TestNowButton({
         body: JSON.stringify({
           slug,
           ...(branch ? { branch } : {}),
-          ...(previewUrl ? { previewUrl } : {}),
         }),
       });
       const d = await res.json();

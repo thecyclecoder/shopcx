@@ -574,10 +574,12 @@ export async function enqueuePreMergeSpecTest(
   slug: string,
   branch: string,
   previewUrl: string,
+  opts?: { force?: boolean },
 ): Promise<{ enqueued: boolean; reason?: string }> {
   if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
   const origin = (previewUrl || "").replace(/\/$/, "");
   if (!origin) return { enqueued: false, reason: "no preview_url" };
+  const force = opts?.force === true;
 
   const admin = createAdminClient();
 
@@ -595,6 +597,12 @@ export async function enqueuePreMergeSpecTest(
   // through both branches → the enqueue proceeds, unwedging the branch. The upstream
   // `backstopPreMergeChecks` still loop-guards standing-pass auto-recovery so a genuinely erroring
   // run can't spin forever.
+  //
+  // premerge-spectest-rerun-and-visibility Phase 3 — an OWNER-initiated re-run from the dashboard
+  // passes `force: true` and skips (b) entirely (an owner clicking Re-run has already decided the
+  // stale terminal verdict should not gate them, and the API path just fresh-captured the branch's
+  // preview so the re-test hits current code). (a) still applies — never stack a spec-test on top of
+  // one that is already in flight for the same branch.
   const { data: openJob } = await admin
     .from("agent_jobs")
     .select("id")
@@ -605,39 +613,41 @@ export async function enqueuePreMergeSpecTest(
     .in("status", ACTIVE_STATUSES)
     .limit(1);
   if (openJob && openJob.length) return { enqueued: false, reason: "in-flight" };
-  const { data: latestRun } = await admin
-    .from("spec_test_runs")
-    .select("agent_verdict, run_at")
-    .eq("workspace_id", workspaceId)
-    .eq("spec_slug", slug)
-    .eq("spec_branch", branch)
-    .order("run_at", { ascending: false })
-    .limit(1);
-  if (latestRun && latestRun.length) {
-    const row = latestRun[0] as { agent_verdict: string | null; run_at: string };
-    const verdict = row.agent_verdict;
-    if (verdict === "approved" || verdict === "needs_human" || verdict === "issues") {
-      // premerge-spectest-rerun-and-visibility Phase 1 — treat the latest terminal verdict as STALE when
-      // the branch has NEWER work than the run: a `build` or `pr-resolve` agent_jobs row for this
-      // spec_branch whose updated_at > latestRun.run_at means the branch's CODE has changed since we
-      // last tested (e.g. a pr-resolve just merged main into the branch, or a next-phase build pushed
-      // to it). Without this check the branch is silently wedged forever — the root cause seen live on
-      // spec-brain-refs: the fix landed via pr-resolve, but its stale `issues` verdict permanently
-      // blocked re-testing on the same branch. No churn: a spec-test run itself creates no
-      // build/pr-resolve row, so after the re-test the branch settles until the next real push.
-      const { data: newer } = await admin
-        .from("agent_jobs")
-        .select("id")
-        .eq("spec_branch", branch)
-        .in("kind", ["build", "pr-resolve"])
-        .gt("updated_at", row.run_at)
-        .limit(1);
-      if (!newer || !newer.length) {
-        return { enqueued: false, reason: `already tested (${verdict})` };
+  if (!force) {
+    const { data: latestRun } = await admin
+      .from("spec_test_runs")
+      .select("agent_verdict, run_at")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("spec_branch", branch)
+      .order("run_at", { ascending: false })
+      .limit(1);
+    if (latestRun && latestRun.length) {
+      const row = latestRun[0] as { agent_verdict: string | null; run_at: string };
+      const verdict = row.agent_verdict;
+      if (verdict === "approved" || verdict === "needs_human" || verdict === "issues") {
+        // premerge-spectest-rerun-and-visibility Phase 1 — treat the latest terminal verdict as STALE when
+        // the branch has NEWER work than the run: a `build` or `pr-resolve` agent_jobs row for this
+        // spec_branch whose updated_at > latestRun.run_at means the branch's CODE has changed since we
+        // last tested (e.g. a pr-resolve just merged main into the branch, or a next-phase build pushed
+        // to it). Without this check the branch is silently wedged forever — the root cause seen live on
+        // spec-brain-refs: the fix landed via pr-resolve, but its stale `issues` verdict permanently
+        // blocked re-testing on the same branch. No churn: a spec-test run itself creates no
+        // build/pr-resolve row, so after the re-test the branch settles until the next real push.
+        const { data: newer } = await admin
+          .from("agent_jobs")
+          .select("id")
+          .eq("spec_branch", branch)
+          .in("kind", ["build", "pr-resolve"])
+          .gt("updated_at", row.run_at)
+          .limit(1);
+        if (!newer || !newer.length) {
+          return { enqueued: false, reason: `already tested (${verdict})` };
+        }
+        // Newer build/pr-resolve exists → stale verdict; fall through and re-enqueue.
       }
-      // Newer build/pr-resolve exists → stale verdict; fall through and re-enqueue.
+      // verdict === "error" (or null) → transient; fall through and re-enqueue.
     }
-    // verdict === "error" (or null) → transient; fall through and re-enqueue.
   }
 
   // The runner reads the preview origin from `instructions` (Phase 2 threads it through). We also
