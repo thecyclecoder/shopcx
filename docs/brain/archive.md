@@ -12,16 +12,22 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
-- **Consolidate director grade+coach into one session, fix the Max-account in-flight count + show the acting director on grade/coach lanes** · folded 2026-07-01 · → [[../libraries/agent-grader]]
-
+- **Founder-prompted escape valve: Ada raises an out-of-leash action to the CEO, approval executes it** · verified 2026-07-02 · → [[../libraries/platform-director]]
+- **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
+- **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
+- **Specs carry a Brain refs list the builder reads first** · verified 2026-07-02 · → [[../project-management]]
 - **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
+- **Agent KPI pages — a per-agent KPI layer on top of grading/coaching (Cleo/Storefront-Optimizer first)** · verified 2026-07-01 · → [[../libraries/agent-kpis]] · [[../libraries/storefront-optimizer-agent]] · [[../dashboard/agents]]
+- **Give Agents a Directors-style sidebar (surfacing KPIs) + redesign the agent profile page** · verified 2026-07-01 · → [[dashboard/agents]]
 - **Add storefront pixel tracking to the blog pages** · verified 2026-07-01 · → [[../lifecycles/blog-resources]]
 - **Fix the phase-accumulation stamp gap that wedges multi-phase builds + guard deploy-rollback against laggy monthly KPIs** · verified 2026-07-01 · → [[../lifecycles/spec-goal-branch-pm-flow]]
+- **Fuse pre-merge spec-test + security into one session (hydrate once, two verdicts) + multi-persona lane** · verified 2026-07-01 · → [[../dashboard/roadmap]] · [[../libraries/agent-jobs]]
 - **Lag the monthly scorecard snapshot to the previous complete UTC day** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
 - **A director grades only the workers in its own charge** · verified 2026-07-01 · → [[libraries/agent-grader]]
 - **Scope GoTrue 'context canceled' auth errors as transient noise in the Supabase log poller** · verified 2026-07-01 · → [[../libraries/control-tower]]
 - **Move every grader onto Max box sessions that read the real diff** · verified 2026-07-01 · → [[../inngest/platform-director-cron]]
 - **Grade a sample by rolling average; lower the proven bar 9→8** · verified 2026-07-01 · → [[libraries/agent-grader]]
+- **Isolate the pre-merge security verdict** · verified 2026-07-01 · → [[../libraries/security-agent]] · [[../libraries/agent-jobs]]
 - **Weekly KPI readers skip pre-lag-fix stale (non-Sunday) snapshot rows** · verified 2026-07-01 · → [[libraries/kpi-review]]
 - **Extend kpi-review's in-flight window guard from daily to weekly + monthly** · verified 2026-07-01 · → [[libraries/kpi-review]]
 - **Downgrade Sonnet v2 parse-fallback log from error to warn (stop false Control Tower incident)** · verified 2026-07-01 · → [[libraries/sonnet-orchestrator-v2]]
@@ -29,6 +35,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **An errored pre-merge spec-test must be visible + re-runnable** · verified 2026-07-01 · → [[../libraries/agent-jobs]] + [[../libraries/spec-test-runs]]
 - **Seed + sharpen Cleo's lever selection from the funnel-tree / chapter-diagnostics / bottleneck SDKs** · verified 2026-07-01 · → [[libraries/storefront-lever-memory]]
 - **Route Meta ad-spend sync through graphFetchJson so Facebook edge 504s self-heal instead of feeding Control Tower** · verified 2026-07-01 · → [[../inngest/today-sync]]
+- **Vale reasons the planned/deferred disposition in her review pass (retire the trust-the-author stub)** · verified 2026-07-01 · → [[../libraries/agents-spec-review]]
 - **appstleAttemptBilling: coerce numeric billing-attempt id to string** · verified 2026-06-30 · → [[libraries/appstle]]
 - **Coerce Appstle billing-attempt id to string before the internal-prefix guard** · verified 2026-06-30 · → [[../libraries/appstle]]
 - **Downgrade appstle-heal per-line PUT failure to warn** · verified 2026-06-30 · → [[lifecycles/subscription-billing]]
