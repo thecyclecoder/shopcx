@@ -114,6 +114,21 @@ const ORPHAN_OWNER = "platform";
  *  NOT agents it supervises. Never rostered as worker cards (the CEO finds them confusing under the director). */
 const DIRECTOR_INFRA_KINDS = new Set(["platform-director", "director-coach", "proposed-goal"]);
 
+/** A director's supervisory SWEEP job kinds — a director grading/coaching the layer BELOW it
+ *  (`agent-grade`/`agent-coach` = Ada over her platform workers; `director-grade` = the CEO over the
+ *  directors' calls; `campaign-grade`/`gap-grade` = Cleo over Growth's work). These are the director's
+ *  OWN activity, NOT agents — the same reason the rubric gate rejects them with `not_a_gradeable_worker`
+ *  ([[agent-grader]]). They carry no MONITORED_LOOPS row + no persona, so without this they'd fall
+ *  through to source 3 and surface as flagged "unregistered" worker cards under Platform. See the
+ *  north-star cascade (CEO → director → worker): a supervisor owns the layer below it. */
+const DIRECTOR_SWEEP_KINDS = new Set([
+  "agent-grade",
+  "agent-coach",
+  "director-grade",
+  "campaign-grade",
+  "gap-grade",
+]);
+
 /** Internal pre-liveness roster entry — one rostered worker, before its status is computed. */
 export interface RosterEntry {
   owner: string;
@@ -208,6 +223,7 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
     if (seen.has(kind)) continue;
     if (registeredAgentKinds.has(kind)) continue; // an agent-kind lane (rostered in step 1)
     if (DIRECTOR_INFRA_KINDS.has(kind)) continue; // the director's own "turn on" mechanisms — not worker cards
+    if (DIRECTOR_SWEEP_KINDS.has(kind)) continue; // a director grading/coaching the layer below it — not a worker
     seen.add(kind);
     const persona = getPersona(kind);
     entries.push({
