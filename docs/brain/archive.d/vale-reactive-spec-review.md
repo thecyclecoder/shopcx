@@ -1,0 +1,1 @@
+- **Vale reviews reactively on spec mutation, cron becomes a gated backstop** · verified 2026-07-02 · → [[../inngest/spec-review-cron]]
