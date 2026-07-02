@@ -1,0 +1,1 @@
+- **Fix: Document the PM-agent activation contract (reactive → cheap gate → cron backstop) in the brain** · verified 2026-07-02 · → [[../operational-rules#PM-agent activation contract]]
