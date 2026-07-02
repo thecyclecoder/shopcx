@@ -26,6 +26,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
 - **Surface the exact out-of-leash command on the CEO approval card** · verified 2026-07-02 · → [[../libraries/platform-director]]
+- **A parked pr-resolve escalation must self-clear when its PR merges or closes** · verified 2026-07-02 · → [[lifecycles/approval-routing-and-inbox]]
 - **Stop the pre-merge-fix loop: depth-guard + production-state checks are advisory, not fail** · Phase 1 verified 2026-07-02 · → [[../libraries/pre-merge-fix]]
 - **Pre-merge spec-tests re-run after a branch changes + are visible/re-runnable** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]] · [[../libraries/spec-test-runs]]
 - **Research sidebar → Competitors (product-filtered)** · verified 2026-07-02 · → [[../dashboard/research__competitors]]

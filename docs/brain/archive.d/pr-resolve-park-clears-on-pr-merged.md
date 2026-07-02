@@ -1,0 +1,1 @@
+- **A parked pr-resolve escalation must self-clear when its PR merges or closes** · verified 2026-07-02 · → [[lifecycles/approval-routing-and-inbox]]
