@@ -1,0 +1,1 @@
+- **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
