@@ -1,0 +1,1 @@
+- **Bo builds reactively on review-pass, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../libraries/build-lifecycle]]
