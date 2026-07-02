@@ -322,6 +322,32 @@ async function surfaceExhaustedPrResolve(
 }
 
 /**
+ * pr-resolve-park-clears-on-pr-merged — one-shot PR-state read for the approval-inbox stale-park
+ * reconciler. Returns `{ ok:true, merged, state, closedAt }` on a positive read; `{ ok:false }` on ANY
+ * failure (no token, non-2xx, malformed body, network throw) so the caller fails CLOSED — a null read
+ * never clears a live park card. Not a poll (unlike `fetchMergeable`); the reconciler doesn't need
+ * `mergeable` to settle — it only asks "is this PR still open, or did a human merge/close it?" per
+ * `pr.merged || pr.state !== 'open'`. See [[../../docs/brain/libraries/approval-inbox.md]].
+ */
+export async function getPr(
+  prNumber: number,
+): Promise<{ ok: true; merged: boolean; state: string; closedAt: string | null } | { ok: false }> {
+  if (!ghToken()) return { ok: false };
+  try {
+    const r = await gh("GET", `/repos/${GH_REPO}/pulls/${prNumber}`);
+    if (!r.ok) return { ok: false };
+    const body = (r.json || {}) as Record<string, unknown>;
+    const state = typeof body.state === "string" ? body.state : "";
+    const merged = body.merged === true;
+    const closedAt = typeof body.closed_at === "string" ? body.closed_at : null;
+    if (!state) return { ok: false };
+    return { ok: true, merged, state, closedAt };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
  * accumulation-stamp-gap-and-rollback-guard P2 — list the set of branch refs backing an OPEN claude/build-*
  * PR right now. The stuck-accumulation backstop uses this to decide "is a build branch NOT already visible as
  * an open PR?" (the wedge signature). Returns `null` on ANY GitHub failure (no token, list failed, bad payload)
