@@ -58,9 +58,9 @@ API endpoints:
 ### Phase 6 — Video (follow-on, deferred)
 Routed via `status='video_pending'` at ingestion; deferred to [[../specs/creative-finder-video]]. Video pipeline drains backlog per workspace, downloads → ffmpeg keyframes + Whisper transcript → same four-slot skeleton, flips to `analyzed`/`failed`. See [[creative-finder-video]] + [[../libraries/video-skeleton]].
 
-## Status / open work (2026-06-26)
+## Status / open work (2026-07-02)
 
-**Shipped:** All five phases (static discovery + vision deconstruction + pattern matrix + surface + daily sweep). Browse tab shows deconstructed winners + shortlist; Pattern matrix tab shows slot patterns + supporting brands + ranked test matrix. Manual "Run sweep now" and daily cron both working. Dedup by `ad_key` and per-seed failures swallowed so one bad keyword doesn't fail the sweep. Cross-brand-repetition signal over ≥N independent brands mines the patterns (not heat/longevity alone).
+**Shipped:** All five phases (static discovery + vision deconstruction + pattern matrix + surface + daily sweep). Browse tab shows deconstructed winners + shortlist; Pattern matrix tab shows slot patterns + supporting brands + ranked test matrix. Manual "Run sweep now" and daily cron both working. Dedup by `ad_key` and per-seed failures swallowed so one bad keyword doesn't fail the sweep. Cross-brand-repetition signal over ≥N independent brands mines the patterns (not heat/longevity alone). **AdLibrary search freshness gate** (Phase 2 of [[../specs/adlibrary-search-freshness-gate]]) live: per-seed last-searched tracking + 7-day skip window to minimize monthly quota burn (~67% → precise), with force-bypass for manual sweeps.
 
 **Shipped and verified:**
 - Discovery from AdLibrary (searchAds + fetchCreative + isLongRunner) ✓
@@ -72,11 +72,13 @@ Routed via `status='video_pending'` at ingestion; deferred to [[../specs/creativ
 - Authenticated proxy for creative display (no re-hosting) ✓
 - Shortlist toggle (PATCH → status='shortlisted') ✓
 - Competitor promotion from category sweep (proposed → owner approval) ✓
+- **AdLibrary freshness gate** — per-seed last-searched tracking (`adlibrary_searches` table), 7-day skip window (env-configurable), auto-skip on cron, force-bypass on manual sweep ✓
 
 **Known gaps / not yet shipped:**
 - Phase 6 (video deconstruction) — deferred to [[creative-finder-video]], backlog at `status='video_pending'` ✓
 
 **Recent activity:**
+- 2026-07-02: AdLibrary search freshness gate (spec [[../specs/adlibrary-search-freshness-gate]]) shipped and verified; folded into brain
 - 2026-06-26: Specification shipped and verified; all phases (1–5) live in production
 - Phase 6 (video) split to creative-finder-video (2026-06-23 board grooming)
 

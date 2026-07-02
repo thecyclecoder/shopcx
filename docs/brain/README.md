@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 235 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 236 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 90 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 335 |

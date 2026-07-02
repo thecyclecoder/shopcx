@@ -1,0 +1,1 @@
+- **AdLibrary search freshness gate** · verified 2026-07-02 · → [[lifecycles/creative-finder]]
