@@ -2126,8 +2126,10 @@ const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations"
 // add is idempotent, and (c) sweep stale build worktrees in reapOrphans. All run as the worker's own
 // user (correct git ownership) and tolerate a worktree whose dir is already gone.
 
-// A build/plan/pr-resolve/fold worktree is `builds/<job.id>`; job.id is a UUID. spec-chat-*/dev-ask-*
-// lanes (non-UUID basenames) are session-stable + torn down each turn — never swept here.
+// A plan/pr-resolve/fold worktree is `builds/<job.id>` (UUID) — swept by job status below. A BUILD worktree
+// is the stable per-slug `builds/build-<slug>` (chained-phase-session-resume-worktree-fix) so every phase
+// shares one cwd for `claude --resume`; it's swept only when NO build job for that slug is still active.
+// spec-chat-*/dev-ask-*/director-* lanes are session-stable + torn down each turn — never swept here.
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Jobs whose worktree is sacrosanct — a live or paused build the owner may still resume. Anything else
 // (completed/failed/needs_attention, i.e. terminal) or a job that no longer exists ⇒ the tree is cruft.
@@ -2190,6 +2192,27 @@ function removeWorktreeForBranch(branch: string) {
 // longer exists, which is also how a merged-and-deleted branch surfaces — is cruft → force-remove it.
 // A live or paused job's worktree is NEVER touched (status in ACTIVE_JOB_STATUSES). Best-effort.
 async function reapOrphanWorktrees() {
+  // chained-phase-session-resume-worktree-fix: stable per-slug build worktrees (`builds/build-<slug>`) are not
+  // UUID-named, so the job-id sweep below skips them (as it does spec-chat-*). Reap one only when NO build job
+  // for its slug is still active — between chained phases a live/paused build keeps it; once the chain is
+  // terminal it's cruft. (Reaping mid-chain is harmless: the next phase re-adds the same path, and claude's
+  // session store lives OUTSIDE the worktree, so `--resume` still resolves.) Runs BEFORE the UUID early-return
+  // below so a box with only stable build worktrees still gets them cleaned.
+  for (const e of listWorktrees().filter((x) => x.path.startsWith(BUILDS_DIR + "/") && basename(x.path).startsWith("build-"))) {
+    const bslug = basename(e.path).slice("build-".length);
+    if (!bslug) continue;
+    const { data: active, error: aerr } = await db
+      .from("agent_jobs")
+      .select("id")
+      .eq("kind", "build")
+      .eq("spec_slug", bslug)
+      .in("status", Array.from(ACTIVE_JOB_STATUSES))
+      .limit(1);
+    if (aerr) { console.error(`[reaper] active-build check failed for ${bslug} (skipping):`, aerr.message); continue; }
+    if (active && active.length) continue; // a live/paused build for this slug — sacrosanct
+    removeWorktreeDir(e.path);
+    console.log(`[reaper] reaped stable build worktree ${e.path} (no active build job for ${bslug})`);
+  }
   const entries = listWorktrees().filter((e) => e.path.startsWith(BUILDS_DIR + "/") && JOB_ID_RE.test(basename(e.path)));
   if (entries.length === 0) {
     sh("git", ["worktree", "prune"]); // reconcile admin entries for already-deleted dirs
@@ -15299,7 +15322,18 @@ async function dispatchJob(job: Job) {
   const slug = job.spec_slug;
   const isResume = !!job.claude_session_id;
   const tag = `[${slug}]`;
-  const wt = join(BUILDS_DIR, job.id); // isolated worktree — parallel builds never collide
+  // chained-phase-session-resume-worktree-fix: key the BUILD worktree on the SLUG, not job.id, so every
+  // phase of a spec shares ONE stable cwd. `claude --resume <session>` resolves against the cwd's project
+  // store (~/.claude/projects/<cwd-slug>/, which lives OUTSIDE the worktree) — with the old per-job-id path,
+  // Phase 2 (a NEW job.id → NEW dir) ran `--resume` from a folder Phase 1's session was never created in, so
+  // claude emitted "No conversation found with session ID" and the chain died on EVERY multi-phase spec.
+  // Safe: the spec BRANCH is already the persistent per-slug `claude/build-${slug}` (below) and
+  // removeWorktreeForBranch already force-removes any tree holding it, so two same-slug builds could never
+  // coexist regardless of the dir name — keying on slug adds no new collision. Mirrors the spec-chat lane's
+  // proven stable-path resume (`builds/spec-chat-${key}`). The dir is disposable (wiped + re-added every
+  // dispatch); only the PATH must be stable for `--resume` to resolve. Empty slug → fall back to job.id.
+  const safeSlug = (slug || "").replace(/[^a-zA-Z0-9_-]/g, "");
+  const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
   // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
