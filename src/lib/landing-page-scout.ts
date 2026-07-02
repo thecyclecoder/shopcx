@@ -19,6 +19,7 @@
  *   - enactRecommendationRoute() — what an APPROVED recommendation does (build job / optimizer draft).
  *   - storage helpers      — the private `lander-shots` bucket (per-chapter screenshots, signed URLs).
  */
+import sharp from "sharp";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
@@ -240,6 +241,289 @@ export async function loadChapterStats(
   // Expose reach as a % of top-of-funnel via the unused denom guard (kept for parity with the funnel route).
   void denom;
   return out;
+}
+
+// ── Funnel-follow (Funnel Teardown Scout, Phase 1) ──────────────────────────────
+
+/** Default funnel-follow depth. Snapshot step 0 (entry lander) + up to 2 next steps.
+ * checkout is Tool 5, out of scope here. */
+export const DEFAULT_FUNNEL_DEPTH = 3;
+
+// Legal / footer / policy paths we drop before ranking — they inflate frequency counts and
+// are never the primary CTA.
+const FUNNEL_FOOTER_PATH_RE =
+  /^\/(privacy|terms|returns?|refund|shipping|cookie|cookies|accessibility|contact|faq|impressum|about|legal|sitemap|press|careers|jobs|help|support|reviews|blog)(\/|$)/i;
+
+function registrableDomain(host: string): string {
+  const parts = host.toLowerCase().split(".").filter(Boolean);
+  if (parts.length <= 2) return parts.join(".");
+  return parts.slice(-2).join(".");
+}
+
+/**
+ * Extract the primary CTA destination from a rendered lander (Funnel Teardown Scout, Phase 1).
+ *
+ * Given all `a[href]` values on the page and its own URL, resolve each to absolute, drop
+ * anchors + non-http + legal/footer paths + same-hostname internal links, keep only
+ * OUTBOUND targets that share the entry's registrable domain (a same-or-related-brand
+ * subdomain — never an arbitrary third party), and rank by frequency. The most-repeated
+ * outbound URL is the funnel's next-step CTA.
+ *
+ * Proven against Erth Labs: learn.erthlabs.co/women50 → erthlabs.co/products/superfoodcoffee-starterkit
+ * appeared 10x vs 1x footer links.
+ *
+ * Returns null if no qualifying outbound target exists.
+ */
+export function extractCtaTarget(hrefs: string[], entryUrl: string): string | null {
+  let entry: URL;
+  try {
+    entry = new URL(entryUrl);
+  } catch {
+    return null;
+  }
+  const entryHost = entry.host.toLowerCase();
+  const entryReg = registrableDomain(entryHost);
+
+  const counts = new Map<string, number>();
+  for (const raw of hrefs) {
+    if (!raw) continue;
+    const h = raw.trim();
+    if (!h || h.startsWith("#") || /^(javascript|mailto|tel|sms):/i.test(h)) continue;
+    let u: URL;
+    try {
+      u = new URL(h, entryUrl);
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    if (FUNNEL_FOOTER_PATH_RE.test(u.pathname)) continue;
+    const host = u.host.toLowerCase();
+    if (host === entryHost) continue; // internal — not an outbound next-step
+    if (registrableDomain(host) !== entryReg) continue; // never an arbitrary third party
+    u.hash = "";
+    const normalized = u.toString();
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+  if (counts.size === 0) return null;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+// ── Lander skeleton — vision deconstruction (Funnel Teardown Scout, Phase 2) ────
+
+/** Max chapter shots sent to vision per lander step — bounds Opus spend. */
+export const DECONSTRUCT_MAX_CHAPTERS = 8;
+
+/** Anthropic vision hard-rejects images > ~10MB base64 + downsamples above ~1568px. Match creative-skeleton. */
+const LANDER_VISION_MAX_EDGE = 1568;
+const LANDER_VISION_JPEG_QUALITY = 82;
+
+async function normalizeLanderShotForVision(buffer: Buffer): Promise<Buffer> {
+  return sharp(buffer)
+    .resize({ width: LANDER_VISION_MAX_EDGE, height: LANDER_VISION_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: LANDER_VISION_JPEG_QUALITY })
+    .toBuffer();
+}
+
+/** The persisted skeleton shape — the landing-page analog of `CreativeSkeleton`. */
+export interface LanderSkeleton {
+  offer_structure: string | null;
+  big_promise: string | null;
+  beats: Array<{ beat: string; does: string; chapters: number[] }>;
+  tactics: string[];
+}
+
+export interface LanderDeconstruction {
+  page_type: string;
+  skeleton: LanderSkeleton;
+}
+
+interface DeconstructInput {
+  id: string;
+  chapters: Array<{ index?: number; label?: string; screenshot_path?: string }> | null;
+  url: string;
+  page_type?: string | null;
+  skeleton?: unknown;
+}
+
+const LANDER_VISION_SYSTEM = `You are a DTC landing-page strategist. You reverse-engineer the STRUCTURE of a competitor lander — never to copy it, only to learn the repeatable skeleton.
+
+Given ordered per-chapter mobile screenshots of a landing page (Chapter 0 earliest first), extract its page-type-aware skeleton as JSON. Recognize which page_type it is:
+- "advertorial"        — a listicle/story article-styled lander that funnels to a PDP
+- "single-bundle PDP"  — a product page selling ONE bundle, one CTA, no tier/variant table
+- "multi-tier PDP"     — a product page with a tier/variant/subscription table
+- "quiz"               — a quiz/assessment lander
+- "editorial"          — a magazine-style content lander
+- "generic PDP"        — a standard PDP that doesn't fit the above
+Use the closest of these or a clear short variant label.
+
+Return ONLY a JSON object with these keys:
+{
+  "page_type":       one of the labels above,
+  "offer_structure": one short line naming the offer (e.g. "one $29 starter bundle", "3-tier subscribe & save"),
+  "big_promise":     the top-of-page big promise sentence, verbatim or tightly paraphrased,
+  "skeleton":        [ { "beat": short handle e.g. "hook"|"problem"|"mechanism"|"proof"|"cta", "does": one sentence describing what the beat does, "chapters": [chapter indices where the beat appears] } ] ordered earliest to latest (~5-10 beats),
+  "tactics":         [ short handles for the persuasion tactics used (e.g. "founder-story", "clinical-badge", "comparison-table", "urgency-timer") ]
+}
+Use null for a slot that is genuinely absent. Return ONLY the JSON — no prose, no markdown fences.`;
+
+interface LanderVisionRaw {
+  page_type?: unknown;
+  offer_structure?: unknown;
+  big_promise?: unknown;
+  skeleton?: unknown;
+  tactics?: unknown;
+}
+
+function coerceString(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s && s.toLowerCase() !== "null" ? s : null;
+}
+
+function parseLanderDeconstruction(text: string): LanderDeconstruction | null {
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  let o: LanderVisionRaw;
+  try {
+    o = JSON.parse(m[0]) as LanderVisionRaw;
+  } catch {
+    return null;
+  }
+  const page_type = coerceString(o.page_type);
+  if (!page_type) return null;
+  const beatsRaw = Array.isArray(o.skeleton) ? (o.skeleton as unknown[]) : [];
+  const beats: LanderSkeleton["beats"] = [];
+  for (const b of beatsRaw) {
+    if (!b || typeof b !== "object") continue;
+    const row = b as { beat?: unknown; does?: unknown; chapters?: unknown };
+    const beat = coerceString(row.beat);
+    const does = coerceString(row.does);
+    if (!beat || !does) continue;
+    const chapters = Array.isArray(row.chapters)
+      ? (row.chapters as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n))
+      : [];
+    beats.push({ beat, does, chapters });
+  }
+  const tactics = Array.isArray(o.tactics)
+    ? (o.tactics as unknown[]).map((t) => coerceString(t)).filter((t): t is string => !!t)
+    : [];
+  return {
+    page_type,
+    skeleton: {
+      offer_structure: coerceString(o.offer_structure),
+      big_promise: coerceString(o.big_promise),
+      beats,
+      tactics,
+    },
+  };
+}
+
+/**
+ * Vision-deconstruct a captured lander step into a page-type-aware skeleton
+ * (Funnel Teardown Scout, Phase 2). Mirrors [[creative-skeleton]] `visionDeconstructFrames`
+ * but for landers: each shot is normalized with sharp (fit 1568px + JPEG) to stay under the
+ * per-image limit, sent as an ordered storyboard to `OPUS_MODEL`, and the response is parsed
+ * into `{ page_type, offer_structure, big_promise, beats[], tactics[] }`.
+ *
+ * Cost-bounded: skips if the snapshot already has both `page_type` and `skeleton` (idempotent
+ * re-run), caps chapters sent at `DECONSTRUCT_MAX_CHAPTERS`. Persists the deconstruction back
+ * onto the snapshot row and logs Opus spend via [[ai-usage]] (`purpose: 'lander-skeleton-vision'`).
+ *
+ * Returns the deconstruction, or null if the snapshot has no readable chapter shots / the
+ * vision call fails to parse / it's already deconstructed.
+ */
+export async function deconstructLander(
+  workspaceId: string,
+  snapshot: DeconstructInput,
+  opts: { maxChapters?: number } = {},
+): Promise<LanderDeconstruction | null> {
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY missing");
+
+  // Idempotency guard — a re-run doesn't re-spend on an already-deconstructed snapshot.
+  if (snapshot.page_type && snapshot.skeleton) return null;
+
+  const cap = Math.max(1, opts.maxChapters ?? DECONSTRUCT_MAX_CHAPTERS);
+  const chapters = (snapshot.chapters || []).filter((c) => c.screenshot_path).slice(0, cap);
+  if (!chapters.length) return null;
+
+  // Fetch + normalize each chapter shot to under the vision size limit.
+  const normalized: Array<{ index: number; buffer: Buffer }> = [];
+  for (const ch of chapters) {
+    const signed = await signLanderShot(ch.screenshot_path!);
+    if (!signed) continue;
+    const raw = await fetchAsBuffer(signed);
+    if (!raw) continue;
+    try {
+      const buf = await normalizeLanderShotForVision(raw);
+      normalized.push({ index: ch.index ?? normalized.length, buffer: buf });
+    } catch {
+      // Unreadable shot — drop it; a lander with zero readable shots returns null below.
+    }
+  }
+  if (!normalized.length) return null;
+
+  const imageBlocks = normalized
+    .map(({ index, buffer }) => [
+      { type: "text", text: `Chapter ${index}:` },
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/jpeg", data: buffer.toString("base64") },
+      },
+    ])
+    .flat();
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: OPUS_MODEL,
+      max_tokens: 1500,
+      system: LANDER_VISION_SYSTEM,
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...imageBlocks,
+            { type: "text", text: `Extract this lander's page-type-aware skeleton as JSON. Lander URL: ${snapshot.url}` },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`lander_vision_${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const json = (await res.json()) as AnthropicResponse;
+  await logAiUsage({
+    workspaceId,
+    model: OPUS_MODEL,
+    usage: json.usage || {},
+    purpose: "lander-skeleton-vision",
+  }).catch(() => {});
+
+  const text = (json.content || []).filter((b) => b.type === "text").map((b) => b.text || "").join("\n").trim();
+  const parsed = parseLanderDeconstruction(text);
+  if (!parsed) return null;
+
+  const admin = createAdminClient();
+  await admin
+    .from("lander_snapshots")
+    .update({ page_type: parsed.page_type, skeleton: parsed.skeleton })
+    .eq("id", snapshot.id);
+  return parsed;
+}
+
+async function fetchAsBuffer(url: string): Promise<Buffer | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return Buffer.from(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
 }
 
 // ── Vision gap-analysis ─────────────────────────────────────────────────────────
