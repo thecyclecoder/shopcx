@@ -35,6 +35,7 @@ import {
 import { getSlackToken, postAsAda, updateMessage } from "@/lib/slack";
 import { buildInboxApprovalCard, type InboxCardAction } from "@/lib/slack-ada";
 import { createChatModeInvitationThread } from "@/lib/agents/director-coach-threads";
+import { getPr } from "@/lib/github-pr-resolve";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -567,6 +568,27 @@ interface ParkCardRow {
   metadata: Record<string, unknown> | null;
 }
 
+/** Live GitHub PR state as observed by `getPr` — `{ok:false}` folded in as the read-failure case. */
+type PrReadOutcome =
+  | { ok: true; merged: boolean; state: string; closedAt: string | null }
+  | { ok: false };
+
+/**
+ * pr-resolve-park-clears-on-pr-merged (pure decision helper) — should the pr-resolve park card auto-
+ * clear given the PR's live GitHub state? CONSERVATIVE: only clears on a POSITIVELY-observed merged
+ * OR closed PR. A failed read (`!ok`) → keep (never clear on a null); a still-open PR → keep. Split
+ * out from `reconcileStaleParkCards` so the SAFETY predicate is unit-testable end-to-end without
+ * mocking the whole supabase + fetch stack. See [[../../docs/brain/libraries/approval-inbox.md]].
+ */
+export function prResolveParkOutcome(
+  pr: PrReadOutcome,
+): { action: "clear"; outcome: "merged" | "closed" } | { action: "keep"; reason: "read_failed" | "still_open" } {
+  if (!pr.ok) return { action: "keep", reason: "read_failed" };
+  if (pr.merged) return { action: "clear", outcome: "merged" };
+  if (pr.state !== "open") return { action: "clear", outcome: "closed" };
+  return { action: "keep", reason: "still_open" };
+}
+
 /** Dismiss one stale park card + log why. Best-effort; a failed update just leaves it for next tick. */
 async function dismissParkCard(admin: Admin, id: string, reason: string): Promise<boolean> {
   const { error } = await admin.from("dashboard_notifications").update({ dismissed: true }).eq("id", id);
@@ -595,6 +617,14 @@ async function dismissParkCard(admin: Admin, id: string, reason: string): Promis
  *         or it shipped+folded clean) → the park is obsolete → dismiss. (A merely-`shipped`-by-rollup
  *         spec whose job is still parked is NOT cleared on status alone — a genuine spec-test park on
  *         a shipped spec must survive; only the `agent_jobs` leaving needs_attention clears it.)
+ *       - the row is STILL needs_attention AND its `kind='pr-resolve'` (a
+ *         [[../github-pr-resolve.ts]] `surfaceExhaustedPrResolve` sentinel — the pr-N slug is
+ *         SYNTHETIC, so the folded-spec branch above can never match): read the PR's live GitHub
+ *         state via `getPr(pr_number)`; if the PR is MERGED or CLOSED, flip the sentinel job to
+ *         `completed` with a log_tail breadcrumb (so it can't re-surface) AND dismiss the card —
+ *         the same two-step the CEO did by hand for pr-1010 on 2026-07-02. CONSERVATIVE: on ANY
+ *         GitHub read failure (`{ok:false}`) leave the card alone (never clear on a null read); a
+ *         still-open+dirty PR keeps its card (the human still has to look).
  *
  *  2. Reva "Ambiguous post-deploy signal" cards (escalation_kind `deploy_unsure`, no agent_job — keyed
  *     on `metadata.spec_slug` + `deploy_watch_id`): the ambiguous signal has RESOLVED when the spec has
@@ -647,11 +677,11 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
     const jobIds = Array.from(new Set(jobCards.map((c) => c.jobId)));
     const { data: jobsData } = await admin
       .from("agent_jobs")
-      .select("id, status, spec_slug")
+      .select("id, status, spec_slug, kind, pr_number")
       .in("id", jobIds);
-    const jobs = new Map<string, { status: string; spec_slug: string | null }>();
-    for (const j of (jobsData ?? []) as Array<{ id: string; status: string; spec_slug: string | null }>) {
-      jobs.set(j.id, { status: j.status, spec_slug: j.spec_slug });
+    const jobs = new Map<string, { status: string; spec_slug: string | null; kind: string; pr_number: number | null }>();
+    for (const j of (jobsData ?? []) as Array<{ id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>) {
+      jobs.set(j.id, { status: j.status, spec_slug: j.spec_slug, kind: j.kind, pr_number: j.pr_number });
     }
     // Batch-fetch the spec statuses for jobs STILL needs_attention (to catch a CEO-folded park).
     const stillParkedSlugs = new Set<string>();
@@ -678,6 +708,31 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
       const status = job.spec_slug ? specStatus.get(job.spec_slug) : null;
       if (status === "folded") {
         if (await dismissParkCard(admin, card.id, `spec ${job.spec_slug} is folded — park superseded`)) cleared++;
+        continue;
+      }
+      // pr-resolve-park-clears-on-pr-merged — a still-parked pr-resolve sentinel (kind='pr-resolve',
+      // synthetic pr-N slug, no real spec row so the folded branch above can never match) auto-clears
+      // when its underlying PR is MERGED or CLOSED on GitHub. Two-step, mirroring the manual pr-1010 fix
+      // on 2026-07-02: flip the sentinel job off needs_attention → 'completed' with a breadcrumb (so a
+      // later reconciler tick can't re-emit a card for the same job), THEN dismiss the card. CONSERVATIVE:
+      // on any GitHub read failure `getPr` returns `{ok:false}` → we skip, keeping the card (never
+      // silently clear on a null read). A still-open PR keeps its card too — a human needs to see it.
+      if (job.kind === "pr-resolve" && job.pr_number != null) {
+        const decision = prResolveParkOutcome(await getPr(job.pr_number));
+        if (decision.action === "keep") continue; // read_failed or still_open — CONSERVATIVE keep
+        const outcome = decision.outcome; // 'merged' | 'closed'
+        const { error: upErr } = await admin
+          .from("agent_jobs")
+          .update({
+            status: "completed",
+            log_tail: `pr-resolve sentinel auto-cleared: PR #${job.pr_number} ${outcome} on GitHub (reconciler-observed ${new Date().toISOString()})`.slice(-2000),
+          })
+          .eq("id", jobId);
+        if (upErr) {
+          console.warn(`[approval-inbox] pr-resolve sentinel flip failed for ${jobId.slice(0, 8)} (PR #${job.pr_number}): ${upErr.message}`);
+          continue; // couldn't flip → don't drop the card
+        }
+        if (await dismissParkCard(admin, card.id, `pr-resolve sentinel: PR #${job.pr_number} ${outcome} on GitHub — park superseded`)) cleared++;
       }
     }
   }
