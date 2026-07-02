@@ -23,6 +23,8 @@ Per-chapter mobile snapshots of competitor landing pages **and ours** — the ca
 | `funnel_step` | `int` | — | default: `0` · 0 = entry lander; each funnel-follow step increments ([[../specs/funnel-teardown-scout]] Phase 1) |
 | `funnel_root_url` | `text` | ✓ | The entry lander URL that groups all steps of one funnel walk. Null for legacy pre-funnel-follow rows. |
 | `cta_target_url` | `text` | ✓ | THIS step's extracted primary CTA — the most-frequent outbound same-or-related-brand URL on the rendered page (Erth: /women50 → erthlabs.co/products/superfoodcoffee-starterkit ×10 vs ×1 footer links). Null when no qualifying outbound target exists. |
+| `page_type` | `text` | ✓ | Vision-inferred lander archetype (e.g. `advertorial`, `single-bundle PDP`, `multi-tier PDP`, `quiz`, `editorial`) — [[../specs/funnel-teardown-scout]] Phase 2. Null until the deconstruction runs. |
+| `skeleton` | `jsonb` | ✓ | The page-type-aware structural skeleton: `{ offer_structure, big_promise, beats[{beat,does,chapters[]}], tactics[] }`. Written by [[../libraries/landing-page-scout]] `deconstructLander`. Null until the deconstruction runs. |
 | `captured_at` | `timestamptz` | ✓ | |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
@@ -47,6 +49,7 @@ Per-chapter mobile snapshots of competitor landing pages **and ours** — the ca
 - The capture is a **box script**, never serverless — Playwright can't run in Inngest/Vercel.
 - **Funnel walk is bounded** to `DEFAULT_FUNNEL_DEPTH=3` (entry → next → next-next). Checkout capture is Tool 5 and out of scope. Each step is its own row; steps of one walk share `funnel_root_url` with incrementing `funnel_step`. A step that fails to load is written as `status='blocked'|'failed'` and stops that branch — never a hard failure. Dedup on URL prevents a CTA loop from re-capturing a page in one run.
 - **Only outbound same-or-related-brand CTAs are followed** — never an arbitrary third party. See [[../libraries/landing-page-scout]] `extractCtaTarget`.
+- **Skeleton is per-step and idempotent** — `deconstructLander` skips a snapshot that already has both `page_type` and `skeleton`, so a re-run doesn't re-spend Opus tokens. Vision cost is bounded to `DECONSTRUCT_MAX_CHAPTERS=8` chapters per step. Token spend is logged via [[../libraries/ai-usage]] with `purpose='lander-skeleton-vision'`.
 
 ## Related
 

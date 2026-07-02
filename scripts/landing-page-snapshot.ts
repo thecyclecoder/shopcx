@@ -26,6 +26,7 @@ import {
   ensureLanderShotsBucket,
   analyzeLanderGaps,
   extractCtaTarget,
+  deconstructLander,
   DEFAULT_FUNNEL_DEPTH,
   type LanderTarget,
   type ChapterStat,
@@ -174,7 +175,7 @@ async function main() {
 
       const cap = await captureLander(currentTarget, stamp, chapterStats);
       const ctaTarget = cap.status === "captured" ? extractCtaTarget(cap.hrefs, currentTarget.url) : null;
-      const { error } = await admin.from("lander_snapshots").insert({
+      const { data: inserted, error } = await admin.from("lander_snapshots").insert({
         workspace_id: args.workspaceId,
         product_id: currentTarget.product_id,
         competitor_id: currentTarget.competitor_id,
@@ -190,7 +191,25 @@ async function main() {
         funnel_step: step,
         funnel_root_url: funnelRoot,
         cta_target_url: ctaTarget,
-      });
+      }).select("id").maybeSingle();
+
+      // Vision-deconstruct each captured step into its page-type-aware skeleton
+      // (Funnel Teardown Scout, Phase 2). Bounded cost, idempotent, non-fatal.
+      let pageType: string | null = null;
+      let deconstructError: string | null = null;
+      if (cap.status === "captured" && inserted?.id) {
+        try {
+          const d = await deconstructLander(args.workspaceId, {
+            id: inserted.id,
+            chapters: cap.chapters,
+            url: currentTarget.url,
+          });
+          pageType = d?.page_type ?? null;
+        } catch (e) {
+          deconstructError = e instanceof Error ? e.message : String(e);
+        }
+      }
+
       summary.push({
         url: currentTarget.url,
         brand: currentTarget.brand,
@@ -199,10 +218,12 @@ async function main() {
         chapters: cap.chapters.length,
         funnel_step: step,
         cta_target_url: ctaTarget,
+        page_type: pageType,
         insertError: error?.message || null,
+        deconstructError,
       });
       console.log(
-        `${cap.status === "captured" ? "✓" : "⊘"} step=${step} ${currentTarget.brand} ${currentTarget.url} → ${cap.status} (${cap.chapters.length} chapters)${ctaTarget ? ` → CTA ${ctaTarget}` : ""}`,
+        `${cap.status === "captured" ? "✓" : "⊘"} step=${step} ${currentTarget.brand} ${currentTarget.url} → ${cap.status} (${cap.chapters.length} chapters)${ctaTarget ? ` → CTA ${ctaTarget}` : ""}${pageType ? ` [${pageType}]` : ""}`,
       );
 
       // Stop this branch on non-captured or when there's no further outbound-brand CTA to follow.
