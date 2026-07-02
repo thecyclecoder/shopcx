@@ -9316,7 +9316,14 @@ async function runSpecTestJob(job: Job) {
             failing: failingChecks,
           });
           if (out.escalated) {
-            console.log(`${tag} pre-merge RED on ${slug} (${branch}) → LOOP-GUARD ESCALATED (${out.attempts}/${PRE_MERGE_FIX_LOOP_GUARD_MAX} prior attempts): ${out.reason}`);
+            // Depth-guard (`out.depth != null`) → the fix-of-fix chain hit its cap; breadth guard
+            // (`depth` absent) → too many sibling fixes for one origin. Same escalate-not-execute
+            // action, different guard rail. See src/lib/pre-merge-fix.ts:PRE_MERGE_FIX_MAX_DEPTH.
+            const kind =
+              out.depth != null
+                ? `DEPTH-GUARD ESCALATED (chain depth ${out.depth})`
+                : `LOOP-GUARD ESCALATED (${out.attempts}/${PRE_MERGE_FIX_LOOP_GUARD_MAX} prior attempts)`;
+            console.log(`${tag} pre-merge RED on ${slug} (${branch}) → ${kind}: ${out.reason}`);
           } else if (out.spawned) {
             console.log(`${tag} pre-merge RED on ${slug} (${branch}) → fix [[${out.fixSlug}]] (attempt ${out.attempts + 1}/${PRE_MERGE_FIX_LOOP_GUARD_MAX}); build ${out.buildQueued ? "queued" : "already-queued"}`);
           } else {
