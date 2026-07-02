@@ -267,11 +267,13 @@ export function checkKey(text: string): string {
  * A `## Verification` bullet is GREEN when its latest-agent check is `pass` OR the owner marked it
  * `✓ Tested` (`spec_test_human_checks` resolution='verified'). Derived per bullet by the same `checkKey`
  * hash the human-queue uses, so it survives re-runs + matches owner resolutions. The green state is
- * rendered live on the VerificationCard and written back onto the spec markdown as a leading ✅ by
- * `reflectSpecGreenChecks` (src/lib/spec-green-writeback.ts). See docs/brain/specs/spec-test-maximize-machine-coverage.md.
+ * rendered live on the VerificationCard from the DB — under 'DB is the spec' (retire-md-spec-writers-
+ * db-is-sole-spec Phase 2) the compute-only `reflectSpecGreenChecks` reports counts but does NOT
+ * commit a leading ✅ back to `docs/brain/specs/{slug}.md`. See docs/brain/specs/spec-test-maximize-machine-coverage.md.
  * ────────────────────────────────────────────────────────────────────────── */
 
-/** The ✅ marker prepended to a green verification bullet in the spec markdown. */
+/** The ✅ marker used to denote a green verification bullet in rendered markdown. Retained for the
+ *  bullet-parse strip so a stale ✅ still in a DB-authored body doesn't corrupt the check key. */
 export const GREEN_CHECK = "✅";
 
 export interface VerificationBullet {

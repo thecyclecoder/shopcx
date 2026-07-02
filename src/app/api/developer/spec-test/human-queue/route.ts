@@ -72,7 +72,8 @@ export async function POST(request: Request) {
   if (body.clear) {
     const { error } = await clearHumanCheckResolution(workspaceId, slug, key);
     if (error) return NextResponse.json({ error }, { status: 500 });
-    // Re-open → strip the ✅ from this bullet on the spec markdown (best-effort, never blocks the click).
+    // Re-open → recompute green state (DB-derived; the writeback is compute-only since
+    // spec-status-db-driven — no markdown commit). Best-effort, never blocks the click.
     const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
     // Auto-fold Gate B sweep (fold-on-spec-test-pass, task #29): human-check resolutions are now ADVISORY and
     // no longer flip fold-eligibility (the machine spec-test pass is the trigger). This call is just a cheap
@@ -99,8 +100,9 @@ export async function POST(request: Request) {
     userId: user.id,
   });
   if (error) return NextResponse.json({ error }, { status: 500 });
-  // Owner marked ✓ Tested (or another resolution) → reflect green state onto the spec markdown: a
-  // `verified` resolution lands a leading ✅ on the bullet (committed to main); any other clears it.
+  // Owner marked ✓ Tested (or another resolution) → recompute green state. The dashboard renders
+  // green live from the DB (spec_test_human_checks + spec_test_runs); the writeback is compute-only
+  // since spec-status-db-driven (no markdown commit).
   const green = await reflectSpecGreenChecks(workspaceId, slug).catch(() => null);
   // Auto-fold Gate B sweep (fold-on-spec-test-pass, task #29): human-check resolutions are now ADVISORY and
   // no longer gate the fold (the machine spec-test pass is the trigger). Kept as a cheap best-effort backstop

@@ -1,8 +1,10 @@
 # libraries/spec-green-writeback
 
-Reflect a spec's **green verification state** back onto its markdown file — prepend/strip a leading ✅
-on each `## Verification` bullet and commit to `main`. Built for [[../specs/spec-test-maximize-machine-coverage]]
-Phase 3 (the founder watches the spec file turn green as checks pass / he tests).
+Compute a spec's **green verification state** from the DB — every `## Verification` bullet's latest
+agent check + owner resolution. Historically one of the six git-committing status writers that PUT
+`docs/brain/specs/{slug}.md` to `main`; all six were retired to DB writes in
+[[../specs/spec-status-db-driven]], and under [[../specs/retire-md-spec-writers-db-is-sole-spec]]
+Phase 2 this surface is **compute-only** — no git write path exists.
 
 **File:** `src/lib/spec-green-writeback.ts`
 
@@ -16,11 +18,11 @@ async function reflectSpecGreenChecks(workspaceId: string, slug: string): Promis
 
 Recomputes the green state of every `## Verification` bullet (a bullet is green iff its latest-agent
 check is `pass` OR the owner resolved it `verified` — see `deriveGreenBullets` in
-[[spec-test-runs]]), rewrites each bullet's first line in `docs/brain/specs/{slug}.md` to carry a
-leading ✅ iff green (stripping it otherwise), and commits the change to `main` via the GitHub Contents
-API. Idempotent (no-op commit when the file already matches). **Best-effort — never throws**: a failed
-fetch/commit returns `{ ok:false, reason }` so it can't break the owner's ✓ Tested click or a box run.
-It only ever edits the leading ✅ of a verification bullet — never the spec's logic.
+[[spec-test-runs]]) and returns the counts. **No markdown mutation, no `main` commit** — the
+dashboard renders the DB-derived state live, and callers use `allGreen` for the all-green → archive
+hand-off. Best-effort: a DB read blip returns `{ ok:false, reason }`.
+
+`changed` is always `false` under DB-is-the-spec (there is nothing to change on disk).
 
 ### `GreenWritebackResult` — interface
 
@@ -28,20 +30,21 @@ It only ever edits the leading ✅ of a verification bullet — never the spec's
 
 ## Callers
 
-- `scripts/builder-worker.ts` → `runSpecTestJob` — after a spec-test run lands (agent `pass` checks → ✅).
-- `src/app/api/developer/spec-test/human-queue/route.ts` `POST` — owner marks ✓ Tested (→ ✅) or re-opens (→ clear).
+- `scripts/builder-worker.ts` → `runSpecTestJob` — after a spec-test run lands (agent `pass` checks
+  contribute to the green count).
+- `src/app/api/developer/spec-test/human-queue/route.ts` `POST` — owner marks ✓ Tested / re-opens.
 
 ## Gotchas
 
-- Needs `GITHUB_TOKEN` (or `AGENT_TODO_GITHUB_TOKEN`) in the runtime env — present on the box worker and
-  in the Vercel API runtime (same token the Improve agent uses to commit ticket specs). Absent → skips.
-- Reads + writes `main` directly (not the deployed bundle's local disk) so the writeback is canonical;
-  the change surfaces in the rendered spec after the commit + next deploy. The VerificationCard renders
-  the live green state immediately (independent of the commit) so the founder isn't gated on a deploy.
-- Bullet identity is the `checkKey` hash of the bullet text — the agent's `check.text` and the spec
-  bullet must match (whitespace-normalized) for a `pass` to land green, the same assumption the
-  human-test queue already relies on.
+- Reads the spec body from the DB via [[../libraries/brain-roadmap]] `getSpec` (which reconstructs
+  the `## Verification` section from `public.specs` + `public.spec_phases`). No filesystem or
+  GitHub Contents fetch.
+- Bullet identity is the `checkKey` hash of the bullet text — the agent's `check.text` and the
+  DB-authored bullet must match (whitespace-normalized) for a `pass` to land green, the same
+  assumption the human-test queue relies on.
+- The VerificationCard renders the same green state independently of this call — the founder never
+  waits on a deploy to see progress.
 
 ---
 
-[[../README]] · [[../../CLAUDE]] · [[spec-test-runs]] · [[../specs/spec-test-maximize-machine-coverage]]
+[[../README]] · [[../../CLAUDE]] · [[spec-test-runs]] · [[../specs/spec-test-maximize-machine-coverage]] · [[../specs/spec-status-db-driven]] · [[../specs/retire-md-spec-writers-db-is-sole-spec]]

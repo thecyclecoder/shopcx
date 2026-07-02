@@ -117,8 +117,8 @@ export default function VerificationCard({
   ) : null;
 
   // Phase 3 (spec-test-maximize-machine-coverage): live green state of each verification bullet — green
-  // when the agent passed it OR the owner marked it ✓ Tested. The founder watches it fill in here; the
-  // same state is written back onto the spec markdown (leading ✅) + committed to main by the box.
+  // when the agent passed it OR the owner marked it ✓ Tested. Rendered directly from the DB
+  // (spec_test_runs + spec_test_human_checks); no markdown commit under 'DB is the spec'.
   const bullets = greenBullets ?? [];
   const greenCount = bullets.filter((b) => b.green).length;
   const greenBlock =
