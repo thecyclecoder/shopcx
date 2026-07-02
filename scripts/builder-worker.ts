@@ -10547,19 +10547,29 @@ async function applyOutOfLeashRequestActionInline(
     ? `\n\nLeash rail: ${leashRail}`
     : "";
   const irrevChip = irreversible ? "  ⚠ irreversible" : "";
+  // out-of-leash-approval-show-exact-cmd — the CEO card MUST show the literal cmd runCeoAuthorizedOutOfLeashJob
+  // will execute. Include `$ ${cmd}` in the preview array; if the assembled preview would exceed the 4000-char
+  // cap and swallow the cmd, truncate the trailing user-supplied blob instead and re-append a truncation-flagged
+  // cmd line, so the byte-identical command is never lost to a slice.
+  const cmdLine = `$ ${cmd}`;
+  const rawPreview = [
+    `Out-of-leash — awaiting CEO authorization.`,
+    founderAsk ? `Founder's ask: ${founderAsk}` : "",
+    `Ada's reasoning: ${reasoning}`,
+    `Reversibility: ${reversibility}`,
+    bodyLine ? bodyLine.trim() : "",
+    cmdLine,
+    preview ? `Preview:\n${preview}` : "",
+  ].filter(Boolean).join("\n\n");
+  const previewText = rawPreview.length <= 4000
+    ? rawPreview
+    : `${rawPreview.slice(0, Math.max(0, 4000 - cmdLine.length - 24))}\n\n… (truncated)\n${cmdLine}`;
   const pendingAction: Record<string, unknown> = {
     id: actionId,
     type: actionType,
     summary: `${summary}${irrevChip}`,
     cmd,
-    preview: [
-      `Out-of-leash — awaiting CEO authorization.`,
-      founderAsk ? `Founder's ask: ${founderAsk}` : "",
-      `Ada's reasoning: ${reasoning}`,
-      `Reversibility: ${reversibility}`,
-      bodyLine ? bodyLine.trim() : "",
-      preview ? `Preview:\n${preview}` : "",
-    ].filter(Boolean).join("\n\n").slice(0, 4000),
+    preview: previewText,
     status: "pending",
     // Markers the inbox surface / audit downstream can key on. `authorized_by:'ceo-pending'` becomes
     // `'ceo'` in Phase 2 the moment the CEO approves; on decline the row is dismissed with no execution.
