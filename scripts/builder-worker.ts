@@ -15441,7 +15441,14 @@ async function dispatchJob(job: Job) {
 
   // Set up the worktree (its own dir + branch).
   sh("git", ["fetch", "origin"]);
-  let branch = job.spec_branch;
+  // chained-phase-null-branch-fix: a chained-phase RESUME job (queued by queueNextChainedPhase) carries the
+  // claude session but NOT spec_branch, so job.spec_branch is null on Phase 2+. The resume worktree-add below
+  // then ran `git worktree add -B null … origin/null`, creating/colliding on a phantom branch literally named
+  // "null" (multiple chained resumes fought over it; one even pushed `null` to origin). The build branch is
+  // ALWAYS the persistent per-spec `claude/build-${slug}` (M1 model, set on the fresh path below), so DERIVE it
+  // when the row's spec_branch is missing — never fall through to a "null" branch. (#980 fixed the cwd half of
+  // the chained resume, which unmasked this branch half.)
+  let branch = job.spec_branch || (slug ? `claude/build-${slug}` : job.spec_branch);
   sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
   if (!isResume) {
     // ── M1: branch-accumulation model (spec-goal-branch-pm-flow) ──────────────────────────────
