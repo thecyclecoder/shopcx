@@ -741,6 +741,40 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
 
 // ── Self-heal manual squash/merge of claude/build-* PRs (stamp-phases-on-github-pr-merged) ──────────
 
+/** Minimal PR shape from GitHub's list-pulls endpoint used to decide "is this branch shipped?". */
+export interface BranchPrCandidate {
+  number: number;
+  merged_at: string | null;
+  merge_commit_sha: string | null;
+}
+
+/**
+ * Pure fail-closed PR picker (stamp-phases-on-github-pr-merged Phase 2). Given the list of PRs
+ * GitHub returns for a `claude/build-*` branch head, return the MERGED PR's provenance — or `null`.
+ *
+ * Fail-closed by construction — a stamp is irreversible provenance:
+ *   - an OPEN PR (`merged_at == null`) NEVER qualifies;
+ *   - a CLOSED-unmerged PR (also `merged_at == null` — the #949-closed shape) NEVER qualifies;
+ *   - MERGED is the ONLY qualifying state (`merged_at != null` — GitHub's ship-of-truth signal);
+ *   - when a branch carries BOTH a MERGED and a CLOSED-unmerged PR (the #961-merged / #949-closed
+ *     shape from fix-spec-brain-refs), the MERGED one wins REGARDLESS of iteration order.
+ *
+ * Passing `null`/`undefined` (the "read failed" shape the caller uses for a GitHub error) returns
+ * `null` — no stamp, no throw. Purity: no I/O, no logging; the whole verification (Phase 2) is
+ * assertable from tests that hand-craft PR lists (see spec-drift.test.ts).
+ */
+export function pickMergedPrFromList(
+  prs: BranchPrCandidate[] | null | undefined,
+): { number: number; merge_sha: string | null } | null {
+  if (!prs || !Array.isArray(prs)) return null;
+  for (const pr of prs) {
+    if (pr && pr.merged_at) {
+      return { number: pr.number, merge_sha: pr.merge_commit_sha ?? null };
+    }
+  }
+  return null;
+}
+
 /**
  * The FOURTH built-unstamped signal — MANUAL GitHub squash/merge of a `claude/build-*` PR.
  *
@@ -792,7 +826,10 @@ export async function reconcileMergedBuildBranchPrs(
 
     // List EVERY PR (open + closed + merged) whose head is this branch. state=all so we can
     // distinguish a MERGED PR from a CLOSED-unmerged one (which shares state=closed). Never guess:
-    // a non-ok response or a non-array payload → skip this spec (fail-closed).
+    // a non-ok response or a non-array payload → skip this spec (fail-closed). Exceptions are
+    // caught → skip (a later pass retries). Selection is the pure `pickMergedPrFromList` helper
+    // (Phase 2 verification lives in spec-drift.test.ts): OPEN + CLOSED-unmerged never win, and
+    // MERGED wins regardless of the API's iteration order.
     let merged: { number: number; merge_sha: string | null } | null = null;
     try {
       const res = await gh(
@@ -800,19 +837,7 @@ export async function reconcileMergedBuildBranchPrs(
         `/repos/${REPO}/pulls?head=${encodeURIComponent(owner)}:${encodeURIComponent(branch)}&state=all&per_page=100`,
       );
       if (!res.ok || !Array.isArray(res.json)) continue;
-      // Prefer a MERGED PR (merged_at != null) regardless of iteration order — the #961/#949 shape
-      // is exactly the case where the API might return the CLOSED one first. Skim the list once,
-      // pick the first MERGED PR (a branch merges at most once, so ambiguity is a non-issue).
-      for (const pr of res.json as {
-        number: number;
-        merged_at: string | null;
-        merge_commit_sha: string | null;
-      }[]) {
-        if (pr.merged_at) {
-          merged = { number: pr.number, merge_sha: pr.merge_commit_sha ?? null };
-          break;
-        }
-      }
+      merged = pickMergedPrFromList(res.json as unknown as BranchPrCandidate[]);
     } catch {
       continue; // fail-closed: exception → no stamp, next pass retries
     }

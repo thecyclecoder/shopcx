@@ -16,6 +16,7 @@
     "check:box-parses": "tsx scripts/_check-box-parses.ts",
     "predeploy": "npm run check:worker-lanes && npm run check:pm-md-reads && npm run check:pm-sdk-compliance && npm run check:vercel-ignore-step-rails && npm run check:goal-branch-targeting && npm run check:box-parses",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
+    "test:spec-drift": "tsx --test src/lib/spec-drift.test.ts",
     "test:approval-router": "tsx --test src/lib/agents/approval-router.test.ts",
     "test:growth-director": "tsx --test src/lib/agents/growth-director.test.ts",
     "test:growth-director-brief": "tsx --test src/lib/agents/growth-director-brief.test.ts",
