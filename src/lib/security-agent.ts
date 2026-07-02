@@ -369,6 +369,127 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
 }
 
 /**
+ * vault-post-merge-diff-backstop Phase 1 — the STANDING-PASS BACKSTOP for the post-merge `diff` security
+ * pass. The gap it closes: today the post-merge diff review fires ONLY reactively from the merge hook
+ * ([[agent-jobs]] `applyMergedBuildEffects`, `enqueueSecurityReviewJob({mergeSha})`). That send is
+ * fire-and-forget — if it's dropped (a Vercel deploy reaps the Inngest sync mid-flight, the box is down,
+ * a transient error), the merged commit never gets its post-merge security pass and nothing re-checks.
+ *
+ * This is the cheap if-due re-sweep, mirroring `enqueueSpecTestIfDue` / `enqueueSpecReviewIfDue` for
+ * symmetry: enumerate recently-merged `claude/*` builds (agent_jobs kind='build', status='merged',
+ * merged within the last ~14d), resolve each build's merge SHA(s) from spec provenance (per-phase
+ * `spec_phases.merge_sha` for multi-phase specs; card-level `specs.last_merge_sha` for one-shots), and
+ * (idempotently) call `enqueueSecurityReviewJob` in diff mode for each SHA. Idempotency comes for free:
+ * `enqueueSecurityReviewDiff` already dedups by merge SHA across any-status security-review jobs in the
+ * last 14d, so the re-sweep only enqueues the genuinely-missing ones and is safe to run every pass.
+ *
+ * Wired into the platform-director standing pass ([[../../../scripts/builder-worker]]) next to
+ * `backstopPreMergeChecks`, and hung off the daily [[../inngest/security-dep-watch]] cron as a second
+ * net. Does NOT replace the reactive merge-hook enqueue — this is purely additive backstop coverage.
+ * Best-effort + never throws.
+ */
+export interface EnqueueSecurityDiffIfDueResult {
+  /** merge SHAs whose diff-mode security review was (re-)enqueued this pass. */
+  enqueued: string[];
+  /** merged build agent_jobs rows scanned (deduped per (workspace, slug)). */
+  scanned: number;
+  /** distinct merge SHAs resolved from the scanned builds (before dedup by the enqueue). */
+  resolved: number;
+}
+
+export async function enqueueSecurityDiffIfDue(
+  admin: Admin,
+  opts: { sinceMs?: number; workspaceId?: string } = {},
+): Promise<EnqueueSecurityDiffIfDueResult> {
+  const out: EnqueueSecurityDiffIfDueResult = { enqueued: [], scanned: 0, resolved: 0 };
+  try {
+    // Window mirrors the 14d dedup window inside enqueueSecurityReviewDiff — no point scanning beyond
+    // the horizon the dedup would treat as "already filed", but recent enough to catch the reap gap.
+    const sinceMs = opts.sinceMs ?? 14 * 24 * 60 * 60 * 1000;
+    const sinceIso = new Date(Date.now() - sinceMs).toISOString();
+    // Merged builds within the window. updated_at is when the build flipped to `merged` (the merge-hook
+    // path updates it in `applyMergedBuildEffects`); scan by updated_at so a build merged weeks after it
+    // was created still surfaces if its post-merge security pass was dropped.
+    let query = admin
+      .from("agent_jobs")
+      .select("id, workspace_id, spec_slug, pr_number, updated_at")
+      .eq("kind", "build")
+      .eq("status", "merged")
+      .gte("updated_at", sinceIso)
+      .order("updated_at", { ascending: false });
+    if (opts.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
+    const { data: jobs } = await query.limit(500);
+
+    // Dedupe by (workspace, slug) — a multi-phase spec has one build job per phase-branch merge but
+    // shares the SHA lookup through the spec's phases; walking each row separately is redundant.
+    const seen = new Set<string>();
+    const { getSpec } = await import("@/lib/specs-table");
+    for (const j of (jobs ?? []) as Array<{
+      workspace_id: string;
+      spec_slug: string;
+      pr_number: number | null;
+    }>) {
+      const slug = j.spec_slug;
+      if (!slug || !j.workspace_id) continue;
+      const key = `${j.workspace_id}:${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.scanned++;
+      try {
+        const spec = await getSpec(j.workspace_id, slug);
+        if (!spec) continue;
+        // Resolve merge SHAs from spec provenance. Multi-phase spec → every shipped phase's
+        // `spec_phases.merge_sha`. One-shot spec (no phases) → card-level `specs.last_merge_sha`. We
+        // trust these stamps (spec-status-phase-pr-provenance) — they're the same values the merge hook
+        // itself wrote via applyMergedBuildEffects → stampPhaseShipped / stampSpecMergeProvenance.
+        const shas: string[] = [];
+        if (spec.phases.length === 0) {
+          if (spec.last_merge_sha) shas.push(spec.last_merge_sha);
+        } else {
+          for (const p of spec.phases) {
+            if (p.merge_sha) shas.push(p.merge_sha);
+          }
+          // Some multi-phase specs also carry last_merge_sha (goal-branch M5 promotion stamp); include
+          // it too so an M5 atomic merge's SHA gets its own security pass. Dedup below handles the case
+          // where last_merge_sha == a phase's merge_sha.
+          if (spec.last_merge_sha && !shas.includes(spec.last_merge_sha)) shas.push(spec.last_merge_sha);
+        }
+        const distinct = Array.from(new Set(shas.map((s) => securitySha12(s)).filter(Boolean)));
+        // Map the 12-char signature back to a full SHA (first occurrence wins — SHAs are globally unique).
+        const fullByShort = new Map<string, string>();
+        for (const s of shas) {
+          const short = securitySha12(s);
+          if (short && !fullByShort.has(short)) fullByShort.set(short, s);
+        }
+        for (const short of distinct) {
+          out.resolved++;
+          const mergeSha = fullByShort.get(short);
+          if (!mergeSha) continue;
+          const r = await enqueueSecurityReviewJob(admin, {
+            mergeSha,
+            specSlug: slug,
+            prNumber: j.pr_number ?? null,
+            workspaceId: j.workspace_id,
+          });
+          if (r.enqueued) out.enqueued.push(short);
+        }
+      } catch (err) {
+        console.warn(
+          `[security-agent] enqueueSecurityDiffIfDue: resolve threw for ${slug} (continuing):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[security-agent] enqueueSecurityDiffIfDue: pass threw (continuing):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return out;
+}
+
+/**
  * Enqueue the daily dependency-CVE-watch scan job. Best-effort + idempotent: no-op if a dep-watch scan
  * is already live OR a non-dismissed one COMPLETED within the recent window (its upgrade-fix is pending
  * deploy — don't re-scan meanwhile). The box job runs `npm audit` on the real tree and (on a finding)

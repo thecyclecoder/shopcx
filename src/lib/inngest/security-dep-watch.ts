@@ -19,7 +19,7 @@
 import { inngest } from "./client";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { enqueueDepWatchJob } from "@/lib/security-agent";
+import { enqueueDepWatchJob, enqueueSecurityDiffIfDue } from "@/lib/security-agent";
 
 export const securityDepWatch = inngest.createFunction(
   { id: "security-dep-watch", retries: 1, triggers: [{ cron: "0 4 * * *" }] },
@@ -32,10 +32,19 @@ export const securityDepWatch = inngest.createFunction(
       return r;
     });
 
-    await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("security-dep-watch", { ok: true, produced: result });
+    // vault-post-merge-diff-backstop Phase 1 — second net for the post-merge diff security review. The
+    // platform-director standing pass is the primary re-sweep; this daily cron is the fallback so a box
+    // outage that skips the standing pass can't leave merged commits unreviewed indefinitely. The
+    // enqueue itself is idempotent (14d SHA dedup inside enqueueSecurityReviewJob).
+    const diffBackstop = await step.run("enqueue-diff-if-due", async () => {
+      const admin = createAdminClient();
+      return await enqueueSecurityDiffIfDue(admin);
     });
 
-    return result;
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("security-dep-watch", { ok: true, produced: { depWatch: result, diffBackstop } });
+    });
+
+    return { depWatch: result, diffBackstop };
   },
 );
