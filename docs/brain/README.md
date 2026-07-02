@@ -14,7 +14,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
 | [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 39 + README |
-| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 63 + 38 settings |
+| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 64 + 38 settings |
 | [functions/](functions/) | One page per org-chart function (Growth, CMO, Retention, CFO, Logistics, CS — the CEO-mode directors — plus Platform/Eng, the build org) — the permanent owner of work. Lists its perpetual mandates + the specs/goals it owns. Doubles as the CEO-mode director-agent charter. | 5 |
 | [goals/](goals/) | One page per finite company goal / BHAG (e.g. CEO mode) — outcome, success metric, and the milestone → spec decomposition. Rolls up to 100% then closes. | 0 |
 | [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 19 |
