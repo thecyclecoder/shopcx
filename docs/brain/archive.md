@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Ada grades a sampled, cadenced, adaptive-by-rollup batch — not every concluded job** · verified 2026-07-02 · → [[../libraries/agent-grader]]
 - **Harden the Devi agent — roll persistent coaching into its mandate** · verified 2026-07-02 · → [[../libraries/db-health]]
 - **Harden the Pax agent — roll persistent coaching into its mandate** · verified 2026-07-02 · → [[../libraries/github-pr-resolve]]
 - **Bo builds reactively on review-pass, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../libraries/build-lifecycle]]

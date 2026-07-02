@@ -1,0 +1,1 @@
+- **Ada grades a sampled, cadenced, adaptive-by-rollup batch — not every concluded job** · verified 2026-07-02 · → [[../libraries/agent-grader]]
