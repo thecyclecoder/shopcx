@@ -574,10 +574,12 @@ export async function enqueuePreMergeSpecTest(
   slug: string,
   branch: string,
   previewUrl: string,
+  opts?: { force?: boolean },
 ): Promise<{ enqueued: boolean; reason?: string }> {
   if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
   const origin = (previewUrl || "").replace(/\/$/, "");
   if (!origin) return { enqueued: false, reason: "no preview_url" };
+  const force = opts?.force === true;
 
   const admin = createAdminClient();
 
@@ -595,6 +597,12 @@ export async function enqueuePreMergeSpecTest(
   // through both branches → the enqueue proceeds, unwedging the branch. The upstream
   // `backstopPreMergeChecks` still loop-guards standing-pass auto-recovery so a genuinely erroring
   // run can't spin forever.
+  //
+  // premerge-spectest-rerun-and-visibility Phase 3 — an OWNER-initiated re-run from the dashboard
+  // passes `force: true` and skips (b) entirely (an owner clicking Re-run has already decided the
+  // stale terminal verdict should not gate them, and the API path just fresh-captured the branch's
+  // preview so the re-test hits current code). (a) still applies — never stack a spec-test on top of
+  // one that is already in flight for the same branch.
   const { data: openJob } = await admin
     .from("agent_jobs")
     .select("id")
@@ -605,20 +613,41 @@ export async function enqueuePreMergeSpecTest(
     .in("status", ACTIVE_STATUSES)
     .limit(1);
   if (openJob && openJob.length) return { enqueued: false, reason: "in-flight" };
-  const { data: latestRun } = await admin
-    .from("spec_test_runs")
-    .select("agent_verdict")
-    .eq("workspace_id", workspaceId)
-    .eq("spec_slug", slug)
-    .eq("spec_branch", branch)
-    .order("run_at", { ascending: false })
-    .limit(1);
-  if (latestRun && latestRun.length) {
-    const verdict = (latestRun[0] as { agent_verdict: string | null }).agent_verdict;
-    if (verdict === "approved" || verdict === "needs_human" || verdict === "issues") {
-      return { enqueued: false, reason: `already tested (${verdict})` };
+  if (!force) {
+    const { data: latestRun } = await admin
+      .from("spec_test_runs")
+      .select("agent_verdict, run_at")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("spec_branch", branch)
+      .order("run_at", { ascending: false })
+      .limit(1);
+    if (latestRun && latestRun.length) {
+      const row = latestRun[0] as { agent_verdict: string | null; run_at: string };
+      const verdict = row.agent_verdict;
+      if (verdict === "approved" || verdict === "needs_human" || verdict === "issues") {
+        // premerge-spectest-rerun-and-visibility Phase 1 — treat the latest terminal verdict as STALE when
+        // the branch has NEWER work than the run: a `build` or `pr-resolve` agent_jobs row for this
+        // spec_branch whose updated_at > latestRun.run_at means the branch's CODE has changed since we
+        // last tested (e.g. a pr-resolve just merged main into the branch, or a next-phase build pushed
+        // to it). Without this check the branch is silently wedged forever — the root cause seen live on
+        // spec-brain-refs: the fix landed via pr-resolve, but its stale `issues` verdict permanently
+        // blocked re-testing on the same branch. No churn: a spec-test run itself creates no
+        // build/pr-resolve row, so after the re-test the branch settles until the next real push.
+        const { data: newer } = await admin
+          .from("agent_jobs")
+          .select("id")
+          .eq("spec_branch", branch)
+          .in("kind", ["build", "pr-resolve"])
+          .gt("updated_at", row.run_at)
+          .limit(1);
+        if (!newer || !newer.length) {
+          return { enqueued: false, reason: `already tested (${verdict})` };
+        }
+        // Newer build/pr-resolve exists → stale verdict; fall through and re-enqueue.
+      }
+      // verdict === "error" (or null) → transient; fall through and re-enqueue.
     }
-    // verdict === "error" (or null) → transient; fall through and re-enqueue.
   }
 
   // The runner reads the preview origin from `instructions` (Phase 2 threads it through). We also
@@ -838,6 +867,64 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
           console.warn(`[pre-merge-backstop] preview recovery for ${branch} failed (skipping):`, e instanceof Error ? e.message : e);
           continue;
         }
+      }
+      // ⭐ premerge-spectest-rerun-and-visibility Phase 2 — REFRESH-ON-CHANGE. Even when the
+      // build row already carries a READY preview_url, that URL can be STALE if the branch has
+      // newer work than the latest spec_test_run — e.g. a pr-resolve merge commit that pushed a
+      // fix onto the branch but never re-captured a preview onto THIS row. Phase 1 unblocks the
+      // re-enqueue for a changed branch; without Phase 2 that re-enqueue would probe the OLD
+      // preview and re-fail. So when the branch has changed since its last run, ask Vercel for
+      // the branch's newest deployment: if its state is READY (Vercel finished building the new
+      // push), persist that fresh URL onto this row via capturePreviewUrlForJob (idempotent,
+      // advances only forward) and use it for the enqueue; if NOT READY (still QUEUED /
+      // BUILDING / ERROR / CANCELED), skip this pass entirely so the re-test never runs against
+      // a stale or non-READY preview — the next standing pass retries. Gated behind
+      // "branch has newer build/pr-resolve than latest run" so the Vercel call is bounded to
+      // real change events, not every standing pass on every branch.
+      try {
+        const { data: latestRun } = await admin
+          .from("spec_test_runs")
+          .select("run_at")
+          .eq("workspace_id", j.workspace_id)
+          .eq("spec_slug", slug)
+          .eq("spec_branch", branch)
+          .order("run_at", { ascending: false })
+          .limit(1);
+        if (latestRun && latestRun.length) {
+          const runAt = (latestRun[0] as { run_at: string }).run_at;
+          const { data: newer } = await admin
+            .from("agent_jobs")
+            .select("id")
+            .eq("spec_branch", branch)
+            .in("kind", ["build", "pr-resolve"])
+            .gt("updated_at", runAt)
+            .limit(1);
+          if (newer && newer.length) {
+            const { getLatestReadyDeploymentForBranch, previewHttpsUrl } = await import("@/lib/vercel-project");
+            const lookup = await getLatestReadyDeploymentForBranch(branch, null);
+            // The branch's NEWEST deployment must be READY — otherwise Vercel is still building
+            // the new push (or the deployment errored/was canceled). A READY older-than-newest
+            // deployment isn't good enough; using it would re-test the pre-change code.
+            if (!lookup.latest || lookup.latest.state !== "READY") {
+              console.log(
+                `[pre-merge-backstop] Phase 2: branch ${branch} changed since last run but newest deployment not READY (${lookup.latest?.state ?? "none"}) — retry next pass`,
+              );
+              continue;
+            }
+            const freshUrl = previewHttpsUrl(lookup.latest);
+            if (!freshUrl) continue;
+            const { capturePreviewUrlForJob } = await import("@/lib/preview-capture");
+            const cap = await capturePreviewUrlForJob({ jobId: j.id, branch, commitSha: null });
+            previewUrl = cap.previewUrl ?? freshUrl;
+            console.log(`[pre-merge-backstop] Phase 2: refreshed preview for changed branch ${branch} → ${previewUrl}`);
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `[pre-merge-backstop] Phase 2 refresh-on-change for ${branch} failed (skipping):`,
+          e instanceof Error ? e.message : e,
+        );
+        continue;
       }
       out.scanned++;
       // spectest-error-visible-and-rerunnable Phase 1 — LOOP-GUARDED auto-recovery: with the
