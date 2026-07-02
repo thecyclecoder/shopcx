@@ -1,0 +1,1 @@
+- **Harden the Pax agent — roll persistent coaching into its mandate** · verified 2026-07-02 · → [[../libraries/github-pr-resolve]]
