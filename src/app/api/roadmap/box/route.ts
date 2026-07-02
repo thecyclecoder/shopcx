@@ -19,6 +19,7 @@ import {
   CLAUDE_PREVIEW_IGNORE_COMMAND,
   getProjectIgnoreState,
 } from "@/lib/vercel-project";
+import { selectLatestBuildBySlug } from "@/lib/box-failed-supersede";
 
 // preview-test-promote-pipeline M1 Phase 3 — the Vercel Ignored-Build-Step override state, surfaced
 // on the build console so the supervisor can SEE that `claude/*` preview builds are enabled. Cached
@@ -379,9 +380,12 @@ export async function GET() {
     .map((j) => ({ ...j, spec_missing: specMissing(j.kind, j.spec_slug) }));
 
   // Failed builds (actionable) — surface a failure so the owner doesn't have to dig into a spec
-  // card to learn a build died. Only show a spec whose *latest* build attempt is `failed`: a later
-  // successful/in-flight build (merged/completed/building/queued) supersedes the old failure, so a
-  // since-rebuilt spec (e.g. control-tower) is NOT shown as failed.
+  // card to learn a build died. Only show a spec whose latest attempt is `failed` UNDER OUTCOME
+  // PRECEDENCE (box-failed-build-supersede-and-dismiss Phase 1): a terminal success (merged /
+  // completed) or an in-flight build (building / queued) supersedes an older failure — AND
+  // supersedes a later-created failure too, so the 2026-07-02 case (a long build that started
+  // 06:09 and merged 08:50 was masked by a quick failed attempt created 08:41) doesn't recur.
+  // See `selectLatestBuildBySlug` for the ranking.
   const { data: buildHist } = await admin
     .from("agent_jobs")
     .select("id, spec_slug, kind, status, error, log_tail, updated_at, created_at")
@@ -389,11 +393,8 @@ export async function GET() {
     .in("kind", ["build", "plan"])
     .order("created_at", { ascending: false })
     .limit(500);
-  type BuildJob = { id: string; spec_slug: string; kind: string; status: string; error: string | null; log_tail: string | null; updated_at: string };
-  const latestBySlug = new Map<string, BuildJob>();
-  for (const j of (buildHist ?? []) as BuildJob[]) {
-    if (!latestBySlug.has(j.spec_slug)) latestBySlug.set(j.spec_slug, j);
-  }
+  type BuildJob = { id: string; spec_slug: string; kind: string; status: string; error: string | null; log_tail: string | null; updated_at: string; created_at: string };
+  const latestBySlug = selectLatestBuildBySlug((buildHist ?? []) as BuildJob[]);
   const failed = [...latestBySlug.values()]
     .filter((j) => j.status === "failed")
     .map((j) => ({ id: j.id, spec_slug: j.spec_slug, kind: j.kind, error: j.error ?? null, detail: failureDetail(j.log_tail), updated_at: j.updated_at, spec_missing: specMissing(j.kind, j.spec_slug) }))
