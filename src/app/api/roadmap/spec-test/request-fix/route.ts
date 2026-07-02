@@ -126,7 +126,7 @@ export async function POST(request: Request) {
       {
         title,
         summary,
-        owner: "[[../functions/platform]]",
+        owner: "platform",
         parent: origin.parent,
         blocked_by: [],
         critical: false,

@@ -328,6 +328,15 @@ function normForCompare(s: string | null | undefined): string {
   return (s ?? "").replace(/\s+/g, " ").trim();
 }
 
+/** Coerce `owner` to the bare function slug ShopCX stores in `specs.owner` — strip a `[[../functions/…]]`
+ *  wikilink wrapper if a caller mistakenly hands us one. The DB shape is the bare slug (`platform`,
+ *  `growth`, …); 170 rows carry that shape. Two authoring surfaces (pre-merge-fix + request-fix-inline)
+ *  regressed to the wikilink form and stuck rows in Vale under "Mangled Owner wikilink" — this is the
+ *  boundary guard so no future author surface can regress the shape again. */
+function normalizeOwnerSlug(owner: string): string {
+  return owner.replace(/^\[\[\.\.\/functions\/([^\]]+)\]\]$/, "$1").trim();
+}
+
 /** Did the re-authored content materially DIFFER from the stored row? Compares title, summary, and each
  *  phase's (title, body, verification) after whitespace-normalization. A different phase COUNT is a change.
  *  Conservative: when in doubt (a field genuinely differs) it returns true so the spec re-opens. */
@@ -447,7 +456,7 @@ export async function authorSpecRowStructured(
         slug,
         title: spec.title,
         summary: spec.summary,
-        owner: spec.owner,
+        owner: normalizeOwnerSlug(spec.owner),
         parent: spec.parent,
         blocked_by: spec.blocked_by ?? [],
         priority: spec.critical ? "critical" : null,
