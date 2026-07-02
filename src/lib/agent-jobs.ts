@@ -806,49 +806,36 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
 }
 
 /**
- * security-test-on-preview-pre-merge Phase 1 (the WIRING the spec never landed) — the pre-merge SECURITY
- * trigger, the security twin of `maybeEnqueuePreMergeSpecTestOnAccumulation`. Both pre-merge signals
- * (`isSpecTestGreenForBranch` ∧ `isSecurityGreenForBranch`) gate `isSpecPromoteEligible` + the M4 auto-merge
- * tests gate; the spec-test leg was wired into the preview-ready hook, but the security leg's enqueue
- * (`enqueueSecurityReviewJob` branch mode) was authored (Phase 1 lib) and its signal helper shipped
- * (Phase 3) — yet NO caller ever invoked the branch-mode enqueue, so `isSecurityGreenForBranch` was
- * ALWAYS false and the M4 gate could never pass (every one-off PR sat `in_testing`). This is that caller.
+ * ⭐ fused-premerge-security-authoritative-drop-standalone Phase 3 — RETIRED. The pre-merge branch-mode
+ * standalone security enqueue is gone; the FUSED spec-test session is now the SOLE pre-merge branch-mode
+ * producer of security verdicts (Phase 2 wired `applyFusedSecurityAsBranchVerdict` in
+ * [[../../scripts/builder-worker]] to insert the branch-mode `security-review` row directly from the
+ * evidence-backed fused envelope). This function now no-ops so the two preview-ready-hook callers +
+ * `backstopPreMergeChecks` don't error — the pre-merge branch-mode `enqueueSecurityReviewJob` path is
+ * effectively dead. The signature is preserved for compat; a future cleanup can strip the callers.
  *
- * ⭐ isolate-premerge-security-verdict Phase 1 — the pre-merge security enqueue is the STANDALONE branch-mode
- * `enqueueSecurityReviewJob` again (was briefly fused into the pre-merge spec-test session in
- * consolidate-premerge-checks-one-session; that fusion let a fused session synthesize a gate-satisfying
- * `security-review` row from a self-declared `security.status="clean"` envelope, which the standalone Vault
- * lane is meant to be the ONLY producer of). runSpecTestJob no longer applies the fused security envelope;
- * pre-merge security verdicts come exclusively from the standalone `runSecurityReviewJob` path.
+ * Post-merge `diff` mode + `dep-watch` are NOT affected — those still enqueue standalone
+ * `security-review` jobs via `enqueueSecurityReviewJob` (diff / dep-watch) and remain the authoritative
+ * post-merge / daily-CVE producers. Only pre-merge BRANCH mode is retired.
  *
- * Same accumulation predicate as the spec-test twin (test the WHOLE built spec on its branch preview, not a
- * partial). Idempotent (branch-mode enqueue dedupes one open review per branch). Best-effort + never throws.
+ * Historical: under consolidate-premerge-checks-one-session the pre-merge was briefly fused with a
+ * self-declared `security.status="clean"` envelope (a rubber-stamp risk). isolate-premerge-security-verdict
+ * reversed that to a standalone enqueue. Now the fused envelope carries STRUCTURED per-check evidence
+ * (Phase 1) that a rubber-stamp cannot satisfy — a bare `clean` downgrades to `needs_human` in
+ * [[security-envelope]] `classifyFusedSecurityEnvelope`, so it's SAFE to make the fused row authoritative
+ * and drop the standalone (Phase 2 + 3). Best-effort + never throws.
  */
-export async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
+export async function maybeEnqueuePreMergeSecurityOnAccumulation(_args: {
   workspaceId: string;
   slug: string;
   branch: string | null;
   previewUrl: string | null;
   prNumber?: number | null;
 }): Promise<{ enqueued: boolean; reason?: string }> {
-  const { workspaceId, slug, branch, previewUrl, prNumber } = args;
-  try {
-    if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
-    const origin = (previewUrl || "").replace(/\/$/, "");
-    if (!origin) return { enqueued: false, reason: "no preview URL yet" };
-    const acc = await isSpecAccumulationComplete(workspaceId, slug);
-    if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
-    const { enqueueSecurityReviewJob } = await import("@/lib/security-agent");
-    return await enqueueSecurityReviewJob(createAdminClient(), {
-      branch,
-      previewOrigin: origin,
-      specSlug: slug,
-      prNumber: prNumber ?? null,
-      workspaceId,
-    });
-  } catch (e) {
-    return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  return {
+    enqueued: false,
+    reason: "retired: fused spec-test session is the sole pre-merge branch-mode security producer (fused-premerge-security-authoritative-drop-standalone Phase 3)",
+  };
 }
 
 /**
@@ -859,15 +846,26 @@ export async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
  * `in_testing` forever (the same standing-pass-backstop gap Gate-A had: event-only, no re-evaluation).
  *
  * This is the reliable re-evaluation: every standing pass, enumerate the latest build job per
- * `claude/build-{slug}` branch that carries a READY preview, and (idempotently) fire BOTH pre-merge
- * triggers for any fully-accumulated branch. The underlying enqueues dedupe (spec-test per
- * (workspace, slug, branch); security one-open-review per branch), so re-running every pass is safe + cheap.
- * Mirrors `promoteEligibleSpecsToGoalBranch`'s candidate-enumeration shape. Best-effort per branch; never throws.
+ * `claude/build-{slug}` branch that carries a READY preview, and (idempotently) fire the pre-merge
+ * spec-test trigger for any fully-accumulated branch. The underlying enqueue dedupes (spec-test per
+ * (workspace, slug, branch)), so re-running every pass is safe + cheap. Mirrors
+ * `promoteEligibleSpecsToGoalBranch`'s candidate-enumeration shape.
+ *
+ * fused-premerge-security-authoritative-drop-standalone Phase 3 — the SECURITY leg of the backstop is
+ * gone. The fused spec-test session is now the sole pre-merge branch-mode security producer
+ * ([[../../scripts/builder-worker]] `applyFusedSecurityAsBranchVerdict` writes the branch-mode
+ * `security-review` row from `runSpecTestJob`'s evidence-backed fused envelope). `securityEnqueued`
+ * stays on the result shape for backward-compat and is always empty. Best-effort per branch; never throws.
  */
 export interface PreMergeBackstopResult {
   /** branches whose pre-merge spec-test was (re-)enqueued this pass. */
   specTestEnqueued: string[];
-  /** branches whose pre-merge security review was (re-)enqueued this pass. */
+  /**
+   * fused-premerge-security-authoritative-drop-standalone Phase 3 — always empty. Retained for
+   * backward-compat with the platform-director's standing-pass logging + existing callers that
+   * enumerate the field. The fused spec-test session writes the pre-merge security-review row
+   * directly (Phase 2), so no separate branch-mode enqueue happens here.
+   */
   securityEnqueued: string[];
   /** candidate branches scanned (READY-preview claude/build-* branches, deduped per slug). */
   scanned: number;
@@ -1054,18 +1052,12 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
           /* best-effort per branch */
         }
       }
-      try {
-        const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
-          workspaceId: j.workspace_id,
-          slug,
-          branch,
-          previewUrl,
-          prNumber: j.pr_number,
-        });
-        if (sec.enqueued) out.securityEnqueued.push(branch);
-      } catch {
-        /* best-effort per branch */
-      }
+      // fused-premerge-security-authoritative-drop-standalone Phase 3 — the security leg is GONE.
+      // The fused spec-test session (enqueued above) is now the sole pre-merge branch-mode security
+      // producer via [[../../scripts/builder-worker]] applyFusedSecurityAsBranchVerdict, which writes
+      // the authoritative branch-mode `security-review` row directly from the evidence-backed fused
+      // envelope. `out.securityEnqueued` stays on the result shape for backward-compat and is always
+      // empty — the fused row is written from runSpecTestJob's completion, not from a separate enqueue.
     }
   } catch (e) {
     console.warn("[pre-merge-backstop] scan threw (continuing):", e instanceof Error ? e.message : e);
