@@ -12,11 +12,14 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Bo builds reactively on review-pass, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../libraries/build-lifecycle]]
 - **Failed-build cards: correct supersede ordering + an owner dismiss button** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
 - **Box worker: persist self-update skip reason into worker_heartbeats.detail** · verified 2026-07-02 · → [[../tables/worker_heartbeats]]
 - **Founder-prompted escape valve: Ada raises an out-of-leash action to the CEO, approval executes it** · verified 2026-07-02 · → [[../libraries/platform-director]]
 - **Resume the build session across chained phases (cache-warm, usage-wall savings)** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]]
+- **DB Health agent: instance-saturation & timeout detector** · verified 2026-07-02 · → [[../libraries/db-health]]
 - **Fix: Bo builds reactively on the review-pass transition, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
+- **Fix: Vault post-merge security review cron backstop** · verified 2026-07-02 · → [[../inngest/vault-post-merge-diff-backstop]]
 - **Fix: Document the PM-agent activation contract (reactive → cheap gate → cron backstop) in the brain** · verified 2026-07-02 · → [[../operational-rules#PM-agent activation contract]]
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]

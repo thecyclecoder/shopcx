@@ -1,0 +1,1 @@
+- **Fix: Vault post-merge security review cron backstop** · verified 2026-07-02 · → [[../inngest/vault-post-merge-diff-backstop]]
