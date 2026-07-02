@@ -140,6 +140,10 @@ export async function enqueuePriorityBuild(admin: Admin, workspaceId: string, sl
     if (!card || card.status === "shipped") return false; // gone or already landed
     const { data: active } = await admin.from("agent_jobs").select("id").eq("workspace_id", workspaceId).eq("spec_slug", slug).eq("kind", "build").in("status", ACTIVE_BUILD_STATUSES).limit(1);
     if (active && active.length) return false; // a build is already carrying it
+    // intentional override of enqueueBuildIfDue (bo-reactive-gated-build-enqueue Phase 1): a CEO-approved
+    // directive elevated this to a PRIORITY build (gate spec / **Priority:** critical) — priority
+    // builds are the one lane authorized to jump the review + build-gate queue. The claim-time gate
+    // still enforces basic sanity if Vale hasn't stamped it yet.
     const { error } = await admin.from("agent_jobs").insert({ workspace_id: workspaceId, spec_slug: slug, kind: "build", status: "queued", created_by: createdBy, instructions: reason });
     return !error;
   } catch {

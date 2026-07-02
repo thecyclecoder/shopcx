@@ -19,6 +19,7 @@ interface Skeleton {
   advertiser: string | null;
   title: string | null;
   image_url: string | null;
+  thumb_url: string | null;
   media_type: string;
   format: string | null;
   framework: string | null;
@@ -261,7 +262,9 @@ function BrowseView({
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {skeletons.map((s) => {
-        const src = proxy(s.image_url);
+        // Prefer OUR stored downscaled copy (fast, served from storage); fall back to the live proxy
+        // only for legacy rows that predate thumb_path.
+        const src = s.thumb_url ?? proxy(s.image_url);
         return (
           <div
             key={s.id}

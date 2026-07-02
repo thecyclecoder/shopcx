@@ -279,6 +279,109 @@ async function enqueueSecurityReviewDiff(admin: Admin, input: EnqueueSecurityRev
  *      original "terminal never blocks a re-review" comment was protecting. A `failed` review never blocks
  *      (it never produced a verdict, so the branch is still un-reviewed).
  */
+/**
+ * fix-vault-post-merge-diff-backstop-7fbde0 — the STANDING-PASS BACKSTOP for the post-merge `diff` security
+ * pass. The gap it closes: today the post-merge diff review fires ONLY reactively from the merge hook
+ * ([[agent-jobs]] `applyMergedBuildEffects`, `enqueueSecurityReviewJob({mergeSha})`). That send is
+ * fire-and-forget — if it's dropped (a Vercel deploy reaps the Inngest sync mid-flight, the box is down,
+ * a transient error), the merged commit never gets its post-merge security pass and nothing re-checks.
+ *
+ * This is the cheap if-due re-sweep, mirroring `enqueueSpecTestIfDue` / `enqueueSpecReviewIfDue` for
+ * symmetry: enumerate the audit-authoritative source of every merged `claude/*` build in the window —
+ * `spec_status_history` rows with `actor='merge:<sha>'` (written by `markSpecCardMergeShipped` inside
+ * `applyMergedBuildEffects`, append-only + never deleted → survives `fold`). For each unique merge SHA
+ * call `enqueueSecurityReviewJob` in diff mode; idempotency comes for free because
+ * `enqueueSecurityReviewDiff` dedups by merge SHA across any-status security-review jobs in the last
+ * 14d, so the re-sweep only enqueues the genuinely-missing ones and is safe to run every pass.
+ *
+ * ⭐ Why `spec_status_history`, NOT `getSpec()` → `spec_phases.merge_sha` / `specs.last_merge_sha`
+ * (fix-vault-post-merge-diff-backstop-7fbde0-0845a3 — the regression fix): the earlier origin
+ * fix resolved SHAs via `getSpec` + phase iteration. That gapped on FOLDED specs (their brain pages
+ * live in `docs/brain/archive.d/`) — the observed orphans included `acquisition-research-hub` and
+ * `ad-creative-scout`, both folded specs whose `spec_phases.merge_sha` was either NULL or unreachable
+ * via `getSpec` for the caller's `(workspace_id, slug)` lookup (workspace mismatch / stale slug). The
+ * audit ledger `spec_status_history` was written by the SAME hook that stamped the phases at merge
+ * time (`markSpecCardMergeShipped` → `upsertCardState` appends `{field:'status', actor:'merge:<sha>'}`
+ * + `{field:'phase', actor:'merge:<sha>'}` per shipped phase), and its rows are never deleted — so
+ * every SHA the fold + phase-provenance path could resolve, the history can too, PLUS the ones fold
+ * has since made unreachable. Same source the `audit-spec-shipped-state` job walks to re-stamp
+ * provenance ([[spec-audit]] — the sanctioned ledger for "did this SHA merge for this slug").
+ *
+ * Wired into the platform-director standing pass ([[../../../scripts/builder-worker]]) next to
+ * `backstopPreMergeChecks`, and hung off the daily [[../inngest/security-dep-watch]] cron as a second
+ * net. Does NOT replace the reactive merge-hook enqueue — this is purely additive backstop coverage.
+ * Best-effort + never throws.
+ */
+export interface EnqueueSecurityDiffIfDueResult {
+  /** merge SHAs (12-char signature) whose diff-mode security review was (re-)enqueued this pass. */
+  enqueued: string[];
+  /** distinct merge SHAs (12-char signature) seen in the window from `spec_status_history`. */
+  scanned: number;
+  /** distinct merge SHAs resolved (same as `scanned` — kept for shape symmetry with the earlier probe). */
+  resolved: number;
+}
+
+export async function enqueueSecurityDiffIfDue(
+  admin: Admin,
+  opts: { sinceMs?: number; workspaceId?: string } = {},
+): Promise<EnqueueSecurityDiffIfDueResult> {
+  const out: EnqueueSecurityDiffIfDueResult = { enqueued: [], scanned: 0, resolved: 0 };
+  try {
+    // Window mirrors the 14d dedup window inside enqueueSecurityReviewDiff — no point scanning beyond
+    // the horizon the dedup would treat as "already filed", but recent enough to catch the reap gap.
+    const sinceMs = opts.sinceMs ?? 14 * 24 * 60 * 60 * 1000;
+    const sinceIso = new Date(Date.now() - sinceMs).toISOString();
+    // Audit-authoritative source (see comment above): every merge writes `actor='merge:<sha>'` history
+    // rows. Deduped inline by 12-char SHA signature — the SAME dedup enqueueSecurityReviewDiff applies.
+    let query = admin
+      .from("spec_status_history")
+      .select("workspace_id, spec_slug, actor, at")
+      .gte("at", sinceIso)
+      .like("actor", "merge:%")
+      .order("at", { ascending: false });
+    if (opts.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
+    const { data: rows } = await query.limit(2000);
+
+    // Dedup by 12-char SHA — one history slug (e.g. multi-phase spec) can write multiple `merge:<sha>`
+    // rows for the SAME sha (one `field='status'` + N `field='phase'`), and multiple slugs can share a
+    // SHA on a goal-branch M5 atomic merge. First occurrence wins for the `(specSlug, workspaceId)` tag.
+    const bySha = new Map<string, { mergeSha: string; specSlug: string; workspaceId: string }>();
+    for (const r of (rows ?? []) as Array<{ workspace_id: string; spec_slug: string; actor: string }>) {
+      if (!r.actor?.startsWith("merge:")) continue;
+      const mergeSha = r.actor.slice("merge:".length).trim();
+      const short = securitySha12(mergeSha);
+      if (!short) continue;
+      if (bySha.has(short)) continue;
+      if (!r.workspace_id || !r.spec_slug) continue;
+      bySha.set(short, { mergeSha, specSlug: r.spec_slug, workspaceId: r.workspace_id });
+    }
+    out.scanned = bySha.size;
+    out.resolved = bySha.size;
+    for (const [short, hit] of bySha) {
+      try {
+        const r = await enqueueSecurityReviewJob(admin, {
+          mergeSha: hit.mergeSha,
+          specSlug: hit.specSlug,
+          prNumber: null,
+          workspaceId: hit.workspaceId,
+        });
+        if (r.enqueued) out.enqueued.push(short);
+      } catch (err) {
+        console.warn(
+          `[security-agent] enqueueSecurityDiffIfDue: enqueue threw for ${short} (continuing):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[security-agent] enqueueSecurityDiffIfDue: pass threw (continuing):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return out;
+}
+
 async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityReviewBranchInput): Promise<{ enqueued: boolean; reason?: string }> {
   const branch = String(input.branch || "").trim();
   if (!branch) return { enqueued: false, reason: "no branch" };
@@ -366,127 +469,6 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     return { enqueued: false, reason: error.message };
   }
   return { enqueued: true, reason: branch };
-}
-
-/**
- * vault-post-merge-diff-backstop Phase 1 — the STANDING-PASS BACKSTOP for the post-merge `diff` security
- * pass. The gap it closes: today the post-merge diff review fires ONLY reactively from the merge hook
- * ([[agent-jobs]] `applyMergedBuildEffects`, `enqueueSecurityReviewJob({mergeSha})`). That send is
- * fire-and-forget — if it's dropped (a Vercel deploy reaps the Inngest sync mid-flight, the box is down,
- * a transient error), the merged commit never gets its post-merge security pass and nothing re-checks.
- *
- * This is the cheap if-due re-sweep, mirroring `enqueueSpecTestIfDue` / `enqueueSpecReviewIfDue` for
- * symmetry: enumerate recently-merged `claude/*` builds (agent_jobs kind='build', status='merged',
- * merged within the last ~14d), resolve each build's merge SHA(s) from spec provenance (per-phase
- * `spec_phases.merge_sha` for multi-phase specs; card-level `specs.last_merge_sha` for one-shots), and
- * (idempotently) call `enqueueSecurityReviewJob` in diff mode for each SHA. Idempotency comes for free:
- * `enqueueSecurityReviewDiff` already dedups by merge SHA across any-status security-review jobs in the
- * last 14d, so the re-sweep only enqueues the genuinely-missing ones and is safe to run every pass.
- *
- * Wired into the platform-director standing pass ([[../../../scripts/builder-worker]]) next to
- * `backstopPreMergeChecks`, and hung off the daily [[../inngest/security-dep-watch]] cron as a second
- * net. Does NOT replace the reactive merge-hook enqueue — this is purely additive backstop coverage.
- * Best-effort + never throws.
- */
-export interface EnqueueSecurityDiffIfDueResult {
-  /** merge SHAs whose diff-mode security review was (re-)enqueued this pass. */
-  enqueued: string[];
-  /** merged build agent_jobs rows scanned (deduped per (workspace, slug)). */
-  scanned: number;
-  /** distinct merge SHAs resolved from the scanned builds (before dedup by the enqueue). */
-  resolved: number;
-}
-
-export async function enqueueSecurityDiffIfDue(
-  admin: Admin,
-  opts: { sinceMs?: number; workspaceId?: string } = {},
-): Promise<EnqueueSecurityDiffIfDueResult> {
-  const out: EnqueueSecurityDiffIfDueResult = { enqueued: [], scanned: 0, resolved: 0 };
-  try {
-    // Window mirrors the 14d dedup window inside enqueueSecurityReviewDiff — no point scanning beyond
-    // the horizon the dedup would treat as "already filed", but recent enough to catch the reap gap.
-    const sinceMs = opts.sinceMs ?? 14 * 24 * 60 * 60 * 1000;
-    const sinceIso = new Date(Date.now() - sinceMs).toISOString();
-    // Merged builds within the window. updated_at is when the build flipped to `merged` (the merge-hook
-    // path updates it in `applyMergedBuildEffects`); scan by updated_at so a build merged weeks after it
-    // was created still surfaces if its post-merge security pass was dropped.
-    let query = admin
-      .from("agent_jobs")
-      .select("id, workspace_id, spec_slug, pr_number, updated_at")
-      .eq("kind", "build")
-      .eq("status", "merged")
-      .gte("updated_at", sinceIso)
-      .order("updated_at", { ascending: false });
-    if (opts.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
-    const { data: jobs } = await query.limit(500);
-
-    // Dedupe by (workspace, slug) — a multi-phase spec has one build job per phase-branch merge but
-    // shares the SHA lookup through the spec's phases; walking each row separately is redundant.
-    const seen = new Set<string>();
-    const { getSpec } = await import("@/lib/specs-table");
-    for (const j of (jobs ?? []) as Array<{
-      workspace_id: string;
-      spec_slug: string;
-      pr_number: number | null;
-    }>) {
-      const slug = j.spec_slug;
-      if (!slug || !j.workspace_id) continue;
-      const key = `${j.workspace_id}:${slug}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.scanned++;
-      try {
-        const spec = await getSpec(j.workspace_id, slug);
-        if (!spec) continue;
-        // Resolve merge SHAs from spec provenance. Multi-phase spec → every shipped phase's
-        // `spec_phases.merge_sha`. One-shot spec (no phases) → card-level `specs.last_merge_sha`. We
-        // trust these stamps (spec-status-phase-pr-provenance) — they're the same values the merge hook
-        // itself wrote via applyMergedBuildEffects → stampPhaseShipped / stampSpecMergeProvenance.
-        const shas: string[] = [];
-        if (spec.phases.length === 0) {
-          if (spec.last_merge_sha) shas.push(spec.last_merge_sha);
-        } else {
-          for (const p of spec.phases) {
-            if (p.merge_sha) shas.push(p.merge_sha);
-          }
-          // Some multi-phase specs also carry last_merge_sha (goal-branch M5 promotion stamp); include
-          // it too so an M5 atomic merge's SHA gets its own security pass. Dedup below handles the case
-          // where last_merge_sha == a phase's merge_sha.
-          if (spec.last_merge_sha && !shas.includes(spec.last_merge_sha)) shas.push(spec.last_merge_sha);
-        }
-        const distinct = Array.from(new Set(shas.map((s) => securitySha12(s)).filter(Boolean)));
-        // Map the 12-char signature back to a full SHA (first occurrence wins — SHAs are globally unique).
-        const fullByShort = new Map<string, string>();
-        for (const s of shas) {
-          const short = securitySha12(s);
-          if (short && !fullByShort.has(short)) fullByShort.set(short, s);
-        }
-        for (const short of distinct) {
-          out.resolved++;
-          const mergeSha = fullByShort.get(short);
-          if (!mergeSha) continue;
-          const r = await enqueueSecurityReviewJob(admin, {
-            mergeSha,
-            specSlug: slug,
-            prNumber: j.pr_number ?? null,
-            workspaceId: j.workspace_id,
-          });
-          if (r.enqueued) out.enqueued.push(short);
-        }
-      } catch (err) {
-        console.warn(
-          `[security-agent] enqueueSecurityDiffIfDue: resolve threw for ${slug} (continuing):`,
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }
-  } catch (err) {
-    console.warn(
-      "[security-agent] enqueueSecurityDiffIfDue: pass threw (continuing):",
-      err instanceof Error ? err.message : err,
-    );
-  }
-  return out;
 }
 
 /**

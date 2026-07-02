@@ -81,26 +81,33 @@ interface CompetitorTargetRow {
  */
 async function adDestinationsForBrand(workspaceId: string, brand: string): Promise<string[]> {
   const admin = createAdminClient();
+  // Match on `seed_keyword` (the normalized keyword the sweep ran, == competitors.brand) — NOT
+  // `advertiser`, which is the display name ("Erth Labs" ≠ "erthlabs") and matched nothing. Read the
+  // `destination_domain` COLUMN ([[adlibrary]] normalizes it from ecom_advertiser_id) — it's now
+  // reliably captured, so we no longer scrape `raw`. Rank by frequency: the most-run destination is
+  // the real lander (Erth: learn.erthlabs.co ×21 beats erthlabs.co ×6).
   const { data } = await admin
     .from("creative_skeletons")
-    .select("raw")
+    .select("landing_page_url, destination_domain")
     .eq("workspace_id", workspaceId)
-    .eq("advertiser", brand)
-    .limit(50);
-  const urls = new Set<string>();
-  const KEYS = ["ecom_advertiser_id", "landing_url", "link_url", "destination_url", "page_url", "url"];
+    .eq("seed_keyword", brand)
+    .limit(500);
+  // PREFER the full landing_page_url (the real advertorial WITH path, e.g. …/women50) over the bare
+  // domain — the domain root often 404s. Count both, but full URLs sort ahead of domain fallbacks.
+  const fullUrls = new Map<string, number>();
+  const domains = new Map<string, number>();
   for (const r of data || []) {
-    const raw = (r.raw || {}) as Record<string, unknown>;
-    for (const k of KEYS) {
-      const v = raw[k];
-      if (typeof v === "string" && /^https?:\/\//i.test(v)) urls.add(v);
-      // ecom_advertiser_id may be a bare domain rather than a full URL.
-      else if (k === "ecom_advertiser_id" && typeof v === "string" && /\.[a-z]{2,}$/i.test(v)) {
-        urls.add(`https://${v.replace(/^https?:\/\//, "")}`);
-      }
+    const lp = (r.landing_page_url as string | null)?.trim();
+    if (lp && /^https?:\/\//i.test(lp)) {
+      fullUrls.set(lp, (fullUrls.get(lp) ?? 0) + 1);
+      continue;
     }
+    const d = (r.destination_domain as string | null)?.replace(/^https?:\/\//i, "").trim();
+    if (d) domains.set(d, (domains.get(d) ?? 0) + 1);
   }
-  return [...urls].slice(0, 3);
+  const rankedFull = [...fullUrls.entries()].sort((a, b) => b[1] - a[1]).map(([u]) => u);
+  const rankedDomains = [...domains.entries()].sort((a, b) => b[1] - a[1]).map(([d]) => `https://${d}`);
+  return [...rankedFull, ...rankedDomains].slice(0, 3);
 }
 
 /** Public URL for one of OUR storefront landers (mirrors /api/ads/landers landerUrl). */

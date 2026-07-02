@@ -1,0 +1,1 @@
+- **Fix: Bo builds reactively on the review-pass transition, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]

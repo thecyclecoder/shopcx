@@ -19,10 +19,11 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import {
   DB_HEALTH_SLOWQ_LOOP_ID,
   DB_HEALTH_SIZE_LOOP_ID,
+  DB_HEALTH_INSTANCE_LOOP_ID,
 } from "@/lib/control-tower/registry";
 import { isAllowlisted } from "@/lib/control-tower/migration-drift";
 
-export { DB_HEALTH_SLOWQ_LOOP_ID, DB_HEALTH_SIZE_LOOP_ID };
+export { DB_HEALTH_SLOWQ_LOOP_ID, DB_HEALTH_SIZE_LOOP_ID, DB_HEALTH_INSTANCE_LOOP_ID };
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -42,7 +43,13 @@ export type DbHealthCause =
   | "unbounded_growth" // a table growing fast with no apparent retention (the loop_heartbeats case).
   | "missing_index" // a large table with a high seq_scan share vs idx_scan.
   | "unused_index" // an idx_scan=0 index on a large table (pure write overhead + bloat).
-  | "bloat_vacuum_lag"; // a hot table with a high dead-tuple ratio + stale autovacuum.
+  | "bloat_vacuum_lag" // a hot table with a high dead-tuple ratio + stale autovacuum.
+  // instance-saturation causes (from the periodic instance-health pass — pg_stat_database + pg_stat_activity + pg_roles.rolconfig):
+  | "statement_timeout_pressure" // live queries are running past a large fraction of the per-role statement_timeout ceiling (the `authenticated` 8s cap) — they'll be killed under load.
+  | "temp_spill_pressure" // pg_stat_database.temp_files/temp_bytes crossed the window flag — hash/sort work_mem is spilling to disk on the instance, dragging every heavy query.
+  | "connection_saturation" // active+waiting backends are eating a big fraction of max_connections — new sessions will queue/error before they can run.
+  | "cache_pressure" // blks_hit / (blks_hit + blks_read) fell below the floor — the working set is spilling out of shared_buffers (memory tier).
+  | "rollback_error_rate"; // pg_stat_database.xact_rollback / total transactions crossed the flag — clients are being killed / rolling back at a rate that indicates ongoing pressure (the 2026-07-02 incident's 7.43%).
 
 /** What the proposed fix spec asks the owner to build. The agent never runs these — it proposes. */
 export type DbHealthFixKind =
@@ -51,10 +58,17 @@ export type DbHealthFixKind =
   | "drop_index"
   | "query_rewrite"
   | "reduce_calls" // a hot, fast-per-call query → cut the call frequency / cache / add a hot-predicate (GIN for an array `@>`) index. NOT a vacuum.
-  | "vacuum_tuning";
+  | "vacuum_tuning"
+  // Escalation-shaped instance-saturation fix kinds — advisory only, never auto-appliable (a compute
+  // tier / work_mem change is high-stakes, surface-don't-apply per operational-rules § North star).
+  // Phase 1 records them so FIX_KIND_BY_CAUSE stays exhaustive over the new causes; Phase 2 wires
+  // the advisory guidance into buildFixSpecMarkdown + surfaces them through enqueueDbHealthProposal.
+  | "raise_compute" // working set > shared_buffers / sustained memory+temp pressure → recommend the next compute tier.
+  | "raise_work_mem" // temp-spill pressure → recommend a bounded per-connection work_mem bump.
+  | "investigate_timeouts"; // rollback/timeout pressure → point at the top statement_timeout offenders from the slow-query pass.
 
 /** Which pass produced the finding (drives the loop_id + panel grouping). */
-export type DbHealthCategory = "slow_query" | "growth" | "index" | "bloat";
+export type DbHealthCategory = "slow_query" | "growth" | "index" | "bloat" | "instance";
 
 const FIX_KIND_BY_CAUSE: Record<DbHealthCause, DbHealthFixKind> = {
   seq_scan: "add_index",
@@ -68,6 +82,12 @@ const FIX_KIND_BY_CAUSE: Record<DbHealthCause, DbHealthFixKind> = {
   missing_index: "add_index",
   unused_index: "drop_index",
   bloat_vacuum_lag: "vacuum_tuning",
+  // Instance-saturation → escalation-shaped fixes (Phase 2 wires the advisory templating).
+  statement_timeout_pressure: "investigate_timeouts",
+  temp_spill_pressure: "raise_work_mem",
+  connection_saturation: "raise_compute",
+  cache_pressure: "raise_compute",
+  rollback_error_rate: "investigate_timeouts",
 };
 
 // ── Input row shapes (what the box reads + hands us) ──────────────────────────
@@ -106,6 +126,50 @@ export interface IndexStatRow {
   is_primary: boolean;
 }
 
+/**
+ * Instance-health input — the per-pass signal snapshot the box reads and hands the pure classifier
+ * (db-health-instance-saturation-detector Phase 1). Aggregate over the shopcx database (the box
+ * SELECTs `pg_stat_database` filtered to `datname = current_database()` and folds the counters, then
+ * probes `pg_stat_activity` for live sessions and `pg_roles.rolconfig` for the `authenticated`
+ * role's `statement_timeout` — the 8s ceiling queries die against on load). Kept as raw counters +
+ * derived probes; the classifier does the ratios so the thresholds live in ONE place.
+ */
+export interface InstanceHealthInput {
+  /** pg_stat_database.xact_commit for this database (successful commits). */
+  xactCommit: number;
+  /** pg_stat_database.xact_rollback for this database (rollbacks — includes client-side aborts + statement_timeout kills). */
+  xactRollback: number;
+  /** pg_stat_database.deadlocks — a rising count means the app is fighting itself. */
+  deadlocks: number;
+  /** pg_stat_database.temp_files — count of on-disk temp files this database has written (hash/sort spills). */
+  tempFiles: number;
+  /** pg_stat_database.temp_bytes — cumulative bytes written to temp files (the 883 GB in the 2026-07-02 incident). */
+  tempBytes: number;
+  /** pg_stat_database.blks_hit — buffer-cache hits. */
+  blksHit: number;
+  /** pg_stat_database.blks_read — disk reads (the ones that missed the cache). */
+  blksRead: number;
+  /** pg_stat_activity: count of backends running a query right now (state='active'). */
+  activeBackends: number;
+  /** pg_stat_activity: count of backends waiting on a lock (wait_event_type='Lock'). */
+  waitingBackends: number;
+  /** current_setting('max_connections')::int — the ceiling active+waiting compete for. */
+  maxConnections: number;
+  /**
+   * pg_stat_activity: count of live queries whose elapsed time is past a big fraction of the
+   * `authenticated` statement_timeout (see INSTANCE_TIMEOUT_HEADROOM_FRACTION). >0 means at least
+   * one live query is about to be killed by the 8s ceiling; a proxy for "the timeout is the reason
+   * we roll back", visible BEFORE the rollback lands.
+   */
+  statementsNearTimeout: number;
+  /**
+   * pg_roles.rolconfig for role='authenticated' (the Supabase REST/anon-key role): the statement
+   * timeout, in milliseconds, that kills a query under load. `null` when unset (no ceiling on that
+   * role). Quoted verbatim in the evidence so the operator sees the exact ceiling being hit.
+   */
+  authenticatedStatementTimeoutMs: number | null;
+}
+
 // ── Thresholds (tunable constants — the bounded proxy's guardrails) ───────────
 
 /** A query under this mean AND under the total-time floor isn't worth a proposal (noise). */
@@ -133,6 +197,22 @@ export const UNUSED_INDEX_MIN_BYTES = 50 * 1024 * 1024; // 50 MB
 /** A dead-tuple ratio at/above this on a big table whose autovacuum is stale ⇒ bloat. */
 export const BLOAT_DEAD_RATIO_FLAG = 0.2;
 export const BLOAT_AUTOVACUUM_STALE_MS = 24 * 60 * 60 * 1000; // last autovacuum older than a day
+
+// ── Instance-saturation thresholds (db-health-instance-saturation-detector Phase 1) ─
+// The 2026-07-02 incident (86.8% DATABASE errors on Observability, dashboards timing out) was invisible
+// to the per-query slow-query pass because it was INSTANCE-level: xact_rollback 7.43%, 883 GB
+// temp_bytes, MEMORY 79%, `authenticated`/`authenticator` statement_timeout=8s catching queries under
+// load. These thresholds are the bounded proxy that lets the instance pass surface the same signature.
+/** xact_rollback / (xact_commit + xact_rollback) at or above this ⇒ rollback_error_rate. Incident was 0.0743. */
+export const INSTANCE_ROLLBACK_RATIO_FLAG = 0.05; // 5%
+/** cumulative temp_bytes over the sampled window at or above this ⇒ temp_spill_pressure. Incident was 883 GB. */
+export const INSTANCE_TEMP_BYTES_WINDOW_FLAG = 100 * 1024 * 1024 * 1024; // 100 GB
+/** blks_hit / (blks_hit + blks_read) BELOW this ⇒ cache_pressure (working set spilling out of shared_buffers). Incident was 0.9869. */
+export const INSTANCE_CACHE_HIT_FLOOR = 0.99;
+/** (active + waiting) / max_connections at or above this ⇒ connection_saturation. */
+export const INSTANCE_CONN_UTIL_FLAG = 0.8; // 80%
+/** A live query past this fraction of the `authenticated` statement_timeout is "near timeout" — driving the timeout-pressure signal BEFORE the rollback lands. */
+export const INSTANCE_TIMEOUT_HEADROOM_FRACTION = 0.5;
 
 // ── Phase 2 trend thresholds (project the size-history forward, not just day-over-day) ──
 /** Need at least this many snapshots in the window to fit a trend (fewer ⇒ no projection — honest). */
@@ -527,6 +607,173 @@ export function analyzeBloat(tables: TableSizeRow[], now: number): DbHealthFindi
   return out;
 }
 
+// ── Instance-health classification (db-health-instance-saturation-detector Phase 1) ─
+//
+// The per-query slow-query pass EXPLAINs each statement in isolation on an idle pooler connection,
+// so it is BLIND to instance-level saturation — the class of miss that let the 2026-07-02 outage
+// (86.8% DATABASE errors, 30 min of dashboard timeouts) go unflagged. This classifier reads the
+// aggregate `pg_stat_database` counters + a `pg_stat_activity` probe + the per-role
+// `statement_timeout` and emits findings that quote the real numbers as evidence — mirror
+// analyzeBloat / analyzeSlowQuery so the operator sees the exact ratio/count that tripped the flag.
+// PURE (no fs/pg/network) — the box reads the signals, this module classifies.
+
+/** Optional threshold overrides — accepts a partial so callers only override what they need. */
+export interface InstanceHealthThresholds {
+  rollbackRatioFlag?: number;
+  tempBytesWindowFlag?: number;
+  cacheHitFloor?: number;
+  connUtilFlag?: number;
+  timeoutHeadroomFraction?: number;
+}
+
+/**
+ * Classify instance-level saturation from the box's periodic pg_stat_database + pg_stat_activity
+ * snapshot. Emits ≥0 `category:'instance'` findings. Each finding QUOTES the offending numbers in
+ * the evidence string (rollback ratio × commit/rollback counts, temp_bytes × temp_files,
+ * cache-hit ratio × blks_hit/blks_read, connection util × active+waiting/max_connections, the
+ * `authenticated` statement_timeout ceiling) so the operator can verify the diagnosis without a
+ * separate DB probe. Order is deterministic (timeout → temp → rollback → cache → connection) so a
+ * dedup collapse under `dedupeFindings` is stable across passes.
+ */
+export function analyzeInstanceHealth(
+  input: InstanceHealthInput,
+  thresholds: InstanceHealthThresholds = {},
+): DbHealthFinding[] {
+  const rollbackFlag = thresholds.rollbackRatioFlag ?? INSTANCE_ROLLBACK_RATIO_FLAG;
+  const tempFlag = thresholds.tempBytesWindowFlag ?? INSTANCE_TEMP_BYTES_WINDOW_FLAG;
+  const cacheFloor = thresholds.cacheHitFloor ?? INSTANCE_CACHE_HIT_FLOOR;
+  const connFlag = thresholds.connUtilFlag ?? INSTANCE_CONN_UTIL_FLAG;
+  const timeoutHeadroom = thresholds.timeoutHeadroomFraction ?? INSTANCE_TIMEOUT_HEADROOM_FRACTION;
+
+  const findings: DbHealthFinding[] = [];
+  const totalXact = input.xactCommit + input.xactRollback;
+  const rollbackRatio = totalXact > 0 ? input.xactRollback / totalXact : 0;
+  const totalBlks = input.blksHit + input.blksRead;
+  const cacheHitRatio = totalBlks > 0 ? input.blksHit / totalBlks : 1; // 0 reads ⇒ effectively 100% (nothing to miss)
+  const connUtil = input.maxConnections > 0 ? (input.activeBackends + input.waitingBackends) / input.maxConnections : 0;
+  const timeoutSecs = input.authenticatedStatementTimeoutMs != null ? input.authenticatedStatementTimeoutMs / 1000 : null;
+
+  // 1) statement_timeout_pressure — live queries running past a big fraction of the `authenticated`
+  //    ceiling. This fires BEFORE the rollback lands, so an operator sees the pressure early.
+  if (input.statementsNearTimeout > 0 && input.authenticatedStatementTimeoutMs != null) {
+    const impact = `${input.statementsNearTimeout} live query(ies) past ${pct(timeoutHeadroom)} of the ${timeoutSecs}s \`authenticated\` statement_timeout — about to be killed`;
+    findings.push({
+      signature: `dbhealth:instance:statement_timeout_pressure`,
+      category: "instance",
+      cause: "statement_timeout_pressure",
+      fixKind: "investigate_timeouts",
+      table: "(instance)",
+      title: `Live queries approaching the ${timeoutSecs}s statement_timeout ceiling`,
+      impact,
+      score: input.statementsNearTimeout * 1_000_000, // rank ahead of temp/rollback — this is an active kill signal
+      evidence: [
+        `Per-role \`authenticated\` \`statement_timeout\` = ${input.authenticatedStatementTimeoutMs} ms (${timeoutSecs}s) — queries exceeding this are killed.`,
+        `Live queries past ${pct(timeoutHeadroom)} of the ceiling: ${input.statementsNearTimeout}.`,
+        `Rollback ratio (context): ${pct(rollbackRatio)} of ${totalXact.toLocaleString()} transactions (${input.xactRollback.toLocaleString()} rolled back).`,
+        `This is the 2026-07-02-class signal: queries running under load hit the ${timeoutSecs}s ceiling and roll back — the per-query slow-query pass EXPLAINs each statement in isolation on an idle pooler connection so it never sees this.`,
+      ].join("\n"),
+      specSlug: slugFor("investigate_timeouts", "instance"),
+      specTitle: specTitleFor("statement_timeout_pressure", "the instance", `${input.statementsNearTimeout} live queries past ${pct(timeoutHeadroom)} of the ${timeoutSecs}s ceiling`),
+    });
+  }
+
+  // 2) temp_spill_pressure — cumulative temp_bytes crossed the window flag (883 GB in the incident).
+  //    Hash/sort work_mem is spilling to disk on every heavy query, dragging the whole instance.
+  if (input.tempBytes >= tempFlag) {
+    const impact = `${humanBytes(input.tempBytes)} spilled to temp files (${input.tempFiles.toLocaleString()} files) — hash/sort work_mem is undersized`;
+    findings.push({
+      signature: `dbhealth:instance:temp_spill_pressure`,
+      category: "instance",
+      cause: "temp_spill_pressure",
+      fixKind: "raise_work_mem",
+      table: "(instance)",
+      title: `Temp-spill pressure — ${humanBytes(input.tempBytes)} across ${input.tempFiles.toLocaleString()} files`,
+      impact,
+      score: input.tempBytes,
+      evidence: [
+        `pg_stat_database.temp_files: ${input.tempFiles.toLocaleString()} on-disk temp files.`,
+        `pg_stat_database.temp_bytes: ${humanBytes(input.tempBytes)} (${input.tempBytes.toLocaleString()} bytes) — window flag is ${humanBytes(tempFlag)}.`,
+        `The 2026-07-02 incident hit ${humanBytes(883 * 1024 * 1024 * 1024)} across 92,832 files — the operator-visible signature of an undersized work_mem: every hash/sort >work_mem spills, dragging every heavy query.`,
+      ].join("\n"),
+      specSlug: slugFor("raise_work_mem", "instance"),
+      specTitle: specTitleFor("temp_spill_pressure", "the instance", `${humanBytes(input.tempBytes)} temp-file spill across ${input.tempFiles.toLocaleString()} files`),
+    });
+  }
+
+  // 3) rollback_error_rate — a systemic rollback ratio. Not a slow-query problem (a single bad
+  //    query wouldn't move the aggregate ratio); either the timeout is catching everyone or the app
+  //    is fighting itself (deadlocks).
+  if (totalXact > 0 && rollbackRatio >= rollbackFlag) {
+    const impact = `${pct(rollbackRatio)} of ${totalXact.toLocaleString()} transactions rolled back (${input.xactRollback.toLocaleString()} rollbacks, ${input.deadlocks.toLocaleString()} deadlocks)`;
+    findings.push({
+      signature: `dbhealth:instance:rollback_error_rate`,
+      category: "instance",
+      cause: "rollback_error_rate",
+      fixKind: "investigate_timeouts",
+      table: "(instance)",
+      title: `Rollback rate ${pct(rollbackRatio)} — instance under duress`,
+      impact,
+      score: rollbackRatio * 100_000,
+      evidence: [
+        `pg_stat_database counters: xact_commit=${input.xactCommit.toLocaleString()}, xact_rollback=${input.xactRollback.toLocaleString()} → rollback ratio ${pct(rollbackRatio)} (flag ≥ ${pct(rollbackFlag)}).`,
+        `Deadlocks: ${input.deadlocks.toLocaleString()}.`,
+        input.authenticatedStatementTimeoutMs != null
+          ? `Per-role \`authenticated\` \`statement_timeout\` = ${timeoutSecs}s — this ceiling kills a query into a rollback under load, the leading suspect when the ratio spikes.`
+          : `No per-role statement_timeout set on the \`authenticated\` role — investigate client-side aborts / deadlocks first.`,
+        `A single slow query can't move the aggregate ratio; a ${pct(rollbackRatio)} rollback rate is a systemic signal — the 2026-07-02 incident hit 7.43% while dashboards were timing out.`,
+      ].join("\n"),
+      specSlug: slugFor("investigate_timeouts", "instance-rollback"),
+      specTitle: specTitleFor("rollback_error_rate", "the instance", `${pct(rollbackRatio)} rollback ratio over ${totalXact.toLocaleString()} transactions`),
+    });
+  }
+
+  // 4) cache_pressure — the working set has outgrown shared_buffers (memory tier problem).
+  if (totalBlks > 0 && cacheHitRatio < cacheFloor) {
+    const impact = `${pct(cacheHitRatio)} cache-hit ratio (${input.blksHit.toLocaleString()} hits / ${input.blksRead.toLocaleString()} disk reads) — working set is spilling out of shared_buffers`;
+    findings.push({
+      signature: `dbhealth:instance:cache_pressure`,
+      category: "instance",
+      cause: "cache_pressure",
+      fixKind: "raise_compute",
+      table: "(instance)",
+      title: `Cache-hit ratio ${pct(cacheHitRatio)} — memory tier undersized`,
+      impact,
+      score: (cacheFloor - cacheHitRatio) * 10_000,
+      evidence: [
+        `pg_stat_database: blks_hit=${input.blksHit.toLocaleString()}, blks_read=${input.blksRead.toLocaleString()} → cache-hit ratio ${pct(cacheHitRatio)} (floor ${pct(cacheFloor)}).`,
+        `A cache-hit ratio below the floor means the hot working set no longer fits in shared_buffers; every miss is a disk read that competes for the same latency budget the statement_timeout enforces.`,
+        `The 2026-07-02 incident showed 0.9869 under load — right below the floor — while MEMORY hit 79% and dashboards timed out.`,
+      ].join("\n"),
+      specSlug: slugFor("raise_compute", "instance-cache"),
+      specTitle: specTitleFor("cache_pressure", "the instance", `${pct(cacheHitRatio)} cache-hit ratio`),
+    });
+  }
+
+  // 5) connection_saturation — active+waiting eating a big fraction of max_connections. Not enough
+  //    slack to accept the next session; new REST requests will queue or error before running.
+  if (input.maxConnections > 0 && connUtil >= connFlag) {
+    const impact = `${pct(connUtil)} of max_connections in use (${input.activeBackends.toLocaleString()} active + ${input.waitingBackends.toLocaleString()} waiting / ${input.maxConnections.toLocaleString()} max)`;
+    findings.push({
+      signature: `dbhealth:instance:connection_saturation`,
+      category: "instance",
+      cause: "connection_saturation",
+      fixKind: "raise_compute",
+      table: "(instance)",
+      title: `Connection saturation — ${pct(connUtil)} of max_connections`,
+      impact,
+      score: connUtil * 10_000,
+      evidence: [
+        `pg_stat_activity: ${input.activeBackends.toLocaleString()} active + ${input.waitingBackends.toLocaleString()} waiting = ${(input.activeBackends + input.waitingBackends).toLocaleString()} of ${input.maxConnections.toLocaleString()} max_connections → ${pct(connUtil)} utilization (flag ≥ ${pct(connFlag)}).`,
+        `At this utilization, new sessions queue at the pooler or fail to connect — a client-visible symptom (the "DATABASE errors" class on Observability).`,
+      ].join("\n"),
+      specSlug: slugFor("raise_compute", "instance-connections"),
+      specTitle: specTitleFor("connection_saturation", "the instance", `${pct(connUtil)} of max_connections in use`),
+    });
+  }
+
+  return findings;
+}
+
 // ── Phase 2 — trend projection (growth-to-ceiling + autovacuum-lag trend) ─────
 //
 // The Phase-1 detectors look at the latest reading (analyzeBloat) or a single day-over-day delta
@@ -732,7 +979,27 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     query_rewrite: `Rewrite the query to its diagnosed cause: bound the set (drive from a small list / add a LIMIT), add the predicate index, or restructure the aggregate. Land it where the query is issued + cite the before/after plan.`,
     reduce_calls: `This query is fast per call but HAMMERED — the win is fewer/cheaper calls, not a vacuum. Reduce how often it runs at the source (cache the result, batch, or widen the poll interval where the endpoint issues it), and/or add a hot-predicate index so each call is cheaper — a covering or partial index for the exact WHERE, or a **GIN index** if the predicate is an array/JSONB containment (\`@>\`). Cite the call count + mean from the evidence below; do NOT propose a VACUUM (the per-call time is already fine).`,
     vacuum_tuning: `Run a one-off \`VACUUM (ANALYZE)\` and set a tighter per-table \`autovacuum_vacuum_scale_factor\` so the bloat doesn't recur. No data is deleted.`,
+    // Escalation-shaped fix kinds (db-health-instance-saturation-detector). These are the FALLBACK
+    // — Phase 2 refines them further per-cause below via `instanceGuidanceByCause` so a
+    // `cache_pressure` vs `connection_saturation` finding (both map to `raise_compute`) gets its own
+    // advisory paragraph. Compute/timeout changes are HIGH-STAKES → owner-approval-only, never
+    // auto-appliable (mirrors the DDL/delete stance in [[../operational-rules]] § North star).
+    raise_compute: `**Owner-approval-only — instance-saturation signal, no auto-apply.** The evidence below points at compute/memory tier pressure, not a per-query fix. Evaluate raising the compute tier (or shared_buffers) rather than tuning a single query. The agent applies zero infra changes; a resize is an owner decision.`,
+    raise_work_mem: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Hash/sort spill to disk implicates \`work_mem\` (a per-connection setting). Do the per-connection math (\`max_connections × work_mem\` must fit in RAM alongside \`shared_buffers\`) BEFORE raising. The agent applies zero DB settings; a \`work_mem\` bump is an owner decision.`,
+    investigate_timeouts: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Rollback / timeout pressure means queries are being killed at the \`authenticated\` \`statement_timeout\` ceiling under load. Correlate with the slow-query pass's top offenders (\`DB_HEALTH_SLOWQ_LOOP_ID\` beats) and address the offenders rather than raising the ceiling. The agent applies zero query rewrites; the fix is an owner decision.`,
   };
+  // Cause-specific advisory guidance for instance findings (Phase 2). Resolved BEFORE the fixKind
+  // fallback so the operator sees language tied to the exact signal (statement_timeout / temp_spill /
+  // rollback / cache / connection), not just the coarser fix kind. Every entry MUST include the
+  // "owner-approval-only, no auto-apply" language + quote the evidence context verbatim.
+  const instanceGuidanceByCause: Partial<Record<DbHealthCause, string>> = {
+    statement_timeout_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Live queries are running past ${pct(INSTANCE_TIMEOUT_HEADROOM_FRACTION)} of the \`authenticated\` \`statement_timeout\` ceiling — they will be KILLED under load, becoming rollbacks. Correlate with the top offenders from the slow-query pass (\`DB_HEALTH_SLOWQ_LOOP_ID\` beats) and fix those queries (index / rewrite / reduce calls) rather than raising the ceiling. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero changes; the fix is an owner decision.`,
+    temp_spill_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Hash/sort operations are spilling to disk on the instance — every heavy query pays the temp-file cost. The lever is \`work_mem\` (a per-connection setting): raising it eats RAM per open session, so do the math \`max_connections × work_mem ≤ (RAM − shared_buffers − OS cache headroom)\` BEFORE proposing a bump. Confirm the top spillers via the slow-query pass (a Sort/Hash with \`Sort Method: external merge\` or \`Disk: NkB\`) — sometimes an index on the ORDER BY / GROUP BY is the cheaper win. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero DB settings; the fix is an owner decision.`,
+    rollback_error_rate: `**Owner-approval-only — instance-saturation signal, no auto-apply.** A high aggregate rollback ratio is a SYSTEMIC signal, not a per-query one — a single slow query can't move the aggregate. The two leading suspects (in order): (1) the \`authenticated\` \`statement_timeout\` ceiling is catching queries under load → address the top slow-query offenders; (2) the app is fighting itself (deadlocks) → check the \`deadlocks\` counter in the evidence and the concurrent-write hot spot. Do NOT raise the timeout ceiling as the reflex — it hides the real culprit. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero changes; the fix is an owner decision.`,
+    cache_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** The cache-hit ratio fell below the floor — the hot working set no longer fits in \`shared_buffers\`. Every miss is a disk read that competes for the same latency budget the \`statement_timeout\` enforces. The lever is compute tier (more RAM ⇒ larger \`shared_buffers\`), not a per-query fix. Confirm the working set has grown organically (not a runaway one-off scan) via the size sweep before proposing a tier bump. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
+    connection_saturation: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Active + waiting backends are eating a big fraction of \`max_connections\`. At this utilization, new sessions queue at the pooler or fail to connect (the customer-visible "DATABASE errors" class). The lever is compute tier (more max_connections + RAM headroom) OR a pgBouncer-style layer for short-lived sessions. Check whether the culprit is a genuine traffic spike vs a leaked pool before proposing a resize. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
+  };
+  const guidance = instanceGuidanceByCause[finding.cause] ?? fixGuidance[finding.fixKind];
   return [
     `# ${finding.specTitle} ⏳`,
     ``,
@@ -746,7 +1013,7 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     finding.evidence,
     ``,
     `## Phase 1 — ${finding.fixKind.replace(/_/g, " ")} ⏳`,
-    fixGuidance[finding.fixKind],
+    guidance,
     `Gate on \`npx tsc --noEmit\`; land the brain page in the same PR.`,
     ``,
     `## Verification`,
@@ -1017,6 +1284,9 @@ function slugFor(fixKind: DbHealthFixKind, target: string): string {
     query_rewrite: "db-rewrite",
     reduce_calls: "db-reduce-calls",
     vacuum_tuning: "db-vacuum",
+    raise_compute: "db-raise-compute",
+    raise_work_mem: "db-raise-work-mem",
+    investigate_timeouts: "db-investigate-timeouts",
   };
   const clean = target.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 40);
   return `${prefix[fixKind]}-${clean}`.slice(0, 60);
@@ -1035,6 +1305,11 @@ function specTitleFor(cause: DbHealthCause, target: string, hint: string): strin
     missing_index: `Add an index to ${target}`,
     unused_index: `Drop the unused index ${target}`,
     bloat_vacuum_lag: `Vacuum / autovacuum-tune ${target}`,
+    statement_timeout_pressure: `Investigate statement_timeout pressure on ${target}`,
+    temp_spill_pressure: `Investigate temp-file spill pressure on ${target}`,
+    connection_saturation: `Investigate connection saturation on ${target}`,
+    cache_pressure: `Investigate cache-hit pressure on ${target}`,
+    rollback_error_rate: `Investigate rollback rate on ${target}`,
   };
   return base[cause] || `Fix ${target}: ${hint.slice(0, 40)}`;
 }

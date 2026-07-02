@@ -54,8 +54,17 @@ export interface AdLibraryAd {
   message: string | null;
   /** "Shop Now" / "Learn More" — the ad's CTA button. */
   call_to_action: string | null;
-  /** ecom_advertiser_id — the store DOMAIN this specific ad drives traffic to (landing-page-scout bridge). */
+  /** ecom_advertiser_id — the store DOMAIN this specific ad drives traffic to (bare host, no path). */
   destination_domain: string | null;
+  /** landing_page_url — the FULL ad destination WITH path (e.g. https://learn.erthlabs.co/women50), the
+   *  real advertorial the landing-page-scout should capture. Present on ~half of ads (`has_source_url`);
+   *  falls back to `destination_domain` when absent. This is the high-signal bridge — the bare domain
+   *  root often 404s (advertorials live at a slug). */
+  landing_page_url: string | null;
+  /** Meta ad-library render URL: facebook.com/ads/archive/render_ad/?id=<archive_id>&access_token=… */
+  ad_snapshot_url: string | null;
+  /** The advertiser's Meta page id (for Graph lookups if ever needed). */
+  page_id: string | null;
   has_store_url: boolean | null;
   preview_img_url: string | null;
   resource_urls: Array<{ type?: number; url?: string; u?: string }>;
@@ -154,6 +163,9 @@ function normalize(row: Record<string, unknown>): NormalizedAd {
     destination_domain: normalizeDestination(
       row.ecom_advertiser_id ?? row.store_url ?? row.link_url ?? row.destination_url,
     ),
+    landing_page_url: pickStr(row.landing_page_url, row.source_url, row.landing_url),
+    ad_snapshot_url: pickStr(row.ad_snapshot_url, row.snapshot_url),
+    page_id: pickStr(row.page_id, row.advertiser_id),
     has_store_url: pickBool(row.has_store_url),
     preview_img_url: (row.preview_img_url as string) ?? (row.previewImgUrl as string) ?? null,
     resource_urls: resourceUrls,
@@ -238,16 +250,50 @@ export async function fetchCreative(
 }
 
 /**
- * A "long-runner" is our winner heuristic: it's been running a while AND is still
- * active (resume flag). `minDays` defaults conservatively — repetition across
- * brands (Phase 4) is the real signal, but we only spend vision on proven ads.
+ * A "long-runner" is the ORIGINAL longevity-only winner heuristic. Kept for reference/back-compat;
+ * `sweepSeed` now uses `isWinner` (below), which also credits reach + spend.
  */
 export function isLongRunner(ad: NormalizedAd, minDays = 14): boolean {
   const days = ad.days_count ?? 0;
   if (days < minDays) return false;
-  // resume flag is the strongest "still winning" signal when present; if the API
-  // omitted it, fall back to longevity alone.
   return ad.resume_advertising_flag !== false;
+}
+
+export interface WinnerOpts {
+  /** Sustained-run floor. Loosened from the old 14 → 7: DTC brands churn creative fast; a 14-day gate
+   *  dropped 72% of Erth's live ads. */
+  minDays?: number;
+  /** Cumulative-reach floor — Meta's own library sorts winners by total impressions. A high-impression
+   *  ad is a proven winner regardless of age (catches fresh-but-scaling creative longevity misses). */
+  minImpressions?: number;
+  /** Estimated-spend floor — real money behind an ad is a winner signal on its own. */
+  minSpend?: number;
+}
+
+/**
+ * The winner heuristic: an ad is worth analyzing if it shows ANY real signal — sustained run OR
+ * meaningful reach OR meaningful spend. This replaces the pure-longevity `isLongRunner` gate (which
+ * also required `resume_advertising_flag !== false` and so dropped recently-paused high-impression
+ * winners — exactly the creative worth learning from). Thresholds calibrated from live Erth data
+ * (winners ran 40-84d / 96K-576K impressions / $0.8-3.2K spend). See scripts/_sweep-erthlabs.ts.
+ */
+export function isWinner(ad: NormalizedAd, opts: WinnerOpts = {}): boolean {
+  const minDays = opts.minDays ?? 7;
+  const minImpressions = opts.minImpressions ?? 50_000;
+  const minSpend = opts.minSpend ?? 500;
+  const days = ad.days_count ?? 0;
+  const impressions = Number(ad.impression) || 0;
+  const spend = Number(ad.estimated_spend) || 0;
+  return days >= minDays || impressions >= minImpressions || spend >= minSpend;
+}
+
+/** Rank winners so a capped sweep keeps the BEST — impressions first (Meta's signal), then spend, then
+ *  longevity as tiebreaks. Higher = better. */
+export function winnerScore(ad: NormalizedAd): number {
+  const impressions = Number(ad.impression) || 0;
+  const spend = Number(ad.estimated_spend) || 0;
+  const days = ad.days_count ?? 0;
+  return impressions + spend * 50 + days * 500;
 }
 
 export type SeedKind = "category" | "competitor";

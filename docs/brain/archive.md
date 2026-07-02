@@ -12,15 +12,23 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Bo builds reactively on review-pass, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../libraries/build-lifecycle]]
+- **Failed-build cards: correct supersede ordering + an owner dismiss button** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
 - **Box worker: persist self-update skip reason into worker_heartbeats.detail** · verified 2026-07-02 · → [[../tables/worker_heartbeats]]
 - **Founder-prompted escape valve: Ada raises an out-of-leash action to the CEO, approval executes it** · verified 2026-07-02 · → [[../libraries/platform-director]]
 - **Resume the build session across chained phases (cache-warm, usage-wall savings)** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]]
+- **DB Health agent: instance-saturation & timeout detector** · verified 2026-07-02 · → [[../libraries/db-health]]
+- **Fix: Bo builds reactively on the review-pass transition, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
+- **Fix: Vault post-merge security review cron backstop** · verified 2026-07-02 · → [[../inngest/vault-post-merge-diff-backstop]]
+- **Fix: Document the PM-agent activation contract (reactive → cheap gate → cron backstop) in the brain** · verified 2026-07-02 · → [[../operational-rules#PM-agent activation contract]]
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
 - **Surface the exact out-of-leash command on the CEO approval card** · verified 2026-07-02 · → [[../libraries/platform-director]]
 - **Pre-merge spec-tests re-run after a branch changes + are visible/re-runnable** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]] · [[../libraries/spec-test-runs]]
+- **Research sidebar → Competitors (product-filtered)** · verified 2026-07-02 · → [[../dashboard/research__competitors]]
 - **Specs carry a Brain refs list the builder reads first** · verified 2026-07-02 · → [[../project-management]]
 - **Owner squash/manual merges are detected + stamped shipped (GitHub PR-merged reconciler)** · verified 2026-07-02 · → [[inngest/spec-drift-reconcile]]
+- **Vale reviews reactively on spec mutation, cron becomes a gated backstop** · verified 2026-07-02 · → [[../inngest/spec-review-cron]]
 - **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
 - **Agent KPI pages — a per-agent KPI layer on top of grading/coaching (Cleo/Storefront-Optimizer first)** · verified 2026-07-01 · → [[../libraries/agent-kpis]] · [[../libraries/storefront-optimizer-agent]] · [[../dashboard/agents]]
 - **Give Agents a Directors-style sidebar (surfacing KPIs) + redesign the agent profile page** · verified 2026-07-01 · → [[dashboard/agents]]

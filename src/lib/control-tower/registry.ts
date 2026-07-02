@@ -304,6 +304,17 @@ export const MIGRATION_DRIFT_LOOP_ID = "migration-drift-check";
  */
 export const DB_HEALTH_SLOWQ_LOOP_ID = "db-health-slow-query";
 export const DB_HEALTH_SIZE_LOOP_ID = "db-health-size-sweep";
+/**
+ * loop_heartbeats.loop_id of the DB Health Agent's INSTANCE-saturation pass
+ * (db-health-instance-saturation-detector, Phase 1). The 2026-07-02 incident (86.8% DATABASE errors,
+ * dashboards timing out) was invisible to the per-query slow-query pass because it was
+ * instance-level (xact_rollback 7.43%, 883 GB temp_bytes, MEMORY 79%, `authenticated`
+ * statement_timeout=8s catching queries under load). This pass reads `pg_stat_database` +
+ * `pg_stat_activity` + `pg_roles.rolconfig` via the pooler, feeds them into `analyzeInstanceHealth`,
+ * and beats here. Liveness tile (green when beating) — Phase 2 surfaces findings as advisory
+ * proposals in the DB Health panel + lets a live instance finding redden the tile.
+ */
+export const DB_HEALTH_INSTANCE_LOOP_ID = "db-health-instance-saturation";
 
 export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ── The box build worker (worker_heartbeats) ──────────────────────────────
@@ -437,6 +448,24 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
   {
+    // BOX-EMITTED — the DB Health Agent's instance-saturation pass (db-health-instance-saturation-detector P1).
+    // Reads pg_stat_database (rollback ratio · temp spill · cache-hit) + pg_stat_activity (connection
+    // utilization · statements near the `authenticated` statement_timeout ceiling) + pg_roles.rolconfig
+    // (the 8s ceiling itself). Fills the blind spot the per-query slow-query pass has for the
+    // 2026-07-02-class instance-level saturation. Liveness only in Phase 1 (findings ride the beat's
+    // `produced` blob for the panel); Phase 2 surfaces them as advisory proposals. registeredAt graces
+    // the first-run window (newcron-grace).
+    id: DB_HEALTH_INSTANCE_LOOP_ID,
+    kind: "cron",
+    owner: "platform",
+    label: "DB Health — instance saturation",
+    description: "Box job: pg_stat_database + pg_stat_activity + pg_roles.rolconfig → classify instance-level saturation (statement_timeout / temp-spill / connection / cache / rollback pressure) the per-query pass can't see.",
+    expectedCadence: "every ~15 min (box job)",
+    livenessWindowMs: 45 * MIN,
+    registeredAt: "2026-07-02T00:00:00Z",
+    personaKind: "db_health", // Devi — all db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+  },
+  {
     // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
     // Snapshots per-table size into db_table_size_history (growth rate), flags unbounded growth /
     // missing+unused indexes / bloat, and proposes the fix. Liveness only (advisory proposals).
@@ -522,6 +551,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Daily enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the event-driven approval processing.", expectedCadence: "daily (15 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
+  { id: "security-diff-backstop-cron", kind: "cron", owner: "platform", label: "Security diff backstop (if-due)", description: "Cheap 15-min backstop for Vault's post-merge diff security review (fix-vault-post-merge-diff-backstop-7fbde0): re-sweeps recently-merged claude/* builds and enqueues a diff-mode security review for any orphaned merge SHA. Idempotent via the 14d SHA dedup inside enqueueSecurityReviewJob.", expectedCadence: "every 15m (*/15 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-07-02T00:00:00Z" },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   {
