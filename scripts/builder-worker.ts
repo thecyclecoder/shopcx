@@ -6528,16 +6528,17 @@ async function markNewSpecInReview(
     );
   }
   if (markdown && markdown.trim()) {
-    const { authorSpecRowFromMarkdown, MissingVerificationError } = await import("../src/lib/author-spec");
+    const { authorSpecRowFromMarkdown, MissingVerificationError, EmptyPhaseBodyError } = await import("../src/lib/author-spec");
     try {
       await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
         intendedStatusSetBy: actor,
       });
     } catch (e) {
-      // A missing-Verification authoring is NOT a best-effort warning — it's an untestable spec and must fail
-      // loudly so the author surface (planner / spec-chat finalize) surfaces it instead of persisting a row
-      // with an empty verification column. Every other (genuine DB) failure stays best-effort (logged).
-      if (e instanceof MissingVerificationError) throw e;
+      // A missing-Verification / empty-body authoring is NOT a best-effort warning — it's an untestable OR
+      // un-buildable spec and must fail loudly so the author surface (planner / spec-chat finalize / db-health
+      // Build resume) surfaces it instead of persisting a row that the builder will silently no-op on. Every
+      // other (genuine DB) failure stays best-effort (logged).
+      if (e instanceof MissingVerificationError || e instanceof EmptyPhaseBodyError) throw e;
       console.warn(
         `[author-spec] authorSpecRowFromMarkdown ${slug} failed:`,
         e instanceof Error ? e.message : e,
@@ -6926,10 +6927,11 @@ async function runPlanJob(job: Job) {
     const returnedBySlug = new Map<string, PlannerSpecOut>();
     for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
 
-    const { authorSpecRowStructured, MissingVerificationError } = await import("../src/lib/author-spec");
+    const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
     let authored = 0;
     const verificationFailures: string[] = [];
+    const emptyBodyFailures: string[] = [];
     const notReturned: string[] = [];
     const milestoneUnresolved: string[] = [];
     for (const a of approved) {
@@ -6982,19 +6984,24 @@ async function runPlanJob(job: Job) {
         );
         authored++;
       } catch (e) {
-        // A spec with no per-phase Verification is untestable — fail loudly instead of silently dropping it
-        // (and then queueing a build for a spec that never landed in public.specs).
+        // A spec with no per-phase Verification is untestable, and a spec with an empty-body phase is
+        // un-buildable — either way, fail loudly instead of silently dropping it (and then queueing a build
+        // for a spec that never landed in public.specs, or one that silently no-ops).
         if (e instanceof MissingVerificationError) {
           verificationFailures.push(e.message);
+          console.error(`${tag} author ${s.slug}: ${e.message}`);
+        } else if (e instanceof EmptyPhaseBodyError) {
+          emptyBodyFailures.push(e.message);
           console.error(`${tag} author ${s.slug}: ${e.message}`);
         } else {
           console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
         }
       }
     }
-    if (verificationFailures.length || notReturned.length || milestoneUnresolved.length) {
+    if (verificationFailures.length || emptyBodyFailures.length || notReturned.length || milestoneUnresolved.length) {
       const reasons: string[] = [];
       if (verificationFailures.length) reasons.push(`untestable (no "## Verification"): ${verificationFailures.join(" | ")}`);
+      if (emptyBodyFailures.length) reasons.push(`un-buildable (empty phase body): ${emptyBodyFailures.join(" | ")}`);
       if (notReturned.length) reasons.push(`planner did not return a spec body for: ${notReturned.join(", ")}`);
       if (milestoneUnresolved.length) reasons.push(`milestone did not resolve to a goal_milestones row: ${milestoneUnresolved.join(", ")}`);
       await update(job.id, {
@@ -15587,12 +15594,18 @@ async function dispatchJob(job: Job) {
     }
     const why = unbuildableReason(specRow); // "" = the DB row carries buildable content (phases or summary)
     if (why) {
+      // spec-body-never-silently-empty Phase 1 — surface as `needs_attention` (a visible, actionable state
+      // the owner sees on the queue), NOT `failed` (which routes to the retry backstop and hides the reason
+      // from the operator queue). The proposal STAYS LIVE (the DB Health enqueue dedup counts
+      // `needs_attention` as a live status, so a subsequent DB Health pass won't re-propose the same
+      // signature — the operator's fix runs against this exact job). This is the belt-and-suspenders backstop
+      // behind db-index-orders's silent stall: an un-buildable spec must surface, never silently complete.
       await update(job.id, {
-        status: "failed",
-        error: `spec ${slug} ${why} — refusing to build an empty spec (db-health-spec-body-robust)`,
+        status: "needs_attention",
+        error: `spec ${slug} ${why} — refusing to build an empty spec (spec-body-never-silently-empty)`,
         log_tail: `build aborted — spec row ${slug} ${why}; no PR opened`,
       });
-      console.error(`${tag} spec row ${why} → failed (no silent empty merge)`);
+      console.error(`${tag} spec row ${why} → needs_attention (no silent empty merge)`);
       chosenAccount.inFlight--;
       sh("git", ["worktree", "remove", "--force", wt]);
       return;
