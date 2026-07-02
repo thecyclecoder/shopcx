@@ -24,6 +24,8 @@ ONE ROW PER PHASE of every spec — the body content (`title`, `body`), the life
 | `verification` | `text?` | the per-phase `## Verification` block when authored ([[../specs/verification-guides]]) |
 | `why` | `text?` | [[../specs/pm-structured-intent-and-refs]] Phase 1 — plain-language WHY this phase exists inside its spec. HARD-gated at the app-layer chokepoint ([[../libraries/author-spec]] `assertEveryNodeHasIntent`). Paired with `what`. NULL only for pre-intent rows |
 | `what` | `text?` | [[../specs/pm-structured-intent-and-refs]] Phase 1 — plain-language WHAT changes when this phase ships. Paired with `why`. HARD-gated at the chokepoint |
+| `kind` | `text` | `phase ｜ fix` · default `phase` · **fixes-as-phases** ([[../libraries/pre-merge-fix]]) — a `fix` phase is APPENDED to the ORIGIN spec when a pre-merge spec-test regression is found (retires the separate `fix-<slug>` spec model). Built one-at-a-time on a resumed session (own commit); the origin self-re-tests when the fix ships. Appended via [[../libraries/specs-table]] `appendFixPhases` |
+| `origin_check_keys` | `text[]` | default `{}` · for `kind='fix'` phases, the [[spec_test_runs]] `check_key`(s) this fix must flip to `pass` — maps a fix back to the failing checks it resolves. Empty for normal phases |
 | `created_at` | `timestamptz` | default `now()` — preserved across moves |
 | `updated_at` | `timestamptz` | default `now()` |
 
@@ -45,6 +47,7 @@ The lift-a-phase primitive `movePhase(phaseId, newSpecId, newPosition)` is a sin
 - `supabase/migrations/20260725160000_drop_rollup_triggers_and_milestone_status.sql` — `derive-rollup-status` P3: dropped `spec_phases_rollup` + `roll_up_spec_status`; status now derives at read time
 - `supabase/migrations/20260726120000_spec_phases_build_sha.sql` — `spec-goal-branch-pm-flow` M2: added `build_sha` (spec-branch build provenance) · apply: `scripts/apply-spec-phases-build-sha-migration.ts`
 - `supabase/migrations/20260807140000_pm_intent_why_what.sql` ([[../specs/pm-structured-intent-and-refs]] Phase 1) — adds `why` + `what` for the plain-language intent layer; HARD-gated by `assertEveryNodeHasIntent` at the app-layer chokepoint (a phase with an empty intent throws before the DB write) · apply: `scripts/apply-pm-intent-why-what-migration.ts`
+- `supabase/migrations/20260808130000_spec_phases_fix_kind.sql` (**fixes-as-phases**, [[../libraries/pre-merge-fix]]) — adds `kind` (`phase`/`fix`) + `origin_check_keys` so a pre-merge spec-test regression is a fix PHASE on the origin (retiring the separate `fix-<slug>` spec + its chains) · apply: `scripts/apply-spec-phases-fix-kind-migration.ts`
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 
 ## Related
