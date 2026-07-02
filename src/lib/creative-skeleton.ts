@@ -336,6 +336,28 @@ export async function sweepSeed(
   });
   result.searched = ads.length;
 
+  // Freshness ledger — best-effort. Phase 2's filterSeedsByFreshness reads this table
+  // to skip seeds searched within the window; here we just stamp the fact of the search.
+  // A write failure MUST NOT fail the sweep (this is telemetry, not the load path).
+  try {
+    const { error: freshnessErr } = await admin
+      .from("adlibrary_searches")
+      .upsert(
+        {
+          workspace_id: workspaceId,
+          keyword: seed.keyword,
+          last_searched_at: new Date().toISOString(),
+          last_result_count: ads.length,
+        },
+        { onConflict: "workspace_id,keyword" },
+      );
+    if (freshnessErr) {
+      console.error(`[creative-finder] adlibrary_searches upsert error for ${seed.keyword}:`, freshnessErr.message);
+    }
+  } catch (err) {
+    console.error(`[creative-finder] adlibrary_searches upsert threw for ${seed.keyword}:`, err);
+  }
+
   // Winner signal = reach/spend OR longevity (not longevity alone). See adlibrary.isWinner.
   const winners = ads.filter((a) =>
     a.ad_key && isWinner(a, { minDays: opts.minDays, minImpressions: opts.minImpressions, minSpend: opts.minSpend }),

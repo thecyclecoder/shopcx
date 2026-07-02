@@ -8,7 +8,7 @@ Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner
 |---|---|
 | `visionDeconstruct(workspaceId, buffer, contentType)` | Claude vision (Opus) → `CreativeSkeleton \| null`. Logs `creative_skeleton_vision` usage. Strategist frameworks (hook-promise-proof / problem-pivot-payoff) baked into the system prompt |
 | `visionDeconstructFrames(workspaceId, frames[], transcript)` | **Video** path ([[../specs/creative-finder-video]]): same four-slot schema + frameworks, fed ordered keyframes (earliest-first storyboard) + the audio transcript. System prompt extended so **hook = opening frame + first spoken line**. Logs `creative_skeleton_video_vision`. Used by [[video-skeleton]] |
-| `sweepSeed(workspaceId, seed, opts?)` | search one seed → filter long-runners → dedup by `ad_key` → ingest. Returns `IngestResult` counts. `opts`: `minDays`/`maxPerSeed`/`daysBack`/`pageSize` |
+| `sweepSeed(workspaceId, seed, opts?)` | search one seed → filter long-runners → dedup by `ad_key` → ingest. Returns `IngestResult` counts. `opts`: `minDays`/`maxPerSeed`/`daysBack`/`pageSize`. Also best-effort upserts [[../tables/adlibrary_searches]] with `last_searched_at`/`last_result_count` after `searchAds` returns — the freshness ledger the Phase 2 gate ([[../specs/adlibrary-search-freshness-gate]]) reads to skip already-fresh seeds |
 | `ingestAd(workspaceId, ad, seed)` | vision (statics) + idempotent upsert into [[../tables/creative_skeletons]]; videos → `status='video_pending'` (no vision) |
 | `buildPatternMatrix(workspaceId, { minBrands=2 })` | → `PatternMatrix`: `slotPatterns` (per-slot clusters repeating across ≥N **independent** brands) + ranked `testMatrix` (hook×mechanism×proof×offer) |
 | `CREATIVE_SHOTS_BUCKET` / `ensureCreativeShotsBucket()` / `uploadCreativeShot(path, buf)` / `signCreativeShot(path, ttl?)` | The private `creative-shots` bucket — our downscaled analyzable copy of each creative (what the dashboard displays; mirrors [[landing-page-scout]]'s `lander-shots`). |
@@ -34,4 +34,4 @@ Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner
 - `src/app/api/ads/creative-finder/patterns` (`buildPatternMatrix`).
 
 ## Related
-[[adlibrary]] · [[../integrations/adlibrary]] · [[../integrations/anthropic]] · [[ai-models]] · [[ai-usage]] · [[../tables/creative_skeletons]] · [[../inngest/creative-finder]] · [[../specs/winning-static-creative-finder]]
+[[adlibrary]] · [[../integrations/adlibrary]] · [[../integrations/anthropic]] · [[ai-models]] · [[ai-usage]] · [[../tables/creative_skeletons]] · [[../tables/adlibrary_searches]] · [[../inngest/creative-finder]] · [[../specs/winning-static-creative-finder]] · [[../specs/adlibrary-search-freshness-gate]]
