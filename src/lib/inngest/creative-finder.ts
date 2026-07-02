@@ -20,7 +20,11 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { hasAdLibraryKey, CATEGORY_SEEDS, type Seed } from "@/lib/adlibrary";
-import { loadApprovedCompetitorSeeds, promoteFromCategorySweep } from "@/lib/competitors";
+import {
+  loadApprovedCompetitorSeeds,
+  promoteFromCategorySweep,
+  promoteWhitelistedPages,
+} from "@/lib/competitors";
 import { sweepSeed, type IngestResult } from "@/lib/creative-skeleton";
 import { hasFfmpeg, processVideoPending, type VideoProcessResult } from "@/lib/video-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -83,6 +87,9 @@ export const creativeFinderDailyCron = inngest.createFunction(
         // Category-sweep promotion (competitor-scout): heavy advertisers that recurred in this
         // workspace's sweep output surface as 'proposed' competitors for owner approval.
         await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
+        // Whitelisted-page promotion: affiliate/advertorial/creator pages fronting a KNOWN
+        // competitor (destination_domain join) surface as 'proposed' whitelisted rows.
+        await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
       }
       return { workspaces: workspaceIds.length, totals };
     })();
@@ -114,6 +121,7 @@ export const creativeFinderManualSweep = inngest.createFunction(
         if (i < seeds.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
       }
       await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
+      await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
     }
     return { workspaces: workspaceIds.length, totals };
   },

@@ -16,6 +16,12 @@ interface CompetitorRow {
   spend_signal: string | null;
   source: string;
   status: string;
+  /** `source='whitelisted'` rows only: exact page name the sweep searches. */
+  search_keyword: string | null;
+  /** `source='whitelisted'` rows only: id of the fronted competitor. */
+  runs_ads_for: string | null;
+  /** Server-resolved display brand for `runs_ads_for` (null for non-whitelisted). */
+  runs_ads_for_brand: string | null;
 }
 interface AdEvidence {
   advertiser: string | null;
@@ -97,6 +103,17 @@ const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
   approved: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
   rejected: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
+};
+
+// Source badge — the four sources compete for provenance: manual/llm/category_sweep are real brand
+// competitors; `whitelisted` is an affiliate/advertorial page fronting a KNOWN competitor (see
+// docs/brain/specs/whitelisted-page-auto-tracking.md). The `whitelisted` styling calls it out so
+// the owner approves it WITH context (the sibling "runs ads for {brand}" line).
+const SOURCE_BADGE: Record<string, string> = {
+  manual: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+  llm: "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300",
+  category_sweep: "bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300",
+  whitelisted: "bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-950 dark:text-fuchsia-300",
 };
 
 function StatCard({ label, value, accent }: { label: string; value: number; accent: string }) {
@@ -349,9 +366,23 @@ export default function AcquisitionHubPage() {
                   <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                     {data.competitors.map((c) => (
                       <tr key={c.id} className="bg-white dark:bg-zinc-950">
-                        <td className="px-4 py-2 font-medium text-zinc-900 dark:text-zinc-100">{c.brand}</td>
+                        <td className="px-4 py-2 font-medium text-zinc-900 dark:text-zinc-100">
+                          {/* Whitelisted rows: prefer the raw page name over the normalized brand
+                              (the exact keyword the sweep uses), and show the "runs ads for X"
+                              affordance beneath so the owner approves WITH context. */}
+                          <div>{c.source === "whitelisted" && c.search_keyword ? c.search_keyword : c.brand}</div>
+                          {c.source === "whitelisted" && c.runs_ads_for_brand && (
+                            <div className="mt-0.5 text-xs font-normal text-zinc-500">
+                              runs ads for <span className="font-medium text-zinc-700 dark:text-zinc-300">{c.runs_ads_for_brand}</span>
+                            </div>
+                          )}
+                        </td>
                         <td className="px-4 py-2 text-zinc-500">{c.domain || "—"}</td>
-                        <td className="px-4 py-2 text-zinc-500">{c.source}</td>
+                        <td className="px-4 py-2">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${SOURCE_BADGE[c.source] || SOURCE_BADGE.manual}`}>
+                            {c.source}
+                          </span>
+                        </td>
                         <td className="px-4 py-2">
                           <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_BADGE[c.status] || ""}`}>
                             {c.status}

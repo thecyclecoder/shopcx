@@ -23,7 +23,7 @@ import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import type { Seed } from "@/lib/adlibrary";
 
-export type CompetitorSource = "llm" | "category_sweep" | "manual";
+export type CompetitorSource = "llm" | "category_sweep" | "manual" | "whitelisted";
 export type CompetitorStatus = "proposed" | "approved" | "rejected";
 
 export interface CompetitorRow {
@@ -38,6 +38,18 @@ export interface CompetitorRow {
   source: CompetitorSource;
   status: CompetitorStatus;
   evidence: string | null;
+  /**
+   * Exact AdLibrary keyword the sweep searches for this row (verbatim, NOT `normalizeBrand`-flattened).
+   * `source='whitelisted'` rows store the raw page name (e.g. `Holistic Health Finds` → 59 ads; the
+   * normalized `holistichealthfinds` → 0). Normal (llm/category_sweep/manual) rows leave this null
+   * and the sweep falls back to `brand`. See [[docs/brain/specs/whitelisted-page-auto-tracking]].
+   */
+  search_keyword: string | null;
+  /**
+   * For `source='whitelisted'` rows, the competitor whose store this page fronts (the destination
+   * -domain join target). ON DELETE SET NULL. Null for real brand competitors.
+   */
+  runs_ads_for: string | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_note: string | null;
@@ -59,22 +71,28 @@ export function normalizeBrand(raw: string): string {
 }
 
 /**
- * The sweep's read path: approved competitors for a workspace, as discovery Seeds (keyword = brand).
+ * The sweep's read path: approved competitors for a workspace, as discovery Seeds.
+ *
  * Empty when no competitor is approved — the sweep then runs ZERO competitor pulls (no hardcoded
  * fallback). This is what replaced the import of COMPETITOR_SEEDS in the creative-finder.
+ *
+ * Whitelisted-page rows (`source='whitelisted'`) use `search_keyword` — the EXACT page name — as
+ * their sweep keyword, because the AdLibrary API matches page names literally
+ * (`"Holistic Health Finds"` → 59 ads; the `normalizeBrand`-flattened `holistichealthfinds` → 0).
+ * Normal (llm/category_sweep/manual) rows leave `search_keyword` null and fall back to `brand`.
  */
 export async function loadApprovedCompetitorSeeds(workspaceId: string): Promise<Seed[]> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("competitors")
-    .select("brand, evidence, category")
+    .select("brand, search_keyword, evidence, category")
     .eq("workspace_id", workspaceId)
     .eq("status", "approved")
     .order("brand", { ascending: true });
   return (data || [])
-    .filter((r) => r.brand)
+    .filter((r) => (r.search_keyword as string | null) || r.brand)
     .map((r) => ({
-      keyword: r.brand as string,
+      keyword: ((r.search_keyword as string | null) ?? (r.brand as string)) as string,
       kind: "competitor" as const,
       note: (r.evidence as string) || (r.category as string) || undefined,
     }));
@@ -256,6 +274,10 @@ interface CandidateInput {
   spend_signal?: string | null;
   source: CompetitorSource;
   evidence: string;
+  /** Whitelisted-page rows only: exact AdLibrary page name (verbatim, NOT normalized). */
+  search_keyword?: string | null;
+  /** Whitelisted-page rows only: the fronted competitor's id. */
+  runs_ads_for?: string | null;
 }
 
 /**
@@ -284,6 +306,8 @@ async function upsertCandidate(workspaceId: string, c: CandidateInput): Promise<
     source: c.source,
     status: "proposed",
     evidence: c.evidence,
+    search_keyword: c.search_keyword ?? null,
+    runs_ads_for: c.runs_ads_for ?? null,
   });
   // A concurrent insert may have won the unique race — treat as "already exists", not new.
   return !error;
@@ -301,6 +325,174 @@ export interface PromoteResult {
  * Recurrence = ≥ minAds distinct skeleton rows for that advertiser. Deduped against existing rows
  * (incl. rejected) by normalized brand. Proposed only — never enters the sweep without approval.
  */
+/**
+ * Extract a bare host from a destination_domain-ish value (`shop.ryzesuperfoods.com`,
+ * `https://learn.erthlabs.co/women50`, `learn.erthlabs.co`). Lowercased, protocol/www stripped,
+ * path dropped. Empty string when nothing extractable.
+ */
+function normalizeHost(raw: string | null | undefined): string {
+  if (!raw) return "";
+  let s = String(raw).trim().toLowerCase();
+  s = s.replace(/^https?:\/\//, "").replace(/^www\./, "");
+  s = s.split("/")[0];
+  return s;
+}
+
+/**
+ * Whitelisted-page promotion: propose affiliate/advertorial/creator pages that front a KNOWN
+ * competitor as new competitor rows (`source='whitelisted'`, `status='proposed'`).
+ *
+ * The join key is `creative_skeletons.destination_domain`: a non-brand page whose ads drive to a
+ * known competitor's domain is a whitelisted page fronting that competitor. Confirmed live —
+ * ~40% of erthlabs's paid social runs under "Holistic Health Finds" (×19) and a network of
+ * creator personas; all drive to `learn.erthlabs.co`. Searching the raw page name pulls the
+ * WHOLE ad set, and the sibling network unfolds once approved seeds sweep by the exact name.
+ *
+ * Steps:
+ *   1. Build the KNOWN-competitor destination-domain set: distinct hosts observed in
+ *      `creative_skeletons.destination_domain` for rows whose `advertiser` (normalized) matches an
+ *      approved competitor's `brand` OR whose `seed_keyword` matches. Each host is mapped to that
+ *      competitor's `id`. The approved competitor's `domain` column also enters this map so a
+ *      competitor with no swept ads yet still anchors its own domain.
+ *   2. Group `creative_skeletons` rows by `normalizeBrand(advertiser)`. Skip empty, skip any brand
+ *      already approved as a competitor. For each remaining group compute count + share-pointing-
+ *      to-known-competitor + the dominant fronted competitor from the group's destination-domain
+ *      distribution.
+ *   3. If `count >= minAds` AND `share >= minShare`, propose the page as `source='whitelisted'`
+ *      with `search_keyword` = the RAW advertiser display (verbatim — the AdLibrary API matches
+ *      page names literally), `runs_ads_for` = the fronted competitor's id, and evidence quoting
+ *      the N-ads → {domain} → {competitor} link. `upsertCandidate` dedups by normalized brand
+ *      across ALL statuses so a rejected/existing page never re-proposes.
+ *
+ * Proposed only — the owner approves before the sweep uses it (north-star).
+ */
+export async function promoteWhitelistedPages(
+  workspaceId: string,
+  { minAds = 3, minShare = 0.5 }: { minAds?: number; minShare?: number } = {},
+): Promise<PromoteResult> {
+  const admin = createAdminClient();
+
+  // 1. Approved competitors: id, brand, domain — the fronted-brand anchor set.
+  const { data: approvedRows } = await admin
+    .from("competitors")
+    .select("id, brand, domain")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "approved");
+  const approvedBrandToId = new Map<string, string>();
+  const knownHostToCompetitor = new Map<string, string>();
+  for (const r of approvedRows || []) {
+    const brand = (r.brand as string | null) || "";
+    if (brand) approvedBrandToId.set(brand, r.id as string);
+    const host = normalizeHost(r.domain as string | null);
+    if (host) knownHostToCompetitor.set(host, r.id as string);
+  }
+
+  // Read enough skeleton rows to cover a workspace's daily sweep + a few historical days without
+  // paging (limit mirrors promoteFromCategorySweep). Whitelisted detection needs advertiser +
+  // destination_domain + seed_keyword together — a row with a null destination_domain is
+  // uninformative for this scan (a page that never drives to a competitor domain can't be
+  // classified) so we filter it out at query time.
+  const { data: skeletons } = await admin
+    .from("creative_skeletons")
+    .select("advertiser, destination_domain, seed_keyword")
+    .eq("workspace_id", workspaceId)
+    .eq("source", "adlibrary")
+    .not("advertiser", "is", null)
+    .not("destination_domain", "is", null)
+    .limit(5000);
+
+  // 2. Extend the known-host → competitor map by scanning skeletons where the advertiser or the
+  //    seed_keyword resolves to an approved competitor. This catches subdomains the approved row's
+  //    `domain` column doesn't list (learn.erthlabs.co vs erthlabs.co).
+  for (const r of skeletons || []) {
+    const host = normalizeHost(r.destination_domain as string | null);
+    if (!host) continue;
+    const advBrand = normalizeBrand((r.advertiser as string) || "");
+    const seedBrand = normalizeBrand((r.seed_keyword as string) || "");
+    const compId = approvedBrandToId.get(advBrand) || approvedBrandToId.get(seedBrand);
+    if (compId && !knownHostToCompetitor.has(host)) knownHostToCompetitor.set(host, compId);
+  }
+
+  // 3. Group by normalized advertiser. For each non-competitor page, count total + count-known +
+  //    the dominant fronted competitor (the competitor id most often pointed at).
+  interface PageStat {
+    display: string; // the raw advertiser page name for search_keyword
+    total: number;
+    known: number;
+    domainHits: Map<string, number>; // dominant destination_domain (for evidence)
+    competitorHits: Map<string, number>; // dominant fronted competitor id
+  }
+  const pages = new Map<string, PageStat>();
+  for (const r of skeletons || []) {
+    const display = ((r.advertiser as string) || "").trim();
+    if (!display) continue;
+    const brand = normalizeBrand(display);
+    if (!brand) continue;
+    if (approvedBrandToId.has(brand)) continue; // page IS an approved competitor — not a front
+
+    const host = normalizeHost(r.destination_domain as string | null);
+    const compId = knownHostToCompetitor.get(host);
+
+    const cur =
+      pages.get(brand) ||
+      ({ display, total: 0, known: 0, domainHits: new Map(), competitorHits: new Map() } as PageStat);
+    cur.total++;
+    if (compId) {
+      cur.known++;
+      cur.competitorHits.set(compId, (cur.competitorHits.get(compId) || 0) + 1);
+      if (host) cur.domainHits.set(host, (cur.domainHits.get(host) || 0) + 1);
+    }
+    pages.set(brand, cur);
+  }
+
+  const result: PromoteResult = { promoted: 0, skippedExisting: 0, scanned: pages.size };
+  // Approved brand → display name for evidence text.
+  const competitorIdToDisplay = new Map<string, string>();
+  for (const r of approvedRows || []) competitorIdToDisplay.set(r.id as string, (r.brand as string) || "");
+
+  for (const [brand, stat] of pages) {
+    if (stat.total < minAds) continue;
+    const share = stat.total > 0 ? stat.known / stat.total : 0;
+    if (share < minShare) continue;
+
+    // Pick the dominant fronted competitor + its dominant destination host for evidence.
+    let dominantCompId: string | null = null;
+    let dominantCompHits = 0;
+    for (const [id, n] of stat.competitorHits) {
+      if (n > dominantCompHits) {
+        dominantCompHits = n;
+        dominantCompId = id;
+      }
+    }
+    if (!dominantCompId) continue; // share threshold met but map came up empty — bail defensively.
+
+    let dominantHost = "";
+    let dominantHostHits = 0;
+    for (const [host, n] of stat.domainHits) {
+      if (n > dominantHostHits) {
+        dominantHostHits = n;
+        dominantHost = host;
+      }
+    }
+    const frontedDisplay = competitorIdToDisplay.get(dominantCompId) || dominantCompId;
+    const evidence =
+      `${stat.known}/${stat.total} ads → ${dominantHost || "known competitor domain"}, fronting ${frontedDisplay}.` +
+      ` Whitelisted-page candidate: search by exact name "${stat.display}".`;
+
+    const inserted = await upsertCandidate(workspaceId, {
+      brand,
+      source: "whitelisted",
+      search_keyword: stat.display, // RAW page name (verbatim, NOT normalized).
+      runs_ads_for: dominantCompId,
+      spend_signal: `${stat.total} ads observed (${stat.known} fronting ${frontedDisplay})`,
+      evidence,
+    });
+    if (inserted) result.promoted++;
+    else result.skippedExisting++;
+  }
+  return result;
+}
+
 export async function promoteFromCategorySweep(
   workspaceId: string,
   minAds = 3,

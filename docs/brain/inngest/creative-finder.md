@@ -12,11 +12,12 @@ Daily sweep that pulls long-running competitor + category ads from [[../integrat
 - Gated on `hasAdLibraryKey()` → returns `{ skipped: "no_adlibrary_key" }` if unset.
 - For each ad-tool workspace (distinct `ad_campaigns.workspace_id`), builds the seed list per workspace via `workspaceSeeds()` = **DB-driven approved competitors** ([[competitor-scout]] `loadApprovedCompetitorSeeds`) **+ `CATEGORY_SEEDS`** — competitor brands are no longer hardcoded. One `step.run` per seed (`sweepSeed`) with a `step.sleep` ~7s throttle (AdLibrary 10/min cap).
 - After a workspace's sweep, a `promote-${workspaceId}` step runs `promoteFromCategorySweep()` — heavy advertisers that recurred (≥3 ads) in the sweep output surface as `status='proposed'` competitors for owner approval.
+- A follow-up `promote-whitelisted-${workspaceId}` step runs `promoteWhitelistedPages()` — advertiser pages (affiliate/advertorial/creator personas) that drive to a KNOWN approved-competitor `destination_domain` surface as `source='whitelisted'`, `status='proposed'` rows with `search_keyword` = the exact page name + `runs_ads_for` = the fronted competitor. See [[../specs/whitelisted-page-auto-tracking]].
 
 ### `creative-finder-manual-sweep`
 - **Trigger:** event `ads/creative-finder.sweep` `{ workspaceId? }`
 - **Retries:** 1
-- Same sweep (incl. per-workspace `workspaceSeeds` + category-sweep promotion); scoped to `workspaceId` when supplied (else all ad-tool workspaces). Fired by the dashboard "Run sweep now" button.
+- Same sweep (incl. per-workspace `workspaceSeeds` + category-sweep promotion + whitelisted-page promotion); scoped to `workspaceId` when supplied (else all ad-tool workspaces). Fired by the dashboard "Run sweep now" button.
 
 ### `creative-finder-video-process`
 - **Trigger:** cron `30 9 * * *` (after the 9:00 static sweep) + event `ads/creative-finder.video` `{ workspaceId?, max? }`
@@ -31,14 +32,14 @@ _None._
 ## Tables written
 
 - [[../tables/creative_skeletons]] (via [[../libraries/creative-skeleton]] `ingestAd` — idempotent upsert; now stores the **complete AdLibrary payload** per ad — destination domain, copy, CTA, spend, engagement, channel — see [[../specs/ad-creative-scout]]). `creative-finder-video-process` **updates** `video_pending` rows → `analyzed` with the four-slot skeleton (via [[../libraries/video-skeleton]]).
-- [[../tables/competitors]] (`promoteFromCategorySweep` inserts `source='category_sweep'`, `status='proposed'` candidates)
+- [[../tables/competitors]] (`promoteFromCategorySweep` inserts `source='category_sweep'` candidates; `promoteWhitelistedPages` inserts `source='whitelisted'` candidates with `search_keyword` + `runs_ads_for` — all `status='proposed'`)
 - `ai_token_usage` (vision usage — statics `creative_skeleton_vision`, video `creative_skeleton_video_vision` — via [[../libraries/ai-usage]])
 
 ## Tables read (not written)
 
 - [[../tables/ad_campaigns]] (which workspaces use the ad tool)
 - [[../tables/competitors]] (approved competitor brands → sweep seeds, via [[../libraries/competitors]] `loadApprovedCompetitorSeeds`)
-- [[../tables/creative_skeletons]] (dedup by `ad_key`; promotion scan reads `advertiser`)
+- [[../tables/creative_skeletons]] (dedup by `ad_key`; category-sweep promotion reads `advertiser`; whitelisted-page promotion reads `advertiser` + `destination_domain` + `seed_keyword`)
 
 ## Gotchas
 
