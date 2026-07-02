@@ -4695,7 +4695,7 @@ async function claimHeldForUnreviewedSpec(job: Job): Promise<boolean> {
 // `continue` overlap; split/fold_now/author_followup_spec/dismiss_candidate/escalate still run.
 async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<string> = new Set()): Promise<string> {
   const lib = await import("../src/lib/agents/platform-director");
-  const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
+  const { deriveSpecStatusFromMarkdown: deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
 
   const candidates = await lib.findGroomCandidates(db);
@@ -6112,7 +6112,7 @@ async function runGrowthDirectorJob(job: Job) {
 async function runDirectorBounceBackJob(job: Job) {
   const tag = `[director-bounce-back:${job.id.slice(0, 8)}]`;
   const lib = await import("../src/lib/agents/platform-director");
-  const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
+  const { deriveSpecStatusFromMarkdown: deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { bounceBackPreamble, reEscalateAfterBounceBody } = await import("../src/lib/agents/director-bounce-back");
   const { APPROVAL_REQUEST_TYPE } = await import("../src/lib/agents/inbox");

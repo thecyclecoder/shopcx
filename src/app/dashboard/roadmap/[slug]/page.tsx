@@ -1,14 +1,15 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { marked } from "marked";
-import { getSpec, listSpecSlugs, getRoadmapFilters, extractSpecSection, stripSpecSection, type SpecStatus } from "@/lib/brain-roadmap";
+import { getSpec, listSpecSlugs, getRoadmapFilters, type SpecStatus } from "@/lib/brain-roadmap";
+import { getSpec as getSpecRow } from "@/lib/specs-table";
+import { listSpecPhaseChecks } from "@/lib/spec-phase-checks-table";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import {
   getLatestSpecTestRuns,
   getHumanCheckResolutions,
   getLiveSpecTestSlugs,
-  parseVerificationBullets,
   deriveGreenBullets,
   type SpecTestRun,
 } from "@/lib/spec-test-runs";
@@ -102,26 +103,30 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const derivation = deriveLifecycleStage(lifecycleCtx);
   const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
 
-  // Phase 3 (spec-test-maximize-machine-coverage): live per-bullet green state — green when the agent
+  // Phase 3 (spec-test-maximize-machine-coverage) — live per-check green state — green when the agent
   // passed it OR the owner marked it ✓ Tested. Rendered directly from the DB
-  // (spec_test_runs + spec_test_human_checks); no markdown commit under 'DB is the spec'.
-  const greenBullets = deriveGreenBullets(
-    parseVerificationBullets(spec.raw).map((b) => b.text),
-    testRun,
-    resolutions,
-    slug,
-  );
+  // (spec_phase_checks rows + spec_test_runs + spec_test_human_checks); no markdown parse under
+  // pm-structured-intent-and-refs Phase 4. Falls back to spec_phases.verification only until the rows
+  // are backfilled — still a DB column read, never a parse of the rendered body.
+  const specRow = workspaceId ? await getSpecRow(workspaceId, slug) : null;
+  const phaseChecks = specRow
+    ? await listSpecPhaseChecks({
+        phases: specRow.phases.map((p) => ({ id: p.id, position: p.position, verification: p.verification })),
+      })
+    : [];
+  const greenBullets = deriveGreenBullets(phaseChecks.map((c) => c.text), testRun, resolutions, slug);
   const allGreen = greenBullets.length > 0 && greenBullets.every((g) => g.green);
 
-  // The "## Verification" test plan (verification-guides) is lifted out of the body and shown as a
-  // prominent card beside the verify button; strip it from the article so it isn't rendered twice.
-  const verification = extractSpecSection(spec.raw, "Verification");
-  const verificationHtml = verification
-    ? await marked.parse(preprocessWikilinks(verification, specSlugs))
+  // The verification test plan is rendered from the ROWS, not lifted out of the body — the detail
+  // page's "build detail" article shows the full rendered spec unchanged.
+  const verificationHtml = phaseChecks.length
+    ? await marked.parse(
+        preprocessWikilinks(phaseChecks.map((c) => `- ${c.text}`).join("\n"), specSlugs),
+      )
     : null;
 
   // Trusted internal content (our own brain markdown), owner-only page → marked → prose.
-  const html = await marked.parse(preprocessWikilinks(stripSpecSection(spec.raw, "Verification"), specSlugs));
+  const html = await marked.parse(preprocessWikilinks(spec.raw, specSlugs));
 
   return (
     <div className="mx-auto w-full max-w-6xl p-6">

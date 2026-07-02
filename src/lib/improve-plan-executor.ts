@@ -174,12 +174,16 @@ export async function executeImprovePlan(
           parent: `[[../functions/cs]] — Ticket-derived product fixes`,
           blocked_by: [],
           autoBuild: false, // improve-plan-executor: commission on Roadmap; do NOT auto-build.
+          why: `Ticket ${ticketId} identified a product gap that requires a durable spec fix commissioned on the Roadmap.`,
+          what: `When this spec ships, the product gap identified in ticket ${ticketId} is addressed.`,
           phases: [
             {
               title: `P1 — implement the fix`,
               body: phaseBody,
               verification: phaseVerification,
               status: "planned",
+              why: `Ticket ${ticketId} identified a product gap that requires a durable spec fix commissioned on the Roadmap.`,
+              what: `When this phase ships, the product gap identified in ticket ${ticketId} is addressed.`,
             },
           ],
         },

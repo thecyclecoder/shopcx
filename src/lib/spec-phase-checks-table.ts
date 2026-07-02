@@ -93,6 +93,62 @@ export async function listPhaseChecks(phaseId: string): Promise<SpecPhaseCheckRo
 }
 
 /**
+ * One row per verification check across every phase of a spec — the rows-first replacement for
+ * parsing `## Verification` bullets out of markdown (pm-structured-intent-and-refs Phase 3).
+ *
+ * Rows: batched read of `spec_phase_checks` for every phase, then interleaved in phase order. During
+ * the migration window a phase MAY still carry only `spec_phases.verification` prose (rows haven't
+ * been backfilled yet) — those fall back to `parseVerificationBlobToChecks(phase.verification)`, which
+ * is column-derived (a DB column read + line-split), NEVER a load-bearing markdown parse of the
+ * rendered spec body. Once every phase has rows the fallback is unreachable and can be dropped.
+ */
+export interface SpecCheckForListing {
+  /** Bullet text used both for display and for `checkKey` (matches the spec-test agent's check.text). */
+  text: string;
+  /** 'auto' → non-destructive machine check · 'human' → owner-verified. Drives the check chip category. */
+  kind: SpecPhaseCheckKind;
+  /** 1-based phase position; disambiguates duplicate check text across phases. */
+  phasePosition: number;
+}
+
+export async function listSpecPhaseChecks(spec: {
+  phases: { id: string; position: number; verification: string | null }[];
+}): Promise<SpecCheckForListing[]> {
+  const admin = createAdminClient();
+  const phaseIds = spec.phases.map((p) => p.id).filter(Boolean);
+  const rowsByPhase = new Map<string, SpecPhaseCheckRow[]>();
+  if (phaseIds.length) {
+    const { data, error } = await admin
+      .from("spec_phase_checks")
+      .select("id, phase_id, position, description, kind, created_at, updated_at")
+      .in("phase_id", phaseIds)
+      .order("position", { ascending: true });
+    if (error) throw error;
+    for (const r of (data as SpecPhaseCheckRow[]) ?? []) {
+      const list = rowsByPhase.get(r.phase_id) ?? [];
+      list.push(r);
+      rowsByPhase.set(r.phase_id, list);
+    }
+  }
+  const out: SpecCheckForListing[] = [];
+  for (const p of [...spec.phases].sort((a, b) => a.position - b.position)) {
+    const rows = rowsByPhase.get(p.id) ?? [];
+    if (rows.length) {
+      for (const r of rows) {
+        out.push({ text: r.description, kind: r.kind, phasePosition: p.position });
+      }
+    } else if (p.verification && p.verification.trim()) {
+      // Transitional fallback: column-derived (a `spec_phases.verification` DB read), NOT a parse of
+      // the rendered spec markdown. Once every phase has rows this branch is unreachable.
+      for (const c of parseVerificationBlobToChecks(p.verification)) {
+        out.push({ text: c.description, kind: c.kind, phasePosition: p.position });
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Best-effort backfill helper: split a free-text verification blob into per-check rows. Splits on
  * bullet lines (`- ` / `* `); an empty blob returns []. `kind` defaults to `auto` (the safe default —
  * the spec-test agent will re-classify to human when it can't run the check).

@@ -103,7 +103,7 @@ export interface MdPattern {
 export const MD_PATTERNS: MdPattern[] = [
   { id: "specs-md-literal", re: /docs\/brain\/specs\//, what: "literal docs/brain/specs/ path" },
   { id: "fetchSpecRawFromMain", re: /fetchSpecRawFromMain\s*\(/, what: "raw-from-main spec fetch" },
-  { id: "parseSpec", re: /\bparseSpec\s*\(/, what: "parseSpec() over a markdown blob" },
+  { id: "parseSpec", re: /\b(?:parseSpec|parseAuthoredSpecMarkdown)\s*\(/, what: "authored-markdown parser over a spec blob" },
   { id: "phaseStatesFromRaw", re: /\bphaseStatesFromRaw\s*\(/, what: "phaseStatesFromRaw() over markdown" },
   { id: "mergePhaseStates", re: /\bmergePhaseStates\s*\(/, what: "mergePhaseStates() merge of md-derived states" },
   { id: "serializeSpecRowToMarkdown", re: /\bserializeSpecRowToMarkdown\s*\(/, what: "DB row → markdown materialization" },
@@ -143,7 +143,7 @@ function readsSpecMarkdown(snippet: string): boolean {
  * allow-listed (the allow-list and the findings stay in agreement, no stale-entry warning).
  */
 function isDefinitionLine(line: string): boolean {
-  return /^\s*(?:export\s+)?(?:async\s+)?function\s+(?:parseSpec|phaseStatesFromRaw|mergePhaseStates|fetchSpecRawFromMain)\b/.test(
+  return /^\s*(?:export\s+)?(?:async\s+)?function\s+(?:parseSpec|parseAuthoredSpecMarkdown|phaseStatesFromRaw|mergePhaseStates|fetchSpecRawFromMain)\b/.test(
     line,
   );
 }
@@ -187,11 +187,11 @@ export const INTENTIONAL_MATERIALIZATION: AllowEntry[] = [
   },
   {
     file: "src/lib/brain-roadmap.ts",
-    fn: "deriveSpecStatus",
+    fn: "deriveSpecStatusFromMarkdown",
     reason:
-      "parseSpec over an IN-MEMORY raw string (no disk read) — the same deriveStatus the board uses, exposed " +
-      "for callers holding freshly-committed content (e.g. /api/roadmap/status computing a flip result before " +
-      "disk reflects it). Round-trip materialization path, not a docs/brain/specs/*.md fetch.",
+      "parseAuthoredSpecMarkdown over an IN-MEMORY raw string (no disk read) — the same deriveStatus the board " +
+      "uses, exposed for callers holding freshly-committed content (e.g. platform-director's would-this-fold " +
+      "check against a groom split's rewritten parent). Round-trip materialization, not a spec/*.md fetch.",
   },
   {
     // The AUTHORING round-trip: parseSpec over agent-AUTHORED markdown to UPSERT into public.specs +

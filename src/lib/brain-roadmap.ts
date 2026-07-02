@@ -227,7 +227,17 @@ function firstParagraph(lines: string[]): string {
   return cleanInline(buf.join(" "));
 }
 
-export function parseSpec(slug: string, raw: string): SpecCard {
+// pm-structured-intent-and-refs Phase 4 — renamed from `parseSpec` to make the AUTHOR-side transport
+// role explicit. This is NOT a load-bearing markdown reader: the DB is the spec (readers are pure-DB
+// via `readSpecsFromDb`/`getSpecFromDb`). This survives ONLY for the two AUTHOR-side transport paths
+// still on markdown:
+//   1. `author-spec.authorSpecRowFromMarkdown` — an agent writes a spec as markdown, we parse it once
+//      to structured shape and UPSERT into `public.specs` / `public.spec_phases`. Nothing READS the
+//      parsed markdown for lookups; the DB row is authoritative from that write forward.
+//   2. `deriveSpecStatusFromMarkdown` — a would-this-fold check the platform-director runs against a
+//      REWRITTEN parent spec's in-memory markdown (never a stored body).
+// Nothing else may call this — grep shows zero readers outside those two transport paths.
+export function parseAuthoredSpecMarkdown(slug: string, raw: string): SpecCard {
   const lines = raw.split("\n");
 
   let title = slug;
@@ -1142,12 +1152,14 @@ export function stripSpecSection(raw: string, heading: string): string {
 
 /** Raw markdown + parsed card for one spec, or null if it doesn't exist. Slug is path-guarded. */
 /**
- * Derive a spec's overall status from its raw markdown (no disk read) — the same deriveStatus the
- * board uses, exposed for callers that hold freshly-committed content in memory (e.g. /api/roadmap/status
- * computing the result of a status flip before disk reflects it). See spec-test-on-ship.
+ * Derive a spec's overall status from a REWRITTEN parent spec's in-memory markdown (no disk read) —
+ * the ONLY residual read-side markdown consumer, guarded to `platform-director.validateGroomSplit`'s
+ * would-this-fold check on a groom split verdict (never a stored body; the DB is the spec).
+ * pm-structured-intent-and-refs Phase 4 renamed this from `deriveSpecStatus` to make the transport
+ * role explicit.
  */
-export function deriveSpecStatus(raw: string): SpecStatus {
-  return parseSpec("_", raw).status;
+export function deriveSpecStatusFromMarkdown(raw: string): SpecStatus {
+  return parseAuthoredSpecMarkdown("_", raw).status;
 }
 
 export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw: string; card: SpecCard } | null> {

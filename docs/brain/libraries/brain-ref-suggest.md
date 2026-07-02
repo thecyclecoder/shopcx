@@ -1,6 +1,6 @@
 # libraries/brain-ref-suggest
 
-Author-time SUGGESTER for the `**Brain refs:**` line ([[../specs/spec-brain-refs]] Phase 2). Given a spec body, scans for the src/ files, tables, and existing brain wikilinks it names, resolves each to a `docs/brain/{libraries|inngest|tables|lifecycles|integrations|…}/{name}.md` that ACTUALLY exists on disk, and returns the top ≤4 as a `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` line the [[author-spec]] chokepoint injects below the last metadata header. Phase 1 taught the [[../.claude/skills/build-spec|build-spec]] skill to Read the `**Brain refs:**` line FIRST as the authoritative brain slice for the build; Phase 2 makes that line cheap to author.
+Author-time SUGGESTER for `spec_brain_refs` rows ([[../specs/pm-structured-intent-and-refs]] Phase 2). Given a spec body, scans for the src/ files, tables, and existing brain wikilinks it names, resolves each to a `docs/brain/{libraries|inngest|tables|lifecycles|integrations|…}/{name}.md` that ACTUALLY exists on disk, and returns the top ≤4 as candidate `brain_slug` values the [[author-spec]] chokepoint persists via `replaceSpecBrainRefs`. The [[../.claude/skills/build-spec|build-spec]] skill Reads each authored `docs/brain/{brain_slug}.md` FIRST as the authoritative brain slice for the build.
 
 **File:** `src/lib/brain-ref-suggest.ts`
 

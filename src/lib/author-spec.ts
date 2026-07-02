@@ -20,7 +20,7 @@
  * so an untestable spec never reaches `public.spec_phases`. A genuine DB/upsert error is best-effort (logged,
  * returns false) per the historical defensive posture.
  */
-import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
+import { parseAuthoredSpecMarkdown, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
@@ -887,7 +887,7 @@ export async function authorSpecRowFromMarkdown(
   }
 
   try {
-    const card = parseSpec(slug, markdown);
+    const card = parseAuthoredSpecMarkdown(slug, markdown);
     const regressionHeaders = extractRegressionHeaders(markdown);
     // pm-structured-intent-and-refs Phase 1 — extract plain-language intent headers from the markdown
     // (`**Why:**` / `**What:**`) when present. The markdown path is SOFT: if the surfaces haven't been
