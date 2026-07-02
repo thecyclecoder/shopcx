@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Founder-prompted escape valve: Ada raises an out-of-leash action to the CEO, approval executes it** · verified 2026-07-02 · → [[../libraries/platform-director]]
 - **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]
 - **Brain refs suggestion skippability regression fix** · verified 2026-07-02 · → [[../libraries/brain-ref-suggest]]
+- **Pre-merge spec-tests re-run after a branch changes + are visible/re-runnable** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]] · [[../libraries/spec-test-runs]]
 - **Specs carry a Brain refs list the builder reads first** · verified 2026-07-02 · → [[../project-management]]
 - **Gate Ada's box sessions to genuine reasoning** · verified 2026-07-01 · → [[../libraries/platform-director]]
 - **Agent KPI pages — a per-agent KPI layer on top of grading/coaching (Cleo/Storefront-Optimizer first)** · verified 2026-07-01 · → [[../libraries/agent-kpis]] · [[../libraries/storefront-optimizer-agent]] · [[../dashboard/agents]]
