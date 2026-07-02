@@ -19,7 +19,7 @@
 import { inngest } from "./client";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { enqueueDepWatchJob } from "@/lib/security-agent";
+import { enqueueDepWatchJob, enqueueSecurityDiffIfDue } from "@/lib/security-agent";
 
 export const securityDepWatch = inngest.createFunction(
   { id: "security-dep-watch", retries: 1, triggers: [{ cron: "0 4 * * *" }] },
@@ -32,10 +32,24 @@ export const securityDepWatch = inngest.createFunction(
       return r;
     });
 
-    await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("security-dep-watch", { ok: true, produced: result });
+    // fix-vault-post-merge-diff-backstop-7fbde0 — the POST-MERGE `diff` security backstop's daily leg
+    // (the platform-director standing pass is the fast leg). Walks `spec_status_history` for
+    // `actor='merge:<sha>'` rows in the 14d window (audit-authoritative, survives fold) and (idempotently
+    // via `enqueueSecurityReviewDiff`'s SHA dedup) enqueues the diff review for any merge SHA that has
+    // no security-review job yet. Best-effort — never breaks the heartbeat.
+    const diffBackstop = await step.run("enqueue-diff-backstop", async () => {
+      try {
+        const admin = createAdminClient();
+        return await enqueueSecurityDiffIfDue(admin);
+      } catch (err) {
+        return { enqueued: [], scanned: 0, resolved: 0, error: err instanceof Error ? err.message : String(err) };
+      }
     });
 
-    return result;
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("security-dep-watch", { ok: true, produced: { ...result, diff_backstop: diffBackstop } });
+    });
+
+    return { ...result, diff_backstop: diffBackstop };
   },
 );

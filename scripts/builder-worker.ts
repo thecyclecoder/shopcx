@@ -4040,6 +4040,25 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // POST-MERGE `diff` SECURITY backstop (fix-vault-post-merge-diff-backstop-7fbde0). Symmetric with
+    // backstopPreMergeChecks above but for the OTHER leg: the reactive merge-hook enqueue in
+    // `applyMergedBuildEffects` is fire-and-forget — a dropped send (Inngest sync reaped mid-flight,
+    // box down, transient error) leaves the merged commit without its post-merge diff review, and the
+    // origin `getSpec`-based backstop gapped on FOLDED specs (their brain pages in `docs/brain/archive.d/`
+    // — e.g. `acquisition-research-hub`, `ad-creative-scout` — whose spec_phases.merge_sha lookup didn't
+    // resolve). This walks `spec_status_history` for `actor='merge:<sha>'` rows in the 14d window (the
+    // audit-authoritative source that survives fold, same source `audit-spec-shipped-state` uses) and
+    // (idempotently, via the SHA dedup inside `enqueueSecurityReviewDiff`) enqueues the missing reviews.
+    const { enqueueSecurityDiffIfDue } = await import("../src/lib/security-agent");
+    const sd = await enqueueSecurityDiffIfDue(db);
+    if (sd.enqueued.length) {
+      notes.push(`post-merge diff backstop → security-review (re-)enqueued for ${sd.enqueued.length} SHA(s) of ${sd.scanned} scanned`);
+    }
+  } catch (e) {
+    notes.push(`post-merge diff backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing post-merge diff backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // SPEC-REVIEW backstop (spec-review-agent) — the reliable heartbeat that gets a newly-authored `in_review`
     // spec its Vale review + Ada disposition. WHY a standing-pass backstop is REQUIRED, not just nice-to-have:
     // before this, the ONLY enqueuers were (a) the Inngest `spec-review-cron` (`*/15`) and (b) the build
