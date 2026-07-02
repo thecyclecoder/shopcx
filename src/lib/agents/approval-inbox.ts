@@ -624,7 +624,13 @@ async function dismissParkCard(admin: Admin, id: string, reason: string): Promis
  *         `completed` with a log_tail breadcrumb (so it can't re-surface) AND dismiss the card —
  *         the same two-step the CEO did by hand for pr-1010 on 2026-07-02. CONSERVATIVE: on ANY
  *         GitHub read failure (`{ok:false}`) leave the card alone (never clear on a null read); a
- *         still-open+dirty PR keeps its card (the human still has to look).
+ *         still-open+dirty PR keeps its card (the human still has to look). TENANT-BOUND: the
+ *         `agent_jobs` read carries `workspace_id`; a card whose `workspace_id` doesn't match the
+ *         job's is refused (bogus/spoofed binding). The flip is a CONDITIONAL transition scoped to
+ *         (`id`, `workspace_id`, `kind='pr-resolve'`, `spec_slug='pr-<N>'`, `pr_number`, `status='needs_attention'`)
+ *         and returns the updated row; a race that already moved the job off `needs_attention` (or
+ *         any binding shift) matches zero rows → the card stays live for a human. Per
+ *         [[../specs/bind-pr-resolve-reconcile-transition]].
  *
  *  2. Reva "Ambiguous post-deploy signal" cards (escalation_kind `deploy_unsure`, no agent_job — keyed
  *     on `metadata.spec_slug` + `deploy_watch_id`): the ambiguous signal has RESOLVED when the spec has
@@ -677,11 +683,11 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
     const jobIds = Array.from(new Set(jobCards.map((c) => c.jobId)));
     const { data: jobsData } = await admin
       .from("agent_jobs")
-      .select("id, status, spec_slug, kind, pr_number")
+      .select("id, workspace_id, status, spec_slug, kind, pr_number")
       .in("id", jobIds);
-    const jobs = new Map<string, { status: string; spec_slug: string | null; kind: string; pr_number: number | null }>();
-    for (const j of (jobsData ?? []) as Array<{ id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>) {
-      jobs.set(j.id, { status: j.status, spec_slug: j.spec_slug, kind: j.kind, pr_number: j.pr_number });
+    const jobs = new Map<string, { workspace_id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>();
+    for (const j of (jobsData ?? []) as Array<{ id: string; workspace_id: string; status: string; spec_slug: string | null; kind: string; pr_number: number | null }>) {
+      jobs.set(j.id, { workspace_id: j.workspace_id, status: j.status, spec_slug: j.spec_slug, kind: j.kind, pr_number: j.pr_number });
     }
     // Batch-fetch the spec statuses for jobs STILL needs_attention (to catch a CEO-folded park).
     const stillParkedSlugs = new Set<string>();
@@ -696,6 +702,16 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
       if (!job) {
         // The job row is gone entirely — nothing left to decide.
         if (await dismissParkCard(admin, card.id, `job ${jobId.slice(0, 8)} no longer exists`)) cleared++;
+        continue;
+      }
+      // bind-pr-resolve-reconcile-transition — never act on a job whose workspace doesn't match the
+      // card's. `dashboard_notifications.workspace_id` and `agent_jobs.workspace_id` are the tenant
+      // boundary; a spoofed `metadata.job_id` from another workspace would otherwise let this pass
+      // flip that job or dismiss the mismatched card. Skip silently (a bogus card sits harmlessly).
+      if (job.workspace_id !== card.workspace_id) {
+        console.warn(
+          `[approval-inbox] cross-workspace park card ${card.id.slice(0, 8)} references job ${jobId.slice(0, 8)} in a different workspace — skipping`,
+        );
         continue;
       }
       if (job.status !== "needs_attention") {
@@ -721,16 +737,39 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
         const decision = prResolveParkOutcome(await getPr(job.pr_number));
         if (decision.action === "keep") continue; // read_failed or still_open — CONSERVATIVE keep
         const outcome = decision.outcome; // 'merged' | 'closed'
-        const { error: upErr } = await admin
+        // bind-pr-resolve-reconcile-transition — the flip is a CONDITIONAL transition scoped to the
+        // full expected shape of the pr-resolve sentinel (workspace + kind + synthetic pr-N slug +
+        // pr_number + still-needs_attention). If any bind shifted between the read and the write —
+        // the row already left needs_attention, the slug/pr mapping raced, or someone tried to point
+        // this update at a different job entirely — the transition applies to zero rows and we KEEP
+        // the card (the human still gets a look). `.select().maybeSingle()` returns the updated row
+        // iff the conditional matched; only THEN do we dismiss.
+        const expectedSlug = `pr-${job.pr_number}`;
+        const { data: updated, error: upErr } = await admin
           .from("agent_jobs")
           .update({
             status: "completed",
             log_tail: `pr-resolve sentinel auto-cleared: PR #${job.pr_number} ${outcome} on GitHub (reconciler-observed ${new Date().toISOString()})`.slice(-2000),
           })
-          .eq("id", jobId);
+          .eq("id", jobId)
+          .eq("workspace_id", card.workspace_id)
+          .eq("kind", "pr-resolve")
+          .eq("spec_slug", expectedSlug)
+          .eq("pr_number", job.pr_number)
+          .eq("status", "needs_attention")
+          .select("id")
+          .maybeSingle();
         if (upErr) {
           console.warn(`[approval-inbox] pr-resolve sentinel flip failed for ${jobId.slice(0, 8)} (PR #${job.pr_number}): ${upErr.message}`);
           continue; // couldn't flip → don't drop the card
+        }
+        if (!updated) {
+          // Conditional transition matched zero rows — the job raced out of needs_attention, or one
+          // of the bindings (workspace/kind/slug/pr_number) shifted. Keep the card for a human.
+          console.log(
+            `[approval-inbox] pr-resolve sentinel flip skipped for ${jobId.slice(0, 8)} (PR #${job.pr_number}) — job no longer matches expected shape`,
+          );
+          continue;
         }
         if (await dismissParkCard(admin, card.id, `pr-resolve sentinel: PR #${job.pr_number} ${outcome} on GitHub — park superseded`)) cleared++;
       }
