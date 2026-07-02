@@ -789,8 +789,15 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
   slug: string;
   branch: string | null;
   previewUrl: string | null;
+  /**
+   * fixes-as-phases self-heal: force the re-test past the "already tested this preview / existing verdict"
+   * dedup. Set when the build that just accumulated completed a `kind='fix'` phase — the prior `issues`
+   * run tested the PRE-fix code and MUST be superseded, or the fix silently stalls (the fused-premerge-
+   * security case: Fix built, no re-test ran, PR held forever). [[pre-merge-fix]].
+   */
+  force?: boolean;
 }): Promise<{ enqueued: boolean; reason?: string }> {
-  const { workspaceId, slug, branch, previewUrl } = args;
+  const { workspaceId, slug, branch, previewUrl, force } = args;
   try {
     if (!branch || !branch.startsWith("claude/")) return { enqueued: false, reason: "not a claude/* branch" };
     const origin = (previewUrl || "").replace(/\/$/, "");
@@ -799,7 +806,7 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
     // partial spec. Same predicate the auto-merge accumulation gate + isSpecPromoteEligible read.
     const acc = await isSpecAccumulationComplete(workspaceId, slug);
     if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
-    return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin);
+    return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin, force ? { force: true } : undefined);
   } catch (e) {
     return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
   }
