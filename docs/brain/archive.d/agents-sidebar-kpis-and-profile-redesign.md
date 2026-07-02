@@ -1,0 +1,1 @@
+- **Give Agents a Directors-style sidebar (surfacing KPIs) + redesign the agent profile page** · verified 2026-07-01 · → [[dashboard/agents]]

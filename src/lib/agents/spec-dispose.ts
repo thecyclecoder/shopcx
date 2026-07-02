@@ -17,9 +17,14 @@
  *     CEO notification ("I moved this to deferred — want it built now? [Build now → planned]") with the
  *     short note WHY surfaces. One-click override returns the spec to `planned`.
  *
- * The disposition function (`adaDispositionFor`) is the policy seam. Phase 3 ships a TRUST-THE-AUTHOR
- * default — Ada agrees with `intended_status` unless a future heuristic upgrades or downgrades; the
- * UPGRADE / DOWNGRADE plumbing is fully wired, so a richer evaluator can drop in without ceremony.
+ * The disposition function (`adaDispositionFor`) is the policy seam. Phase 3 shipped a TRUST-THE-AUTHOR
+ * stub — Ada always agreed with `intended_status`. [[../specs/vale-reasons-the-disposition]] Phase 2
+ * RETIRES that stub: Vale's PASS now emits a reasoned planned/deferred recommendation (`specs.vale_disposition`
+ * + `specs.vale_disposition_reason`), and `adaDispositionFor` COMPARES Vale's rec vs the author's
+ * intended to route through the asymmetric branches above — carrying VALE'S plain-text reason to the CEO
+ * on a non-`same` row. Ada still OWNS the outcome via the CEO gate (an UPGRADE remains gated); Vale only
+ * PROPOSES. A candidate with NO stored Vale rec (pre-migration legacy) falls back to `intended` so
+ * nothing regresses mid-migration.
  *
  * The disposition writer is the ONLY component that flips a Vale-passed `in_review` spec; the sweep is
  * idempotent (a card already carrying `flags.ada_disposition` is skipped) so a cron re-fire never
@@ -65,6 +70,16 @@ export interface AdaDecision {
 export interface DispositionCandidate {
   slug: string;
   intended: "planned" | "deferred";
+  /**
+   * vale-reasons-the-disposition Phase 2 — Vale's reasoned planned/deferred recommendation carried off
+   * the SpecRow (stored on `specs.vale_disposition` by the spec-review lane on a PASS). When present,
+   * `adaDispositionFor` USES this instead of the trust-the-author default; when absent (a pre-migration
+   * legacy pass), the sweep falls back to `intended` — nothing regresses mid-migration.
+   */
+  vale_disposition: "planned" | "deferred" | null;
+  /** Plain-text WHY paired with `vale_disposition`; surfaced verbatim on Ada's DOWNGRADE notification /
+   *  UPGRADE Approval Request so the CEO reads the reason Vale wrote. */
+  vale_disposition_reason: string | null;
 }
 
 export async function selectDispositionCandidates(
@@ -81,29 +96,79 @@ export async function selectDispositionCandidates(
     if (r.ada_disposition) continue; // already disposed (autonomous flip landed) or parked (pending_upgrade) — skip.
     if (r.deferred) continue; // an out-of-band defer already happened — leave it for the operator.
     const intended: "planned" | "deferred" = r.intended_status === "deferred" ? "deferred" : "planned";
-    out.push({ slug: r.slug, intended });
+    out.push({
+      slug: r.slug,
+      intended,
+      // vale-reasons-the-disposition Phase 2 — carry Vale's stored recommendation (may be null on a
+      // pre-migration legacy pass; adaDispositionFor falls back to `intended` in that case).
+      vale_disposition: r.vale_disposition,
+      vale_disposition_reason: r.vale_disposition_reason,
+    });
   }
   return out;
 }
 
 /**
- * Ada's per-spec disposition decision — the POLICY seam. Phase 3 ships a TRUST-THE-AUTHOR default:
- * she agrees with `intended_status`, so the asymmetric check always lands on `kind="same"` and the
- * sweep flips the card silently. The UPGRADE / DOWNGRADE plumbing is wired (writers + CEO inbox card +
- * notification) so a future heuristic (build capacity, criticality, blocker pressure) can drop in here
- * and the rest of the lane keeps working — no policy change needed downstream.
+ * Ada's per-spec disposition decision — the POLICY seam. [[../specs/vale-reasons-the-disposition]]
+ * Phase 2 retires the Phase-3 trust-the-author stub: Vale (who already read the entire spec for quality)
+ * emits a REASONED planned/deferred recommendation on her PASS — stored on `specs.vale_disposition` +
+ * `specs.vale_disposition_reason`. `selectDispositionCandidates` reads both off the SpecRow onto the
+ * candidate; this function now DECIDES using Vale's rec and returns the asymmetric branch:
  *
- * The reason string is the human-readable WHY the CEO sees on a non-`same` row + the audit trail on
- * a `same` row; keep it short and specific.
+ *   - Vale rec == author intended  → `same`      (autonomous, silent — as today)
+ *   - Vale rec = deferred, author = planned  → `downgrade` (autonomous + CEO notify, carrying VALE's reason)
+ *   - Vale rec = planned,  author = deferred → `upgrade`   (CEO Approval Request, carrying VALE's reason)
+ *
+ * Back-compat fallback: a candidate with NO stored `vale_disposition` (a pre-migration legacy pass, or a
+ * Vale pass that didn't emit a rec) FALLS BACK to the author's `intended` — kind='same', reason names the
+ * fallback so the audit ledger reflects it. Nothing regresses mid-migration.
+ *
+ * The director still OWNS the disposition via the ASYMMETRIC CEO gate downstream (an UPGRADE remains
+ * gated) — Vale only PROPOSES. This is the same north-star principle as the rest of the pipeline:
+ * spending MORE than the author proposed confirms with the CEO; spending LESS is autonomous + a
+ * one-click override.
  */
 export function adaDispositionFor(candidate: DispositionCandidate): AdaDecision {
-  // Phase 3 baseline — trust the author. A real evaluator (criticality / capacity / blocker pressure)
-  // can later upgrade or downgrade here and the rest of the lane handles the asymmetric routing.
+  const intended = candidate.intended;
+  const valeRec = candidate.vale_disposition;
+  // Back-compat: no stored Vale rec → fall back to the author's intended (today's trust-the-author
+  // behavior). A pre-migration legacy pass whose vale_pass was set BEFORE the vale_disposition columns
+  // existed lands here; the sweep still flips the card silently, matching prior behavior.
+  if (valeRec !== "planned" && valeRec !== "deferred") {
+    return {
+      kind: "same",
+      decision: intended,
+      intended,
+      reason: `No Vale disposition on this pass (legacy) — falling back to the author's intent (${intended}).`,
+    };
+  }
+  const valeReason = (candidate.vale_disposition_reason || "").trim();
+  // Same → autonomous. Vale + author agree; the CEO sees this on the audit row only (no notification /
+  // no Approval Request — the pipeline stays quiet on a match).
+  if (valeRec === intended) {
+    return {
+      kind: "same",
+      decision: intended,
+      intended,
+      reason: valeReason || `Vale agreed with the author's intent (${intended}).`,
+    };
+  }
+  // Vale rec differs from author intent → asymmetric routing. Preserve VALE'S reason so the CEO
+  // reads what Vale wrote (the whole point of retiring the stub).
+  if (valeRec === "deferred" && intended === "planned") {
+    return {
+      kind: "downgrade",
+      decision: "deferred",
+      intended,
+      reason: valeReason || "Vale recommended deferring this spec (no reason provided).",
+    };
+  }
+  // valeRec === 'planned' && intended === 'deferred' → UPGRADE (CEO-gated).
   return {
-    kind: "same",
-    decision: candidate.intended,
-    intended: candidate.intended,
-    reason: `Author's intended destination matches my read of build priority — flipping to ${candidate.intended}.`,
+    kind: "upgrade",
+    decision: "planned",
+    intended,
+    reason: valeReason || "Vale recommended building this spec now (no reason provided).",
   };
 }
 
@@ -141,7 +206,13 @@ export async function applyAdaDispositionDecision(
         actionKind: "spec_dispose_same",
         specSlug: candidate.slug,
         reason,
-        metadata: { intended: candidate.intended, decision: decision.decision, autonomous: true },
+        metadata: {
+          intended: candidate.intended,
+          decision: decision.decision,
+          autonomous: true,
+          vale_disposition: candidate.vale_disposition,
+          source: candidate.vale_disposition ? "vale-rec" : "author-intent-fallback",
+        },
       });
       return { applied: "same", ok: true };
     }
@@ -156,7 +227,14 @@ export async function applyAdaDispositionDecision(
         actionKind: "spec_dispose_downgrade",
         specSlug: candidate.slug,
         reason,
-        metadata: { intended: candidate.intended, decision: "deferred", notification: notifResult.ok, autonomous: true },
+        metadata: {
+          intended: candidate.intended,
+          decision: "deferred",
+          notification: notifResult.ok,
+          autonomous: true,
+          vale_disposition: candidate.vale_disposition,
+          source: "vale-rec",
+        },
       });
       return { applied: "downgrade", ok: true };
     }
@@ -174,7 +252,14 @@ export async function applyAdaDispositionDecision(
       actionKind: "spec_dispose_upgrade_proposed",
       specSlug: candidate.slug,
       reason,
-      metadata: { intended: candidate.intended, proposed: "planned", autonomous: false, gated: true },
+      metadata: {
+        intended: candidate.intended,
+        proposed: "planned",
+        autonomous: false,
+        gated: true,
+        vale_disposition: candidate.vale_disposition,
+        source: "vale-rec",
+      },
     });
     return { applied: "upgrade_proposed", ok: true };
   } catch (err) {

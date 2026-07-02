@@ -101,6 +101,11 @@ interface LaneRow {
   // expand: the full checklist). Phase 1's runner writes both onto the row; Phase 2 surfaces them here.
   session_note?: string | null;
   session_checklist?: SessionChecklistItem[] | null;
+  // consolidate-premerge-checks-one-session Phase 2 — true for a `spec-test` lane whose underlying
+  // agent_jobs row is a PRE-MERGE fused session (spec_branch starts with `claude/`). The box view renders
+  // TWO personas (Vera + Vault) + a static 'spec-test · security' label for these, because one session
+  // emits both verdicts; a NON-fused spec-test lane (post-ship, no branch) still renders single-persona.
+  fused_pre_merge?: boolean;
 }
 
 // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
@@ -264,11 +269,28 @@ export async function GET() {
     }
   }
 
+  // consolidate-premerge-checks-one-session Phase 2 — mark each `spec-test` lane whose job carries a
+  // `claude/*` `spec_branch` as fused_pre_merge (one session, two verdicts). The box card then renders
+  // BOTH Vera (spec-test) + Vault (security) avatars + a 'spec-test · security' label. A spec-test job
+  // without a claude/* branch is post-ship (single-persona; unchanged).
+  if (worker?.lanes?.length) {
+    const stIds = worker.lanes.filter((l) => l.kind === "spec-test" && l.job_id).map((l) => l.job_id);
+    if (stIds.length) {
+      const { data: st } = await admin.from("agent_jobs").select("id, spec_branch").in("id", stIds);
+      const fusedById = new Map<string, boolean>();
+      for (const j of (st || []) as Array<{ id: string; spec_branch: string | null }>) {
+        fusedById.set(j.id, !!(j.spec_branch && j.spec_branch.startsWith("claude/")));
+      }
+      worker.lanes = worker.lanes.map((l) => (fusedById.has(l.job_id) ? { ...l, fused_pre_merge: fusedById.get(l.job_id) ?? false } : l));
+    }
+  }
+
   // Open jobs (live, actionable layer) for queue depth + paused callouts. `instructions` is pulled so the
-  // queued-jobs log (below) can parse the per-job "Phase N" the worker was handed.
+  // queued-jobs log (below) can parse the per-job "Phase N" the worker was handed. `spec_branch` is pulled
+  // so a queued spec-test job for a claude/* branch renders as fused pre-merge (Vera + Vault) too.
   const { data: jobsData } = await admin
     .from("agent_jobs")
-    .select("id, spec_slug, kind, status, pr_url, pr_number, created_at, instructions")
+    .select("id, spec_slug, kind, status, pr_url, pr_number, created_at, instructions, spec_branch")
     .eq("workspace_id", workspaceId)
     .in("status", ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume"])
     .order("created_at", { ascending: true });
@@ -281,6 +303,7 @@ export async function GET() {
     pr_number: number | null;
     created_at: string;
     instructions: string | null;
+    spec_branch: string | null;
   }[];
 
   // fold-guard-live-build (Phase 1) — defense in depth: a build/spec-test job whose spec page no longer
@@ -342,6 +365,9 @@ export async function GET() {
       phase: phaseForJob(j.kind, j.spec_slug, j.instructions),
       spec_missing: specMissing(j.kind, j.spec_slug),
       director_function: directorFunctionForGradeKind(j.kind, j.instructions),
+      // consolidate-premerge-checks-one-session Phase 2 — a queued spec-test job targeting a `claude/*`
+      // branch is a fused pre-merge session (Vera + Vault); the queued-jobs log renders both personas.
+      fused_pre_merge: j.kind === "spec-test" && !!(j.spec_branch && j.spec_branch.startsWith("claude/")),
     }));
   const paused = jobs
     .filter((j) => j.status === "needs_input" || j.status === "needs_approval")

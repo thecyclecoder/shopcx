@@ -53,6 +53,12 @@ GitHub-API tools, you have the **whole working tree** and the **web**.
   small (2-4, the ones truly load-bearing); no mappable pages means no line (better than a wrong one).
   This is a suggestion — a subsequent refine turn can edit it. The worker also runs a deterministic
   safety-net suggester on the buffer after your call, so a missed obvious page is still surfaced.
+  **Editable OR skippable ([[../../docs/brain/specs/fix-spec-brain-refs]]):** a refine can EITHER edit
+  the wikilinks (author picks always win) OR skip refs entirely — but "skip" needs a persisted signal
+  the safety-net suggester will honor on the next author, else the ref gets re-injected. Two forms:
+  leave an empty `**Brain refs:**` header (colon with no value) OR drop an invisible
+  `<!-- brain-refs: skip -->` HTML comment anywhere in the body. Simply DELETING the line is not a
+  durable skip — the deterministic suggester can't tell it from a brand-new spec and will re-inject.
 
 ## Modes (the worker tells you which; it sets your final-JSON shape)
 

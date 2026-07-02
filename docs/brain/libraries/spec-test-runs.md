@@ -79,6 +79,17 @@ The spec-test agent runs in TWO modes off the SAME runner + JSON contract:
   The runner's contract is otherwise unchanged: one JSON verdict, no mutating checks. Dedupe key is per-branch (workspace, slug,
   branch) so a pre-merge run on branch A doesn't block one on branch B; the post-ship `(workspace, slug)` chokepoint is strictly
   broader so the two lanes never collide.
+  **Fused pre-merge security review ([[../specs/consolidate-premerge-checks-one-session]] Phase 1).** The pre-merge session ALSO
+  emits a SECURITY REVIEW off the same branch diff it already loaded — a two-verdict JSON envelope
+  (`{...spec_test, security: {...}}`). The worker writes the spec-test verdict to `spec_test_runs` FIRST (partial-safety — a session
+  that dies after the spec-test half still records it), then INSERTS a synthetic `security-review` `agent_jobs` row for the branch
+  (mode='branch', status='claimed' so the standalone poll never picks it) and applies the security verdict via the shared
+  `applySecurityVerdictToJob` sink — SAME appliers the standalone lane uses (`director_activity` + [[security-agent]] fix-spec author
+  + [[approval-router]] fix-routing). The standalone `security-review` branch-mode enqueue ([[agent-jobs]]
+  `maybeEnqueuePreMergeSecurityOnAccumulation`) is now inert (its work moved into this fused session); the standalone lane still
+  runs for post-merge `diff` mode + on-demand use, and it's the safety-net fallback the fused session invokes when its own security
+  envelope is missing/malformed. The M4 promote gate's dual green signal (`isSpecTestGreenForBranch` ∧ `isSecurityGreenForBranch`)
+  reads the same rows — the synthetic security-review row satisfies the security signal.
 
 ### Pre-merge green-signal (Phase 3) — readable by the M4 promote gate
 - `getLatestSpecTestRunForBranch(workspaceId, slug, branch)` → `SpecTestRun | null` — the latest pre-merge row for the branch

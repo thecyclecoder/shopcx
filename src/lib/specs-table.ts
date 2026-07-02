@@ -87,6 +87,14 @@ export interface SpecRow {
   /** spec-review-agent Phase 3 — Ada's disposition state. `pending_upgrade` means a CEO Planned/Deferred
    *  call is parked waiting; null means Ada hasn't touched this Vale-passed spec yet. */
   ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
+  /** vale-reasons-the-disposition Phase 1 — Vale's reasoned planned/deferred recommendation on a PASS.
+   *  Populated by the spec-review lane when the pass carries a disposition; NULL for a needs_fix verdict
+   *  or a pass authored BEFORE this column existed (Ada's Phase-2 sweep falls back to `intended_status`).
+   *  Cleared alongside `vale_pass` on send-back / re-author. */
+  vale_disposition: "planned" | "deferred" | null;
+  /** vale-reasons-the-disposition Phase 1 — the plain-text WHY paired with `vale_disposition`. Ada's
+   *  asymmetric routing surfaces this on the CEO Approval Request (UPGRADE) / notification (DOWNGRADE). */
+  vale_disposition_reason: string | null;
   milestone_id: string | null;
   /** spec-status-phase-pr-provenance Phase 1 — card-level shipping PR for a ONE-SHOT spec (zero phases):
    *  the single merge that ships the whole spec, recorded here because there's no phase slot to carry it.
@@ -179,6 +187,8 @@ interface SpecRowDb {
   vale_pass: boolean | null;
   vale_review_passed_at: string | null;
   ada_disposition: "autonomous_same" | "autonomous_downgrade" | "pending_upgrade" | null;
+  vale_disposition: "planned" | "deferred" | null;
+  vale_disposition_reason: string | null;
   milestone_id: string | null;
   merged_pr: number | null;
   last_merge_sha: string | null;
@@ -188,7 +198,7 @@ interface SpecRowDb {
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, created_at, updated_at";
 
@@ -214,6 +224,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     vale_pass: db.vale_pass,
     vale_review_passed_at: db.vale_review_passed_at,
     ada_disposition: db.ada_disposition,
+    vale_disposition: db.vale_disposition,
+    vale_disposition_reason: db.vale_disposition_reason,
     milestone_id: db.milestone_id,
     merged_pr: db.merged_pr,
     last_merge_sha: db.last_merge_sha,

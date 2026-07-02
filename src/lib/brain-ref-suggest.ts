@@ -30,6 +30,43 @@ export function hasBrainRefsLine(body: string): boolean {
   return /^\s*\*\*Brain refs:\*\*/im.test(body);
 }
 
+/**
+ * fix-spec-brain-refs — the durable, persisted "author explicitly skipped Brain refs" marker. An
+ * HTML comment because it survives re-authoring (part of the body) yet renders as nothing on GitHub /
+ * the dashboard, so an author-picked skip doesn't leave a visible artifact in the spec text. Paired
+ * with the second signal `hasBrainRefsSkip` also recognizes — a header line whose value is empty
+ * (`**Brain refs:**` on its own, no wikilinks) — a Refine that clears the injected refs without
+ * removing the header is likewise durable.
+ *
+ * Why a persisted signal is required: `hasBrainRefsLine` already treats ANY `**Brain refs:** …` line
+ * as "author picked, never clobber" — but if a refine REMOVES the line entirely (the natural "I don't
+ * want brain refs on this spec" edit), the next authoring re-scans + re-injects it. Without a
+ * durable marker, the suggester has no way to distinguish a brand-new spec from one where the author
+ * explicitly said "skip." This marker is that distinction.
+ */
+export const BRAIN_REFS_SKIP_MARKER = "<!-- brain-refs: skip -->";
+
+/** True when the body carries the durable skip marker — the `<!-- brain-refs: skip -->` HTML comment.
+ *  Case-insensitive + whitespace-tolerant so an author-typed variant still matches. */
+export function hasBrainRefsSkipMarker(body: string): boolean {
+  return /<!--\s*brain-refs\s*:\s*skip\s*-->/i.test(body);
+}
+
+/**
+ * True when the body carries EITHER durable skip signal — an empty `**Brain refs:**` header (author
+ * kept the header but cleared the value) OR the `<!-- brain-refs: skip -->` HTML comment (an
+ * invisible durable marker). Both are equivalent: "author explicitly picked NONE — do not re-inject."
+ * The empty-header form was implicitly supported by `hasBrainRefsLine`; this helper makes the intent
+ * explicit for callers that also want to no-op on the comment marker.
+ */
+export function hasBrainRefsSkip(body: string): boolean {
+  if (hasBrainRefsSkipMarker(body)) return true;
+  // An empty `**Brain refs:**` header line — the header exists but carries no wikilinks after it.
+  // Line-anchored + tolerant of trailing whitespace so `**Brain refs:**   ` still counts as skip.
+  if (/^\s*\*\*Brain refs:\*\*\s*$/im.test(body)) return true;
+  return false;
+}
+
 /** A resolved candidate ref: the target wikilink relative to `docs/brain/specs/` (e.g. `../libraries/foo`)
  *  + the on-disk `docs/brain/…` path we verified exists. */
 export interface BrainRefCandidate {
@@ -143,6 +180,9 @@ export function formatBrainRefsLine(refs: BrainRefCandidate[]): string {
 export function injectSuggestedBrainRefsLine(body: string, refs: BrainRefCandidate[]): string {
   if (!refs.length) return body;
   if (hasBrainRefsLine(body)) return body;
+  // fix-spec-brain-refs — honor the durable skip marker. A body carrying `<!-- brain-refs: skip -->`
+  // is an explicit "author picked none" signal; never re-inject over it, regardless of what maps.
+  if (hasBrainRefsSkipMarker(body)) return body;
 
   const lines = body.split("\n");
   const isMetaLine = (l: string): boolean =>
@@ -172,6 +212,10 @@ export function suggestBrainRefs(
 ): { body: string; refs: BrainRefCandidate[] } {
   try {
     if (hasBrainRefsLine(body)) return { body, refs: [] };
+    // fix-spec-brain-refs — a durable skip marker (either the `<!-- brain-refs: skip -->` comment or
+    // an empty `**Brain refs:**` header) means the author explicitly picked NONE. Short-circuit to
+    // { body, refs:[] } so a subsequent re-author does NOT re-inject the previously-mapped ref.
+    if (hasBrainRefsSkip(body)) return { body, refs: [] };
     const refs = deriveSuggestedBrainRefs(body, brainDir);
     if (!refs.length) return { body, refs };
     const next = injectSuggestedBrainRefsLine(body, refs);

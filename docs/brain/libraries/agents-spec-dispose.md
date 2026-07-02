@@ -15,7 +15,7 @@ Ada disposes every Vale-passed `in_review` spec with an asymmetric check against
 | `planned` | `deferred` | **downgrade** | Autonomous flip → `deferred`. CEO notification: "I moved this to deferred — want it built now? [Build now → planned]". |
 | `deferred` | `planned` | **upgrade** | GATED. Spec parked `flags.ada_disposition='pending_upgrade'`; a 2-button CEO Approval Request (Planned / Deferred) lands in the agent inbox. |
 
-The asymmetry: spending more than the author proposed (UPGRADE) confirms with the CEO; spending less (DOWNGRADE) is autonomous + a one-click override.
+The asymmetry: spending more than the author proposed (UPGRADE) confirms with the CEO; spending less (DOWNGRADE) is autonomous + a one-click override. [[../specs/vale-reasons-the-disposition]] Phase 2: **Vale's reasoned recommendation** now drives which branch fires (previously the stub always landed on `same`); Vale's plain-text reason is what the CEO reads on UPGRADE / DOWNGRADE surfaces.
 
 ## Exports
 
@@ -31,7 +31,18 @@ Every Vale-passed `in_review` spec the lane hasn't touched. Reads `spec_card_sta
 
 ### `adaDispositionFor(candidate): AdaDecision`
 
-The POLICY seam. Phase 3 ships a TRUST-THE-AUTHOR default — Ada agrees with `intended_status`, so the asymmetric check always lands on `kind='same'` and the sweep flips the card silently. The UPGRADE / DOWNGRADE plumbing (writers + CEO inbox card + notification) is fully wired so a future heuristic (build capacity, criticality, blocker pressure) can drop in here and the rest of the lane keeps working — no policy change needed downstream.
+The POLICY seam. Phase 3 shipped a TRUST-THE-AUTHOR stub — Ada agreed with `intended_status`, so the asymmetric check always landed on `kind='same'` and the sweep flipped silently. [[../specs/vale-reasons-the-disposition]] Phase 2 RETIRES that stub: `selectDispositionCandidates` reads Vale's `specs.vale_disposition` + `specs.vale_disposition_reason` (set on her PASS by [[agents-spec-review]] `applySpecReviewDecision`) onto the candidate, and `adaDispositionFor` COMPARES Vale's rec vs the author's `intended`:
+
+| Vale's rec | Author intended | Branch | What happens |
+| ---------- | --------------- | ------ | ------------ |
+| `planned`  | `planned`  | **same** | Autonomous flip → `planned` (Vale's reason on the audit row). |
+| `deferred` | `deferred` | **same** | Autonomous flip → `deferred` (Vale's reason on the audit row). |
+| `deferred` | `planned`  | **downgrade** | Autonomous flip → `deferred` + CEO notification carrying VALE's reason. |
+| `planned`  | `deferred` | **upgrade** | GATED — CEO Approval Request carrying VALE's reason (director still owns the outcome via the gate). |
+
+Back-compat: a candidate with NO stored `vale_disposition` (pre-migration legacy pass) FALLS BACK to `intended` — `kind='same'`, reason names the fallback so the audit ledger reflects it. The sweep still flips silently, matching the Phase-3 behavior — nothing regresses mid-migration.
+
+Director-owns-the-outcome: Vale only PROPOSES. The DIRECTOR still DISPOSES via the CEO gate (an UPGRADE remains gated). Same north-star principle as before: spending MORE than the author proposed confirms with the CEO; spending LESS is autonomous + a one-click override.
 
 ### `applyAdaDispositionDecision(admin, workspaceId, candidate, decision): Promise<{applied, ok}>`
 

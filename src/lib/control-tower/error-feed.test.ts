@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
   isTransientShopifyWebhookHmacFailure,
@@ -367,4 +368,69 @@ test("isTransientShopifyWebhookHmacFailure returns false on empty / nullish inpu
   assert.equal(isTransientShopifyWebhookHmacFailure(undefined, undefined), false);
   assert.equal(isTransientShopifyWebhookHmacFailure("", ""), false);
   assert.equal(isTransientShopifyWebhookHmacFailure("/api/webhooks/shopify", ""), false);
+});
+
+// ── isTransientClientNetworkAbort (error-feed-drop-safari-load-failed-client-network-abort-noise) ──
+// Every browser has a fixed TypeError message for a cancelled/aborted fetch — Safari
+// 'Load failed', Chrome/Firefox 'Failed to fetch' / 'NetworkError when attempting to
+// fetch resource', iOS URLSession 'The network connection was lost'. With an empty
+// stack, that's the aborted-fetch class — mobile-Safari counterpart to the Node stream-abort
+// noise. Classifying it transient auto-resolves a first sighting (recorded, not paged);
+// a chronic client outage would recur within the window and still surface. The false
+// positive that opened Control Tower `client:fe00dcba3e396856` on one iPhone Safari
+// 26.5 user hitting /dashboard/roadmap.
+
+test("isTransientClientNetworkAbort matches Safari 'Load failed' with empty stack", () => {
+  assert.equal(isTransientClientNetworkAbort("Load failed", null), true);
+  assert.equal(isTransientClientNetworkAbort("Load failed", ""), true);
+  assert.equal(isTransientClientNetworkAbort("Load failed", undefined), true);
+  // Case-insensitive on the message.
+  assert.equal(isTransientClientNetworkAbort("load failed", ""), true);
+  assert.equal(isTransientClientNetworkAbort("  Load failed  ", ""), true);
+});
+
+test("isTransientClientNetworkAbort matches Chrome/Firefox 'Failed to fetch' with empty stack", () => {
+  assert.equal(isTransientClientNetworkAbort("Failed to fetch", null), true);
+  assert.equal(isTransientClientNetworkAbort("Failed to fetch", ""), true);
+});
+
+test("isTransientClientNetworkAbort matches Firefox 'NetworkError when attempting to fetch resource' with empty stack", () => {
+  assert.equal(
+    isTransientClientNetworkAbort("NetworkError when attempting to fetch resource", null),
+    true,
+  );
+  // Firefox sometimes ships a trailing period.
+  assert.equal(
+    isTransientClientNetworkAbort("NetworkError when attempting to fetch resource.", ""),
+    true,
+  );
+});
+
+test("isTransientClientNetworkAbort matches iOS URLSession 'The network connection was lost' with empty stack", () => {
+  assert.equal(isTransientClientNetworkAbort("The network connection was lost", null), true);
+  assert.equal(isTransientClientNetworkAbort("The network connection was lost.", ""), true);
+});
+
+test("isTransientClientNetworkAbort KEEPS the same message with a real stack (code-throw)", () => {
+  // A real code-throw carrying the same literal string ships a stack with a frame in our
+  // code — that's an application bug we want captured + paged, not swallowed as transient.
+  const realStack = `TypeError: Load failed
+    at fetchRoadmap (webpack-internal:///./src/app/dashboard/roadmap/page.tsx:42:15)
+    at DashboardRoadmap (webpack-internal:///./src/app/dashboard/roadmap/page.tsx:12:5)`;
+  assert.equal(isTransientClientNetworkAbort("Load failed", realStack), false);
+  assert.equal(isTransientClientNetworkAbort("Failed to fetch", "at foo (bar.js:1:1)"), false);
+});
+
+test("isTransientClientNetworkAbort KEEPS an unrelated message (not the abort family)", () => {
+  assert.equal(isTransientClientNetworkAbort("TypeError: undefined is not an object", null), false);
+  assert.equal(isTransientClientNetworkAbort("Cannot read properties of undefined", ""), false);
+  assert.equal(isTransientClientNetworkAbort("Load failed to render", ""), false); // substring, not exact
+  assert.equal(isTransientClientNetworkAbort("Something failed to fetch data", ""), false);
+});
+
+test("isTransientClientNetworkAbort returns false on empty / nullish message", () => {
+  assert.equal(isTransientClientNetworkAbort(null, null), false);
+  assert.equal(isTransientClientNetworkAbort(undefined, undefined), false);
+  assert.equal(isTransientClientNetworkAbort("", ""), false);
+  assert.equal(isTransientClientNetworkAbort("   ", null), false);
 });

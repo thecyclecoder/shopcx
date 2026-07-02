@@ -1,0 +1,1 @@
+- **Fix: pre-merge-red spec authoring writes a mangled Owner into specs.owner** · verified 2026-07-02 · → [[../libraries/author-spec]]

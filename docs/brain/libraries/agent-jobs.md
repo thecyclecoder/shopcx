@@ -51,7 +51,7 @@ The **M3 pre-merge spec-test TRIGGER**. Under the branch-accumulation model a sp
 
 The queued spec-test then materializes the spec from the DB row ([[build-spec-materializer]] reads `public.specs`+`spec_phases`, which M1/M2 stamped from this branch's commits) and points its probes at the preview URL — testing the BUILT spec on its branch preview, not main. Best-effort + never throws.
 
-### `maybeEnqueuePreMergeSecurityOnAccumulation` — function  *(security-test-on-preview-pre-merge Phase 1 — the wiring)*
+### `maybeEnqueuePreMergeSecurityOnAccumulation` — function  *(isolate-premerge-security-verdict Phase 1)*
 
 ```ts
 async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
@@ -59,7 +59,11 @@ async function maybeEnqueuePreMergeSecurityOnAccumulation(args: {
 }): Promise<{ enqueued: boolean; reason?: string }>
 ```
 
-The **pre-merge SECURITY TRIGGER** — the security twin of `maybeEnqueuePreMergeSpecTestOnAccumulation`. Same accumulation predicate (test the WHOLE built spec on its branch preview); calls [[security-agent]] `enqueueSecurityReviewJob` in `branch` mode. **This is the caller the `security-test-on-preview-pre-merge` spec said the preview-ready hook would invoke but never landed** — until it was wired, the branch-mode enqueue had ZERO callers, so [[security-agent]] `isSecurityGreenForBranch` was ALWAYS false and the M4 tests gate (`isSpecPromoteEligible` ∧ `autoMergeReadyPrs`) could never pass (every one-off PR sat `in_testing`; branch-mode reviews = 0 in prod). Invoked from `runBuildJob`'s preview-ready callback alongside the spec-test trigger, AND from `backstopPreMergeChecks`. Idempotent (one open review per branch). Best-effort + never throws.
+**Restored to active status as the standalone pre-merge SECURITY TRIGGER** ([[../specs/isolate-premerge-security-verdict]] Phase 1, reverts consolidate-premerge-checks-one-session Phase 1). The security twin of `maybeEnqueuePreMergeSpecTestOnAccumulation`, calling [[security-agent]] `enqueueSecurityReviewJob` in `branch` mode from the preview-ready hook + `backstopPreMergeChecks`. It runs a SEPARATE branch-mode Max session per branch (a dedicated security review, no longer fused with the spec-test session).
+
+Under **`consolidate-premerge-checks-one-session` Phase 1** the pre-merge security review WAS FUSED into the pre-merge spec-test session (`runSpecTestJob` in `scripts/builder-worker.ts`), where the same session emitted both verdicts in one envelope and inserted a synthetic `security-review` row. This function was retired as a no-op.
+
+Under **`isolate-premerge-security-verdict` Phase 1** the fusion is REVERSED: the pre-merge spec-test session emits ONLY the spec-test verdict; the security review runs as a dedicated standalone enqueue via this function. The [[security-agent]] `enqueueSecurityReviewJob` (branch mode) is the ONLY producer of pre-merge security verdicts. The `isSecurityGreenForBranch` signal reads agent_jobs rows directly (no synthetic rows from the spec-test envelope). Best-effort + never throws.
 
 ### `backstopPreMergeChecks` — function  *(Gate-A class gap fix — standing-pass backstop)*
 
@@ -68,6 +72,8 @@ async function backstopPreMergeChecks(adminClient?): Promise<PreMergeBackstopRes
 ```
 
 The **standing-pass backstop for BOTH pre-merge triggers** (spec-test + security). Both enqueues fire only from the build's fire-and-forget preview-capture READY callback — the SAME event-only gap Gate-A had: a missed READY (worker restart, slow preview, transient hiccup) means the signal is never enqueued and the branch stalls `in_testing` forever. This re-evaluates every READY-preview `claude/build-*` build job (latest per slug) each platform-director standing pass and (idempotently) re-fires `maybeEnqueuePreMergeSpecTestOnAccumulation` + `maybeEnqueuePreMergeSecurityOnAccumulation`. The underlying enqueues dedupe, so running it every pass is safe + cheap. Best-effort per branch; never throws.
+
+**isolate-premerge-security-verdict Phase 1 — restored security enqueue.** Both halves of the backstop are now active. `maybeEnqueuePreMergeSecurityOnAccumulation` was restored to call [[security-agent]] `enqueueSecurityReviewJob` in branch mode, running as a dedicated Max session per branch (reverts the fusion from consolidate-premerge-checks-one-session Phase 1). The backstop's spec-test re-fire and security re-fire are now independent legs, each with its own dedup logic.
 
 **No-captured-preview recovery (resume-after-approval fix — `noop-pipeline-test-4` / #837).** The original backstop scanned only branches whose build row already carries a **READY** preview — but the resume-after-approval finalize path never captures the branch tip's preview (the `commitWip` push at the `needs_approval` pause pushes the branch but kicks no `pollCapturePreviewUrl`, and the resume's `!dirty` finalize pushes nothing). So #837's latest build row had `preview_state` null and the READY-only scan skipped it forever → permanent `in_testing` with EMPTY `spec_test_runs`. The backstop now adds an **on-demand capture** for the latest build row of an in-flight spec whose preview isn't READY, gated tight to avoid hammering Vercel: only when the spec is **fully accumulated** (`isSpecAccumulationComplete`), has an **open PR** (`pr_url`/`pr_number`), and has **NO `spec_test_runs` row for `(workspace, slug, branch)` yet**. It calls `capturePreviewUrlForJob({ jobId, branch, commitSha: null })` to persist the branch tip's preview onto that row, then falls through to the normal spec-test + security triggers. Idempotent (`capturePreviewUrlForJob` only advances the row forward; once a run exists the recovery short-circuits). This is the heartbeat that self-recovers any spec stuck the way #837 was.
 

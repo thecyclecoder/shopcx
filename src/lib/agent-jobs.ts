@@ -692,6 +692,13 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
  * (Phase 3) — yet NO caller ever invoked the branch-mode enqueue, so `isSecurityGreenForBranch` was
  * ALWAYS false and the M4 gate could never pass (every one-off PR sat `in_testing`). This is that caller.
  *
+ * ⭐ isolate-premerge-security-verdict Phase 1 — the pre-merge security enqueue is the STANDALONE branch-mode
+ * `enqueueSecurityReviewJob` again (was briefly fused into the pre-merge spec-test session in
+ * consolidate-premerge-checks-one-session; that fusion let a fused session synthesize a gate-satisfying
+ * `security-review` row from a self-declared `security.status="clean"` envelope, which the standalone Vault
+ * lane is meant to be the ONLY producer of). runSpecTestJob no longer applies the fused security envelope;
+ * pre-merge security verdicts come exclusively from the standalone `runSecurityReviewJob` path.
+ *
  * Same accumulation predicate as the spec-test twin (test the WHOLE built spec on its branch preview, not a
  * partial). Idempotent (branch-mode enqueue dedupes one open review per branch). Best-effort + never throws.
  */

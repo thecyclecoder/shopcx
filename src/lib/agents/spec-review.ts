@@ -7,6 +7,12 @@
  *
  *   - `pass`       — the spec is well-formed (CHECKLIST clears). Sets `flags.vale_pass=true` on the card;
  *                    the spec stays in `in_review` to enter Ada's **director-disposition lane** (Phase 3).
+ *                    **vale-reasons-the-disposition Phase 1** — a pass MAY also carry a reasoned
+ *                    planned/deferred recommendation (Vale hydrated once for quality + emitted the
+ *                    disposition at ~zero extra cost); when present it lands on
+ *                    `specs.vale_disposition` + `vale_disposition_reason` and Ada's Phase-2 sweep
+ *                    consumes it (retiring the trust-the-author stub). Absent on a legacy pass — the
+ *                    sweep falls back to `intended_status`.
  *   - `needs_fix`  — the spec is malformed. The defects surface as a `director_activity` row so the CEO
  *                    sees the diagnosis; the spec stays in `in_review` until the corrections land.
  *
@@ -40,6 +46,16 @@ export interface SpecReviewDecision {
   reason: string;
   /** Optional list of checklist items that failed (Owner missing, mangled phases, …) — surfaced on needs_fix. */
   defects?: string[];
+  /**
+   * vale-reasons-the-disposition Phase 1 — Vale's reasoned planned/deferred recommendation, emitted
+   * ONLY on `verdict='pass'` (an ill-formed spec is not dispositionable yet). Persisted on
+   * `specs.vale_disposition`; Ada's disposition sweep will consume it in Phase 2 (retiring the
+   * trust-the-author stub). Absent on legacy passes → the sweep falls back to `intended_status`.
+   */
+  disposition?: "planned" | "deferred";
+  /** vale-reasons-the-disposition Phase 1 — plain-text WHY paired with `disposition` (surfaced by Ada's
+   *  asymmetric routing on the CEO Approval Request / notification). Required when `disposition` is set. */
+  disposition_reason?: string;
 }
 
 /**
@@ -116,7 +132,16 @@ export async function enqueueSpecReviewIfDue(
  */
 export async function applySpecReviewDecision(
   workspaceId: string,
-  decision: SpecReviewDecision | { slug: string; verdict: string; reason: string; defects?: string[] },
+  decision:
+    | SpecReviewDecision
+    | {
+        slug: string;
+        verdict: string;
+        reason: string;
+        defects?: string[];
+        disposition?: string;
+        disposition_reason?: string;
+      },
 ): Promise<{ ok: boolean; reason?: string; applied?: SpecReviewVerdict }> {
   const admin = createAdminClient();
   const reason = (decision.reason || "").slice(0, 1000);
@@ -130,19 +155,46 @@ export async function applySpecReviewDecision(
         ? "pass"
         : "needs_fix"; // unknown verdict → safest is no-op-of-state + diagnosis surfaced
   const action_kind = verdict === "pass" ? "spec_review_passed" : "spec_review_needs_fix";
+  // vale-reasons-the-disposition Phase 1 — on a PASS, Vale MAY also emit a reasoned planned/deferred
+  // recommendation ('hydrate once, extra verdict free'). Persist it when present; Ada's Phase-2 sweep
+  // will consume it (retiring the trust-the-author stub). Absent → the sweep falls back to intended_status.
+  const rawDisposition =
+    "disposition" in decision && typeof decision.disposition === "string" ? decision.disposition : undefined;
+  const rawDispositionReason =
+    "disposition_reason" in decision && typeof decision.disposition_reason === "string"
+      ? decision.disposition_reason.slice(0, 1000)
+      : undefined;
+  const disposition: "planned" | "deferred" | null =
+    verdict === "pass" && (rawDisposition === "planned" || rawDisposition === "deferred")
+      ? rawDisposition
+      : null;
+  const dispositionReason = disposition && rawDispositionReason ? rawDispositionReason : null;
   try {
     if (verdict === "pass") {
-      await markSpecCardValePassed(workspaceId, decision.slug, { actor, reason });
+      await markSpecCardValePassed(
+        workspaceId,
+        decision.slug,
+        { actor, reason },
+        disposition && dispositionReason
+          ? { disposition, disposition_reason: dispositionReason }
+          : undefined,
+      );
     }
     // needs_fix leaves the spec in_review (the build hard-stop holds). The defect surfaces via the
-    // director_activity row so the CEO sees what Vale flagged.
+    // director_activity row so the CEO sees what Vale flagged. On a pass, the disposition is recorded
+    // on the same row (Ada's sweep + the grader read the audit ledger for the reasoning trail).
     await recordDirectorActivity(admin, {
       workspaceId,
       directorFunction: "platform",
       actionKind: action_kind,
       specSlug: decision.slug,
       reason,
-      metadata: { defects: decision.defects ?? [] },
+      metadata: {
+        defects: decision.defects ?? [],
+        ...(disposition
+          ? { vale_disposition: disposition, vale_disposition_reason: dispositionReason }
+          : {}),
+      },
     });
     return { ok: true, applied: verdict };
   } catch (err) {

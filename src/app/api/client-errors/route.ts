@@ -29,7 +29,11 @@
  * See docs/brain/specs/client-error-capture.md · docs/brain/tables/error_events.md.
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { recordError, recordFeedDelivery } from "@/lib/control-tower/error-feed";
+import {
+  isTransientClientNetworkAbort,
+  recordError,
+  recordFeedDelivery,
+} from "@/lib/control-tower/error-feed";
 import type { ClientErrorSurface } from "@/lib/client-error-reporter";
 
 const VALID_SURFACES: ReadonlySet<string> = new Set<ClientErrorSurface>([
@@ -125,6 +129,10 @@ export async function POST(request: NextRequest) {
       title: `${surface} · ${page}: ${message}`.slice(0, 300),
       detail: stack ? `${message}\n${stack}` : message,
       sample: { surface, page, message, stack, userAgent },
+      // Browser network-abort TypeErrors (Safari 'Load failed' etc. with an empty stack)
+      // are one-off aborted-fetch noise — auto-resolve first sighting, escalate only on
+      // recurrence within the window.
+      transient: isTransientClientNetworkAbort(message, stack),
     });
     // Prove the feed is live (so a connected, clean panel reads green not amber).
     await recordFeedDelivery("client");

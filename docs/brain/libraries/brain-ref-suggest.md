@@ -10,9 +10,19 @@ Phase 1 of [[../specs/spec-brain-refs]] gave specs an optional `**Brain refs:**`
 
 The suggestion is BEST-EFFORT: nothing mappable ⇒ no line (Phase 1's grep-the-brain fallback covers it). The author's explicit `**Brain refs:**` line always wins (never overridden) — a subsequent spec-chat refine turn can strip or replace whatever we injected.
 
+**Editable AND skippable.** A refine can either REPLACE the injected wikilinks (edit the value of the header — the author's picks always win) OR SKIP the refs entirely by leaving a durable persisted signal. Two equivalent skip forms, either satisfies the [[../specs/fix-spec-brain-refs]] regression fix:
+
+- **Empty header:** `**Brain refs:**` on its own (no wikilinks after the colon) — a persisted "author picked NONE" that `hasBrainRefsLine` already treats as "never re-inject."
+- **HTML-comment marker:** `<!-- brain-refs: skip -->` placed anywhere in the spec body — invisible in the rendered spec but part of the persisted text, so it survives re-authoring. Use this when the author doesn't want the empty header artifact in the summary block.
+
+Without one of these markers, a refine that fully removed the `**Brain refs:**` line would be re-injected on the next author (indistinguishable from a brand-new spec that never had refs). The persisted signal is what makes SKIP a durable author choice, not a per-refine erasure.
+
 ## Exports
 
 - **`hasBrainRefsLine(body)`** → `boolean` — line-anchored probe for an existing `**Brain refs:**` metadata line (case-insensitive). A prose mention of the phrase inside a paragraph is NOT a false positive (regex is `/^…$/im`).
+- **`BRAIN_REFS_SKIP_MARKER`** → `string` — the durable "author explicitly skipped" HTML-comment marker (`<!-- brain-refs: skip -->`). Invisible in rendered markdown; survives re-authoring because it rides in the spec body. Paired with the equivalent empty `**Brain refs:**` header form.
+- **`hasBrainRefsSkipMarker(body)`** → `boolean` — probe for the HTML-comment skip marker (whitespace-tolerant, case-insensitive).
+- **`hasBrainRefsSkip(body)`** → `boolean` — probe for EITHER durable skip signal: the HTML-comment marker OR an empty `**Brain refs:**` header. Both mean "author explicitly picked NONE — do not re-inject on the next author." This is what makes the suggestion SKIPPABLE (the [[../specs/fix-spec-brain-refs]] regression fix): without a persisted signal, a refine that removed the injected line would be re-inserted next author. Callers who prevent re-injection use this; callers who only care about the header shape use `hasBrainRefsLine`.
 - **`deriveSuggestedBrainRefs(body, brainDir?, max=4)`** → `BrainRefCandidate[]` — scan + resolve. Order:
   1. Existing brain wikilinks the author already dropped in the body (`[[../libraries/foo]]`, `[[libraries/foo]]`) — these come first. Only build-relevant kinds (libraries / inngest / tables / lifecycles / integrations / recipes / journeys / playbooks / dashboard) are harvested; functions / goals are org-chart taxonomy, not build context. Wikilinks on METADATA header lines (`**Owner:**` / `**Parent:**` / `**Blocked-by:**` / `**Regression-of:**` / `**Brain refs:**` / `**Repair-signature:**` / `**Regression-signature:**`) are SKIPPED — the Owner line's `[[../functions/{slug}]]` is the classic false positive this guard blocks.
   2. `src/lib/inngest/{name}.ts` → `docs/brain/inngest/{name}.md`.
