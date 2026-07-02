@@ -14,7 +14,8 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `dedup_key` | `text` | — | AdLibrary `ad_key` — idempotency key; never re-vision/re-spend |
 | `advertiser` | `text` | ✓ | the **brand** — the unit of "independent" for the matrix |
 | `title` | `text` | ✓ | AdLibrary `title` (often thin) |
-| `image_url` | `text` | ✓ | original AdLibrary creative link (analysis only; displayed via the authenticated proxy) |
+| `image_url` | `text` | ✓ | original AdLibrary creative link (analysis only; NOT the display source anymore — see `thumb_path`) |
+| `thumb_path` | `text` | ✓ | storage path in the private `creative-shots` bucket of OUR downscaled (2048px q88) analyzable copy — what the dashboard displays via a signed URL. NULL for legacy rows (they fall back to the proxy). Set by [[../libraries/creative-skeleton]] `ingestAd`; migration `20260807120000`. |
 | `media_type` | `text` | — | default `'static'` · `static` \| `video` (routed at ingestion) |
 | `format` | `text` | ✓ | `ugc` \| `studio` \| `text-card` \| `before_after` \| `demo` \| … (vision) |
 | `framework` | `text` | ✓ | `hook-promise-proof` \| `problem-pivot-payoff` \| variant (vision) |
@@ -62,7 +63,7 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 
 - **Statics are visioned at ingestion** (`status='analyzed'`); **videos are routed aside** (`status='video_pending'`) and then drained by the **video pipeline** ([[../libraries/video-skeleton]] · [[../specs/creative-finder-video]]) — `creative-finder-video-process` downloads → ffmpeg keyframes + Whisper transcript → the same four-slot skeleton and flips the row to `analyzed` (or `failed`). The status flip is the dedup: a video `ad_key` is processed once.
 - The matrix counts **distinct `advertiser`s** — repetition across independent brands is the signal, never one ad's `heat`/`days_running` (those are tiebreakers only).
-- `image_url` 403s without the AdLibrary Bearer key — display goes through `/api/ads/creative-finder/media`.
+- **Display serves OUR hosted copy, not AdLibrary.** `image_url` 403s without the Bearer key AND is full-res (6–22MB) — live-proxying it 502'd (serverless response-size limit). So `ingestAd` stores a downscaled analyzable copy in the private `creative-shots` bucket (`thumb_path`) and the list route returns a signed URL to it. `/api/ads/creative-finder/media` remains only as a downscaling fallback for legacy rows without `thumb_path`.
 - **Full payload from `ingestAd`, not vision** — `destination_domain`/copy/CTA/spend/engagement/`platform` columns come straight from the AdLibrary row ([[../specs/ad-creative-scout]]); only `format`/`framework`/`hook`/`mechanism_claim`/`proof`/`offer` are vision-extracted. `destination_domain` is null for ads with no store url (`has_store_url=false`).
 
 ## Written by
