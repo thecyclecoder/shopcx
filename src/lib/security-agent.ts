@@ -357,7 +357,26 @@ export async function enqueueSecurityDiffIfDue(
     }
     out.scanned = bySha.size;
     out.resolved = bySha.size;
+    // backsweep-skip-archived (hotfix): NEVER re-enqueue a post-merge diff review for a FOLDED/DEFERRED/archived
+    // spec. This backstop exists to catch a RECENT ACTIVE merge whose reactive review was dropped — re-reviewing
+    // the entire archived backlog (folded specs' old merges, observed ~360 in the 14d window) burns one Max
+    // session PER spec for zero benefit (they were security-reviewed when they shipped). Load status for every
+    // candidate slug once; keep only genuinely-active specs (skip folded/deferred, and skip UNKNOWN — no active
+    // row means archived/removed → skip). This retires the earlier "catch folded specs' merges" intent, which was
+    // the Max-burn runaway (2026-07-02).
+    const candidateSlugs = [...new Set([...bySha.values()].map((h) => h.specSlug))];
+    const activeKeys = new Set<string>();
+    if (candidateSlugs.length) {
+      const { data: specRows } = await admin
+        .from("specs")
+        .select("workspace_id, slug, status, deferred")
+        .in("slug", candidateSlugs);
+      for (const s of (specRows ?? []) as Array<{ workspace_id: string; slug: string; status: string | null; deferred: boolean | null }>) {
+        if (s.status !== "folded" && s.status !== "deferred" && s.deferred !== true) activeKeys.add(`${s.workspace_id}:${s.slug}`);
+      }
+    }
     for (const [short, hit] of bySha) {
+      if (!activeKeys.has(`${hit.workspaceId}:${hit.specSlug}`)) continue; // skip folded/deferred/archived → no Max burn
       try {
         const r = await enqueueSecurityReviewJob(admin, {
           mergeSha: hit.mergeSha,
