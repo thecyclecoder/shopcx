@@ -306,6 +306,75 @@ function toDate(s: string | null): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
 
+// Freshness-gate window: the max age (in days) of a prior AdLibrary search for a given
+// seed before we search it again on the daily cron. Rounded to the ~7-day cadence of
+// the AdLibrary subscription's monthly cap — see docs/brain/specs/adlibrary-search-freshness-gate.md.
+// Overridable per-env via ADLIBRARY_FRESHNESS_DAYS (integer, > 0).
+export const ADLIBRARY_FRESHNESS_DAYS_DEFAULT = 7;
+
+function envFreshnessDays(): number {
+  const raw = process.env.ADLIBRARY_FRESHNESS_DAYS;
+  if (!raw) return ADLIBRARY_FRESHNESS_DAYS_DEFAULT;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : ADLIBRARY_FRESHNESS_DAYS_DEFAULT;
+}
+
+/** Named for the same knob the env override uses — the value the cron actually reads. */
+export function adlibraryFreshnessDays(): number {
+  return envFreshnessDays();
+}
+
+/**
+ * Freshness gate for the AdLibrary daily sweep — the Phase 2 quota governor.
+ *
+ * Returns only seeds whose `adlibrary_searches.last_searched_at` for (workspace, keyword)
+ * is either NULL (never searched — a newly-approved competitor / whitelisted page runs
+ * on the very next cron) OR older than `maxAgeDays` (default `ADLIBRARY_FRESHNESS_DAYS_DEFAULT`).
+ * Seeds inside the window are dropped WITHOUT a `searchAds` call — that's the whole point
+ * (the subscription has a fixed ~900-search/month cap).
+ *
+ * Orthogonal to the [[creative-finder]] cron's ~7s SWEEP_DELAY_MS rate throttle — that
+ * bounds the 10/min RATE cap; this bounds the monthly QUOTA. Both stay on.
+ *
+ * The manual sweep bypasses this by passing `force=true` upstream (never calls this fn).
+ *
+ * Failure mode: on a DB read error we log + return ALL seeds unchanged (over-search, not
+ * under-search — never let a broken ledger silently starve the sweep).
+ */
+export async function filterSeedsByFreshness(
+  workspaceId: string,
+  seeds: Seed[],
+  maxAgeDays: number = adlibraryFreshnessDays(),
+): Promise<{ kept: Seed[]; skipped: Seed[] }> {
+  if (!seeds.length) return { kept: [], skipped: [] };
+  const admin = createAdminClient();
+  const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+  const keywords = Array.from(new Set(seeds.map((s) => s.keyword)));
+  const { data, error } = await admin
+    .from("adlibrary_searches")
+    .select("keyword, last_searched_at")
+    .eq("workspace_id", workspaceId)
+    .in("keyword", keywords);
+  if (error) {
+    console.error(`[creative-finder] freshness read failed for ${workspaceId} — passing all seeds:`, error.message);
+    return { kept: seeds, skipped: [] };
+  }
+  // Fresh iff we have a row AND last_searched_at is strictly newer than the cutoff.
+  const freshKeywords = new Set<string>();
+  for (const row of data || []) {
+    const kw = row.keyword as string | null;
+    const ts = row.last_searched_at as string | null;
+    if (kw && ts && ts > cutoff) freshKeywords.add(kw);
+  }
+  const kept: Seed[] = [];
+  const skipped: Seed[] = [];
+  for (const seed of seeds) {
+    if (freshKeywords.has(seed.keyword)) skipped.push(seed);
+    else kept.push(seed);
+  }
+  return { kept, skipped };
+}
+
 /**
  * Search ONE seed and ingest its long-runners into creative_skeletons.
  * Statics are visioned now (status='analyzed'); videos are routed aside
