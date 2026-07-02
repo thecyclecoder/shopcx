@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Harden the Devi agent — roll persistent coaching into its mandate** · verified 2026-07-02 · → [[../libraries/db-health]]
 - **Bo builds reactively on review-pass, behind a gated enqueue chokepoint** · verified 2026-07-02 · → [[../libraries/build-lifecycle]]
 - **Failed-build cards: correct supersede ordering + an owner dismiss button** · verified 2026-07-02 · → [[../lifecycles/roadmap-build-console]]
 - **Box worker: persist self-update skip reason into worker_heartbeats.detail** · verified 2026-07-02 · → [[../tables/worker_heartbeats]]

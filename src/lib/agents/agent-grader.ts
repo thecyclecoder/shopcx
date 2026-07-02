@@ -764,33 +764,7 @@ export interface CoachingLearning {
   reasoning: string;
 }
 
-const GRADER_REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GRADER_ACTIVE_BUILD = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage", "blocked_on_dependency"];
-function graderGhToken(): string | undefined {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-
-/** Commit a spec markdown to docs/brain/specs/{slug}.md on main via the GitHub Contents API (works from the
- *  deployed cron, unlike the box's putFileMain). Get-then-PUT so it updates in place. */
-async function ghCommitSpec(slug: string, content: string, message: string): Promise<boolean> {
-  const token = graderGhToken();
-  if (!token) return false;
-  const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
-  const path = `docs/brain/specs/${slug}.md`;
-  let sha: string | undefined;
-  try {
-    const get = await fetch(`https://api.github.com/repos/${GRADER_REPO}/contents/${path}?ref=main`, { headers, cache: "no-store" });
-    if (get.ok) sha = ((await get.json()) as { sha?: string }).sha;
-  } catch {
-    /* new file */
-  }
-  const put = await fetch(`https://api.github.com/repos/${GRADER_REPO}/contents/${path}`, {
-    method: "PUT",
-    headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ message, content: Buffer.from(content, "utf8").toString("base64"), sha, branch: "main" }),
-  });
-  return put.ok;
-}
 
 /**
  * director-grades-agents: when an agent persistently underperforms despite coaching, the Director does NOT
@@ -821,29 +795,45 @@ export async function rollCoachingIntoFixSpec(
   const bullets = rows.length
     ? rows.map((r) => `- **When ${r.triggering_pattern || r.error_class || "the slip pattern"}:** ${r.new_instruction || "(see agent_coaching_log)"}${r.reasoning ? ` — ${r.reasoning}` : ""}`).join("\n")
     : "- (the open coaching entries in agent_coaching_log for this agent)";
-  const day = new Date().toISOString().slice(0, 10);
-  const md = [
-    `# Harden the ${persona.name} agent — roll persistent coaching into its mandate`,
-    ``,
-    `**Owner:** [[../functions/platform]] · **Parent:** [[platform-director-agent]] — graduate persistent coaching into a durable fix (director grades agents: low score → fix spec, never a CEO escalation)`,
-    `**Found in use ${day}:** the **${persona.name}** agent (\`${opts.agentKind}\`) sits at **${opts.rollupAvg?.toFixed(1) ?? "?"}/10** after **${opts.attempts}** coaching attempts that didn't stick. Rather than escalate to the CEO, roll the coaching into a permanent fix so the agent improves at the mandate level.`,
-    ``,
-    `## The accumulated coaching to bake in (now archived as rolled-into-mandates)`,
-    bullets,
-    ``,
-    `## Phase 1 — bake the coaching into the agent`,
-    `- Make the above coaching PERMANENT behavior of the \`${opts.agentKind}\` agent — fold it into its prompt/mandate/code (its run-job + prompt in \`scripts/builder-worker.ts\` and the relevant \`src/lib/agents/*\`), not ephemeral appended \`agent_instructions\`. Once baked, the agent should follow it by default.`,
-    `- Verify the agent's grade rollup recovers (≥ ${COACH_LOW_ROLLUP}/10) over the next window of graded actions; if a coaching class still recurs, the bake-in missed it.`,
-    ``,
-    `## Ownership`,
-    `Owner: [[../functions/platform]] (Ada supervises ${persona.name}). The director authored this from ${persona.name}'s coaching ledger; building it hardens the agent so the coaching never has to repeat.`,
-    ``,
-  ].join("\n");
-
-  const committed = await ghCommitSpec(slug, md, `spec: ${slug} — roll ${opts.agentKind} coaching into a durable agent fix`);
-  if (!committed) return { ok: false, reason: "commit failed (no GitHub token?)" };
-
-  await admin.from("agent_jobs").insert({ workspace_id: opts.workspaceId, spec_slug: slug, kind: "build", status: "queued", instructions: `Harden the ${opts.agentKind} agent: bake its accumulated coaching into its permanent mandate/prompt/code (director-authored from the coaching ledger).` });
+  // author-mandate-hardening-through-db-chokepoint (2026-07-02): author the fix spec into public.specs via the
+  // authorSpecRowStructured CHOKEPOINT — NOT a docs/brain/specs/*.md commit. The build pipeline reads
+  // public.specs; the old ghCommitSpec path wrote an ORPHAN .md with no DB row, so every roll parked
+  // `spec_row_missing` and NEVER built (silently dropping the coaching — the bug that broke agent-mandate
+  // hardening for every agent). Landing it in_review flows it through Vale + the director disposition like
+  // any other spec; the pipeline builds it once reviewed (no manual build enqueue, no premature .md).
+  const { authorSpecRowStructured } = await import("../author-spec");
+  let authored = false;
+  try {
+    authored = await authorSpecRowStructured(
+      opts.workspaceId,
+      slug,
+      {
+        title: `Harden the ${persona.name} agent — roll persistent coaching into its mandate`,
+        summary: `The ${persona.name} agent (\`${opts.agentKind}\`) sits at ${opts.rollupAvg?.toFixed(1) ?? "?"}/10 after ${opts.attempts} coaching attempts that didn't stick. Rather than escalate to the CEO, bake the accumulated coaching into the agent's permanent mandate/prompt/code so it improves at the mandate level (director grades agents: low score → durable fix spec, never a CEO escalation).`,
+        owner: "platform",
+        parent: `[[../functions/platform]] — the platform-director graduates persistent coaching into a durable agent fix.`,
+        blocked_by: [],
+        phases: [
+          {
+            title: `Phase 1 — bake the coaching into the ${opts.agentKind} agent`,
+            body: [
+              `Make the accumulated coaching PERMANENT behavior of the \`${opts.agentKind}\` agent — fold it into its run-job + prompt in \`scripts/builder-worker.ts\` and the relevant \`src/lib/agents/*\`, NOT ephemeral appended \`agent_instructions\`. Once baked, the agent follows it by default.`,
+              ``,
+              `The accumulated coaching to bake in (archived as rolled-into-mandates):`,
+              bullets,
+            ].join("\n"),
+            verification: `The build's diff modifies the ${opts.agentKind} agent's prompt/run-job (scripts/builder-worker.ts) or src/lib/agents/* to incorporate the coaching above (not only agent_instructions) — grep the changed files for the baked-in guidance. \`npx tsc --noEmit\` clean.`,
+            status: "planned",
+          },
+        ],
+      },
+      "planned",
+      { intendedStatusSetBy: "director:platform" },
+    );
+  } catch (err) {
+    return { ok: false, reason: `author failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!authored) return { ok: false, reason: "author write failed" };
   // Archive the open coachings as "rolled into mandates" so they stop counting toward the loop-guard + are retired.
   await admin
     .from("agent_coaching_log")

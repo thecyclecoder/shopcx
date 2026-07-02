@@ -1942,7 +1942,7 @@ async function gh(method: string, path: string, body?: unknown) {
 
 async function ensurePr(branch: string, title: string, draft: boolean, body?: string, base = "main"): Promise<{ url: string; number: number } | null> {
   const owner = REPO.split("/")[0];
-  const prBody = body ?? `Automated build of \`docs/brain/specs/${title}\` by the box worker. ${draft ? "**Draft — has open questions.**" : ""}`;
+  const prBody = body ?? `Automated build of spec \`${title}\` by the box worker (the spec lives in public.specs + public.spec_phases — the DB is the spec). ${draft ? "**Draft — has open questions.**" : ""}`;
   // Retry `gh pr create` a few times with backoff — most failures are transient (GitHub 5xx / secondary
   // rate-limit), so the manual Create-PR recovery (build-recover-pr-create) is the rare fallback, not the
   // norm. Before each retry adopt an already-open PR for the branch (idempotent: a prior attempt may have
@@ -2707,6 +2707,14 @@ async function surfaceDbHealthFindings(findings: import("../src/lib/control-towe
 // The FREQUENT slow-query root-cause pass: top pg_stat_statements offenders → EXPLAIN → classify →
 // propose. Writes a kind:'cron' beat (loop_id = DB_HEALTH_SLOWQ_LOOP_ID) carrying the slow-query list
 // for the panel. NEVER throws (guarded) — a pass failure must not break the poll loop. Zero DDL.
+//
+// agent-mandate-hardening-dbhealth guardrail (rolled coaching): the classification lives inside
+// classifyExplainPlan + analyzeSlowQuery in [[../src/lib/control-tower/db-health]]. Per the baked-in
+// invariant, this run-job's calls to `mod.analyzeSlowQuery` NEVER produce a `vacuum_tuning` fixKind
+// — vacuum belongs to the size-sweep bloat path (analyzeBloat / analyzeBloatTrend), never the
+// slow-query path. The 4.8/10 grade over 10 unstuck coaching attempts came from the classifier
+// falling through to bloat_stale_stats on erratic/index-driven/no-scan plans; the guardrail baked
+// into the pure classifier fixes that for every call site, this run-job included.
 async function runDbHealthSlowQueryJob(): Promise<void> {
   const startedAt = Date.now();
   const mod = await import("../src/lib/control-tower/db-health");
@@ -9682,7 +9690,7 @@ function migrationFixPrompt(audit: Record<string, unknown>, brief: string): stri
     `  • HUMAN-JUDGMENT (a decision YOU can't make but the OWNER can — e.g. an ambiguous grandfathered price, conflicting records, an unclear intended base) → DON'T dump check-jargon. Pause on status "needs_input" with ONE plain-language, actionable question that names the concrete choice and the specific values, e.g. "This customer's locked-in price is unclear — our records show $39 and $49 for their coffee. What should we bill per unit?" — NOT "pricing_preserved failed: engine subtotal ≠ pre_migration_charge ±2¢/line." Reuse the questions [{id,q}] shape. The owner answers inline on /dashboard/migrations and you'll be resumed WITH the answer to propose the concrete fix.`,
     `  • OUT-OF-SYSTEM (nothing the owner can type fixes it — e.g. no card anywhere) → status "human_needed" with a ONE-LINE plain instruction (no technical dump).`,
     ``,
-    `CODE-GAP escalation: if the root cause is a RECURRING code/data gap — a CLASS of missing catalog rows (not just this sub's one variant), or a pricing-inference edge case inferAppstleLineBase can't cover — don't just hand it to a human one sub at a time. Status "code_gap": author a permanent fix spec so the box commits docs/brain/specs/{slug}.md (surfaced on Roadmap to commission a build, like box-escalation-triage routes analyzer fixes). Use a STABLE, gap-descriptive slug (NOT the sub/audit id — recurring failures must converge on ONE spec, e.g. "migration-variant-backfill-from-appstle"), so the same gap doesn't spawn a duplicate spec per sub. The migration still fails-closed to a human (the spec fixes the class, not this renewal) — put what to do for THIS sub in the diagnosis.`,
+    `CODE-GAP escalation: if the root cause is a RECURRING code/data gap — a CLASS of missing catalog rows (not just this sub's one variant), or a pricing-inference edge case inferAppstleLineBase can't cover — don't just hand it to a human one sub at a time. Status "code_gap": author a permanent fix spec through the author-spec SDK (a row in public.specs + public.spec_phases — the DB is the spec, never a docs/brain/specs/*.md commit), surfaced on Roadmap to commission a build like box-escalation-triage routes analyzer fixes. Use a STABLE, gap-descriptive slug (NOT the sub/audit id — recurring failures must converge on ONE spec, e.g. "migration-variant-backfill-from-appstle"), so the same gap doesn't spawn a duplicate spec per sub. The migration still fails-closed to a human (the spec fixes the class, not this renewal) — put what to do for THIS sub in the diagnosis.`,
     ``,
     `If every failing check has a safe typed fix → status "propose" with the actions. If a failing check needs an owner DECISION → status "needs_input" with the plain question. If it's out-of-system → status "human_needed". If it's a recurring code/data gap → status "code_gap". Never propose a partial fix that re-bills blindly.`,
     ``,
@@ -10051,8 +10059,8 @@ const DEV_ASK_OUTPUT = [
   `  — for a pure investigation / analytics / planning answer (you already ran any read-only query in-session via a throwaway scripts/_*.ts; reads are silent, never asked).`,
   `{"status":"replied","reply":"<answer>","pending_actions":[{"type":"db_mutation","summary":"<what & why>","cmd":"<a SELF-CONTAINED shell command the worker will run on approval — e.g. write a scripts/_apply.ts via heredoc that bootstraps createAdminClient and runs the write, then 'npx tsx scripts/_apply.ts'>","preview":"<the exact statement/rows it changes>"}]}`,
   `  — when the answer REQUIRES an INSERT/UPDATE/DELETE. NEVER run the write yourself; stop and propose it.`,
-  `{"status":"replied","reply":"<answer>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/{fn}]]","parent":"<a function mandate or a goal milestone>","content":"<the FULL docs/brain/specs/{slug}.md markdown, in the house spec format>","queueBuild":false}]}`,
-  `  — when you spot a code/capability gap worth a spec. The worker commits the spec to main on approval (and queues a build if queueBuild).`,
+  `{"status":"replied","reply":"<answer>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/{fn}]]","parent":"<a function mandate or a goal milestone>","content":"<the FULL spec markdown, in the house spec format — this is a scratch buffer the worker parses and authors to public.specs + public.spec_phases via the author-spec SDK; the DB row is the spec, never a docs/brain/specs/*.md commit>","queueBuild":false}]}`,
+  `  — when you spot a code/capability gap worth a spec. The worker parses your buffer and authors the spec to public.specs on approval (and queues a build if queueBuild). No docs/brain/specs/*.md file is committed.`,
   `Schema changes (new table/column/migration) ride the spec→build handoff, NOT a db_mutation. Never run DDL.`,
 ].join("\n");
 
@@ -10349,20 +10357,16 @@ async function applySpecStatusActionInline(
   // BACKWARDS to the queue, not claiming a phase shipped).
   const statusRaw = typeof raw.status === "string" ? raw.status.toLowerCase() : "";
   if (statusRaw === "in_review") {
+    // retire-md-spec-writers-db-is-sole-spec Phase 3 — resolve the spec + its owner from the DB
+    // (`public.specs.owner`, via brain-roadmap.getSpec). The per-spec docs/brain/specs/{slug}.md
+    // orphans were swept; the DB is the sole spec.
     const cs = await import("../src/lib/spec-card-state");
     const states = await cs.getSpecCardStates(workspaceId);
     const existing = states[slug];
-    const specPath = join(wt, `docs/brain/specs/${slug}.md`);
-    const mdExists = existsSync(specPath);
-    if (!existing && !mdExists) return logInvalid("spec not found in spec_card_state or docs/brain/specs/");
-    let owner: string | undefined;
-    if (mdExists) {
-      try {
-        const md = readFileSync(specPath, "utf8");
-        const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
-        if (m) owner = m[1].replace(/^.*\//, "").trim();
-      } catch { /* fall through to leash rejection */ }
-    }
+    const { getSpec: getSpecCard } = await import("../src/lib/brain-roadmap");
+    const specCard = await getSpecCard(slug, workspaceId);
+    if (!existing && !specCard) return logInvalid("spec not found in spec_card_state or public.specs");
+    const owner = specCard?.card.owner;
     if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
     if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
     try {
@@ -10438,31 +10442,24 @@ async function applySpecStatusActionInline(
   // {shortCircuit:true, reason:'…'} payload is a complete closure.
   const effectiveStatus: "planned" | "in_progress" | "shipped" | "rejected" | undefined =
     shortCircuit === true ? "shipped" : status;
-  // Existence: slug must resolve to a spec_card_state row OR a docs/brain/specs/{slug}.md file.
+  // retire-md-spec-writers-db-is-sole-spec Phase 3 — resolve the spec + its owner from the DB
+  // (`public.specs`, via brain-roadmap.getSpec). The per-spec docs/brain/specs/{slug}.md orphans
+  // were swept; the DB is the sole spec.
   const cs = await import("../src/lib/spec-card-state");
   const states = await cs.getSpecCardStates(workspaceId);
   const existing = states[slug];
-  const specPath = join(wt, `docs/brain/specs/${slug}.md`);
-  const mdExists = existsSync(specPath);
-  if (!existing && !mdExists) return logInvalid("spec not found in spec_card_state or docs/brain/specs/");
+  const { getSpec: getSpecCard } = await import("../src/lib/brain-roadmap");
+  const specCard = await getSpecCard(slug, workspaceId);
+  if (!existing && !specCard) return logInvalid("spec not found in spec_card_state or public.specs");
   // Owner-only leash: the spec's `Owner:` director must match the emitting director (or the spec is
-  // owner-less, in which case no director can flip it — only the CEO from the owner UI). Read from the
-  // worktree's checkout of origin/main so we see the canonical markdown the brain board renders from.
-  let owner: string | undefined;
-  if (mdExists) {
-    try {
-      const md = readFileSync(specPath, "utf8");
-      const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
-      if (m) owner = m[1].replace(/^.*\//, "").trim();
-    } catch { /* fall through to leash rejection */ }
-  }
+  // owner-less, in which case no director can flip it — only the CEO from the owner UI). Owner lives on
+  // `public.specs.owner`.
+  const owner = specCard?.card.owner;
   if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
   if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
-  // Validate phase indices against the markdown's actual phase count (when markdown exists).
-  if (phases.length && mdExists) {
-    const { getSpec } = await import("../src/lib/brain-roadmap");
-    const got = await getSpec(slug);
-    const phaseCount = got?.card.phases.length ?? 0;
+  // Validate phase indices against the DB spec's actual phase count.
+  if (phases.length && specCard) {
+    const phaseCount = specCard.card.phases.length;
     const bad = phases.find((p) => p.index < 0 || p.index >= phaseCount);
     if (bad) return logInvalid(`phase index ${bad.index} out of range (spec has ${phaseCount} phases)`);
   }
@@ -10611,18 +10608,13 @@ async function applyDismissParkActionInline(
   }
 
   // Owner-only leash: the parked job's underlying spec must declare an Owner that matches THIS director.
-  // The spec slug is on the job; the markdown is in the worktree's checkout of origin/main.
+  // retire-md-spec-writers-db-is-sole-spec Phase 3 — owner lives on `public.specs.owner`, not the .md.
   const specSlug = (job.spec_slug as string | null) ?? null;
   let owner: string | undefined;
   if (specSlug) {
-    const specPath = join(wt, `docs/brain/specs/${specSlug}.md`);
-    if (existsSync(specPath)) {
-      try {
-        const md = readFileSync(specPath, "utf8");
-        const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
-        if (m) owner = m[1].replace(/^.*\//, "").trim();
-      } catch { /* fall through to leash rejection */ }
-    }
+    const { getSpec: getSpecCard } = await import("../src/lib/brain-roadmap");
+    const specCard = await getSpecCard(specSlug, workspaceId);
+    owner = specCard?.card.owner;
   }
   if (!owner) return logInvalid("parked job has no resolvable spec owner — out-of-leash for a director auto-apply");
   if (owner !== directorFunction) return logInvalid(`parked job's spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
@@ -10700,16 +10692,12 @@ async function applyRequestAuditActionInline(
   if (!slug) return logInvalid("slug is required");
   if (!reason) return logInvalid("reason is required (no silent audits)");
 
-  // Owner-only leash: the spec's declared `Owner:` must match THIS director. Read the markdown out of
-  // the worktree's checkout of origin/main so we see the canonical owner the board renders from.
-  const specPath = join(wt, `docs/brain/specs/${slug}.md`);
-  if (!existsSync(specPath)) return logInvalid("spec not found in docs/brain/specs/");
-  let owner: string | undefined;
-  try {
-    const md = readFileSync(specPath, "utf8");
-    const m = md.match(/\*\*Owner:\*\*\s*\[\[([^\]|]+)/);
-    if (m) owner = m[1].replace(/^.*\//, "").trim();
-  } catch { /* fall through to leash rejection */ }
+  // Owner-only leash: the spec's declared `Owner:` must match THIS director.
+  // retire-md-spec-writers-db-is-sole-spec Phase 3 — owner lives on `public.specs.owner`, not the .md.
+  const { getSpec: getSpecCard } = await import("../src/lib/brain-roadmap");
+  const specCard = await getSpecCard(slug, workspaceId);
+  if (!specCard) return logInvalid("spec not found in public.specs");
+  const owner = specCard.card.owner;
   if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
   if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
 
@@ -11103,12 +11091,12 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — for an explanation ("why haven't you built X?"): investigate read-only and explain (X is blocked by Y · X is a 0-phase feature needing the CEO's greenlight · X isn't goal-linked so my goal-walk didn't catch it · its build failed N× and hit my loop-guard · it's outside my leash).`,
   `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. auto-build-unblocked-fix-specs>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
   `  — when the CEO COACHES you ("build these types automatically going forward"). Distill it into ONE durable rule. On approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-does something destructive/irreversible or starts a new goal.`,
-  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/platform]]","parent":"<a mandate or goal milestone>","content":"<the FULL docs/brain/specs/{slug}.md markdown>","queueBuild":false}]}`,
-  `  — when the fix needs CODE (an automation/infra capability). The worker commits the spec on approval.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec","summary":"<the gap>","slug":"<kebab-slug>","title":"<Title>","owner":"[[../functions/platform]]","parent":"<a mandate or goal milestone>","content":"<the FULL spec markdown — the worker parses this and authors it to public.specs + public.spec_phases via the author-spec SDK; the DB row is the spec, never a docs/brain/specs/*.md commit>","queueBuild":false}]}`,
+  `  — when the fix needs CODE (an automation/infra capability). The worker authors the spec to public.specs on approval.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"goal","summary":"<the objective in one line>","slug":"<kebab-slug>","title":"<Title>","outcome":"<one-line outcome>","successMetric":"<how we'll measure it>","body":"<markdown body: a 'Why now' paragraph + a 'Milestone seeds for Pia' bullet list>"}]}`,
   `  — when you spot a STRATEGIC objective worth a MULTI-SPEC initiative (not one fix). You PROPOSE it for YOUR OWN function; on the CEO's approval the worker commits it as a **proposed** goal and surfaces it for the CEO's **greenlight** (the activation gate — directors propose, the CEO greenlights). Once greenlit, Pia decomposes it into a milestone→spec tree. A single capability gap is a 'spec' card; a whole initiative is a 'goal' card.`,
-  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec-edit","summary":"<what you're changing + why>","slug":"<existing-spec-slug>","content":"<the FULL revised docs/brain/specs/{slug}.md markdown>"}]}`,
-  `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker commits it on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"spec-edit","summary":"<what you're changing + why>","slug":"<existing-spec-slug>","content":"<the FULL revised spec markdown — a scratch buffer the worker parses and re-authors to public.specs + public.spec_phases via the author-spec SDK; never a docs/brain/specs/*.md commit>"}]}`,
+  `  — when the CEO asks you to MODIFY an EXISTING spec (e.g. "add the right **Blocked-by:** lines to Pia's milestone specs"). READ the spec, edit it, emit the WHOLE revised markdown (not a diff). The worker re-authors it to public.specs on approval (the spec must already exist — spec-edit never creates a new one). Emit ONE card per spec to revise several in one turn. This is a real edit, not just a recommendation.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"directive","summary":"<the plan in one line>","steps":["<ordered step>","<step>"],"gateBuildsUntil":"<spec-slug or omit>","criticalSpecs":["<slug>"],"holdBuilds":["<slug to cancel>"]}]}`,
   `  — for the INTENT: PLAN case (the CEO hands you a plan to execute). On approval it becomes your ONE active directive (runs FIRST, before routine) AND the worker acts immediately: it QUEUES the gate spec + every \`criticalSpecs\` build right now (no waiting for the init cadence), marks them \`**Priority:** critical\`, and CANCELS any parked \`holdBuilds\` (out-of-order builds to clear). \`gateBuildsUntil\` pauses ROUTINE builds until that spec ships (priority/critical builds still run; auto-lifts on ship). A directive re-prioritizes, never authorizes destructive work or a new goal.`,
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"model_tier","summary":"<agent + tier change in one line>","targetKind":"<agent kind, e.g. fold>","tier":"<haiku|sonnet|opus, or null to clear to the Max default>","rollup":<the cited grade rollup 0-10, or omit>,"evidence":"<why — the grade slip / speed + 5-hr-window pressure>"}]}`,
@@ -12554,9 +12542,11 @@ interface RegressionBriefInstr {
 
 // Load the read-only brief: the regressed spec slug, its failing `## Verification` checks (with the
 // evidence the spec-test agent captured), and a pointer to read the spec + trace what shipped.
+// retire-md-spec-writers-db-is-sole-spec Phase 3 — points the agent at the DB-materialized
+// `.box/spec-{slug}.md` (public.specs + spec_phases). The docs/brain/specs/*.md files were swept.
 function regressionBrief(instr: RegressionBriefInstr): string {
   const lines: string[] = [
-    `REGRESSED SPEC: docs/brain/specs/${instr.spec_slug}.md  (title: ${instr.title})`,
+    `REGRESSED SPEC: ${instr.spec_slug}  (title: ${instr.title})`,
     `SIGNATURE: ${instr.signature}  ·  spec-test run_at: ${instr.run_at}`,
     ``,
     `This spec is ✅ SHIPPED but its verification no longer holds — the box spec-test agent observed these check(s) FAILING (evidence-backed breakage of prior-working behaviour):`,
@@ -12567,7 +12557,7 @@ function regressionBrief(instr: RegressionBriefInstr): string {
   }
   lines.push(
     ``,
-    `Read docs/brain/specs/${instr.spec_slug}.md (esp. its "## Verification"), then trace what shipped that broke it (recent merges / the implicated src/ code) to decide whether this is a REAL regression and what the fix is.`,
+    `Read .box/spec-${instr.spec_slug}.md — the worker materialized it from public.specs + public.spec_phases (the docs/brain/specs/*.md files were DELETED in the DB cutover; do NOT try to read them). Read its "## Verification" section, then trace what shipped that broke it (recent merges / the implicated src/ code) to decide whether this is a REAL regression and what the fix is.`,
   );
   return lines.join("\n");
 }
@@ -12790,6 +12780,18 @@ async function runRegressionJob(job: Job) {
   // ── Fresh review — investigate read-only on Max → verdict → dismiss | author + route. ──
   console.log(`${tag} reviewing regression ${signature} (spec ${regressedSlug})`);
   try {
+    // retire-md-spec-writers-db-is-sole-spec Phase 3 — the regression brief tells the box to Read
+    // `.box/spec-${slug}.md`; materialize the DB row to that path first (spec-test does the same at
+    // line ~9075). Best-effort: a missing row leaves the file absent and the agent surfaces
+    // needs-human on the spec read failure — better than a stale docs/brain/specs/*.md read.
+    if (regressedSlug) {
+      try {
+        const { materializeSpec } = await import("../src/lib/build-spec-materializer");
+        await materializeSpec(job.workspace_id, regressedSlug, join(REPO_DIR, ".box"));
+      } catch (e) {
+        console.warn(`${tag} materializeSpec ${regressedSlug} failed (proceeding — agent will surface needs-human on read): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
     const { appendAgentInstructions } = await import("../src/lib/agents/agent-instructions");
     const coachedRegressionPrompt = await appendAgentInstructions(db, job.workspace_id, "regression", regressionPrompt(regressionBrief(instr)));
@@ -16214,7 +16216,19 @@ async function dispatchJob(job: Job) {
     // spec-authoring-writes-db-and-worker-materialize Phase 2: the spec body comes from the DB row; the
     // file Bo reads is a worker-materialized copy under `.box/` (gitignored, regenerated each dispatch).
     const prompt = isResume && sessionId
-      ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing ${materializedRelPath} (the spec body comes from the DB row; this file is a worker-materialized copy) and finish. Same rules and the same final JSON output protocol as before.`
+      ? [
+          resumeBits.join(". ") || "Resuming.",
+          // one-phase-per-session on RESUME (fixes-as-phases + chained phases): a resumed build implements
+          // EXACTLY the one phase its instructions name, then STOPS — it must NOT power through subsequent
+          // phases in the same session (the bug that had Bo build P2–P5 in one resumed session). Each
+          // chained/fix phase is scoped by queueNextChainedPhase via phaseScopedInstructions on job.instructions;
+          // the worker auto-queues the NEXT phase after this one merges. Previously the resume prompt dropped
+          // job.instructions entirely, so a resumed session was unscoped.
+          job.instructions
+            ? `⭐ ONE-PHASE-PER-SESSION (mandate): implement ONLY the phase named here and its verification, then finish — do NOT implement any subsequent phase this session. ${job.instructions}`
+            : `Implement ONLY the current (first not-yet-built) phase and its verification, then finish — do NOT proceed to later phases; the worker auto-queues the next.`,
+          `Continue implementing ${materializedRelPath} (the spec body comes from the DB row; this file is a worker-materialized copy). Same rules and the same final JSON output protocol as before.`,
+        ].join(" ")
       : [
           `Use the build-spec skill to implement the spec at ${materializedRelPath} (cwd is the repo root). The spec body comes from the DB row (public.specs + public.spec_phases); the file you read is a worker-materialized copy.`,
           `⭐ PRE-FLIGHT STATE CHECK (mandate — do this FIRST, before writing any code or running any build tool): inspect the actual REPO STATE (git log, grep, file contents, existing migrations, open PRs) and determine, per phase, what is ALREADY BUILT on main. Mark satisfied phases DONE and SKIP them — build ONLY the unbuilt delta. If EVERY phase is already on main, make NO edits and return {"status":"completed","no_changes_reason":"already built — <which phases/files are on main>"} (the worker reconciles the board status from that). Judge "built" by the CODE ON MAIN — NOT by any ⏳/✅ in the markdown: spec status is DB-driven now, the .md carries no status. Never rebuild work that's already shipped. You build ONE phase (the first unbuilt one) per run; when your PR merges, the worker tags THAT phase shipped in the DB with your PR # + merge SHA (phase-pr-provenance) — you don't touch status yourself. A one-shot/single-phase spec is the whole thing in one PR.`,

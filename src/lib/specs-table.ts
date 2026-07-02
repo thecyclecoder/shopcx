@@ -53,6 +53,11 @@ export interface SpecPhaseRow {
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. Paired
    *  with `why`. HARD gate at the app-layer chokepoint. NULL only for pre-intent rows. */
   what: string | null;
+  /** fixes-as-phases — 'phase' (normal) | 'fix' (appended by the pre-merge-fix flow for a spec-test
+   *  regression; builds one-at-a-time on a resumed session, then the origin self-re-tests). */
+  kind: string;
+  /** fixes-as-phases — for kind='fix' phases, the spec_test check_key(s) this fix addresses. */
+  origin_check_keys: string[];
   created_at: string;
   updated_at: string;
 }
@@ -187,6 +192,9 @@ export interface SpecPhaseInput {
   why?: string | null;
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. */
   what?: string | null;
+  /** fixes-as-phases — defaults to 'phase' on insert; set 'fix' for an appended fix phase. */
+  kind?: string;
+  origin_check_keys?: string[];
 }
 
 export interface UpsertSpecResult {
@@ -241,7 +249,7 @@ interface SpecRowDb {
 const SPEC_COLUMNS =
   "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, created_at, updated_at";
 const PHASE_COLUMNS =
-  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, created_at, updated_at";
+  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, kind, origin_check_keys, created_at, updated_at";
 
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   return {
@@ -459,10 +467,10 @@ export async function upsertSpec(
       if (phase.pr !== undefined) updateRow.pr = phase.pr;
       if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
       if (phase.verification !== undefined) updateRow.verification = phase.verification;
-      // pm-structured-intent-and-refs Phase 1 — preserve on undefined (an idempotent re-author that isn't
-      // touching intent), write on an explicit string/null (a real change from the author chokepoint).
       if (phase.why !== undefined) updateRow.why = phase.why;
       if (phase.what !== undefined) updateRow.what = phase.what;
+      if (phase.kind !== undefined) updateRow.kind = phase.kind;
+      if (phase.origin_check_keys !== undefined) updateRow.origin_check_keys = phase.origin_check_keys;
       const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
       if (uErr) throw uErr;
       phaseIds[phase.position] = existing.id;
@@ -476,10 +484,10 @@ export async function upsertSpec(
         pr: phase.pr ?? null,
         merge_sha: phase.merge_sha ?? null,
         verification: phase.verification ?? null,
-        // pm-structured-intent-and-refs Phase 1 — the chokepoint gates non-empty; here we simply persist
-        // whatever the caller passed (null keeps the pre-intent shape, a string writes it through).
         why: phase.why ?? null,
         what: phase.what ?? null,
+        kind: phase.kind ?? "phase",
+        origin_check_keys: phase.origin_check_keys ?? [],
       };
       const { data: inserted, error: iErr } = await admin
         .from("spec_phases")
@@ -780,6 +788,80 @@ export async function restampPhases(
       .eq("position", p.position);
     if (error) throw error;
   }
+}
+
+/**
+ * fixes-as-phases — APPEND `kind='fix'` phases to an existing spec (INSERT-ONLY: never reads/updates/deletes
+ * existing phases, so it can't clobber the origin's P1-P5 the way `upsertSpec` replace-by-position would).
+ * New phases land after the current max position, `status:'planned'`, no `build_sha`. That does two things
+ * for free (no explicit status write — `specs.status` stays override-only NULL):
+ *   1. `isSpecAccumulationComplete` → false → `applyInTestingOverlay` returns the base rollup → the spec
+ *      derives OUT of `in_testing` back to `in_progress` (a spec-test regression re-opens the spec).
+ *   2. `queueNextChainedPhase` then picks the first planned (fix) phase, resumes the origin's Claude session
+ *      on the same `claude/build-{slug}` branch, and builds it one-at-a-time; when the last fix ships the
+ *      origin SELF-re-tests (`enqueueSpecTestIfDue` via `applyMergedBuildEffects`).
+ * This is what retires the separate `fix-<slug>` spec model (no new spec row, no cold P1-P5 re-hydration,
+ * no fix-<slug> chain to depth-guard). Returns the appended 1-based positions.
+ */
+export async function appendFixPhases(
+  workspaceId: string,
+  slug: string,
+  fixes: { title: string; body: string; verification: string; origin_check_keys: string[] }[],
+): Promise<{ appended: number; positions: number[] }> {
+  if (!fixes.length) return { appended: 0, positions: [] };
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) return { appended: 0, positions: [] };
+  const specId = (spec as { id: string }).id;
+  const { data: maxRow } = await admin
+    .from("spec_phases")
+    .select("position")
+    .eq("spec_id", specId)
+    .order("position", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  let pos = (maxRow as { position: number } | null)?.position ?? 0;
+  const positions: number[] = [];
+  for (const f of fixes) {
+    pos += 1;
+    const { error } = await admin.from("spec_phases").insert({
+      spec_id: specId,
+      position: pos,
+      title: f.title,
+      body: f.body,
+      status: "planned" as Phase,
+      verification: f.verification,
+      kind: "fix",
+      origin_check_keys: f.origin_check_keys,
+    });
+    if (error) throw error;
+    positions.push(pos);
+  }
+  return { appended: positions.length, positions };
+}
+
+/** fixes-as-phases — count a spec's existing `kind='fix'` phases (used to number the next "Fix N" phase). */
+export async function countFixPhases(workspaceId: string, slug: string): Promise<number> {
+  const admin = createAdminClient();
+  const { data: spec } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (!spec) return 0;
+  const { count } = await admin
+    .from("spec_phases")
+    .select("id", { count: "exact", head: true })
+    .eq("spec_id", (spec as { id: string }).id)
+    .eq("kind", "fix");
+  return count ?? 0;
 }
 
 /**

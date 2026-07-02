@@ -132,12 +132,12 @@ export async function POST(request: Request) {
     // traceability of which failing checks this fix targets.
     const checkKeys = failing.map((c) => checkKey(c.text)).join(", ");
     const brief = [
-      `The shipped spec "${title}" (docs/brain/specs/${slug}.md) FAILED its own ## Verification when the box spec-test QA agent last ran it — a likely regression or an incomplete build.`,
+      `The shipped spec "${title}" (\`${slug}\`) FAILED its own ## Verification when the box spec-test QA agent last ran it — a likely regression or an incomplete build.`,
       "",
       "Failing checks:",
       ...failing.map((c, i) => `${i + 1}. [check ${checkKey(c.text)}] ${c.text}${c.evidence ? `\n   evidence: ${c.evidence}` : ""}`),
       "",
-      `Investigate each failure against the spec + the brain + the code, then propose a concise FIX spec: what's broken, what to change and where, and how to re-verify it. When we finalize, write it as a new spec under docs/brain/specs/ owned by [[../functions/platform]], parented under the same mandate/goal as the original where sensible.`,
+      `Investigate each failure against the spec + the brain + the code, then propose a concise FIX spec: what's broken, what to change and where, and how to re-verify it. When we finalize, author the fix spec through the author-spec SDK (a row in public.specs + public.spec_phases — the DB is the spec), owned by [[../functions/platform]], parented under the same mandate/goal as the original where sensible. Never commit a docs/brain/specs/*.md file.`,
       "",
       `IMPORTANT — when you finalize the fix spec, include BOTH machine-readable metadata lines directly under the \`**Owner:** … · **Parent:** …\` line, verbatim (they link the fix back to the spec it resolves so the origin auto-re-tests once this fix ships — do not paraphrase or omit them):`,
       `\`**Regression-of:** [[${slug}]]\``,
