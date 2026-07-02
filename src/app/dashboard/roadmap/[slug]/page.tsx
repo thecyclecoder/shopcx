@@ -138,31 +138,33 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         {/* Main: intent-first header then the rendered spec body.
             pm-structured-intent-and-refs Phase 4 — the detail page LEADS with plain-language
             what + why (the shared intent both humans + agents read), then the phase list, and
-            only THEN drops into the technical body/build detail. Legacy rows without `what`/`why`
-            fall back to the summary + rendered body (no visible regression). */}
+            only THEN drops into the technical body/build detail. pm-detail-page-legacy-intent-fallback
+            Phase 1 — a spec authored before the intent columns landed still renders a legible
+            intent card: (1) fall back to the summary when what+why are both null, (2) title
+            always renders (so a row missing what+why+summary is never a bare card), (3) auto-open
+            the Build detail fold when structured+summary intent are all absent so the raw body is
+            visible without a click (display-only fallback per the spec). */}
         <div className="order-2 lg:order-1">
-          {(spec.card.what || spec.card.why || spec.card.summary) && (
-            <section className="mb-5 rounded-lg border border-zinc-200 bg-white/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
-              <h1 className="text-lg font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
-                {spec.card.title}
-              </h1>
-              {spec.card.what && (
-                <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{spec.card.what}</p>
-              )}
-              {spec.card.why && (
-                <details className="mt-3 text-sm">
-                  <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
-                    Why this exists
-                  </summary>
-                  <p className="mt-2 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{spec.card.why}</p>
-                </details>
-              )}
-              {!spec.card.what && !spec.card.why && spec.card.summary && (
-                <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{spec.card.summary}</p>
-              )}
-            </section>
-          )}
-          <details className="mb-4">
+          <section className="mb-5 rounded-lg border border-zinc-200 bg-white/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
+            <h1 className="text-lg font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
+              {spec.card.title}
+            </h1>
+            {spec.card.what && (
+              <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{spec.card.what}</p>
+            )}
+            {spec.card.why && (
+              <details className="mt-3 text-sm">
+                <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+                  Why this exists
+                </summary>
+                <p className="mt-2 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{spec.card.why}</p>
+              </details>
+            )}
+            {!spec.card.what && !spec.card.why && spec.card.summary && (
+              <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{spec.card.summary}</p>
+            )}
+          </section>
+          <details className="mb-4" open={!spec.card.what && !spec.card.why && !spec.card.summary}>
             <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
               Build detail
             </summary>

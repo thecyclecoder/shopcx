@@ -1250,6 +1250,12 @@ export interface GoalCard {
   owner?: string; // function slug (the DRI) from the goal's `Owner: [[../functions/x]]` line
   status: GoalStatus; // **Status:** line (proposed｜greenlit｜complete); legacy no-Status goals ⇒ greenlit
   proposedBy?: string; // function slug from a `**Proposed-by:** [[../functions/x]]` marker (director-proposed only)
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this goal exists. Read straight off
+   *  `public.goals.why`; empty on legacy goals authored before the column landed (~all pre-build rows).
+   *  Surfaced by the goal detail page's intent card (falls back to outcome + success_metric when null,
+   *  per pm-detail-page-legacy-intent-fallback). `outcome` IS the goal's WHAT (reconciled — no separate
+   *  column), so a goal's structured intent is (why + outcome). */
+  why?: string | null;
   milestones: Milestone[];
   pct: number; // 0..100 rollup of milestone completion
   linkedSpecCount: number; // resolvable specs across milestones
@@ -1486,6 +1492,9 @@ function goalRowToCard(
     owner: row.owner || undefined,
     status,
     proposedBy: row.proposer_function || undefined,
+    // pm-detail-page-legacy-intent-fallback Phase 1 — surface the structured why so the goal detail page's
+    // intent card can render it (falling back to outcome + success_metric when null).
+    why: row.why,
     milestones,
     pct,
     linkedSpecCount,

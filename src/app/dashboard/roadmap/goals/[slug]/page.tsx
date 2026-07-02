@@ -74,11 +74,49 @@ export default async function GoalDetailPage({ params }: { params: Promise<{ slu
       </Link>
 
       <div className="mt-3 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
-        {/* Main: the rendered goal doc */}
-        <article
-          className="prose prose-sm prose-zinc order-2 max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs lg:order-1"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        {/* Main: intent-first header then the rendered goal doc.
+            pm-detail-page-legacy-intent-fallback Phase 1 — mirror the intent-first pattern the
+            spec detail page shipped in pm-structured-intent-and-refs. Prefer the structured
+            plain-language `why` + `outcome` (outcome IS the goal's WHAT — reconciled, no separate
+            column). Legacy goals without `why` fall back to `outcome` + `success_metric` so the
+            intent card is never a bare title. Beyond that, the raw body renders inline below
+            (display-only fallback: nothing means nothing to lose). */}
+        <div className="order-2 lg:order-1">
+          <section className="mb-5 rounded-lg border border-zinc-200 bg-white/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
+            <h1 className="text-lg font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
+              {card.title}
+            </h1>
+            {card.why ? (
+              <>
+                {card.outcome && (
+                  <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{card.outcome}</p>
+                )}
+                <details className="mt-3 text-sm">
+                  <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+                    Why this exists
+                  </summary>
+                  <p className="mt-2 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{card.why}</p>
+                </details>
+              </>
+            ) : (
+              <>
+                {card.outcome && (
+                  <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{card.outcome}</p>
+                )}
+                {card.successMetric && (
+                  <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="mr-1.5 font-medium uppercase tracking-wide">Success metric</span>
+                    {card.successMetric}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+          <article
+            className="prose prose-sm prose-zinc max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        </div>
 
         {/* Sidebar: rollup, plan control, milestone tree with live spec status */}
         <aside className="order-1 self-start lg:sticky lg:top-6 lg:order-2">
@@ -173,10 +211,46 @@ function FoldedGoalView({
       </Link>
 
       <div className="mt-3 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
-        <article
-          className="prose prose-sm prose-zinc order-2 max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs lg:order-1"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        {/* pm-detail-page-legacy-intent-fallback Phase 1 — same intent-first + legacy fallback the
+            live goal view renders. Folded goals are the archived-row case the spec calls out (~all
+            pre-build goals carry NULL why); the fallback ensures the card reads outcome/success_metric
+            instead of leaving a bare title. */}
+        <div className="order-2 lg:order-1">
+          <section className="mb-5 rounded-lg border border-zinc-200 bg-white/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
+            <h1 className="text-lg font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
+              {card.title}
+            </h1>
+            {card.why ? (
+              <>
+                {card.outcome && (
+                  <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{card.outcome}</p>
+                )}
+                <details className="mt-3 text-sm">
+                  <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+                    Why this exists
+                  </summary>
+                  <p className="mt-2 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{card.why}</p>
+                </details>
+              </>
+            ) : (
+              <>
+                {card.outcome && (
+                  <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{card.outcome}</p>
+                )}
+                {card.successMetric && (
+                  <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="mr-1.5 font-medium uppercase tracking-wide">Success metric</span>
+                    {card.successMetric}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+          <article
+            className="prose prose-sm prose-zinc max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        </div>
 
         <aside className="order-1 self-start lg:sticky lg:top-6 lg:order-2">
           <div className="space-y-4 rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/40">
