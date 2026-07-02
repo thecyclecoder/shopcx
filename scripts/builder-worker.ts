@@ -16182,7 +16182,19 @@ async function dispatchJob(job: Job) {
     // spec-authoring-writes-db-and-worker-materialize Phase 2: the spec body comes from the DB row; the
     // file Bo reads is a worker-materialized copy under `.box/` (gitignored, regenerated each dispatch).
     const prompt = isResume && sessionId
-      ? `${resumeBits.join(". ") || "Resuming."}. Continue implementing ${materializedRelPath} (the spec body comes from the DB row; this file is a worker-materialized copy) and finish. Same rules and the same final JSON output protocol as before.`
+      ? [
+          resumeBits.join(". ") || "Resuming.",
+          // one-phase-per-session on RESUME (fixes-as-phases + chained phases): a resumed build implements
+          // EXACTLY the one phase its instructions name, then STOPS — it must NOT power through subsequent
+          // phases in the same session (the bug that had Bo build P2–P5 in one resumed session). Each
+          // chained/fix phase is scoped by queueNextChainedPhase via phaseScopedInstructions on job.instructions;
+          // the worker auto-queues the NEXT phase after this one merges. Previously the resume prompt dropped
+          // job.instructions entirely, so a resumed session was unscoped.
+          job.instructions
+            ? `⭐ ONE-PHASE-PER-SESSION (mandate): implement ONLY the phase named here and its verification, then finish — do NOT implement any subsequent phase this session. ${job.instructions}`
+            : `Implement ONLY the current (first not-yet-built) phase and its verification, then finish — do NOT proceed to later phases; the worker auto-queues the next.`,
+          `Continue implementing ${materializedRelPath} (the spec body comes from the DB row; this file is a worker-materialized copy). Same rules and the same final JSON output protocol as before.`,
+        ].join(" ")
       : [
           `Use the build-spec skill to implement the spec at ${materializedRelPath} (cwd is the repo root). The spec body comes from the DB row (public.specs + public.spec_phases); the file you read is a worker-materialized copy.`,
           `⭐ PRE-FLIGHT STATE CHECK (mandate — do this FIRST, before writing any code or running any build tool): inspect the actual REPO STATE (git log, grep, file contents, existing migrations, open PRs) and determine, per phase, what is ALREADY BUILT on main. Mark satisfied phases DONE and SKIP them — build ONLY the unbuilt delta. If EVERY phase is already on main, make NO edits and return {"status":"completed","no_changes_reason":"already built — <which phases/files are on main>"} (the worker reconciles the board status from that). Judge "built" by the CODE ON MAIN — NOT by any ⏳/✅ in the markdown: spec status is DB-driven now, the .md carries no status. Never rebuild work that's already shipped. You build ONE phase (the first unbuilt one) per run; when your PR merges, the worker tags THAT phase shipped in the DB with your PR # + merge SHA (phase-pr-provenance) — you don't touch status yourself. A one-shot/single-phase spec is the whole thing in one PR.`,
