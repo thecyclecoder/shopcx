@@ -10,13 +10,20 @@ The pipeline shape is **author → Spec Review (Vale, quality + disposition prop
 
 ## Exports
 
-### `selectInReviewSpecs(admin, workspaceId): Promise<string[]>`
+### `selectUnreviewedInReviewSpecs(admin, workspaceId): Promise<string[]>`
 
-The current `in_review` queue for one workspace — every `spec_card_state` row with `status='in_review'` (filtered through `effectiveStatusFromState` so a row marked `flags.deferred` never slips in). Used by the cron + the runner.
+The current Vale queue for one workspace — every `public.specs` row with `status='in_review'` AND `deferred=false` AND `vale_pass !== true` (i.e. in_review specs that LACK a current Vale review). Introduced by [[../specs/vale-reactive-spec-review]] Phase 1; the earlier `selectInReviewSpecs` returned the full non-deferred in_review pool and re-scheduled Vale even when every spec had already passed. The durable review signal keys to spec CONTENT: `markSpecCardBackToReview` NULLs `vale_pass` on every re-open / re-author and a fresh authoring leaves it null (`upsertSpec` DB default) — so a `vale_pass=true` spec is parked for Ada's disposition lane, NOT part of Vale's queue. Used by the cron backstop + the runner + (Phase 2) the reactive event consumer.
 
 ### `enqueueSpecReviewIfDue(workspaceId): Promise<{enqueued, reason?, pending?}>`
 
-Insert ONE `agent_jobs` row `kind='spec-review'` for a workspace IFF there's ≥1 in_review spec AND no in-flight spec-review job. The `(spec-review-cron)` calls this per build-console workspace; future event triggers can call it too. Idempotent.
+Insert ONE `agent_jobs` row `kind='spec-review'` for a workspace IFF ≥1 in_review spec LACKS a current Vale review AND no in-flight spec-review job. The 15-min `[[../inngest/spec-review-cron]]` calls this per build-console workspace (backstop); the reactive `spec-review/spec-mutated` event consumer will also call it (Phase 2). Idempotent. The free SDK check inside this helper is the whole point of the gate — an expensive box `claude -p` only spins up when there is real, unreviewed work.
+
+`reason` disambiguates the empty-pool cases:
+
+- `no-in-review-specs` — no non-deferred in_review specs exist at all.
+- `no-unreviewed-specs` — in_review pool is non-empty but every spec already carries `vale_pass=true` (parked for Ada's disposition lane, not Vale's queue).
+- `in-flight` — a `spec-review` job is already queued/running for this workspace.
+- `insert-failed: …` — the row insert failed (transient DB error; the cron backstop retries next tick).
 
 ### `applySpecReviewDecision(workspaceId, decision): Promise<{ok, reason?, applied?}>`
 
@@ -71,8 +78,8 @@ Every back-to-review write records a `director_activity` row with `action_kind='
 ## Gotchas
 
 - **Empty-queue NO-OP — never park on nothing.** The sweep (sentinel job `spec_slug='spec-review-sweep'`) must NO-OP gracefully when there are ZERO `in_review` specs — it must NOT launch Vale and must NOT park a `needs_attention` job on empty input. Three gates enforce this:
-  1. `enqueueSpecReviewIfDue` returns `{enqueued:false, reason:"no-in-review-specs"}` when `selectInReviewSpecs` is empty (enqueue-side gate), and the standing backstop in `runSpecReviewJob`'s poll loop only enqueues `if (inReview.length)`.
-  2. `runSpecReviewJob` re-reads `selectInReviewSpecs` at run start; an empty pool early-returns `status='completed'` (runs only Ada's disposition sweep) — never launches the agent.
+  1. `enqueueSpecReviewIfDue` returns `{enqueued:false, reason:"no-in-review-specs"}` or `{enqueued:false, reason:"no-unreviewed-specs"}` when `selectUnreviewedInReviewSpecs` is empty (enqueue-side gate, [[../specs/vale-reactive-spec-review]] Phase 1), and the standing backstop in `runSpecReviewJob`'s poll loop only enqueues `if (inReview.length)`.
+  2. `runSpecReviewJob` re-reads `selectUnreviewedInReviewSpecs` at run start; an empty pool early-returns `status='completed'` (runs only Ada's disposition sweep) — never launches the agent.
   3. **Defensive:** if Vale DOES run and returns "no parseable decisions", `runSpecReviewJob` re-reads the in_review pool — if it has DRAINED to 0 since enqueue (every spec shipped/deferred/sent-back while the job sat queued), the job completes as a benign no-op instead of parking. Only a parse failure over a STILL-POPULATED queue parks (a genuine malformed-output failure on real input).
   - **Why this matters (the phantom-park bug, 2026-06-27):** before gate 3, a sweep launched with an empty/drained queue produced "spec-review produced no parseable decisions", parked `needs_attention`, retried to the 3-attempt cap, then Ada (platform-director) re-escalated the dead park on EVERY standing pass — pure noise (no work to do). 3 such phantoms in workspace `fdc11e10-…` were dismissed (`status='dismissed'`, `needs_attention_class='dismissed_by_director'`) + 9 matching `dashboard_notifications` ("Park needs eyes / Parked spec-review: spec-review-sweep") cleared via the one-off `scripts/_clear-phantom-spec-review-parks.ts`.
 
