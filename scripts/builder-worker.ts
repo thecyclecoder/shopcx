@@ -14694,13 +14694,63 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
     const { getSpec } = await import("../src/lib/brain-roadmap");
     const existing = await getSpec(slug, workspaceId);
     if (existing) return { slug, alreadyExists: true }; // same-slug convergence — don't clobber.
-    const markdown = securityFixSpecMarkdown({ ...s, slug, title }, parentSlug, source);
-    const reason =
+    // security-agent-authors-valid-parent-and-intent: author through the STRUCTURED chokepoint so the fix
+    // spec ALWAYS carries a resolvable function-mandate parent + plain-language why/what (the pm-structured
+    // authoring model). The agent's proposed `parent` was `extends [[../specs/security-dependency-agent]]` —
+    // a prose string pointing at a SPEC, which Vale rejects ("Parent is not a function mandate or goal
+    // milestone"), and the old markdown carried no why/what, so EVERY security fix churned Vale forever (the
+    // 3 stuck pr-resolve specs on 2026-07-02). We IGNORE the agent's parent and set a valid platform-security
+    // mandate here; intent → summary, and a plain why/what pair the gate accepts. The vuln detail + fix +
+    // `Fixes:` link live in the phase BODY (where file:line/code is allowed), not in why/what.
+    const whereDiff = source.kind === "diff" ? "merged" : "unmerged branch";
+    const vBullets = (Array.isArray(s.verification) ? s.verification : []).filter((b) => typeof b === "string" && b.trim());
+    const defaultBullet =
       source.kind === "diff"
-        ? `security-agent fix for merged ${parentSlug}`
-        : `security-agent fix for unmerged branch of ${parentSlug}`;
+        ? `Re-review the merged diff (git show ${source.mergeSha}) → the flagged vulnerability is closed.`
+        : `Re-review the branch diff (git diff origin/main...origin/${source.branch}) → the flagged vulnerability is closed.`;
+    const verificationBody = (vBullets.length ? vBullets : [defaultBullet]).map((b) => `- ${b.trim()}`).join("\n");
+    const sourceLine =
+      source.kind === "diff"
+        ? `Security-of-merge: \`${source.mergeSha}\` · Fixes: [[${parentSlug}]]`
+        : `Security-of-branch: \`${source.branch}\`${source.previewOrigin ? ` · preview \`${source.previewOrigin}\`` : ""} · Fixes: [[${parentSlug}]]`;
+    const phaseBody = [
+      sourceLine,
+      "",
+      (s.fix || "Scope from the security review above; land the fix + its brain page.").trim(),
+      "Gate on `npx tsc --noEmit`.",
+    ].join("\n");
     try {
-      await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", reason, markdown);
+      const { authorSpecRowStructured } = await import("../src/lib/author-spec");
+      const ok = await authorSpecRowStructured(
+        workspaceId,
+        slug,
+        {
+          title,
+          summary: (s.intent || `Close the vulnerability the ${whereDiff} diff for ${parentSlug} introduced.`).trim(),
+          owner: String(s.owner || "[[../functions/platform]]"),
+          parent:
+            "[[../functions/platform]] — platform security mandate: keep merged and pre-merge diffs free of introduced vulnerabilities",
+          why: `A security review of the ${whereDiff} diff for ${parentSlug} found a genuine vulnerability that must be closed before it ships or stays on main.`,
+          what: "A single scoped code fix closes the flagged vulnerability, verified by re-reviewing the diff.",
+          blocked_by: [],
+          phases: [
+            {
+              title: "Phase 1 — close the vulnerability",
+              body: phaseBody,
+              verification: verificationBody,
+              why: `The ${whereDiff} diff introduced a vulnerability that this phase must close before merge/promotion.`,
+              what: "The specific scoped code change that closes the vulnerability, gated on tsc.",
+              status: "planned",
+            },
+          ],
+        },
+        "planned",
+        { intendedStatusSetBy: "security-agent" },
+      );
+      if (!ok) {
+        console.warn(`[security] structured author returned false for ${slug}`);
+        return null;
+      }
     } catch (e) {
       console.warn(`[security] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
       return null;
@@ -16430,11 +16480,27 @@ async function dispatchJob(job: Job) {
             if (capture.previewState === "READY" && capture.previewUrl) {
               const { maybeEnqueuePreMergeSpecTestOnAccumulation, maybeEnqueuePreMergeSecurityOnAccumulation } =
                 await import("../src/lib/agent-jobs");
+              // fixes-as-phases self-heal: if this build completed a `kind='fix'` phase, the prior pre-merge
+              // spec-test ran against the PRE-fix code — a stale `issues` verdict that the normal dedup would
+              // let block the re-test (the fused-premerge-security stall: Fix built, no re-test, PR held). The
+              // preview we captured is the fix commit's deploy (pollCapturePreviewUrl keyed on finalizeSha), so
+              // forcing past the existing-verdict dedup re-tests the CORRECT (fixed) code.
+              let forceForFix = false;
+              try {
+                const { getSpec: getSpecForFix } = await import("../src/lib/specs-table");
+                const specForFix = await getSpecForFix(job.workspace_id, slug);
+                forceForFix = (specForFix?.phases || []).some(
+                  (p) => p.kind === "fix" && p.status !== "shipped" && p.status !== "rejected",
+                );
+              } catch {
+                /* best-effort — a getSpec blip just means no force (the backstop is the safety net) */
+              }
               const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
                 workspaceId: job.workspace_id,
                 slug,
                 branch: finalizeBranch,
                 previewUrl: capture.previewUrl,
+                force: forceForFix,
               });
               console.log(
                 `${tag} [finalize] M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
