@@ -25,6 +25,8 @@ import {
   uploadLanderShot,
   ensureLanderShotsBucket,
   analyzeLanderGaps,
+  extractCtaTarget,
+  DEFAULT_FUNNEL_DEPTH,
   type LanderTarget,
   type ChapterStat,
 } from "../src/lib/landing-page-scout";
@@ -63,12 +65,12 @@ interface CapturedChapter {
   reach_sessions?: number;
 }
 
-/** Capture one lander → its per-chapter shots (or a blocked/failed marker). */
+/** Capture one lander → its per-chapter shots + collected anchor hrefs (or a blocked/failed marker). */
 async function captureLander(
   target: LanderTarget,
   stamp: string,
   chapterStats: Record<string, ChapterStat>,
-): Promise<{ status: "captured" | "blocked" | "failed"; chapters: CapturedChapter[]; error: string | null }> {
+): Promise<{ status: "captured" | "blocked" | "failed"; chapters: CapturedChapter[]; hrefs: string[]; error: string | null }> {
   const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   try {
     const context = await browser.newContext({
@@ -82,7 +84,7 @@ async function captureLander(
     const resp = await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => null);
     const httpStatus = resp?.status() ?? 0;
     if (!resp || httpStatus >= 400) {
-      return { status: "blocked", chapters: [], error: `nav http ${httpStatus || "no-response"}` };
+      return { status: "blocked", chapters: [], hrefs: [], error: `nav http ${httpStatus || "no-response"}` };
     }
     await page.waitForTimeout(1200); // let lazy sections hydrate
 
@@ -125,10 +127,17 @@ async function captureLander(
       }
     }
 
-    if (!chapters.length) return { status: "failed", chapters: [], error: "no chapters captured" };
-    return { status: "captured", chapters, error: null };
+    // Collect all anchor hrefs so the funnel-follow can rank the primary CTA destination
+    // (docs/brain/specs/funnel-teardown-scout.md, Phase 1). Runs unconditionally; extractCtaTarget
+    // returns null for our own landers (no outbound same-brand target) so nothing is followed.
+    const hrefs = await page
+      .$$eval("a[href]", (els) => els.map((e) => (e as HTMLAnchorElement).getAttribute("href") || "").filter(Boolean))
+      .catch(() => [] as string[]);
+
+    if (!chapters.length) return { status: "failed", chapters: [], hrefs, error: "no chapters captured" };
+    return { status: "captured", chapters, hrefs, error: null };
   } catch (e) {
-    return { status: "failed", chapters: [], error: e instanceof Error ? e.message : String(e) };
+    return { status: "failed", chapters: [], hrefs: [], error: e instanceof Error ? e.message : String(e) };
   } finally {
     await browser.close().catch(() => {});
   }
@@ -149,23 +158,64 @@ async function main() {
   const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const summary: Array<Record<string, unknown>> = [];
   for (const target of targets) {
-    const cap = await captureLander(target, stamp, chapterStats);
-    const { error } = await admin.from("lander_snapshots").insert({
-      workspace_id: args.workspaceId,
-      product_id: target.product_id,
-      competitor_id: target.competitor_id,
-      is_ours: target.is_ours,
-      brand: target.brand,
-      url: target.url,
-      source: target.source,
-      viewport: "mobile",
-      status: cap.status,
-      chapters: cap.chapters,
-      error: cap.error,
-      captured_at: new Date().toISOString(),
-    });
-    summary.push({ url: target.url, brand: target.brand, is_ours: target.is_ours, status: cap.status, chapters: cap.chapters.length, insertError: error?.message || null });
-    console.log(`${cap.status === "captured" ? "✓" : "⊘"} ${target.brand} ${target.url} → ${cap.status} (${cap.chapters.length} chapters)`);
+    // Funnel walk: for a competitor lander, capture the entry (step 0) and then follow the extracted
+    // primary CTA one step at a time up to DEFAULT_FUNNEL_DEPTH (funnel-teardown-scout Phase 1). Our
+    // own lander gets a single capture (no funnel-follow — this is a competitive-research tool).
+    // Depth is bounded; a blocked step stops that branch (never a hard failure); dedup prevents a
+    // repeat CTA loop within one run.
+    const maxDepth = target.is_ours ? 1 : DEFAULT_FUNNEL_DEPTH;
+    const funnelRoot = target.url;
+    const seen = new Set<string>();
+    let currentTarget: LanderTarget | null = target;
+
+    for (let step = 0; step < maxDepth && currentTarget; step++) {
+      if (seen.has(currentTarget.url)) break; // dedup
+      seen.add(currentTarget.url);
+
+      const cap = await captureLander(currentTarget, stamp, chapterStats);
+      const ctaTarget = cap.status === "captured" ? extractCtaTarget(cap.hrefs, currentTarget.url) : null;
+      const { error } = await admin.from("lander_snapshots").insert({
+        workspace_id: args.workspaceId,
+        product_id: currentTarget.product_id,
+        competitor_id: currentTarget.competitor_id,
+        is_ours: currentTarget.is_ours,
+        brand: currentTarget.brand,
+        url: currentTarget.url,
+        source: currentTarget.source,
+        viewport: "mobile",
+        status: cap.status,
+        chapters: cap.chapters,
+        error: cap.error,
+        captured_at: new Date().toISOString(),
+        funnel_step: step,
+        funnel_root_url: funnelRoot,
+        cta_target_url: ctaTarget,
+      });
+      summary.push({
+        url: currentTarget.url,
+        brand: currentTarget.brand,
+        is_ours: currentTarget.is_ours,
+        status: cap.status,
+        chapters: cap.chapters.length,
+        funnel_step: step,
+        cta_target_url: ctaTarget,
+        insertError: error?.message || null,
+      });
+      console.log(
+        `${cap.status === "captured" ? "✓" : "⊘"} step=${step} ${currentTarget.brand} ${currentTarget.url} → ${cap.status} (${cap.chapters.length} chapters)${ctaTarget ? ` → CTA ${ctaTarget}` : ""}`,
+      );
+
+      // Stop this branch on non-captured or when there's no further outbound-brand CTA to follow.
+      if (cap.status !== "captured" || !ctaTarget || seen.has(ctaTarget)) break;
+      currentTarget = {
+        url: ctaTarget,
+        source: currentTarget.source,
+        is_ours: currentTarget.is_ours,
+        brand: currentTarget.brand,
+        competitor_id: currentTarget.competitor_id,
+        product_id: currentTarget.product_id,
+      };
+    }
   }
 
   let analysis: unknown = null;

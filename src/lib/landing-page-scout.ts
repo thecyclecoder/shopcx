@@ -242,6 +242,71 @@ export async function loadChapterStats(
   return out;
 }
 
+// ── Funnel-follow (Funnel Teardown Scout, Phase 1) ──────────────────────────────
+
+/** Default funnel-follow depth. Snapshot step 0 (entry lander) + up to 2 next steps.
+ * checkout is Tool 5, out of scope here. */
+export const DEFAULT_FUNNEL_DEPTH = 3;
+
+// Legal / footer / policy paths we drop before ranking — they inflate frequency counts and
+// are never the primary CTA.
+const FUNNEL_FOOTER_PATH_RE =
+  /^\/(privacy|terms|returns?|refund|shipping|cookie|cookies|accessibility|contact|faq|impressum|about|legal|sitemap|press|careers|jobs|help|support|reviews|blog)(\/|$)/i;
+
+function registrableDomain(host: string): string {
+  const parts = host.toLowerCase().split(".").filter(Boolean);
+  if (parts.length <= 2) return parts.join(".");
+  return parts.slice(-2).join(".");
+}
+
+/**
+ * Extract the primary CTA destination from a rendered lander (Funnel Teardown Scout, Phase 1).
+ *
+ * Given all `a[href]` values on the page and its own URL, resolve each to absolute, drop
+ * anchors + non-http + legal/footer paths + same-hostname internal links, keep only
+ * OUTBOUND targets that share the entry's registrable domain (a same-or-related-brand
+ * subdomain — never an arbitrary third party), and rank by frequency. The most-repeated
+ * outbound URL is the funnel's next-step CTA.
+ *
+ * Proven against Erth Labs: learn.erthlabs.co/women50 → erthlabs.co/products/superfoodcoffee-starterkit
+ * appeared 10x vs 1x footer links.
+ *
+ * Returns null if no qualifying outbound target exists.
+ */
+export function extractCtaTarget(hrefs: string[], entryUrl: string): string | null {
+  let entry: URL;
+  try {
+    entry = new URL(entryUrl);
+  } catch {
+    return null;
+  }
+  const entryHost = entry.host.toLowerCase();
+  const entryReg = registrableDomain(entryHost);
+
+  const counts = new Map<string, number>();
+  for (const raw of hrefs) {
+    if (!raw) continue;
+    const h = raw.trim();
+    if (!h || h.startsWith("#") || /^(javascript|mailto|tel|sms):/i.test(h)) continue;
+    let u: URL;
+    try {
+      u = new URL(h, entryUrl);
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    if (FUNNEL_FOOTER_PATH_RE.test(u.pathname)) continue;
+    const host = u.host.toLowerCase();
+    if (host === entryHost) continue; // internal — not an outbound next-step
+    if (registrableDomain(host) !== entryReg) continue; // never an arbitrary third party
+    u.hash = "";
+    const normalized = u.toString();
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+  if (counts.size === 0) return null;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 // ── Vision gap-analysis ─────────────────────────────────────────────────────────
 
 interface SnapshotRow {
