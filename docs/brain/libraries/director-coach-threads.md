@@ -17,6 +17,9 @@ Server helpers for the [[../tables/director_coach_threads]] conversation ([[../s
 ## The two-button intent
 The route ([[../../src/app/api/director/coach/route]]) sets `intent` on a turn: **Ask** (explain only) vs **Coach her** (distill into a `coaching` card). The box (`runDirectorCoachJob`) branches its framing on `intent`; the approval card is the explicit confirmation. Owner-gated at the route/UI; surfaced as `DirectorCoachChat` on her profile (`/dashboard/agents/platform`).
 
+## Founder-prompted out-of-leash escape valve
+[[../specs/ceo-authorized-out-of-leash-actions]] Phase 1 — when the CEO asks Ada in this chat to do something OUTSIDE her leash (e.g. to unstick a wedged pipeline) she has a supervised path: investigate read-only, and IF she independently AGREES it's sound + the right call she emits ONE `out-of-leash-request` action in her reply. That action is **auto-applied inline** (`applyOutOfLeashRequestActionInline` in `scripts/builder-worker.ts`, mirroring `spec-status` / `dismiss-park` / `request-audit`): it raises a CEO-routed Approval Request (`kind='ceo-authorized-out-of-leash'`, `status='needs_approval'`) carrying her reasoning + a concrete executable pending-action (`run_prod_script` or `apply_migration`) that the CEO approves in the standard [[../dashboard/agents|Approvals inbox]] (Phase 2 executes via the standard executor). If she DISAGREES (unsound / risky / wrong), she emits NO action — the reply is her reasoning + what she'd do instead. That independent-agreement gate is what keeps her a supervisor, not a rubber-stamp: the founder's ask is necessary but NOT sufficient. See [[platform-director]] § Founder-prompted out-of-leash actions.
+
 ---
 
 [[../README]] · [[../tables/director_coach_threads]] · [[director-instructions]] · [[dev-message-threads]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]
