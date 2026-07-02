@@ -1,6 +1,6 @@
 # libraries/agent-jobs
 
-Server-side helpers over the [[../tables/agent_jobs]] build queue — the dashboard "Build" button inserts a row; the box worker claims it via `claim_agent_job()` and drives it to a PR. Also home to the **shared spec-test enqueue guard** ([[../specs/spec-test-on-ship]]). See [[../lifecycles/roadmap-build-console]].
+Server-side helpers over the [[../tables/agent_jobs]] build queue — the dashboard "Build" button inserts a row; the box worker claims it via `claim_agent_job()` and drives it to a PR. Also home to the **shared spec-test enqueue guard** ([[../specs/spec-test-on-ship]]). See [[../lifecycles/roadmap-build-console]]. The `enqueueXIfDue` helpers in this file (`enqueueSpecTestIfDue` + `enqueuePreMergeSpecTest` below) are the canonical shape referenced by the [[../operational-rules#PM-agent activation contract|PM-agent activation contract]] — pending-pool predicate + one-in-flight guard behind a legible `{ enqueued, reason }`; every reactive fire, cron, and standing-pass backstop routes through the same chokepoint.
 
 **File:** `src/lib/agent-jobs.ts`
 
