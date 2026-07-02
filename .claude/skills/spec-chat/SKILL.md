@@ -35,30 +35,35 @@ GitHub-API tools, you have the **whole working tree** and the **web**.
   worker needs it as its input. Touch no other file.
 - **Never the Anthropic API; never a nested `claude`.** All reasoning happens here, on Max.
 - **A good spec** (per `docs/brain/project-management.md`) — the worker parses these into the DB row +
-  `spec_phases` — has: an H1 `# <Title>` (NO status emoji — status is DB-driven); directly under it
-  `**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or goal milestone}` (exactly one
-  REAL owner + one REAL parent — no orphans; a spec missing either is unbuildable); a one-paragraph
-  outcome-tied summary; **at least one** concrete `## Phase N — name` section with file paths / schema /
-  tasks (NO status markers — per-phase status lives in `spec_phases`) — each becomes a `spec_phases`
-  row; a `## Safety / invariants` section; `## Completion criteria`; and a `## Verification` checklist.
-- **Propose a `**Brain refs:**` line at FINALIZE** ([[../../docs/brain/specs/spec-brain-refs]] Phase 2).
-  When the spec you're materializing names specific `src/lib/…` files or `public.…` tables, add a
-  `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` line (0-4 wikilinks) right under
-  the `**Owner:** / **Parent:**` metadata block, pointing at the docs/brain pages the builder should
-  Read FIRST. Mapping: `src/lib/{name}.ts` → `[[../libraries/{name}]]`; `src/lib/inngest/{name}.ts` →
-  `[[../inngest/{name}]]`; `src/lib/{subdir}/{name}.ts` → `[[../libraries/{name}]]` (basename); a table
-  ref like `public.{name}` → `[[../tables/{name}]]`. Verify the page actually exists on disk (`ls
-  docs/brain/{libraries,inngest,tables,lifecycles,integrations}/`) before including it — never a
-  dangling wikilink (the builder would land on a 404 and be blinder than with no refs). Keep the list
-  small (2-4, the ones truly load-bearing); no mappable pages means no line (better than a wrong one).
-  This is a suggestion — a subsequent refine turn can edit it. The worker also runs a deterministic
-  safety-net suggester on the buffer after your call, so a missed obvious page is still surfaced.
-  **Editable OR skippable ([[../../docs/brain/specs/fix-spec-brain-refs]]):** a refine can EITHER edit
-  the wikilinks (author picks always win) OR skip refs entirely — but "skip" needs a persisted signal
-  the safety-net suggester will honor on the next author, else the ref gets re-injected. Two forms:
-  leave an empty `**Brain refs:**` header (colon with no value) OR drop an invisible
-  `<!-- brain-refs: skip -->` HTML comment anywhere in the body. Simply DELETING the line is not a
-  durable skip — the deterministic suggester can't tell it from a brand-new spec and will re-inject.
+  `spec_phases` + `spec_phase_checks` + `spec_brain_refs` rows — has: an H1 `# <Title>` (NO status
+  emoji — status is DB-driven); directly under it `**Owner:** [[../functions/{slug}]] · **Parent:**
+  {a function mandate or goal milestone}` (exactly one REAL owner + one REAL parent — no orphans; a
+  spec missing either is unbuildable); a one-paragraph outcome-tied summary; **at least one** concrete
+  `## Phase N — name` section with file paths / schema / tasks (NO status markers — per-phase status
+  lives in `spec_phases`) — each becomes a `spec_phases` row; a `## Safety / invariants` section;
+  `## Completion criteria`; and per-phase acceptance checks (≥1 per phase — persisted as `spec_phase_checks`
+  rows, the app-layer chokepoint gates them via `assertEveryPhaseHasChecks`).
+- **pm-structured-intent-and-refs Phase 1 — the plain-language intent layer.** Every finalize buffer
+  MUST include a `**Why:**` header line (why this spec exists, plain language for humans + agents) and
+  a `**What:**` header line (what changes when it ships) right under `**Owner:** / **Parent:**` and
+  before `**Brain refs:**`. Both are hard-gated at the app-layer chokepoint (`MissingIntentError`) —
+  the DB write fails without them. Same rule per-phase: each `## Phase N — name` section carries a
+  short "why this phase" + "what changes when this phase ships" prose paragraph at the top. NO code
+  fences / `file:line` refs / `**Header:**` lines inside `why`/`what` — the intent lint rejects them.
+- **Structured brain refs at author time** ([[../../docs/brain/specs/pm-structured-intent-and-refs]]
+  Phase 2). Brain refs are a first-class RELATION now (`spec_brain_refs` rows keyed to the spec/phase),
+  not a `**Brain refs:**` prose line. Author them as `{brain_slug}` values via the structured
+  `authorSpecRowStructured` `brainRefs` argument (or leave them alone — the box worker runs the
+  deterministic ref-suggester against your body after finalize, so a missed obvious page is still
+  surfaced). Slug shape: `libraries/foo`, `inngest/foo`, `tables/foo`, `lifecycles/foo`,
+  `integrations/foo`. Verify the page exists (`ls docs/brain/{libraries,inngest,tables,lifecycles,
+  integrations}/{slug}.md`) before authoring it — the CI ref check refuses a dangling row. Keep the
+  list small (2-4, the ones truly load-bearing).
+- **Structured parent** ([[../../docs/brain/specs/pm-structured-intent-and-refs]] Phase 2). The parent
+  is a typed reference too — `(parent_kind, parent_ref)` on the `specs` row: `parent_kind='mandate'`
+  with `parent_ref={function_slug}#{mandate_slug}`, `parent_kind='milestone'` with
+  `parent_ref={milestone_uuid}`, or `parent_kind='function'` with `parent_ref={function_slug}`. The
+  `[[wikilink]]` `**Parent:**` prose line is legacy transport only — the DB row is authoritative.
 
 ## Modes (the worker tells you which; it sets your final-JSON shape)
 

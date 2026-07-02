@@ -4695,7 +4695,7 @@ async function claimHeldForUnreviewedSpec(job: Job): Promise<boolean> {
 // `continue` overlap; split/fold_now/author_followup_spec/dismiss_candidate/escalate still run.
 async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<string> = new Set()): Promise<string> {
   const lib = await import("../src/lib/agents/platform-director");
-  const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
+  const { deriveSpecStatusFromMarkdown: deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
 
   const candidates = await lib.findGroomCandidates(db);
@@ -6112,7 +6112,7 @@ async function runGrowthDirectorJob(job: Job) {
 async function runDirectorBounceBackJob(job: Job) {
   const tag = `[director-bounce-back:${job.id.slice(0, 8)}]`;
   const lib = await import("../src/lib/agents/platform-director");
-  const { deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
+  const { deriveSpecStatusFromMarkdown: deriveSpecStatus, getSpec } = await import("../src/lib/brain-roadmap");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { bounceBackPreamble, reEscalateAfterBounceBody } = await import("../src/lib/agents/director-bounce-back");
   const { APPROVAL_REQUEST_TYPE } = await import("../src/lib/agents/inbox");
@@ -7112,14 +7112,15 @@ async function runPlanJob(job: Job) {
     // bound by its "never write specs / never run git" invariant, never wrote, so the glob found nothing).
     const prompt = [
       `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
-      `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); \`phases\` — an ARRAY of {"title":"Phase N — name","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+      `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+      `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
       `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
       `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
       `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
       ``,
       `Approved specs (author EXACTLY these slugs, no more, no fewer):\n${specList}`,
       ``,
-      `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
+      `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
     ].join("\n");
 
     const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir, job.id);
@@ -7148,9 +7149,11 @@ async function runPlanJob(job: Job) {
     type PlannerSpecOut = {
       slug?: string;
       summary?: string;
+      why?: string;
+      what?: string;
       milestone?: string;
       blocked_by?: unknown;
-      phases?: Array<{ title?: string; body?: string; verification?: string }>;
+      phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string }>;
     };
     const returnedSpecs: PlannerSpecOut[] = (() => {
       const obj = extractJson<{ specs?: unknown }>(resultText);
@@ -7159,11 +7162,12 @@ async function runPlanJob(job: Job) {
     const returnedBySlug = new Map<string, PlannerSpecOut>();
     for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
 
-    const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError } = await import("../src/lib/author-spec");
+    const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError, MissingIntentError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
     let authored = 0;
     const verificationFailures: string[] = [];
     const emptyBodyFailures: string[] = [];
+    const intentFailures: string[] = [];
     const notReturned: string[] = [];
     const milestoneUnresolved: string[] = [];
     for (const a of approved) {
@@ -7188,10 +7192,17 @@ async function runPlanJob(job: Job) {
       // Blocked-by: approved blockers only (drop declined siblings + self-refs) — the same rule as the
       // proposal stage, applied to whichever list is authoritative (the approved action carries it).
       const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
+      // pm-structured-intent-and-refs Phase 1 — extract per-phase intent (why/what) from the planner
+      // JSON. Fall back to the spec-level intent (`out.why`/`out.what`) so a planner that only writes
+      // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
+      const fallbackWhy = String(out.why || "").trim();
+      const fallbackWhat = String(out.what || "").trim();
       const phases = out.phases.map((p) => ({
         title: String(p.title || "").trim() || "Phase",
         body: String(p.body || "").trim(),
         verification: String(p.verification || "").trim(),
+        why: String(p.why || "").trim() || fallbackWhy,
+        what: String(p.what || "").trim() || fallbackWhat,
       }));
       try {
         // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
@@ -7200,6 +7211,12 @@ async function runPlanJob(job: Job) {
         await markSpecCardForReview(job.workspace_id, s.slug, "planned", { actor: "planner", reason: `planner authored for goal ${goalSlug}` }).catch((e) => {
           console.warn(`${tag} markSpecCardForReview ${s.slug} failed: ${e instanceof Error ? e.message : e}`);
         });
+        // pm-structured-intent-and-refs Phase 1 — build the spec-level intent. The planner should emit
+        // both explicitly; fall back to the approved action's `intent` (a one-liner) + a synthesized
+        // "what" from the title if the planner missed either field. If the planner supplied nothing
+        // useful at all the chokepoint gate throws MissingIntentError below (caught + reported).
+        const specWhy = (String(out.why || "").trim() || (s.intent || "").trim()) || "";
+        const specWhat = String(out.what || "").trim();
         await authorSpecRowStructured(
           job.workspace_id,
           s.slug,
@@ -7209,6 +7226,8 @@ async function runPlanJob(job: Job) {
             owner: s.owner,
             parent: s.parent,
             blocked_by: blockers,
+            why: specWhy,
+            what: specWhat,
             phases,
           },
           "planned",
@@ -7216,24 +7235,28 @@ async function runPlanJob(job: Job) {
         );
         authored++;
       } catch (e) {
-        // A spec with no per-phase Verification is untestable, and a spec with an empty-body phase is
-        // un-buildable — either way, fail loudly instead of silently dropping it (and then queueing a build
-        // for a spec that never landed in public.specs, or one that silently no-ops).
+        // A spec with no per-phase Verification is untestable, one with an empty-body phase is un-buildable,
+        // and one with no plain-language intent is unreadable — all three fail loudly instead of silently
+        // dropping the spec (and then queueing a build for a spec that never landed or that silently no-ops).
         if (e instanceof MissingVerificationError) {
           verificationFailures.push(e.message);
           console.error(`${tag} author ${s.slug}: ${e.message}`);
         } else if (e instanceof EmptyPhaseBodyError) {
           emptyBodyFailures.push(e.message);
           console.error(`${tag} author ${s.slug}: ${e.message}`);
+        } else if (e instanceof MissingIntentError) {
+          intentFailures.push(e.message);
+          console.error(`${tag} author ${s.slug}: ${e.message}`);
         } else {
           console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
         }
       }
     }
-    if (verificationFailures.length || emptyBodyFailures.length || notReturned.length || milestoneUnresolved.length) {
+    if (verificationFailures.length || emptyBodyFailures.length || intentFailures.length || notReturned.length || milestoneUnresolved.length) {
       const reasons: string[] = [];
       if (verificationFailures.length) reasons.push(`untestable (no "## Verification"): ${verificationFailures.join(" | ")}`);
       if (emptyBodyFailures.length) reasons.push(`un-buildable (empty phase body): ${emptyBodyFailures.join(" | ")}`);
+      if (intentFailures.length) reasons.push(`missing plain-language why/what: ${intentFailures.join(" | ")}`);
       if (notReturned.length) reasons.push(`planner did not return a spec body for: ${notReturned.join(", ")}`);
       if (milestoneUnresolved.length) reasons.push(`milestone did not resolve to a goal_milestones row: ${milestoneUnresolved.join(", ")}`);
       await update(job.id, {
@@ -10993,6 +11016,10 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
         outcome,
         successMetric: typeof a.successMetric === "string" ? a.successMetric : "",
         body: typeof a.body === "string" ? a.body : "",
+        // pm-structured-intent-and-refs Phase 1 — plumb the plain-language WHY through the coach action
+        // shape so proposeGoal can chokepoint-gate it. Missing → the proposer synthesizes a stub from the
+        // title downstream so the gate passes.
+        why: typeof a.why === "string" ? a.why : "",
         status: "pending",
       });
     } else if (a.type === "spec-edit") {
@@ -11388,6 +11415,12 @@ async function runDirectorCoachJob(job: Job) {
             // routes to the CEO for the greenlight (the activation gate). A chat-proposed goal is then identical
             // to any director-proposed goal — never a direct/ungated commit.
             const { proposeGoal } = await import("../src/lib/agents/goal-proposals");
+            // pm-structured-intent-and-refs Phase 1 — the chokepoint requires a plain-language WHY. The
+            // director-coach action carries `why` when the director wrote one; if she didn't, synthesize a
+            // stub from the title + owner function so the gate passes but the intent is still recognizable.
+            const goalWhy = (typeof a.why === "string" && a.why.trim())
+              ? a.why.trim()
+              : `The ${thread.director_function} director proposed this goal to advance "${String(a.title)}".`;
             const r = await proposeGoal(db, job.workspace_id, {
               proposerFunction: thread.director_function,
               ownerFunction: thread.director_function,
@@ -11396,6 +11429,7 @@ async function runDirectorCoachJob(job: Job) {
               outcome: String(a.outcome),
               successMetric: a.successMetric ? String(a.successMetric) : undefined,
               body: a.body ? String(a.body) : undefined,
+              why: goalWhy,
             });
             if (!r.ok) { a.status = "failed"; a.result = r.error || "proposeGoal failed"; notes.push(`${a.summary} → ${a.result}`); continue; }
             a.status = "done";

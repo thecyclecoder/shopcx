@@ -813,6 +813,8 @@ export async function rollCoachingIntoFixSpec(
         owner: "platform",
         parent: `[[../functions/platform]] — the platform-director graduates persistent coaching into a durable agent fix.`,
         blocked_by: [],
+        why: `The ${opts.agentKind} agent sits at ${opts.rollupAvg?.toFixed(1) ?? "?"}/10 after ${opts.attempts} coaching attempts that didn't stick — the coaching must be baked into the mandate, not left as ephemeral instructions.`,
+        what: `When this spec ships, the ${opts.agentKind} agent's coaching is permanently folded into its prompt/run-job so it improves by default on every future run.`,
         phases: [
           {
             title: `Phase 1 — bake the coaching into the ${opts.agentKind} agent`,
@@ -824,6 +826,8 @@ export async function rollCoachingIntoFixSpec(
             ].join("\n"),
             verification: `The build's diff modifies the ${opts.agentKind} agent's prompt/run-job (scripts/builder-worker.ts) or src/lib/agents/* to incorporate the coaching above (not only agent_instructions) — grep the changed files for the baked-in guidance. \`npx tsc --noEmit\` clean.`,
             status: "planned",
+            why: `The ${opts.agentKind} agent sits at ${opts.rollupAvg?.toFixed(1) ?? "?"}/10 after ${opts.attempts} coaching attempts that didn't stick — the coaching must be baked into the mandate permanently.`,
+            what: `When this phase ships, the accumulated coaching is folded into the ${opts.agentKind} agent's prompt/run-job so it applies on every future run without re-coaching.`,
           },
         ],
       },

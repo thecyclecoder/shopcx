@@ -70,6 +70,10 @@ export interface ProposeGoalInput {
    *  Most proposals (a director-coach goal, a top-level director-proposed goal) leave this undefined. The
    *  acyclicity rail (`goals_parent_cycle` trigger) rejects a self-ancestor. */
   parentGoalId?: string;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this goal exists. HARD gated at the
+   *  chokepoint (`proposeGoal` rejects a proposal with empty `why`). Reconcile: `outcome` IS the goal's
+   *  WHAT — we do not carry a separate `what` field. */
+  why: string;
 }
 
 /** A goal slug is lowercase-kebab (mirrors the spec/goal slug guard in brain-roadmap). */
@@ -97,6 +101,10 @@ export function buildProposedGoalMarkdown(input: ProposeGoalInput): string {
     `**Status:** proposed`,
     `**Proposed-by:** [[../functions/${fn}]]`,
     `**Owner:** [[../functions/${fn}]]`,
+    // pm-structured-intent-and-refs Phase 1 — surface the plain-language WHY at the top of the mirror
+    // artifact. `outcome` remains the WHAT (reconcile-don't-duplicate); together they read as the
+    // human-first intent header.
+    input.why ? `**Why:** ${input.why}` : "",
     `**Outcome:** ${input.outcome}`,
     input.successMetric ? `**Success metric:** ${input.successMetric}` : "",
     input.target ? `**Target:** ${input.target}` : "",
@@ -198,6 +206,12 @@ export async function proposeGoal(
   if (!isValidGoalSlug(input.slug)) return { ok: false, error: `invalid goal slug "${input.slug}" — use lowercase-kebab-case` };
   if (!input.title.trim()) return { ok: false, error: "a goal title is required" };
   if (!input.outcome.trim()) return { ok: false, error: "a goal outcome is required" };
+  // pm-structured-intent-and-refs Phase 1 — the plain-language WHY is required (`outcome` remains the
+  // WHAT — reconcile-don't-duplicate). A goal without a why is unreadable to humans + gives the CEO's
+  // greenlight surface no motivation string.
+  if (!input.why || !input.why.trim()) {
+    return { ok: false, error: "a plain-language WHY is required (pm-structured-intent-and-refs Phase 1) — describe why this goal exists so humans + agents share the intent." };
+  }
 
   const artifact = buildProposedGoalMarkdown(input);
 
@@ -224,6 +238,9 @@ export async function proposeGoal(
         proposer_function: input.proposerFunction,
         parent_goal_id: input.parentGoalId ?? null,
         status: "proposed",
+        // pm-structured-intent-and-refs Phase 1 — persist the plain-language WHY column on the goal row
+        // (chokepoint-gated non-empty above). `outcome` continues to carry the WHAT.
+        why: input.why.trim(),
       },
       extractDecompositionMilestones(artifact),
     );

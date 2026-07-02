@@ -6,7 +6,7 @@
  *
  * A "regression" is a thing that USED TO WORK and now doesn't (distinct from a brand-new error — those
  * stay with the [[repair-agent]]). Phase 1's concrete detector is **spec-test-✅-now-failing**: a spec
- * marked ✅ shipped whose `## Verification` no longer holds (an evidence-backed `fail` check on its
+ * marked ✅ shipped whose spec_phase_checks rows no longer hold (an evidence-backed `fail` check on its
  * latest [[spec_test_runs]] run — a false-✅ / drift caught by [[../specs/spec-test-deep-verification]]).
  *
  * North star (supervisable autonomy): the agent **authors + dismisses** (a bounded proxy — "is this a
@@ -62,7 +62,7 @@ export const REGRESSION_RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 /** Statuses that mean a regression job for a signature is still "live" (being worked or surfaced). */
 export const LIVE_REGRESSION_STATUSES = ["queued", "claimed", "building", "needs_input", "needs_approval", "queued_resume", "needs_attention"];
 
-/** One failing `## Verification` check the spec-test agent observed breaking (evidence-backed). */
+/** One failing spec_phase_checks row the spec-test agent observed breaking (evidence-backed). */
 export interface RegressionFailing {
   text: string;
   evidence?: string;

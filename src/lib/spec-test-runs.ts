@@ -264,64 +264,13 @@ export function checkKey(text: string): string {
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Phase 3 (spec-test-maximize-machine-coverage) — green-check derivation.
- * A `## Verification` bullet is GREEN when its latest-agent check is `pass` OR the owner marked it
- * `✓ Tested` (`spec_test_human_checks` resolution='verified'). Derived per bullet by the same `checkKey`
+ * A verification check is GREEN when its latest-agent check is `pass` OR the owner marked it
+ * `✓ Tested` (`spec_test_human_checks` resolution='verified'). Derived per row by the same `checkKey`
  * hash the human-queue uses, so it survives re-runs + matches owner resolutions. The green state is
- * rendered live on the VerificationCard from the DB — under 'DB is the spec' (retire-md-spec-writers-
- * db-is-sole-spec Phase 2) the compute-only `reflectSpecGreenChecks` reports counts but does NOT
- * commit a leading ✅ back to `docs/brain/specs/{slug}.md`. See docs/brain/specs/spec-test-maximize-machine-coverage.md.
+ * rendered live on the VerificationCard directly from the DB (`spec_phase_checks` rows +
+ * `spec_test_runs` + `spec_test_human_checks`) — pm-structured-intent-and-refs Phase 4 removed the
+ * legacy markdown bullet parser; nothing extracts semantic structure from the rendered spec body.
  * ────────────────────────────────────────────────────────────────────────── */
-
-/** The ✅ marker used to denote a green verification bullet in rendered markdown. Retained for the
- *  bullet-parse strip so a stale ✅ still in a DB-authored body doesn't corrupt the check key. */
-export const GREEN_CHECK = "✅";
-
-export interface VerificationBullet {
-  /** Bullet content, with the `- ` prefix and any leading ✅ stripped, whitespace-collapsed (keys cleanly). */
-  text: string;
-  /** Index of the bullet's first line (`- …`) in the raw spec markdown's line array (for the writeback edit). */
-  startLine: number;
-  /** Whether that first line already carries a leading ✅ (idempotency — avoid a no-op commit). */
-  hasCheck: boolean;
-}
-
-/**
- * Parse the top-level `- ` bullets of a spec's `## Verification` section out of its raw markdown.
- * Continuation lines (indented / nested) fold into the current bullet's text so a multi-line bullet
- * keys the same as the agent's verbatim `check.text`. Returns [] when there's no Verification section.
- */
-export function parseVerificationBullets(raw: string): VerificationBullet[] {
-  const lines = String(raw).split("\n");
-  const start = lines.findIndex((l) => /^##\s+Verification\b/i.test(l));
-  if (start === -1) return [];
-  const greenRe = new RegExp(`^${GREEN_CHECK}\\s+`);
-  const bullets: VerificationBullet[] = [];
-  let cur: { startLine: number; parts: string[]; hasCheck: boolean } | null = null;
-  const flush = () => {
-    if (cur) {
-      bullets.push({ text: cur.parts.join(" ").replace(/\s+/g, " ").trim(), startLine: cur.startLine, hasCheck: cur.hasCheck });
-      cur = null;
-    }
-  };
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^##\s/.test(line)) break; // next section
-    const m = /^- (.*)$/.exec(line); // a top-level bullet (no leading whitespace)
-    if (m) {
-      flush();
-      let body = m[1];
-      const hasCheck = greenRe.test(body);
-      if (hasCheck) body = body.replace(greenRe, "");
-      cur = { startLine: i, parts: [body], hasCheck };
-    } else if (cur && line.trim() !== "" && /^\s+\S/.test(line)) {
-      cur.parts.push(line.trim()); // indented continuation of the current bullet
-    } else {
-      flush(); // blank line / non-indented prose ends the bullet
-    }
-  }
-  flush();
-  return bullets;
-}
 
 export interface GreenBullet {
   text: string;

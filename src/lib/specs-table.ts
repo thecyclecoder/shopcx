@@ -46,6 +46,13 @@ export interface SpecPhaseRow {
    *  main-promotion stamp). A phase with `build_sha` set but `status !== 'shipped'` is built-on-branch. */
   build_sha: string | null;
   verification: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this phase exists. Paired with `what`.
+   *  HARD gate at the app-layer chokepoint (`author-spec.assertEveryNodeHasIntent`). NULL only for rows
+   *  authored BEFORE the intent columns landed. */
+  why: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. Paired
+   *  with `why`. HARD gate at the app-layer chokepoint. NULL only for pre-intent rows. */
+  what: string | null;
   /** fixes-as-phases — 'phase' (normal) | 'fix' (appended by the pre-merge-fix flow for a spec-test
    *  regression; builds one-at-a-time on a resumed session, then the origin self-re-tests). */
   kind: string;
@@ -114,6 +121,21 @@ export interface SpecRow {
    *  (a goal-mate never ships to main until M5's atomic goal promotion), and M5 reads "every spec in the goal
    *  has goal_branch_sha" to detect goal-complete. Null = not yet on the goal branch. */
   goal_branch_sha: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists. Paired with `what`.
+   *  HARD gate at the app-layer chokepoint (`author-spec.assertEveryNodeHasIntent`). NULL only for rows
+   *  authored BEFORE the intent columns landed. Not markdown — the plain-language lint (no code fences /
+   *  no `file:line`) rejects jargon that belongs in the technical body. */
+  why: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. Paired
+   *  with `why`. HARD gate at the app-layer chokepoint. Distinct from `summary`. */
+  what: string | null;
+  /** pm-structured-intent-and-refs Phase 2 — typed parent kind (`function`/`mandate`/`milestone`), or
+   *  NULL for legacy rows. Paired with `parent_ref`. The free-text `parent` stays for display; the
+   *  typed pair is authoritative for CI resolution. */
+  parent_kind: "function" | "mandate" | "milestone" | null;
+  /** pm-structured-intent-and-refs Phase 2 — the resolvable value for the typed parent (function slug,
+   *  mandate key, or milestone id). Paired with `parent_kind`. */
+  parent_ref: string | null;
   created_at: string;
   updated_at: string;
   phases: SpecPhaseRow[];
@@ -143,6 +165,16 @@ export interface SpecRowInput {
   regression_signature?: string | null;
   auto_build?: boolean;
   milestone_id?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists. HARD gated at the
+   *  app-layer chokepoint; this SDK writer simply persists. PASS `null` to CLEAR; OMIT to PRESERVE. */
+  why?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. HARD
+   *  gated at the app-layer chokepoint; this SDK writer simply persists. */
+  what?: string | null;
+  /** pm-structured-intent-and-refs Phase 2 — typed parent kind. */
+  parent_kind?: "function" | "mandate" | "milestone" | null;
+  /** pm-structured-intent-and-refs Phase 2 — the resolvable typed-parent value. */
+  parent_ref?: string | null;
 }
 
 /** Field set callers pass per-phase. `pr`/`merge_sha`/`verification` are optional — preserved when omitted. */
@@ -155,6 +187,11 @@ export interface SpecPhaseInput {
   pr?: number | null;
   merge_sha?: string | null;
   verification?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this phase exists. HARD gated at the
+   *  app-layer chokepoint. PASS `null` to CLEAR; OMIT to PRESERVE. */
+  why?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. */
+  what?: string | null;
   /** fixes-as-phases — defaults to 'phase' on insert; set 'fix' for an appended fix phase. */
   kind?: string;
   origin_check_keys?: string[];
@@ -201,14 +238,18 @@ interface SpecRowDb {
   merged_pr: number | null;
   last_merge_sha: string | null;
   goal_branch_sha: string | null;
+  why: string | null;
+  what: string | null;
+  parent_kind: "function" | "mandate" | "milestone" | null;
+  parent_ref: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, created_at, updated_at";
 const PHASE_COLUMNS =
-  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, kind, origin_check_keys, created_at, updated_at";
+  "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, kind, origin_check_keys, created_at, updated_at";
 
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   return {
@@ -238,6 +279,10 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     merged_pr: db.merged_pr,
     last_merge_sha: db.last_merge_sha,
     goal_branch_sha: db.goal_branch_sha,
+    why: db.why,
+    what: db.what,
+    parent_kind: db.parent_kind,
+    parent_ref: db.parent_ref,
     created_at: db.created_at,
     updated_at: db.updated_at,
     phases,
@@ -340,6 +385,14 @@ export async function upsertSpec(
     milestone_id: row.milestone_id ?? null,
     updated_at: new Date().toISOString(),
   };
+  // pm-structured-intent-and-refs Phase 1 — persist the plain-language intent columns. `undefined` means
+  // "preserve" (the caller isn't touching them); an explicit `null` or a string is written through.
+  if (row.why !== undefined) upsertRow.why = row.why;
+  if (row.what !== undefined) upsertRow.what = row.what;
+  // pm-structured-intent-and-refs Phase 2 — persist the typed parent pair (function|mandate|milestone).
+  // Same preserve-on-undefined rule.
+  if (row.parent_kind !== undefined) upsertRow.parent_kind = row.parent_kind;
+  if (row.parent_ref !== undefined) upsertRow.parent_ref = row.parent_ref;
   // specs-status-override-only: `specs.status` is OVERRIDE-ONLY (in_review / deferred / folded). When a caller
   // passes an explicit status, persist it ONLY if it's a true override; a DERIVED value (planned /
   // in_progress / shipped) is normalized to NULL so the rollup derives it (never a leaked stored derived
@@ -414,6 +467,8 @@ export async function upsertSpec(
       if (phase.pr !== undefined) updateRow.pr = phase.pr;
       if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
       if (phase.verification !== undefined) updateRow.verification = phase.verification;
+      if (phase.why !== undefined) updateRow.why = phase.why;
+      if (phase.what !== undefined) updateRow.what = phase.what;
       if (phase.kind !== undefined) updateRow.kind = phase.kind;
       if (phase.origin_check_keys !== undefined) updateRow.origin_check_keys = phase.origin_check_keys;
       const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
@@ -429,6 +484,8 @@ export async function upsertSpec(
         pr: phase.pr ?? null,
         merge_sha: phase.merge_sha ?? null,
         verification: phase.verification ?? null,
+        why: phase.why ?? null,
+        what: phase.what ?? null,
         kind: phase.kind ?? "phase",
         origin_check_keys: phase.origin_check_keys ?? [],
       };

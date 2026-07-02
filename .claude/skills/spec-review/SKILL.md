@@ -99,6 +99,17 @@ the `**Owner:** · **Parent:**` header line, an optional `**Blocked-by:**` line,
 - **Verification per phase.** Each phase carries a `### Verification` block (from `spec_phases.verification`)
   so the spec-test agent (Vera) can grade it later. A phase with no Verification block is a defect; a
   one-shot spec needs at least one Verification block.
+- **Plain-language intent per node (pm-structured-intent-and-refs Phase 1).** Every spec + every phase
+  MUST carry non-empty plain-language `**Why:**` (why this exists) + `**What:**` (what changes when
+  it ships). Both are stored as columns on `public.specs` / `public.spec_phases` and are HARD-gated
+  at the app-layer chokepoint (`MissingIntentError`) — the materialized `.box/spec-{slug}.md` renders
+  them as `**Why:**` / `**What:**` header lines just under `**Owner:** · **Parent:**`. A missing or
+  empty why/what is a defect. Reject a why/what that stuffs code fences / `file:line` refs /
+  `**Header:**` lines into the intent field — that content belongs in the phase body.
+- **Structured checks per phase (pm-structured-intent-and-refs Phase 3).** The phase's `### Verification`
+  block is a bulleted checklist that materializes into `public.spec_phase_checks` rows. Each bullet
+  must be a concrete "- On {where}, {do what} → expect {observable result}" line. A phase whose
+  Verification yields ZERO parseable checks (no bullets, or a vague single sentence) is a defect.
 
 The defect bar is **specific**: name the missing field, the mangled phase numbers, the missing function
 slug. "Doesn't look quite right" is not a defect.

@@ -506,12 +506,16 @@ export async function materializeTriageOutcome(
           owner: "cs",
           parent: `[[../functions/cs]] — Ticket-derived product fixes`,
           blocked_by: [],
+          why: `Escalation-triage quorum on ticket ${ticketId} identified a product gap that requires a durable spec fix.`,
+          what: `When this spec ships, the product gap the escalated ticket identified is resolved.`,
           phases: [
             {
               title: `P1 — implement the fix`,
               body: phaseBody,
               verification: phaseVerification,
               status: "planned",
+              why: `Escalation-triage quorum on ticket ${ticketId} identified a product gap that requires a durable spec fix.`,
+              what: `When this phase ships, the product gap the escalated ticket identified is resolved.`,
             },
           ],
         },

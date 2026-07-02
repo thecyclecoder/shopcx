@@ -74,44 +74,44 @@ To revisit an archived feature, don't reactivate the stale spec — use **New sp
 
 ## Writing a spec
 
-Add a file under `docs/brain/specs/{kebab-name}.md`. The spec file is the contract — it's what a `/goal` session (or a human) executes against. Template:
+Author a spec through the DB via [[libraries/author-spec]] `authorSpecRowStructured` — the STRUCTURED authoring path ([[specs/pm-structured-intent-and-refs]]). The `public.specs` row + `public.spec_phases` rows + `spec_phase_checks` rows + `spec_brain_refs` rows ARE the spec; there is no `docs/brain/specs/*.md` on disk anymore. Structured input shape:
 
-```markdown
-# {Feature name}
-
-**Owner:** [[../functions/{slug}]] · **Parent:** {mandate or goal-milestone}
-**Blocked-by:** [[prerequisite-spec]]   ← optional; omit if nothing must ship first
-**Auto-build:** off                      ← optional; opt OUT of auto-queue-on-unblock (manual Build only)
-**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]]   ← optional; 0-4 docs/brain pages the builder should Read FIRST
-
-One-paragraph summary of what we're building + why. Tie it to a
-business outcome.
-
-## Phase 1 — {phase name}
-- Concrete tasks, file paths, schema additions
-
-## Phase 2 — {phase name}
-- More concrete tasks
-
-## Safety / invariants
-- Non-negotiable rules (e.g. "never delete approved prompts")
-
-## Completion criteria
-- Bulleted list of what must be true for the spec to be retired
-
-## Verification
-- A concrete, prod-facing test checklist the **owner** follows to confirm the shipped
-  feature actually works — the exact route / Slack action / CLI, the input, and the
-  **observable expected result**. Shape: `- On {where}, {do what} → expect {observable result}.`
-- e.g. `- On /dashboard/roadmap/box, queue a build → expect that lane to show the slug + a live elapsed timer.`
-- **Never** vague ("test it works"). Every bullet names a concrete place + a concrete expected observation.
+```ts
+authorSpecRowStructured(workspaceId, {
+  slug, title,
+  owner: "{function_slug}",              // Owner: exactly one function DRI
+  parent: "{prose label}",               // legacy prose label (for display only)
+  // TYPED parent — the DB-authoritative fields (pm-structured-intent-and-refs Phase 2):
+  parentKind: "function" | "mandate" | "milestone",
+  parentRef:  "{function_slug}" | "{function_slug}#{mandate_slug}" | "{milestone_uuid}",
+  why:  "plain-language why this spec exists (shared human + agent intent — required)",
+  what: "plain-language what changes when this ships (required)",
+  summary: "one-paragraph outcome-tied summary",
+  blocked_by: [ "{prerequisite-slug}" ],  // optional
+  phases: [
+    {
+      title: "phase name",
+      why:  "plain-language why this phase exists",
+      what: "plain-language what changes when this phase ships",
+      body: "concrete work: file paths, schema, tasks",
+      checks: [
+        { position: 1, kind: "auto"  as const, description: "On {where}, {do what} → expect {observable result}." },
+        { position: 2, kind: "human" as const, description: "..." },
+      ],
+    },
+  ],
+  brainRefs: [                            // 0-4 rows, each brain_slug is a real docs/brain/*.md
+    { brain_slug: "libraries/foo" },
+    { brain_slug: "tables/bar" },
+  ],
+})
 ```
 
-Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. The roadmap board reads it live, no deploy needed. Phase titles + the `## Phase N` headings stay in markdown as the durable record of what was planned.
+The author chokepoint HARD-gates on non-empty `why`+`what` at every level and ≥1 check per phase (`MissingIntentError` / `MissingChecksError`), so a spec that would render as unreadable / untestable never lands in the DB. Phase status lives in [[tables/spec_phases]] (DB); the roadmap board reads it live, no deploy needed.
 
-**`Brain refs:` — accuracy-first brain scoping ([[specs/spec-brain-refs]]).** A spec MAY carry a header line `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` — the 2-4 docs/brain pages actually relevant to the build. The [[../.claude/skills/build-spec|build-spec]] skill Reads these FIRST, before any grep or `docs/brain/README.md` sweep, and treats them as the authoritative context for the build (falling back to grep/README only if they're insufficient). The convention lives in the spec body — it's parsed by the skill from the materialized markdown ([[libraries/build-spec-materializer]]), not a new typed column. Optional (absence = today's grep-the-brain behavior). Wikilinks resolve relative to `docs/brain/specs/` — same convention as the brain index — so `[[../libraries/foo]]` → `docs/brain/libraries/foo.md`. Frame this as an ACCURACY improvement: the builder Reads the RIGHT pages instead of missing one or reading three wrong ones; the context trim is a modest bonus, not the point (the brain is Read on demand, not preloaded).
+**`Brain refs:` — accuracy-first brain scoping ([[specs/pm-structured-intent-and-refs]] Phase 2).** Brain refs are stored as `spec_brain_refs` RELATION rows (spec_id/phase_id → `brain_slug`) — 2-4 pages per spec — NOT a `**Brain refs:**` prose line. The [[../.claude/skills/build-spec|build-spec]] skill Reads each authored `docs/brain/{brain_slug}.md` FIRST, before any grep or `docs/brain/README.md` sweep, as the authoritative context for the build (falling back to grep/README only if they're insufficient). `scripts/_check-brain-refs.ts` fails CI on a dangling slug. Frame this as an ACCURACY improvement: the builder Reads the RIGHT pages instead of missing one or reading three wrong ones; the context trim is a modest bonus.
 
-**`Brain refs:` are SUGGESTED at authoring time ([[specs/spec-brain-refs]] Phase 2 · [[libraries/brain-ref-suggest]]).** So authors don't hand-pick refs, the spec-authoring flow proposes them: when [[libraries/author-spec]] writes a spec to `public.specs` (from spec-chat finalize, the goal planner's structured author, or any fix-spec author surface), it scans the body for the `src/lib/…` files, `public.…` tables, and existing brain wikilinks it names, resolves each to a `docs/brain/{libraries|inngest|tables|lifecycles|…}/{name}.md` that ACTUALLY exists on disk, and injects the top ≤4 as a `**Brain refs:**` line just below the last metadata header. The [[../.claude/skills/spec-chat|spec-chat]] skill's finalize instructions also ask the founder-facing box to propose the line proactively — the deterministic suggester is the safety net. **Never an override:** a body that already carries a `**Brain refs:**` line (the author picked) is passed through unchanged. **Never a dangling ref:** each candidate is verified against the current `docs/brain/` tree — a wikilink to a missing page would point the builder at nothing (worse than no refs), so it's dropped. Nothing mappable → no line (Phase 1's grep-the-brain fallback covers it). Author-confirmable: a subsequent spec-chat refine turn can strip or replace the suggested refs. **Editable OR skippable ([[specs/fix-spec-brain-refs]]):** a refine either edits the wikilinks (author picks win) OR persists a durable skip signal — an empty `**Brain refs:**` header (colon, no value) or an invisible `<!-- brain-refs: skip -->` HTML comment anywhere in the body. Both survive re-authoring; simply removing the line is NOT a durable skip (indistinguishable from a brand-new spec, so the deterministic suggester would re-inject on the next author).
+**`Brain refs:` are SUGGESTED at authoring time ([[libraries/brain-ref-suggest]]).** So authors don't hand-pick refs, [[libraries/author-spec]] scans the body for the `src/lib/…` files, `public.…` tables, and existing brain wikilinks it names, resolves each to a `docs/brain/{libraries|inngest|tables|lifecycles|…}/{name}.md` that ACTUALLY exists on disk, and persists the top ≤4 as `spec_brain_refs` rows via `replaceSpecBrainRefs`. **Never a dangling ref:** each candidate is verified against the current `docs/brain/` tree before the row lands. Nothing mappable → no rows (the builder falls back to grep-the-brain). Author-confirmable: a subsequent structured author replaces the row set with the author's own picks.
 
 **Phases ACCUMULATE on one spec branch → the spec ships ATOMICALLY (spec-goal-branch-pm-flow M1–M5).** A spec's phases build one-by-one onto ONE persistent branch `claude/build-{slug}` (phase per commit, `Spec:`/`Phase:` trailers). A built phase is stamped `spec_phases.build_sha` and stays `in_progress` (NOT shipped) — `shipped` is reserved for the atomic promotion. The accumulation gate ([[libraries/specs-table]] `isSpecAccumulationComplete`) blocks promotion until EVERY phase is built on the branch. Then:
 
@@ -121,6 +121,8 @@ Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. Th
 Provenance is tagged per-phase on `spec_phases.{pr,merge_sha}` ([[specs/spec-status-phase-pr-provenance]]) at the PROMOTION (a built-but-unpromoted phase carries only `build_sha` and reads `in_progress`), so "shipped" is provable/auditable; the board renders a `P2 ✓` link per shipped phase. Promote-eligibility = accumulation-complete ∧ spec-test-green (on the branch preview) ∧ security-green ([[libraries/agent-jobs]] `isSpecPromoteEligible`). Ada (director, grooming/escort) treats a spec with ≥1 **branch-built** phase (`build_sha`, NOT a `pr` tag) as **started** and sequences the next phase's build off the branch — branch-build, never main-merge. The full end-to-end trace — spec branch → goal branch → atomic main promotion, the three gates, and Reva's escalate-not-revert atomic deploy-watch — is in [[lifecycles/spec-goal-branch-pm-flow]].
 
 The **`## Verification` section** is the "how do I test this?" checklist ([[specs/verification-guides]]). The build that ships a spec **writes it** from the routes/tables/actions it actually touched, so a shipped spec arrives test-ready — and it's exactly what the **machine spec-test** grades: an `approved` run over these bullets auto-folds the spec. The spec detail page renders it as a prominent card with the per-bullet agent verdicts + the advisory **Fold to brain now** override. A shipped spec missing the section offers an owner-only **Generate test plan** button (Opus drafts one, brain-grounded). It folds into the brain with the rest of the spec on fold.
+
+**Structured intent + structured verification checks ([[specs/pm-structured-intent-and-refs]]).** Every level of the PM tree (goals, goal_milestones, specs, spec_phases) carries plain-language `why` + `what` columns that LEAD the detail page — the same value humans and agents both read. Specs + phases are HARD-gated: [[libraries/author-spec]] `authorSpecRowStructured` throws `MissingIntentError` before the DB write when either is empty (or fails the plain-language lint that rejects code fences / `file:line` / `**Header:**` lines). The `## Verification` bullets are also stored as structured rows in [[tables/spec_phase_checks]] (`{position, description, kind:'auto'|'human'}`); the same chokepoint gates ≥1 check per phase (`assertEveryPhaseHasChecks`). Brain refs move off the prose `**Brain refs:**` line into [[tables/spec_brain_refs]] rows (spec_id/phase_id → `kind/name` slug) — `scripts/_check-brain-refs.ts` validates every slug resolves to a real `docs/brain/{kind}/{name}.md`. The typed parent lives on `specs.parent_kind` (`function`/`mandate`/`milestone`) + `specs.parent_ref`. Legacy rows keep working (columns nullable); new authoring is gated.
 
 ## Kicking off a build session
 

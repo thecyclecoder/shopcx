@@ -323,12 +323,28 @@ async function routeAuthorBlocker(admin: Admin, row: ParkedRow, klass: "real_blo
         parent: `[[../specs/${row.spec_slug}]]`,
         blocked_by: [],
         critical: !!originSpec.card.critical,
+        why:
+          klass === "real_blocker"
+            ? `The build of [[${row.spec_slug}]] uncovered a real blocker that must be fixed before the origin can ship.`
+            : `The build of [[${row.spec_slug}]] parked under class \`${klass}\` — a tooling failure must be resolved before the build can resume.`,
+        what:
+          klass === "real_blocker"
+            ? `When this spec ships, the blocker blocking [[${row.spec_slug}]] is resolved and the origin build can proceed.`
+            : `When this spec ships, the tooling failure is fixed and [[${row.spec_slug}]] can resume building without re-parking.`,
         phases: [
           {
             title: `Phase 1 — diagnose + fix`,
             body: phaseBody,
             verification: phaseVerification,
             status: "planned",
+            why:
+              klass === "real_blocker"
+                ? `The build of [[${row.spec_slug}]] uncovered a real blocker that must be fixed before the origin can ship.`
+                : `The build of [[${row.spec_slug}]] parked under class \`${klass}\` — a tooling failure must be resolved before the build can resume.`,
+            what:
+              klass === "real_blocker"
+                ? `When this phase ships, the blocker blocking [[${row.spec_slug}]] is resolved and the origin build can proceed.`
+                : `When this phase ships, the tooling failure is fixed and [[${row.spec_slug}]] can resume building without re-parking.`,
           },
         ],
       },
