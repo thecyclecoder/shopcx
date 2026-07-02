@@ -186,33 +186,6 @@ async function clearRoutedZombie(admin: Admin, row: ParkedRow): Promise<boolean>
   return true;
 }
 
-// Commit the child blocker spec markdown to main via the GitHub Contents API (Phase 2). Mirrors
-// `ghCommitSpec` in agent-grader.ts — works from both the deployed runtime + the box, get-then-PUT
-// so it updates in place. Returns true on success; false on missing token / API failure.
-const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
-function ghToken(): string | undefined {
-  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
-}
-async function commitChildSpec(slug: string, content: string, message: string): Promise<boolean> {
-  const token = ghToken();
-  if (!token) return false;
-  const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
-  const path = `docs/brain/specs/${slug}.md`;
-  let sha: string | undefined;
-  try {
-    const get = await fetch(`https://api.github.com/repos/${REPO}/contents/${path}?ref=main`, { headers, cache: "no-store" });
-    if (get.ok) sha = ((await get.json()) as { sha?: string }).sha;
-  } catch {
-    /* new file */
-  }
-  const put = await fetch(`https://api.github.com/repos/${REPO}/contents/${path}`, {
-    method: "PUT",
-    headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ message, content: Buffer.from(content, "utf8").toString("base64"), sha, branch: "main" }),
-  });
-  return put.ok;
-}
-
 /** A safe-but-strict slug builder for the child blocker spec (Phase 2). */
 function childSpecSlug(originSlug: string, klass: NeedsAttentionClass, jobId: string): string {
   const base = originSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().slice(0, 40).replace(/^-+|-+$/g, "");
@@ -277,16 +250,15 @@ async function routeAlreadyShipped(admin: Admin, row: ParkedRow): Promise<boolea
 /**
  * Phase 2 — auto-spec the blocker when the park class is `real_blocker` or `tooling_failure`.
  *
- * Authors a child spec via the existing `kind='spec'` PendingAction shape the planner uses
- * ([[goal-decomposition-engine]]): a `proposed-spec` `agent_jobs` row carrying the new spec body
- * for the worker to write to `docs/brain/specs/{slug}.md` on its standing pass. Owner = Platform,
- * parent = the original spec (so the orphan-spec rule holds). Marks **Priority:** critical when the
- * origin was critical.
+ * Authors a child spec THROUGH the `authorSpecRowStructured` chokepoint (a `public.specs` row +
+ * `spec_phases`, retire-md-spec-writers-db-is-sole-spec Phase 1 — DB is the spec, never a
+ * `docs/brain/specs/{slug}.md` commit). Owner = Platform, parent = the original spec (so the
+ * orphan-spec rule holds). Marks **Priority:** critical when the origin was critical.
  *
- * Then writes a `**Blocked-by:** [[{child}]]` line patch to the origin via the spec-status writer
- * (markSpecCardBlocked + a card-state metadata stash carrying the child slug) so the board renders
- * the origin as gated until the child ships. The original WAITS; the standing build escort picks
- * up the child next pass.
+ * Then writes a `**Blocked-by:** [[{child}]]` flag onto the origin's spec_card_state so the board
+ * renders the origin as gated until the child ships. The original WAITS; Vale reviews the newly
+ * authored child, and the standing build pipeline picks it up on the next pass (`auto_build`
+ * defaults on).
  *
  * Best-effort: a row whose spec is missing falls back to a CEO escalation (the spec a `real_blocker`
  * named couldn't be found → human triage is the right answer).
@@ -297,75 +269,86 @@ async function routeAuthorBlocker(admin: Admin, row: ParkedRow, klass: "real_blo
   if (!originSpec) return false; // backstop will surface to CEO
 
   const childSlug = childSpecSlug(row.spec_slug, klass, row.id);
-  const priorityLine = originSpec.card.critical ? `\n**Priority:** critical\n` : "";
-  const title =
-    klass === "real_blocker"
-      ? `${row.spec_slug} — fix the blocker uncovered by the build`
-      : `${row.spec_slug} — fix the tooling failure that parked the build`;
   const intent =
     klass === "real_blocker"
       ? `The build of [[../specs/${row.spec_slug}]] parked with a real blocker the spec didn't declare. Author the missing prerequisite (API surface, schema change, dependency) so the origin can resume.`
       : `The build of [[../specs/${row.spec_slug}]] parked because the agent itself failed to produce a verdict (the ${row.kind} pipeline's tooling, not the origin's content). Fix the tool so the origin's build can run cleanly.`;
   const evidence = `Park reason: ${(row.error ?? "(none recorded)").slice(0, 300)}\nLog tail: ${(row.log_tail ?? "(none)").slice(-400)}`;
-  const content = `# ${childSlug}
+  const summary = [
+    `Auto-authored by Ada (Platform/DevOps Director) from a parked ${row.kind} on [[../specs/${row.spec_slug}]] (job ${row.id.slice(0, 8)}, class \`${klass}\`).`,
+    ``,
+    intent,
+    ``,
+    `### Evidence`,
+    ``,
+    "```",
+    evidence,
+    "```",
+  ].join("\n");
+  const phaseBody = [
+    `Read the parked job's reason + log tail below. Trace the failure into the implicated code path.`,
+    ``,
+    `Author the minimum change that unblocks the origin (a new surface, a schema migration, a tooling`,
+    `guard, or a corrected agent prompt — whichever the trace points to).`,
+    ``,
+    `### Evidence`,
+    ``,
+    "```",
+    evidence,
+    "```",
+  ].join("\n");
+  const phaseVerification =
+    klass === "real_blocker"
+      ? `The origin spec [[../specs/${row.spec_slug}]] builds without re-parking under class \`${klass}\`.`
+      : `The origin spec [[../specs/${row.spec_slug}]] builds without re-parking under class \`${klass}\`, and the agent that parked produces a parseable verdict on a fresh invocation against a representative input.`;
 
-**Owner:** [[../functions/platform]]
-**Parent:** [[../specs/${row.spec_slug}]]${priorityLine}
-**Status:** ⏳ Planned
-
-## Why
-
-Auto-authored by Ada (Platform/DevOps Director) from a parked ${row.kind} on [[../specs/${row.spec_slug}]] (job ${row.id.slice(0, 8)}, class \`${klass}\`).
-
-${intent}
-
-### Evidence
-
-\`\`\`
-${evidence}
-\`\`\`
-
-## Phases
-
-### Phase 1 — diagnose + fix
-- ⏳ Read the parked job's reason + log tail above. Trace the failure into the implicated code path.
-- ⏳ Author the minimum change that unblocks the origin (a new surface, a schema migration, a tooling
-  guard, or a corrected agent prompt — whichever the trace points to).
-- ⏳ Verify: re-running the origin build should now produce a non-parked verdict.
-
-## Verification
-
-- The origin spec [[../specs/${row.spec_slug}]] builds without re-parking under class \`${klass}\`.
-- (For \`tooling_failure\`) the agent that parked produces a parseable verdict on a fresh invocation
-  against a representative input.
-`;
-
-  // Commit the child spec to main FIRST (so the build pipeline finds it on origin/main), then
-  // queue its build. Same authoring pattern as `rollCoachingIntoFixSpec` (agent-grader.ts) — works
-  // from both the deployed runtime and the box. A failed commit aborts the route (no half-step).
-  const committed = await commitChildSpec(childSlug, content, `spec: ${childSlug} — auto-author from parked ${row.kind} ${row.id.slice(0, 8)} (class=${klass})`);
-  if (!committed) {
-    console.warn(`[needs-attention-route] child spec commit FAILED for ${childSlug} — leaving origin parked for the backstop`);
+  // retire-md-spec-writers-db-is-sole-spec Phase 1 — author the child blocker spec THROUGH the
+  // authorSpecRowStructured chokepoint (a public.specs row + spec_phases), NOT a
+  // docs/brain/specs/{slug}.md commit. The DB is the spec; the build pipeline reads public.specs.
+  // The old get-then-PUT of an orphan .md is exactly the class of writer this spec retires. A
+  // failed author aborts the route (no half-step).
+  const { authorSpecRowStructured } = await import("@/lib/author-spec");
+  let authored = false;
+  try {
+    authored = await authorSpecRowStructured(
+      row.workspace_id,
+      childSlug,
+      {
+        title:
+          klass === "real_blocker"
+            ? `${row.spec_slug} — fix the blocker uncovered by the build`
+            : `${row.spec_slug} — fix the tooling failure that parked the build`,
+        summary,
+        owner: "platform",
+        parent: `[[../specs/${row.spec_slug}]]`,
+        blocked_by: [],
+        critical: !!originSpec.card.critical,
+        phases: [
+          {
+            title: `Phase 1 — diagnose + fix`,
+            body: phaseBody,
+            verification: phaseVerification,
+            status: "planned",
+          },
+        ],
+      },
+      "planned",
+      { intendedStatusSetBy: "director:platform" },
+    );
+  } catch (e) {
+    console.warn(`[needs-attention-route] child spec author FAILED for ${childSlug}:`, e instanceof Error ? e.message : e);
+    return false;
+  }
+  if (!authored) {
+    console.warn(`[needs-attention-route] child spec author FAILED for ${childSlug} — leaving origin parked for the backstop`);
     return false;
   }
 
-  // intentional override of enqueueBuildIfDue (bo-reactive-gated-build-enqueue Phase 1): the
-  // just-committed child spec was authored 12 lines above and hasn't reached Vale yet. Routing
-  // through the gated chokepoint would return `not-review-passed`. This path is a REPAIR flow (a
-  // parked build classified as needing a child spec) and is expected to bypass review the same way
-  // pre-merge-fix.ts does — the claim-time backstop still holds if Vale doesn't catch up in time.
-  const { error } = await admin.from("agent_jobs").insert({
-    workspace_id: row.workspace_id,
-    spec_slug: childSlug,
-    kind: "build",
-    status: "queued",
-    created_by: null,
-    instructions: `Auto-authored by needs-attention router (class=${klass}). Origin: [[../specs/${row.spec_slug}]]. Build the just-committed child spec.`,
-  });
-  if (error) {
-    console.warn(`[needs-attention-route] enqueue child build failed for ${row.spec_slug}: ${error.message}`);
-    return false;
-  }
+  // The authored row lands `in_review`; Vale reviews it and the standing build pipeline picks it up
+  // (auto_build defaults on). We deliberately do NOT enqueue a `build` `agent_jobs` row here — the
+  // old path did so to bypass the review gate, but under 'DB is the spec' the pipeline is the single
+  // dispatcher; a repair spec that's real gets built once Vale passes it. The origin's blocked-by
+  // flag below still holds the origin until then.
 
   // Origin's card → blocked + carry the child slug so the board can render the wait.
   try {
