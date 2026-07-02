@@ -178,28 +178,85 @@ export async function findAlreadyMergedDuplicate(
 }
 
 /**
+ * pr-resolve-supersede-action-authorization: fresh-read the PR + verify state/ref/repository/SHA
+ * still match the analysis snapshot, immediately before a mutation. Fail-closed if anything drifted
+ * (a fork PR whose head ref matches an internal claude/* branch, a re-push between analysis and
+ * mutation, or a repo/branch rename). Every code path that PATCHes or DELETEs on GitHub must pass
+ * through this gate — never mutate on stale evidence.
+ */
+async function reverifyPrHeadForMutation(
+  prNumber: number,
+  expectedBranch: string,
+  expectedHeadSha: string,
+): Promise<{ ok: boolean; reason: string }> {
+  const r = await gh("GET", `/repos/${GH_REPO}/pulls/${prNumber}`);
+  if (!r.ok) return { ok: false, reason: `pr fetch failed (${r.status})` };
+  const pr = r.json as {
+    state?: string;
+    merged?: boolean;
+    head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
+    base?: { repo?: { full_name?: string } };
+  };
+  if (pr.state !== "open" || pr.merged) return { ok: false, reason: `state=${pr.state} merged=${pr.merged}` };
+  const headRepo = pr.head?.repo?.full_name;
+  const baseRepo = pr.base?.repo?.full_name;
+  if (headRepo !== GH_REPO) return { ok: false, reason: `head.repo=${headRepo} (expected ${GH_REPO})` };
+  if (baseRepo !== GH_REPO) return { ok: false, reason: `base.repo=${baseRepo} (expected ${GH_REPO})` };
+  if (pr.head?.ref !== expectedBranch) return { ok: false, reason: `head.ref=${pr.head?.ref} (expected ${expectedBranch})` };
+  if (pr.head?.sha !== expectedHeadSha) return { ok: false, reason: `head.sha=${pr.head?.sha?.slice(0, 8)} (expected ${expectedHeadSha.slice(0, 8)})` };
+  return { ok: true, reason: "ok" };
+}
+
+/**
+ * Verify the internal branch ref on GitHub is still at the exact SHA we authorized against. Called
+ * between PATCH-close and DELETE-branch so a race that re-pushed the branch (fork PR named
+ * claude/*, human amend on the internal branch) causes a fail-closed no-delete.
+ */
+async function reverifyBranchRefForDelete(
+  branch: string,
+  expectedHeadSha: string,
+): Promise<{ ok: boolean; reason: string }> {
+  const r = await gh("GET", `/repos/${GH_REPO}/git/refs/heads/${encodeURIComponent(branch)}`);
+  if (!r.ok) return { ok: false, reason: `ref fetch failed (${r.status})` };
+  const obj = (r.json as { object?: { sha?: string } }).object;
+  if (obj?.sha !== expectedHeadSha) return { ok: false, reason: `ref.sha=${obj?.sha?.slice(0, 8)} (expected ${expectedHeadSha.slice(0, 8)})` };
+  return { ok: true, reason: "ok" };
+}
+
+/**
  * Close a duplicate claude/* PR (+ delete its branch) with an explanatory comment, instead of resolving it.
- * Used when the PR's work already merged via a sibling — there is nothing to resolve. Best-effort: a failed
- * comment/branch-delete never blocks the close. Returns true once the PR is closed.
+ * Used when the PR's work already merged via a sibling — there is nothing to resolve.
+ *
+ * pr-resolve-supersede-action-authorization: `expectedHeadSha` is REQUIRED. Immediately before PATCH we
+ * re-fetch the PR and confirm state=open / head.repo=REPO / head.ref=branch / head.sha=expectedHeadSha —
+ * any drift is fail-closed (no mutation). Between PATCH-close and DELETE-branch we also re-read the branch
+ * ref and confirm it still sits at expectedHeadSha (a race that re-pushed the branch causes a no-delete,
+ * so we never delete a branch that has moved). The comment is best-effort AFTER the authorized close.
  */
 export async function closeDuplicatePr(
   prNumber: number,
   branch: string,
   comment: string,
-): Promise<boolean> {
+  opts: { expectedHeadSha: string },
+): Promise<{ ok: boolean; reason?: string }> {
+  const expectedHeadSha = opts.expectedHeadSha;
+  const verify = await reverifyPrHeadForMutation(prNumber, branch, expectedHeadSha);
+  if (!verify.ok) return { ok: false, reason: `authorization-drift: ${verify.reason}` };
+  const closed = await gh("PATCH", `/repos/${GH_REPO}/pulls/${prNumber}`, { state: "closed" });
+  if (!closed.ok) return { ok: false, reason: `patch failed (${closed.status})` };
   try {
     await gh("POST", `/repos/${GH_REPO}/issues/${prNumber}/comments`, { body: comment });
   } catch {
-    /* best-effort comment */
+    /* best-effort comment (posted AFTER the authorized close so we never leave a comment on a stale PR) */
   }
-  const closed = await gh("PATCH", `/repos/${GH_REPO}/pulls/${prNumber}`, { state: "closed" });
-  if (!closed.ok) return false;
+  const refOk = await reverifyBranchRefForDelete(branch, expectedHeadSha);
+  if (!refOk.ok) return { ok: true, reason: `closed; branch delete skipped: ${refOk.reason}` };
   try {
-    await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${branch}`);
+    await gh("DELETE", `/repos/${GH_REPO}/git/refs/heads/${encodeURIComponent(branch)}`);
   } catch {
     /* best-effort branch cleanup (404/422 = already gone / protected) */
   }
-  return true;
+  return { ok: true };
 }
 
 /**
@@ -428,9 +485,15 @@ export async function detectAndEnqueueDirtyPrs(admin?: Admin): Promise<DirtyPrRe
   if (!list.ok || !Array.isArray(list.json)) return result;
 
   // claude/* build branches only — never touch a human PR or main directly (guardrail).
+  //
+  // pr-resolve-supersede-action-authorization: also demand head.repo.full_name === GH_REPO. A fork
+  // PR whose head ref happens to be named `claude/…` MUST NOT enter the resolve pipeline — otherwise
+  // closing that PR + deleting `refs/heads/claude/…` would delete OUR internal branch, not the fork's.
   const claudePrs = (list.json as Array<Record<string, unknown>>).filter((p) => {
-    const ref = (p.head as { ref?: string } | undefined)?.ref || "";
-    return typeof ref === "string" && ref.startsWith("claude/");
+    const head = (p.head as { ref?: string; repo?: { full_name?: string } } | undefined);
+    const ref = head?.ref || "";
+    const headRepo = head?.repo?.full_name;
+    return typeof ref === "string" && ref.startsWith("claude/") && headRepo === GH_REPO;
   });
   if (!claudePrs.length) return result;
 
@@ -439,7 +502,9 @@ export async function detectAndEnqueueDirtyPrs(admin?: Admin): Promise<DirtyPrRe
 
   for (const p of claudePrs) {
     const prNumber = Number(p.number);
-    const branch = (p.head as { ref?: string }).ref as string;
+    const head = p.head as { ref?: string; sha?: string; repo?: { full_name?: string } };
+    const branch = head.ref as string;
+    const headSha = typeof head.sha === "string" ? head.sha : "";
     result.checked++;
     let mergeable: boolean | null;
     try {
@@ -457,18 +522,21 @@ export async function detectAndEnqueueDirtyPrs(admin?: Admin): Promise<DirtyPrRe
         // dirty-pr-resolver-duplicate-detection (Phase 1): if this PR's work already merged via a sibling
         // build, it is unresolvable by definition (its diff is already on main → rebasing re-conflicts).
         // Close it + delete the branch with a clear comment instead of looping the resolver on it.
-        const dup = await findAlreadyMergedDuplicate(db, branch);
-        if (dup) {
+        const dup = headSha ? await findAlreadyMergedDuplicate(db, branch) : null;
+        if (dup && headSha) {
           const sib = dup.mergedPr ? `#${dup.mergedPr}` : (dup.mergedBranch ?? "a sibling build");
           const closed = await closeDuplicatePr(
             prNumber,
             branch,
             `Closing as a duplicate: this spec (\`${dup.specSlug}\`) already shipped via ${sib}, so this PR's changes are already on \`main\`. There is nothing left to merge — rebasing would only re-conflict. Auto-closed by the dirty-PR resolver (dirty-pr-resolver-duplicate-detection).`,
+            { expectedHeadSha: headSha },
           );
-          if (closed) {
+          if (closed.ok) {
             closedDup = true;
             result.closedDuplicate++;
-            console.log(`[dirty-pr] closed duplicate PR #${prNumber} (${branch}) — ${dup.specSlug} already merged via ${sib}`);
+            console.log(`[dirty-pr] closed duplicate PR #${prNumber} (${branch}) — ${dup.specSlug} already merged via ${sib}${closed.reason ? ` (${closed.reason})` : ""}`);
+          } else {
+            console.log(`[dirty-pr] refused to close duplicate PR #${prNumber} (${branch}): ${closed.reason}`);
           }
         }
         if (!closedDup) {
