@@ -188,7 +188,7 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
         {
           title,
           summary,
-          owner: "[[../functions/platform]]",
+          owner: "platform",
           parent,
           blocked_by: [],
           critical: false,
