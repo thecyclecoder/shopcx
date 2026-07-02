@@ -607,16 +607,35 @@ export async function enqueuePreMergeSpecTest(
   if (openJob && openJob.length) return { enqueued: false, reason: "in-flight" };
   const { data: latestRun } = await admin
     .from("spec_test_runs")
-    .select("agent_verdict")
+    .select("agent_verdict, run_at")
     .eq("workspace_id", workspaceId)
     .eq("spec_slug", slug)
     .eq("spec_branch", branch)
     .order("run_at", { ascending: false })
     .limit(1);
   if (latestRun && latestRun.length) {
-    const verdict = (latestRun[0] as { agent_verdict: string | null }).agent_verdict;
+    const row = latestRun[0] as { agent_verdict: string | null; run_at: string };
+    const verdict = row.agent_verdict;
     if (verdict === "approved" || verdict === "needs_human" || verdict === "issues") {
-      return { enqueued: false, reason: `already tested (${verdict})` };
+      // premerge-spectest-rerun-and-visibility Phase 1 — treat the latest terminal verdict as STALE when
+      // the branch has NEWER work than the run: a `build` or `pr-resolve` agent_jobs row for this
+      // spec_branch whose updated_at > latestRun.run_at means the branch's CODE has changed since we
+      // last tested (e.g. a pr-resolve just merged main into the branch, or a next-phase build pushed
+      // to it). Without this check the branch is silently wedged forever — the root cause seen live on
+      // spec-brain-refs: the fix landed via pr-resolve, but its stale `issues` verdict permanently
+      // blocked re-testing on the same branch. No churn: a spec-test run itself creates no
+      // build/pr-resolve row, so after the re-test the branch settles until the next real push.
+      const { data: newer } = await admin
+        .from("agent_jobs")
+        .select("id")
+        .eq("spec_branch", branch)
+        .in("kind", ["build", "pr-resolve"])
+        .gt("updated_at", row.run_at)
+        .limit(1);
+      if (!newer || !newer.length) {
+        return { enqueued: false, reason: `already tested (${verdict})` };
+      }
+      // Newer build/pr-resolve exists → stale verdict; fall through and re-enqueue.
     }
     // verdict === "error" (or null) → transient; fall through and re-enqueue.
   }
