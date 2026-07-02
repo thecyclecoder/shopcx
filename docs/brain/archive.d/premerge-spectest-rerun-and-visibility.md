@@ -1,0 +1,1 @@
+- **Pre-merge spec-tests re-run after a branch changes + are visible/re-runnable** · verified 2026-07-02 · → [[../libraries/agent-jobs]] · [[../dashboard/roadmap]] · [[../libraries/spec-test-runs]]
