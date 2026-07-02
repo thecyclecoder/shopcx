@@ -349,6 +349,11 @@ ${evidence}
     return false;
   }
 
+  // intentional override of enqueueBuildIfDue (bo-reactive-gated-build-enqueue Phase 1): the
+  // just-committed child spec was authored 12 lines above and hasn't reached Vale yet. Routing
+  // through the gated chokepoint would return `not-review-passed`. This path is a REPAIR flow (a
+  // parked build classified as needing a child spec) and is expected to bypass review the same way
+  // pre-merge-fix.ts does — the claim-time backstop still holds if Vale doesn't catch up in time.
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: row.workspace_id,
     spec_slug: childSlug,

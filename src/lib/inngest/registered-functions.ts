@@ -133,6 +133,7 @@ import { claudeStatusPollCron } from "@/lib/inngest/claude-status-poll-cron";
 import { deployGuardianCron } from "@/lib/inngest/deploy-guardian-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
+import { buildOnEligible } from "@/lib/inngest/build-on-eligible";
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
@@ -276,6 +277,7 @@ export const registeredInngestFunctions = [
   loopHeartbeatsPrune,
   dailyDigestCron,
   platformDirectorCron,
+  buildOnEligible,
   securityDepWatch,
 ];
 
