@@ -9,7 +9,7 @@ Eight halves: (1) the **enqueue** — purely the box-job insert, no reasoning. (
 ## Functions
 
 ### `platform-director-cron`
-- **Trigger:** cron `*/5 * * * *` (every 5 min — a TIGHT standing beat so the build pool stays saturated, [[../specs/director-initiation-throughput]] Phase 3 tightened it 15→5; the in-flight dedupe below prevents pileup). This cron is now the **BACKSTOP** heartbeat — the **event-driven top-up** ([[../libraries/agent-jobs]] `enqueueDirectorTopUp`, fired from `applyMergedBuildEffects` on a build merge) refills a freed lane within seconds, so the pool re-saturates between beats too.
+- **Trigger:** cron `*/5 * * * *` (every 5 min — a TIGHT standing beat so the build pool stays saturated, [[../specs/director-initiation-throughput]] Phase 3 tightened it 15→5; the in-flight dedupe below prevents pileup). This cron is now the **BACKSTOP** heartbeat — the **event-driven top-up** ([[../libraries/agent-jobs]] `enqueueDirectorTopUp`, fired from `applyMergedBuildEffects` on a build merge) refills a freed lane within seconds, so the pool re-saturates between beats too. **Build-lane reactive companion** ([[../specs/bo-reactive-gated-build-enqueue]] Phase 2): a `build/spec-build-eligible` event fires on the Vale-pass / Ada-planned transition and [[build-on-eligible]] runs the same gated `enqueueBuildIfDue` chokepoint on receipt — so this cron catches only dropped events / cold workspaces (Ada's lanes already gate on `specReviewDone`, so a cron/event race no-ops on the one-in-flight guard).
 - **Retries:** 1
 - **Concurrency:** `concurrency: [{ limit: 1 }]`
 
