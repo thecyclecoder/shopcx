@@ -739,6 +739,151 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
   return healed;
 }
 
+// ── Self-heal manual squash/merge of claude/build-* PRs (stamp-phases-on-github-pr-merged) ──────────
+
+/** Minimal PR shape from GitHub's list-pulls endpoint used to decide "is this branch shipped?". */
+export interface BranchPrCandidate {
+  number: number;
+  merged_at: string | null;
+  merge_commit_sha: string | null;
+}
+
+/**
+ * Pure fail-closed PR picker (stamp-phases-on-github-pr-merged Phase 2). Given the list of PRs
+ * GitHub returns for a `claude/build-*` branch head, return the MERGED PR's provenance — or `null`.
+ *
+ * Fail-closed by construction — a stamp is irreversible provenance:
+ *   - an OPEN PR (`merged_at == null`) NEVER qualifies;
+ *   - a CLOSED-unmerged PR (also `merged_at == null` — the #949-closed shape) NEVER qualifies;
+ *   - MERGED is the ONLY qualifying state (`merged_at != null` — GitHub's ship-of-truth signal);
+ *   - when a branch carries BOTH a MERGED and a CLOSED-unmerged PR (the #961-merged / #949-closed
+ *     shape from fix-spec-brain-refs), the MERGED one wins REGARDLESS of iteration order.
+ *
+ * Passing `null`/`undefined` (the "read failed" shape the caller uses for a GitHub error) returns
+ * `null` — no stamp, no throw. Purity: no I/O, no logging; the whole verification (Phase 2) is
+ * assertable from tests that hand-craft PR lists (see spec-drift.test.ts).
+ */
+export function pickMergedPrFromList(
+  prs: BranchPrCandidate[] | null | undefined,
+): { number: number; merge_sha: string | null } | null {
+  if (!prs || !Array.isArray(prs)) return null;
+  for (const pr of prs) {
+    if (pr && pr.merged_at) {
+      return { number: pr.number, merge_sha: pr.merge_commit_sha ?? null };
+    }
+  }
+  return null;
+}
+
+/**
+ * The FOURTH built-unstamped signal — MANUAL GitHub squash/merge of a `claude/build-*` PR.
+ *
+ * The Branches page invites owners to squash & merge a `claude/build-*` PR themselves. When they do
+ * (spec-brain-refs PR #961 was manually squash-merged 2026-07-02, the live root cause), the box's
+ * OWN merge flow never fires — no `already merged via #N` job log lands, so every job-log signal in
+ * `healBuiltUnstampedPhases` misses. The squash also DISCARDS the branch's `build_sha`, so SHA-
+ * ancestry checks miss it too. Result: phases stay `in_progress`, the spec stalls at `in_testing`
+ * forever, and the fold is never enqueued.
+ *
+ * THE STRONG, SHA-AGNOSTIC SIGNAL: for each spec with ≥1 unshipped phase (not folded), ask GitHub
+ * whether its `claude/build-{slug}` branch has a MERGED PR. GitHub's MERGED state is the definitive,
+ * squash-safe ship signal, and the PR's `merge_commit_sha` is the ship provenance. If MERGED, stamp
+ * every non-shipped, non-rejected phase `shipped` via `stampPhaseShipped({ pr, merge_sha })`.
+ *
+ * FAIL-CLOSED BY CONSTRUCTION (stamps are irreversible provenance, never guess): NO stamp when the
+ * branch has no PR / an OPEN PR / a CLOSED-without-merge PR / on ANY GitHub read failure (missing
+ * token, rate limit, API blip, 404). We skip the spec that pass and let a later pass retry. When a
+ * branch carries BOTH a MERGED and a CLOSED-unmerged PR (the #961-merged / #949-closed shape from
+ * fix-spec-brain-refs), resolve to the MERGED one — irrespective of API return order — never the
+ * closed one. One `director_activity` row per healed spec (mirrors the existing signals above).
+ *
+ * SINGLE-WORKSPACE by contract (mirrors `healBuiltUnstampedPhases`) — it MUTATES phase status.
+ */
+export async function reconcileMergedBuildBranchPrs(
+  workspaceId: string,
+): Promise<{ slug: string; phases: number[]; pr: number }[]> {
+  if (!ghToken()) return [];
+  const admin = createAdminClient();
+
+  // Candidate specs: any with ≥1 phase NOT IN ('shipped','rejected'), not folded — the same shape
+  // `healBuiltUnstampedPhases` uses. Read through the specs-table SDK (no raw PM SQL).
+  const specs = await listSpecs(workspaceId);
+  const unstampedBySlug = new Map<string, number[]>();
+  for (const spec of specs) {
+    if (spec.status === "folded") continue;
+    const positions = spec.phases
+      .filter((p) => p.status !== "shipped" && p.status !== "rejected")
+      .map((p) => p.position);
+    if (positions.length) unstampedBySlug.set(spec.slug, positions);
+  }
+  if (!unstampedBySlug.size) return [];
+
+  const owner = REPO.split("/")[0];
+  const healed: { slug: string; phases: number[]; pr: number }[] = [];
+
+  for (const [slug, positions] of unstampedBySlug) {
+    const branch = `claude/build-${slug}`;
+
+    // List EVERY PR (open + closed + merged) whose head is this branch. state=all so we can
+    // distinguish a MERGED PR from a CLOSED-unmerged one (which shares state=closed). Never guess:
+    // a non-ok response or a non-array payload → skip this spec (fail-closed). Exceptions are
+    // caught → skip (a later pass retries). Selection is the pure `pickMergedPrFromList` helper
+    // (Phase 2 verification lives in spec-drift.test.ts): OPEN + CLOSED-unmerged never win, and
+    // MERGED wins regardless of the API's iteration order.
+    let merged: { number: number; merge_sha: string | null } | null = null;
+    try {
+      const res = await gh(
+        "GET",
+        `/repos/${REPO}/pulls?head=${encodeURIComponent(owner)}:${encodeURIComponent(branch)}&state=all&per_page=100`,
+      );
+      if (!res.ok || !Array.isArray(res.json)) continue;
+      merged = pickMergedPrFromList(res.json as unknown as BranchPrCandidate[]);
+    } catch {
+      continue; // fail-closed: exception → no stamp, next pass retries
+    }
+    if (!merged) continue; // no MERGED PR (open / closed-unmerged / none) → skip, never stamp
+
+    const stamped: number[] = [];
+    for (const position of positions.slice().sort((a, b) => a - b)) {
+      try {
+        await stampPhaseShipped(workspaceId, slug, position, {
+          pr: merged.number,
+          merge_sha: merged.merge_sha,
+        });
+        stamped.push(position);
+      } catch {
+        /* a single-phase stamp failure — the next sweep re-attempts the remainder */
+      }
+    }
+    if (!stamped.length) continue;
+    healed.push({ slug, phases: stamped, pr: merged.number });
+
+    // Supervisor-visible report: one director_activity row per healed spec, naming the signal.
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "healed_built_unstamped",
+        specSlug: slug,
+        reason: `reconciler:spec-drift stamped ${stamped.length} built-but-unstamped phase(s) (P${stamped.join(", P")}) of ${slug} shipped — GitHub reports ${branch}'s PR #${merged.number} is MERGED (merge_sha ${merged.merge_sha ?? "unknown"}). The owner manually squash-merged the PR (which the Branches page invites), so the box's own merge flow never fired the "already merged via #N" job-log signal and the phases stalled. Self-healed the derived status from GitHub's MERGED state.`,
+        metadata: {
+          actor: "reconciler:spec-drift",
+          signal: "github-pr-merged",
+          pr: merged.number,
+          merge_sha: merged.merge_sha,
+          phases: stamped,
+          branch,
+        },
+      });
+    } catch {
+      /* audit is best-effort — the stamp already landed */
+    }
+  }
+
+  return healed;
+}
+
 // ── Self-heal "archived-but-not-folded" specs (folded-spec-must-stay-folded) ────────────────────────
 
 /**
