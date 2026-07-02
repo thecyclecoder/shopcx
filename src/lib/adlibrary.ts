@@ -238,16 +238,50 @@ export async function fetchCreative(
 }
 
 /**
- * A "long-runner" is our winner heuristic: it's been running a while AND is still
- * active (resume flag). `minDays` defaults conservatively — repetition across
- * brands (Phase 4) is the real signal, but we only spend vision on proven ads.
+ * A "long-runner" is the ORIGINAL longevity-only winner heuristic. Kept for reference/back-compat;
+ * `sweepSeed` now uses `isWinner` (below), which also credits reach + spend.
  */
 export function isLongRunner(ad: NormalizedAd, minDays = 14): boolean {
   const days = ad.days_count ?? 0;
   if (days < minDays) return false;
-  // resume flag is the strongest "still winning" signal when present; if the API
-  // omitted it, fall back to longevity alone.
   return ad.resume_advertising_flag !== false;
+}
+
+export interface WinnerOpts {
+  /** Sustained-run floor. Loosened from the old 14 → 7: DTC brands churn creative fast; a 14-day gate
+   *  dropped 72% of Erth's live ads. */
+  minDays?: number;
+  /** Cumulative-reach floor — Meta's own library sorts winners by total impressions. A high-impression
+   *  ad is a proven winner regardless of age (catches fresh-but-scaling creative longevity misses). */
+  minImpressions?: number;
+  /** Estimated-spend floor — real money behind an ad is a winner signal on its own. */
+  minSpend?: number;
+}
+
+/**
+ * The winner heuristic: an ad is worth analyzing if it shows ANY real signal — sustained run OR
+ * meaningful reach OR meaningful spend. This replaces the pure-longevity `isLongRunner` gate (which
+ * also required `resume_advertising_flag !== false` and so dropped recently-paused high-impression
+ * winners — exactly the creative worth learning from). Thresholds calibrated from live Erth data
+ * (winners ran 40-84d / 96K-576K impressions / $0.8-3.2K spend). See scripts/_sweep-erthlabs.ts.
+ */
+export function isWinner(ad: NormalizedAd, opts: WinnerOpts = {}): boolean {
+  const minDays = opts.minDays ?? 7;
+  const minImpressions = opts.minImpressions ?? 50_000;
+  const minSpend = opts.minSpend ?? 500;
+  const days = ad.days_count ?? 0;
+  const impressions = Number(ad.impression) || 0;
+  const spend = Number(ad.estimated_spend) || 0;
+  return days >= minDays || impressions >= minImpressions || spend >= minSpend;
+}
+
+/** Rank winners so a capped sweep keeps the BEST — impressions first (Meta's signal), then spend, then
+ *  longevity as tiebreaks. Higher = better. */
+export function winnerScore(ad: NormalizedAd): number {
+  const impressions = Number(ad.impression) || 0;
+  const spend = Number(ad.estimated_spend) || 0;
+  const days = ad.days_count ?? 0;
+  return impressions + spend * 50 + days * 500;
 }
 
 export type SeedKind = "category" | "competitor";
