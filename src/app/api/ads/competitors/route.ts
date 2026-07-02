@@ -39,7 +39,7 @@ export async function GET(req: Request) {
   let q = auth.admin
     .from("competitors")
     .select(
-      "id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence, reviewed_by, reviewed_at, review_note, created_at, updated_at",
+      "id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence, search_keyword, runs_ads_for, reviewed_by, reviewed_at, review_note, created_at, updated_at",
     )
     .eq("workspace_id", workspaceId as string)
     .order("created_at", { ascending: false })
@@ -50,7 +50,28 @@ export async function GET(req: Request) {
 
   const { data, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ competitors: data ?? [] });
+
+  // Resolve `runs_ads_for` (self-FK) → the fronted competitor's brand so the UI can render
+  // "runs ads for {brand}" without a second lookup. Whitelisted-page rows only.
+  const rows = data ?? [];
+  const runsAdsForIds = Array.from(
+    new Set(rows.map((r) => r.runs_ads_for as string | null).filter((v): v is string => !!v)),
+  );
+  const idToBrand = new Map<string, string>();
+  if (runsAdsForIds.length) {
+    const { data: fronted } = await auth.admin
+      .from("competitors")
+      .select("id, brand")
+      .eq("workspace_id", workspaceId as string)
+      .in("id", runsAdsForIds);
+    for (const r of fronted || []) idToBrand.set(r.id as string, (r.brand as string) || "");
+  }
+  const withResolved = rows.map((r) => ({
+    ...r,
+    runs_ads_for_brand: r.runs_ads_for ? idToBrand.get(r.runs_ads_for as string) || null : null,
+  }));
+
+  return NextResponse.json({ competitors: withResolved });
 }
 
 export async function POST(req: Request) {

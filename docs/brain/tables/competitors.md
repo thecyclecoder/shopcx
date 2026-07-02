@@ -66,10 +66,12 @@ const { data } = await admin.from("competitors")
 
 ## Read/written by
 
-- [[../libraries/competitors]] — `loadApprovedCompetitorSeeds` (read), `discoverCompetitors` / `promoteFromCategorySweep` (write proposals).
-- [[../inngest/creative-finder]] — reads approved seeds; writes category-sweep proposals.
+- [[../libraries/competitors]] — `loadApprovedCompetitorSeeds` (read), `discoverCompetitors` / `promoteFromCategorySweep` / `promoteWhitelistedPages` (write proposals).
+- [[../inngest/creative-finder]] — reads approved seeds; writes category-sweep + whitelisted-page proposals.
+- [[../inngest/acquisition-research-cadence]] — writes category-sweep + whitelisted-page proposals in the daily re-scan.
 - [[../inngest/competitor-scout]] — the discovery pass writer.
-- `src/app/api/ads/competitors` (+ `[id]`) — owner list / discover trigger / approve-reject.
+- `src/app/api/ads/competitors` (+ `[id]`) — owner list / discover trigger / approve-reject. The list route resolves `runs_ads_for` (self-FK) → the fronted competitor's `brand` server-side (`runs_ads_for_brand`) so the UI renders "runs ads for {brand}" without a second lookup.
+- `src/app/dashboard/marketing/acquisition` (via [[../libraries/acquisition-hub]] `loadHubData`) — the Acquisition Research Hub's Competitor set section renders a `source` badge and, for `source='whitelisted'` rows, the exact `search_keyword` + "runs ads for {brand}" affordance.
 - [[../dashboard/research__competitors]] — the owner-facing, product-filtered, read-only browse surface under Research › Competitors (reads the API above; never mutates).
 
 ---

@@ -27,7 +27,7 @@
  */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { promoteFromCategorySweep } from "@/lib/competitors";
+import { promoteFromCategorySweep, promoteWhitelistedPages } from "@/lib/competitors";
 import { materializeAdGaps } from "@/lib/acquisition-hub";
 import { pickGapGradeBatch } from "@/lib/acquisition-gap-grader";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -42,6 +42,8 @@ async function adToolWorkspaceIds(): Promise<string[]> {
 interface WorkspaceCadenceResult {
   workspaceId: string;
   promoted: number;
+  /** Whitelisted-page candidates proposed this beat (source='whitelisted', status='proposed'). */
+  promotedWhitelisted: number;
   adGaps: number;
   /**
    * grading-cascade-to-box-sessions Phase 4: the inline API grader is gone. `considered` is the
@@ -56,6 +58,7 @@ interface WorkspaceCadenceResult {
 /** One workspace's re-scan + grade pass. Best-effort per step — a failure never breaks the loop. */
 async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenceResult> {
   let promoted = 0;
+  let promotedWhitelisted = 0;
   let adGaps = 0;
   const graded = { considered: 0, enqueued: 0 };
 
@@ -64,6 +67,13 @@ async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenc
     promoted = p.promoted;
   } catch (err) {
     console.error(`[acquisition-cadence] promote failed ws=${workspaceId}:`, err);
+  }
+
+  try {
+    const p = await promoteWhitelistedPages(workspaceId);
+    promotedWhitelisted = p.promoted;
+  } catch (err) {
+    console.error(`[acquisition-cadence] promote-whitelisted failed ws=${workspaceId}:`, err);
   }
 
   try {
@@ -111,7 +121,7 @@ async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenc
     console.error(`[acquisition-cadence] gap-grade pick/enqueue failed ws=${workspaceId}:`, err);
   }
 
-  return { workspaceId, promoted, adGaps, graded };
+  return { workspaceId, promoted, promotedWhitelisted, adGaps, graded };
 }
 
 export const acquisitionResearchCadenceCron = inngest.createFunction(

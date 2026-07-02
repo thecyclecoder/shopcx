@@ -82,6 +82,18 @@ export interface CompetitorRow {
   source: string;
   status: string;
   evidence: Record<string, unknown> | null;
+  /**
+   * `source='whitelisted'` rows only: the exact AdLibrary page name the sweep searches (verbatim).
+   * Null for real brand competitors (they fall back to `brand`).
+   */
+  search_keyword: string | null;
+  /** `source='whitelisted'` rows only: the fronted competitor's id (self-FK). */
+  runs_ads_for: string | null;
+  /**
+   * Server-resolved display brand for `runs_ads_for` — so the UI can render "runs ads for {brand}"
+   * without a second lookup. Null when the row isn't whitelisted / the fronted row is missing.
+   */
+  runs_ads_for_brand: string | null;
 }
 
 export interface LanderSnapshotRow {
@@ -311,13 +323,44 @@ export async function loadHubData(workspaceId: string, productId?: string | null
   // Competitor set (scoped to the product when one is selected).
   let competitorsQ = admin
     .from("competitors")
-    .select("id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence")
+    .select(
+      "id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence, search_keyword, runs_ads_for",
+    )
     .eq("workspace_id", workspaceId)
     .order("status", { ascending: true })
     .order("brand", { ascending: true });
   if (selectedProductId) competitorsQ = competitorsQ.eq("product_id", selectedProductId);
   const { data: compRows } = await competitorsQ;
-  const competitors = (compRows || []) as CompetitorRow[];
+  // The `runs_ads_for` self-FK can point at ANY competitor in the workspace, incl. rows filtered
+  // out by the product scope. Resolve via a separate id→brand fetch so a product-scoped view still
+  // shows "runs ads for <brand>" for its whitelisted rows.
+  const runsAdsForIds = Array.from(
+    new Set((compRows || []).map((r) => r.runs_ads_for as string | null).filter((v): v is string => !!v)),
+  );
+  const compIdToBrand = new Map<string, string>();
+  if (runsAdsForIds.length) {
+    const { data: fronted } = await admin
+      .from("competitors")
+      .select("id, brand")
+      .eq("workspace_id", workspaceId)
+      .in("id", runsAdsForIds);
+    for (const r of fronted || []) compIdToBrand.set(r.id as string, (r.brand as string) || "");
+  }
+  const competitors: CompetitorRow[] = (compRows || []).map((r) => ({
+    id: r.id as string,
+    product_id: r.product_id as string | null,
+    brand: r.brand as string,
+    domain: r.domain as string | null,
+    pdp_urls: r.pdp_urls as string[] | null,
+    category: r.category as string | null,
+    spend_signal: r.spend_signal as string | null,
+    source: r.source as string,
+    status: r.status as string,
+    evidence: r.evidence as Record<string, unknown> | null,
+    search_keyword: (r.search_keyword as string | null) ?? null,
+    runs_ads_for: (r.runs_ads_for as string | null) ?? null,
+    runs_ads_for_brand: r.runs_ads_for ? compIdToBrand.get(r.runs_ads_for as string) || null : null,
+  }));
 
   // Lander findings — snapshots (light: brand/url/status, no signed images here).
   let snapsQ = admin
