@@ -615,6 +615,20 @@ export async function markSpecCardValePassed(
   await upsertCardState(workspaceId, slug, { flags }, [
     { field: "status", actor: audit.actor, reason: audit.reason ?? "vale: pass (quality check cleared)" },
   ]);
+  // bo-reactive-gated-build-enqueue Phase 2 — fire-and-forget the reactive build-eligibility event.
+  // enqueueBuildIfDue re-checks the FULL gate (deferred/auto_build/blockers/in-flight), so firing on the
+  // Vale pass alone is safe: if the spec still needs Ada's disposition the consumer no-ops for free, and
+  // applyAdaDisposition('planned') re-fires when Ada dispositions it. Untyped client + swallowed reject
+  // so a broken event pipe never breaks the review-pass write (the */5 platform-director cron is the
+  // gated backstop). Same pattern as brain/index.refresh (roadmap-actions.ts:503).
+  try {
+    const { inngest } = await import("@/lib/inngest/client");
+    await inngest
+      .send({ name: "build/spec-build-eligible", data: { workspace_id: workspaceId, slug } })
+      .catch(() => {});
+  } catch {
+    /* best-effort — the card write already landed; the cron backstop will catch it. */
+  }
 }
 
 /**
@@ -660,6 +674,21 @@ export async function applyAdaDisposition(
     await setSpecStatus(workspaceId, slug, decision === "deferred" ? "deferred" : null, audit.actor);
   } catch {
     /* best-effort — the flag write above already landed; the next reconcile/dispose pass backstops. */
+  }
+  // bo-reactive-gated-build-enqueue Phase 2 — Ada moving the spec into the buildable lane is the OTHER
+  // build-eligibility transition. Fire only on `planned` (a `deferred` disposition parks the spec, the
+  // gate would no-op anyway). The consumer runs `enqueueBuildIfDue` which re-checks the full gate;
+  // firing on markSpecCardValePassed AND here is intentional — either transition alone may make the spec
+  // eligible (Vale pass on an already-planned/queued dependent, or Ada disposing a pre-passed spec).
+  if (decision === "planned") {
+    try {
+      const { inngest } = await import("@/lib/inngest/client");
+      await inngest
+        .send({ name: "build/spec-build-eligible", data: { workspace_id: workspaceId, slug } })
+        .catch(() => {});
+    } catch {
+      /* best-effort — the disposition already landed; the cron backstop will catch it. */
+    }
   }
 }
 
