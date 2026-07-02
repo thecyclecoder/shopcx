@@ -47,6 +47,7 @@ Re-running `authorSpecRowFromMarkdown` with the same body is a no-op against the
 
 ## Gotchas
 
+- **`owner` is normalized to a bare function slug.** Both entry points call `normalizeOwnerSlug` to strip any `[[../functions/…]]` wikilink wrapper before writing to `specs.owner` — so an author can pass `"[[../functions/platform]]"` and the DB stores `"platform"`. This defensive normalizer prevents a regression where pre-merge-red authoring wrote mangled wikilink-wrapped owners ([[../specs/fix-pre-merge-red-owner-shape]]) and was added to every authoring surface.
 - **`intendedStatus` is the author's SUGGESTION.** Vale's disposition lane reads the field; it's not binding. Default to `'planned'` (a bug fix you don't want built is a contradiction) unless the surface knows the author meant `'deferred'`.
 - **Verification is a HARD gate, the DB write is best-effort.** A phase with no non-empty `## Verification` THROWS `MissingVerificationError` (caught by the planner loop → fails the job loudly). A genuine DB/upsert failure logs + returns `false`. Both entry points run the SAME gate.
 - **DB-only — no `.md`.** Nothing here commits `docs/brain/specs/{slug}.md`. The readers ([[brain-roadmap]] `getSpec`/`listSpecs`, the board, the build pipeline) read the DB rows.

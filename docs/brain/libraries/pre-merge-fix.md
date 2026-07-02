@@ -29,6 +29,10 @@ A fix-spec authored here carries `specs.regression_of_slug = origin`. After its 
 - Drive `PRE_MERGE_FIX_LOOP_GUARD_MAX + 1` red→fix cycles on the same origin → the loop-guard escalation kicks in: no new fix-spec is authored, a `director_activity` `escalated` row is written instead, the origin's PR continues to be held `in_testing`. No infinite re-spawn.
 - Grep `src/lib/pre-merge-fix.ts` → `countPreMergeFixAttempts >= PRE_MERGE_FIX_LOOP_GUARD_MAX` is the bounded retry cap; no unbounded path past it.
 
+## Known fixes
+
+- **Owner field normalization** ([[../specs/fix-pre-merge-red-owner-shape]]) — the `spawnPreMergeFix` path sets `owner: "platform"` (bare slug); the [[author-spec]] `authorSpecRowStructured` entry point normalizes any wikilink-wrapped owner before writing to the DB. This prevents regression where pre-merge-red authoring would write mangled `"[[../functions/platform]]"` values to `specs.owner`.
+
 ## Related
 
 - [[../specs/promote-on-green-merge-gate]] (the M4 goal)
