@@ -23,6 +23,8 @@
 import { parseSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
+import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
+import { upsertPhaseChecks, parseVerificationBlobToChecks, type SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
 import { inngest } from "@/lib/inngest/client";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
@@ -256,6 +258,31 @@ export function assertIntentIsPlainLanguage(slug: string, field: "why" | "what" 
 }
 
 /**
+ * pm-structured-intent-and-refs Phase 3 — reject any phase authored with zero structured verification
+ * checks. Runs after `assertEveryPhaseHasVerification` so the free-text gate still fires first for a
+ * fully-empty phase; the structured gate catches "the free-text blob exists but doesn't yield any
+ * checks" — the exact "text says something but the checklist is really empty" gap. Throws
+ * `MissingVerificationError` (same class as the text gate) so every author surface treats untestable
+ * as a single failure mode.
+ */
+export function assertEveryPhaseHasChecks(
+  slug: string,
+  phases: { title: string; checks: SpecPhaseCheckInput[] }[],
+): void {
+  const missing = phases
+    .map((p, i) => ({ pos: i + 1, title: p.title, ok: p.checks.length > 0 }))
+    .filter((p) => !p.ok);
+  if (missing.length) {
+    const which = missing.map((m) => `phase ${m.pos}${m.title ? ` (${m.title})` : ""}`).join(", ");
+    throw new MissingVerificationError(
+      `spec ${slug} ${missing.length === 1 ? "has a phase" : "has phases"} with zero structured checks — ${which} ` +
+        `carry no spec_phase_checks rows. Every phase needs >=1 concrete "- On {where}, {do what} → expect {observable result}" check ` +
+        `(pm-structured-intent-and-refs Phase 3).`,
+    );
+  }
+}
+
+/**
  * Reject any spec / phase whose plain-language `why` or `what` is empty (or a lint failure). Throws
  * `MissingIntentError` (loud, with the slug + which field + which phase). Called by
  * `authorSpecRowStructured` BEFORE the DB write, mirroring `assertEveryPhaseHasVerification` — a spec that
@@ -480,6 +507,16 @@ export interface AuthorSpecOpts {
    *  the milestone the proposed spec attaches under so the goal→milestone→spec link is made AT author time
    *  (db-driven; no separate `attachSpecToMilestone` round-trip). Omit / null for a standalone spec. */
   milestoneId?: string | null;
+  /** pm-structured-intent-and-refs Phase 2 — typed parent kind. When set, `parentRef` MUST also be set;
+   *  the CI enforcer validates the pair resolves to a real function slug / mandate key / milestone id. */
+  parentKind?: "function" | "mandate" | "milestone" | null;
+  /** pm-structured-intent-and-refs Phase 2 — the typed parent value (function slug, mandate key, or
+   *  milestone id). Mirrors the `milestoneId` typed FK for the milestone case. */
+  parentRef?: string | null;
+  /** pm-structured-intent-and-refs Phase 2 — structured brain refs the author picked (replaces the
+   *  free-text `**Brain refs:**` line). Omit → the chokepoint derives from summary + phase bodies via
+   *  the existing suggester. Each ref carries a canonical `kind/name` slug + an optional phase link. */
+  brainRefs?: Array<{ brain_slug: string; phase_id?: string | null }>;
 }
 
 /** A structured phase a caller hands to `authorSpecRowStructured` — title + body + the verification checklist
@@ -497,6 +534,10 @@ export interface StructuredPhaseInput {
   why: string;
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this phase ships. */
   what: string;
+  /** pm-structured-intent-and-refs Phase 3 — the phase's structured verification checks as [{position,
+   *  description, kind}]. When omitted, the chokepoint DERIVES them by splitting `verification` on
+   *  bullet lines. Either way the ≥1-check gate fires; a phase that yields zero checks throws. */
+  checks?: SpecPhaseCheckInput[];
 }
 
 /** The structured spec a caller hands to `authorSpecRowStructured` (no markdown parse). */
@@ -644,6 +685,15 @@ export async function authorSpecRowStructured(
     { why: spec.why, what: spec.what },
     spec.phases.map((p) => ({ title: p.title, why: p.why, what: p.what })),
   );
+  // pm-structured-intent-and-refs Phase 3 — derive structured checks (caller-provided win, else split
+  // the verification blob into bullets) and gate ≥1 per phase. Same fail-loud rail.
+  const phaseChecks = spec.phases.map((p) =>
+    (p.checks && p.checks.length ? p.checks : parseVerificationBlobToChecks(p.verification)),
+  );
+  assertEveryPhaseHasChecks(
+    slug,
+    spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
+  );
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
   // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
@@ -698,7 +748,7 @@ export async function authorSpecRowStructured(
       why: p.why.trim(),
       what: p.what.trim(),
     }));
-    await upsertSpec(
+    const upsertResult = await upsertSpec(
       workspaceId,
       {
         slug,
@@ -718,6 +768,10 @@ export async function authorSpecRowStructured(
         // pm-structured-intent-and-refs Phase 1 — persist the spec-level intent columns.
         why: spec.why.trim(),
         what: spec.what.trim(),
+        // pm-structured-intent-and-refs Phase 2 — typed parent (function|mandate|milestone). Optional at
+        // the SDK layer; the structured input carries them when known. Legacy shapes leave them null.
+        parent_kind: opts.parentKind ?? null,
+        parent_ref: opts.parentRef ?? null,
         // auto-build-default-on: an autonomously-authored spec auto-builds by DEFAULT — only an EXPLICIT
         // `autoBuild: false` parks it (request-fix + pre-merge-fix opt out deliberately; Pia's planner
         // decomposition + spec-chat + director-authored specs pass nothing → on). Omitting it used to default
@@ -736,6 +790,43 @@ export async function authorSpecRowStructured(
       summary: spec.summary,
       phases: phaseBodies,
     });
+    // pm-structured-intent-and-refs Phase 2 — persist structured brain refs. Prefer the caller's
+    // explicit `opts.brainRefs`, else derive from the summary + phase bodies via the existing
+    // suggester (which is what the pre-Phase-2 shape already wrote onto the summary line). This
+    // replaces the row set for the spec so a re-author reflects the current picks. Best-effort.
+    try {
+      const refs: SpecBrainRefInput[] = [];
+      if (opts.brainRefs && opts.brainRefs.length) {
+        for (const r of opts.brainRefs) refs.push({ phase_id: r.phase_id ?? null, brain_slug: r.brain_slug });
+      } else {
+        const scan = [spec.summary ?? "", ...spec.phases.map((p) => p.body)].join("\n\n");
+        for (const cand of deriveSuggestedBrainRefs(scan)) {
+          // wikilink comes as "../libraries/foo" — strip the leading "../" for the canonical slug.
+          const slugStr = cand.wikilink.replace(/^\.\.\//, "");
+          refs.push({ phase_id: null, brain_slug: slugStr });
+        }
+      }
+      if (upsertResult?.spec_id) await replaceSpecBrainRefs(upsertResult.spec_id, refs);
+    } catch (e) {
+      console.warn(
+        `[author-spec] ${slug} — spec_brain_refs persist failed (best-effort):`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+    // pm-structured-intent-and-refs Phase 3 — persist per-phase structured checks. The chokepoint gate
+    // above already ensured each phase yields ≥1; here we write them via `upsertPhaseChecks` per phase.
+    try {
+      for (let i = 0; i < spec.phases.length; i++) {
+        const phaseId = upsertResult?.phase_ids?.[i + 1];
+        if (!phaseId) continue;
+        await upsertPhaseChecks(phaseId, phaseChecks[i]);
+      }
+    } catch (e) {
+      console.warn(
+        `[author-spec] ${slug} — spec_phase_checks persist failed (best-effort):`,
+        e instanceof Error ? e.message : e,
+      );
+    }
     // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (a fresh
     // spec always lands in `in_review`; a re-author already re-opens through the writer above). The
     // consumer routes through the SAME gated `enqueueSpecReviewIfDue`, so a re-author of already-passed

@@ -130,11 +130,43 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
       </Link>
 
       <div className="mt-3 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-        {/* Main: the rendered spec */}
-        <article
-          className="prose prose-sm prose-zinc order-2 max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs lg:order-1"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        {/* Main: intent-first header then the rendered spec body.
+            pm-structured-intent-and-refs Phase 4 — the detail page LEADS with plain-language
+            what + why (the shared intent both humans + agents read), then the phase list, and
+            only THEN drops into the technical body/build detail. Legacy rows without `what`/`why`
+            fall back to the summary + rendered body (no visible regression). */}
+        <div className="order-2 lg:order-1">
+          {(spec.card.what || spec.card.why || spec.card.summary) && (
+            <section className="mb-5 rounded-lg border border-zinc-200 bg-white/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
+              <h1 className="text-lg font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
+                {spec.card.title}
+              </h1>
+              {spec.card.what && (
+                <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{spec.card.what}</p>
+              )}
+              {spec.card.why && (
+                <details className="mt-3 text-sm">
+                  <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+                    Why this exists
+                  </summary>
+                  <p className="mt-2 whitespace-pre-line text-zinc-700 dark:text-zinc-300">{spec.card.why}</p>
+                </details>
+              )}
+              {!spec.card.what && !spec.card.why && spec.card.summary && (
+                <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{spec.card.summary}</p>
+              )}
+            </section>
+          )}
+          <details className="mb-4">
+            <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+              Build detail
+            </summary>
+            <article
+              className="prose prose-sm prose-zinc mt-3 max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs"
+              dangerouslySetInnerHTML={{ __html: html }}
+            />
+          </details>
+        </div>
 
         {/* Sidebar: status, build actions, phases — the same controls as the board card */}
         <aside className="order-1 self-start lg:sticky lg:top-6 lg:order-2">

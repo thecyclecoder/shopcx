@@ -124,6 +124,13 @@ export interface SpecRow {
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. Paired
    *  with `why`. HARD gate at the app-layer chokepoint. Distinct from `summary`. */
   what: string | null;
+  /** pm-structured-intent-and-refs Phase 2 — typed parent kind (`function`/`mandate`/`milestone`), or
+   *  NULL for legacy rows. Paired with `parent_ref`. The free-text `parent` stays for display; the
+   *  typed pair is authoritative for CI resolution. */
+  parent_kind: "function" | "mandate" | "milestone" | null;
+  /** pm-structured-intent-and-refs Phase 2 — the resolvable value for the typed parent (function slug,
+   *  mandate key, or milestone id). Paired with `parent_kind`. */
+  parent_ref: string | null;
   created_at: string;
   updated_at: string;
   phases: SpecPhaseRow[];
@@ -159,6 +166,10 @@ export interface SpecRowInput {
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. HARD
    *  gated at the app-layer chokepoint; this SDK writer simply persists. */
   what?: string | null;
+  /** pm-structured-intent-and-refs Phase 2 — typed parent kind. */
+  parent_kind?: "function" | "mandate" | "milestone" | null;
+  /** pm-structured-intent-and-refs Phase 2 — the resolvable typed-parent value. */
+  parent_ref?: string | null;
 }
 
 /** Field set callers pass per-phase. `pr`/`merge_sha`/`verification` are optional — preserved when omitted. */
@@ -221,12 +232,14 @@ interface SpecRowDb {
   goal_branch_sha: string | null;
   why: string | null;
   what: string | null;
+  parent_kind: "function" | "mandate" | "milestone" | null;
+  parent_ref: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, created_at, updated_at";
 
@@ -260,6 +273,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     goal_branch_sha: db.goal_branch_sha,
     why: db.why,
     what: db.what,
+    parent_kind: db.parent_kind,
+    parent_ref: db.parent_ref,
     created_at: db.created_at,
     updated_at: db.updated_at,
     phases,
@@ -366,6 +381,10 @@ export async function upsertSpec(
   // "preserve" (the caller isn't touching them); an explicit `null` or a string is written through.
   if (row.why !== undefined) upsertRow.why = row.why;
   if (row.what !== undefined) upsertRow.what = row.what;
+  // pm-structured-intent-and-refs Phase 2 — persist the typed parent pair (function|mandate|milestone).
+  // Same preserve-on-undefined rule.
+  if (row.parent_kind !== undefined) upsertRow.parent_kind = row.parent_kind;
+  if (row.parent_ref !== undefined) upsertRow.parent_ref = row.parent_ref;
   // specs-status-override-only: `specs.status` is OVERRIDE-ONLY (in_review / deferred / folded). When a caller
   // passes an explicit status, persist it ONLY if it's a true override; a DERIVED value (planned /
   // in_progress / shipped) is normalized to NULL so the rollup derives it (never a leaked stored derived

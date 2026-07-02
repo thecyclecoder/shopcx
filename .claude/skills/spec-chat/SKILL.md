@@ -41,6 +41,13 @@ GitHub-API tools, you have the **whole working tree** and the **web**.
   outcome-tied summary; **at least one** concrete `## Phase N — name` section with file paths / schema /
   tasks (NO status markers — per-phase status lives in `spec_phases`) — each becomes a `spec_phases`
   row; a `## Safety / invariants` section; `## Completion criteria`; and a `## Verification` checklist.
+- **pm-structured-intent-and-refs Phase 1 — the plain-language intent layer.** Every finalize buffer
+  MUST include a `**Why:**` header line (why this spec exists, plain language for humans + agents) and
+  a `**What:**` header line (what changes when it ships) right under `**Owner:** / **Parent:**` and
+  before `**Brain refs:**`. Both are hard-gated at the app-layer chokepoint (`MissingIntentError`) —
+  the DB write fails without them. Same rule per-phase: each `## Phase N — name` section carries a
+  short "why this phase" + "what changes when this phase ships" prose paragraph at the top. NO code
+  fences / `file:line` refs / `**Header:**` lines inside `why`/`what` — the intent lint rejects them.
 - **Propose a `**Brain refs:**` line at FINALIZE** ([[../../docs/brain/specs/spec-brain-refs]] Phase 2).
   When the spec you're materializing names specific `src/lib/…` files or `public.…` tables, add a
   `**Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]] · …` line (0-4 wikilinks) right under

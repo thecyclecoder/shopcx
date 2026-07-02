@@ -19,12 +19,15 @@ import {
   assertEveryPhaseHasBody,
   assertEveryPhaseHasVerification,
   assertEveryNodeHasIntent,
+  assertEveryPhaseHasChecks,
   assertIntentIsPlainLanguage,
   extractIntentHeaders,
   EmptyPhaseBodyError,
   MissingVerificationError,
   MissingIntentError,
 } from "./author-spec";
+import { parseVerificationBlobToChecks } from "./spec-phase-checks-table";
+import { parseBrainRefsLineToSlugs } from "./spec-brain-refs-table";
 import { unbuildableReason, specHasBuildableContent } from "./build-spec-materializer";
 import type { SpecRow } from "./specs-table";
 
@@ -236,4 +239,60 @@ test("extractIntentHeaders returns nulls when headers are absent", () => {
   const got = extractIntentHeaders(md);
   assert.equal(got.why, null);
   assert.equal(got.what, null);
+});
+
+// ── pm-structured-intent-and-refs Phase 3 — structured verification checks ──
+
+test("assertEveryPhaseHasChecks throws when a phase has zero checks", () => {
+  assert.throws(
+    () => assertEveryPhaseHasChecks("no-checks", [{ title: "P1", checks: [] }]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingVerificationError);
+      assert.match((e as Error).message, /zero structured checks/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasChecks passes when every phase has ≥1 check", () => {
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasChecks("ok", [
+      { title: "P1", checks: [{ position: 1, description: "On X, do Y → expect Z", kind: "auto" }] },
+    ]),
+  );
+});
+
+test("parseVerificationBlobToChecks splits bullet lines into rows", () => {
+  const blob = [
+    "- On the repo, run `npx tsc --noEmit` → expect clean",
+    "- On /dashboard, load the roadmap → expect the intent header",
+  ].join("\n");
+  const checks = parseVerificationBlobToChecks(blob);
+  assert.equal(checks.length, 2);
+  assert.equal(checks[0].position, 1);
+  assert.match(checks[0].description, /tsc --noEmit/);
+  assert.equal(checks[0].kind, "auto");
+});
+
+test("parseVerificationBlobToChecks returns [] for empty input", () => {
+  assert.deepEqual(parseVerificationBlobToChecks(null), []);
+  assert.deepEqual(parseVerificationBlobToChecks(""), []);
+});
+
+// ── pm-structured-intent-and-refs Phase 2 — structured brain refs ──
+
+test("parseBrainRefsLineToSlugs pulls kind/name pairs from wikilinks", () => {
+  const line = "**Brain refs:** [[../libraries/author-spec]] · [[../tables/specs]] · [[../inngest/spec-review-on-mutate]]";
+  const slugs = parseBrainRefsLineToSlugs(line);
+  assert.deepEqual(slugs, [
+    "libraries/author-spec",
+    "tables/specs",
+    "inngest/spec-review-on-mutate",
+  ]);
+});
+
+test("parseBrainRefsLineToSlugs dedupes duplicates", () => {
+  const line = "[[../libraries/foo]] [[../libraries/foo]]";
+  const slugs = parseBrainRefsLineToSlugs(line);
+  assert.deepEqual(slugs, ["libraries/foo"]);
 });

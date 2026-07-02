@@ -83,6 +83,8 @@ Add a file under `docs/brain/specs/{kebab-name}.md`. The spec file is the contra
 **Blocked-by:** [[prerequisite-spec]]   ← optional; omit if nothing must ship first
 **Auto-build:** off                      ← optional; opt OUT of auto-queue-on-unblock (manual Build only)
 **Brain refs:** [[../libraries/foo]] · [[../lifecycles/bar]]   ← optional; 0-4 docs/brain pages the builder should Read FIRST
+**Why:** plain-language why this spec exists (shared human + agent intent — required)
+**What:** plain-language what changes when this spec ships (required)
 
 One-paragraph summary of what we're building + why. Tie it to a
 business outcome.
@@ -121,6 +123,8 @@ Phase status is tracked in [[tables/spec_card_state]] (DB), not the markdown. Th
 Provenance is tagged per-phase on `spec_phases.{pr,merge_sha}` ([[specs/spec-status-phase-pr-provenance]]) at the PROMOTION (a built-but-unpromoted phase carries only `build_sha` and reads `in_progress`), so "shipped" is provable/auditable; the board renders a `P2 ✓` link per shipped phase. Promote-eligibility = accumulation-complete ∧ spec-test-green (on the branch preview) ∧ security-green ([[libraries/agent-jobs]] `isSpecPromoteEligible`). Ada (director, grooming/escort) treats a spec with ≥1 **branch-built** phase (`build_sha`, NOT a `pr` tag) as **started** and sequences the next phase's build off the branch — branch-build, never main-merge. The full end-to-end trace — spec branch → goal branch → atomic main promotion, the three gates, and Reva's escalate-not-revert atomic deploy-watch — is in [[lifecycles/spec-goal-branch-pm-flow]].
 
 The **`## Verification` section** is the "how do I test this?" checklist ([[specs/verification-guides]]). The build that ships a spec **writes it** from the routes/tables/actions it actually touched, so a shipped spec arrives test-ready — and it's exactly what the **machine spec-test** grades: an `approved` run over these bullets auto-folds the spec. The spec detail page renders it as a prominent card with the per-bullet agent verdicts + the advisory **Fold to brain now** override. A shipped spec missing the section offers an owner-only **Generate test plan** button (Opus drafts one, brain-grounded). It folds into the brain with the rest of the spec on fold.
+
+**Structured intent + structured verification checks ([[specs/pm-structured-intent-and-refs]]).** Every level of the PM tree (goals, goal_milestones, specs, spec_phases) carries plain-language `why` + `what` columns that LEAD the detail page — the same value humans and agents both read. Specs + phases are HARD-gated: [[libraries/author-spec]] `authorSpecRowStructured` throws `MissingIntentError` before the DB write when either is empty (or fails the plain-language lint that rejects code fences / `file:line` / `**Header:**` lines). The `## Verification` bullets are also stored as structured rows in [[tables/spec_phase_checks]] (`{position, description, kind:'auto'|'human'}`); the same chokepoint gates ≥1 check per phase (`assertEveryPhaseHasChecks`). Brain refs move off the prose `**Brain refs:**` line into [[tables/spec_brain_refs]] rows (spec_id/phase_id → `kind/name` slug) — `scripts/_check-brain-refs.ts` validates every slug resolves to a real `docs/brain/{kind}/{name}.md`. The typed parent lives on `specs.parent_kind` (`function`/`mandate`/`milestone`) + `specs.parent_ref`. Legacy rows keep working (columns nullable); new authoring is gated.
 
 ## Kicking off a build session
 

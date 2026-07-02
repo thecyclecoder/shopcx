@@ -131,6 +131,12 @@ export interface SpecCard {
    *  branch). Surfaced by the board's `BranchPosition` chip. */
   goalBranchSha?: string | null;
   onGoalBranch?: boolean;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists. Surfaced at the top
+   *  of the spec detail page (intent-first) so humans + agents both read the intent before the
+   *  implementation body. Empty when the spec was authored before the intent columns landed. */
+  why?: string | null;
+  /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. */
+  what?: string | null;
 }
 
 export interface RoadmapData {
@@ -547,6 +553,10 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     // branch). Null/false on a spec that hasn't merged to its goal branch yet (or a one-off no-goal spec).
     goalBranchSha: row.goal_branch_sha ?? null,
     onGoalBranch: !!row.goal_branch_sha,
+    // pm-structured-intent-and-refs Phase 1 — the plain-language intent columns flow through to the
+    // SpecCard so the detail page (and the board hover state) can render intent-first. Null-safe.
+    why: row.why ?? null,
+    what: row.what ?? null,
   };
 }
 
