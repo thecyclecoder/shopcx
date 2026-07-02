@@ -28,11 +28,12 @@ Per-job, per-turn **token metering** for the box agent fleet — the `claude -p`
 | `account` | `text?` | Phase 2 — Max account label that ran this turn (`accountLabel`, e.g. `account 1 · default`) |
 | `config_dir` | `text?` | Phase 2 — the `CLAUDE_CONFIG_DIR` that ran this turn ([[../specs/box-multi-account-failover]]) |
 | `usage_cost_cents` | `numeric?` | `$` in cents — **only** for genuinely API-billed rows (`usageCostCents`, [[../libraries/ai-usage]]); **NULL** for Max lanes (no per-token bill) |
+| `resumed_session` | `bool` | default `false` — [[../specs/chained-phase-session-resume]] Phase 2 · **true** when this turn started as a **RESUME** of a prior `claude -p` session (chained-phase carry-forward, or a `needs_input` / `needs_approval` → `queued_resume` flip); **false** when it started **FRESH**. A resumed turn should show `cache_read_tokens` materially exceeding `input_tokens` (the prior transcript served from cache ~0.1x). |
 | `created_at` | `timestamptz` | default `now()` |
 
 ## Indexes
 
-`agent_job_costs_job_idx (job_id)` · `agent_job_costs_ws_created_idx (workspace_id, created_at desc)` · `agent_job_costs_slug_idx (spec_slug, created_at desc)` · `agent_job_costs_kind_idx (kind, created_at desc)` · `agent_job_costs_owner_idx (owner_function, created_at desc)`.
+`agent_job_costs_job_idx (job_id)` · `agent_job_costs_ws_created_idx (workspace_id, created_at desc)` · `agent_job_costs_slug_idx (spec_slug, created_at desc)` · `agent_job_costs_kind_idx (kind, created_at desc)` · `agent_job_costs_owner_idx (owner_function, created_at desc)` · `agent_job_costs_resumed_idx (resumed_session, created_at desc)`.
 
 ## Who writes / reads
 
@@ -49,6 +50,8 @@ Per-job, per-turn **token metering** for the box agent fleet — the `claude -p`
 ## Migration
 
 `supabase/migrations/20260705170000_agent_job_costs.sql` — apply with `npx tsx scripts/apply-agent-job-costs-migration.ts`. RLS: service-role full access + workspace-member SELECT (same shape as [[ai_token_usage]] / [[agent_jobs]]).
+
+`supabase/migrations/20260702130000_agent_job_costs_resumed_session.sql` — adds `resumed_session bool default false` + `agent_job_costs_resumed_idx` ([[../specs/chained-phase-session-resume]] Phase 2). Apply with `npx tsx scripts/apply-agent-job-costs-resumed-session-migration.ts`. Idempotent (`ADD COLUMN IF NOT EXISTS`).
 
 ## Related
 

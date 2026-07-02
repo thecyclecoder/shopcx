@@ -46,6 +46,14 @@ export interface RecordAgentJobCostParams {
    * model is known, usageCostCents is attached. Defaults false.
    */
   apiBilled?: boolean;
+  /**
+   * chained-phase-session-resume Phase 2 — true when this turn started as a RESUME of a prior
+   * `claude -p` session (the job carried a `claude_session_id` at claim time), false when it
+   * started FRESH. A resumed turn should show `cache_read_tokens` materially exceeding
+   * `input_tokens` (the prior transcript served from cache ~0.1x); this flag makes the
+   * comparison a WHERE-clause instead of an inferred ratio.
+   */
+  resumedSession?: boolean;
 }
 
 /**
@@ -81,6 +89,7 @@ export async function recordAgentJobCost(p: RecordAgentJobCostParams): Promise<b
       account: p.account || null,
       config_dir: p.configDir || null,
       usage_cost_cents,
+      resumed_session: !!p.resumedSession,
     });
     return true;
   } catch (err) {

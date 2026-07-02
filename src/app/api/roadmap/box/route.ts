@@ -106,6 +106,11 @@ interface LaneRow {
   // TWO personas (Vera + Vault) + a static 'spec-test · security' label for these, because one session
   // emits both verdicts; a NON-fused spec-test lane (post-ship, no branch) still renders single-persona.
   fused_pre_merge?: boolean;
+  // chained-phase-session-resume Phase 2 — true when this lane's job carried a `claude_session_id` at
+  // claim (a chained-phase resume from the prior phase's session, OR a needs_input/needs_approval →
+  // queued_resume flip). Written by the box worker's heartbeat; passed through as-is so the lane card
+  // can render a `resumed`/`fresh` indicator (cache-warm vs cache-cold). Undefined on legacy rows.
+  resumed?: boolean;
 }
 
 // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
