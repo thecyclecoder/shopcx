@@ -51,6 +51,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
 - [[dev-message-center-db]] — read-only prod-DB queries from the Developer Message Center (throwaway `scripts/_*.ts`, SELECT-only, never committed)
+- [[what-makes-a-buildable-spec]] — the single definition of a sound, buildable spec (owner/parent/intent/verification/grounding). Authors write to it; Vale's [[../../.claude/skills/spec-review|spec-review]] gates on it — one referenced artifact so author + reviewer can't drift. The [[../../.claude/skills/submit-spec|submit-spec]] skill points here.
 - [[pm-flow-data-sources]] — the PM flow's post-purge call graph (DB row → typed reader → consumer) + every surviving consumer of `serializeSpecRowToMarkdown` ([[../specs/retire-md-reads-from-pm-flow]])
 - [[pipeline-doctor]] — `diagnosePipeline` / `scripts/pipeline-status.ts`: an INSTANT read-only diagnosis of the whole spec pipeline (derived status + jobs/gates + what's stuck and WHY, via named anomaly detectors). Composes the canonical readers — never re-derives status with raw SQL.
 - [[next16-metadata-boundary-csr-bail]] — why /store, /widget, /portal, /help bail to CSR under cacheComponents (Next's `botType && isRoutePPREnabled` metadata short-circuit) + the `src/proxy.ts` bot-UA-neutralization fix

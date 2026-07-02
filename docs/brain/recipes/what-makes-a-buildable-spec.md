@@ -1,0 +1,42 @@
+# Recipe: What makes a buildable spec (`what-makes-a-buildable-spec`)
+
+**The single source of truth for "a sound, buildable spec."** Every author writes to this; the reviewer gates on it — one referenced artifact so author + reviewer can't drift. The [[../../.claude/skills/submit-spec|submit-spec]] skill points here for the authoring bar.
+
+> **Who reads this:** anything that authors a spec — an interactive session via [[../../.claude/skills/submit-spec|submit-spec]], the box [[../../.claude/skills/spec-chat|spec-chat]] finalize, and the propose→worker-write box agents (the goal planner [[../../.claude/skills/plan-goal|plan-goal]], director-coach, triage, repair, security). And the reviewer — Vale's [[../../.claude/skills/spec-review|spec-review]] job gates every `in_review` spec against these checks.
+
+## Where a spec lives
+
+**The DB row IS the spec** ([[../../CLAUDE.md]] § Database is the spec) — [[../tables/specs]] (the card) + [[../tables/spec_phases]] (the phases), plus [[../tables/spec_phase_checks]] (structured verification) + [[../tables/spec_brain_refs]] (structured refs). There is NO `docs/brain/specs/{slug}.md` — the per-spec markdown was retired. Authors write through the [[../libraries/author-spec]] chokepoint (`authorSpecRowStructured` / `authorSpecRowFromMarkdown`), never raw `upsertSpec`, never a `.md` commit. The worker materializes the row to a temporary `.box/spec-{slug}.md` for a reader (Vale, the builder) — that render is what the checks below describe field-by-field. Full flow: [[../project-management]].
+
+## The CHECKLIST — every check a spec must pass
+
+The materialized row renders as a `**Owner:** · **Parent:**` header line, plain-language **Intent** (why/what), an optional `**Blocked-by:**` line, the summary, then one `## {phase.title}` heading per `spec_phases` row, each with its own intent + a `### Verification` block. Walk these:
+
+- **Owner — a real function.** `owner` resolves to a `docs/brain/functions/` doc (`growth` · `platform` · `cmo` · `cs` · `retention`). **No orphan specs.** The owner is *who operates the finished tool*, NOT who builds it — **Ada / Platform is the sole builder for every spec, all departments** ([[../functions/platform]]).
+- **Parent — a mandate or goal milestone.** `parent` points at a function mandate (a `###` under that function's `## Mandates`) OR a goal milestone (a goal in `docs/brain/goals/` + its `M#`). Never an orphan.
+- **Intent — `why` + `what`, on the spec AND every phase (hard gate).** Plain-language *why this exists* + *what changes when it ships* — the header humans + agents read. **Code-enforced**: [[../libraries/author-spec]] `assertEveryNodeHasIntent` THROWS `MissingIntentError` at author time if the spec or any phase has an empty `why`/`what` (pm-structured-intent-and-refs). Not a description of the mechanics — the motivation.
+- **Blocked-by — present iff there are real prerequisites.** Required when the spec depends on other unshipped specs; its absence is fine when there are none. Only a defect when prerequisites are *named in the body* but missing from `blocked_by`.
+- **One well-formed phase sequence.** Phases render `## Phase 1 — …`, `## Phase 2 — …`, one per `spec_phases` row — never duplicated, out-of-order, or mangled (`P1/P2/P1/P2` is the canonical defect). A one-shot spec with NO `## Phase` heading (a summary body shipping in one PR) is perfectly valid. A phase with an **empty body** is rejected (`EmptyPhaseBodyError`).
+- **Verification per phase — the hard gate, now structured.** Every phase carries a non-empty `### Verification` (`spec_phases.verification`) that must yield **≥1 structured check** — the author-spec write parses it into [[../tables/spec_phase_checks]] and rejects a phase whose blob produces zero checks (so the spec-test agent Vera can grade each). `assertEveryPhaseHasVerification` fires first for a fully-empty phase; the structured gate catches "text exists but yields no check." Write *observable acceptance checks* ("route returns 200 for owner, 403 for non-owner; tsc clean"), one per line — not restated intent.
+- **DB-companion plan for a `customer_id` table.** When the spec adds a `customer_id`-referenced table, the [[../../CLAUDE.md]] hard rule requires a Sonnet data tool wired in `sonnet-orchestrator-v2.ts` — the body must say so. A new such table with no companion plan is a defect.
+- **Grounded, not guessed.** The body cites real `src/` `file:line`, real table/column/enum names (probed via [[../../.claude/skills/probe-db|probe-db]] — the database is the spec), and the relevant brain pages. Grounding + the gates are what make a spec *accurate*; a spec from guessed shapes is the common build failure.
+- **Brain-page rule.** Any phase that adds a table / Inngest function / library file / integration must update `docs/brain/` in the SAME PR. The [[../libraries/author-spec]] `**Brain refs:**` suggester injects the authoritative pages ([[../tables/spec_brain_refs]]); the body should still name them where it matters.
+
+The defect bar is **specific**: name the missing field, the mangled phase numbers, the unresolvable function slug. "Doesn't look quite right" is not a defect.
+
+## What's enforced where (so nothing drifts)
+
+| Concern | Enforced by | Drift-proof because |
+|---|---|---|
+| Write mechanics (columns, status enum, phase positions, `auto_build` default) | [[../libraries/author-spec]] code + CI (`_check-pm-sdk-compliance.ts`, `_check-pm-md-reads.ts`) | It's *executed*, not described |
+| Non-empty intent (`why`/`what`), verification, body, ≥1 structured check | [[../libraries/author-spec]] `assertEveryNodeHasIntent` / `assertEveryPhaseHasVerification` / `EmptyPhaseBodyError` / the checks parse — all THROW pre-write | The write fails; a malformed spec never lands |
+| "Good spec" judgment (this checklist) | THIS page — referenced by author + reviewer | One artifact, cited both sides of the gate |
+| The gate itself (`pass` / `needs_fix`) | Vale's [[../../.claude/skills/spec-review|spec-review]] job → the spec stays `in_review` until it passes | The reviewer reads this page |
+
+## Lifecycle after authoring
+
+A freshly-authored spec lands `in_review` (the build pipeline refuses to dispatch it). Vale reviews it against this checklist → `pass` (+ a reasoned `planned`/`deferred` disposition proposal) or `needs_fix` (specific defects recorded). Ada's disposition sweep then flips a passed spec to `planned` → the box worker builds it. `auto_build` stays off (review-gated) by default unless a CEO commission sets it on. Full flow: [[../project-management]].
+
+## Related
+
+[[../libraries/author-spec]] · [[../libraries/specs-table]] · [[../tables/spec_phase_checks]] · [[../tables/spec_brain_refs]] · [[../project-management]] · [[../../.claude/skills/submit-spec|submit-spec]] · [[../../.claude/skills/spec-review|spec-review]] · [[../../.claude/skills/spec-chat|spec-chat]] · [[../../.claude/skills/plan-goal|plan-goal]] · [[../../.claude/skills/spec-test|spec-test]] · [[../../.claude/skills/probe-db|probe-db]]
