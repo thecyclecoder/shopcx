@@ -858,6 +858,64 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
           continue;
         }
       }
+      // ⭐ premerge-spectest-rerun-and-visibility Phase 2 — REFRESH-ON-CHANGE. Even when the
+      // build row already carries a READY preview_url, that URL can be STALE if the branch has
+      // newer work than the latest spec_test_run — e.g. a pr-resolve merge commit that pushed a
+      // fix onto the branch but never re-captured a preview onto THIS row. Phase 1 unblocks the
+      // re-enqueue for a changed branch; without Phase 2 that re-enqueue would probe the OLD
+      // preview and re-fail. So when the branch has changed since its last run, ask Vercel for
+      // the branch's newest deployment: if its state is READY (Vercel finished building the new
+      // push), persist that fresh URL onto this row via capturePreviewUrlForJob (idempotent,
+      // advances only forward) and use it for the enqueue; if NOT READY (still QUEUED /
+      // BUILDING / ERROR / CANCELED), skip this pass entirely so the re-test never runs against
+      // a stale or non-READY preview — the next standing pass retries. Gated behind
+      // "branch has newer build/pr-resolve than latest run" so the Vercel call is bounded to
+      // real change events, not every standing pass on every branch.
+      try {
+        const { data: latestRun } = await admin
+          .from("spec_test_runs")
+          .select("run_at")
+          .eq("workspace_id", j.workspace_id)
+          .eq("spec_slug", slug)
+          .eq("spec_branch", branch)
+          .order("run_at", { ascending: false })
+          .limit(1);
+        if (latestRun && latestRun.length) {
+          const runAt = (latestRun[0] as { run_at: string }).run_at;
+          const { data: newer } = await admin
+            .from("agent_jobs")
+            .select("id")
+            .eq("spec_branch", branch)
+            .in("kind", ["build", "pr-resolve"])
+            .gt("updated_at", runAt)
+            .limit(1);
+          if (newer && newer.length) {
+            const { getLatestReadyDeploymentForBranch, previewHttpsUrl } = await import("@/lib/vercel-project");
+            const lookup = await getLatestReadyDeploymentForBranch(branch, null);
+            // The branch's NEWEST deployment must be READY — otherwise Vercel is still building
+            // the new push (or the deployment errored/was canceled). A READY older-than-newest
+            // deployment isn't good enough; using it would re-test the pre-change code.
+            if (!lookup.latest || lookup.latest.state !== "READY") {
+              console.log(
+                `[pre-merge-backstop] Phase 2: branch ${branch} changed since last run but newest deployment not READY (${lookup.latest?.state ?? "none"}) — retry next pass`,
+              );
+              continue;
+            }
+            const freshUrl = previewHttpsUrl(lookup.latest);
+            if (!freshUrl) continue;
+            const { capturePreviewUrlForJob } = await import("@/lib/preview-capture");
+            const cap = await capturePreviewUrlForJob({ jobId: j.id, branch, commitSha: null });
+            previewUrl = cap.previewUrl ?? freshUrl;
+            console.log(`[pre-merge-backstop] Phase 2: refreshed preview for changed branch ${branch} → ${previewUrl}`);
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `[pre-merge-backstop] Phase 2 refresh-on-change for ${branch} failed (skipping):`,
+          e instanceof Error ? e.message : e,
+        );
+        continue;
+      }
       out.scanned++;
       // spectest-error-visible-and-rerunnable Phase 1 — LOOP-GUARDED auto-recovery: with the
       // enqueue's dedup narrowed (an `error` verdict no longer blocks re-enqueue), the backstop
