@@ -715,6 +715,16 @@ function markCodexCapped(now: number, text?: string) {
   if (!codexState.capLogged) {
     codexState.capLogged = true;
     console.warn(`[runtime] codex usage wall — routing to Claude until ${astTime(codexState.cappedUntil)}`);
+    // fleet-usage-cockpit Phase 1 — record a discovery event so
+    // discoverLimit tightens toward the true Codex burn-at-wall (Codex's
+    // real limit still lives in /status; this row is kept for confidence).
+    void recordUsageWallEventBestEffort({
+      account: "codex",
+      runtime: "codex",
+      window: isWeeklyWall(text || "") ? "weekly" : "5h",
+      wallText: text ?? null,
+      wallResetAt: codexState.cappedUntil ? new Date(codexState.cappedUntil).toISOString() : null,
+    });
   }
 }
 
@@ -947,8 +957,104 @@ function markAccountCapped(dir: string, now: number, errorText?: string) {
     a.capEventLogged = true; // record the `cap` once per window; noteAccountRecoveries logs the matching `recovered`
     recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ${astTime(a.cappedUntil)}`);
     console.warn(`[multi-account] ${dir} capped → back at ${astTime(a.cappedUntil)}${isWeeklyWall(errorText || "") ? " (weekly wall — honoring stated reset)" : ""}`);
+    // fleet-usage-cockpit Phase 1 — record the wall's classification + the
+    // current window's token burn so discoverLimit(account, window) tightens
+    // toward the true hidden Max limit. Fire-and-forget; a metering failure
+    // must never interfere with cap-handling.
+    const idx = accounts.indexOf(a);
+    const label = accountLabel(dir, idx < 0 ? 0 : idx);
+    void recordUsageWallEventBestEffort({
+      account: label,
+      runtime: "claude",
+      window: isWeeklyWall(errorText || "") ? "weekly" : "5h",
+      wallText: errorText ?? null,
+      wallResetAt: new Date(a.cappedUntil).toISOString(),
+    });
   }
 }
+// ── fleet-usage-cockpit Phase 1: per-account snapshots + wall-event discovery ─────────────────────
+// Resolve the owner workspace the box operates against. Mirrors coverage-register's resolveWorkspace:
+// the newest agent_jobs row's workspace, else the oldest workspaces row. Memoized (workspace id is
+// stable on the box). Best-effort — a null return silently drops the write.
+let _cachedWorkspaceId: string | null | undefined;
+async function resolveOwnerWorkspaceId(): Promise<string | null> {
+  if (_cachedWorkspaceId !== undefined) return _cachedWorkspaceId;
+  try {
+    const { data: latestJob } = await db
+      .from("agent_jobs")
+      .select("workspace_id")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const fromJob = (latestJob as { workspace_id?: string } | null)?.workspace_id;
+    if (fromJob) { _cachedWorkspaceId = fromJob; return fromJob; }
+    const { data: ws } = await db.from("workspaces").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
+    _cachedWorkspaceId = (ws as { id?: string } | null)?.id ?? null;
+    return _cachedWorkspaceId;
+  } catch {
+    _cachedWorkspaceId = null;
+    return null;
+  }
+}
+// Record ONE detected wall event to public.usage_wall_events, stamped with the current window's token
+// burn so discoverLimit(account, window) = MAX(tokens_at_wall) tightens toward the true hidden Max limit.
+// Fire-and-forget: called from markAccountCapped / markCodexCapped in the cap-detection hot path — a
+// metering failure must never interfere with cap-handling. Codex wall events are recorded for the wall
+// COUNT (confidence), but discoverLimit still returns null for Codex (Codex's real limit is /status %).
+async function recordUsageWallEventBestEffort(p: {
+  account: string;
+  runtime: "claude" | "codex";
+  window: "5h" | "weekly";
+  wallText: string | null;
+  wallResetAt: string | null;
+}): Promise<void> {
+  try {
+    const workspaceId = await resolveOwnerWorkspaceId();
+    if (!workspaceId) return;
+    const { currentWindowBurn, recordWallEvent } = await import("../src/lib/usage-snapshots");
+    const tokensAtWall = await currentWindowBurn(workspaceId, p.account, p.window).catch(() => 0);
+    await recordWallEvent({
+      workspaceId,
+      account: p.account,
+      runtime: p.runtime,
+      window: p.window,
+      tokensAtWall,
+      wallText: p.wallText,
+      wallResetAt: p.wallResetAt,
+    });
+  } catch (err) {
+    console.error("[usage-snapshots] wall-event write failed (swallowed):", err);
+  }
+}
+// Standing per-account snapshot pass. Reads the live cap state from the in-memory accounts pool +
+// codexState and writes source='box' rows to public.account_usage_snapshots for each Max lane + Codex.
+// Called each heartbeat tick — cheap (10 UPSERTs / tick, one per account × window). Never throws.
+async function runAccountUsageRollupBestEffort(): Promise<void> {
+  try {
+    const workspaceId = await resolveOwnerWorkspaceId();
+    if (!workspaceId) return;
+    const { rollupBoxAccountUsage } = await import("../src/lib/usage-snapshots");
+    const now = Date.now();
+    const liveStates: { account: string; runtime: "claude" | "codex"; capped: boolean; cappedUntil: number | null }[] = accounts.map((a, i) => ({
+      account: accountLabel(a.configDir, i),
+      runtime: "claude",
+      capped: a.cappedUntil > now,
+      cappedUntil: a.cappedUntil > now ? a.cappedUntil : null,
+    }));
+    if (CODEX_ENABLED) {
+      liveStates.push({
+        account: "codex",
+        runtime: "codex",
+        capped: codexState.cappedUntil > now,
+        cappedUntil: codexState.cappedUntil > now ? codexState.cappedUntil : null,
+      });
+    }
+    await rollupBoxAccountUsage({ workspaceId, liveStates, now });
+  } catch (err) {
+    console.error("[usage-snapshots] rollup failed (swallowed):", err);
+  }
+}
+
 // Distinguish a Max usage-WALL (pull the account from rotation) from a transient 529/overloaded (which
 // the existing retry owns — NOT a cap, NOT an account switch). Conservative: a 529/overloaded mention
 // short-circuits to "not a cap" so a transient is never mistaken for the wall.
@@ -1332,6 +1438,12 @@ async function meterAgentJob(
       ownerFunction = ownerFunctionForKind(job.kind);
     } catch { /* owner attribution is optional */ }
     const idx = configDir ? accounts.findIndex((a) => a.configDir === configDir) : -1;
+    // fleet-usage-cockpit Phase 1 — a Codex turn's usage is recorded under
+    // account='codex' (ChatGPT plan, single account) with configDir null,
+    // regardless of the Claude configDir the wrapper picked as a fallback.
+    // codexCostOverride is the shared pure mapping (unit-tested separately).
+    const { codexCostOverride } = await import("../src/lib/usage-snapshots");
+    const codexOverlay = codexCostOverride(model);
     await recordAgentJobCost({
       jobId: job.id,
       workspaceId: job.workspace_id,
@@ -1340,9 +1452,9 @@ async function meterAgentJob(
       ownerFunction,
       usage,
       model,
-      account: configDir ? accountLabel(configDir, idx < 0 ? 0 : idx) : null,
-      configDir: configDir ?? null,
-      // Box lanes run on Max with NO ANTHROPIC_API_KEY → no per-token bill, never a `$`.
+      account: codexOverlay ? codexOverlay.account : configDir ? accountLabel(configDir, idx < 0 ? 0 : idx) : null,
+      configDir: codexOverlay ? codexOverlay.configDir : configDir ?? null,
+      // Box lanes run on Max / ChatGPT plan with NO API key → no per-token bill, never a `$`.
       apiBilled: false,
       resumedSession: !!job.claude_session_id,
     });
@@ -2438,6 +2550,9 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
   // round-robin least-loaded selection reads. Belt-and-suspenders alongside the scattered `inFlight--`.
   reconcileAccountLoad();
+  // fleet-usage-cockpit Phase 1 — per-tick per-account 5h + weekly rollup into public.account_usage_
+  // snapshots. Cheap (10 UPSERTs), fire-and-forget: a rollup failure must never break the heartbeat.
+  void runAccountUsageRollupBestEffort();
   try {
     await db.from("worker_heartbeats").upsert({
       id: WORKER_BOX_ID,

@@ -24,6 +24,16 @@ export const DEVELOPER_PULSE_HREF = "/dashboard/developer/pulse";
 export const DEVELOPER_PULSE_ICON =
   "M3.75 12h3l2.25-6 4.5 12 2.25-6h4.5";
 
+/** The fleet-usage cockpit — 4 Max + Codex account cards + departments + API $ (fleet-usage-
+ *  cockpit spec Phase 3). Rendered directly BELOW Pulse in the developer sidebar takeover —
+ *  same peer treatment as Pulse (not a `DEVELOPER_GROUPS` member) so the founder's compute-
+ *  cost view sits at the top of the portal alongside their context view. */
+export const DEVELOPER_USAGE_HREF = "/dashboard/developer/usage";
+
+/** Heroicon path for the Usage link — a stylized bar-chart / meter. */
+export const DEVELOPER_USAGE_ICON =
+  "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z";
+
 /** A "needs you" count key — the sidebar/Overview look these up to render a live badge. */
 export type DeveloperBadgeKey = "approvals" | "security" | "regressions" | "humanQA" | "branches";
 
@@ -179,10 +189,11 @@ export const DEVELOPER_OVERVIEW_ICON =
 /** The "Developer" portal icon in the main tree (angle brackets). */
 export const DEVELOPER_PORTAL_ICON = "M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5";
 
-/** Is `pathname` inside the Developer portal? (any sub-surface, or the Overview itself, or Pulse). */
+/** Is `pathname` inside the Developer portal? (any sub-surface, or the Overview itself, or Pulse or Usage). */
 export function isInDeveloperPortal(pathname: string): boolean {
   if (pathname === DEVELOPER_OVERVIEW_HREF || pathname.startsWith(DEVELOPER_OVERVIEW_HREF + "/")) return true;
   if (pathname === DEVELOPER_PULSE_HREF || pathname.startsWith(DEVELOPER_PULSE_HREF + "/")) return true;
+  if (pathname === DEVELOPER_USAGE_HREF || pathname.startsWith(DEVELOPER_USAGE_HREF + "/")) return true;
   return DEVELOPER_NAV.some((i) => pathname === i.href || pathname.startsWith(i.href + "/"));
 }
 
