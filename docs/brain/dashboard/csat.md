@@ -16,7 +16,10 @@ _None._
 
 ## API endpoints called
 
-- `/api/workspaces/:x/csat`
+- `GET /api/workspaces/:x/csat` — stats + recent responses. Stats aggregates drop `excluded_at IS NOT NULL` rows; the list still includes them (carrying `excluded_at` + `exclusion_reason`) so the owner can see + reverse.
+- `POST /api/workspaces/:x/csat` with `action:'exclude'` (owner-only, body: `{ csat_id, reason }`) sets `excluded_at=now`, `excluded_by=user.id`, `exclusion_reason`.
+- `POST /api/workspaces/:x/csat` with `action:'include'` (owner-only, body: `{ csat_id }`) clears all three columns.
+- `POST /api/workspaces/:x/csat` with `action:'create_ticket'` (owner/admin/agent) — unchanged.
 
 ## Permissions
 

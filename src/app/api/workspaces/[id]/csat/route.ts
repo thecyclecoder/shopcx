@@ -100,13 +100,14 @@ export async function GET(
 
 /**
  * POST /api/workspaces/[id]/csat
- * Body: { action: "create_ticket", csat_id }
+ * Body: { action: "create_ticket" | "exclude" | "include", csat_id, ... }
  *
- * Creates a new ticket from a CSAT comment when the customer used
- * the comment field to slip in a new request (e.g. "5 stars but I
- * actually need to cancel my subscription"). The comment goes in
- * as the first inbound message on the new ticket. Returns the
- * new ticket_id for client-side redirect.
+ * - "create_ticket" — owner/admin/agent. Creates a new ticket from a CSAT
+ *   comment when the customer used the comment field to slip in a new
+ *   request (e.g. "5 stars but I actually need to cancel my subscription").
+ * - "exclude" / "include" — OWNER-ONLY (admin/agent get 403). Soft-excludes
+ *   or reinstates a CSAT so a product-complaint rating stops polluting the
+ *   CS-quality metric. Reversible + audited via excluded_by / exclusion_reason.
  */
 export async function POST(
   request: Request,
@@ -126,7 +127,42 @@ export async function POST(
   }
 
   const body = await request.json().catch(() => ({}));
-  if (body.action !== "create_ticket") {
+  const action = body.action;
+
+  // Exclude / include are OWNER-only (admin/agent → 403). Only the workspace
+  // owner can decide whether a CSAT reflects a product complaint instead of
+  // service quality.
+  if (action === "exclude" || action === "include") {
+    if (member.role !== "owner") {
+      return NextResponse.json({ error: "Owner only" }, { status: 403 });
+    }
+    const csatId = String(body.csat_id || "");
+    if (!csatId) return NextResponse.json({ error: "csat_id required" }, { status: 400 });
+
+    if (action === "exclude") {
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      const { error: uerr } = await admin
+        .from("ticket_csat")
+        .update({
+          excluded_at: new Date().toISOString(),
+          excluded_by: user.id,
+          exclusion_reason: reason || null,
+        })
+        .eq("workspace_id", workspaceId)
+        .eq("id", csatId);
+      if (uerr) return NextResponse.json({ error: uerr.message }, { status: 500 });
+    } else {
+      const { error: uerr } = await admin
+        .from("ticket_csat")
+        .update({ excluded_at: null, excluded_by: null, exclusion_reason: null })
+        .eq("workspace_id", workspaceId)
+        .eq("id", csatId);
+      if (uerr) return NextResponse.json({ error: uerr.message }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true });
+  }
+
+  if (action !== "create_ticket") {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   }
   const csatId = String(body.csat_id || "");
