@@ -50,6 +50,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
+- [[raise-work-mem]] — owner-approval-only raise of `work_mem` on the `authenticated` role (the DB Health Agent's `raise_work_mem` fix for the `dbhealth:instance:temp_spill_pressure` signature — sizing math + rollback + verification)
 - [[dev-message-center-db]] — read-only prod-DB queries from the Developer Message Center (throwaway `scripts/_*.ts`, SELECT-only, never committed)
 - [[what-makes-a-buildable-spec]] — the single definition of a sound, buildable spec (owner/parent/intent/verification/grounding). Authors write to it; Vale's [[../../.claude/skills/spec-review|spec-review]] gates on it — one referenced artifact so author + reviewer can't drift. The [[../../.claude/skills/submit-spec|submit-spec]] skill points here.
 - [[pm-flow-data-sources]] — the PM flow's post-purge call graph (DB row → typed reader → consumer) + every surviving consumer of `serializeSpecRowToMarkdown` ([[../specs/retire-md-reads-from-pm-flow]])
