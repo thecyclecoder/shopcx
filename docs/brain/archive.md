@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
+- **Destructive-migration safety rails** · verified 2026-07-03 · → [[../libraries/migration-safety]]
 - **Director-KPI SDK — one DB-derived source for every scorecard/recap metric** · verified 2026-07-03 · → [[libraries/director-kpis]]
 - **Internal renewal: advance next_billing_date on zero-total skip so 100%-off subs don't stall the renewal tile** · verified 2026-07-03 · → [[../inngest/internal-subscription-renewals]]
 - **Weekly KPI snapshot done-guard forces pre-SDK stale-row re-write** · verified 2026-07-03 · → [[inngest/platform-director-cron]]
