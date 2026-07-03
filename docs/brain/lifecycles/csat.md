@@ -98,7 +98,7 @@ A high reopen rate (>15%) is the leading indicator of premature ticket-close. Lo
 
 ## Status / open work
 
-**Shipped:** Cron-driven send 48h post-close, resolution gate (yes → rate path, no → reopen path), 5-star rating + comment on separate screens, 500-point award on completion, already-submitted guard, dashboard view at `/dashboard/csat` — all shipped today.
+**Shipped:** Cron-driven send 48h post-close, resolution gate (yes → rate path, no → reopen path), 5-star rating + comment on separate screens, 500-point award on completion, already-submitted guard, dashboard view at `/dashboard/csat` — all shipped today. Owner-only soft-exclude control (reversible + audited): workspace owners can exclude a CSAT from the CS-quality stats via the dashboard when the response reflects a product complaint rather than service failure; excluded rows drop from count/avg/by_rating/response_rate aggregates but remain visible in the list (dimmed with reason) so the owner can reverse via the Exclude/Include toggle. Permission gated strictly to owner role (admin/agent get 403).
 
 **Known gaps / not yet shipped:** None.
 
