@@ -14,6 +14,8 @@ import {
   DEVELOPER_PORTAL_ICON,
   DEVELOPER_PULSE_HREF,
   DEVELOPER_PULSE_ICON,
+  DEVELOPER_USAGE_HREF,
+  DEVELOPER_USAGE_ICON,
   isInDeveloperPortal,
   isDeveloperHrefActive,
   type DeveloperBadgeKey,
@@ -444,6 +446,19 @@ export default function Sidebar({
             >
               <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={DEVELOPER_PULSE_ICON} /></svg>
               Pulse
+            </Link>
+            {/* fleet-usage-cockpit Phase 3 — Usage sits directly BELOW Pulse (per spec) as the
+                second peer link before the DEVELOPER_GROUPS render, matching the Pulse styling. */}
+            <Link
+              href={DEVELOPER_USAGE_HREF}
+              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                pathname === DEVELOPER_USAGE_HREF
+                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
+                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              }`}
+            >
+              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={DEVELOPER_USAGE_ICON} /></svg>
+              Usage
             </Link>
             {DEVELOPER_GROUPS.map((group) => (
               <div key={group.heading} className="pt-1">

@@ -614,3 +614,349 @@ export function codexCostOverride(model: string | null | undefined): CodexCostOv
   const isCodex = !!model && model.startsWith("codex/");
   return isCodex ? { account: "codex", configDir: null, apiBilled: false } : null;
 }
+
+// ── Phase 3 — cockpit composition (pure) ─────────────────────────────────────
+// buildUsageCockpit composes the /api/developer/usage response from already-
+// loaded inputs. Pure so a fixture-driven test proves the seeded box+mac SUM,
+// the 'learning…' vs discovered-% branching, the Codex limit_pct routing, and
+// the departments[] breach flag WITHOUT hitting the DB. The route wraps this.
+
+/** One row from public.account_usage_snapshots (box or mac source). */
+export interface AccountUsageSnapshotRow {
+  source: "box" | "mac";
+  runtime: UsageRuntime;
+  account: string;
+  window_kind: UsageWindow;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  capped?: boolean;
+  capped_until?: string | null;
+  window_reset_at?: string | null;
+  limit_pct?: number | null;
+  captured_at?: string | null;
+}
+
+/** discoverLimit outputs the cockpit needs per (account, window). */
+export interface WallCounts {
+  /** DiscoveredLimit.limit for the 5h window. Codex → null (uses limit_pct). */
+  fiveH: DiscoveredLimit;
+  /** DiscoveredLimit for the weekly window. */
+  weekly: DiscoveredLimit;
+}
+
+/** One row per fleet_budgets budget the cockpit surfaces on the departments panel. */
+export interface DepartmentBudgetInput {
+  ownerFunction: string;
+  windowDays: number;
+  tokenCeiling: number | null;
+  usdCeilingCents: number | null;
+}
+
+/** Reused shape from src/lib/fleet-cost.ts — kept structural so the caller
+ * doesn't have to import that module to construct a test fixture. */
+export interface FleetFunctionBucket {
+  key: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  usd_cents: number | null;
+  subscription_only: boolean;
+}
+
+export interface ApiPurposeBucket {
+  purpose: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  usd_cents: number;
+  calls: number;
+}
+
+export interface ApiModelBucket {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  usd_cents: number;
+  calls: number;
+}
+
+export interface CockpitAccountWindow {
+  window_kind: UsageWindow;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  /** Cheap-cache split for the cockpit's cached-vs-uncached bar. */
+  cache_read_ratio_pct: number;
+  capped: boolean;
+  capped_until: string | null;
+  window_reset_at: string | null;
+  /**
+   * Discovery status for the account+window:
+   *   • Claude, ≥1 wall sampled → { status: 'discovered', limit_tokens, wall_count, burn_pct }
+   *   • Claude, 0 walls sampled → { status: 'learning' } (never a fabricated %)
+   *   • Codex, live /status %  → { status: 'reported', limit_pct, wall_count }
+   */
+  limit:
+    | { status: "discovered"; limit_tokens: number; wall_count: number; burn_pct: number }
+    | { status: "learning"; wall_count: number }
+    | { status: "reported"; limit_pct: number; wall_count: number };
+}
+
+export interface CockpitAccountCard {
+  account: string;
+  runtime: UsageRuntime;
+  /** True when EITHER window is currently capped. */
+  capped: boolean;
+  windows: {
+    fiveH: CockpitAccountWindow;
+    weekly: CockpitAccountWindow;
+  };
+}
+
+export interface CockpitDepartmentRow {
+  owner_function: string;
+  window_days: number;
+  total_tokens: number;
+  usd_cents: number | null;
+  subscription_only: boolean;
+  token_ceiling: number | null;
+  usd_ceiling_cents: number | null;
+  /** True when tokens > ceiling OR $ > ceiling (matches runFleetSpendGovernor). */
+  breach: boolean;
+  breach_reason: string | null;
+}
+
+export interface CockpitApiPanel {
+  window_days: number;
+  total_cost_cents: number;
+  total_tokens: number;
+  /** Cached-vs-uncached breakdown across the API-billed rows. */
+  cache: {
+    raw_input_tokens: number;
+    cache_creation_tokens: number;
+    cache_read_tokens: number;
+    output_tokens: number;
+    read_ratio_pct: number;
+  };
+  by_model: ApiModelBucket[];
+  by_purpose: ApiPurposeBucket[];
+}
+
+export interface UsageCockpit {
+  generated_at: string;
+  accounts: CockpitAccountCard[];
+  departments: CockpitDepartmentRow[];
+  api: CockpitApiPanel;
+}
+
+export interface BuildUsageCockpitInput {
+  /** All account_usage_snapshots rows visible to the workspace. */
+  snapshots: AccountUsageSnapshotRow[];
+  /** discoverLimit output per (account, window). Callers pre-load this so the
+   * composition is pure — no DB. */
+  wallLimits: Record<string, WallCounts>;
+  /** Per-owner_function fleet-cost rollup + budget for the departments panel. */
+  functionBuckets: FleetFunctionBucket[];
+  budgets: DepartmentBudgetInput[];
+  /** Byproduct of the fleet-cost rollup / ai_token_usage — the API panel. */
+  api: CockpitApiPanel;
+  /** now() override for testing. */
+  now?: number;
+}
+
+function ratioPct(numer: number, denom: number): number {
+  if (!denom) return 0;
+  return Math.max(0, Math.min(100, Math.round((numer / denom) * 100)));
+}
+
+function summariseAccountWindow(
+  windowRows: AccountUsageSnapshotRow[],
+  runtime: UsageRuntime,
+  discovery: DiscoveredLimit,
+  window_kind: UsageWindow,
+): CockpitAccountWindow {
+  let input_tokens = 0, output_tokens = 0, cache_creation_tokens = 0, cache_read_tokens = 0;
+  let capped = false;
+  let capped_until: string | null = null;
+  let window_reset_at: string | null = null;
+  let liveLimitPct: number | null = null;
+  for (const r of windowRows) {
+    input_tokens += r.input_tokens || 0;
+    output_tokens += r.output_tokens || 0;
+    cache_creation_tokens += r.cache_creation_tokens || 0;
+    cache_read_tokens += r.cache_read_tokens || 0;
+    if (r.capped) capped = true;
+    if (r.capped_until && (!capped_until || r.capped_until > capped_until)) capped_until = r.capped_until;
+    if (r.window_reset_at && (!window_reset_at || r.window_reset_at > window_reset_at)) window_reset_at = r.window_reset_at;
+    if (typeof r.limit_pct === "number" && r.limit_pct != null) {
+      liveLimitPct = liveLimitPct === null ? r.limit_pct : Math.max(liveLimitPct, r.limit_pct);
+    }
+  }
+  const total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
+  const inputSide = input_tokens + cache_creation_tokens + cache_read_tokens;
+  const cache_read_ratio_pct = ratioPct(cache_read_tokens, inputSide);
+
+  let limit: CockpitAccountWindow["limit"];
+  if (runtime === "codex") {
+    // Codex's real limit lives in its /status % — reported via limit_pct on the mac snapshot.
+    // The box side of Codex is 'learning' if the mac hasn't reported yet.
+    if (liveLimitPct !== null) {
+      limit = { status: "reported", limit_pct: Math.round(liveLimitPct), wall_count: discovery.wallCount };
+    } else {
+      limit = { status: "learning", wall_count: discovery.wallCount };
+    }
+  } else if (discovery.limit !== null && discovery.limit > 0) {
+    const burn_pct = ratioPct(total_tokens, discovery.limit);
+    limit = { status: "discovered", limit_tokens: discovery.limit, wall_count: discovery.wallCount, burn_pct };
+  } else {
+    // Claude/Max with 0 walls sampled — the cockpit shows 'learning…', never a fabricated %.
+    limit = { status: "learning", wall_count: discovery.wallCount };
+  }
+
+  return {
+    window_kind,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_tokens,
+    cache_read_ratio_pct,
+    capped,
+    capped_until,
+    window_reset_at,
+    limit,
+  };
+}
+
+/**
+ * Compose the cockpit response from pre-loaded inputs. Pure.
+ *
+ * Contract (fleet-usage-cockpit Phase 3 verification):
+ *   • accounts[] SUMs source='box' + source='mac' per (account, window_kind);
+ *   • Codex windows carry a REPORTED limit_pct (never discoverLimit — that
+ *     stays null for Codex);
+ *   • Claude/Max windows carry burn / discoverLimit(account, window_kind) as
+ *     a real % once ≥1 wall is sampled, else status='learning' (no fabricated %);
+ *   • departments[] carry tokens + $ + ceiling + a breach flag matching
+ *     runFleetSpendGovernor's (tokens > ceiling || $ > ceiling) rule;
+ *   • the api[] panel carries real $ (usage_cost_cents), tokens, and the
+ *     cached-vs-uncached split;
+ *   • account cards NEVER carry a $ figure — two-currency honesty (the
+ *     fleet-cost invariant).
+ */
+export function buildUsageCockpit(input: BuildUsageCockpitInput): UsageCockpit {
+  const now = input.now ?? Date.parse("2026-01-01T00:00:00.000Z");
+
+  // Group snapshots by (account, window_kind). Both sources fold together — a
+  // re-report from the Mac reporter REPLACES its prior row via the unique key,
+  // so seeing at most one 'mac' row per pair is guaranteed at the DB layer.
+  const perAccount = new Map<string, { runtime: UsageRuntime; fiveH: AccountUsageSnapshotRow[]; weekly: AccountUsageSnapshotRow[] }>();
+  for (const r of input.snapshots) {
+    const bucket = perAccount.get(r.account) ?? { runtime: r.runtime, fiveH: [], weekly: [] };
+    if (r.window_kind === "5h") bucket.fiveH.push(r);
+    else bucket.weekly.push(r);
+    // A row's runtime overrides the sentinel — codex snapshots stamp runtime='codex'.
+    bucket.runtime = r.runtime;
+    perAccount.set(r.account, bucket);
+  }
+
+  // Every Max lane + Codex renders even when it has ZERO burn (a healthy
+  // fresh window is a real signal — the cockpit shouldn't hide it).
+  const knownAccounts: Array<{ account: string; runtime: UsageRuntime }> = [
+    ...MAX_ACCOUNT_LABELS.map((a) => ({ account: a, runtime: "claude" as const })),
+    { account: CODEX_ACCOUNT_LABEL, runtime: "codex" as const },
+  ];
+  for (const k of knownAccounts) {
+    if (!perAccount.has(k.account)) {
+      perAccount.set(k.account, { runtime: k.runtime, fiveH: [], weekly: [] });
+    }
+  }
+
+  // Preserve display order: 4 Max labels then Codex, then any unexpected extras.
+  const displayOrder = [
+    ...MAX_ACCOUNT_LABELS.map((a) => a as string),
+    CODEX_ACCOUNT_LABEL as string,
+    ...[...perAccount.keys()].filter((k) => !MAX_ACCOUNT_LABELS.includes(k as (typeof MAX_ACCOUNT_LABELS)[number]) && k !== CODEX_ACCOUNT_LABEL),
+  ];
+
+  const accounts: CockpitAccountCard[] = [];
+  for (const account of displayOrder) {
+    const bucket = perAccount.get(account);
+    if (!bucket) continue;
+    const wl = input.wallLimits[account] ?? {
+      fiveH: { limit: null, wallCount: 0 },
+      weekly: { limit: null, wallCount: 0 },
+    };
+    const fiveH = summariseAccountWindow(bucket.fiveH, bucket.runtime, wl.fiveH, "5h");
+    const weekly = summariseAccountWindow(bucket.weekly, bucket.runtime, wl.weekly, "weekly");
+    accounts.push({
+      account,
+      runtime: bucket.runtime,
+      capped: fiveH.capped || weekly.capped,
+      windows: { fiveH, weekly },
+    });
+  }
+
+  // Departments: token-only for Max lanes (subscription_only=true → usd_cents=null),
+  // real $ where the API-billed runtime AI contributed. Breach = tokens > ceiling
+  // OR $ > ceiling (matches runFleetSpendGovernor).
+  const budgetByFn = new Map<string, DepartmentBudgetInput>();
+  for (const b of input.budgets) budgetByFn.set(b.ownerFunction, b);
+
+  // The union of every function that has EITHER a spend bucket OR a budget row
+  // (a budget with zero spend still renders — the ceiling is real intent).
+  const fnKeys = new Set<string>();
+  for (const b of input.functionBuckets) fnKeys.add(b.key);
+  for (const b of input.budgets) fnKeys.add(b.ownerFunction);
+
+  const departments: CockpitDepartmentRow[] = [];
+  for (const fn of fnKeys) {
+    const bucket = input.functionBuckets.find((b) => b.key === fn);
+    const budget = budgetByFn.get(fn);
+    const total_tokens = bucket?.total_tokens ?? 0;
+    const usd_cents = bucket?.usd_cents ?? null;
+    const subscription_only = bucket?.subscription_only ?? true;
+    const token_ceiling = budget?.tokenCeiling ?? null;
+    const usd_ceiling_cents = budget?.usdCeilingCents ?? null;
+    const tokenOver = token_ceiling != null && total_tokens > token_ceiling;
+    const usdOver = usd_ceiling_cents != null && usd_cents != null && usd_cents > usd_ceiling_cents;
+    const breach = tokenOver || usdOver;
+    let breach_reason: string | null = null;
+    if (breach) {
+      const parts: string[] = [];
+      if (tokenOver) parts.push(`tokens ${total_tokens} > ceiling ${token_ceiling}`);
+      if (usdOver) parts.push(`$ ${Math.round((usd_cents || 0) / 100 * 100) / 100}¢ > ceiling ${usd_ceiling_cents}¢`);
+      breach_reason = parts.join(" · ");
+    }
+    departments.push({
+      owner_function: fn,
+      window_days: budget?.windowDays ?? 7,
+      total_tokens,
+      usd_cents,
+      subscription_only,
+      token_ceiling,
+      usd_ceiling_cents,
+      breach,
+      breach_reason,
+    });
+  }
+  departments.sort((a, b) => (Number(b.breach) - Number(a.breach)) || b.total_tokens - a.total_tokens || a.owner_function.localeCompare(b.owner_function));
+
+  return {
+    generated_at: new Date(now).toISOString(),
+    accounts,
+    departments,
+    api: input.api,
+  };
+}

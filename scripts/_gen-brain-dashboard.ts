@@ -82,6 +82,7 @@ const PURPOSE: Record<string, string> = {
   "portal-analytics": "Customer-portal usage stats. Action funnel (pause / cancel / address change / coupon apply).",
   "team": "Workspace members list. Edit display_name + role per member. Invite flow.",
   "developer/pulse": "Founder Pulse — read-only context-reconstitution surface. Five-lens synthesis (what's working / where you left off / open threads / decisions / refs) over the LLM-distilled session-digest ledger joined to the specs + agent_jobs ledger, every claim cite-anchored. Owner-gated; `?refresh=1` recomputes.",
+  "developer/usage": "Fleet usage cockpit — 4 Max Round Robin lanes + Codex account cards (tokens + rate-limit proximity, NEVER $), departments panel (rollupFleetCost per owner_function + fleet_budgets ceilings + breach flag), and API $ panel (real usage_cost_cents by model/purpose + cache-read split). Two-currency honesty. Claude limit = burn / discoverLimit(account, window_kind) once ≥1 wall is sampled, else 'learning…'; Codex limit = reported /status %. Owner-gated.",
   "": "Dashboard home — workspace overview, KPI cards (open tickets, customers, retention, AI resolution rate).",
   // Settings
   "settings": "Settings hub — cards linking to every workspace-level configuration page.",

@@ -12,12 +12,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildUsageCockpit,
   codexCostOverride,
   discoverLimit,
   mapCcusageToSnapshots,
   validateMacReportPayload,
+  type AccountUsageSnapshotRow,
   type CcusageOutputLike,
+  type CockpitApiPanel,
+  type DepartmentBudgetInput,
+  type FleetFunctionBucket,
   type UsageSnapshotsAdmin,
+  type WallCounts,
 } from "./usage-snapshots";
 
 // ── codexCostOverride ─────────────────────────────────────────────────────────
@@ -276,4 +282,130 @@ test("mapCcusageToSnapshots: accepts flat inputTokens (not just tokenCounts) —
   const [five] = mapCcusageToSnapshots(ccu, { account: "Round Robin 3", runtime: "claude", now: NOW_MS });
   assert.equal(five.input_tokens, 42);
   assert.equal(five.output_tokens, 84);
+});
+
+// ── Phase 3 — buildUsageCockpit ──────────────────────────────────────────────
+
+const EMPTY_WALLS: WallCounts = { fiveH: { limit: null, wallCount: 0 }, weekly: { limit: null, wallCount: 0 } };
+function emptyApiPanel(): CockpitApiPanel {
+  return {
+    window_days: 7,
+    total_cost_cents: 0,
+    total_tokens: 0,
+    cache: { raw_input_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, output_tokens: 0, read_ratio_pct: 0 },
+    by_model: [],
+    by_purpose: [],
+  };
+}
+
+test("buildUsageCockpit: accounts[] SUM source='box' + source='mac' per (account, window) — the seeded pair sums correctly", () => {
+  const snapshots: AccountUsageSnapshotRow[] = [
+    { source: "box", runtime: "claude", account: "Round Robin 1", window_kind: "5h", input_tokens: 1000, output_tokens: 500, cache_creation_tokens: 100, cache_read_tokens: 2000 },
+    { source: "mac", runtime: "claude", account: "Round Robin 1", window_kind: "5h", input_tokens: 200, output_tokens: 50, cache_creation_tokens: 10, cache_read_tokens: 500 },
+    { source: "box", runtime: "claude", account: "Round Robin 1", window_kind: "weekly", input_tokens: 5000, output_tokens: 2500, cache_creation_tokens: 500, cache_read_tokens: 10000 },
+    { source: "mac", runtime: "claude", account: "Round Robin 1", window_kind: "weekly", input_tokens: 100, output_tokens: 50, cache_creation_tokens: 10, cache_read_tokens: 200 },
+  ];
+  const cockpit = buildUsageCockpit({ snapshots, wallLimits: {}, functionBuckets: [], budgets: [], api: emptyApiPanel(), now: NOW_MS });
+  const card = cockpit.accounts.find((a) => a.account === "Round Robin 1");
+  assert.ok(card, "Round Robin 1 must always render");
+  assert.equal(card!.windows.fiveH.input_tokens, 1200);
+  assert.equal(card!.windows.fiveH.output_tokens, 550);
+  assert.equal(card!.windows.fiveH.cache_creation_tokens, 110);
+  assert.equal(card!.windows.fiveH.cache_read_tokens, 2500);
+  assert.equal(card!.windows.fiveH.total_tokens, 1200 + 550 + 110 + 2500);
+  assert.equal(card!.windows.weekly.total_tokens, 5100 + 2550 + 510 + 10200);
+});
+
+test("buildUsageCockpit: Claude with ≥1 sampled wall → status='discovered' with burn/limit %; 0 walls → status='learning' (no fabricated %)", () => {
+  const snapshots: AccountUsageSnapshotRow[] = [
+    { source: "box", runtime: "claude", account: "Round Robin 2", window_kind: "5h", input_tokens: 200_000, output_tokens: 300_000, cache_creation_tokens: 0, cache_read_tokens: 500_000 },
+    { source: "box", runtime: "claude", account: "Round Robin 3", window_kind: "5h", input_tokens: 100_000, output_tokens: 100_000, cache_creation_tokens: 0, cache_read_tokens: 200_000 },
+  ];
+  const wallLimits: Record<string, WallCounts> = {
+    "Round Robin 2": { fiveH: { limit: 2_000_000, wallCount: 3 }, weekly: { limit: null, wallCount: 0 } },
+    // Round Robin 3 gets no wall entry — should degrade to 'learning'
+  };
+  const cockpit = buildUsageCockpit({ snapshots, wallLimits, functionBuckets: [], budgets: [], api: emptyApiPanel(), now: NOW_MS });
+  const rr2 = cockpit.accounts.find((a) => a.account === "Round Robin 2")!;
+  assert.equal(rr2.windows.fiveH.limit.status, "discovered");
+  if (rr2.windows.fiveH.limit.status === "discovered") {
+    assert.equal(rr2.windows.fiveH.limit.limit_tokens, 2_000_000);
+    assert.equal(rr2.windows.fiveH.limit.wall_count, 3);
+    // (200k + 300k + 0 + 500k) / 2M = 50%
+    assert.equal(rr2.windows.fiveH.limit.burn_pct, 50);
+  }
+  const rr3 = cockpit.accounts.find((a) => a.account === "Round Robin 3")!;
+  assert.equal(rr3.windows.fiveH.limit.status, "learning");
+});
+
+test("buildUsageCockpit: Codex uses the REPORTED limit_pct — NEVER discoverLimit (even if walls exist)", () => {
+  const snapshots: AccountUsageSnapshotRow[] = [
+    { source: "mac", runtime: "codex", account: "codex", window_kind: "5h", input_tokens: 100_000, output_tokens: 50_000, cache_creation_tokens: 0, cache_read_tokens: 100_000, limit_pct: 42 },
+  ];
+  const wallLimits: Record<string, WallCounts> = {
+    codex: { fiveH: { limit: 999_999, wallCount: 2 }, weekly: { limit: null, wallCount: 0 } },
+  };
+  const cockpit = buildUsageCockpit({ snapshots, wallLimits, functionBuckets: [], budgets: [], api: emptyApiPanel(), now: NOW_MS });
+  const codex = cockpit.accounts.find((a) => a.account === "codex")!;
+  assert.equal(codex.runtime, "codex");
+  assert.equal(codex.windows.fiveH.limit.status, "reported");
+  if (codex.windows.fiveH.limit.status === "reported") {
+    assert.equal(codex.windows.fiveH.limit.limit_pct, 42);
+    assert.equal(codex.windows.fiveH.limit.wall_count, 2);
+  }
+});
+
+test("buildUsageCockpit: departments[] carry tokens + $ + ceiling + breach flag from fleet_budgets/rollupFleetCost", () => {
+  const functionBuckets: FleetFunctionBucket[] = [
+    { key: "platform", input_tokens: 5_000_000, output_tokens: 3_000_000, cache_creation_tokens: 500_000, cache_read_tokens: 15_000_000, total_tokens: 23_500_000, usd_cents: 4200, subscription_only: false },
+    { key: "cs", input_tokens: 1_000_000, output_tokens: 500_000, cache_creation_tokens: 100_000, cache_read_tokens: 2_000_000, total_tokens: 3_600_000, usd_cents: null, subscription_only: true },
+  ];
+  const budgets: DepartmentBudgetInput[] = [
+    { ownerFunction: "platform", windowDays: 7, tokenCeiling: 20_000_000, usdCeilingCents: 5000 },
+    { ownerFunction: "cs", windowDays: 7, tokenCeiling: 5_000_000, usdCeilingCents: null },
+  ];
+  const cockpit = buildUsageCockpit({ snapshots: [], wallLimits: {}, functionBuckets, budgets, api: emptyApiPanel(), now: NOW_MS });
+  const platform = cockpit.departments.find((d) => d.owner_function === "platform")!;
+  assert.equal(platform.total_tokens, 23_500_000);
+  assert.equal(platform.usd_cents, 4200);
+  assert.equal(platform.token_ceiling, 20_000_000);
+  assert.equal(platform.usd_ceiling_cents, 5000);
+  assert.equal(platform.breach, true, "tokens 23.5M > ceiling 20M ⇒ breach");
+  assert.ok(platform.breach_reason && platform.breach_reason.includes("tokens"));
+
+  const cs = cockpit.departments.find((d) => d.owner_function === "cs")!;
+  assert.equal(cs.total_tokens, 3_600_000);
+  assert.equal(cs.usd_cents, null);
+  assert.equal(cs.subscription_only, true);
+  assert.equal(cs.breach, false, "3.6M ≤ 5M ceiling ⇒ ok");
+});
+
+test("buildUsageCockpit: account cards NEVER carry a $ figure (two-currency honesty); api panel carries real $", () => {
+  const snapshots: AccountUsageSnapshotRow[] = [
+    { source: "box", runtime: "claude", account: "Round Robin 1", window_kind: "5h", input_tokens: 1000, output_tokens: 500, cache_creation_tokens: 0, cache_read_tokens: 2000 },
+  ];
+  const api: CockpitApiPanel = {
+    window_days: 7,
+    total_cost_cents: 12345,
+    total_tokens: 999,
+    cache: { raw_input_tokens: 100, cache_creation_tokens: 50, cache_read_tokens: 400, output_tokens: 449, read_ratio_pct: 73 },
+    by_model: [{ model: "claude-sonnet-4-6", input_tokens: 100, output_tokens: 200, cache_creation_tokens: 50, cache_read_tokens: 400, total_tokens: 750, usd_cents: 12345, calls: 5 }],
+    by_purpose: [{ purpose: "orchestrator-decision", input_tokens: 100, output_tokens: 200, cache_creation_tokens: 50, cache_read_tokens: 400, total_tokens: 750, usd_cents: 12345, calls: 5 }],
+  };
+  const cockpit = buildUsageCockpit({ snapshots, wallLimits: {}, functionBuckets: [], budgets: [], api, now: NOW_MS });
+  const card = cockpit.accounts.find((a) => a.account === "Round Robin 1")!;
+  // Account card has NO $ field of any kind — enumerate keys and assert.
+  for (const w of [card.windows.fiveH, card.windows.weekly]) {
+    for (const k of Object.keys(w)) {
+      assert.ok(!/\$|cents|usd|cost/i.test(k), `account window carries a $-shaped field: ${k}`);
+    }
+  }
+  assert.equal(cockpit.api.total_cost_cents, 12345);
+  assert.equal(cockpit.api.by_model[0].usd_cents, 12345);
+});
+
+test("buildUsageCockpit: renders 5 account cards (4 Max + Codex) even when no snapshots exist yet", () => {
+  const cockpit = buildUsageCockpit({ snapshots: [], wallLimits: {}, functionBuckets: [], budgets: [], api: emptyApiPanel(), now: NOW_MS });
+  const labels = cockpit.accounts.map((a) => a.account);
+  assert.deepEqual(labels, ["Round Robin 1", "Round Robin 2", "Round Robin 3", "Round Robin 4", "codex"]);
 });
