@@ -95,4 +95,4 @@ Phase 3 of [[../specs/rhea-research-automation]] — the DISCOVERY surface betwe
 
 ## Related
 
-[[../tables/research_urls]] · [[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../specs/rhea-research-automation]] · [[../goals/acquisition-research-engine]] · [[../tables/creative_skeletons]] · [[creative-skeleton]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[landing-page-scout]] · [[../functions/growth]]
+[[../tables/research_urls]] · [[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../specs/rhea-research-automation]] · [[../goals/acquisition-research-engine]] · [[../tables/creative_skeletons]] · [[creative-skeleton]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[landing-page-scout]] · [[../functions/growth]] · [[../dashboard/research__landers]] (owner viewer)
