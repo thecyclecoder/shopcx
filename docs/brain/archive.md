@@ -16,6 +16,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
 - **Director-KPI SDK — one DB-derived source for every scorecard/recap metric** · verified 2026-07-03 · → [[libraries/director-kpis]]
+- **Research → Competitors: the product filter + table (finish Phase 2)** · verified 2026-07-03 · → [[../dashboard/research__competitors]]
 - **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
 - **Ada grades a sampled, cadenced, adaptive-by-rollup batch — not every concluded job** · verified 2026-07-02 · → [[../libraries/agent-grader]]
 - **AdLibrary search freshness gate** · verified 2026-07-02 · → [[lifecycles/creative-finder]]
