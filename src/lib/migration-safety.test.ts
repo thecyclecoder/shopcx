@@ -411,35 +411,220 @@ test("routeDestructiveAction: irreversible_destructive + NOT business-material �
 });
 
 // ── Phase 4: routing wiring via routed_to_function_override ────────────────────
+//
+// The override is trusted ONLY on the `ceo-authorized-out-of-leash` kind with an expected
+// destructive action type (apply_migration / run_prod_script) AND a server-authored
+// `destructive_route` metadata object (the shape `routeDestructiveAction` writes). See
+// scope-destructive-route-override-to-out-of-leash-jobs — this hardens against a pending-
+// action payload on some unrelated kind (proposed-goal, plan, model-tier proposal …)
+// silently overriding CEO fail-safe routing.
 
-test("routingOwnerForJob: honors routed_to_function_override='platform' on a ceo-authorized-out-of-leash job", () => {
+const platformRouteMeta = {
+  routedToFunction: "platform" as const,
+  renameAndExpire: true,
+  businessMaterial: false,
+  reason: "reversible_destructive + rename-and-expire rail — Ada owns final call (PITR backstop)",
+};
+const ceoRouteMeta = {
+  routedToFunction: "ceo" as const,
+  renameAndExpire: false,
+  businessMaterial: true,
+  reason: "irreversible_destructive + business-material — CEO circuit-break (mass customer/financial destruction)",
+};
+
+test("routingOwnerForJob: honors routed_to_function_override='platform' on a ceo-authorized-out-of-leash job with trusted destructive_route metadata", () => {
   const job = {
     kind: "ceo-authorized-out-of-leash",
     pending_actions: [
-      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "platform" },
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
     ],
   };
   assert.equal(routingOwnerForJob(job), "platform");
 });
 
-test("routingOwnerForJob: honors routed_to_function_override='ceo' explicitly", () => {
+test("routingOwnerForJob: honors routed_to_function_override='ceo' explicitly with trusted metadata", () => {
   const job = {
     kind: "ceo-authorized-out-of-leash",
     pending_actions: [
-      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "ceo" },
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "ceo",
+        destructive_route: ceoRouteMeta,
+      },
     ],
   };
   assert.equal(routingOwnerForJob(job), "ceo");
+});
+
+test("routingOwnerForJob: run_prod_script is also an eligible destructive action type", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "run_prod_script",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), "platform");
 });
 
 test("routingOwnerForJob: falls through to KIND_TO_FUNCTION when no valid override is present", () => {
   const job = {
     kind: "ceo-authorized-out-of-leash",
     pending_actions: [
-      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "bogus" },
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "bogus",
+        destructive_route: platformRouteMeta,
+      },
     ],
   };
   // ceo-authorized-out-of-leash is UNMAPPED in KIND_TO_FUNCTION → null → CEO fail-safe.
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override on a proposed-goal job (unrelated kind)", () => {
+  const job = {
+    kind: "proposed-goal",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
+    ],
+  };
+  // proposed-goal is deliberately unmapped in KIND_TO_FUNCTION so it can never auto-route to a
+  // director — a spoofed override must not hijack that CEO fail-safe.
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override on a proposed-model-tier job (unrelated kind)", () => {
+  const job = {
+    kind: "proposed-model-tier",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
+    ],
+  };
+  // No apply_model_tier action → the model-tier branch doesn't fire → we fall through to the
+  // kind default (unmapped → null → CEO fail-safe) rather than honoring the pending override.
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override on a plan job (unrelated kind)", () => {
+  const job = {
+    kind: "plan",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
+    ],
+  };
+  // A plan job routes by KIND_TO_FUNCTION.plan (= 'platform') via the goal-owner async path;
+  // the sync fall-through here is that same platform default. The override must NOT come into
+  // play — it is only trusted on ceo-authorized-out-of-leash.
+  assert.equal(routingOwnerForJob(job), "platform");
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override on an unknown/unmapped kind", () => {
+  const job = {
+    kind: "some-random-worker-kind",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override on a non-destructive action type (build)", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "build",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: platformRouteMeta,
+      },
+    ],
+  };
+  // Wrong action type — only apply_migration / run_prod_script may carry the override.
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override when destructive_route metadata is MISSING", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "platform" },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override when destructive_route.routedToFunction MISMATCHES", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        destructive_route: { ...platformRouteMeta, routedToFunction: "ceo" },
+      },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("routingOwnerForJob: IGNORES routed_to_function_override when destructive_route metadata is MALFORMED", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        // Missing reason / boolean rails — not the shape routeDestructiveAction writes.
+        destructive_route: { routedToFunction: "platform" },
+      },
+    ],
+  };
   assert.equal(routingOwnerForJob(job), null);
 });
 

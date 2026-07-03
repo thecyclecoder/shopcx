@@ -115,29 +115,67 @@ export function ownerFunctionForKind(kind: string): string | null {
  * `KIND_TO_FUNCTION` default (which for `ceo-authorized-out-of-leash` is null →
  * CEO fail-safe): a reversible_destructive + rename-and-expire lands in Ada's inbox
  * (she owns the final call, PITR is the backstop), while irreversible + business-material
- * stays on the CEO's circuit-breaker path. The override is trusted only to the values
- * 'platform' | 'ceo' — any other string is ignored and we fall through to the kind default.
+ * stays on the CEO's circuit-breaker path.
+ *
+ * scope-destructive-route-override-to-out-of-leash-jobs — the override is trusted ONLY on
+ * `ceo-authorized-out-of-leash` jobs carrying an `apply_migration` or `run_prod_script`
+ * action plus a server-authored `destructive_route` metadata object whose `routedToFunction`
+ * matches. On any other kind (proposed-goal, plan, model-tier proposal, unknown …) OR any
+ * other action type OR a missing/mismatched `destructive_route` object, the field is ignored
+ * and routing falls through to the kind-based fail-safe. Closes prevent-prod-dry-run-
+ * transaction-escape: a user-supplied pending_actions payload can never re-route a job
+ * around CEO oversight by naming its own owner function.
  */
 export function routingOwnerForJob(job: { kind: string; pending_actions?: PendingActionLike[] | null }): string | null {
   if (job.kind === MODEL_TIER_PROPOSAL_KIND) {
     const a = (job.pending_actions || []).find((x) => x.type === APPLY_MODEL_TIER_ACTION_TYPE);
     if (a?.target_kind) return ownerFunctionForKind(a.target_kind);
   }
-  const override = destructiveRouteOverride(job.pending_actions ?? []);
-  if (override) return override;
+  if (job.kind === OUT_OF_LEASH_KIND) {
+    const override = destructiveRouteOverride(job.pending_actions ?? []);
+    if (override) return override;
+  }
   return ownerFunctionForKind(job.kind);
 }
 
+/** The one job kind on which a `routed_to_function_override` is server-authored (the box worker's
+ *  destructive-action raise path — see `runCeoAuthorizedOutOfLeashJob`). Every OTHER kind falls
+ *  through to the kind-based fail-safe so a spoofed pending-action payload can't hijack routing. */
+const OUT_OF_LEASH_KIND = "ceo-authorized-out-of-leash";
+
+/** Action types the destructive-action raise path emits — apply a migration or run a prod-mutating
+ *  script. A pending action of any other type is not eligible to carry a routing override. */
+const DESTRUCTIVE_ACTION_TYPES = new Set(["apply_migration", "run_prod_script"]);
+
 /** Read the Phase-4 destructive-action routing override off a pending action. Trusts only
  *  the whitelist ('platform' | 'ceo'); anything else returns null (fall through to the
- *  KIND_TO_FUNCTION default → CEO fail-safe). */
+ *  KIND_TO_FUNCTION default → CEO fail-safe). Also requires an expected destructive action
+ *  type AND a server-authored `destructive_route` metadata object whose `routedToFunction`
+ *  matches — a bare `routed_to_function_override` string without the metadata is untrusted
+ *  and ignored. */
 function destructiveRouteOverride(pending: PendingActionLike[]): string | null {
   for (const a of pending) {
+    if (!a.type || !DESTRUCTIVE_ACTION_TYPES.has(a.type)) continue;
     const rec = a as unknown as Record<string, unknown>;
     const raw = rec["routed_to_function_override"];
-    if (raw === "platform" || raw === "ceo") return raw;
+    if (raw !== "platform" && raw !== "ceo") continue;
+    if (!isTrustedDestructiveRouteMetadata(rec["destructive_route"], raw)) continue;
+    return raw;
   }
   return null;
+}
+
+/** True when `meta` is the shape `routeDestructiveAction` writes (a `DestructiveRoute` object with a
+ *  matching `routedToFunction`, boolean rails, and a non-empty `reason`) — the trust anchor that
+ *  proves the override was server-computed alongside the pending action, not tacked on afterwards. */
+function isTrustedDestructiveRouteMetadata(meta: unknown, expected: "platform" | "ceo"): boolean {
+  if (!meta || typeof meta !== "object") return false;
+  const m = meta as Record<string, unknown>;
+  if (m.routedToFunction !== expected) return false;
+  if (typeof m.reason !== "string" || !m.reason.trim()) return false;
+  if (typeof m.renameAndExpire !== "boolean") return false;
+  if (typeof m.businessMaterial !== "boolean") return false;
+  return true;
 }
 
 /**
