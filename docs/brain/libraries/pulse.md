@@ -13,6 +13,8 @@ The digest table is the evidence layer; this module is the reasoning layer. Ever
 1. **Deterministic join** (`synthesizeDeterministic`) — pure code, unit-testable without an LLM. This is what the Phase-2 verification harness `scripts/_verify-pulse-synthesis.ts` imports and asserts on.
 2. **Optional LLM narrative pass** (`narrateWithModel`) — Haiku rewrites each lens's claims in the founder's voice FROM the same structured evidence + cite ids. Reuses the workspace's existing raw-fetch Anthropic client pattern (mirrors [[../libraries/sonnet-orchestrator-v2]] / [[ad-avatar-proposals]]). If the API is unavailable the deterministic prose ships as-is.
 
+**Briefing cap (2026-07-03 fix):** the deterministic join emits one claim per thread across up to 40 digests — left uncapped that's a ~160-claim firehose that both reads as noise AND blows `narrateWithModel`'s output budget (the truncated JSON fails to parse → silent deterministic fallback, so the Pulse looked empty/raw). `synthesizeDeterministic` now dedups near-identical claims (via `normalizeForMatch`) and caps each lens to briefing size (`whats_working` 8 · `where_you_left_off` 10 · `rabbit_holes` 6 · `next_moves` 5 · `threads_in_flight` 10), keeping the most-recent (digests arrive newest-first); `narrateWithModel`'s `max_tokens` was raised to 2400.
+
 ## The five lenses
 
 Rendered in this order on `/dashboard/developer/pulse`:
