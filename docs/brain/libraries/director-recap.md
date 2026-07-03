@@ -24,7 +24,7 @@ This **extends the [[daily-analysis-report]] `generateDailyReport` aggregate-the
 
 | Count | Source | Rule |
 |---|---|---|
-| `specsShipped` | [[../tables/agent_jobs]] | `kind='build'` + `status='merged'` with `updated_at` in-day (the merge flip), `spec_slug` mapped to the function in the live spec→owner map ([[brain-roadmap]] `getRoadmap().specs[].owner`). |
+| `specsShipped` | [[../tables/agent_jobs]] | `kind='build'` + `status='merged'` with `updated_at` in-day (the merge flip), `spec_slug` mapped to the function via [[director-kpis]] `shippedSpecsByOwner` — which builds the map from the FULL [[specs-table]] `listSpecs` set (folded INCLUDED). Fixes the [[../specs/director-kpi-sdk]] Phase 1 bug where a same-day-folded spec's merge dropped off the count. |
 | `bugsFixed` | [[../tables/approval_decisions]] × [[../tables/agent_jobs]] | `decision='approved'` in-day whose raising job is `kind ∈ {repair, regression}`, by `raised_by_function`. |
 | `migrationsApproved` | [[../tables/approval_decisions]] × [[../tables/agent_jobs]] | `decision='approved'` in-day whose raising job is `kind='migration-fix'`, by `raised_by_function`. |
 | `approvalsHandled` | [[../tables/approval_decisions]] | every `decision='approved'` in-day by `raised_by_function` (bugs + migrations + other; drives the active signal + a "cleared N approvals" tail). |
@@ -50,7 +50,7 @@ The one-line standup is the **headline**; the Daily Summaries row deep-links to 
 
 ## Related
 
-[[../specs/directors-board-gamified]] · [[../specs/director-loop-grading]] · [[director-board]] · [[director-xp]] · [[director-activity]] · [[daily-analysis-report]] · [[agent-personas]] · [[../dashboard/agents]] · [[../tables/director_messages]] · [[../tables/director_activity]] · [[../tables/approval_decisions]] · [[../tables/dashboard_notifications]] · [[../goals/devops-director]] · [[../operational-rules]]
+[[../specs/directors-board-gamified]] · [[../specs/director-loop-grading]] · [[../specs/director-kpi-sdk]] · [[director-kpis]] · [[director-board]] · [[director-xp]] · [[director-activity]] · [[daily-analysis-report]] · [[agent-personas]] · [[../dashboard/agents]] · [[../tables/director_messages]] · [[../tables/director_activity]] · [[../tables/approval_decisions]] · [[../tables/dashboard_notifications]] · [[../goals/devops-director]] · [[../operational-rules]]
 
 ---
 
