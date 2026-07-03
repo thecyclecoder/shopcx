@@ -58,6 +58,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[pipeline-doctor]] — `diagnosePipeline` / `scripts/pipeline-status.ts`: an INSTANT read-only diagnosis of the whole spec pipeline (derived status + jobs/gates + what's stuck and WHY, via named anomaly detectors). Composes the canonical readers — never re-derives status with raw SQL.
 - [[next16-metadata-boundary-csr-bail]] — why /store, /widget, /portal, /help bail to CSR under cacheComponents (Next's `botType && isRoutePPREnabled` metadata short-circuit) + the `src/proxy.ts` bot-UA-neutralization fix
 - [[next16-empty-generate-static-params-preview-build]] — why spec-build PREVIEW deploys fail with `EmptyGenerateStaticParamsError` while prod builds clean (empty build-time DB query + cacheComponents PPR), and the `__placeholder__`-sentinel fix in the storefront `generateStaticParams` helpers (NOT an env-var issue — preview & prod share the same DB)
+- [[founder-pulse-capture]] — the local-Mac session capture wiring (launchd timer + SessionEnd hook) that feeds the `founder-pulse` Pulse: the digest chain, the `scripts/pulse-digest.ts` path contract the build must honor, and how to disable/uninstall on the local machine
 
 ## Build & ops skills (committed Claude Code skills)
 
