@@ -15,8 +15,11 @@ The chokepoint for [[../tables/research_urls]]: the ONLY file allowed to write t
 | `setCaptureRef(workspaceId, id, captureRef)` | Rhea's capture-pointer write (Phase 2). Stamps the storage-path prefix under the private `research-shots` bucket where the chapter shots live — the box lane calls this after a successful capture so the manifest can be re-opened later. |
 | `setTeardown(workspaceId, id, recipe)` | Rhea's structured teardown write ([[../specs/rhea-teardown-recipe]] Phase 1 SDK + Phase 2 driver — worthy only, same session, no re-render). Runs `validateTeardownRecipe` (throws on empty `architecture` / `levers` / `transferable_pattern`, unknown lever tag, missing `funnel_type` / `strategy`, malformed `reason_sequence` entries, non-positive `offer.options`) BEFORE the write — a half-formed recipe never reaches the row (author-spec gate discipline). Persists to `research_urls.teardown` via `createAdminClient()`. Cleo's input for slice 3 (gap analysis → build blueprint). |
 | `validateTeardownRecipe(recipe)` | Author-spec-style gate — the same validator `setTeardown` runs internally, exported so one-off scripts / tests can assert a recipe before storing it. Throws on failure; returns void on pass. |
+| `listNewTeardowns(workspaceId, limit=50)` | Cleo's DISCOVERY reader ([[../specs/rhea-research-automation]] Phase 3). Rows where `teardown IS NOT NULL AND growth_reviewed_at IS NULL`, ordered `ad_count DESC` (highest-spend competitor funnels first). Naturally EXCLUDES `excluded` / `checkout` / `not_worthy` / `unviewable` rows because none of them carry a teardown. The input trigger the slice-4 gap-analysis loop will consume. |
+| `markTeardownReviewed(workspaceId, id)` | Cleo's watermark stamp — sets `growth_reviewed_at = now()`, dropping the row out of `listNewTeardowns`. Idempotent. The ONLY write path for `growth_reviewed_at`. |
 | `normalizeUrl(raw)` | `HTTPS://Learn.Erthlabs.co/women50/?utm_source=fb#hook` → `https://learn.erthlabs.co/women50`. Lower-cases the host; strips query + hash; drops a lone trailing slash on paths deeper than `/`. Returns `null` on parse failure. Exported for tests + one-off scripts. |
-| `isJunkUrl(normalizedUrl)` | True for `linkedin.com` / social / short-link hosts on the built-in `JUNK_DOMAINS` skiplist. |
+| `classifyNonLanderGate(normalizedUrl)` | rhea-research-automation Phase 2 deterministic gate — returns `{classification:'excluded', rationale:'non-lander domain (social/login/app-store/aggregator)'}` for a `NON_LANDER_DOMAINS` host / subdomain / `accounts.` login / `/login`/`/signin` path; `{classification:'checkout', rationale:'checkout page — out of scope (separate feature)'}` for a `/checkout`/`/cart` path or `checkout.`/`pay.` subdomain; else null. Sync uses it to pre-stamp gated rows so the [[../inngest/research-sensor]] claim (`classification IS NULL`) can never see them. |
+| `isJunkUrl(normalizedUrl)` | @deprecated shim — true when `classifyNonLanderGate` returns non-null (i.e. the URL would be gated as `excluded` or `checkout`). Kept for callers outside the sync. |
 | `ResearchUrl` / `ResearchUrlFilter` / `ResearchUrlClassification` / `ResearchUrlVerdict` / `TeardownRecipe` / `TeardownLever` / `SyncResearchUrlsResult` | Types |
 
 ## `TeardownRecipe` shape
@@ -59,11 +62,14 @@ Extending `TeardownLever` requires a spec change — the point of the union is a
 1. Read every `creative_skeletons` row for `workspace_id` (ordered oldest-first).
 2. Per row, pick a candidate URL: `landing_page_url` if present, else `https://` + `destination_domain`. `landing_page_url` wins because the bare-host root often 404s — mirrors [[landing-page-scout]] `adDestinationsForBrand`.
 3. Normalize (`normalizeUrl`). Drop parse failures.
-4. Skip URLs on `JUNK_DOMAINS` (linkedin.com, facebook.com, instagram.com, x.com, tiktok.com, youtube.com, pinterest.com, google.com, apple.com, wa.me, bit.ly + subdomains).
-5. Aggregate by normalized URL: bump `ad_count`, min-collapse `first_seen`, max-collapse `last_seen`, first non-null `seed_keyword` wins as `brand`.
-6. Upsert on `(workspace_id, url)` with `teardown_verdict='unreviewed'`.
+4. Aggregate by normalized URL: bump `ad_count`, min-collapse `first_seen`, max-collapse `last_seen`, first non-null `seed_keyword` wins as `brand`. Run `classifyNonLanderGate` on the URL — a non-null verdict is carried into the payload.
+5. Upsert on `(workspace_id, url)`. A gated verdict pre-stamps `classification='excluded'|'checkout'` + `teardown_verdict='not_worthy'` + `classified_by='deterministic'` + `rationale` so the row is INVISIBLE to the [[../inngest/research-sensor]] claim (`classification IS NULL`) but still auditable; ungated rows upsert with `teardown_verdict='unreviewed'`.
 
 Idempotent — a second run against the same `creative_skeletons` set writes identical rows.
+
+## Cleo handoff (`listNewTeardowns` + `markTeardownReviewed`)
+
+Phase 3 of [[../specs/rhea-research-automation]] — the DISCOVERY surface between Rhea's per-URL classify-plus-teardown loop and Cleo's slice-4 gap-analysis loop. Cleo polls `listNewTeardowns` for new findings (rows Rhea has landed a `teardown` recipe on but Cleo hasn't marked reviewed), consumes them into her gap analysis, then calls `markTeardownReviewed` to advance the watermark. A partial index `(workspace_id, ad_count desc) WHERE teardown IS NOT NULL AND growth_reviewed_at IS NULL` keeps the read fast even as the table grows.
 
 ## Gotchas
 
@@ -76,10 +82,11 @@ Idempotent — a second run against the same `creative_skeletons` set writes ide
 ## Callers
 
 - [[../inngest/creative-finder]] (`creative-finder-daily-cron`, `creative-finder-manual-sweep`) — `syncResearchUrlsFromCreatives` per workspace after `sweepSeed` + `promoteWhitelistedPages`.
-- [[../inngest/acquisition-research-cadence]] — dedup-gated enqueue of the `research` box job per workspace per beat (Phase 2 driver).
-- [[builder-worker]] (`runResearchJob`, Phase 2) — captures via [[../recipes/lander-capture]] then calls `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` per URL in Rhea's batch, and (for worthy URLs) persists the same-session `TeardownRecipe` via `setTeardown` ([[../recipes/lander-teardown]]).
-- Owner-facing Growth queue (later) — `listResearchUrls`.
+- [[../inngest/research-sensor]] — the paced HOURLY claim (rhea-research-automation Phase 1). Runs `syncResearchUrlsFromCreatives` then enqueues ONE `research` job carrying the top-`ad_count` unreviewed URL id (dedup-gated).
+- [[builder-worker]] (`runResearchJob`) — captures via [[../recipes/lander-capture]] then calls `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` per URL, and (for worthy URLs) persists the same-session `TeardownRecipe` via `setTeardown` ([[../recipes/lander-teardown]]).
+- Cleo (Growth, slice 4 loop — coming) — `listNewTeardowns` / `markTeardownReviewed`. The rhea-research-automation Phase 3 discovery surface.
+- Owner-facing Growth queue — `listResearchUrls`.
 
 ## Related
 
-[[../tables/research_urls]] · [[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../goals/acquisition-research-engine]] · [[../tables/creative_skeletons]] · [[creative-skeleton]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[landing-page-scout]] · [[../functions/growth]]
+[[../tables/research_urls]] · [[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../specs/rhea-research-automation]] · [[../goals/acquisition-research-engine]] · [[../tables/creative_skeletons]] · [[creative-skeleton]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[landing-page-scout]] · [[../functions/growth]]

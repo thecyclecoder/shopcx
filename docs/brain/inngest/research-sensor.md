@@ -27,6 +27,7 @@ Rhea's **paced hourly claim** of the top-spend unreviewed research URL — the r
 
 ## Downstream
 - The box worker's `research` lane ([[builder-worker]] `runResearchJob`) captures + classifies via Rhea (Max session) and writes back through the [[../libraries/research-urls]] SDK.
+- **Cleo's handoff** (rhea-research-automation Phase 3): once Rhea lands a `teardown` recipe on the row, it becomes visible to [[../libraries/research-urls]] `listNewTeardowns` — the discovery reader Cleo polls to feed her slice-4 gap-analysis loop. She calls `markTeardownReviewed` to advance the watermark.
 
 ## Gotchas
 - **One-at-a-time is enforced by dedup, not concurrency.** The claim query returns the top row; the DEDUP probe on `agent_jobs` guarantees the second tick during an in-flight run enqueues nothing. Rely on the probe, not on job-lock timing.

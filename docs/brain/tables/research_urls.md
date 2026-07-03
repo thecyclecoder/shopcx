@@ -27,12 +27,13 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 | `teardown` | `jsonb` | ✓ | Rhea's structured teardown recipe for a worthy lander (`TeardownRecipe` — funnel_type + strategy + architecture[] + reason_sequence[]? + levers[] + offer + transferable_pattern). Written by [[../libraries/research-urls]] `setTeardown` in the same `runResearchJob` session as the classify pass (no re-render — reuses the captured chapters). Null on `not_worthy` / `unviewable` / pre-teardown rows. The artifact [[../functions/growth]]'s Cleo (slice 3) reads to diff against our storefront and emit a build blueprint. See [[../specs/rhea-teardown-recipe]]. |
 | `classified_at` | `timestamptz` | ✓ | When `classification` was set. |
 | `classified_by` | `text` | ✓ | `'rhea'` for the box classifier; `'deterministic'` for the Phase-2 sync gate (`excluded` / `checkout`); operator email on manual override. Free-text on purpose. |
+| `growth_reviewed_at` | `timestamptz` | ✓ | Cleo's review watermark (rhea-research-automation Phase 3). Null until Growth (Cleo) has consumed the row's teardown recipe via [[../libraries/research-urls]] `listNewTeardowns` and stamped via `markTeardownReviewed`. The discovery reader filters `teardown IS NOT NULL AND growth_reviewed_at IS NULL`, so stamping drops the row out of Cleo's queue. Slice 4 will consume this handoff into the gap-analysis loop. |
 | `created_at` | `timestamptz` | — | default `now()` |
 | `updated_at` | `timestamptz` | — | default `now()`, auto-bumped by `research_urls_touch_updated_at` on any UPDATE. |
 
 **Unique:** `(workspace_id, url)` — the idempotent upsert key; re-running the sync updates `ad_count` / `last_seen` in place.
 
-**Indexes:** `(workspace_id, domain)`, `(workspace_id, teardown_verdict)` — browse-by-domain + Rhea's queue-by-verdict.
+**Indexes:** `(workspace_id, domain)`, `(workspace_id, teardown_verdict)` — browse-by-domain + Rhea's queue-by-verdict · partial `(workspace_id, ad_count desc) WHERE teardown IS NOT NULL AND growth_reviewed_at IS NULL` — matches the `listNewTeardowns` query shape (Cleo's discovery reader, Phase 3).
 
 ## Recipe shape (`teardown` jsonb)
 
@@ -68,7 +69,7 @@ The write path (`setTeardown` in [[../libraries/research-urls]]) runs `validateT
 
 ## Read by
 
-[[../libraries/research-urls]] (`listResearchUrls`) — Phase 2 Rhea capture+classify loop + owner-facing Growth queue.
+[[../libraries/research-urls]] (`listResearchUrls` — Rhea capture+classify loop + owner-facing Growth queue · `listNewTeardowns` — Cleo's Phase-3 discovery reader, the input trigger the slice-4 gap-analysis loop will consume).
 
 ## Related
 

@@ -155,6 +155,12 @@ export interface ResearchUrl {
   teardown: TeardownRecipe | null;
   classified_at: string | null;
   classified_by: string | null;
+  /**
+   * Cleo's review watermark (rhea-research-automation Phase 3). Null until Growth (Cleo) has
+   * read the row's teardown recipe and stamped it via `markTeardownReviewed`. `listNewTeardowns`
+   * returns only rows where this is null — the discovery surface Cleo polls for NEW findings.
+   */
+  growth_reviewed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -627,4 +633,54 @@ export async function setTeardown(
     .eq("id", id)
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setTeardown: ${error.message}`);
+}
+
+// ── Cleo handoff (rhea-research-automation Phase 3) ──────────────────────────
+
+/**
+ * Cleo's DISCOVERY reader — the input trigger for the slice-4 gap-analysis loop. Returns rows
+ * where Rhea has already landed a structured `teardown` recipe AND Cleo (Growth) hasn't yet
+ * stamped `growth_reviewed_at`. Ordered `ad_count` DESC — the highest-spend competitor funnels
+ * surface first, so Cleo's attention rides the same "spend = importance" signal the
+ * research-sensor claim uses. Naturally EXCLUDES `excluded` / `checkout` / `not_worthy` /
+ * `unviewable` rows because none of them carry a teardown (the recipe is worthy-only per
+ * validateTeardownRecipe + the box lane's write-guard).
+ *
+ * Read-only. All-workspace-scoped. Bounded by `limit` (default 50 — the panel size Cleo can
+ * usefully triage per poll).
+ */
+export async function listNewTeardowns(
+  workspaceId: string,
+  limit = 50,
+): Promise<ResearchUrl[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("research_urls")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .not("teardown", "is", null)
+    .is("growth_reviewed_at", null)
+    .order("ad_count", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`listNewTeardowns: ${error.message}`);
+  return (data || []) as ResearchUrl[];
+}
+
+/**
+ * Cleo's watermark stamp — the chokepoint write that drops a teardown out of `listNewTeardowns`.
+ * Called once per row Cleo has consumed into her gap-analysis (slice 4). Idempotent — a second
+ * call is a no-op update (the watermark simply re-advances to `now()`, which the discovery
+ * reader still filters out identically).
+ */
+export async function markTeardownReviewed(
+  workspaceId: string,
+  id: string,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("research_urls")
+    .update({ growth_reviewed_at: new Date().toISOString() })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`markTeardownReviewed: ${error.message}`);
 }
