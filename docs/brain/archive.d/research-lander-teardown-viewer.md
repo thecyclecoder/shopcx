@@ -1,0 +1,1 @@
+- **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
