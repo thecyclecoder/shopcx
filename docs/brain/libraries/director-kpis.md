@@ -14,16 +14,39 @@ Display-only proxy ([[../operational-rules]] § North star / § supervisable aut
 
 ## Exports
 
+### Phase 1 — shipped-spec attribution
+
 | Symbol | Signature | Notes |
 |---|---|---|
-| `ShippedSpecsWindow` type | `{ startIso: string; endIso: string }` | Half-open trailing window (`.gte(startIso).lt(endIso)`) — the standard `agent_jobs.updated_at` window used by [[director-recap]]. Inclusive-end callers pass the next-day boundary. |
+| `ShippedSpecsWindow` type | `{ startIso: string; endIso: string }` | Half-open trailing window (`.gte(startIso).lt(endIso)`) — the standard `agent_jobs.updated_at` window used by [[director-recap]]. Inclusive-end callers pass the next-day boundary. Independent from the `KpiWindow` shape below (Phase 2 uses inclusive-both). |
 | `ShippedSpecsByOwnerResult` type | `{ countsByOwner: Record<string, number>; slugsByOwner: Record<string, string[]> }` | Per-owner count + slug list. Only owners with ≥1 merged spec appear; a zero-owner is elided (the caller fills it as needed). |
 | `shippedSpecsByOwner` | `(workspaceId, window, owner?) → Promise<ShippedSpecsByOwnerResult>` | The main entrypoint. Merged-build population = [[../tables/agent_jobs]] `kind='build'` + `status='merged'` with `updated_at` in-window; `spec_slug` mapped via [[specs-table]] `listSpecs` (full set incl. folded). When `owner` is provided, restricts the maps to that single owner. |
 | `rollupShippedSpecsByOwner` | `(specSet, mergedSpecSlugs, owner?) → ShippedSpecsByOwnerResult` | Pure roll-up (exported for unit tests + callers with the raw shapes already in hand). Folded specs are just regular rows in `specSet` — that's the whole point. |
 
+### Phase 2 — the remaining scorecard KPIs
+
+Same rationale (single-source-of-truth + testability), plus **parity**: each function preserves the previous inline query shape (`.gte(startIso).lte(endIso)` — inclusive both) 1:1, so the persisted values are byte-identical to what [[platform-scorecard]] used to compute inline. Each async function is a thin wrapper around a pure `rollup…` helper so the arithmetic is unit-tested without a Postgres shim.
+
+| Symbol | Signature | Notes |
+|---|---|---|
+| `KpiWindow` type | `{ startIso: string; endIso: string }` | Inclusive-both trailing window (`.gte(startIso).lte(endIso)`) — matches [[platform-scorecard]]'s `MetricWindow.curr` convention (`endIso = day + T23:59:59.999Z`). Independent from `ShippedSpecsWindow` (which is half-open). |
+| `FAILED_BUILD_STATUSES` const | `readonly string[]` = `['failed', 'needs_attention']` | The [[../tables/agent_jobs]] statuses that count as a build FAILURE — the denominator's failure side for `buildSuccessRate`. |
+| `buildSuccessRate` | `(workspaceId, window) → Promise<{rate, merged, failed, total}>` | `merged ÷ (merged + failed)` over the window on [[../tables/agent_jobs]] `kind='build'` terminal-flip rows. Success = `merged`, failure = `status ∈ FAILED_BUILD_STATUSES`. Two `HEAD` counts, no data fetch. |
+| `rollupBuildSuccessRate` | `(merged, failed) → {rate, merged, failed, total}` | Pure arithmetic. |
+| `autonomyRatio` | `(workspaceId, window) → Promise<{ratio, autonomous, terminal, approved, declined}>` | `autonomous ÷ terminal` over [[../tables/approval_decisions]] where `decision ∈ approved｜declined` in-window on `created_at`. Escalated rows excluded from denominator. |
+| `rollupAutonomyRatio` | `(rows) → AutonomyRatioResult` | Pure roll-up over the terminal-decision rows. |
+| `humanTouchPerBuild` | `(workspaceId, window) → Promise<{ratio, touched, builds}>` | The Platform monthly headline. `touched / builds`: numerator = every `approval_decisions.decided_by ∈ ceo｜human` in-window (`created_at`); denominator = every merged build in-window (`updated_at`). Lower is better. |
+| `rollupHumanTouchPerBuild` | `(touched, builds) → HumanTouchPerBuildResult` | Pure arithmetic. |
+| `goalsEscortedUnbabysat` | `(workspaceId, window, {directorFunction?}) → Promise<{count, goals: [{goal, milestones[]}]}>` | Goals whose milestones advanced in-window WITHOUT CEO/human touch. Reads `director_activity action_kind='escorted_goal'` for the director → intersect with `getGoals()` shipped-milestone candidates → drop any candidate whose milestone spec slugs match a CEO-touched `agent_job.spec_slug`. Defaults `directorFunction='platform'`. |
+| `rollupGoalsEscortedUnbabysat` | `(candidates, touchedSpecSlugs) → GoalsEscortedUnbabysatResult` | Pure roll-up over the resolved shipped-milestone candidates + touched-spec set. |
+
 ## Callers
 
 - [[platform-scorecard]] `specs_per_week.compute` — `shippedSpecsByOwner(ws, {startIso, endIso}, 'platform')` per current + prior window. Replaced the local `getRoadmap()` owner map. `specs_per_week` is **no longer flagged** [[platform-scorecard#liveSpecSetDependent|`liveSpecSetDependent`]] — the full spec set is stable across snapshot/audit re-reads.
+- [[platform-scorecard]] `build_success_rate.compute` — `sdkBuildSuccessRate(ws, {startIso, endIso})` per current + prior window (Phase 2). No inline `agent_jobs` count query remains in the metric-def.
+- [[platform-scorecard]] `autonomy_ratio.compute` — `sdkAutonomyRatio(ws, {startIso, endIso})` per current + prior window (Phase 2). No inline `approval_decisions` fetch remains.
+- [[platform-scorecard]] `human_touch_per_build.compute` — `sdkHumanTouchPerBuild(ws, {startIso, endIso})` per current + prior window (Phase 2). No inline count queries remain.
+- [[platform-scorecard]] `goals_escorted_unbabysat.compute` — `sdkGoalsEscortedUnbabysat(ws, {startIso, endIso}, {directorFunction: 'platform'})` per current + prior window (Phase 2). No inline `director_activity`/`getGoals`/touch-check remains.
 - [[director-recap]] `generateDirectorRecap` — one `shippedSpecsByOwner(ws, {startIso, endIso})` call per day, then walks `countsByOwner` to populate each active director's `DirectorDayStats.specsShipped`. Replaced the local `getRoadmap()` owner map.
 
 ## What this SDK does NOT own
