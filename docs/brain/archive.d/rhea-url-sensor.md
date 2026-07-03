@@ -1,0 +1,1 @@
+- **Rhea's URL sensor — research_urls table + Playwright capture + classification** · verified 2026-07-03 · → [[../tables/research_urls]]

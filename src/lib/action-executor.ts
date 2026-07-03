@@ -1358,7 +1358,8 @@ export const directActionHandlers: Record<
 
   crisis_pause: async (ctx, p) => {
     const { appstleSubscriptionAction } = await import("@/lib/appstle");
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "pause", "Crisis — customer requested pause until restock");
+    if (!p.contract_id) return { success: false, error: "Missing contract_id" };
+    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id, "pause", "Crisis — customer requested pause until restock");
     if (r.success && p.crisis_action_id) {
       await ctx.admin.from("crisis_customer_actions").update({
         tier3_response: "accepted_pause", paused_at: new Date().toISOString(),

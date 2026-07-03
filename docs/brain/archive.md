@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Guard crisis_pause action-executor handler against a missing contract_id** · verified 2026-07-03 · → [[../libraries/action-executor]]
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
@@ -22,6 +23,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Research → Competitors: the product filter + table (finish Phase 2)** · verified 2026-07-03 · → [[../dashboard/research__competitors]]
 - **research-competitors-table — fix the blocker uncovered by the build** · verified 2026-07-03 · → [[../libraries/spec-test-runs]]
 - **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
+- **Rhea's URL sensor — research_urls table + Playwright capture + classification** · verified 2026-07-03 · → [[../tables/research_urls]]
 - **Secure destructive-migration preapproval execution and routing** · verified 2026-07-03 · → [[../libraries/approval-inbox]]
 - **Sonnet Orchestrator — fall back to price_override_cents for internal subs** · verified 2026-07-03 · → [[libraries/sonnet-orchestrator-v2]]
 - **Ada grades a sampled, cadenced, adaptive-by-rollup batch — not every concluded job** · verified 2026-07-02 · → [[../libraries/agent-grader]]
