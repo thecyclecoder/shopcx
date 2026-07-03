@@ -1,0 +1,1 @@
+- **Rhea's lander teardown → structured recipe (research slice 2)** · verified 2026-07-03 · → [[../lifecycles/research-and-heal]]
