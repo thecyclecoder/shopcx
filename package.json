@@ -44,7 +44,8 @@
     "test:growth-report-contract": "tsx --test src/lib/growth-report-contract.test.ts",
     "test:ad-spend-governor": "tsx --test src/lib/ad-spend-governor.test.ts",
     "test:growth-allocation": "tsx --test src/lib/growth-allocation.test.ts",
-    "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts"
+    "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts",
+    "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",
