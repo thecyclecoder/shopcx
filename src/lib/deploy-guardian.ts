@@ -132,8 +132,18 @@ export function isMonthlyKpiDriftLoop(loopId: string): boolean {
  * auditable — the supervisor can see which signals were considered and which were dropped, and why.
  */
 export function reasonExcludedFromDeployRegressionLoop(loopId: string): string | null {
-  if (isMonthlyKpiDriftLoop(loopId)) {
-    return "monthly-cadence kpi_drift — trailing 30-day aggregate, not deploy-attributable inside a canary window";
+  const cadence = kpiDriftCadence(loopId);
+  // WEEKLY + MONTHLY kpi_drift are aggregates over a 7-day / 30-day trailing window; a canary window is
+  // minutes-to-hours, so a single deploy CANNOT causally shift either inside it — the same timescale
+  // category error `isMonthlyKpiDriftLoop` already guards for monthly. We exclude BOTH by CADENCE,
+  // independent of any registry flag. This closes the flag-removal trap that reverted 3 good specs on
+  // 2026-07-03: `director-kpi-sdk` (correctly) dropped `specs_per_week`'s `liveSpecSetDependent` flag, which
+  // was the SOLE thing excluding `kpi_drift:specs_per_week:weekly` from rollback — so removing the flag
+  // re-armed Reva to revert that very fix (and two concurrent deploys) on a weekly aggregate no deploy can
+  // move. Cadence-based exclusion no longer depends on the fragile flag. (Same class as the prior
+  // noop-pipeline-test-6 weekly false-revert.) Only DAILY / windowed / error-rate loops stay attributable.
+  if (cadence === "monthly" || cadence === "weekly") {
+    return `${cadence}-cadence kpi_drift — trailing ${cadence === "weekly" ? "7" : "30"}-day aggregate, not deploy-attributable inside a canary window`;
   }
   if (isAuditSkippedKpiDriftLoop(loopId)) {
     return "audit-skipped kpi_drift metric (liveSpecSetDependent/currentState) — PM volume / membership delta, not the deployed code";
