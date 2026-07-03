@@ -1,0 +1,1 @@
+- **Internal renewal: advance next_billing_date on zero-total skip so 100%-off subs don't stall the renewal tile** · verified 2026-07-03 · → [[../inngest/internal-subscription-renewals]]
