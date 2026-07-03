@@ -46,7 +46,10 @@ export async function GET(req: Request) {
     .limit(500);
 
   if (status && STATUSES.includes(status)) q = q.eq("status", status);
-  if (productId) q = q.eq("product_id", productId);
+  // Product filter semantics: when a product is selected, still include workspace-level
+  // (product_id IS NULL) competitors — the seeds are all null-scoped, so a naive equality
+  // filter would render an empty list. See docs/brain/dashboard/research__competitors.md.
+  if (productId) q = q.or(`product_id.eq.${productId},product_id.is.null`);
 
   const { data, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
