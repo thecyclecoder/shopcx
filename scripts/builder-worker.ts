@@ -10934,12 +10934,19 @@ async function applyOutOfLeashRequestActionInline(
   if (!reasoning) return logInvalid("reasoning is required (why it's right + why it's out of leash)");
   if (!reversibility) return logInvalid("reversibility is required (reversible via X, or 'irreversible — <why>')");
 
-  // destructive-migration-safety-rails Phase 3 — computed blast-radius via transactional
-  // dry-run. REPLACE the self-declared `reversibility` string with a MEASURED fact so
-  // the CEO sees a real row count, not Ada's free-text. Falls back to `measured:false`
-  // + static Phase-1 severity when the SQL isn't dry-runnable (lock-heavy DDL, no SQL
-  // in preview for a shell-wrapped apply_migration, or the pg pooler unreachable). We
-  // NEVER lock prod to measure.
+  // destructive-migration-safety-rails Phase 3 — computed blast-radius via the DETERMINISTIC
+  // Phase-1 classifier. secure-destructive-migration-preapproval-boundary: the previous version
+  // opened a real `pgClient()` against the shared PRODUCTION pooler and dry-ran the (attacker-
+  // controlled) preview/cmd SQL inside BEGIN/ROLLBACK on it. Even wrapped in a rollback, that let
+  // arbitrary SELECT / function-call SQL from the raising agent reach `pg.query` on the shared
+  // production client BEFORE a human ever approved — a preapproval SQL-execution primitive that
+  // widened Ada's out-of-leash raise into a limited read/RPC channel on prod. We KEEP the
+  // classifier (which is pure, no I/O) so the CEO card still sees the static severity + matches,
+  // but we NEVER dry-run against the shared production client from the raise path. `measured:false`
+  // rides through — the routing wrapper below already treats any non-`reversible_destructive`
+  // severity as CEO-only, and the CEO card surfaces the `measurementSkipped` reason inline. When
+  // an isolated Supabase branch DB becomes available, this can wire it back in via `pg:<branch>`.
+  const dryRunSql = `${preview}\n${cmd}`;
   let blastRadius: { measured: boolean; severity: string; matches: string[]; summary: string; measurementSkipped?: string; affected?: unknown } = {
     measured: false,
     severity: "additive",
@@ -10947,25 +10954,13 @@ async function applyOutOfLeashRequestActionInline(
     summary: "",
     measurementSkipped: "not attempted",
   };
-  const dryRunSql = `${preview}\n${cmd}`;
   try {
     const { computeBlastRadius } = await import("../src/lib/migration-safety");
-    const { pgClient } = await import("./_bootstrap");
-    let pg: { query: (s: string) => Promise<{ rowCount: number | null; rows: unknown[] }> } | undefined;
-    let pgClose: (() => Promise<void>) | undefined;
-    try {
-      const client = pgClient();
-      await client.connect();
-      pg = { query: (s: string) => client.query(s) as unknown as Promise<{ rowCount: number | null; rows: unknown[] }> };
-      pgClose = async () => { try { await client.end(); } catch { /* best-effort */ } };
-    } catch {
-      pg = undefined; // pooler unreachable / no creds → measured:false, static severity
-    }
-    try {
-      blastRadius = await computeBlastRadius(dryRunSql, { pg });
-    } finally {
-      if (pgClose) await pgClose();
-    }
+    // NO `pg` passed — computeBlastRadius returns `measured:false` with the static Phase-1
+    // severity + matches + a `measurementSkipped: "no pg client provided"` reason. This is the
+    // only supported shape on the approval-raising path; opening a shared-prod pg client here
+    // is the removed vulnerability.
+    blastRadius = await computeBlastRadius(dryRunSql);
   } catch (e) {
     blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
   }
@@ -11001,14 +10996,14 @@ async function applyOutOfLeashRequestActionInline(
     skepticVerdict = { dataLossing: false, confidence: 0, reason: `skeptic pass failed: ${(e as Error)?.message ?? e}` };
   }
 
-  // Phase 4: routing on (severity × rename-and-expire × business-materiality). A
-  // reversible_destructive that passes the Phase-2 rails routes to PLATFORM (Ada
-  // owns the final call, PITR is the backstop); irreversible+material routes to the
-  // CEO circuit-breaker with the computed blast-radius on the card (no raw SQL
-  // required to decide). Every destructive-action approval writes a
-  // director_decision_grades row async via the existing box director-grade sweep,
-  // so accountability is grading, not per-decision pre-approval. Uses the
-  // SKEPTIC-adjusted blast-radius so a skeptic escalation flows into routing.
+  // Phase 4: routing on (actionType × severity × rename-and-expire × business-materiality).
+  // secure-destructive-migration-preapproval-boundary: use `routeOutOfLeashAction`, which
+  // gates on the raise's actionType + validated severity BEFORE consulting the Phase-4 table:
+  //   • non-`apply_migration` (i.e. every `run_prod_script`) → CEO (not blast-radius-validatable);
+  //   • `additive` severity → CEO (Ada is out of leash — she does not silently self-approve);
+  //   • `irreversible_destructive` → CEO circuit-break;
+  //   • only `reversible_destructive` + rename-and-expire OR NOT business-material → Platform.
+  // Uses the SKEPTIC-adjusted blast-radius so a skeptic escalation flows into routing.
   let destructiveRoute: { routedToFunction: "platform" | "ceo"; renameAndExpire: boolean; businessMaterial: boolean; reason: string } = {
     routedToFunction: "ceo",
     renameAndExpire: false,
@@ -11016,8 +11011,8 @@ async function applyOutOfLeashRequestActionInline(
     reason: "default CEO fail-safe",
   };
   try {
-    const { routeDestructiveAction } = await import("../src/lib/migration-safety");
-    destructiveRoute = routeDestructiveAction(dryRunSql, blastRadius as unknown as Parameters<typeof routeDestructiveAction>[1]);
+    const { routeOutOfLeashAction } = await import("../src/lib/migration-safety");
+    destructiveRoute = routeOutOfLeashAction(actionType, dryRunSql, blastRadius as unknown as Parameters<typeof routeOutOfLeashAction>[2]);
   } catch (e) {
     destructiveRoute = { routedToFunction: "ceo", renameAndExpire: false, businessMaterial: false, reason: `route decision failed (${(e as Error)?.message ?? e}) — CEO fail-safe` };
   }
@@ -11458,6 +11453,12 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   // Best-effort; a grade-write failure never blocks the executor.
   const blastRadiusMeta = (instr.blast_radius as { severity?: string; measured?: boolean; summary?: string } | undefined) ?? undefined;
   const destructiveRouteMeta = (instr.destructive_route as { routedToFunction?: string; reason?: string } | undefined) ?? undefined;
+  // secure-destructive-migration-preapproval-boundary — preserve the ACTUAL approver identity
+  // instead of unconditionally stamping the CEO. The Phase-4 route decides who owned the call:
+  // 'platform' → Ada authorized this out-of-leash action within her routed lane; 'ceo' → the
+  // CEO circuit-breaker approved it. The audit rows below (executed_ceo_authorized_out_of_leash
+  // + ceo_declined_out_of_leash_request) read this so the ledger says who really approved.
+  const authorizedByStamp = destructiveRouteMeta?.routedToFunction === "platform" ? "platform" : "ceo";
   const isDestructiveDecision = !!blastRadiusMeta && blastRadiusMeta.severity !== undefined && blastRadiusMeta.severity !== "additive";
   if (isDestructiveDecision) {
     try {
@@ -11500,7 +11501,7 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
           cmd: a.cmd ?? null,
           reversibility: reversibility || null,
           irreversible: irreversibleFlag,
-          authorized_by: "ceo",
+          authorized_by: authorizedByStamp,
           autonomous: false,
         },
       });
@@ -11530,9 +11531,10 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
       continue;
     }
 
-    // Upgrade the authorization marker: 'ceo-pending' → 'ceo' — the CEO authorized THIS action now, at
-    // execution time. Scoped, one-time — the leash config is untouched.
-    meta.authorized_by = "ceo";
+    // Upgrade the authorization marker from the 'ceo-pending' placeholder to the actual approver
+    // ('platform' when Ada owned the routed lane, 'ceo' when the CEO circuit-breaker approved).
+    // Scoped, one-time — the leash config is untouched either way.
+    meta.authorized_by = authorizedByStamp;
     meta.ceo_authorized_at = new Date().toISOString();
 
     let ok = false;
@@ -11563,7 +11565,7 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
         cmd: a.cmd,
         reversibility: reversibility || null,
         irreversible: irreversibleFlag,
-        authorized_by: "ceo",
+        authorized_by: authorizedByStamp,
         outcome: ok ? "ok" : "failed",
         result_tail: resultText.slice(-500) || null,
         autonomous: false,

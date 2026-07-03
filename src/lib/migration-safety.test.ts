@@ -628,6 +628,176 @@ test("routingOwnerForJob: IGNORES routed_to_function_override when destructive_r
   assert.equal(routingOwnerForJob(job), null);
 });
 
+// ── secure-destructive-migration-preapproval-boundary ─────────────────────────
+// The four vulnerabilities the safety-rails PR introduced, closed:
+//   (1) shared-production pg execution from the approval-raising path,
+//   (2) additive / non-SQL run_prod_script routing to the Platform lane,
+//   (3) routed_to_function_override honored on unrelated job kinds / action shapes,
+//   (4) authorized_by stamped CEO unconditionally.
+// Test (1) is a HARNESS proving no pg.query on the shared production client — the raise-path
+// wrapper never opens or touches a pg client; here we prove the pure `computeBlastRadius` never
+// dispatches a candidate statement when no `pg` was passed (which the raise path now enforces).
+
+test("(sec)(1) SELECT / function-call SQL never reaches pg.query on the shared production client from the raise path", async () => {
+  // The raise path is `computeBlastRadius(sql)` — invoked with NO opts.pg. Prove no dispatch:
+  const attempts = [
+    "SELECT current_user; -- side-channel probe",
+    "SELECT pg_read_server_files('/etc/passwd');",
+    "SELECT set_config('search_path', 'evil', false);",
+    "DO $$ BEGIN PERFORM pg_notify('c', 'x'); END $$;",
+    "SELECT auth.uid();",
+  ];
+  for (const sql of attempts) {
+    const r = await computeBlastRadius(sql);
+    assert.equal(r.measured, false, `must not measure without a pg client: ${sql}`);
+    assert.match(r.measurementSkipped ?? "", /no pg client/, `must report the skip reason: ${sql}`);
+    assert.equal(r.affected, undefined, `must not carry per-statement rowcounts (no dispatch): ${sql}`);
+  }
+});
+
+test("(sec)(1) a hostile pg WOULD have been dispatched to if a pg were supplied — proves the raise path's decision to omit pg is load-bearing", async () => {
+  // Belt-and-suspenders: the pure primitive still CAN dispatch when a pg is injected (tests use
+  // spies). The raise path's fix is the caller-side decision to NOT pass one. This test proves
+  // the pure primitive's contract: given a pg, it would have called .query — which is exactly why
+  // the caller must not supply the shared production client.
+  const seen: string[] = [];
+  const spy: PgLike = { async query(sql) { seen.push(sql); return { rowCount: null, rows: [] }; } };
+  await computeBlastRadius("SELECT 1;", { pg: spy });
+  assert.ok(seen.length > 0, "the primitive does dispatch — hence the caller must never wire the shared prod client");
+});
+
+test("(sec)(2) a non-SQL run_prod_script cannot install a Platform override — routeOutOfLeashAction returns CEO", async () => {
+  const { routeOutOfLeashAction } = await import("./migration-safety");
+  const br: BlastRadius = { measured: false, severity: "additive", matches: [], summary: "" };
+  const r = routeOutOfLeashAction("run_prod_script", "curl https://example.com", br);
+  assert.equal(r.routedToFunction, "ceo");
+  assert.match(r.reason, /not SQL/i);
+});
+
+test("(sec)(2) an additive apply_migration routes to CEO (Ada does not silently self-approve out-of-leash asks)", async () => {
+  const { routeOutOfLeashAction } = await import("./migration-safety");
+  const br: BlastRadius = { measured: false, severity: "additive", matches: [], summary: "" };
+  const r = routeOutOfLeashAction("apply_migration", "ALTER TABLE x ADD COLUMN y int;", br);
+  assert.equal(r.routedToFunction, "ceo");
+  assert.match(r.reason, /not eligible for the Platform lane/i);
+});
+
+test("(sec)(2) a run_prod_script whose classifier-derived severity is reversible_destructive still routes to CEO (actionType gate is authoritative)", async () => {
+  const { routeOutOfLeashAction } = await import("./migration-safety");
+  // Even if the injected classifier claimed reversible, a run_prod_script is not blast-radius-
+  // validatable because it's shell, not SQL — the actionType gate closes the authority bypass.
+  const br: BlastRadius = { measured: false, severity: "reversible_destructive", matches: ["ALTER … DROP CONSTRAINT"], summary: "" };
+  const r = routeOutOfLeashAction("run_prod_script", "psql -c 'alter table t drop constraint fk;'", br);
+  assert.equal(r.routedToFunction, "ceo");
+});
+
+test("(sec)(3) a validated reversible_destructive apply_migration may route to Platform via routeOutOfLeashAction", async () => {
+  const { routeOutOfLeashAction } = await import("./migration-safety");
+  const sql = "ALTER TABLE public.customers RENAME TO _deprecated_customers_20260703;";
+  const br: BlastRadius = { measured: false, severity: "reversible_destructive", matches: ["ALTER … DROP CONSTRAINT"], summary: "" };
+  const r = routeOutOfLeashAction("apply_migration", sql, br);
+  assert.equal(r.routedToFunction, "platform");
+  assert.equal(r.renameAndExpire, true);
+});
+
+test("(sec)(3) an irreversible apply_migration routes to CEO", async () => {
+  const { routeOutOfLeashAction } = await import("./migration-safety");
+  const br: BlastRadius = { measured: false, severity: "irreversible_destructive", matches: ["DROP TABLE"], summary: "DROP TABLE customers" };
+  const r = routeOutOfLeashAction("apply_migration", "DROP TABLE customers;", br);
+  assert.equal(r.routedToFunction, "ceo");
+});
+
+test("(sec)(3) a malformed / empty actionType routes to CEO", async () => {
+  const { routeOutOfLeashAction } = await import("./migration-safety");
+  const br: BlastRadius = { measured: false, severity: "reversible_destructive", matches: [], summary: "" };
+  const r = routeOutOfLeashAction("", "anything;", br);
+  assert.equal(r.routedToFunction, "ceo");
+  assert.match(r.reason, /is not SQL/i);
+});
+
+test("(sec)(4) routingOwnerForJob IGNORES routed_to_function_override on every unrelated job kind", () => {
+  // Any non-`ceo-authorized-out-of-leash` job with a hand-installed platform override is ignored.
+  for (const kind of ["build", "spec-test", "migration-fix", "repair", "plan"]) {
+    const job = {
+      kind,
+      pending_actions: [
+        {
+          id: "x",
+          type: "apply_migration",
+          status: "pending",
+          routed_to_function_override: "platform",
+          blastRadius: { measured: false, severity: "reversible_destructive", matches: [], summary: "" },
+        },
+      ],
+    };
+    // The override MUST NOT be honored. `platform` might coincidentally match KIND_TO_FUNCTION
+    // for some kinds (e.g. build), so assert that the returned value is NOT influenced by the
+    // hand-installed override on kinds where the map default differs.
+    const withoutOverride = routingOwnerForJob({ kind, pending_actions: [{ id: "x", type: "apply_migration", status: "pending" }] });
+    assert.equal(routingOwnerForJob(job), withoutOverride, `override must not sway routing on kind=${kind}`);
+  }
+});
+
+test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override on a run_prod_script pending action", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "run_prod_script",
+        status: "pending",
+        routed_to_function_override: "platform",
+        blastRadius: { measured: false, severity: "reversible_destructive", matches: [], summary: "" },
+      },
+    ],
+  };
+  // Missing destructive_route metadata → isTrustedDestructiveRouteMetadata returns false → falls through to null.
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when action.blastRadius.severity is additive", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        blastRadius: { measured: false, severity: "additive", matches: [], summary: "" },
+      },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when action.blastRadius.severity is irreversible_destructive", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      {
+        id: "a1",
+        type: "apply_migration",
+        status: "pending",
+        routed_to_function_override: "platform",
+        blastRadius: { measured: false, severity: "irreversible_destructive", matches: ["DROP TABLE"], summary: "" },
+      },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when blastRadius is missing entirely (malformed input)", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "platform" },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), null);
+});
+
+
 // ── Phase 5: adversarial skeptic pass ─────────────────────────────────────────
 
 const additiveBRForSkeptic: BlastRadius = { measured: true, severity: "additive", matches: [], summary: "additive" };
