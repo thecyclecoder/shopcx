@@ -1,0 +1,1 @@
+- **Sonnet Orchestrator — fall back to price_override_cents for internal subs** · verified 2026-07-03 · → [[libraries/sonnet-orchestrator-v2]]
