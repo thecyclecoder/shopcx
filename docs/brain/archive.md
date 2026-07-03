@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
+- **Director-KPI SDK — one DB-derived source for every scorecard/recap metric** · verified 2026-07-03 · → [[libraries/director-kpis]]
 - **Research → Competitors: the product filter + table (finish Phase 2)** · verified 2026-07-03 · → [[../dashboard/research__competitors]]
 - **research-competitors-table — fix the blocker uncovered by the build** · verified 2026-07-03 · → [[../libraries/spec-test-runs]]
 - **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
