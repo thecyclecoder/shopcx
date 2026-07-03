@@ -355,13 +355,28 @@ export const platformDirectorCron = inngest.createFunction(
       const mondayOffset = (d.getUTCDay() + 6) % 7; // Sun=0 → 6, Mon=1 → 0, …
       const thisMonday = new Date(d.getTime() - mondayOffset * 86_400_000);
       const snapshotDate = new Date(thisMonday.getTime() - 86_400_000).toISOString().slice(0, 10);
-      // The done guard matches on the same lagged snapshot_date so the once-per-week spend-saving
-      // check still holds (a second beat in the same ISO week sees the prev-Sunday row and skips).
+      // The done guard has TWO conditions on updated_at, ANDed via a single `max(...)` floor:
+      //   (1) endIso half — mirrors the daily's heal-in-place pattern: a row written DURING its own
+      //       snapshot_date (updated_at < endIso) falls OUT of the done set and is re-snapshotted,
+      //       healing in place via the idempotent upsert on (workspace_id, metric_key, cadence,
+      //       snapshot_date). Protects future in-flight pre-endIso stale writes on any weekly metric.
+      //   (2) hotfix-cutoff half — forces one-time re-write of pre-director-kpi-sdk weekly rows
+      //       (kpi-weekly-snapshot-done-guard-heal-pre-sdk-stale-rows spec): the OLD getRoadmap
+      //       live-only compute built its slug→owner map from the live roadmap only, so ISO weeks
+      //       written days late (after most spec_slugs had folded out of the live set) came out as 0
+      //       and disagree with the audit's folded-inclusive listSpecs re-run. Any weekly row with
+      //       updated_at < '2026-07-02T21:05:00Z' (the SDK hotfix landing) falls OUT of the done set
+      //       and is re-snapshotted with the new compute. `max(endIso, hotfixIso)` collapses both
+      //       into ONE .gte guard: endIso protects future weeks, hotfixIso heals the 2026-06-28 row.
+      const endIso = `${snapshotDate}T23:59:59.999Z`;
+      const hotfixIso = "2026-07-02T21:05:00Z";
+      const guardIso = endIso > hotfixIso ? endIso : hotfixIso;
       const { data: existing } = await admin
         .from("platform_scorecard_snapshots")
-        .select("workspace_id")
+        .select("workspace_id, updated_at")
         .eq("cadence", "weekly")
-        .eq("snapshot_date", snapshotDate);
+        .eq("snapshot_date", snapshotDate)
+        .gte("updated_at", guardIso);
       const done = new Set(((existing ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id));
       let snapshotted = 0;
       let metricsWritten = 0;
