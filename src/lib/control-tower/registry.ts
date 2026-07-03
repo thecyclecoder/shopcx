@@ -538,7 +538,23 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "daily (0 10 * * *)",
     livenessWindowMs: 26 * HOUR,
     registeredAt: "2026-06-25T14:30:03.155Z",
-    personaKind: "research", // Rhea — the three acquisition-research crons merge into one Rhea worker under Max/Growth
+    personaKind: "research", // Rhea — the acquisition-research crons merge into one Rhea worker under Max/Growth
+  },
+  {
+    // rhea-research-automation spec, Phase 1: the paced hourly claim of the top-spend unreviewed
+    // research URL. Per ad-tool workspace: sync research_urls → pick top ad_count unreviewed →
+    // dedup on in-flight `research` agent_jobs → enqueue ONE `research` job carrying the url id.
+    // Supersedes the slice-1 stub inside acquisition-research-cadence that enqueued a research job
+    // once a day. Merges under Rhea (personaKind:'research') on the Growth org view.
+    id: "research-sensor-cron",
+    kind: "cron",
+    owner: "growth",
+    label: "Research sensor",
+    description: "Hourly paced claim: sync research_urls + enqueue ONE `research` job carrying the top-ad_count unreviewed URL id, dedup-gated on any in-flight `research` job (true one-at-a-time).",
+    expectedCadence: "hourly (0 * * * *)",
+    livenessWindowMs: 2 * HOUR,
+    registeredAt: "2026-07-03T00:00:00Z",
+    personaKind: "research",
   },
   { id: "amazon-daily-sync", kind: "cron", owner: "growth", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "tickets-auto-archive", kind: "cron", owner: "cs", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },

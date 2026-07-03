@@ -12,32 +12,63 @@
  *
  * Phase 1 sync: reads creative_skeletons (prefers `landing_page_url`, else `https://` + `destination_domain`),
  * joins the brand via `seed_keyword`, dedups by normalized URL, counts ads per destination into `ad_count`,
- * filters a JUNK_DOMAINS skiplist (linkedin.com + obvious non-commerce / lead-gen), and upserts rows as
- * teardown_verdict='unreviewed'. Idempotent — re-running does NOT duplicate rows (the UNIQUE(workspace_id,
- * url) plus upsert holds).
+ * and upserts rows as teardown_verdict='unreviewed'. Idempotent — re-running does NOT duplicate rows
+ * (the UNIQUE(workspace_id, url) plus upsert holds).
+ *
+ * rhea-research-automation Phase 2 — deterministic gate at sync time (`classifyNonLanderGate`):
+ * a non-lander domain (social/login/app-store/aggregator/search + generic login paths) upserts
+ * with `classification='excluded'` + `teardown_verdict='not_worthy'` + `classified_by='deterministic'`;
+ * a checkout URL (`/checkout`, `/cart`, `checkout.` / `pay.` subdomain) upserts with
+ * `classification='checkout'`. Gated rows are KEPT (auditable) but INVISIBLE to the research-sensor
+ * claim (which filters `classification IS NULL`). Genuine advertorial/PDP destinations still upsert
+ * `classification=null` and remain claimable.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
- * Junk / non-commerce destinations we deliberately drop at sync time — they aren't landers we would
- * ever teardown. Kept small and obvious; a real 'spam' verdict is Phase 2's call (Rhea classifies).
+ * Non-lander domains — social networks, login walls, app stores, aggregators, search engines.
+ * These are KEPT (not dropped) at sync time, but pre-stamped `classification='excluded'` +
+ * `teardown_verdict='not_worthy'` + `classified_by='deterministic'` so they're INVISIBLE to
+ * the Phase-1 research-sensor claim (which filters on `classification IS NULL`) while remaining
+ * auditable in the row. Matches host OR any subdomain (`.host` suffix). See
+ * docs/brain/specs/rhea-research-automation.md Phase 2.
  */
-const JUNK_DOMAINS: readonly string[] = [
-  "linkedin.com",
+const NON_LANDER_DOMAINS: readonly string[] = [
+  // Social / community
   "facebook.com",
   "instagram.com",
-  "twitter.com",
+  "linkedin.com",
   "x.com",
-  "tiktok.com",
+  "twitter.com",
   "youtube.com",
   "youtu.be",
+  "tiktok.com",
   "pinterest.com",
-  "google.com",
-  "apple.com",
+  "reddit.com",
+  "snapchat.com",
+  "threads.net",
+  // App stores
+  "apps.apple.com",
   "play.google.com",
-  "wa.me",
-  "bit.ly",
+  // Link aggregators
+  "linktr.ee",
+  "beacons.ai",
+  // Search engines
+  "google.com",
+  "bing.com",
 ];
+
+/** Path prefixes (case-insensitive) that mark a URL as a generic login/signin wall — same treatment as non-lander domain. */
+const NON_LANDER_LOGIN_PATHS: readonly string[] = ["/login", "/signin", "/sign-in", "/log-in"];
+
+/** Subdomain prefixes (case-insensitive) that mark a URL as an account/login page — same treatment. */
+const NON_LANDER_LOGIN_SUBDOMAIN_PREFIXES: readonly string[] = ["accounts."];
+
+/** Path prefixes (case-insensitive) that mark a URL as a checkout page — `classification='checkout'`. */
+const CHECKOUT_PATH_SEGMENTS: readonly string[] = ["/checkout", "/checkouts", "/cart"];
+
+/** Subdomain prefixes (case-insensitive) that mark a URL as a checkout page — same treatment. */
+const CHECKOUT_SUBDOMAIN_PREFIXES: readonly string[] = ["checkout.", "pay."];
 
 /** classification vocab (matches the CHECK constraint on public.research_urls.classification). */
 export type ResearchUrlClassification =
@@ -46,7 +77,9 @@ export type ResearchUrlClassification =
   | "generic_pdp"
   | "homepage"
   | "spam"
-  | "unviewable";
+  | "unviewable"
+  | "excluded"
+  | "checkout";
 
 /** teardown_verdict vocab (matches the CHECK constraint). */
 export type ResearchUrlVerdict = "worthy" | "not_worthy" | "unreviewed";
@@ -122,6 +155,12 @@ export interface ResearchUrl {
   teardown: TeardownRecipe | null;
   classified_at: string | null;
   classified_by: string | null;
+  /**
+   * Cleo's review watermark (rhea-research-automation Phase 3). Null until Growth (Cleo) has
+   * read the row's teardown recipe and stamped it via `markTeardownReviewed`. `listNewTeardowns`
+   * returns only rows where this is null — the discovery surface Cleo polls for NEW findings.
+   */
+  growth_reviewed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -169,14 +208,86 @@ function domainOf(normalizedUrl: string): string | null {
   }
 }
 
-/** True when a normalized URL points at a domain (or subdomain of one) on the JUNK_DOMAINS skiplist. */
-export function isJunkUrl(normalizedUrl: string): boolean {
+/**
+ * Deterministic gate applied at sync time (rhea-research-automation Phase 2). Two verdicts:
+ *   • 'excluded' — non-lander domain (social/login/app-store/aggregator/search) OR a generic
+ *     login/signin path or `accounts.` subdomain. Never a lander we would teardown.
+ *   • 'checkout' — checkout / cart page, either by URL path or `checkout.` / `pay.` subdomain.
+ *     Out of scope for the lander teardown pipeline (a separate feature will own checkout gaps).
+ *   • null      — passes the gate; a genuine advertorial/PDP that Rhea will classify later.
+ *
+ * The sync KEEPS these rows and pre-stamps them so they're INVISIBLE to the research-sensor
+ * claim (which filters `classification IS NULL`) while remaining kept + auditable. Returns null
+ * when the URL host can't be parsed — the sync treats that as skippedNoUrl (upstream), never
+ * gated (we can't safely stamp a rationale for a URL we don't understand).
+ */
+export function classifyNonLanderGate(normalizedUrl: string): {
+  classification: "excluded" | "checkout";
+  rationale: string;
+} | null {
   const host = domainOf(normalizedUrl);
-  if (!host) return true;
-  for (const junk of JUNK_DOMAINS) {
-    if (host === junk || host.endsWith(`.${junk}`)) return true;
+  if (!host) return null;
+  const lowerHost = host.toLowerCase();
+
+  // Checkout subdomain (checkout. / pay.) wins first — a `checkout.brand.com` should be `checkout`,
+  // not `excluded`, even if its parent were on the non-lander list (it wouldn't be, but be safe).
+  for (const prefix of CHECKOUT_SUBDOMAIN_PREFIXES) {
+    if (lowerHost.startsWith(prefix)) {
+      return { classification: "checkout", rationale: "checkout page — out of scope (separate feature)" };
+    }
   }
-  return false;
+
+  // Non-lander domain (host === list or host endsWith .list). Includes app stores + aggregators.
+  for (const domain of NON_LANDER_DOMAINS) {
+    if (lowerHost === domain || lowerHost.endsWith(`.${domain}`)) {
+      return {
+        classification: "excluded",
+        rationale: "non-lander domain (social/login/app-store/aggregator)",
+      };
+    }
+  }
+
+  // Generic account/login subdomain (e.g. accounts.google.com would be caught above, but
+  // accounts.brand.com is also a login wall).
+  for (const prefix of NON_LANDER_LOGIN_SUBDOMAIN_PREFIXES) {
+    if (lowerHost.startsWith(prefix)) {
+      return {
+        classification: "excluded",
+        rationale: "non-lander domain (social/login/app-store/aggregator)",
+      };
+    }
+  }
+
+  // URL-path checks — parse fresh so we get the *actual* pathname (lowercase, from URL).
+  let path = "";
+  try {
+    path = new URL(normalizedUrl).pathname.toLowerCase();
+  } catch {
+    return null;
+  }
+  for (const seg of CHECKOUT_PATH_SEGMENTS) {
+    if (path === seg || path.startsWith(`${seg}/`)) {
+      return { classification: "checkout", rationale: "checkout page — out of scope (separate feature)" };
+    }
+  }
+  for (const seg of NON_LANDER_LOGIN_PATHS) {
+    if (path === seg || path.startsWith(`${seg}/`)) {
+      return {
+        classification: "excluded",
+        rationale: "non-lander domain (social/login/app-store/aggregator)",
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * @deprecated Kept for callers outside the sync path. Prefer `classifyNonLanderGate` — the sync
+ * itself no longer DROPS junk URLs; it KEEPS them with `classification='excluded'`. A `true`
+ * return here means the URL would be gated as 'excluded' or 'checkout'.
+ */
+export function isJunkUrl(normalizedUrl: string): boolean {
+  return classifyNonLanderGate(normalizedUrl) !== null;
 }
 
 // ── Sync from the ad scout (creative_skeletons → research_urls) ───────────────
@@ -193,6 +304,16 @@ export interface SyncResearchUrlsResult {
   scanned: number;
   distinct: number;
   upserted: number;
+  /**
+   * Rows KEPT but pre-stamped `classification='excluded'` by the deterministic gate — social /
+   * login / app-store / aggregator / search / generic login-path URLs. They upsert like any other
+   * row but stay INVISIBLE to the research-sensor claim (`classification IS NULL`). Was
+   * `skippedJunk` in Phase 1; the sync no longer drops these — it audits them.
+   */
+  gatedExcluded: number;
+  /** Rows KEPT but pre-stamped `classification='checkout'` — checkout/cart URLs, out of scope. */
+  gatedCheckout: number;
+  /** @deprecated alias for `gatedExcluded + gatedCheckout` — legacy callers may still read it. */
   skippedJunk: number;
   skippedNoUrl: number;
 }
@@ -202,6 +323,12 @@ export interface SyncResearchUrlsResult {
  * per distinct destination. Prefers `landing_page_url` (the FULL advertorial URL with path) over
  * `https://` + `destination_domain` (the bare host root, which often 404s) — mirrors the choice in
  * landing-page-scout.ts:96. Idempotent: re-running writes the same rows (UNIQUE(workspace_id, url)).
+ *
+ * rhea-research-automation Phase 2 — deterministic gate: as each destination is prepared for
+ * upsert, `classifyNonLanderGate` may pre-stamp it as `classification='excluded'` (non-lander
+ * domain or generic login) or `classification='checkout'`. Gated rows are UPSERTED (kept +
+ * auditable) but invisible to the sensor's claim query, so the box never chases a lander that
+ * isn't one and never captures a checkout page here.
  */
 export async function syncResearchUrlsFromCreatives(workspaceId: string): Promise<SyncResearchUrlsResult> {
   const admin = createAdminClient();
@@ -217,7 +344,6 @@ export async function syncResearchUrlsFromCreatives(workspaceId: string): Promis
   if (error) throw new Error(`syncResearchUrlsFromCreatives read: ${error.message}`);
 
   const rows = (data || []) as CreativeSkeletonSlice[];
-  let skippedJunk = 0;
   let skippedNoUrl = 0;
 
   interface Agg {
@@ -227,6 +353,8 @@ export async function syncResearchUrlsFromCreatives(workspaceId: string): Promis
     ad_count: number;
     first_seen: string | null;
     last_seen: string | null;
+    /** null = passes the gate; a genuine advertorial/PDP candidate. */
+    gate: ReturnType<typeof classifyNonLanderGate>;
   }
   const byUrl = new Map<string, Agg>();
 
@@ -246,10 +374,6 @@ export async function syncResearchUrlsFromCreatives(workspaceId: string): Promis
     const url = normalizeUrl(candidate);
     if (!url) {
       skippedNoUrl++;
-      continue;
-    }
-    if (isJunkUrl(url)) {
-      skippedJunk++;
       continue;
     }
     const domain = domainOf(url);
@@ -273,35 +397,71 @@ export async function syncResearchUrlsFromCreatives(workspaceId: string): Promis
         ad_count: 1,
         first_seen: r.first_seen,
         last_seen: r.last_seen,
+        gate: classifyNonLanderGate(url),
       });
     }
   }
 
   const distinct = byUrl.size;
+  let gatedExcluded = 0;
+  let gatedCheckout = 0;
   if (distinct === 0) {
-    return { scanned: rows.length, distinct: 0, upserted: 0, skippedJunk, skippedNoUrl };
+    return {
+      scanned: rows.length,
+      distinct: 0,
+      upserted: 0,
+      gatedExcluded: 0,
+      gatedCheckout: 0,
+      skippedJunk: 0,
+      skippedNoUrl,
+    };
   }
 
   // Upsert each row. We `onConflict:'workspace_id,url'` so re-runs update ad_count / last_seen without
-  // duplicating. ignoreDuplicates=false so the count refresh actually lands.
-  const payload = [...byUrl.values()].map((a) => ({
-    workspace_id: workspaceId,
-    url: a.url,
-    domain: a.domain,
-    brand: a.brand,
-    source: "ad_scout",
-    ad_count: a.ad_count,
-    first_seen: a.first_seen,
-    last_seen: a.last_seen,
-    teardown_verdict: "unreviewed" as const,
-  }));
+  // duplicating. ignoreDuplicates=false so the count refresh actually lands. Gated rows are
+  // pre-stamped with classification + teardown_verdict + rationale + classified_by so they're
+  // INVISIBLE to the research-sensor claim (`classification IS NULL`).
+  const nowIso = new Date().toISOString();
+  const payload = [...byUrl.values()].map((a) => {
+    const base = {
+      workspace_id: workspaceId,
+      url: a.url,
+      domain: a.domain,
+      brand: a.brand,
+      source: "ad_scout",
+      ad_count: a.ad_count,
+      first_seen: a.first_seen,
+      last_seen: a.last_seen,
+    };
+    if (a.gate) {
+      if (a.gate.classification === "excluded") gatedExcluded++;
+      else gatedCheckout++;
+      return {
+        ...base,
+        classification: a.gate.classification,
+        teardown_verdict: "not_worthy" as const,
+        rationale: a.gate.rationale,
+        classified_by: "deterministic",
+        classified_at: nowIso,
+      };
+    }
+    return { ...base, teardown_verdict: "unreviewed" as const };
+  });
 
   const { error: upErr } = await admin
     .from("research_urls")
     .upsert(payload, { onConflict: "workspace_id,url", ignoreDuplicates: false });
   if (upErr) throw new Error(`syncResearchUrlsFromCreatives upsert: ${upErr.message}`);
 
-  return { scanned: rows.length, distinct, upserted: payload.length, skippedJunk, skippedNoUrl };
+  return {
+    scanned: rows.length,
+    distinct,
+    upserted: payload.length,
+    gatedExcluded,
+    gatedCheckout,
+    skippedJunk: gatedExcluded + gatedCheckout,
+    skippedNoUrl,
+  };
 }
 
 // ── Read + narrow-write helpers ──────────────────────────────────────────────
@@ -473,4 +633,54 @@ export async function setTeardown(
     .eq("id", id)
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setTeardown: ${error.message}`);
+}
+
+// ── Cleo handoff (rhea-research-automation Phase 3) ──────────────────────────
+
+/**
+ * Cleo's DISCOVERY reader — the input trigger for the slice-4 gap-analysis loop. Returns rows
+ * where Rhea has already landed a structured `teardown` recipe AND Cleo (Growth) hasn't yet
+ * stamped `growth_reviewed_at`. Ordered `ad_count` DESC — the highest-spend competitor funnels
+ * surface first, so Cleo's attention rides the same "spend = importance" signal the
+ * research-sensor claim uses. Naturally EXCLUDES `excluded` / `checkout` / `not_worthy` /
+ * `unviewable` rows because none of them carry a teardown (the recipe is worthy-only per
+ * validateTeardownRecipe + the box lane's write-guard).
+ *
+ * Read-only. All-workspace-scoped. Bounded by `limit` (default 50 — the panel size Cleo can
+ * usefully triage per poll).
+ */
+export async function listNewTeardowns(
+  workspaceId: string,
+  limit = 50,
+): Promise<ResearchUrl[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("research_urls")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .not("teardown", "is", null)
+    .is("growth_reviewed_at", null)
+    .order("ad_count", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`listNewTeardowns: ${error.message}`);
+  return (data || []) as ResearchUrl[];
+}
+
+/**
+ * Cleo's watermark stamp — the chokepoint write that drops a teardown out of `listNewTeardowns`.
+ * Called once per row Cleo has consumed into her gap-analysis (slice 4). Idempotent — a second
+ * call is a no-op update (the watermark simply re-advances to `now()`, which the discovery
+ * reader still filters out identically).
+ */
+export async function markTeardownReviewed(
+  workspaceId: string,
+  id: string,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("research_urls")
+    .update({ growth_reviewed_at: new Date().toISOString() })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`markTeardownReviewed: ${error.message}`);
 }

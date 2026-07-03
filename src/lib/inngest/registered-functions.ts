@@ -123,6 +123,7 @@ import { creativeFinderDailyCron, creativeFinderManualSweep, creativeFinderVideo
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
+import { researchSensorCron } from "@/lib/inngest/research-sensor";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
@@ -270,6 +271,7 @@ export const registeredInngestFunctions = [
   landingPageScoutAnalyze,
   acquisitionResearchCadenceCron,
   acquisitionResearchCadenceManual,
+  researchSensorCron,
   controlTowerMonitor,
   specDriftReconcileCron,
   fleetSpendGovernorCron,

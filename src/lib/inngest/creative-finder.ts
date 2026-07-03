@@ -105,9 +105,11 @@ export const creativeFinderDailyCron = inngest.createFunction(
         // Whitelisted-page promotion: affiliate/advertorial/creator pages fronting a KNOWN
         // competitor (destination_domain join) surface as 'proposed' whitelisted rows.
         await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
-        // Rhea's URL sensor (rhea-url-sensor Phase 1): walk creative_skeletons for the
-        // workspace and upsert one research_urls row per distinct destination. Idempotent
-        // — the SDK dedups by normalized URL and skips a JUNK_DOMAINS list.
+        // Rhea's URL sensor (rhea-url-sensor Phase 1 + rhea-research-automation Phase 2):
+        // walk creative_skeletons for the workspace and upsert one research_urls row per
+        // distinct destination. Idempotent — the SDK dedups by normalized URL and pre-stamps
+        // non-lander domains / checkout URLs with classification='excluded'|'checkout' so
+        // they're invisible to the research-sensor claim (but still auditable).
         await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
       }
       return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, freshnessDays };

@@ -39,7 +39,7 @@ CI static check `scripts/_check-worker-lanes.ts` enforces that every kind in the
 
 The Growth-owned lane that classifies unreviewed [[../tables/research_urls]] rows into `advertorial | quiz | generic_pdp | homepage | spam` + `worthy | not_worthy` verdicts with a rationale — and, in the SAME session, reverse-engineers every worthy URL into a structured [[../recipes/lander-teardown]] recipe (`TeardownRecipe`) persisted via `setTeardown`. Cleo (slice 3) reads those recipes to diff against our storefront and emit a build blueprint.
 
-- **Enqueue** — [[../inngest/acquisition-research-cadence]]'s daily cron: for any ad-tool workspace with `research_urls` rows at `teardown_verdict='unreviewed'`, insert ONE `kind='research'` `agent_jobs` row (dedup-gated on any in-flight `research` job for the workspace — same pattern as `gap-grade`).
+- **Enqueue** — [[../inngest/research-sensor]]'s HOURLY paced claim (rhea-research-automation Phase 1): syncs [[../tables/research_urls]] then picks the top `ad_count` unreviewed URL (`classification IS NULL AND teardown_verdict='unreviewed'`, tiebroken by earliest `first_seen`), dedups on any in-flight `research` job for the workspace, and inserts ONE `kind='research'` `agent_jobs` row carrying `{research_url_id}` in `instructions`. Supersedes the prior daily stub in [[../inngest/acquisition-research-cadence]].
 - **Cap** — `MAX_RESEARCH=1` concurrency lane, `RESEARCH_TIMEOUT_MS=30 min`, `RESEARCH_BATCH_CAP=8` URLs per pass. Bumping the batch size is a knob (env-tunable), not a code change.
 - **`runResearchJob(job)`** (the runner, in `scripts/builder-worker.ts`):
   1. Read the top-N unreviewed `research_urls` for the workspace, biggest `ad_count` first.
@@ -52,4 +52,4 @@ The Growth-owned lane that classifies unreviewed [[../tables/research_urls]] row
 
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[acquisition-gap-grader]] · [[../operational-rules]]
+[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[acquisition-gap-grader]] · [[../operational-rules]]

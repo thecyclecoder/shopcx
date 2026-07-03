@@ -14,8 +14,9 @@ The **standing re-scan loop + gap→outcome grading sweep** that makes the Acqui
   1b. **promote whitelisted** — [[../libraries/competitors]] `promoteWhitelistedPages` → advertiser pages fronting a KNOWN competitor `destination_domain` surface as `source='whitelisted'` `proposed` rows with `search_keyword` = the exact page name + `runs_ads_for` = the fronted competitor (deduped). See [[../specs/whitelisted-page-auto-tracking]].
   2. **ad gaps** — [[../libraries/acquisition-hub]] `materializeAdGaps` → re-materialize the deterministic ad-gap report into [[../tables/ad_gap_recommendations]] as `proposed` (idempotent on `dedup_key`; SUPPRESSED `ad_angle` skipped).
   3. **grade** — [[../libraries/acquisition-gap-grader]] `gradeActedGaps` → initial-grade each acted-on gap, revise-grade resolved outcomes.
-  4. **research** — Rhea's URL sensor ([[../specs/rhea-url-sensor]] Phase 2): if [[../tables/research_urls]] has any `teardown_verdict='unreviewed'` rows for the workspace, enqueue ONE `research` `agent_jobs` row per workspace per beat (dedup-gated on any in-flight `research` job — same pattern as gap-grade). The box lane ([[builder-worker]] `runResearchJob`) captures via [[../recipes/lander-capture]] and applies Rhea's classification + verdict + capture_ref through the [[../libraries/research-urls]] SDK.
   - then `sendEvent ads/landing-page-scout.analyze { workspaceId }` → the Landing Page Scout re-surfaces NEW lander gaps (deduped; suppressed types skipped).
+
+  The `research` enqueue that used to live in step 4 has moved to [[research-sensor]] (rhea-research-automation Phase 1) — the paced hourly claim SUPERSEDES the once-a-day stub.
 - Ends with a Control-Tower heartbeat (`emit-heartbeat`) so a healthy-but-idle run still beats.
 
 ### `acquisition-research-cadence-manual`
@@ -28,8 +29,7 @@ The **standing re-scan loop + gap→outcome grading sweep** that makes the Acqui
 - [[../tables/competitors]] (`promoteFromCategorySweep` + `promoteWhitelistedPages`)
 - [[../tables/ad_gap_recommendations]] (`materializeAdGaps`)
 - [[../tables/acquisition_gap_grades]] + [[../tables/acquisition_grader_prompts]] (`gradeActedGaps`)
-- `agent_jobs` (enqueues a `gap-grade` row when a batch is picked; enqueues a `research` row when unreviewed research_urls exist — both dedup-gated).
-- [[../tables/research_urls]] is written INSIDE the `research` box lane (not on the cron thread) — the cron just enqueues.
+- `agent_jobs` (enqueues a `gap-grade` row when a batch is picked; dedup-gated). The `research` enqueue moved to [[research-sensor]] — this cron no longer touches `kind='research'` / `research_urls`.
 - `ai_token_usage` (grader usage, via [[../libraries/ai-usage]])
 
 ## Gotchas
