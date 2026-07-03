@@ -16,7 +16,8 @@ Nav plumbing lives in `src/app/dashboard/sidebar.tsx` — a new collapsible `NAV
 - Filter semantics: selecting a product shows rows WHERE `product_id = <selected> OR product_id IS NULL` — the workspace-level (null-scoped) seeds always stay visible. Otherwise the current all-null data reads as an empty list.
 - Columns (from [[../tables/competitors]]): Brand · Domain · Category · Product scope · Source badge · Status badge · Spend signal · PDP-URL count · Evidence (truncate + expand).
 - Sort: approved-first, then brand.
-- Reads GET `/api/ads/competitors` (owner/admin-gated); `?productId=` added there for the filter. No page control writes to competitors.
+- Reads GET `/api/ads/competitors` (owner/admin-gated); `?productId=` on the route applies the OR-with-null semantics above via a single `.or('product_id.eq.<id>,product_id.is.null')` clause. No page control writes to competitors.
+- Columns beyond Brand/Domain/Source/Status (which the acquisition-hub table also renders) are unique to this surface: Category · Product scope · Spend signal · PDP-URL count · Evidence (with expand). The evidence cell truncates via `line-clamp-2` with an inline Expand button; the table itself is `overflow-x-auto` + `min-w-[1100px]` per [[../ui-conventions]] wide-table rule.
 
 ## API endpoints called
 
@@ -24,6 +25,6 @@ Nav plumbing lives in `src/app/dashboard/sidebar.tsx` — a new collapsible `NAV
 
 ## Status / open work
 
-✅ **Shipped (2026-07-02):** Phase 1 (shell + nav) + Phase 2 (table + product filter). The **Research** sidebar section is now live with the **Competitors** surface as surface 1 of N — sibling surfaces (Ad Creative gaps, Landing-page snapshots, unified gap queue) are extensible one-line additions to `src/app/dashboard/sidebar.tsx` under `section.items`.
+✅ **Shipped (2026-07-03):** Phase 1 (shell + nav) + Phase 2 (table + product filter, from the folded `research-sidebar-competitors` spec's never-built Phase 2). The **Research** sidebar section is now live with the **Competitors** surface as surface 1 of N — sibling surfaces (Ad Creative gaps, Landing-page snapshots, unified gap queue) are extensible one-line additions to `src/app/dashboard/sidebar.tsx` under `section.items`.
 
 See [[../tables/competitors]] · [[../libraries/competitors]] · [[../libraries/acquisition-hub]] · [[marketing__acquisition]].
