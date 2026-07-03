@@ -9261,6 +9261,46 @@ async function runSpecTestJob(job: Job) {
       parsed = extractSpecTestResult(resultText);
     }
 
+    // Missing-security-envelope repair: a FUSED pre-merge session sometimes emits parseable JSON that
+    // forgot the required `security` field entirely. Without this repair the run silently falls through
+    // to `applyFusedSecurityAsBranchVerdict` → classifyFusedSecurityEnvelope(undefined) →
+    // "no security envelope on the fused spec-test result" → needs-human → the origin build parks under
+    // class `real_blocker`. Re-prompt ONCE on the same session for JUST the envelope before that fall-through.
+    // Only fires on the pre-merge branch (the fused contract only applies there) and only when the parse
+    // succeeded, the run isn't a self-declared `error`, and `parsed.security` is missing / not-an-object.
+    if (
+      isPreMerge &&
+      parsed &&
+      parsed.status !== "error" &&
+      (!parsed.security || typeof parsed.security !== "object" || Array.isArray(parsed.security))
+    ) {
+      console.log(`${tag} fused JSON missing security envelope — re-prompting once for JUST the envelope`);
+      const envelopeRepair = [
+        `Your previous JSON parsed but did NOT include the required "security" field. This is a FUSED pre-merge session — both the spec-test verdict AND the security envelope MUST ship together, or the pre-merge gate has to hold the branch for a human.`,
+        `Return ONLY one valid JSON object with the SAME schema as before (reuse your prior checks + report verbatim; do not re-run the spec-test) — add the "security" envelope now:`,
+        `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"...","fix":"...","verification":["..."]}}}`,
+        `security.checks MUST cover ALL 5 required keys (injection, secret_leak, authz_rls, unsafe_admin_client, crypto_encrypted) with per-check evidence — a bare status flag is REJECTED by the fused-envelope validator (fused-premerge-security-authoritative-drop-standalone Phase 1). The security.spec field is required only when security.status="real-vuln".`,
+        `Review the branch diff you already have in context (\`git diff origin/main...origin/${branch}\`) — do NOT re-fetch. If you genuinely cannot classify a check, use verdict="needs_human" with an "evidence" note explaining why. If you genuinely could not proceed at all, return ONLY {"status":"error","error":"<why>"}.`,
+      ].join("\n");
+      const envRetry = await runSpecTestClaude(envelopeRepair, session, REPO_DIR, specTestDir ?? pickHealthyConfigDir(), job.id);
+      await meterAgentJob(job, specTestDir ?? undefined, envRetry.usage, envRetry.model);
+      if (envRetry.session) { session = envRetry.session; await update(job.id, { claude_session_id: session }); }
+      resultText = envRetry.resultText; isError = envRetry.isError; raw = envRetry.raw;
+      const reparsed = extractSpecTestResult(resultText);
+      // Only adopt the reparsed object when it actually landed the envelope — otherwise keep the prior
+      // `parsed` so the spec-test verdict + checks the session already produced are preserved (falling
+      // through to the "no security envelope" path is worse than logging the old verdict with no envelope).
+      if (reparsed) {
+        const gotEnvelope =
+          reparsed.security && typeof reparsed.security === "object" && !Array.isArray(reparsed.security);
+        if (gotEnvelope) {
+          parsed = reparsed;
+        } else if (reparsed.status === "error") {
+          parsed = reparsed;
+        }
+      }
+    }
+
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
     if (parsed?.status === "error") {
