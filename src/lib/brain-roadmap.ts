@@ -481,10 +481,20 @@ export interface InTestingSignals {
   specTestGreen: boolean;
   securityGreen: boolean;
   merged: boolean;
-  /** All phases accumulated on the spec branch (every phase build_sha'd or terminal), or a zero-phase
+  /** All phases accumulated on the spec branch (every phase build_sha'd or terminal), or a 0/1-phase
    *  one-shot. A spec is NOT in_testing until ALL phases are built — not just because P1 made a preview. */
   accumulationComplete: boolean;
+  /** REAL-TIME "in progress": the spec's latest build agent_job is actively working (`building`/`running`)
+   *  or paused mid-build (`needs_approval`/`needs_input`). Drives the "in progress" column the INSTANT a
+   *  build is claimed — before any `build_sha` is stamped — so the roadmap reflects the live pipeline, not a
+   *  stored/stamped status. A merely `queued` build stays "planned" (the short pre-build queue window). */
+  hasLiveBuild: boolean;
 }
+
+/** Build agent_job statuses that mean "a build is actively underway" → the spec derives "in progress" in
+ *  real time. `queued`/`queued_resume` are NOT here: a queued build hasn't started, so it stays "planned"
+ *  (the short review-passed-but-not-yet-building window). */
+const LIVE_BUILD_STATUSES: ReadonlySet<string> = new Set(["building", "running", "needs_approval", "needs_input"]);
 
 /**
  * Apply the in_testing rule over a base derived status (preview-test-promote-pipeline M3). Pure: signals
@@ -508,11 +518,18 @@ export function applyInTestingOverlay(base: SpecStatus, signals: InTestingSignal
   // A spec is in_testing only with a preview AND all phases accumulated on the branch — a single built
   // phase (P1) that produced a preview must NOT flip the whole spec to in_testing while P2+ are still
   // planned/building. The spec stays in_progress until accumulation completes.
-  if (!signals.hasPreview || !signals.accumulationComplete) return base;
-  const bothGreen = signals.specTestGreen && signals.securityGreen;
-  // Only "both green AND merged" allows the shipped derivation through; otherwise the card is in_testing.
-  if (bothGreen && signals.merged) return base;
-  return "in_testing";
+  if (signals.hasPreview && signals.accumulationComplete) {
+    const bothGreen = signals.specTestGreen && signals.securityGreen;
+    // Only "both green AND merged" allows the shipped derivation through; otherwise the card is in_testing.
+    if (bothGreen && signals.merged) return base;
+    return "in_testing";
+  }
+  // REAL-TIME in_progress: a build job is actively working for this spec (or paused mid-build). Show it
+  // building the instant the job is claimed — before any build_sha is stamped — so the roadmap tracks the
+  // live pipeline. Never downgrades a `shipped` base; won't fire when in_testing applied above. A base that
+  // already derives `in_progress` (a phase carries a build_sha) also falls through to the same result.
+  if (base !== "shipped" && (signals.hasLiveBuild || base === "in_progress")) return "in_progress";
+  return base;
 }
 
 /** Build a SpecCard from one DB row + its joined `spec_phases`. The phases keep their stable id-by-position
@@ -675,6 +692,9 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
       const previewUrl = job ? (job["preview_url"] as string | null | undefined) : undefined;
       const jobStatus = job ? String(job["status"] || "") : "";
       const hasPreview = typeof previewUrl === "string" && previewUrl.length > 0;
+      // REAL-TIME in_progress signal: the latest build job for this spec is actively working/paused-mid-build
+      // (not merely queued, not terminal). The overlay uses it to show "in progress" before any build_sha lands.
+      const hasLiveBuild = LIVE_BUILD_STATUSES.has(jobStatus);
       // Per the spec: "Only when both are green AND the branch promoted (merged to main) does it derive
       // shipped." Treat the build job's terminal `merged` status as the promotion signal — the canonical
       // "the PR is now on main" state agent_jobs carries for a PER-SPEC PR merge.
@@ -701,12 +721,16 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
       // Security green — same `completedClean` rollup the fold gate reads.
       const securityGreen = !!securityBySlug[card.slug]?.completedClean;
       // spec-goal-branch-pm-flow fix: a spec is in_testing only once ALL phases have accumulated on the
-      // branch (every phase build_sha'd or terminal), or it's a zero-phase one-shot. A single built phase
-      // (P1) producing a preview does NOT make the whole spec in_testing — it stays in_progress until P2+ build.
+      // branch (every phase build_sha'd or terminal). A single built phase (P1) of a MULTI-phase spec does
+      // NOT flip the whole spec to in_testing while P2+ are still planned — it stays in_progress.
+      // single-phase-in-testing fix: a 0- or 1-phase spec ships in ONE PR — there's nothing to accumulate,
+      // so it's trivially complete (mirrors specs-table `isSpecAccumulationComplete`, which the merge gate
+      // uses). Without this the board required a build_sha the single-phase build path can lag on, so a
+      // single-phase spec with a live preview never showed "in testing" (research-competitors-table).
       const accumulationComplete =
-        card.phases.length === 0 ||
+        card.phases.length <= 1 ||
         card.phases.every((p) => !!p.build_sha || p.status === "shipped" || p.status === "rejected");
-      out.set(card.slug, { hasPreview, specTestGreen, securityGreen, merged, accumulationComplete });
+      out.set(card.slug, { hasPreview, specTestGreen, securityGreen, merged, accumulationComplete, hasLiveBuild });
     }
   } catch {
     /* best-effort — the deriver short-circuits to base rollup when signals can't be loaded. */
