@@ -11,11 +11,13 @@
  * Photos live in the public `agent-avatars` Supabase bucket (crafted via Nano Banana Pro);
  * `avatarUrl` is the real headshot, `mascotId` the inline-SVG fallback when no photo.
  *
- * ⭐ AVATAR STYLE (every gen MUST match the cast): a PHOTOREALISTIC corporate headshot PHOTOGRAPH — tight
- * CLOSE CROP (head + shoulders only, filling the frame), a real-looking person, studio portrait lighting,
- * plain neutral soft background, looking at camera (think a real LinkedIn headshot). NEVER a cartoon /
- * illustration / 3D render / stylized art, and NO props or gimmicks. Bump the `?v=N` on `avatarUrl` when
- * you replace a photo so clients re-fetch.
+ * ⭐ AVATAR STYLE (every gen MUST match the cast): a PHOTOREALISTIC portrait PHOTOGRAPH of a real-looking
+ * person — tight CLOSE CROP (top of head at the top of the frame, cropped just below the collarbone; the
+ * face fills the frame), looking at camera, soft editorial lighting, plain neutral background. These are
+ * STYLISH, fashion-forward people with real personal taste — modern, distinctive outfits + hair + energy,
+ * NOT boring corporate headshots: NO blazers, NO stiff LinkedIn vibe. Give each a genuinely different look.
+ * NEVER a cartoon / illustration / 3D render / stylized art, and NO cheesy props or gimmicks. Bump the
+ * `?v=N` on `avatarUrl` when you replace a photo so clients re-fetch.
  * Pure config (no server imports) → safe to import from client components.
  */
 
@@ -259,6 +261,14 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-900/40",
     dot: "bg-emerald-500", ring: "bg-emerald-50 dark:bg-emerald-900/20", accent: "text-emerald-600 dark:text-emerald-400",
   },
+  research: {
+    key: "research", name: "Rhea", role: "Research", emoji: "🔎",
+    personality: "Scouts the competitive field — pulls rivals' running ads + their destination URLs + lander teardowns, and reasons about which gaps are worth chasing. She finds the opportunities; Cleo tests them. Autonomous within Max's leash; escalates what she can't call.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}rhea-research.jpg?v=2`,
+    chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
+    dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
+  },
 };
 
 /**
@@ -348,6 +358,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Answer read-only 'why / how / is it working' developer questions",
     "Investigate the code + live state to ground the answer",
     "Never mutate — surface findings back to the message center",
+  ],
+  research: [
+    "Sweep approved competitors' running ads (AdLibrary) + capture their destination URLs and lander funnels",
+    "Deconstruct what's working — creative skeletons, offers, lander teardowns — and surface the gaps worth chasing",
+    "Reason about which competitors / URLs / angles deserve Growth's attention, not just dump everything found",
+    "Feed the confirmed opportunities to Cleo's tests + Max's approval queue; escalate what she can't call",
   ],
   "storefront-optimizer": [
     "Read the funnel + lever-importance map and form one atomic, grounded hypothesis per campaign",
