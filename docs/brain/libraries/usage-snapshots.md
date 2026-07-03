@@ -1,6 +1,6 @@
 # libraries/usage-snapshots
 
-Per-account usage snapshots + hidden-limit discovery for the [[../specs/fleet-usage-cockpit]] Phase 1 — the write layer the box worker's standing pass calls to keep [[../tables/account_usage_snapshots]] fresh, plus the `MAX(tokens_at_wall)` discoverer that reads [[../tables/usage_wall_events]].
+Per-account usage snapshots + hidden-limit discovery for the [[../archive.d/fleet-usage-cockpit]] Phase 1 — the write layer the box worker's standing pass calls to keep [[../tables/account_usage_snapshots]] fresh, plus the `MAX(tokens_at_wall)` discoverer that reads [[../tables/usage_wall_events]].
 
 **File:** `src/lib/usage-snapshots.ts`
 
@@ -78,4 +78,4 @@ function codexCostOverride(model: string | null | undefined): CodexCostOverride 
 
 ## Related
 
-[[../tables/account_usage_snapshots]] · [[../tables/usage_wall_events]] · [[../tables/agent_job_costs]] · [[../tables/worker_heartbeats]] · [[fleet-cost]] · [[ai-usage]] · [[developer-nav]] · [[../specs/fleet-usage-cockpit]] · [[../functions/platform]] · [[../recipes/build-box-setup]]
+[[../tables/account_usage_snapshots]] · [[../tables/usage_wall_events]] · [[../tables/agent_job_costs]] · [[../tables/worker_heartbeats]] · [[fleet-cost]] · [[ai-usage]] · [[developer-nav]] · [[../archive.d/fleet-usage-cockpit]] · [[../functions/platform]] · [[../recipes/build-box-setup]]

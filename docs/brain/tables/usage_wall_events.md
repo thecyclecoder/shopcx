@@ -1,6 +1,6 @@
 # usage_wall_events
 
-One row per detected Max/Claude usage wall — stamped with the current window's token burn at the moment the wall hit + the window classification (`5h` session vs `weekly` seven-day). Phase 1 of [[../specs/fleet-usage-cockpit]]. Owner: [[../functions/platform]].
+One row per detected Max/Claude usage wall — stamped with the current window's token burn at the moment the wall hit + the window classification (`5h` session vs `weekly` seven-day). Phase 1 of [[../archive.d/fleet-usage-cockpit]]. Owner: [[../functions/platform]].
 
 **Discover-the-limit.** Anthropic doesn't publish the hidden Max ceiling. The box detects a wall the instant it sees the 429/wall text (`markAccountCapped` / `markCodexCapped` in `scripts/builder-worker.ts`). At that moment it records ONE row here stamped with the current window's token burn (via [[../libraries/usage-snapshots]] `currentWindowBurn`) — that burn is a LOWER-BOUND estimate of the true limit (you hit the wall AT the limit). `discoverLimit(account, window)` = `MAX(tokens_at_wall)` over this table — it tightens toward the true hidden ceiling as more walls are sampled.
 
@@ -46,4 +46,4 @@ One row per detected Max/Claude usage wall — stamped with the current window's
 
 ## Related
 
-[[account_usage_snapshots]] · [[agent_job_costs]] · [[worker_heartbeats]] · [[../libraries/usage-snapshots]] · [[../libraries/fleet-cost]] · [[../specs/fleet-usage-cockpit]] · [[../functions/platform]]
+[[account_usage_snapshots]] · [[agent_job_costs]] · [[worker_heartbeats]] · [[../libraries/usage-snapshots]] · [[../libraries/fleet-cost]] · [[../archive.d/fleet-usage-cockpit]] · [[../functions/platform]]

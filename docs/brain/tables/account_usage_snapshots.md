@@ -1,6 +1,6 @@
 # account_usage_snapshots
 
-Per-account (Max Round Robin 1..4 + Codex) token-burn rollups keyed by `source` (box|mac) + `window` (5h|weekly). Phase 1 of [[../specs/fleet-usage-cockpit]]. Owner: [[../functions/platform]].
+Per-account (Max Round Robin 1..4 + Codex) token-burn rollups keyed by `source` (box|mac) + `window` (5h|weekly). Phase 1 of [[../archive.d/fleet-usage-cockpit]]. Owner: [[../functions/platform]].
 
 The Phase-3 `/dashboard/developer/usage` cockpit SUMs `source='box'` + `source='mac'` per (`account`, `window`) so the founder sees the full picture: the box's own view of its `agent_job_costs` burn PLUS the local ccusage reporter's ~/.claude + ~/.codex/sessions view. Uniquely keyed on `(workspace_id, source, account, window)` so a re-report REPLACES the prior slice — the Mac reporter is idempotent per rollup.
 
@@ -65,4 +65,4 @@ Written by:
 
 ## Related
 
-[[usage_wall_events]] · [[agent_job_costs]] · [[worker_heartbeats]] · [[ai_token_usage]] · [[../libraries/usage-snapshots]] · [[../libraries/fleet-cost]] · [[../libraries/ai-usage]] · [[../specs/fleet-usage-cockpit]] · [[../functions/platform]] · [[../recipes/mac-usage-reporter]]
+[[usage_wall_events]] · [[agent_job_costs]] · [[worker_heartbeats]] · [[ai_token_usage]] · [[../libraries/usage-snapshots]] · [[../libraries/fleet-cost]] · [[../libraries/ai-usage]] · [[../archive.d/fleet-usage-cockpit]] · [[../functions/platform]] · [[../recipes/mac-usage-reporter]]
