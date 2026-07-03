@@ -93,6 +93,9 @@ export function buildLifecycleContext(opts: BuildLifecycleInputs): LifecycleCont
     specTestVerdict: testRun?.agent_verdict ?? null,
     specTestHasOpenRegression: specTestHasOpenRegression(spec.slug, testRun, humanResolutions),
     specTestLive: liveSpecTestSlugs.has(spec.slug),
+    // >=1 check floor (mirrors isCleanMachinePassRun) — a human-only run (all advisory checks) still has
+    // >=1 check, so its Spec Test node reads `done`; a degenerate 0-check run does not. [human-only-specs-ship-and-fold]
+    specTestHasChecks: (testRun?.checks?.length ?? 0) >= 1,
     securityLive: security?.live ?? false,
     securitySurfaced: security?.surfaced ?? false,
     securityCompletedClean: security?.completedClean ?? false,

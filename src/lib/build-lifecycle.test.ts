@@ -28,6 +28,7 @@ function ctx(overrides: Partial<LifecycleContext> = {}): LifecycleContext {
     specTestVerdict: null,
     specTestHasOpenRegression: false,
     specTestLive: false,
+    specTestHasChecks: true,
     securityLive: false,
     securitySurfaced: false,
     securityCompletedClean: false,
@@ -58,6 +59,23 @@ test("built on branch, no spec-test run yet (verdict null, no live job) → Spec
   assert.equal(s.build, "done");
   assert.equal(s["spec-test"], "active");
   assert.equal(s["security-test"], "pending");
+});
+
+// ── human-only-specs-ship-and-fold: a needs_human (0 machine checks) run IS a complete spec-test ─────
+
+test("human-only run (needs_human + >=1 check, no regression, not live) → Spec Test=done, Security current", () => {
+  // A spec whose Verification is entirely advisory human checks: 0 machine tests to run, so needs_human is
+  // its TERMINAL spec-test state. The node must read `done` (mirrors isCleanMachinePassRun / the fold gate)
+  // and advance to Security — NOT sit on "QA-verifying" forever (the CEO-flagged visual lag).
+  const c = ctx({ status: "in_testing", builtOnBranch: true, specTestVerdict: "needs_human", specTestHasChecks: true, specTestLive: false });
+  const s = byName(c);
+  assert.equal(s["spec-test"], "done", "a human-only needs_human run is a COMPLETE spec-test (nothing to machine-verify)");
+  assert.equal(deriveLifecycleStage(c).current, "security-test", "flow must advance to Security");
+});
+
+test("degenerate 0-check run (needs_human but specTestHasChecks=false) → Spec Test stays active (not a silent-empty pass)", () => {
+  const s = byName(ctx({ status: "in_testing", builtOnBranch: true, specTestVerdict: "needs_human", specTestHasChecks: false }));
+  assert.equal(s["spec-test"], "active", "a 0-check run cannot satisfy the fold gate — must not read done");
 });
 
 // ── Pre-merge security in flight ──────────────────────────────────────────────────
