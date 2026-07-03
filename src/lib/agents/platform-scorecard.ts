@@ -31,6 +31,7 @@ import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
 import { getFunctions, getGoals, getRoadmap } from "@/lib/brain-roadmap";
 import { BUILD_POOL_CAPACITY } from "@/lib/agents/platform-director";
 import { computeAgentRollup, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
+import { shippedSpecsByOwner } from "@/lib/agents/director-kpis";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -152,14 +153,16 @@ interface MetricDef {
   currentState?: true;
   /**
    * Marks a metric whose ground truth depends on the LIVE brain-roadmap spec set (via
-   * `getRoadmap()` — `specs_per_week` uses it for the live spec→owner map; `regression_coverage_pct`
-   * uses it for the live shipped-spec denominator). [[kpi-review]] `auditAllKpis` / `auditKpi` skip
-   * these — the live set changes between snapshot write and audit re-read (specs fold/archive on
-   * their own cadence), so the re-run sees a different population than the snapshot did and surfaces
-   * the membership delta as "drift" that isn't engine drift. Same false-positive class as
-   * `currentState` (comparing a frozen snapshot against a moving target) — different axis (the
-   * population definition moved, not the underlying counter). Repair Agent verdict on signature
-   * `loop:kpi_drift:specs_per_week:weekly`.
+   * `getRoadmap()` — today only `regression_coverage_pct`, which uses the LIVE shipped-spec set as
+   * its coverage denominator by design — a folded spec is archived and isn't expected to be
+   * re-tested). [[kpi-review]] `auditAllKpis` / `auditKpi` skip these — the live set changes
+   * between snapshot write and audit re-read (specs fold/archive on their own cadence), so the
+   * re-run sees a different population than the snapshot did and surfaces the membership delta as
+   * "drift" that isn't engine drift. Same false-positive class as `currentState` (comparing a
+   * frozen snapshot against a moving target) — different axis (the population definition moved,
+   * not the underlying counter). `specs_per_week` USED to be flagged too, but director-kpi-sdk
+   * Phase 1 repointed it at the FULL spec set (via [[director-kpis]] `shippedSpecsByOwner`) so its
+   * slug→owner map is folded-inclusive + stable across snapshot/audit — it's no longer flagged.
    */
   liveSpecSetDependent?: true;
 }
@@ -606,35 +609,23 @@ const needsAttention: MetricDef = {
 /**
  * specs_per_week — merged feature builds OWNED BY PLATFORM in the window: agent_jobs kind='build'
  * status='merged' with updated_at (the merge flip) in-window, spec_slug mapped to its owner function
- * via the live spec→owner map (brain-roadmap getRoadmap().specs[].owner — the exact rule director-xp
- * uses for specsShipped). Only builds whose spec is platform-owned are counted.
+ * via [[director-kpis]] `shippedSpecsByOwner` — which builds the map from `listSpecs()` (FULL spec
+ * set incl. folded). Only builds whose spec is platform-owned are counted. Previously read from
+ * `getRoadmap()` (live specs only), so a same-day fold dropped the merged build; now folded specs
+ * still map to their owner and the count reflects the full merged population.
  */
 const specsPerWeek: MetricDef = {
   key: "specs_per_week",
   unit: "count",
-  liveSpecSetDependent: true,
   compute: async (ctx) => {
-    const { admin, workspaceId, curr, prev } = ctx;
-    // Live spec slug → owner function (live specs only — a folded spec leaves specs/; display proxy).
-    const { specs } = await getRoadmap();
-    const ownerBySpec = new Map<string, string>();
-    for (const s of specs) if (s.owner) ownerBySpec.set(s.slug, s.owner);
-
+    const { workspaceId, curr, prev } = ctx;
     const countPlatformMerged = async (w: MetricWindow["curr"]): Promise<{ n: number; slugs: string[] }> => {
-      const { data } = await admin
-        .from("agent_jobs")
-        .select("spec_slug")
-        .eq("workspace_id", workspaceId)
-        .eq("kind", "build")
-        .eq("status", "merged")
-        .gte("updated_at", w.startIso)
-        .lte("updated_at", w.endIso);
-      const slugs: string[] = [];
-      for (const r of (data ?? []) as Array<{ spec_slug: string | null }>) {
-        const owner = r.spec_slug ? ownerBySpec.get(r.spec_slug) : undefined;
-        if (owner === PLATFORM_FUNCTION && r.spec_slug) slugs.push(r.spec_slug);
-      }
-      return { n: slugs.length, slugs };
+      const { countsByOwner, slugsByOwner } = await shippedSpecsByOwner(
+        workspaceId,
+        { startIso: w.startIso, endIso: w.endIso },
+        PLATFORM_FUNCTION,
+      );
+      return { n: countsByOwner[PLATFORM_FUNCTION] ?? 0, slugs: slugsByOwner[PLATFORM_FUNCTION] ?? [] };
     };
     const cur = await countPlatformMerged(curr);
     const pri = await countPlatformMerged(prev);

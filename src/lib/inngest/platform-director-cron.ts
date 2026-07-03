@@ -476,8 +476,10 @@ export const platformDirectorCron = inngest.createFunction(
           // Stale-alert sweep for audit-skipped metrics: `auditAllKpis` SKIPS
           // `MetricDef.currentState` metrics (lane_utilization etc. — point reads churn between
           // snapshot write and ground-truth re-read) AND `MetricDef.liveSpecSetDependent` metrics
-          // (specs_per_week, regression_coverage_pct — the live brain-roadmap spec set churns
-          // between snapshot write and audit re-read). The within-tolerance auto-resolve branch
+          // (today: only regression_coverage_pct — specs_per_week's slug→owner map moved to the
+          // folded-inclusive director-kpis SDK in director-kpi-sdk Phase 1 and dropped the flag —
+          // the live brain-roadmap spec set churns between snapshot write and audit re-read for
+          // the remaining live-set-dependent metric). The within-tolerance auto-resolve branch
           // below never fires for either class — they don't appear in `reports` at all — so an
           // alert opened before the metric was flagged would sit open forever. Resolve any open
           // `kpi_drift:<skipped-metric>:<cadence>` here once, on the same standing beat, so the

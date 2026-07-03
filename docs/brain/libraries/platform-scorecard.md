@@ -43,7 +43,7 @@ The **weekly** lens ([[../specs/platform-scorecard-weekly]]) — how much the bu
 
 | `metric_key` | unit | Derivation |
 |---|---|---|
-| `specs_per_week` | count | [[../tables/agent_jobs]] `kind='build'` + `status='merged'` with `updated_at` (the merge flip) in-window, **`spec_slug` mapped to the `platform` owner** via the live spec→owner map ([[brain-roadmap]] `getRoadmap().specs[].owner` — the exact rule [[director-xp]] uses). Only platform-owned merged builds count; `detail.slugs` lists them. |
+| `specs_per_week` | count | [[../tables/agent_jobs]] `kind='build'` + `status='merged'` with `updated_at` (the merge flip) in-window, **`spec_slug` mapped to the `platform` owner** via [[director-kpis]] `shippedSpecsByOwner` — the map is built from the FULL [[specs-table]] `listSpecs` set (folded INCLUDED). Fixes the [[../specs/director-kpi-sdk]] Phase 1 bug: previously the map came from [[brain-roadmap]] `getRoadmap()` (live-only), so a merged build whose spec had folded that day dropped off. Only platform-owned merged builds count; `detail.slugs` lists them. |
 | `build_success_rate` | ratio | `merged ÷ (merged + failed)` over the window from [[../tables/agent_jobs]] `kind='build'` (success = `status='merged'`, failure = `status ∈ failed｜needs_attention`), terminal flip by `updated_at`. `detail` carries the raw `merged`/`failed`/`total` counts; prior is null when the prior week had no terminal builds. |
 | `idea_to_merge_hours` | hours | Median over merged builds in-window of `(updated_at − created_at)` — the queued→merged "idea→merged-PR" north-star cycle time. `value` = p50; `detail` carries `p50`/`p90` + `merged_count`. |
 | `approvals_untouched_pct` | pct | [[../tables/approval_decisions]] `autonomous=true` ÷ all terminal decisions (`decision ∈ approved｜declined`) in-window, **as a percentage** — "% of platform approvals you never have to touch". A `decided_by ∈ ceo｜human` decision is a TOUCHED approval (surfaced in `detail`); escalated rows are excluded from the denominator. |
@@ -73,4 +73,4 @@ Daily rows written **before** [[../specs/devops-kpi-daily-snapshot-date-lag-fix]
 
 ## Related
 
-[[../archive.d/platform-scorecard-engine]] · [[../specs/regression-backlog-reconciliation-scorecard]] · [[../goals/platform-department-scorecard]] · [[../tables/platform_scorecard_snapshots]] · [[../inngest/platform-director-cron]] · [[kpi-review]] · [[meta__scorecards]] · [[director-xp]] · [[director-recap]] · [[control-tower]] · [[../operational-rules]]
+[[../archive.d/platform-scorecard-engine]] · [[../specs/regression-backlog-reconciliation-scorecard]] · [[../specs/director-kpi-sdk]] · [[../goals/platform-department-scorecard]] · [[../tables/platform_scorecard_snapshots]] · [[../inngest/platform-director-cron]] · [[director-kpis]] · [[kpi-review]] · [[meta__scorecards]] · [[director-xp]] · [[director-recap]] · [[control-tower]] · [[../operational-rules]]
