@@ -16,7 +16,8 @@
     "check:box-parses": "tsx scripts/_check-box-parses.ts",
     "check:no-md-spec-commits": "tsx scripts/_check-no-md-spec-commits.ts",
     "check:rls-on-new-tables": "tsx scripts/_check-rls-on-new-tables.ts",
-    "predeploy": "npm run check:worker-lanes && npm run check:pm-md-reads && npm run check:pm-sdk-compliance && npm run check:vercel-ignore-step-rails && npm run check:goal-branch-targeting && npm run check:box-parses && npm run check:no-md-spec-commits && npm run check:rls-on-new-tables",
+    "check:no-hard-destructive-migrations": "tsx scripts/_check-no-hard-destructive-migrations.ts",
+    "predeploy": "npm run check:worker-lanes && npm run check:pm-md-reads && npm run check:pm-sdk-compliance && npm run check:vercel-ignore-step-rails && npm run check:goal-branch-targeting && npm run check:box-parses && npm run check:no-md-spec-commits && npm run check:rls-on-new-tables && npm run check:no-hard-destructive-migrations",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:box-failed-supersede": "tsx --test src/lib/box-failed-supersede.test.ts",
     "test:spec-drift": "tsx --test src/lib/spec-drift.test.ts",
@@ -44,7 +45,9 @@
     "test:growth-report-contract": "tsx --test src/lib/growth-report-contract.test.ts",
     "test:ad-spend-governor": "tsx --test src/lib/ad-spend-governor.test.ts",
     "test:growth-allocation": "tsx --test src/lib/growth-allocation.test.ts",
-    "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts"
+    "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts",
+    "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts",
+    "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

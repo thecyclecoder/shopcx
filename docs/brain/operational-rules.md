@@ -169,6 +169,16 @@ Critical for the `amazon_reseller` fraud rule which compares ship vs bill — ne
 
 - **When you write a migration, apply it to the database in the same session — don't leave it for "the next deploy."** Dylan's directive (2026-06). Use the `pg` Client pattern in `scripts/apply-*-migration.ts` (tries the pooler/direct connection-string candidates, runs the SQL, verifies the columns/indexes/constraints landed). A migration file that's committed but unapplied means any new code that reads the new columns fails against the live DB until a deploy that may be hours away.
 
+## Reversible-by-default DB changes
+
+- **No immediate hard-destroy from a migration.** The autonomous migration path is deliberately incapable of destroying data in-place. `DROP TABLE`, `DROP COLUMN`, and `TRUNCATE` are BANNED at the raw-statement level; the reversible equivalents are:
+  - **Table drop → deprecate + scheduled drop.** `ALTER TABLE public.x RENAME TO _deprecated_x_{yyyymmdd}` today; a follow-up migration performs the real drop later (or is annotated when the deprecation window closes). The rename is instantly reversible by a rename-back; the actual drop then happens after callers have proven-clean.
+  - **Column drop → deprecate.** `ALTER TABLE public.x RENAME COLUMN y TO _deprecated_y_{yyyymmdd}`; the follow-up drop lands after callers stop writing/reading it. The rename is reversible; the drop is not, so it goes through the deprecation gate too.
+  - **Row deletes → soft-delete / tombstone.** Set a `deleted_at` / status flag; the row stays. The scheduled hard-purge lives outside migrations.
+  - **Real compliance hard-delete (GDPR / CCPA)** flows through a **separate, narrow, audited data-subject-deletion tool** — NEVER an ad-hoc migration. That path is per-subject, RLS-scoped, and audit-logged; it's not the autonomous migration lane.
+- **Opt-out annotation is explicit + per-statement.** When a legitimate DROP/TRUNCATE is genuinely the right call (e.g., dropping a mistakenly-created scratch table before it ships, or the follow-up drop after a deprecation window), the STATEMENT carries an inline `-- reversible: <reason>` comment on the same line or the line immediately preceding it. No blanket file-level opt-out — every destructive statement stands on its own reason so the audit trail names why. The reason is prose the human/grader reads; it is not machine-parsed for meaning, only for presence.
+- **Enforced by CI — a bare DROP/TRUNCATE breaks the build.** [scripts/_check-no-hard-destructive-migrations.ts](../../scripts/_check-no-hard-destructive-migrations.ts) (`npm run check:no-hard-destructive-migrations`, chained into `predeploy`) statically scans every `supabase/migrations/*.sql`: any `DROP TABLE` / `DROP COLUMN` / `TRUNCATE` statement without an adjacent `-- reversible: <reason>` annotation fails the check. The rename-and-expire form and additive-only migrations pass unchanged. This is the file-authoring rail; the runtime rail is [libraries/migration-safety](libraries/migration-safety.md)'s `classifyMigrationSql` (destructive-migration-safety-rails Phase 1), which binds Ada's leash so she cannot auto-approve destructive SQL at apply time.
+
 ## Shopify extension deploy
 
 After editing files under `shopify-extension/portal-src/`:

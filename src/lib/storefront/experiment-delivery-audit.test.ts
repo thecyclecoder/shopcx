@@ -94,11 +94,18 @@ function makeAdminStub(opts: {
             return builder;
           },
           contains(_column: string, value: unknown) {
-            if (Array.isArray(value)) {
-              const first = value[0] as { experiment_id?: string } | undefined;
+            // Production calls .contains("experiment_assignments", JSON.stringify([...])) —
+            // the value arrives as a STRING, not an array. Parse the stringified form so the
+            // stub matches production behaviour; then fall through to the object/array shapes.
+            let parsed: unknown = value;
+            if (typeof value === "string") {
+              try { parsed = JSON.parse(value); } catch { /* leave as string */ }
+            }
+            if (Array.isArray(parsed)) {
+              const first = parsed[0] as { experiment_id?: string } | undefined;
               experimentId = first?.experiment_id ?? null;
-            } else if (value && typeof value === "object") {
-              experimentId = (value as { experiment_id?: string }).experiment_id ?? null;
+            } else if (parsed && typeof parsed === "object") {
+              experimentId = (parsed as { experiment_id?: string }).experiment_id ?? null;
             }
             const map = table === "storefront_sessions" ? opts.counts.sessions : opts.counts.exposures;
             const count = experimentId ? (map[experimentId] ?? 0) : 0;

@@ -82,6 +82,7 @@ import {
 import { buildControlTowerSnapshot, type LoopColor } from "@/lib/control-tower/monitor";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { getPersona } from "@/lib/agents/personas";
+import { classifyMigrationSql } from "@/lib/migration-safety";
 import {
   composeRegressionWatchLine,
   composeScorecardWatchLine,
@@ -273,13 +274,26 @@ function pendingTargetActions(job: DirectorTargetJob): DirectorActionLike[] {
  * when the SAME bundle also applies an additive migration (the migration-plus-its-dependent-backfill case,
  * worker-grading P8 / the a2edeca0 escalation). A standalone prod script has no migration to anchor it →
  * null → escalate. The soundness gate (the investigation) still confirms the script is an idempotent backfill.
+ *
+ * Deterministic destructive-SQL rail (destructive-migration-safety-rails Phase 1). BEFORE returning the
+ * type-based `additive_migration`/`additive_backfill` for an `apply_migration`/`run_prod_script`, we run
+ * `classifyMigrationSql` over the action's cmd+preview. If severity !== 'additive', the action falls OUT
+ * of the leash (returns null) — the rail binds Ada, not just the builder; she cannot auto-approve
+ * destructive SQL even though the action TYPE is `apply_migration`. The escalation carries the classifier
+ * matches so the CEO sees the concrete rail that was hit.
  */
 function categoryFor(action: DirectorActionLike, bundle: DirectorActionLike[]): LeashCategory | null {
   const type = action.type;
   if (!type) return null;
-  if (LEASH_ACTION_TYPES[type]) return LEASH_ACTION_TYPES[type];
-  if (type === "run_prod_script" && bundle.some((a) => a.type === "apply_migration")) return "additive_backfill";
-  return null;
+  const baseCategory: LeashCategory | null =
+    LEASH_ACTION_TYPES[type] ??
+    (type === "run_prod_script" && bundle.some((a) => a.type === "apply_migration") ? "additive_backfill" : null);
+  if (!baseCategory) return null;
+  if (type === "apply_migration" || type === "run_prod_script") {
+    const sql = `${action.cmd ?? ""}\n${action.preview ?? ""}`;
+    if (classifyMigrationSql(sql).severity !== "additive") return null;
+  }
+  return baseCategory;
 }
 
 /**

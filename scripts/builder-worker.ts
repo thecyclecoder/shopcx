@@ -10934,6 +10934,94 @@ async function applyOutOfLeashRequestActionInline(
   if (!reasoning) return logInvalid("reasoning is required (why it's right + why it's out of leash)");
   if (!reversibility) return logInvalid("reversibility is required (reversible via X, or 'irreversible — <why>')");
 
+  // destructive-migration-safety-rails Phase 3 — computed blast-radius via transactional
+  // dry-run. REPLACE the self-declared `reversibility` string with a MEASURED fact so
+  // the CEO sees a real row count, not Ada's free-text. Falls back to `measured:false`
+  // + static Phase-1 severity when the SQL isn't dry-runnable (lock-heavy DDL, no SQL
+  // in preview for a shell-wrapped apply_migration, or the pg pooler unreachable). We
+  // NEVER lock prod to measure.
+  let blastRadius: { measured: boolean; severity: string; matches: string[]; summary: string; measurementSkipped?: string; affected?: unknown } = {
+    measured: false,
+    severity: "additive",
+    matches: [],
+    summary: "",
+    measurementSkipped: "not attempted",
+  };
+  const dryRunSql = `${preview}\n${cmd}`;
+  try {
+    const { computeBlastRadius } = await import("../src/lib/migration-safety");
+    const { pgClient } = await import("./_bootstrap");
+    let pg: { query: (s: string) => Promise<{ rowCount: number | null; rows: unknown[] }> } | undefined;
+    let pgClose: (() => Promise<void>) | undefined;
+    try {
+      const client = pgClient();
+      await client.connect();
+      pg = { query: (s: string) => client.query(s) as unknown as Promise<{ rowCount: number | null; rows: unknown[] }> };
+      pgClose = async () => { try { await client.end(); } catch { /* best-effort */ } };
+    } catch {
+      pg = undefined; // pooler unreachable / no creds → measured:false, static severity
+    }
+    try {
+      blastRadius = await computeBlastRadius(dryRunSql, { pg });
+    } finally {
+      if (pgClose) await pgClose();
+    }
+  } catch (e) {
+    blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
+  }
+
+  // Phase 5: adversarial skeptic pass — a BONUS defense-in-depth layer over the
+  // Phase-1 classifier + Phase-3 dry-run. Runs read-only, can ESCALATE severity if
+  // it spots data-loss the mechanical classifier missed, but NEVER downgrades a
+  // mechanically-flagged destructive back to additive. Verdict is attached to the
+  // payload so the CEO sees the second opinion, but the deterministic severity
+  // stays authoritative for the leash decision downstream. Skipped when the
+  // classifier said additive + no matches (nothing to refute).
+  let skepticVerdict: { dataLossing: boolean; confidence: number; reason: string; additionalMatches?: string[] } | undefined;
+  let skepticSkipped = true;
+  try {
+    const { runSkepticPass, deterministicDataLossSkeptic } = await import("../src/lib/migration-safety");
+    const skepticResult = await runSkepticPass(
+      dryRunSql,
+      blastRadius as unknown as Parameters<typeof runSkepticPass>[1],
+      // Fix 1 — inject the deterministic data-loss skeptic so a REAL adversarial pass runs
+      // (the defaultLenientSkeptic just echoed the classifier). This one independently scans
+      // for CTE writes without WHERE, FK/constraint drops on business tables, and belt-and-
+      // suspenders agrees with the classifier when severity !== 'additive'.
+      { skeptic: deterministicDataLossSkeptic },
+    );
+    skepticSkipped = skepticResult.skipped;
+    skepticVerdict = skepticResult.verdict;
+    // finalBlastRadius carries the (possibly-escalated) severity + skeptic-annotated summary.
+    blastRadius = skepticResult.finalBlastRadius as unknown as typeof blastRadius;
+  } catch (e) {
+    // Best-effort — a skeptic failure never blocks the raise. The classifier + dry-run
+    // remain load-bearing; the skeptic is a bonus layer.
+    skepticSkipped = false;
+    skepticVerdict = { dataLossing: false, confidence: 0, reason: `skeptic pass failed: ${(e as Error)?.message ?? e}` };
+  }
+
+  // Phase 4: routing on (severity × rename-and-expire × business-materiality). A
+  // reversible_destructive that passes the Phase-2 rails routes to PLATFORM (Ada
+  // owns the final call, PITR is the backstop); irreversible+material routes to the
+  // CEO circuit-breaker with the computed blast-radius on the card (no raw SQL
+  // required to decide). Every destructive-action approval writes a
+  // director_decision_grades row async via the existing box director-grade sweep,
+  // so accountability is grading, not per-decision pre-approval. Uses the
+  // SKEPTIC-adjusted blast-radius so a skeptic escalation flows into routing.
+  let destructiveRoute: { routedToFunction: "platform" | "ceo"; renameAndExpire: boolean; businessMaterial: boolean; reason: string } = {
+    routedToFunction: "ceo",
+    renameAndExpire: false,
+    businessMaterial: false,
+    reason: "default CEO fail-safe",
+  };
+  try {
+    const { routeDestructiveAction } = await import("../src/lib/migration-safety");
+    destructiveRoute = routeDestructiveAction(dryRunSql, blastRadius as unknown as Parameters<typeof routeDestructiveAction>[1]);
+  } catch (e) {
+    destructiveRoute = { routedToFunction: "ceo", renameAndExpire: false, businessMaterial: false, reason: `route decision failed (${(e as Error)?.message ?? e}) — CEO fail-safe` };
+  }
+
   // Dedupe: an active same-(thread, actionType, cmd) request already lives → don't double-raise. A different
   // cmd (or a fresh thread) is a fresh out-of-leash ask. We match on the row's `instructions` JSON tag.
   const dedupeKey = `${threadId}::${actionType}::${cmd}`;
@@ -10980,11 +11068,18 @@ async function applyOutOfLeashRequestActionInline(
   // cap and swallow the cmd, truncate the trailing user-supplied blob instead and re-append a truncation-flagged
   // cmd line, so the byte-identical command is never lost to a slice.
   const cmdLine = `$ ${cmd}`;
+  // Phase 3: the CEO card shows the MEASURED blast-radius (from the transactional
+  // dry-run) instead of Ada's self-declared `reversibility` text. When the dry-run
+  // couldn't run (lock-heavy / no SQL / pooler unreachable) we fall through to the
+  // static Phase-1 severity with the reason surfaced — never Ada's free-text alone.
+  const blastRadiusLine = blastRadius.measured
+    ? `Blast-radius (measured, ROLLBACK-proven): ${blastRadius.summary}`
+    : `Blast-radius (static — ${blastRadius.measurementSkipped ?? "not measured"}): ${blastRadius.summary || reversibility}`;
   const rawPreview = [
     `Out-of-leash — awaiting CEO authorization.`,
     founderAsk ? `Founder's ask: ${founderAsk}` : "",
     `Ada's reasoning: ${reasoning}`,
-    `Reversibility: ${reversibility}`,
+    blastRadiusLine,
     bodyLine ? bodyLine.trim() : "",
     cmdLine,
     preview ? `Preview:\n${preview}` : "",
@@ -11004,14 +11099,38 @@ async function applyOutOfLeashRequestActionInline(
     out_of_leash: true,
     authorized_by: "ceo-pending",
     irreversible,
-    reversibility,
+    // Phase 3 — COMPUTED blast-radius from the transactional dry-run replaces the
+    // self-declared reversibility field on the surface. We KEEP `reversibility` for
+    // back-compat downstream (the executor's audit rows still read it), but the CEO
+    // card + log_tail now show `blastRadius.summary` (measured or static-with-reason).
+    reversibility: blastRadius.summary || reversibility,
+    blastRadius,
+    // Phase 4 — the routing decision the approval-inbox reconciler honors via
+    // `routingOwnerForJob`. Reversible_destructive + rename-and-expire → 'platform'
+    // (Ada owns final call); irreversible + business-material → 'ceo' circuit-breaker.
+    routed_to_function_override: destructiveRoute.routedToFunction,
+    destructive_route: destructiveRoute,
+    // Phase 5 — adversarial skeptic verdict. Attached FOR the CEO/Ada to read; the
+    // deterministic Phase-1 severity remains authoritative for the leash decision.
+    skeptic_verdict: skepticVerdict ?? null,
+    skeptic_skipped: skepticSkipped,
   };
+  const routedTag = destructiveRoute.routedToFunction === "ceo"
+    ? "CEO circuit-break"
+    : "Platform / Ada (final call)";
+  const skepticLogLine = skepticSkipped
+    ? "Skeptic: skipped (additive — nothing to refute)"
+    : skepticVerdict
+      ? `Skeptic: ${skepticVerdict.dataLossing ? "data-loss confirmed" : "no additional data-loss found"} — ${skepticVerdict.reason} (confidence ${skepticVerdict.confidence.toFixed(2)})`
+      : "Skeptic: (unavailable)";
   const logTail = [
-    `🛠️ Ada (${directorFunction}) raised an out-of-leash Approval Request — CEO in the loop.`,
+    `🛠️ Ada (${directorFunction}) raised an out-of-leash Approval Request → ${routedTag}.`,
     founderAsk ? `Founder's ask: ${founderAsk}` : "",
     `Action (${actionType}): ${summary}`,
     `Reasoning: ${reasoning}`,
-    `Reversibility: ${reversibility}${irreversible ? " (flagged irreversible)" : ""}`,
+    blastRadiusLine + (irreversible ? " (flagged irreversible)" : ""),
+    skepticLogLine,
+    `Routing: ${destructiveRoute.reason}`,
     leashRail ? `Leash rail: ${leashRail}` : "",
     `$ ${cmd}`,
   ].filter(Boolean).join("\n");
@@ -11030,6 +11149,18 @@ async function applyOutOfLeashRequestActionInline(
     out_of_leash: true,
     authorized_by: "ceo-pending",
     dedupe_key: dedupeKey,
+    // Phase 3 — persist the computed blast-radius so the executor's audit rows
+    // (executed_ceo_authorized_out_of_leash / ceo_declined_out_of_leash_request) can
+    // record the measured fact alongside the CEO's decision.
+    blast_radius: blastRadius,
+    // Phase 4 — persist the routing decision so the executor's audit rows record
+    // WHO owned the call (Platform/Ada or CEO circuit-break) alongside the decision.
+    destructive_route: destructiveRoute,
+    // Phase 5 — persist the adversarial skeptic verdict alongside the mechanical
+    // classifier's severity so the audit row shows BOTH the deterministic call
+    // AND the second opinion the CEO/Ada saw at decision time.
+    skeptic_verdict: skepticVerdict ?? null,
+    skeptic_skipped: skepticSkipped,
   });
 
   const { data: inserted, error } = await db
@@ -11066,6 +11197,19 @@ async function applyOutOfLeashRequestActionInline(
         leash_rail: leashRail || null,
         founder_ask: founderAsk || null,
         autonomous: false,
+        // Phase 3 — computed blast-radius from the transactional dry-run.
+        blast_radius_summary: blastRadius.summary,
+        blast_radius_measured: blastRadius.measured,
+        blast_radius_severity: blastRadius.severity,
+        // Phase 4 — the routing decision that lands the request in Ada's or the CEO's inbox.
+        routed_to_function: destructiveRoute.routedToFunction,
+        route_reason: destructiveRoute.reason,
+        rename_and_expire: destructiveRoute.renameAndExpire,
+        business_material: destructiveRoute.businessMaterial,
+        // Phase 5 — the adversarial skeptic verdict recorded on the audit row so a later
+        // grader can see both the mechanical severity + the skeptic's second opinion.
+        skeptic_verdict: skepticVerdict ?? null,
+        skeptic_skipped: skepticSkipped,
       },
     });
   } catch { /* audit best-effort */ }
@@ -11305,6 +11449,29 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   }
 
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { writeDestructiveActionDecisionGrade } = await import("../src/lib/migration-safety");
+
+  // Phase 4/Fix-1 — write a director_decision_grades row for every destructive-action
+  // approval decision so Dylan reviews Ada's decision QUALITY async via the standard
+  // director-grade sweep, satisfying the destructive-migration-safety-rails Phase 4
+  // accountability rail even though the CEO — not Ada — decided this specific approval.
+  // Best-effort; a grade-write failure never blocks the executor.
+  const blastRadiusMeta = (instr.blast_radius as { severity?: string; measured?: boolean; summary?: string } | undefined) ?? undefined;
+  const destructiveRouteMeta = (instr.destructive_route as { routedToFunction?: string; reason?: string } | undefined) ?? undefined;
+  const isDestructiveDecision = !!blastRadiusMeta && blastRadiusMeta.severity !== undefined && blastRadiusMeta.severity !== "additive";
+  if (isDestructiveDecision) {
+    try {
+      await writeDestructiveActionDecisionGrade(db, {
+        workspaceId: job.workspace_id,
+        agentJobId: job.id,
+        directorFunction,
+        blastRadiusSummary: blastRadiusMeta?.summary ?? null,
+        routeReason: destructiveRouteMeta?.reason ?? null,
+      });
+    } catch (e) {
+      console.warn(`${tag} writeDestructiveActionDecisionGrade failed (continuing): ${e instanceof Error ? e.message : e}`);
+    }
+  }
 
   const summaries: string[] = [];
   let anyDeclined = false;

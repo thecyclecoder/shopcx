@@ -107,13 +107,37 @@ export function ownerFunctionForKind(kind: string): string | null {
  * routes by the TARGET kind (read off the apply_model_tier action), not the proposal kind: a worker's
  * change resolves UP to its director, a director's own change is unmapped ⇒ the CEO. Every other kind
  * routes by its own kind, unchanged.
+ *
+ * destructive-migration-safety-rails Phase 4 — a raised out-of-leash action carries a
+ * `routed_to_function_override` on its pending action naming who OWNS the decision
+ * (Ada or CEO), computed by `routeDestructiveAction` from the Phase-1 severity ×
+ * Phase-2 rename-and-expire × business-materiality. When present, it wins over the
+ * `KIND_TO_FUNCTION` default (which for `ceo-authorized-out-of-leash` is null →
+ * CEO fail-safe): a reversible_destructive + rename-and-expire lands in Ada's inbox
+ * (she owns the final call, PITR is the backstop), while irreversible + business-material
+ * stays on the CEO's circuit-breaker path. The override is trusted only to the values
+ * 'platform' | 'ceo' — any other string is ignored and we fall through to the kind default.
  */
 export function routingOwnerForJob(job: { kind: string; pending_actions?: PendingActionLike[] | null }): string | null {
   if (job.kind === MODEL_TIER_PROPOSAL_KIND) {
     const a = (job.pending_actions || []).find((x) => x.type === APPLY_MODEL_TIER_ACTION_TYPE);
     if (a?.target_kind) return ownerFunctionForKind(a.target_kind);
   }
+  const override = destructiveRouteOverride(job.pending_actions ?? []);
+  if (override) return override;
   return ownerFunctionForKind(job.kind);
+}
+
+/** Read the Phase-4 destructive-action routing override off a pending action. Trusts only
+ *  the whitelist ('platform' | 'ceo'); anything else returns null (fall through to the
+ *  KIND_TO_FUNCTION default → CEO fail-safe). */
+function destructiveRouteOverride(pending: PendingActionLike[]): string | null {
+  for (const a of pending) {
+    const rec = a as unknown as Record<string, unknown>;
+    const raw = rec["routed_to_function_override"];
+    if (raw === "platform" || raw === "ceo") return raw;
+  }
+  return null;
 }
 
 /**
