@@ -23,7 +23,7 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 | `classification` | `text` | ✓ | CHECK ∈ `advertorial` \| `quiz` \| `generic_pdp` \| `homepage` \| `spam` \| `unviewable`. Vocab reuses the [[../libraries/landing-page-scout]] `page_type` labels plus the two failure cases. Null until Phase 2's Rhea pass classifies. |
 | `teardown_verdict` | `text` | — | default `'unreviewed'` · CHECK ∈ `worthy` \| `not_worthy` \| `unreviewed`. Phase 1 always writes `unreviewed`; Phase 2 flips based on Rhea's rationale. |
 | `rationale` | `text` | ✓ | Rhea's one-sentence citation of what she saw (why worthy / not_worthy). Null on `unreviewed`. |
-| `capture_ref` | `text` | ✓ | Pointer to Phase 2's capture bundle (e.g. `lander-shots` bucket prefix). Null until Phase 2 captures. |
+| `capture_ref` | `text` | ✓ | Pointer into the private `research-shots` Storage bucket — the path prefix under which the chapter shots for the last capture live. Written by [[../libraries/research-urls]] `setCaptureRef` after a successful Playwright capture ([[../recipes/lander-capture]]). Null until Phase 2 captures. |
 | `classified_at` | `timestamptz` | ✓ | When `classification` was set. |
 | `classified_by` | `text` | ✓ | `'rhea'` for the box classifier; operator email on manual override. Free-text on purpose. |
 | `created_at` | `timestamptz` | — | default `now()` |
@@ -48,7 +48,7 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 
 ## Written by
 
-[[../libraries/research-urls]] (`syncResearchUrlsFromCreatives` — the ONLY write path; the SDK's `setUrlClassification` / `setTeardownVerdict` land Phase 2's classifier writes) ← [[../inngest/creative-finder]] (`creative-finder-daily-cron`, `creative-finder-manual-sweep`).
+[[../libraries/research-urls]] (`syncResearchUrlsFromCreatives` — the ONLY write path for INSERTs; the SDK's `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` land Phase 2's classifier writes) ← [[../inngest/creative-finder]] (`creative-finder-daily-cron`, `creative-finder-manual-sweep`) + [[builder-worker]] `runResearchJob` (Phase 2 — captures via [[../recipes/lander-capture]] then applies Rhea's decisions via the SDK).
 
 ## Read by
 
@@ -56,4 +56,4 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 
 ## Related
 
-[[../specs/rhea-url-sensor]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../libraries/landing-page-scout]] · [[../functions/growth]]
+[[../specs/rhea-url-sensor]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../libraries/landing-page-scout]] · [[../functions/growth]]

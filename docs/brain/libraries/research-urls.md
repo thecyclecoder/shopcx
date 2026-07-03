@@ -12,6 +12,7 @@ The chokepoint for [[../tables/research_urls]]: the ONLY file allowed to write t
 | `listResearchUrls(workspaceId, filter?)` | Read helper — filter by `domain` \| `brand` \| `classification` \| `teardown_verdict` \| `competitor_id`; ordered by `ad_count desc`, default limit 500. |
 | `setUrlClassification(workspaceId, id, classification, classifiedBy='rhea')` | Rhea's classify write (Phase 2). Stamps `classification` + `classified_at` + `classified_by`. Vocab is the CHECK constraint: `advertorial` \| `quiz` \| `generic_pdp` \| `homepage` \| `spam` \| `unviewable`. |
 | `setTeardownVerdict(workspaceId, id, verdict, rationale)` | Rhea's verdict write. `verdict ∈ worthy \| not_worthy \| unreviewed`; `rationale` is the one-sentence citation of what she saw. |
+| `setCaptureRef(workspaceId, id, captureRef)` | Rhea's capture-pointer write (Phase 2). Stamps the storage-path prefix under the private `research-shots` bucket where the chapter shots live — the box lane calls this after a successful capture so the manifest can be re-opened later. |
 | `normalizeUrl(raw)` | `HTTPS://Learn.Erthlabs.co/women50/?utm_source=fb#hook` → `https://learn.erthlabs.co/women50`. Lower-cases the host; strips query + hash; drops a lone trailing slash on paths deeper than `/`. Returns `null` on parse failure. Exported for tests + one-off scripts. |
 | `isJunkUrl(normalizedUrl)` | True for `linkedin.com` / social / short-link hosts on the built-in `JUNK_DOMAINS` skiplist. |
 | `ResearchUrl` / `ResearchUrlFilter` / `ResearchUrlClassification` / `ResearchUrlVerdict` / `SyncResearchUrlsResult` | Types |
@@ -38,9 +39,10 @@ Idempotent — a second run against the same `creative_skeletons` set writes ide
 ## Callers
 
 - [[../inngest/creative-finder]] (`creative-finder-daily-cron`, `creative-finder-manual-sweep`) — `syncResearchUrlsFromCreatives` per workspace after `sweepSeed` + `promoteWhitelistedPages`.
-- Phase 2 (Rhea's box capture+classify loop) — `setUrlClassification` / `setTeardownVerdict`.
+- [[../inngest/acquisition-research-cadence]] — dedup-gated enqueue of the `research` box job per workspace per beat (Phase 2 driver).
+- [[builder-worker]] (`runResearchJob`, Phase 2) — captures via [[../recipes/lander-capture]] then calls `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` per URL in Rhea's batch.
 - Owner-facing Growth queue (later) — `listResearchUrls`.
 
 ## Related
 
-[[../tables/research_urls]] · [[../specs/rhea-url-sensor]] · [[../goals/acquisition-research-engine]] · [[../tables/creative_skeletons]] · [[creative-skeleton]] · [[../inngest/creative-finder]] · [[landing-page-scout]] · [[../functions/growth]]
+[[../tables/research_urls]] · [[../specs/rhea-url-sensor]] · [[../goals/acquisition-research-engine]] · [[../tables/creative_skeletons]] · [[creative-skeleton]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[landing-page-scout]] · [[../functions/growth]]

@@ -29,6 +29,13 @@ Every ad has a scent-matched lander (advertorial / before-after) so paid traffic
 - **Metric:** lander conversion rate by campaign; ad→lander scent-match coverage.
 - **Specs:** **advertorial-landers** ✅ (verified + archived → [[../lifecycles/advertorial-landers]])
 
+### Acquisition research (Rhea, beside Cleo)
+**Rhea** is Growth's research worker — the URL sensor + teardown classifier operating alongside Cleo (the [[../libraries/storefront-optimizer-agent|Storefront Optimizer]]). She writes [[../tables/research_urls]] (and only that table): the deterministic sync surfaces every distinct ad-scout destination as `teardown_verdict='unreviewed'`, and Rhea's box lane ([[../libraries/research-urls]] SDK + [[../recipes/lander-capture]]) captures each URL and stamps `classification` + `teardown_verdict` + `rationale`. Read by Cleo's Storefront Optimizer and by the Content Agent handoff to draft the next lander. North star: she proposes and classifies; she never acts.
+
+- **Metric:** worthy-lander hit-rate (share of captured URLs Rhea marked `worthy`); unviewable rate (bot-block coverage).
+- **Loop:** ad scout captures a destination → sync upserts a `research_urls` row `unreviewed` → cadence enqueues Rhea's `research` box job → she classifies → the resulting worthy landers feed Cleo's brief + the Content-Agent teardown queue.
+- **Specs:** [[../specs/rhea-url-sensor]] ⏳ (M1 of Rhea's research engine — this spec; slice 1 SENSOR only).
+
 ### Storefront CRO
 The storefront is **the** conversion surface — continuously lift predicted-LTV-per-visitor across the whole Amazing Coffee funnel, from first paint to renewal. Run by the **Storefront Optimizer**, this director's *graded employee* (the objective-owner in the CEO→role-agent→tool chain, [[../goals/ceo-mode]]). Never "done"; measured by a metric trend, not % complete.
 
