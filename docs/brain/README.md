@@ -13,7 +13,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 35 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 9 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
-| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 41 + README |
+| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 42 + README |
 | [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 65 + 38 settings |
 | [functions/](functions/) | One page per org-chart function (Growth, CMO, Retention, CFO, Logistics, CS — the CEO-mode directors — plus Platform/Eng, the build org) — the permanent owner of work. Lists its perpetual mandates + the specs/goals it owns. Doubles as the CEO-mode director-agent charter. | 5 |
 | [goals/](goals/) | One page per finite company goal / BHAG (e.g. CEO mode) — outcome, success metric, and the milestone → spec decomposition. Rolls up to 100% then closes. | 0 |
