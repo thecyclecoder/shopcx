@@ -104,6 +104,12 @@ export function extractCodePaths(body: string): string[] {
     // main the whole time). Durable deliverables (src/, migrations, brain, committed non-`_` scripts like
     // scripts/landing-page-snapshot.ts) are still checked.
     if (/^scripts\/_/.test(p)) continue;
+    // Skip PLACEHOLDER/template paths — a phase body routinely quotes the migration NAMING CONVENTION
+    // verbatim (`supabase/migrations/YYYYMMDDNNNNNN_description.sql`) or a `<slug>` / `{name}` template.
+    // These are illustrative, never real files, so they always 404 on main and false-flag a revert (the
+    // adlibrary-search-freshness-gate P1 alarm — its real migration `20260810120000_adlibrary_searches.sql`
+    // WAS on main; the body just cited the YYYYMMDDNNNNNN template).
+    if (/YYYYMMDD|NNNNNN|[<>{}]/.test(p)) continue;
     // Trim trailing punctuation the regex's char class might have swept up (none here) — keep as-is.
     out.add(p);
   }
