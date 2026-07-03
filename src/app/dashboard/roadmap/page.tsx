@@ -139,6 +139,7 @@ const FOLDED_DERIVATION = deriveLifecycleStage({
   specTestVerdict: "approved",
   specTestHasOpenRegression: false,
   specTestLive: false,
+  specTestHasChecks: true,
   securityLive: false,
   securitySurfaced: false,
   securityCompletedClean: true,

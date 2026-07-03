@@ -70,6 +70,11 @@ export interface LifecycleContext {
   specTestHasOpenRegression: boolean;
   /** A `spec-test` `agent_jobs` row for this slug in ACTIVE_STATUSES (live spec-test). */
   specTestLive: boolean;
+  /** The latest spec_test_run asserted >=1 check. Mirrors `isCleanMachinePassRun`'s `checks.length >= 1`
+   *  floor so the Spec Test node can mark `done` for a HUMAN-ONLY run (all advisory `needs_human` checks,
+   *  0 machine checks) exactly when the fold gate would — while still rejecting a degenerate 0-check
+   *  "silent empty pass". False when there's no run yet. [human-only-specs-ship-and-fold] */
+  specTestHasChecks: boolean;
   /** A `security-review` `agent_jobs` row for this slug / its merge SHA in
    *  `queued`/`claimed`/`building`/`needs_input`/`queued_resume` (running, not yet surfaced). */
   securityLive: boolean;
@@ -153,12 +158,23 @@ function specTestStatus(ctx: LifecycleContext, buildDone: boolean): LifecycleSta
   // being done (built on branch), then derive from the spec-test signals regardless of shipped status. A
   // live pre-merge run therefore lights this node `active` (not grey) for the whole testing window.
   if (!buildDone) return "pending";
-  // The fold gate requires `approved` + 0 open regressions (`getAutoFoldEligibleSlugs`) — mirror exactly so
-  // the Spec Test node and the fold gate can never disagree.
-  if (ctx.specTestVerdict === "approved" && !ctx.specTestHasOpenRegression) return "done";
+  // An unresolved machine regression / an issues|error verdict keeps the node open regardless — remediate
+  // before fold.
   if (ctx.specTestHasOpenRegression) return "needs-attention";
   if (ctx.specTestVerdict === "issues" || ctx.specTestVerdict === "error") return "needs-attention";
-  // No verdict yet (null), `needs_human` (advisory — not a fold gate), or a live spec-test job → active.
+  // COMPLETE when the fold gate (`isCleanMachinePassRun`) would accept it — mirror it EXACTLY: verdict ∈
+  // {approved, needs_human} + >=1 check + no open regression. human-only-specs-ship-and-fold: a spec whose
+  // Verification is entirely advisory human checks has 0 MACHINE checks to run, so `needs_human` IS its
+  // terminal spec-test state — the node reads `done` so the flow advances to Security → Shipped instead of
+  // sitting on "QA-verifying" forever (the exact CEO-flagged visual lag: 0 machine tests ⇒ nothing to run ⇒
+  // spec-test is already complete). The >=1-check floor still rejects a degenerate 0-check silent-empty pass.
+  if (
+    (ctx.specTestVerdict === "approved" || ctx.specTestVerdict === "needs_human") &&
+    ctx.specTestHasChecks
+  ) {
+    return "done";
+  }
+  // No verdict yet (null), or a run that can't satisfy the gate (0 checks) / a live re-test → active.
   return "active";
 }
 
