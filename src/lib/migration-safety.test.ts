@@ -19,9 +19,15 @@ import {
   classifyMigrationSql,
   computeBlastRadius,
   splitSqlStatements,
+  isRenameAndExpire,
+  isBusinessMaterial,
+  routeDestructiveAction,
+  BUSINESS_MATERIAL_ROW_THRESHOLD,
+  type BlastRadius,
   type PgLike,
 } from "./migration-safety";
 import { directorLeashCandidates, type DirectorTargetJob } from "./agents/platform-director";
+import { routingOwnerForJob } from "./agents/approval-inbox";
 
 // ── classifyMigrationSql ───────────────────────────────────────────────────────
 
@@ -295,4 +301,138 @@ test("splitSqlStatements: respects single-quoted strings", () => {
   const sql = "INSERT INTO t (name) VALUES ('a;b;c'); UPDATE t SET x=1;";
   const parts = splitSqlStatements(sql);
   assert.equal(parts.length, 2);
+});
+
+// ── Phase 4: routing helpers ──────────────────────────────────────────────────
+
+const additiveBR: BlastRadius = { measured: true, severity: "additive", matches: [], summary: "additive" };
+const revBR = (opts: Partial<BlastRadius> = {}): BlastRadius => ({
+  measured: true,
+  severity: "reversible_destructive",
+  matches: ["ALTER … DROP CONSTRAINT"],
+  summary: "reversible destructive",
+  affected: [{ statement: "alter table things drop constraint things_fk", rowCount: null }],
+  ...opts,
+});
+const irrevBR = (opts: Partial<BlastRadius> = {}): BlastRadius => ({
+  measured: true,
+  severity: "irreversible_destructive",
+  matches: ["DROP TABLE"],
+  summary: "irreversible destructive",
+  affected: [{ statement: "drop table things", rowCount: null }],
+  ...opts,
+});
+
+test("isRenameAndExpire: matches ALTER TABLE ... RENAME TO _deprecated_x_YYYYMMDD", () => {
+  assert.equal(isRenameAndExpire("ALTER TABLE public.x RENAME TO _deprecated_x_20260703;"), true);
+  assert.equal(isRenameAndExpire("alter table foo rename to _deprecated_foo_20270101;"), true);
+});
+
+test("isRenameAndExpire: matches ALTER TABLE ... RENAME COLUMN ... TO _deprecated_y_YYYYMMDD", () => {
+  assert.equal(isRenameAndExpire("ALTER TABLE x RENAME COLUMN y TO _deprecated_y_20260703;"), true);
+});
+
+test("isRenameAndExpire: rejects a plain DROP TABLE / rename that isn't the deprecation form", () => {
+  assert.equal(isRenameAndExpire("DROP TABLE x;"), false);
+  assert.equal(isRenameAndExpire("ALTER TABLE x RENAME TO x_new;"), false);
+});
+
+test("isBusinessMaterial: flag when a destructive statement touches customers/orders", () => {
+  assert.equal(isBusinessMaterial(irrevBR({ affected: [{ statement: "drop table customers", rowCount: null }] })), true);
+  assert.equal(isBusinessMaterial(irrevBR({ affected: [{ statement: "delete from orders", rowCount: 5 }] })), true);
+});
+
+test("isBusinessMaterial: flag when any affected row count exceeds the mass threshold", () => {
+  assert.equal(
+    isBusinessMaterial(revBR({ affected: [{ statement: "update products set flag=1", rowCount: BUSINESS_MATERIAL_ROW_THRESHOLD + 1 }] })),
+    true,
+  );
+});
+
+test("isBusinessMaterial: NOT material for a small internal-table change", () => {
+  assert.equal(
+    isBusinessMaterial(revBR({ affected: [{ statement: "alter table director_directives drop constraint dd_ck", rowCount: null }] })),
+    false,
+  );
+});
+
+test("isBusinessMaterial: measured:false + material table name is still flagged (conservative fallback)", () => {
+  const br: BlastRadius = { measured: false, severity: "irreversible_destructive", matches: ["DROP TABLE"], summary: "DROP TABLE customers — irreversible; measurement skipped: pooler unreachable" };
+  assert.equal(isBusinessMaterial(br), true);
+});
+
+test("routeDestructiveAction: additive → platform (in-leash)", () => {
+  const r = routeDestructiveAction("CREATE TABLE foo(id uuid);", additiveBR);
+  assert.equal(r.routedToFunction, "platform");
+});
+
+test("routeDestructiveAction: reversible_destructive + rename-and-expire → platform (Ada owns final call)", () => {
+  const sql = "ALTER TABLE public.customers RENAME TO _deprecated_customers_20260703;";
+  const br = revBR({ affected: [{ statement: sql, rowCount: null }] });
+  const r = routeDestructiveAction(sql, br);
+  assert.equal(r.routedToFunction, "platform");
+  assert.equal(r.renameAndExpire, true);
+  assert.match(r.reason, /rename-and-expire/);
+});
+
+test("routeDestructiveAction: reversible_destructive + NOT material → platform (Ada owns final call)", () => {
+  const sql = "ALTER TABLE things DROP CONSTRAINT things_fk;";
+  const r = routeDestructiveAction(sql, revBR());
+  assert.equal(r.routedToFunction, "platform");
+  assert.equal(r.businessMaterial, false);
+});
+
+test("routeDestructiveAction: reversible_destructive + material + NOT rename-form → CEO", () => {
+  const br = revBR({ affected: [{ statement: "update customers set flag=1", rowCount: 250_000 }] });
+  const r = routeDestructiveAction("update customers set flag=1;", br);
+  assert.equal(r.routedToFunction, "ceo");
+  assert.equal(r.businessMaterial, true);
+});
+
+test("routeDestructiveAction: irreversible_destructive + business-material → CEO circuit-break", () => {
+  const sql = "DROP TABLE customers;";
+  const br = irrevBR({ affected: [{ statement: sql, rowCount: null }] });
+  const r = routeDestructiveAction(sql, br);
+  assert.equal(r.routedToFunction, "ceo");
+  assert.match(r.reason, /circuit-break/);
+});
+
+test("routeDestructiveAction: irreversible_destructive + NOT business-material → CEO fail-safe (unfamiliar shape)", () => {
+  const sql = "DROP TABLE _scratch_debug;";
+  const br = irrevBR({ affected: [{ statement: sql, rowCount: null }] });
+  const r = routeDestructiveAction(sql, br);
+  assert.equal(r.routedToFunction, "ceo");
+});
+
+// ── Phase 4: routing wiring via routed_to_function_override ────────────────────
+
+test("routingOwnerForJob: honors routed_to_function_override='platform' on a ceo-authorized-out-of-leash job", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "platform" },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), "platform");
+});
+
+test("routingOwnerForJob: honors routed_to_function_override='ceo' explicitly", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "ceo" },
+    ],
+  };
+  assert.equal(routingOwnerForJob(job), "ceo");
+});
+
+test("routingOwnerForJob: falls through to KIND_TO_FUNCTION when no valid override is present", () => {
+  const job = {
+    kind: "ceo-authorized-out-of-leash",
+    pending_actions: [
+      { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "bogus" },
+    ],
+  };
+  // ceo-authorized-out-of-leash is UNMAPPED in KIND_TO_FUNCTION → null → CEO fail-safe.
+  assert.equal(routingOwnerForJob(job), null);
 });

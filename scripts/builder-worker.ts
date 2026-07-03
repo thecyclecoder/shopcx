@@ -10947,9 +10947,9 @@ async function applyOutOfLeashRequestActionInline(
     summary: "",
     measurementSkipped: "not attempted",
   };
+  const dryRunSql = `${preview}\n${cmd}`;
   try {
     const { computeBlastRadius } = await import("../src/lib/migration-safety");
-    const dryRunSql = `${preview}\n${cmd}`;
     const { pgClient } = await import("./_bootstrap");
     let pg: { query: (s: string) => Promise<{ rowCount: number | null; rows: unknown[] }> } | undefined;
     let pgClose: (() => Promise<void>) | undefined;
@@ -10968,6 +10968,26 @@ async function applyOutOfLeashRequestActionInline(
     }
   } catch (e) {
     blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
+  }
+
+  // Phase 4: routing on (severity × rename-and-expire × business-materiality). A
+  // reversible_destructive that passes the Phase-2 rails routes to PLATFORM (Ada
+  // owns the final call, PITR is the backstop); irreversible+material routes to the
+  // CEO circuit-breaker with the computed blast-radius on the card (no raw SQL
+  // required to decide). Every destructive-action approval writes a
+  // director_decision_grades row async via the existing box director-grade sweep,
+  // so accountability is grading, not per-decision pre-approval.
+  let destructiveRoute: { routedToFunction: "platform" | "ceo"; renameAndExpire: boolean; businessMaterial: boolean; reason: string } = {
+    routedToFunction: "ceo",
+    renameAndExpire: false,
+    businessMaterial: false,
+    reason: "default CEO fail-safe",
+  };
+  try {
+    const { routeDestructiveAction } = await import("../src/lib/migration-safety");
+    destructiveRoute = routeDestructiveAction(dryRunSql, blastRadius as unknown as Parameters<typeof routeDestructiveAction>[1]);
+  } catch (e) {
+    destructiveRoute = { routedToFunction: "ceo", renameAndExpire: false, businessMaterial: false, reason: `route decision failed (${(e as Error)?.message ?? e}) — CEO fail-safe` };
   }
 
   // Dedupe: an active same-(thread, actionType, cmd) request already lives → don't double-raise. A different
@@ -11053,13 +11073,22 @@ async function applyOutOfLeashRequestActionInline(
     // card + log_tail now show `blastRadius.summary` (measured or static-with-reason).
     reversibility: blastRadius.summary || reversibility,
     blastRadius,
+    // Phase 4 — the routing decision the approval-inbox reconciler honors via
+    // `routingOwnerForJob`. Reversible_destructive + rename-and-expire → 'platform'
+    // (Ada owns final call); irreversible + business-material → 'ceo' circuit-breaker.
+    routed_to_function_override: destructiveRoute.routedToFunction,
+    destructive_route: destructiveRoute,
   };
+  const routedTag = destructiveRoute.routedToFunction === "ceo"
+    ? "CEO circuit-break"
+    : "Platform / Ada (final call)";
   const logTail = [
-    `🛠️ Ada (${directorFunction}) raised an out-of-leash Approval Request — CEO in the loop.`,
+    `🛠️ Ada (${directorFunction}) raised an out-of-leash Approval Request → ${routedTag}.`,
     founderAsk ? `Founder's ask: ${founderAsk}` : "",
     `Action (${actionType}): ${summary}`,
     `Reasoning: ${reasoning}`,
     blastRadiusLine + (irreversible ? " (flagged irreversible)" : ""),
+    `Routing: ${destructiveRoute.reason}`,
     leashRail ? `Leash rail: ${leashRail}` : "",
     `$ ${cmd}`,
   ].filter(Boolean).join("\n");
@@ -11082,6 +11111,9 @@ async function applyOutOfLeashRequestActionInline(
     // (executed_ceo_authorized_out_of_leash / ceo_declined_out_of_leash_request) can
     // record the measured fact alongside the CEO's decision.
     blast_radius: blastRadius,
+    // Phase 4 — persist the routing decision so the executor's audit rows record
+    // WHO owned the call (Platform/Ada or CEO circuit-break) alongside the decision.
+    destructive_route: destructiveRoute,
   });
 
   const { data: inserted, error } = await db
@@ -11118,6 +11150,15 @@ async function applyOutOfLeashRequestActionInline(
         leash_rail: leashRail || null,
         founder_ask: founderAsk || null,
         autonomous: false,
+        // Phase 3 — computed blast-radius from the transactional dry-run.
+        blast_radius_summary: blastRadius.summary,
+        blast_radius_measured: blastRadius.measured,
+        blast_radius_severity: blastRadius.severity,
+        // Phase 4 — the routing decision that lands the request in Ada's or the CEO's inbox.
+        routed_to_function: destructiveRoute.routedToFunction,
+        route_reason: destructiveRoute.reason,
+        rename_and_expire: destructiveRoute.renameAndExpire,
+        business_material: destructiveRoute.businessMaterial,
       },
     });
   } catch { /* audit best-effort */ }

@@ -71,13 +71,48 @@ Splits a SQL blob into per-statement chunks. Respects `-- …` / `/* … */` com
 
 Minimal pg-Client shape (`query(sql: string): Promise<{ rowCount, rows }>`). The real `pg.Client` satisfies it directly; tests inject a spy that records `BEGIN` / statement / `ROLLBACK` calls.
 
-### `BlastRadius` · `BlastRadiusStatement` · `MigrationSeverity` · `MigrationClassification` — types / interfaces
+### `routeDestructiveAction` — function ([[../specs/destructive-migration-safety-rails]] Phase 4)
+
+```ts
+function routeDestructiveAction(sql: string, blastRadius: BlastRadius): {
+  routedToFunction: "platform" | "ceo";
+  renameAndExpire: boolean;
+  businessMaterial: boolean;
+  reason: string;
+};
+```
+
+Route a destructive-action raise on (Phase-1 severity × Phase-2 rename-and-expire × business-materiality). PURE.
+
+| Case | Routes to |
+|---|---|
+| `additive` | Platform (in-leash — Ada auto-approves) |
+| `reversible_destructive` AND rename-and-expire | Platform (Ada owns final call, PITR backstop) |
+| `reversible_destructive` AND NOT business-material | Platform (Ada owns final call) |
+| `reversible_destructive` AND business-material AND NOT rename-form | CEO (mass mutation circuit-break) |
+| `irreversible_destructive` AND business-material | CEO (circuit-break — mass customer/financial destruction) |
+| everything else destructive | CEO (fail-safe — unfamiliar destructive shape) |
+
+Every destructive-action approval writes a `director_decision_grades` row via the existing box director-grade sweep (Ada's approvals only — CEO circuit-break decisions aren't self-graded). Accountability is grading, not per-decision pre-approval. See [[../operational-rules]] § *North star*.
+
+### `isRenameAndExpire(sql)` — function
+
+Matches the Phase-2 reversible-by-default conventions (see [[../operational-rules]] § Reversible-by-default DB changes):
+- `ALTER TABLE public.x RENAME TO _deprecated_x_YYYYMMDD;`
+- `ALTER TABLE x RENAME COLUMN y TO _deprecated_y_YYYYMMDD;`
+
+### `isBusinessMaterial(blastRadius)` — function
+
+True when any dry-run-measured affected row count exceeds `BUSINESS_MATERIAL_ROW_THRESHOLD` (100) OR any affected statement touches a business-material table (customers / orders / subscriptions / payments / invoices / tickets / billing / ledger). Falls back conservatively when `measured:false`: an unmeasured irreversible destructive is treated as material by default so a lock-heavy `DROP TABLE public.customers` still surfaces to the CEO circuit-breaker.
+
+### `BlastRadius` · `BlastRadiusStatement` · `DestructiveRoute` · `RouteDestination` · `MigrationSeverity` · `MigrationClassification` — types / interfaces
 
 ## Callers
 
 - `src/lib/agents/platform-director.ts` — `categoryFor` runs the classifier over the pending action's `cmd`+`preview` before returning `additive_migration` / `additive_backfill`; a non-additive severity forces `null` (out of leash, whole bundle escalates).
-- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the measured summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. `pgClient()` is opened, `BEGIN → each stmt → ROLLBACK` runs, then the connection is closed — a pooler-unreachable environment falls through to `measured:false`.
-- `src/lib/migration-safety.test.ts` — pins the Phase-1 + Phase-3 verification cases (`npm run test:migration-safety`).
+- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the measured summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. **Phase 4**: the same call site runs `routeDestructiveAction` and stamps `routed_to_function_override: 'platform' | 'ceo'` on the pending action; the reconciler's `routingOwnerForJob` honors it so a reversible+rename-safe raise lands in Ada's inbox instead of the CEO's, and the raised `director_activity` row records the route + reason.
+- `src/lib/agents/approval-inbox.ts` — `routingOwnerForJob` honors the pending action's Phase-4 `routed_to_function_override` (whitelist `'platform' | 'ceo'`) before falling back to `KIND_TO_FUNCTION`, so a reversible_destructive + rename-and-expire raise routes to Platform (Ada owns the final call) and irreversible+business-material stays on the CEO circuit-breaker.
+- `src/lib/migration-safety.test.ts` — pins the Phase-1 + Phase-3 + Phase-4 verification cases (`npm run test:migration-safety`).
 
 ## Gotchas
 

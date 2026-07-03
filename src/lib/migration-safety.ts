@@ -380,3 +380,155 @@ export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOp
     affected,
   };
 }
+
+// ── Phase 4 — CTO-final-call routing + CEO business circuit-breaker ─────────────
+//
+// The routing decision the raised out-of-leash approval carries: Ada (Platform) owns
+// technical soundness within a bounded/recoverable envelope; the CEO circuit-breaks
+// on the genuinely-irreversible + business-material tail. Realizes operational-rules
+// § North star — the tool optimizes a bounded proxy, Ada owns the objective, the CEO
+// owns the last-resort circuit-breaker. Every destructive-action decision is graded
+// async by the existing box director-grade sweep (director_decision_grades) —
+// accountability via grading, not per-decision pre-approval.
+
+/** Tables whose destruction is "business-material" — mass customer / financial data
+ *  loss the CEO must circuit-break on, not Ada. Substring match (case-insensitive)
+ *  against the destroyed/mutated table name from the classifier or the dry-run
+ *  affected list. Deliberately liberal — we err on the side of surfacing to the CEO
+ *  when a destructive action touches these ledgers. */
+const BUSINESS_MATERIAL_TABLE_PATTERNS: RegExp[] = [
+  /\bcustomers?\b/i,
+  /\borders?\b/i,
+  /\bline_items?\b/i,
+  /\bsubscriptions?\b/i,
+  /\bpayments?\b/i,
+  /\btransactions?\b/i,
+  /\bcharges?\b/i,
+  /\brefunds?\b/i,
+  /\binvoices?\b/i,
+  /\bledger\b/i,
+  /\btickets?\b/i,
+  /\bbilling\b/i,
+];
+
+/** Row-count threshold above which a destructive touch on ANY table counts as
+ *  business-material — a mass mutation is material regardless of the table name. */
+export const BUSINESS_MATERIAL_ROW_THRESHOLD = 100;
+
+/**
+ * Does the SQL follow the rename-and-expire convention (operational-rules
+ * § Reversible-by-default DB changes)? A rename to `_deprecated_<name>_<yyyymmdd>`
+ * is inherently reversible (rename back), so a `reversible_destructive` migration
+ * that IS a rename-and-expire is safe for Ada to own without escalating.
+ *
+ * Matches: `ALTER TABLE public.x RENAME TO _deprecated_x_20260703` and the column
+ * variant `ALTER TABLE x RENAME COLUMN y TO _deprecated_y_20260703`. Comment-stripped,
+ * case-insensitive.
+ */
+export function isRenameAndExpire(sql: string): boolean {
+  if (!sql || typeof sql !== "string") return false;
+  const stripped = stripComments(sql).toLowerCase();
+  if (/\balter\s+table\s+[^\s;]+\s+rename\s+to\s+_deprecated_[a-z0-9_]+_\d{8}\b/.test(stripped)) return true;
+  if (/\balter\s+table\s+[^\s;]+\s+rename\s+column\s+[^\s;]+\s+to\s+_deprecated_[a-z0-9_]+_\d{8}\b/.test(stripped)) return true;
+  return false;
+}
+
+/**
+ * Is this destructive change business-material? True when EITHER
+ *   (a) any measured affected row count exceeds `BUSINESS_MATERIAL_ROW_THRESHOLD`, OR
+ *   (b) any destroyed / mutated statement touches a business-material table pattern
+ *       (customers/orders/subscriptions/payments/invoices/tickets/billing/ledger).
+ *
+ * PURE — reads the blast-radius the caller supplies. When the dry-run was skipped
+ * (`measured:false`), we fall back to the Phase-1 `matches` prose plus a
+ * conservative "assume material for irreversible" rule so we don't undersell the
+ * CEO circuit-breaker on a lock-heavy DROP TABLE.
+ */
+export function isBusinessMaterial(blastRadius: BlastRadius): boolean {
+  const affected = blastRadius.affected ?? [];
+  for (const a of affected) {
+    if (a.rowCount !== null && a.rowCount > BUSINESS_MATERIAL_ROW_THRESHOLD) return true;
+    for (const re of BUSINESS_MATERIAL_TABLE_PATTERNS) if (re.test(a.statement)) return true;
+  }
+  // Fallback when the dry-run was skipped: check the Phase-1 matches prose for
+  // material-table names. A lock-heavy DROP TABLE public.customers must still be
+  // recognized as material — we cannot punt just because we didn't measure it.
+  if (!blastRadius.measured) {
+    const summary = blastRadius.summary;
+    for (const re of BUSINESS_MATERIAL_TABLE_PATTERNS) if (re.test(summary)) return true;
+    if (blastRadius.severity === "irreversible_destructive") return true; // conservative
+  }
+  return false;
+}
+
+export type RouteDestination = "platform" | "ceo";
+
+export interface DestructiveRoute {
+  /** 'platform' = Ada owns the final call; 'ceo' = CEO circuit-breaker. */
+  routedToFunction: RouteDestination;
+  /** True iff the SQL follows the Phase-2 rename-and-expire pattern. */
+  renameAndExpire: boolean;
+  /** True iff `isBusinessMaterial(blastRadius)` fired. */
+  businessMaterial: boolean;
+  /** One-line reason the routing decision is what it is — surfaced on the CEO card + director_activity. */
+  reason: string;
+}
+
+/**
+ * Route a destructive-action raise to Ada (Platform) or the CEO based on
+ * (Phase-1 severity × Phase-2 rename-and-expire × business-materiality).
+ *
+ * Rules (destructive-migration-safety-rails Phase 4):
+ *   • `additive` → 'platform' (in-leash — should never actually reach the raise path).
+ *   • `reversible_destructive` AND (rename-and-expire OR not business-material) → 'platform'.
+ *     Ada owns the final call; PITR is the backstop. Logged to director_activity with the
+ *     Phase-3 computed blast-radius. NOT routed to the CEO.
+ *   • `irreversible_destructive` AND business-material (mass customer/financial data
+ *     destruction) → 'ceo' circuit-break. Surfaced with the computed plain-English risk
+ *     line via the existing CEO-routed approval; NO raw SQL required to decide.
+ *   • Everything else destructive → 'ceo' (fail-safe: unfamiliar destructive shape UP).
+ */
+export function routeDestructiveAction(sql: string, blastRadius: BlastRadius): DestructiveRoute {
+  const renameAndExpire = isRenameAndExpire(sql);
+  const businessMaterial = isBusinessMaterial(blastRadius);
+
+  if (blastRadius.severity === "additive") {
+    return {
+      routedToFunction: "platform",
+      renameAndExpire,
+      businessMaterial,
+      reason: "additive change — in-leash, Ada auto-approves",
+    };
+  }
+
+  if (blastRadius.severity === "reversible_destructive") {
+    if (renameAndExpire || !businessMaterial) {
+      const why = renameAndExpire
+        ? "reversible_destructive + rename-and-expire rail — Ada owns final call (PITR backstop)"
+        : "reversible_destructive + not business-material — Ada owns final call (PITR backstop)";
+      return { routedToFunction: "platform", renameAndExpire, businessMaterial, reason: why };
+    }
+    return {
+      routedToFunction: "ceo",
+      renameAndExpire,
+      businessMaterial,
+      reason: "reversible_destructive but business-material — CEO circuit-break (mass customer/financial mutation)",
+    };
+  }
+
+  // irreversible_destructive
+  if (businessMaterial) {
+    return {
+      routedToFunction: "ceo",
+      renameAndExpire,
+      businessMaterial,
+      reason: "irreversible_destructive + business-material — CEO circuit-break (mass customer/financial destruction)",
+    };
+  }
+  return {
+    routedToFunction: "ceo",
+    renameAndExpire,
+    businessMaterial,
+    reason: "irreversible_destructive — CEO circuit-break (unfamiliar destructive shape)",
+  };
+}
