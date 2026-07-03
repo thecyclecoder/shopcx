@@ -26,6 +26,15 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
+ * The private bucket where Rhea's mobile chapter shots live (uploaded by scripts/research-capture.ts).
+ * The UI reads shots via short-lived signed URLs (see `signResearchShot`); this constant is exported
+ * so the same string can't drift between the writer (capture) and the reader (viewer API).
+ */
+export const RESEARCH_SHOTS_BUCKET = "research-shots";
+/** Signed-URL TTL for a chapter shot — matches the landing-page-scout convention (1 hour). */
+export const RESEARCH_SHOTS_SIGNED_TTL_SEC = 3600;
+
+/**
  * Non-lander domains — social networks, login walls, app stores, aggregators, search engines.
  * These are KEPT (not dropped) at sync time, but pre-stamped `classification='excluded'` +
  * `teardown_verdict='not_worthy'` + `classified_by='deterministic'` so they're INVISIBLE to
@@ -495,6 +504,66 @@ export async function syncResearchUrlsFromCreatives(workspaceId: string): Promis
 }
 
 // ── Read + narrow-write helpers ──────────────────────────────────────────────
+
+/**
+ * Short-lived signed URL for a chapter shot stored under the private `research-shots` bucket
+ * (mirror of `signLanderShot` in [[landing-page-scout]] but for Rhea's capture manifest). Returns
+ * null on any signing failure — the caller renders a placeholder for that chapter.
+ */
+export async function signResearchShot(
+  path: string,
+  ttlSec: number = RESEARCH_SHOTS_SIGNED_TTL_SEC,
+): Promise<string | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin.storage.from(RESEARCH_SHOTS_BUCKET).createSignedUrl(path, ttlSec);
+  return error || !data ? null : data.signedUrl;
+}
+
+/**
+ * List the chapter shots under a `capture_ref` prefix and return each one with a short-lived signed
+ * URL. Files are named `{safe_url}-chapter-{i}.png` by scripts/research-capture.ts; we sort by that
+ * trailing index so the chapters render in the same top-to-bottom order they were captured. Returns
+ * `[]` when the capture_ref is null/empty or the prefix has no objects yet.
+ */
+export async function listResearchShotChapters(
+  captureRef: string | null,
+  ttlSec: number = RESEARCH_SHOTS_SIGNED_TTL_SEC,
+): Promise<Array<{ index: number; label: string; path: string; signed_url: string | null }>> {
+  if (!captureRef) return [];
+  const admin = createAdminClient();
+  const { data, error } = await admin.storage.from(RESEARCH_SHOTS_BUCKET).list(captureRef, { limit: 100 });
+  if (error || !data) return [];
+  const withIndex = data
+    .filter((f) => f && f.name && !f.name.startsWith("."))
+    .map((f) => {
+      const m = f.name.match(/-chapter-(\d+)\.png$/i);
+      const idx = m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+      return { name: f.name, index: idx };
+    })
+    .sort((a, b) => a.index - b.index);
+  const out: Array<{ index: number; label: string; path: string; signed_url: string | null }> = [];
+  for (let i = 0; i < withIndex.length; i++) {
+    const entry = withIndex[i];
+    const path = `${captureRef}/${entry.name}`;
+    const signed = await signResearchShot(path, ttlSec);
+    const index = Number.isFinite(entry.index) ? entry.index : i;
+    out.push({ index, label: `chapter-${index}`, path, signed_url: signed });
+  }
+  return out;
+}
+
+/** Fetch ONE research_urls row (workspace-scoped). Returns null when it doesn't exist. */
+export async function getResearchUrl(workspaceId: string, id: string): Promise<ResearchUrl | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("research_urls")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getResearchUrl: ${error.message}`);
+  return (data as ResearchUrl | null) ?? null;
+}
 
 /** List a workspace's research_urls, optionally filtered by domain / brand / classification / verdict. */
 export async function listResearchUrls(
