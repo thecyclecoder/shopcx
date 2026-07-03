@@ -1,0 +1,1 @@
+- **Weekly KPI snapshot done-guard forces pre-SDK stale-row re-write** · verified 2026-07-03 · → [[inngest/platform-director-cron]]
