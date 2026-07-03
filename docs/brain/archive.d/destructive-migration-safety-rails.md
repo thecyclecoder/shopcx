@@ -1,0 +1,1 @@
+- **Destructive-migration safety rails** · verified 2026-07-03 · → [[../libraries/migration-safety]]
