@@ -621,10 +621,15 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
 
     parts.push("SUBSCRIPTIONS:");
     for (const s of subs) {
-      const items = (s.items as { title?: string; variant_title?: string; quantity?: number; variant_id?: string; price_cents?: number }[] || []);
+      const items = (s.items as { title?: string; variant_title?: string; quantity?: number; variant_id?: string; price_cents?: number | null; price_override_cents?: number | null }[] || []);
       const itemStr = items.map(i => {
         const msrp = priceMap.get(String(i.variant_id));
-        const realized = i.price_cents || 0;
+        // Internal-contract subs store per-line price on price_override_cents,
+        // not price_cents (see resolveSubscriptionPricing in src/lib/pricing.ts:257
+        // and the resubscribe flow's internal-sub creation). Fall back so the
+        // SUBSCRIPTIONS block doesn't misrender them as "@ $0.00" and mislead the
+        // orchestrator into skipping bill_now / undersizing save-offer + refund math.
+        const realized = i.price_cents ?? i.price_override_cents ?? 0;
         const qty = i.quantity || 1;
         const tail: string[] = [];
         if (msrp) {
