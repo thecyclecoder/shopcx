@@ -28,16 +28,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { reportDbError } from "@/lib/control-tower/error-feed";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
-import { getFunctions, getRoadmap } from "@/lib/brain-roadmap";
+import { getFunctions, getGoals, getRoadmap } from "@/lib/brain-roadmap";
 import { BUILD_POOL_CAPACITY } from "@/lib/agents/platform-director";
 import { computeAgentRollup, GRADEABLE_KINDS } from "@/lib/agents/agent-grader";
-import {
-  autonomyRatio as sdkAutonomyRatio,
-  buildSuccessRate as sdkBuildSuccessRate,
-  goalsEscortedUnbabysat as sdkGoalsEscortedUnbabysat,
-  humanTouchPerBuild as sdkHumanTouchPerBuild,
-  shippedSpecsByOwner,
-} from "@/lib/agents/director-kpis";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -159,16 +152,14 @@ interface MetricDef {
   currentState?: true;
   /**
    * Marks a metric whose ground truth depends on the LIVE brain-roadmap spec set (via
-   * `getRoadmap()` — today only `regression_coverage_pct`, which uses the LIVE shipped-spec set as
-   * its coverage denominator by design — a folded spec is archived and isn't expected to be
-   * re-tested). [[kpi-review]] `auditAllKpis` / `auditKpi` skip these — the live set changes
-   * between snapshot write and audit re-read (specs fold/archive on their own cadence), so the
-   * re-run sees a different population than the snapshot did and surfaces the membership delta as
-   * "drift" that isn't engine drift. Same false-positive class as `currentState` (comparing a
-   * frozen snapshot against a moving target) — different axis (the population definition moved,
-   * not the underlying counter). `specs_per_week` USED to be flagged too, but director-kpi-sdk
-   * Phase 1 repointed it at the FULL spec set (via [[director-kpis]] `shippedSpecsByOwner`) so its
-   * slug→owner map is folded-inclusive + stable across snapshot/audit — it's no longer flagged.
+   * `getRoadmap()` — `specs_per_week` uses it for the live spec→owner map; `regression_coverage_pct`
+   * uses it for the live shipped-spec denominator). [[kpi-review]] `auditAllKpis` / `auditKpi` skip
+   * these — the live set changes between snapshot write and audit re-read (specs fold/archive on
+   * their own cadence), so the re-run sees a different population than the snapshot did and surfaces
+   * the membership delta as "drift" that isn't engine drift. Same false-positive class as
+   * `currentState` (comparing a frozen snapshot against a moving target) — different axis (the
+   * population definition moved, not the underlying counter). Repair Agent verdict on signature
+   * `loop:kpi_drift:specs_per_week:weekly`.
    */
   liveSpecSetDependent?: true;
 }
@@ -422,21 +413,35 @@ const buildEnqueueRate: MetricDef = {
 };
 
 /**
- * autonomy_ratio — share of terminal [[../tables/approval_decisions]] that were autonomous director
- * auto-approvals: `autonomous=true ÷ all terminal decisions` (`decision ∈ approved｜declined`) in-
- * window. Escalated decisions (routed up, not decided here) are excluded from the denominator.
- * Delegates the query + arithmetic to [[director-kpis]] `autonomyRatio` (Phase 2 SSOT).
+ * autonomy_ratio — share of terminal approval decisions that were autonomous director auto-approvals:
+ * approval_decisions autonomous=true ÷ all terminal decisions (decision ∈ approved|declined) in-window.
+ * Escalated decisions (routed up, not decided here) are excluded from the denominator.
  */
 const autonomyRatio: MetricDef = {
   key: "autonomy_ratio",
   unit: "ratio",
   compute: async (ctx) => {
-    const { workspaceId, curr, prev } = ctx;
-    const cur = await sdkAutonomyRatio(workspaceId, { startIso: curr.startIso, endIso: curr.endIso });
-    const pri = await sdkAutonomyRatio(workspaceId, { startIso: prev.startIso, endIso: prev.endIso });
+    const { admin, workspaceId, curr, prev } = ctx;
+    const ratioFor = async (w: MetricWindow["curr"]): Promise<{ ratio: number; autonomous: number; terminal: number; approved: number; declined: number }> => {
+      const { data } = await admin
+        .from("approval_decisions")
+        .select("decision, autonomous")
+        .eq("workspace_id", workspaceId)
+        .in("decision", ["approved", "declined"])
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const rows = (data ?? []) as Array<{ decision: string; autonomous: boolean }>;
+      const terminal = rows.length;
+      const autonomous = rows.filter((r) => r.autonomous === true).length;
+      const approved = rows.filter((r) => r.decision === "approved").length;
+      const declined = rows.filter((r) => r.decision === "declined").length;
+      return { ratio: terminal > 0 ? round(autonomous / terminal) : 0, autonomous, terminal, approved, declined };
+    };
+    const cur = await ratioFor(curr);
+    const pri = await ratioFor(prev);
     return {
-      value: round(cur.ratio),
-      priorValue: pri.terminal > 0 ? round(pri.ratio) : null,
+      value: cur.ratio,
+      priorValue: pri.terminal > 0 ? pri.ratio : null,
       detail: { autonomous: cur.autonomous, terminal: cur.terminal, approved: cur.approved, declined: cur.declined },
     };
   },
@@ -601,23 +606,35 @@ const needsAttention: MetricDef = {
 /**
  * specs_per_week — merged feature builds OWNED BY PLATFORM in the window: agent_jobs kind='build'
  * status='merged' with updated_at (the merge flip) in-window, spec_slug mapped to its owner function
- * via [[director-kpis]] `shippedSpecsByOwner` — which builds the map from `listSpecs()` (FULL spec
- * set incl. folded). Only builds whose spec is platform-owned are counted. Previously read from
- * `getRoadmap()` (live specs only), so a same-day fold dropped the merged build; now folded specs
- * still map to their owner and the count reflects the full merged population.
+ * via the live spec→owner map (brain-roadmap getRoadmap().specs[].owner — the exact rule director-xp
+ * uses for specsShipped). Only builds whose spec is platform-owned are counted.
  */
 const specsPerWeek: MetricDef = {
   key: "specs_per_week",
   unit: "count",
+  liveSpecSetDependent: true,
   compute: async (ctx) => {
-    const { workspaceId, curr, prev } = ctx;
+    const { admin, workspaceId, curr, prev } = ctx;
+    // Live spec slug → owner function (live specs only — a folded spec leaves specs/; display proxy).
+    const { specs } = await getRoadmap();
+    const ownerBySpec = new Map<string, string>();
+    for (const s of specs) if (s.owner) ownerBySpec.set(s.slug, s.owner);
+
     const countPlatformMerged = async (w: MetricWindow["curr"]): Promise<{ n: number; slugs: string[] }> => {
-      const { countsByOwner, slugsByOwner } = await shippedSpecsByOwner(
-        workspaceId,
-        { startIso: w.startIso, endIso: w.endIso },
-        PLATFORM_FUNCTION,
-      );
-      return { n: countsByOwner[PLATFORM_FUNCTION] ?? 0, slugs: slugsByOwner[PLATFORM_FUNCTION] ?? [] };
+      const { data } = await admin
+        .from("agent_jobs")
+        .select("spec_slug")
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "build")
+        .eq("status", "merged")
+        .gte("updated_at", w.startIso)
+        .lte("updated_at", w.endIso);
+      const slugs: string[] = [];
+      for (const r of (data ?? []) as Array<{ spec_slug: string | null }>) {
+        const owner = r.spec_slug ? ownerBySpec.get(r.spec_slug) : undefined;
+        if (owner === PLATFORM_FUNCTION && r.spec_slug) slugs.push(r.spec_slug);
+      }
+      return { n: slugs.length, slugs };
     };
     const cur = await countPlatformMerged(curr);
     const pri = await countPlatformMerged(prev);
@@ -626,22 +643,39 @@ const specsPerWeek: MetricDef = {
 };
 
 /**
- * build_success_rate — merged ÷ (merged + failed) over the window: [[../tables/agent_jobs]]
- * `kind='build'` with a terminal flip (`updated_at`) in-window, where success = `status='merged'`
- * and failure = `status ∈ failed｜needs_attention`. Delegates the query + arithmetic to
- * [[director-kpis]] `buildSuccessRate` (Phase 2 SSOT). `detail` carries the raw counts;
- * `priorValue` is the prior-week rate (null when the prior week had no terminal builds).
+ * build_success_rate — merged ÷ (merged + failed) over the window: agent_jobs kind='build' with a
+ * terminal flip (updated_at) in-window, where success = status='merged' and failure = status ∈
+ * failed｜needs_attention (a pushed-but-broken PR). detail carries the raw counts. prior = the same
+ * rate over the prior equal-length week (null when the prior week had no terminal builds).
  */
+const FAILED_BUILD_STATUSES = ["failed", "needs_attention"];
 const buildSuccessRate: MetricDef = {
   key: "build_success_rate",
   unit: "ratio",
   compute: async (ctx) => {
-    const { workspaceId, curr, prev } = ctx;
-    const cur = await sdkBuildSuccessRate(workspaceId, { startIso: curr.startIso, endIso: curr.endIso });
-    const pri = await sdkBuildSuccessRate(workspaceId, { startIso: prev.startIso, endIso: prev.endIso });
+    const { admin, workspaceId, curr, prev } = ctx;
+    const rateFor = async (w: MetricWindow["curr"]): Promise<{ rate: number; merged: number; failed: number; total: number }> => {
+      const countStatuses = async (statuses: string[]): Promise<number> => {
+        const { count } = await admin
+          .from("agent_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", workspaceId)
+          .eq("kind", "build")
+          .in("status", statuses)
+          .gte("updated_at", w.startIso)
+          .lte("updated_at", w.endIso);
+        return count ?? 0;
+      };
+      const merged = await countStatuses(["merged"]);
+      const failed = await countStatuses(FAILED_BUILD_STATUSES);
+      const total = merged + failed;
+      return { rate: total > 0 ? round(merged / total) : 0, merged, failed, total };
+    };
+    const cur = await rateFor(curr);
+    const pri = await rateFor(prev);
     return {
-      value: round(cur.rate),
-      priorValue: pri.total > 0 ? round(pri.rate) : null,
+      value: cur.rate,
+      priorValue: pri.total > 0 ? pri.rate : null,
       detail: { merged: cur.merged, failed: cur.failed, total: cur.total },
     };
   },
@@ -868,46 +902,122 @@ const regressionCoveragePct: MetricDef = {
 /**
  * human_touch_per_build — the goal's headline. `(approval_decisions where decided_by ∈ ceo｜human in
  * the month) ÷ (agent_jobs kind='build' status='merged' in the month)`. Lower is better; the prior-
- * month `delta_pct` is the "declining MoM" signal. Delegates the query + arithmetic to
- * [[director-kpis]] `humanTouchPerBuild` (Phase 2 SSOT). `value` = the ratio; `detail` carries the
- * numerator/denominator so the trend point is auditable.
+ * month `delta_pct` is the "declining MoM" signal. `value` = the ratio; `detail` carries the
+ * numerator/denominator so the trend point is auditable. Workspace-scoped on both sides.
  */
 const humanTouchPerBuild: MetricDef = {
   key: "human_touch_per_build",
   unit: "ratio",
   compute: async (ctx) => {
-    const { workspaceId, curr, prev } = ctx;
-    const cur = await sdkHumanTouchPerBuild(workspaceId, { startIso: curr.startIso, endIso: curr.endIso });
-    const pri = await sdkHumanTouchPerBuild(workspaceId, { startIso: prev.startIso, endIso: prev.endIso });
+    const { admin, workspaceId, curr, prev } = ctx;
+    const ratioFor = async (w: MetricWindow["curr"]): Promise<{ ratio: number; touched: number; builds: number }> => {
+      const { count: touchedRaw } = await admin
+        .from("approval_decisions")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId)
+        .in("decided_by", ["ceo", "human"])
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const { count: buildsRaw } = await admin
+        .from("agent_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "build")
+        .eq("status", "merged")
+        .gte("updated_at", w.startIso)
+        .lte("updated_at", w.endIso);
+      const touched = touchedRaw ?? 0;
+      const builds = buildsRaw ?? 0;
+      return { ratio: builds > 0 ? round(touched / builds) : 0, touched, builds };
+    };
+    const cur = await ratioFor(curr);
+    const pri = await ratioFor(prev);
     return {
-      value: round(cur.ratio),
-      priorValue: pri.builds > 0 ? round(pri.ratio) : null,
+      value: cur.ratio,
+      priorValue: pri.builds > 0 ? pri.ratio : null,
       detail: { touched: cur.touched, builds: cur.builds },
     };
   },
 };
 
 /**
- * goals_escorted_unbabysat — goals whose milestones advanced WITHOUT CEO touch in the month.
- * Delegates the resolve + touch-check to [[director-kpis]] `goalsEscortedUnbabysat` (Phase 2 SSOT)
- * for the Platform director. `detail.goals` lists the escorted-without-touch goals + their
- * shipped milestones.
+ * goals_escorted_unbabysat — goals whose milestones advanced WITHOUT CEO touch in the month. Resolve
+ * candidates from director_activity action_kind='escorted_goal' (director_function='platform') rows
+ * in-window → distinct goal_slug; intersect with brain-roadmap `getGoals()` to pick the goals with
+ * at least one shipped milestone; count those whose milestone spec_slugs received NO non-autonomous
+ * approval_decision (decided_by ∈ ceo｜human) in-window. The CEO-touch check joins approval_decisions
+ * to agent_jobs.spec_slug (via agent_job_id) and matches against the goal's shipped-milestone slugs.
  */
 const goalsEscortedUnbabysat: MetricDef = {
   key: "goals_escorted_unbabysat",
   unit: "count",
   compute: async (ctx) => {
-    const { workspaceId, curr, prev } = ctx;
-    const cur = await sdkGoalsEscortedUnbabysat(
-      workspaceId,
-      { startIso: curr.startIso, endIso: curr.endIso },
-      { directorFunction: PLATFORM_FUNCTION },
-    );
-    const pri = await sdkGoalsEscortedUnbabysat(
-      workspaceId,
-      { startIso: prev.startIso, endIso: prev.endIso },
-      { directorFunction: PLATFORM_FUNCTION },
-    );
+    const { admin, workspaceId, curr, prev } = ctx;
+    const countFor = async (w: MetricWindow["curr"]): Promise<{ count: number; goals: Array<{ goal: string; milestones: string[] }> }> => {
+      const { data: escorts } = await admin
+        .from("director_activity")
+        .select("metadata")
+        .eq("workspace_id", workspaceId)
+        .eq("director_function", PLATFORM_FUNCTION)
+        .eq("action_kind", "escorted_goal")
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const escortedSlugs = new Set<string>();
+      for (const r of (escorts ?? []) as Array<{ metadata: Record<string, unknown> | null }>) {
+        const slug = typeof r.metadata?.goal_slug === "string" ? (r.metadata.goal_slug as string) : null;
+        if (slug) escortedSlugs.add(slug);
+      }
+      if (!escortedSlugs.size) return { count: 0, goals: [] };
+
+      const allGoals = await getGoals();
+      const candidates: Array<{ slug: string; milestones: string[]; specSlugs: Set<string> }> = [];
+      for (const g of allGoals) {
+        if (!escortedSlugs.has(g.slug)) continue;
+        const shipped = g.milestones.filter((m) => m.status === "shipped");
+        if (!shipped.length) continue;
+        const specSlugs = new Set<string>();
+        for (const m of shipped) for (const s of m.specSlugs) specSlugs.add(s);
+        candidates.push({ slug: g.slug, milestones: shipped.map((m) => m.id || m.name), specSlugs });
+      }
+      if (!candidates.length) return { count: 0, goals: [] };
+
+      const { data: touched } = await admin
+        .from("approval_decisions")
+        .select("agent_job_id")
+        .eq("workspace_id", workspaceId)
+        .in("decided_by", ["ceo", "human"])
+        .gte("created_at", w.startIso)
+        .lte("created_at", w.endIso);
+      const jobIds = Array.from(
+        new Set(
+          ((touched ?? []) as Array<{ agent_job_id: string | null }>)
+            .map((r) => r.agent_job_id)
+            .filter((x): x is string => !!x),
+        ),
+      );
+      const touchedSpecSlugs = new Set<string>();
+      if (jobIds.length) {
+        const { data: jobs } = await admin.from("agent_jobs").select("spec_slug").in("id", jobIds);
+        for (const j of (jobs ?? []) as Array<{ spec_slug: string | null }>) {
+          if (j.spec_slug) touchedSpecSlugs.add(j.spec_slug);
+        }
+      }
+
+      const goals: Array<{ goal: string; milestones: string[] }> = [];
+      for (const c of candidates) {
+        let babysat = false;
+        for (const s of c.specSlugs) {
+          if (touchedSpecSlugs.has(s)) {
+            babysat = true;
+            break;
+          }
+        }
+        if (!babysat) goals.push({ goal: c.slug, milestones: c.milestones });
+      }
+      return { count: goals.length, goals };
+    };
+    const cur = await countFor(curr);
+    const pri = await countFor(prev);
     return { value: cur.count, priorValue: pri.count, detail: { goals: cur.goals } };
   },
 };
