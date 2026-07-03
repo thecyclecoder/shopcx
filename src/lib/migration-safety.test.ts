@@ -252,11 +252,51 @@ test("computeBlastRadius: a lock-heavy DDL (ALTER COLUMN TYPE) returns measured:
   assert.equal(pg.calls.length, 0);
 });
 
-test("computeBlastRadius: no pg client → measured:false with static Phase-1 severity", async () => {
+test("computeBlastRadius: no pg client → measured:false with static Phase-1 severity + `ephemeral database unavailable` reason", async () => {
   const r = await computeBlastRadius("DROP TABLE orders;");
   assert.equal(r.measured, false);
   assert.equal(r.severity, "irreversible_destructive");
-  assert.match(r.summary, /measurement skipped: no pg client/);
+  // disable-production-migration-dry-run-execution — the box worker path passes
+  // no pg. The reason on the payload MUST be `ephemeral database unavailable`
+  // so the reader (and the auditor) sees the security-fix rationale rather than
+  // a generic "no client" fallback.
+  assert.equal(r.measurementSkipped, "ephemeral database unavailable");
+  assert.match(r.summary, /ephemeral database unavailable/);
+});
+
+test("computeBlastRadius: hostile payload (DML + transaction control + function call + non-transactional cmd) with no pg → zero pg.query calls", async () => {
+  // disable-production-migration-dry-run-execution Phase 1 verification — a
+  // proposed SQL payload containing DML, transaction control, function calls,
+  // and non-transactional commands causes ZERO pg.query calls when the worker
+  // path (which supplies no pg) invokes computeBlastRadius. The spy proves this
+  // by being unreachable when opts.pg is absent.
+  class UnreachableSpy implements PgLike {
+    calls: string[] = [];
+    async query(sql: string): Promise<{ rowCount: number | null; rows: unknown[] }> {
+      this.calls.push(sql);
+      throw new Error("pg.query was invoked despite opts.pg being absent");
+    }
+  }
+  const spy = new UnreachableSpy();
+  // Intentionally NOT injecting `spy` — this mirrors the worker path which
+  // never passes a pg client. The assertion is that no code path opens one.
+  const hostilePayload = [
+    "-- DML",
+    "DELETE FROM orders WHERE created_at < now();",
+    "UPDATE customers SET email = 'x' WHERE id IS NOT NULL;",
+    "-- transaction control (would escape BEGIN/ROLLBACK wrapper)",
+    "COMMIT;",
+    "BEGIN;",
+    "-- function call with side effects",
+    "SELECT pg_notify('ch', 'msg');",
+    "-- non-transactional command",
+    "VACUUM ANALYZE orders;",
+    "REINDEX INDEX CONCURRENTLY idx_orders_created_at;",
+  ].join("\n");
+  const r = await computeBlastRadius(hostilePayload, {});
+  assert.equal(r.measured, false);
+  assert.equal(r.measurementSkipped, "ephemeral database unavailable");
+  assert.equal(spy.calls.length, 0);
 });
 
 test("computeBlastRadius: skipDryRun bypasses even when pg is provided", async () => {

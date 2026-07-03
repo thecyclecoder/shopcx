@@ -59,9 +59,11 @@ async function computeBlastRadius(sql: string, opts?: {
 }>;
 ```
 
-Runs the migration inside `BEGIN → each statement → ROLLBACK` on the injected `PgLike` (typically a `pg.Client` connected to the Supabase pooler). The transaction NEVER commits — the `ROLLBACK` sits in a `finally` so even a mid-migration exception unwinds cleanly. Per-statement rowcounts are captured and rolled into a human summary (e.g. `deletes 48,201 rows from orders — irreversible`). The Phase-1 static severity stays authoritative for the leash decision — a measured 0-row DELETE still classifies destructive if the classifier flagged the SQL.
+Runs the migration inside `BEGIN → each statement → ROLLBACK` on the injected `PgLike`. The transaction NEVER commits — the `ROLLBACK` sits in a `finally` so even a mid-migration exception unwinds cleanly. Per-statement rowcounts are captured and rolled into a human summary (e.g. `deletes 48,201 rows from orders — irreversible`). The Phase-1 static severity stays authoritative for the leash decision — a measured 0-row DELETE still classifies destructive if the classifier flagged the SQL.
 
-**Never locks prod to measure.** Lock-heavy DDL (`ALTER TABLE … ALTER COLUMN … SET DATA TYPE` — a table rewrite that holds `ACCESS EXCLUSIVE`) is detected up front and returns `{ measured: false }` with a `measurementSkipped: "lock-heavy DDL …"` reason instead. The caller can pass `skipDryRun: true` for an explicit bypass. An ephemeral Supabase branch DB is the future path — the injected-`PgLike` accepts one unchanged.
+**Never locks prod to measure.** Lock-heavy DDL (`ALTER TABLE … ALTER COLUMN … SET DATA TYPE` — a table rewrite that holds `ACCESS EXCLUSIVE`) is detected up front and returns `{ measured: false }` with a `measurementSkipped: "lock-heavy DDL …"` reason instead. The caller can pass `skipDryRun: true` for an explicit bypass.
+
+**Never dry-runs against the production pooler.** The injected `PgLike` MUST connect to an EXPLICITLY EPHEMERAL branch / test / preview DB — wrapping caller-supplied SQL in `BEGIN/ROLLBACK` is NOT a safe sandbox against DDL that auto-commits, non-transactional commands (`VACUUM`, `REINDEX CONCURRENTLY`, `CREATE INDEX CONCURRENTLY`), function/procedure calls with side effects, or hostile transaction-control payloads. The box worker path (`applyOutOfLeashRequestActionInline`) therefore passes NO `pg` today — `computeBlastRadius` returns `{ measured: false, measurementSkipped: "ephemeral database unavailable" }` with the static Phase-1 severity. The `PgLike` path is preserved for isolated tests and for a future ephemeral-branch caller. See [[../specs/disable-production-migration-dry-run-execution]].
 
 ### `splitSqlStatements` — function
 
@@ -69,7 +71,7 @@ Splits a SQL blob into per-statement chunks. Respects `-- …` / `/* … */` com
 
 ### `PgLike` — interface
 
-Minimal pg-Client shape (`query(sql: string): Promise<{ rowCount, rows }>`). The real `pg.Client` satisfies it directly; tests inject a spy that records `BEGIN` / statement / `ROLLBACK` calls.
+Minimal pg-Client shape (`query(sql: string): Promise<{ rowCount, rows }>`). The real `pg.Client` satisfies it directly; tests inject a spy that records `BEGIN` / statement / `ROLLBACK` calls. **MUST connect to an ephemeral branch/test/preview DB, NEVER the production pooler** — see [[../specs/disable-production-migration-dry-run-execution]] for the rationale (BEGIN/ROLLBACK is not a safe sandbox against DDL auto-commit, non-transactional commands, side-effectful function calls, or hostile transaction control).
 
 ### `routeDestructiveAction` — function ([[../specs/destructive-migration-safety-rails]] Phase 4)
 

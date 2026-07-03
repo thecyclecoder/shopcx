@@ -153,7 +153,15 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
 // unchanged.
 
 /** A minimal pg-Client-compatible interface. The real `pg.Client` satisfies it
- *  directly; tests inject a spy that records BEGIN / statement / ROLLBACK calls. */
+ *  directly; tests inject a spy that records BEGIN / statement / ROLLBACK calls.
+ *
+ *  IMPORTANT — a `PgLike` passed here MUST connect to an EXPLICITLY EPHEMERAL
+ *  branch / test / preview database, NEVER the production pooler. Wrapping
+ *  caller-supplied SQL in BEGIN/ROLLBACK is not a safe sandbox against DDL that
+ *  auto-commits, non-transactional commands, side-effectful function calls, or
+ *  hostile transaction control — the atomic wrapper is a courtesy, not a rail.
+ *  See disable-production-migration-dry-run-execution; the box worker path
+ *  therefore passes no `pg` at all today (measured:false, static severity). */
 export interface PgLike {
   query(sql: string): Promise<{ rowCount: number | null; rows: unknown[] }>;
 }
@@ -183,7 +191,9 @@ export interface BlastRadius {
 }
 
 export interface ComputeBlastRadiusOpts {
-  /** Injected pg client (already connected). When absent, returns `measured: false`. */
+  /** Injected pg client (already connected). MUST be an ephemeral branch/test/
+   *  preview DB — see `PgLike` doc. When absent, returns `measured: false` with
+   *  `measurementSkipped: 'ephemeral database unavailable'`. */
   pg?: PgLike;
   /** Explicit "don't dry-run this against prod" — the caller declares the DDL is lock-heavy. */
   skipDryRun?: boolean;
@@ -338,12 +348,17 @@ export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOp
   const stripped = stripComments(sql).trim();
 
   if (opts.skipDryRun || !opts.pg || lockHeavy || !stripped) {
+    // The `!opts.pg` reason is `ephemeral database unavailable` — the injectable
+    // `PgLike` MUST be an ephemeral branch / test DB, never the production pooler
+    // (see disable-production-migration-dry-run-execution). Absence of that
+    // client means we cannot safely measure and MUST fall back to the static
+    // Phase-1 classifier severity.
     const cause = lockHeavy
       ? "lock-heavy DDL (refusing to acquire a prod lock — run on an ephemeral branch DB or skip)"
       : opts.skipDryRun
         ? "dry-run explicitly skipped"
         : !opts.pg
-          ? "no pg client provided"
+          ? "ephemeral database unavailable"
           : "empty SQL";
     return { measured: false, severity: cls.severity, matches: cls.matches, summary: composeSummary(cls, null, cause), measurementSkipped: cause };
   }

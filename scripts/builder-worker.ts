@@ -10934,40 +10934,38 @@ async function applyOutOfLeashRequestActionInline(
   if (!reasoning) return logInvalid("reasoning is required (why it's right + why it's out of leash)");
   if (!reversibility) return logInvalid("reversibility is required (reversible via X, or 'irreversible — <why>')");
 
-  // destructive-migration-safety-rails Phase 3 — computed blast-radius via transactional
-  // dry-run. REPLACE the self-declared `reversibility` string with a MEASURED fact so
-  // the CEO sees a real row count, not Ada's free-text. Falls back to `measured:false`
-  // + static Phase-1 severity when the SQL isn't dry-runnable (lock-heavy DDL, no SQL
-  // in preview for a shell-wrapped apply_migration, or the pg pooler unreachable). We
-  // NEVER lock prod to measure.
+  // destructive-migration-safety-rails Phase 3 — computed blast-radius.
+  //
+  // SECURITY (disable-production-migration-dry-run-execution): the worker path
+  // NEVER opens the production pooler to "dry-run" the proposed SQL. Wrapping
+  // arbitrary caller-supplied SQL in BEGIN/ROLLBACK is NOT a safe sandbox — DDL
+  // that auto-commits, non-transactional commands (VACUUM, REINDEX CONCURRENTLY,
+  // CREATE INDEX CONCURRENTLY), function/procedure calls with side effects, and
+  // hostile transaction-control payloads can all escape the atomic wrapper. Until
+  // an EXPLICITLY-IDENTIFIED ephemeral branch / test DB is wired up, we call
+  // `computeBlastRadius` WITHOUT a pg client: the static Phase-1 classifier
+  // severity + summary is what the CEO sees, with `measured:false` and reason
+  // `ephemeral database unavailable`. The injectable `PgLike` path stays in
+  // migration-safety.ts for isolated tests and future ephemeral execution — a
+  // future caller may supply an ephemeral-branch client here to re-enable
+  // measurement, but no such path exists today.
+  const ephemeralPgUnavailableReason = "ephemeral database unavailable";
   let blastRadius: { measured: boolean; severity: string; matches: string[]; summary: string; measurementSkipped?: string; affected?: unknown } = {
     measured: false,
     severity: "additive",
     matches: [],
     summary: "",
-    measurementSkipped: "not attempted",
+    measurementSkipped: ephemeralPgUnavailableReason,
   };
   const dryRunSql = `${preview}\n${cmd}`;
   try {
     const { computeBlastRadius } = await import("../src/lib/migration-safety");
-    const { pgClient } = await import("./_bootstrap");
-    let pg: { query: (s: string) => Promise<{ rowCount: number | null; rows: unknown[] }> } | undefined;
-    let pgClose: (() => Promise<void>) | undefined;
-    try {
-      const client = pgClient();
-      await client.connect();
-      pg = { query: (s: string) => client.query(s) as unknown as Promise<{ rowCount: number | null; rows: unknown[] }> };
-      pgClose = async () => { try { await client.end(); } catch { /* best-effort */ } };
-    } catch {
-      pg = undefined; // pooler unreachable / no creds → measured:false, static severity
-    }
-    try {
-      blastRadius = await computeBlastRadius(dryRunSql, { pg });
-    } finally {
-      if (pgClose) await pgClose();
-    }
+    // Explicitly no `pg`. computeBlastRadius returns measured:false with the
+    // static classifier severity and reason (already `ephemeral database
+    // unavailable`) — zero pg.query calls hit prod from this path.
+    blastRadius = await computeBlastRadius(dryRunSql, {});
   } catch (e) {
-    blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
+    blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: ephemeralPgUnavailableReason };
   }
 
   // Phase 5: adversarial skeptic pass — a BONUS defense-in-depth layer over the
