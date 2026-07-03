@@ -15,7 +15,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyMigrationSql } from "./migration-safety";
+import {
+  classifyMigrationSql,
+  computeBlastRadius,
+  splitSqlStatements,
+  type PgLike,
+} from "./migration-safety";
 import { directorLeashCandidates, type DirectorTargetJob } from "./agents/platform-director";
 
 // ── classifyMigrationSql ───────────────────────────────────────────────────────
@@ -172,4 +177,122 @@ test("categoryFor: run_prod_script bundled with a destructive apply_migration es
   };
   const v = directorLeashCandidates(job);
   assert.equal(v.verdict, "none");
+});
+
+// ── Phase 3: computeBlastRadius ────────────────────────────────────────────────
+
+/** A pg spy that records every query and returns programmable rowCounts. Also proves
+ *  that a real DELETE never persists — the spy tracks a `committed` flag that stays
+ *  false because computeBlastRadius always ROLLBACKs. */
+class PgSpy implements PgLike {
+  calls: string[] = [];
+  committed = false;
+  txOpen = false;
+  rollbackCalled = false;
+  constructor(private readonly rowCounts: Record<string, number | null> = {}) {}
+  async query(sql: string) {
+    this.calls.push(sql);
+    const upper = sql.trim().toUpperCase();
+    if (upper === "BEGIN") { this.txOpen = true; return { rowCount: null, rows: [] }; }
+    if (upper === "COMMIT") { if (this.txOpen) this.committed = true; this.txOpen = false; return { rowCount: null, rows: [] }; }
+    if (upper === "ROLLBACK") { this.rollbackCalled = true; this.txOpen = false; return { rowCount: null, rows: [] }; }
+    // Programmable per-statement rowcount; default null (like DDL).
+    for (const [prefix, count] of Object.entries(this.rowCounts)) {
+      if (sql.trim().toUpperCase().startsWith(prefix.toUpperCase())) {
+        return { rowCount: count, rows: [] };
+      }
+    }
+    return { rowCount: null, rows: [] };
+  }
+}
+
+test("computeBlastRadius: DELETE FROM t WHERE … returns real affected-row count and ROLLBACKs (unchanged after)", async () => {
+  const pg = new PgSpy({ "DELETE FROM orders": 48201 });
+  const r = await computeBlastRadius("DELETE FROM orders WHERE created_at < now() - interval '90 days';", { pg });
+  assert.equal(r.measured, true);
+  assert.equal(r.severity, "additive"); // WHERE-scoped DELETE is not destructive per Phase-1
+  assert.ok(r.affected && r.affected[0].rowCount === 48201);
+  assert.match(r.summary, /48,201 rows from orders/);
+  // ROLLBACK contract — the tx never committed. This is the "row count unchanged afterward" proof.
+  assert.equal(pg.committed, false);
+  assert.equal(pg.rollbackCalled, true);
+  assert.equal(pg.calls[0].toUpperCase(), "BEGIN");
+  assert.equal(pg.calls[pg.calls.length - 1].toUpperCase(), "ROLLBACK");
+});
+
+test("computeBlastRadius: an unfiltered DELETE FROM t reports the destructive severity + the measured count", async () => {
+  const pg = new PgSpy({ "DELETE FROM orders": 1_234_567 });
+  const r = await computeBlastRadius("DELETE FROM orders;", { pg });
+  assert.equal(r.measured, true);
+  assert.equal(r.severity, "irreversible_destructive");
+  assert.match(r.summary, /1,234,567 rows from orders/);
+  assert.match(r.summary, /irreversible$/);
+  assert.equal(pg.rollbackCalled, true);
+});
+
+test("computeBlastRadius: a lock-heavy DDL (ALTER COLUMN TYPE) returns measured:false with the static severity", async () => {
+  const pg = new PgSpy();
+  const r = await computeBlastRadius("ALTER TABLE big_events ALTER COLUMN payload SET DATA TYPE jsonb;", { pg });
+  assert.equal(r.measured, false);
+  assert.equal(r.severity, "additive"); // classifier doesn't flag a plain ALTER TYPE (Phase 1 patterns)
+  assert.match(r.measurementSkipped ?? "", /lock-heavy/i);
+  // Critically: NO BEGIN was issued — we NEVER lock prod to measure.
+  assert.equal(pg.calls.length, 0);
+});
+
+test("computeBlastRadius: no pg client → measured:false with static Phase-1 severity", async () => {
+  const r = await computeBlastRadius("DROP TABLE orders;");
+  assert.equal(r.measured, false);
+  assert.equal(r.severity, "irreversible_destructive");
+  assert.match(r.summary, /measurement skipped: no pg client/);
+});
+
+test("computeBlastRadius: skipDryRun bypasses even when pg is provided", async () => {
+  const pg = new PgSpy({ "DELETE FROM x": 100 });
+  const r = await computeBlastRadius("DELETE FROM x;", { pg, skipDryRun: true });
+  assert.equal(r.measured, false);
+  assert.equal(r.severity, "irreversible_destructive");
+  assert.equal(pg.calls.length, 0);
+});
+
+test("computeBlastRadius: ROLLBACK still runs when a statement mid-migration throws", async () => {
+  class FailingPg implements PgLike {
+    calls: string[] = [];
+    rollbackCalled = false;
+    async query(sql: string) {
+      this.calls.push(sql);
+      if (sql.trim().toUpperCase() === "BEGIN") return { rowCount: null, rows: [] };
+      if (sql.trim().toUpperCase() === "ROLLBACK") { this.rollbackCalled = true; return { rowCount: null, rows: [] }; }
+      throw new Error("simulated pg failure");
+    }
+  }
+  const pg = new FailingPg();
+  const r = await computeBlastRadius("DELETE FROM x WHERE id = 1;", { pg });
+  assert.equal(r.measured, true);
+  assert.ok(r.affected && r.affected[0].error);
+  assert.equal(pg.rollbackCalled, true);
+});
+
+test("computeBlastRadius: additive migration reports 'no destructive rows affected'", async () => {
+  const pg = new PgSpy();
+  const r = await computeBlastRadius("ALTER TABLE x ADD COLUMN y int;", { pg });
+  assert.equal(r.measured, true);
+  assert.equal(r.severity, "additive");
+  assert.match(r.summary, /no destructive rows affected/);
+});
+
+// ── splitSqlStatements ────────────────────────────────────────────────────────
+
+test("splitSqlStatements: respects dollar-quoted bodies (`;` inside $$…$$ is not a separator)", () => {
+  const sql = "DO $$ BEGIN INSERT INTO t VALUES(1); END $$;\nALTER TABLE t ADD COLUMN y int;";
+  const parts = splitSqlStatements(sql);
+  assert.equal(parts.length, 2);
+  assert.match(parts[0], /DO \$\$/);
+  assert.match(parts[1], /ADD COLUMN/);
+});
+
+test("splitSqlStatements: respects single-quoted strings", () => {
+  const sql = "INSERT INTO t (name) VALUES ('a;b;c'); UPDATE t SET x=1;";
+  const parts = splitSqlStatements(sql);
+  assert.equal(parts.length, 2);
 });

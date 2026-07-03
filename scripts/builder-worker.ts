@@ -10934,6 +10934,42 @@ async function applyOutOfLeashRequestActionInline(
   if (!reasoning) return logInvalid("reasoning is required (why it's right + why it's out of leash)");
   if (!reversibility) return logInvalid("reversibility is required (reversible via X, or 'irreversible — <why>')");
 
+  // destructive-migration-safety-rails Phase 3 — computed blast-radius via transactional
+  // dry-run. REPLACE the self-declared `reversibility` string with a MEASURED fact so
+  // the CEO sees a real row count, not Ada's free-text. Falls back to `measured:false`
+  // + static Phase-1 severity when the SQL isn't dry-runnable (lock-heavy DDL, no SQL
+  // in preview for a shell-wrapped apply_migration, or the pg pooler unreachable). We
+  // NEVER lock prod to measure.
+  let blastRadius: { measured: boolean; severity: string; matches: string[]; summary: string; measurementSkipped?: string; affected?: unknown } = {
+    measured: false,
+    severity: "additive",
+    matches: [],
+    summary: "",
+    measurementSkipped: "not attempted",
+  };
+  try {
+    const { computeBlastRadius } = await import("../src/lib/migration-safety");
+    const dryRunSql = `${preview}\n${cmd}`;
+    const { pgClient } = await import("./_bootstrap");
+    let pg: { query: (s: string) => Promise<{ rowCount: number | null; rows: unknown[] }> } | undefined;
+    let pgClose: (() => Promise<void>) | undefined;
+    try {
+      const client = pgClient();
+      await client.connect();
+      pg = { query: (s: string) => client.query(s) as unknown as Promise<{ rowCount: number | null; rows: unknown[] }> };
+      pgClose = async () => { try { await client.end(); } catch { /* best-effort */ } };
+    } catch {
+      pg = undefined; // pooler unreachable / no creds → measured:false, static severity
+    }
+    try {
+      blastRadius = await computeBlastRadius(dryRunSql, { pg });
+    } finally {
+      if (pgClose) await pgClose();
+    }
+  } catch (e) {
+    blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
+  }
+
   // Dedupe: an active same-(thread, actionType, cmd) request already lives → don't double-raise. A different
   // cmd (or a fresh thread) is a fresh out-of-leash ask. We match on the row's `instructions` JSON tag.
   const dedupeKey = `${threadId}::${actionType}::${cmd}`;
@@ -10980,11 +11016,18 @@ async function applyOutOfLeashRequestActionInline(
   // cap and swallow the cmd, truncate the trailing user-supplied blob instead and re-append a truncation-flagged
   // cmd line, so the byte-identical command is never lost to a slice.
   const cmdLine = `$ ${cmd}`;
+  // Phase 3: the CEO card shows the MEASURED blast-radius (from the transactional
+  // dry-run) instead of Ada's self-declared `reversibility` text. When the dry-run
+  // couldn't run (lock-heavy / no SQL / pooler unreachable) we fall through to the
+  // static Phase-1 severity with the reason surfaced — never Ada's free-text alone.
+  const blastRadiusLine = blastRadius.measured
+    ? `Blast-radius (measured, ROLLBACK-proven): ${blastRadius.summary}`
+    : `Blast-radius (static — ${blastRadius.measurementSkipped ?? "not measured"}): ${blastRadius.summary || reversibility}`;
   const rawPreview = [
     `Out-of-leash — awaiting CEO authorization.`,
     founderAsk ? `Founder's ask: ${founderAsk}` : "",
     `Ada's reasoning: ${reasoning}`,
-    `Reversibility: ${reversibility}`,
+    blastRadiusLine,
     bodyLine ? bodyLine.trim() : "",
     cmdLine,
     preview ? `Preview:\n${preview}` : "",
@@ -11004,14 +11047,19 @@ async function applyOutOfLeashRequestActionInline(
     out_of_leash: true,
     authorized_by: "ceo-pending",
     irreversible,
-    reversibility,
+    // Phase 3 — COMPUTED blast-radius from the transactional dry-run replaces the
+    // self-declared reversibility field on the surface. We KEEP `reversibility` for
+    // back-compat downstream (the executor's audit rows still read it), but the CEO
+    // card + log_tail now show `blastRadius.summary` (measured or static-with-reason).
+    reversibility: blastRadius.summary || reversibility,
+    blastRadius,
   };
   const logTail = [
     `🛠️ Ada (${directorFunction}) raised an out-of-leash Approval Request — CEO in the loop.`,
     founderAsk ? `Founder's ask: ${founderAsk}` : "",
     `Action (${actionType}): ${summary}`,
     `Reasoning: ${reasoning}`,
-    `Reversibility: ${reversibility}${irreversible ? " (flagged irreversible)" : ""}`,
+    blastRadiusLine + (irreversible ? " (flagged irreversible)" : ""),
     leashRail ? `Leash rail: ${leashRail}` : "",
     `$ ${cmd}`,
   ].filter(Boolean).join("\n");
@@ -11030,6 +11078,10 @@ async function applyOutOfLeashRequestActionInline(
     out_of_leash: true,
     authorized_by: "ceo-pending",
     dedupe_key: dedupeKey,
+    // Phase 3 — persist the computed blast-radius so the executor's audit rows
+    // (executed_ceo_authorized_out_of_leash / ceo_declined_out_of_leash_request) can
+    // record the measured fact alongside the CEO's decision.
+    blast_radius: blastRadius,
   });
 
   const { data: inserted, error } = await db

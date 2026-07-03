@@ -42,14 +42,42 @@ function classifyMigrationSql(sql: string): {
 };
 ```
 
-### `MigrationSeverity` — type
+### `computeBlastRadius` — async function ([[../specs/destructive-migration-safety-rails]] Phase 3)
 
-### `MigrationClassification` — interface
+```ts
+async function computeBlastRadius(sql: string, opts?: {
+  pg?: PgLike;              // injected client; when absent → measured:false
+  skipDryRun?: boolean;     // caller declares "don't dry-run this against prod"
+  lockHeavy?: boolean;      // force lock-heavy classification (usually auto-detected)
+}): Promise<{
+  measured: boolean;                                // false when skipped
+  severity: MigrationSeverity;                      // Phase-1 static severity (authoritative)
+  matches: string[];                                // Phase-1 rails that fired
+  summary: string;                                  // plain-English (e.g. "deletes 48,201 rows from orders — irreversible")
+  affected?: { statement: string; rowCount: number | null; error?: string }[];
+  measurementSkipped?: string;                      // reason when measured:false
+}>;
+```
+
+Runs the migration inside `BEGIN → each statement → ROLLBACK` on the injected `PgLike` (typically a `pg.Client` connected to the Supabase pooler). The transaction NEVER commits — the `ROLLBACK` sits in a `finally` so even a mid-migration exception unwinds cleanly. Per-statement rowcounts are captured and rolled into a human summary (e.g. `deletes 48,201 rows from orders — irreversible`). The Phase-1 static severity stays authoritative for the leash decision — a measured 0-row DELETE still classifies destructive if the classifier flagged the SQL.
+
+**Never locks prod to measure.** Lock-heavy DDL (`ALTER TABLE … ALTER COLUMN … SET DATA TYPE` — a table rewrite that holds `ACCESS EXCLUSIVE`) is detected up front and returns `{ measured: false }` with a `measurementSkipped: "lock-heavy DDL …"` reason instead. The caller can pass `skipDryRun: true` for an explicit bypass. An ephemeral Supabase branch DB is the future path — the injected-`PgLike` accepts one unchanged.
+
+### `splitSqlStatements` — function
+
+Splits a SQL blob into per-statement chunks. Respects `-- …` / `/* … */` comments, `$$…$$` and `$tag$…$tag$` dollar-quoted bodies (a `;` inside a plpgsql function body is NOT a separator), and single-quoted strings (with `''` doubling). Used by `computeBlastRadius`; exported so callers can walk the same statement stream for their own dry-run wrappers.
+
+### `PgLike` — interface
+
+Minimal pg-Client shape (`query(sql: string): Promise<{ rowCount, rows }>`). The real `pg.Client` satisfies it directly; tests inject a spy that records `BEGIN` / statement / `ROLLBACK` calls.
+
+### `BlastRadius` · `BlastRadiusStatement` · `MigrationSeverity` · `MigrationClassification` — types / interfaces
 
 ## Callers
 
 - `src/lib/agents/platform-director.ts` — `categoryFor` runs the classifier over the pending action's `cmd`+`preview` before returning `additive_migration` / `additive_backfill`; a non-additive severity forces `null` (out of leash, whole bundle escalates).
-- `src/lib/migration-safety.test.ts` — pins the Phase-1 verification cases (`npm run test:migration-safety`).
+- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the measured summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. `pgClient()` is opened, `BEGIN → each stmt → ROLLBACK` runs, then the connection is closed — a pooler-unreachable environment falls through to `measured:false`.
+- `src/lib/migration-safety.test.ts` — pins the Phase-1 + Phase-3 verification cases (`npm run test:migration-safety`).
 
 ## Gotchas
 
