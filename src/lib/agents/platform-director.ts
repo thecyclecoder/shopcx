@@ -2449,12 +2449,17 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
         ? "parked with an inconclusive QC result that couldn't be auto-recovered"
         : "parked and nothing automated can resolve it";
     const diagnosis = `A ${kind} job is parked in needs_attention: it ${why}. Reason: ${error || "(none recorded)"}. Detail: ${excerpt}`.slice(0, 4000);
+    // Per-PR escalation dedupe (pr-resolve storm fix, 2026-07-03): every parked pr-resolve job for one PR
+    // shares `spec_slug` = `pr-<n>`, so key the CEO card on the PR (spec_slug) rather than the job id — N
+    // retries against a superseded/un-mergeable PR collapse to ONE inbox card instead of one per job (two
+    // superseded PRs had produced 11+ near-identical "Parked pr-resolve" cards). Other kinds stay per-job.
+    const parkDedupeKey = kind === "pr-resolve" && specSlug ? `needsattn:${specSlug}` : `needsattn:${j.id}`;
     const r = await escalateDiagnosisToCeo(admin, {
       workspaceId,
       specSlug,
       title: `Parked ${kind}${specSlug ? `: ${specSlug}` : ""}`,
       diagnosis,
-      dedupeKey: `needsattn:${j.id}`,
+      dedupeKey: parkDedupeKey,
       deepLink,
       escalationKind: "needs_attention",
       metadata: { kind: "needs_attention_triage", job_id: j.id, target_kind: kind, error, loop_guard: alreadyReran },
