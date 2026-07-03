@@ -2,7 +2,7 @@
 
 The wiring on the **founder's Mac** that feeds the Max/Codex sides of the [[../dashboard/developer__usage|/dashboard/developer/usage]] cockpit. Like [[founder-pulse-capture]], it lives *outside* the repo/box because the deployed app and the [[build-box-setup|build box]] **cannot reach the founder's filesystem** — the raw Claude/Codex session logs only exist locally, so the rollup has to be *pushed* from the machine they live on.
 
-Tracking: the feature itself is the **`fleet-usage-cockpit` spec** (a row in `public.specs` — see [[../project-management]]). This page documents only the already-installable local reporter wiring.
+Tracking: the feature itself is archived in [[../archive.d/fleet-usage-cockpit]] (formerly a row in `public.specs` — see [[../project-management]]). This page documents only the already-installable local reporter wiring.
 
 ## The reporter chain
 
@@ -122,8 +122,8 @@ rm ~/Library/LaunchAgents/ai.shopcx.usage-report.plist
 
 - Phase 1 (already merged): the box's `rollupBoxAccountUsage` writes `source='box'` snapshots; wall events are recorded on cap detection so `discoverLimit(account, window_kind)` converges toward the true hidden Max limit. See [[../libraries/usage-snapshots]] + [[../tables/usage_wall_events]].
 - Phase 2 (this page): the Mac reporter route + script + these local triggers.
-- Phase 3 (upcoming): the `/dashboard/developer/usage` cockpit page that sums box+mac per account.
+- Phase 3 (shipped): the `/dashboard/developer/usage` cockpit page that sums box+mac per account.
 
 ## Related
 
-[[founder-pulse-capture]] · [[build-box-setup]] · [[../tables/account_usage_snapshots]] · [[../tables/usage_wall_events]] · [[../libraries/usage-snapshots]] · [[../specs/fleet-usage-cockpit]] · [[../functions/platform]]
+[[founder-pulse-capture]] · [[build-box-setup]] · [[../tables/account_usage_snapshots]] · [[../tables/usage_wall_events]] · [[../libraries/usage-snapshots]] · [[../archive.d/fleet-usage-cockpit]] · [[../functions/platform]]

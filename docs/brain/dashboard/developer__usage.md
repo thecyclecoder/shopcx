@@ -1,6 +1,6 @@
 # Dashboard · developer/usage
 
-Fleet usage cockpit — 4 Max Round Robin lanes + Codex account cards (tokens + rate-limit proximity, NEVER $), departments panel (rollupFleetCost per owner_function + fleet_budgets ceilings + breach flag), and API $ panel (real usage_cost_cents by model/purpose + cache-read split). Two-currency honesty. Claude limit = burn / discoverLimit(account, window_kind) once ≥1 wall is sampled, else 'learning…'; Codex limit = reported /status %. Owner-gated. Phase 3 of [[../specs/fleet-usage-cockpit]].
+Fleet usage cockpit — 4 Max Round Robin lanes + Codex account cards (tokens + rate-limit proximity, NEVER $), departments panel (rollupFleetCost per owner_function + fleet_budgets ceilings + breach flag), and API $ panel (real usage_cost_cents by model/purpose + cache-read split). Two-currency honesty. Claude limit = burn / discoverLimit(account, window_kind) once ≥1 wall is sampled, else 'learning…'; Codex limit = reported /status %. Owner-gated. Phase 3 of [[../archive.d/fleet-usage-cockpit]].
 
 **Route:** `/dashboard/developer/usage`
 
@@ -45,6 +45,6 @@ _None._
 
 ## Related
 
-[[developer__pulse]] · [[../tables/account_usage_snapshots]] · [[../tables/usage_wall_events]] · [[../tables/agent_job_costs]] · [[../tables/ai_token_usage]] · [[../tables/fleet_budgets]] · [[../libraries/usage-snapshots]] · [[../libraries/fleet-cost]] · [[../libraries/fleet-spend-governor]] · [[../libraries/ai-usage]] · [[../libraries/developer-nav]] · [[../specs/fleet-usage-cockpit]] · [[../recipes/mac-usage-reporter]] · [[../functions/platform]]
+[[developer__pulse]] · [[../tables/account_usage_snapshots]] · [[../tables/usage_wall_events]] · [[../tables/agent_job_costs]] · [[../tables/ai_token_usage]] · [[../tables/fleet_budgets]] · [[../libraries/usage-snapshots]] · [[../libraries/fleet-cost]] · [[../libraries/fleet-spend-governor]] · [[../libraries/ai-usage]] · [[../libraries/developer-nav]] · [[../archive.d/fleet-usage-cockpit]] · [[../recipes/mac-usage-reporter]] · [[../functions/platform]]
 
 ---

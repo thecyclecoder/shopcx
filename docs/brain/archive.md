@@ -18,6 +18,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
 - **Destructive-migration safety rails** · verified 2026-07-03 · → [[../libraries/migration-safety]]
 - **Director-KPI SDK — one DB-derived source for every scorecard/recap metric** · verified 2026-07-03 · → [[libraries/director-kpis]]
+- **Fleet usage cockpit** — verified 2026-07-03 · → [[../tables/account_usage_snapshots]] + [[../tables/usage_wall_events]] + [[../libraries/usage-snapshots]] + [[../recipes/mac-usage-reporter]] + [[../dashboard/developer__usage]]
 - **Founder Pulse** · verified 2026-07-03 · → [[../lifecycles/founder-pulse]] (founder supervisory intelligence surface)
 - **Internal renewal: advance next_billing_date on zero-total skip so 100%-off subs don't stall the renewal tile** · verified 2026-07-03 · → [[../inngest/internal-subscription-renewals]]
 - **Weekly KPI snapshot done-guard forces pre-SDK stale-row re-write** · verified 2026-07-03 · → [[inngest/platform-director-cron]]

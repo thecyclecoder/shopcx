@@ -1,0 +1,1 @@
+- **Fleet usage cockpit** — verified 2026-07-03 · → [[../tables/account_usage_snapshots]] + [[../tables/usage_wall_events]] + [[../libraries/usage-snapshots]] + [[../recipes/mac-usage-reporter]] + [[../dashboard/developer__usage]]
