@@ -34,6 +34,20 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 
 **Indexes:** `(workspace_id, domain)`, `(workspace_id, teardown_verdict)` — browse-by-domain + Rhea's queue-by-verdict.
 
+## Recipe shape (`teardown` jsonb)
+
+`teardown` stores a `TeardownRecipe` (see [[../libraries/research-urls]] for the full `TeardownRecipe` / `TeardownLever` type + [[../recipes/lander-teardown]] for the fully-worked erthlabs 8-reasons example). Field-by-field:
+
+- **`funnel_type`** (string) — broad classification: `"advertorial-listicle"`, `"quiz"`, `"generic_pdp"`, …
+- **`strategy`** (string) — one-sentence summary of the funnel play.
+- **`architecture`** — ORDERED list of `{ chapter_role, purpose }` from hero → intro/proof → … → offer → faq → testimonials. The skeleton Cleo diffs against.
+- **`reason_sequence`** — OPTIONAL. Present for listicle-style landers: `{ order, benefit, appeal ∈ emotion|logic, mechanism }` per numbered reason.
+- **`levers`** — Non-empty list of `{ lever, evidence }`. `lever` is one of `authority | social_proof | ugc | urgency | price_anchor | risk_reversal | value_stack | objection_handling | specificity | bandwagon | choice_simplicity`. `evidence` is the CONCRETE beat Rhea saw (e.g. `"'50,000+ happy customers' + testimonials chapter at the end"`).
+- **`offer`** — `{ discount?, bundle?, bonuses?[], guarantee?, urgency?, options }`. `options` is the count of purchase paths (1 = single option, the erthlabs default).
+- **`transferable_pattern`** — Non-empty product-agnostic string. The skeleton we could port to a Superfoods lander.
+
+The write path (`setTeardown` in [[../libraries/research-urls]]) runs `validateTeardownRecipe` and REJECTS a half-formed recipe — empty `architecture`, empty `levers`, missing `transferable_pattern`, unknown lever tag, or non-positive `offer.options` all throw before the row is touched.
+
 ## RLS
 
 - `research_urls_select` — `authenticated` read where `workspace_id` ∈ caller's `workspace_members`.
@@ -49,7 +63,7 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 
 ## Written by
 
-[[../libraries/research-urls]] (`syncResearchUrlsFromCreatives` — the ONLY write path for INSERTs; the SDK's `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` land Phase 2's classifier writes) ← [[../inngest/creative-finder]] (`creative-finder-daily-cron`, `creative-finder-manual-sweep`) + [[builder-worker]] `runResearchJob` (Phase 2 — captures via [[../recipes/lander-capture]] then applies Rhea's decisions via the SDK).
+[[../libraries/research-urls]] (`syncResearchUrlsFromCreatives` — the ONLY write path for INSERTs; the SDK's `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` / `setTeardown` land Phase 2's classifier writes) ← [[../inngest/creative-finder]] (`creative-finder-daily-cron`, `creative-finder-manual-sweep`) + [[builder-worker]] `runResearchJob` (Phase 2 — captures via [[../recipes/lander-capture]] then applies Rhea's decisions via the SDK, including the same-session structured teardown for worthy URLs — [[../recipes/lander-teardown]]).
 
 ## Read by
 
@@ -57,4 +71,4 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 
 ## Related
 
-[[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../libraries/landing-page-scout]] · [[../functions/growth]]
+[[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[../libraries/landing-page-scout]] · [[../functions/growth]]
