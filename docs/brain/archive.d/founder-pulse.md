@@ -1,0 +1,1 @@
+- **Founder Pulse** · verified 2026-07-03 · → [[../lifecycles/founder-pulse]] (founder supervisory intelligence surface)

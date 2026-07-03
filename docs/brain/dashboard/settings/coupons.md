@@ -47,10 +47,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/coupons/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/coupon_mappings]] · [[../../recipes/apply-coupon]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

@@ -33,10 +33,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/subscriptions/page.tsx` — the page itself
 - `src/app/dashboard/subscriptions/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/subscriptions]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/dunning]] · [[../recipes/pause-sub]] · [[../recipes/resume-sub]] · [[../recipes/cancel-sub-via-journey]] · [[../recipes/bill-now]] · [[../recipes/change-next-date]] · [[../recipes/swap-variant]] · [[../recipes/change-line-item-price]] · [[../recipes/apply-coupon]] · [[../integrations/appstle]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

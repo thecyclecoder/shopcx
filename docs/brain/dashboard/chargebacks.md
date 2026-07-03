@@ -36,10 +36,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/chargebacks/page.tsx` — the page itself
 
-## Related
-
-[[../tables/chargeback_events]] · [[../tables/chargeback_subscription_actions]] · [[../lifecycles/chargeback-pipeline]] · [[settings/chargebacks]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

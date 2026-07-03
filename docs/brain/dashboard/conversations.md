@@ -24,10 +24,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/conversations/page.tsx` — the page itself
 
-## Related
-
-[[../tables/tickets]] · [[../tables/ticket_messages]] · [[../lifecycles/ticket-lifecycle]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

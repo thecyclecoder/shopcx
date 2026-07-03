@@ -1,6 +1,6 @@
 # Dashboard · demographics
 
-Customer demographics dashboard. Age band, household income, geo. Cohort snapshots. End-to-end pipeline in [[../lifecycles/demographic-enrichment]].
+Customer demographics dashboard. Age band, household income, geo. Cohort snapshots.
 
 **Route:** `/dashboard/demographics`
 
@@ -28,10 +28,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 ## Files touched
 
 - `src/app/dashboard/demographics/page.tsx` — the page itself
-
-## Related
-
-[[../tables/customer_demographics]] · [[../tables/demographics_snapshots]] · [[../tables/zip_code_demographics]] · [[../inngest/customer-demographics]]
 
 ---
 

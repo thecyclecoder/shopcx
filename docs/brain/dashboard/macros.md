@@ -34,10 +34,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/macros/page.tsx` — the page itself
 - `src/app/dashboard/macros/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/macros]] · [[../tables/macro_usage_log]] · [[../lifecycles/ai-multi-turn]] · [[../libraries/rag]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

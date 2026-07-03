@@ -37,10 +37,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/reviews/page.tsx` — the page itself
 
-## Related
-
-[[../tables/product_reviews]] · [[../tables/product_review_analysis]] · [[../inngest/sync-reviews]] · [[../integrations/klaviyo]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

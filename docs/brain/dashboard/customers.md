@@ -35,10 +35,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 - `src/app/dashboard/customers/page.tsx` — the page itself
 - `src/app/dashboard/customers/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/customers]] · [[../tables/customer_links]] · [[../tables/customer_events]] · [[../lifecycles/customer-link-confirmation]] · [[../tables/loyalty_members]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]
