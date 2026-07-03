@@ -2462,6 +2462,27 @@ async function readDrainControl(): Promise<{ draining: boolean; requestedAtSha: 
     return { draining: false, requestedAtSha: null, requestedAt: null }; // a read failure must never strand the box draining
   }
 }
+// Egress guard for the poll loop: one cheap existence read of whether ANY job is claimable right
+// now, so an idle box can skip the ~20 per-kind claim_agent_job RPCs it would otherwise fire (and
+// get 20 empty responses from) every POLL_MS tick — the top PostgREST-egress driver we found. This
+// mirrors claim_agent_job's EXACT claimable predicate (status in queued/queued_resume AND
+// (claimed_at is null OR claimed_at <= now())), so a `false` result means nothing is claimable and
+// no lane is ever starved. Fails OPEN: a read error returns null ⇒ the caller polls all lanes as
+// normal, so a transient DB hiccup never stalls the build queue.
+async function hasClaimableJob(): Promise<boolean | null> {
+  try {
+    const { data, error } = await db
+      .from("agent_jobs")
+      .select("id")
+      .in("status", ["queued", "queued_resume"])
+      .or(`claimed_at.is.null,claimed_at.lte.${new Date().toISOString()}`)
+      .limit(1);
+    if (error) return null;
+    return (data?.length ?? 0) > 0;
+  } catch {
+    return null;
+  }
+}
 async function clearDrain(reason: string): Promise<void> {
   try {
     await db.from("worker_controls").update({ drain_for_update: false, updated_at: new Date().toISOString() }).eq("box_id", WORKER_BOX_ID);
@@ -17278,7 +17299,11 @@ async function main() {
       // lanes finish so the box reaches idle and the self-update below fires. The heartbeat + maybeSelfUpdate
       // still run; only the claim block is gated. New work piles up `queued` and runs after the SHA advances.
       const { draining } = await readDrainControl();
-      if (!draining) {
+      // Egress guard: skip the whole per-kind claim block when nothing is claimable, so an idle box
+      // doesn't fire ~20 empty claim_agent_job RPCs/tick. false ⇒ nothing queued (skip); true or null
+      // (read error) ⇒ poll as normal (fail-open — never stalls the queue). See hasClaimableJob.
+      const claimable = await hasClaimableJob();
+      if (!draining && claimable !== false) {
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
       while (countFold() < MAX_FOLD) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold", "goal-fold"] });
