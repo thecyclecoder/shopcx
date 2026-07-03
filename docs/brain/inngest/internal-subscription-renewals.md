@@ -17,6 +17,7 @@ Renews `subscriptions.is_internal=true` rows on schedule (post-Appstle scheduler
 - **Retries:** 3
 - **Concurrency:** `concurrency: [{ limit: 10 }]`
 - **Outcome beats:** every terminal path emits ONE `emitRenewalOutcomeHeartbeat(outcome)` ([[../libraries/control-tower]]) — `charged` · `declined_to_dunning` · `skipped_no_payment_method` · `skipped_zero_total` · `comp_shipped` · `comp_blocked` (comp gate / not-allowlisted) · `skipped_other` (benign not_internal/status/no_customer state changes). The only uniform channel that captures SKIPS (which write no transaction row), feeding the Control Tower **outcome-distribution** assertion. Uncaught errors aren't beat — a sub that errored never advances, so it's caught by the **renewal-integrity** overdue assertion instead.
+- **Zero-total skip advances the calendar:** the `skipped_zero_total` branch (100%-off coupon, free shipping, no tax) runs `zero-total-advance-next-billing-date` after the heartbeat — same interval math as the comp/success branches, drops one-time items. Without it a $0 sub sits at yesterday's `next_billing_date` forever, gets re-picked every cron run, and pins the Control Tower **renewal-integrity** tile red. The other two exit paths (comp shipped, successful charge) already advance; this closes the last calendar-advance gap. No $0 order is emitted — that scope-of-work question (do free-by-coupon subs ship product?) lives in a separate spec.
 
 
 ## Comp branch (free subs)

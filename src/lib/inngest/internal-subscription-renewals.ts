@@ -539,6 +539,32 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     const totalCents = Math.max(0, subtotalCents - discountCents) + shippingCents + protectionCents + taxCents;
     if (totalCents <= 0) {
       await step.run("emit-outcome-zero-total", () => emitRenewalOutcomeHeartbeat("skipped_zero_total"));
+      // Advance next_billing_date so a $0 renewal (e.g. 100%-off coupon) still
+      // rolls the calendar forward — otherwise the sub stays overdue and the
+      // Control Tower renewal-integrity tile flips red every day. Mirrors the
+      // comp branch's advance step; drops any spent one-time items.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const zeroDroppedOneTime = ((ctx.sub.items as any[]) || []).some((i) => i?.one_time_next_renewal === true);
+      await step.run("zero-total-advance-next-billing-date", async () => {
+        const interval = (ctx.sub.billing_interval || "day").toLowerCase();
+        const count = ctx.sub.billing_interval_count || 1;
+        const current = ctx.sub.next_billing_date ? new Date(ctx.sub.next_billing_date) : new Date();
+        const next = new Date(current);
+        if (interval === "day") next.setUTCDate(next.getUTCDate() + count);
+        else if (interval === "week") next.setUTCDate(next.getUTCDate() + count * 7);
+        else if (interval === "month") next.setUTCMonth(next.getUTCMonth() + count);
+        else if (interval === "year") next.setUTCFullYear(next.getUTCFullYear() + count);
+        else next.setUTCDate(next.getUTCDate() + count * 28);
+        const update: Record<string, unknown> = {
+          next_billing_date: next.toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        if (zeroDroppedOneTime) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          update.items = ((ctx.sub.items as any[]) || []).filter((i) => !i?.one_time_next_renewal);
+        }
+        await admin.from("subscriptions").update(update).eq("id", subscription_id);
+      });
       return { skipped: true, reason: "zero_total" };
     }
 
