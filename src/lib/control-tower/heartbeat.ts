@@ -28,21 +28,53 @@ export interface HeartbeatInput {
   durationMs?: number;
 }
 
+/**
+ * In-memory ≤1/min-per-loop coalesce. Liveness only needs "this loop ran recently",
+ * so at most one beat per loop_id per minute is plenty (even 1/min is fine). Without
+ * this, per-EVENT emitters (a beat per ticket analyzed / order fraud-checked / journey
+ * delivered / renewal) each fire a PostgREST INSERT on every event — pure egress waste.
+ * This collapses that flood to one write per loop per minute.
+ *
+ * Two carve-outs so we never lose signal:
+ *   - ok:false beats ALWAYS write — the error-rate + liveness-when-work-exists assertions
+ *     must see every failure.
+ *   - Aggregation channels (RENEWAL_OUTCOME_LOOP_ID) ALWAYS write — each beat is a COUNTED
+ *     record (outcome distribution), not a liveness ping; coalescing would corrupt the counts.
+ *
+ * Best-effort, like the rest of this module. The map is bounded (one entry per loop_id, and
+ * loop_ids are a finite registered set). On a fresh process the first beat per loop always
+ * writes (liveness is fresh on boot). Per-process: on serverless this coalesces within a warm
+ * instance; across instances you get at most ~1/min each — still an orders-of-magnitude cut.
+ */
+const HEARTBEAT_COALESCE_MS = 60_000;
+const lastBeatAt = new Map<string, number>();
+/** loop_ids whose beats are AGGREGATED (counted), not liveness — never coalesced. */
+const NEVER_COALESCE = new Set<string>([RENEWAL_OUTCOME_LOOP_ID]);
+
 export async function emitLoopHeartbeat(
   loopId: string,
   kind: LoopKind,
   input: HeartbeatInput = {},
 ): Promise<void> {
+  const ok = input.ok ?? true;
+  const now = Date.now();
+  // Coalesce successful liveness beats to ≤1/min per loop. Failures + aggregation channels
+  // always fall through to a write.
+  if (ok && !NEVER_COALESCE.has(loopId)) {
+    const last = lastBeatAt.get(loopId);
+    if (last !== undefined && now - last < HEARTBEAT_COALESCE_MS) return;
+  }
+  lastBeatAt.set(loopId, now);
   try {
     const admin = createAdminClient();
     await admin.from("loop_heartbeats").insert({
       loop_id: loopId,
       kind,
-      ok: input.ok ?? true,
+      ok,
       produced: input.produced ?? null,
       detail: input.detail ?? null,
       duration_ms: input.durationMs ?? null,
-      ran_at: new Date().toISOString(),
+      ran_at: new Date(now).toISOString(),
     });
   } catch (e) {
     console.warn(`[control-tower] heartbeat write failed for ${loopId}:`, e instanceof Error ? e.message : e);
