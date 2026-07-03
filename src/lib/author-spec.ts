@@ -658,6 +658,79 @@ async function reopenIfReauthoredAndChanged(
  * Verification is a HARD error: a phase with an empty `verification` throws `MissingVerificationError` BEFORE
  * the DB write (an untestable spec never lands). A genuine DB/upsert error is best-effort (logged → `false`).
  */
+// ── Runaway-authoring circuit-breaker (2026-07-03 incident) ──────────────────────────────────────
+// A single security finding recursively authored a chain of near-duplicate fix specs (the fused pre-merge
+// review of a fix-spec's OWN branch found a vuln → authored another fix spec → …). The security→fix-phases
+// reroute + the fix-blocker→fix-phases reroute remove the two KNOWN spawners; this is the CATCH-ALL backstop
+// at the sole author chokepoint: if DERIVATIVE fix specs are being authored faster than a human could be
+// driving them, HALT the next one + escalate to the CEO instead of silently spawning more. Fails OPEN — a
+// read blip never blocks a legitimate author.
+const RUNAWAY_FIX_WINDOW_MIN = 30;
+const RUNAWAY_FIX_THRESHOLD = 5; // the 6th derivative-fix spec authored inside the window halts + escalates
+const DERIVATIVE_FIX_SLUG_RE = /-fix-blocker-|-fix-tooling-|-fix-/;
+
+/** Count derivative-fix specs authored in the window; at/over threshold, HALT + escalate to the CEO. */
+async function isRunawayFixAuthoring(workspaceId: string, slug: string): Promise<boolean> {
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const since = new Date(Date.now() - RUNAWAY_FIX_WINDOW_MIN * 60_000).toISOString();
+    const { data } = await admin
+      .from("specs")
+      .select("slug, parent, repair_signature, regression_of_slug, created_at")
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since);
+    const recentFixes = (data ?? []).filter(
+      (r) =>
+        !!r.repair_signature ||
+        !!r.regression_of_slug ||
+        DERIVATIVE_FIX_SLUG_RE.test(String(r.slug)) ||
+        (typeof r.parent === "string" && r.parent.includes("../specs/")),
+    );
+    if (recentFixes.length < RUNAWAY_FIX_THRESHOLD) return false;
+    const diagnosis =
+      `Runaway auto-authoring detected: ${recentFixes.length} derivative fix spec(s) authored in the last ` +
+      `${RUNAWAY_FIX_WINDOW_MIN} min (threshold ${RUNAWAY_FIX_THRESHOLD}). Halted the author of "${slug}" and ` +
+      `escalated instead of spawning another. Recent: ${recentFixes.map((r) => r.slug).slice(0, 12).join(", ")}.`;
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "escalated",
+        specSlug: slug,
+        reason: diagnosis,
+        metadata: { signature: "runaway-fix-authoring-circuit-breaker", halted_slug: slug, window_min: RUNAWAY_FIX_WINDOW_MIN, recent_count: recentFixes.length },
+      });
+    } catch { /* best-effort */ }
+    // One CEO card per workspace for a runaway burst (dedupe_key), only if none is already live.
+    try {
+      const dedupeKey = `runaway-authoring:${workspaceId}`;
+      const { data: existingCard } = await admin
+        .from("dashboard_notifications")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("metadata->>dedupe_key", dedupeKey)
+        .eq("dismissed", false)
+        .maybeSingle();
+      if (!existingCard) {
+        await admin.from("dashboard_notifications").insert({
+          workspace_id: workspaceId,
+          type: "agent_approval_request",
+          title: `Runaway spec authoring halted (${recentFixes.length} fixes / ${RUNAWAY_FIX_WINDOW_MIN}m)`,
+          body: `🛑 Platform circuit-breaker: ${diagnosis}`,
+          link: "/dashboard/roadmap",
+          metadata: { routed_to_function: "ceo", escalation_kind: "runaway_authoring", dedupe_key: dedupeKey, autonomous: true },
+        });
+      }
+    } catch { /* best-effort */ }
+    console.warn(`[author-spec] CIRCUIT-BREAKER halted ${slug}: ${recentFixes.length} derivative fixes in ${RUNAWAY_FIX_WINDOW_MIN}m`);
+    return true;
+  } catch {
+    return false; // fail OPEN — never block a legitimate author on a breaker read blip
+  }
+}
+
 export async function authorSpecRowStructured(
   workspaceId: string,
   slug: string,
@@ -732,6 +805,17 @@ export async function authorSpecRowStructured(
       existing = await getSpec(workspaceId, slug);
     } catch {
       existing = null;
+    }
+    // Runaway-authoring circuit-breaker: only a BRAND-NEW DERIVATIVE fix spec can trip it (a re-author of an
+    // existing slug, a planner milestone parented to a goal, or a human/spec-chat author never does). At the
+    // threshold it halts + escalates and returns false — the caller already treats false as "author failed."
+    const isDerivativeFix =
+      !!opts.repairSignature ||
+      !!opts.regressionOfSlug ||
+      DERIVATIVE_FIX_SLUG_RE.test(slug) ||
+      (typeof spec.parent === "string" && spec.parent.includes("../specs/"));
+    if (!existing && isDerivativeFix && (await isRunawayFixAuthoring(workspaceId, slug))) {
+      return false;
     }
     const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
       position: i + 1,
