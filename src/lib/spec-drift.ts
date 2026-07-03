@@ -93,8 +93,19 @@ const MIGRATION_RE = /\b(\d{14}_[\w-]+\.sql)\b/g;
 export function extractCodePaths(body: string): string[] {
   const out = new Set<string>();
   for (const m of body.matchAll(PATH_RE)) {
+    const p = m[0];
+    // Exclude disposable one-off scripts (`scripts/_*`): per the `_author-*` / `_analyze-*` / `_probe-*`
+    // convention these are per-task THROWAWAY scaffolding (a scout's competitor-analysis run, an authoring
+    // one-off) — never the durable capability a phase ships. A phase referencing one, usually in its
+    // verification ("run scripts/_analyze-erth-lander.ts to check the deconstruction"), must NOT have it
+    // counted as shipped code: it's uncommitted BY DESIGN, so it always looks "missing on main" and
+    // false-flags a high-confidence revert (the funnel-teardown-scout + adlibrary-search-freshness-gate
+    // alarms, 2026-07-02 — the REAL deliverables landing-page-scout.ts/landing-page-snapshot.ts were on
+    // main the whole time). Durable deliverables (src/, migrations, brain, committed non-`_` scripts like
+    // scripts/landing-page-snapshot.ts) are still checked.
+    if (/^scripts\/_/.test(p)) continue;
     // Trim trailing punctuation the regex's char class might have swept up (none here) — keep as-is.
-    out.add(m[0]);
+    out.add(p);
   }
   for (const m of body.matchAll(MIGRATION_RE)) {
     out.add(`supabase/migrations/${m[1]}`);
