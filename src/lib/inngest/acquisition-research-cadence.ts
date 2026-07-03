@@ -31,6 +31,9 @@ import { promoteFromCategorySweep, promoteWhitelistedPages } from "@/lib/competi
 import { materializeAdGaps } from "@/lib/acquisition-hub";
 import { pickGapGradeBatch } from "@/lib/acquisition-gap-grader";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+// Note: the Rhea `research` enqueue that used to live here has moved to
+// [[research-sensor]] (rhea-research-automation spec, Phase 1) — the paced hourly claim
+// SUPERSEDES the once-a-day stub. This cron no longer touches research_urls / kind='research'.
 
 async function adToolWorkspaceIds(): Promise<string[]> {
   const admin = createAdminClient();
@@ -53,13 +56,6 @@ interface WorkspaceCadenceResult {
    * minutes.
    */
   graded: { considered: number; enqueued: number };
-  /**
-   * rhea-url-sensor Phase 2: 1 when we dispatched a `research` box job for this workspace this
-   * beat, 0 when dedup skipped (already an in-flight `research` job) or the workspace has no
-   * unreviewed research_urls to classify. Actual classifications land on the box within tens of
-   * minutes (a per-URL Playwright capture + a single Max classify pass).
-   */
-  research: { unreviewed: number; enqueued: number };
 }
 
 /** One workspace's re-scan + grade pass. Best-effort per step — a failure never breaks the loop. */
@@ -68,7 +64,6 @@ async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenc
   let promotedWhitelisted = 0;
   let adGaps = 0;
   const graded = { considered: 0, enqueued: 0 };
-  const research = { unreviewed: 0, enqueued: 0 };
 
   try {
     const p = await promoteFromCategorySweep(workspaceId);
@@ -129,45 +124,10 @@ async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenc
     console.error(`[acquisition-cadence] gap-grade pick/enqueue failed ws=${workspaceId}:`, err);
   }
 
-  // rhea-url-sensor Phase 2: enqueue Rhea's URL sensor for any workspace with unreviewed
-  // research_urls, dedup-gated like gap-grade above. The box lane (scripts/builder-worker.ts →
-  // runResearchJob) captures + classifies up to RESEARCH_BATCH_CAP unreviewed URLs per pass.
-  // Idempotent — if there's already an in-flight `research` job for this workspace we skip.
-  try {
-    const admin = createAdminClient();
-    const { count } = await admin
-      .from("research_urls")
-      .select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .eq("teardown_verdict", "unreviewed");
-    research.unreviewed = count ?? 0;
-    if (research.unreviewed > 0) {
-      const { data: inflight } = await admin
-        .from("agent_jobs")
-        .select("id")
-        .eq("workspace_id", workspaceId)
-        .eq("kind", "research")
-        .in("status", ["queued", "queued_resume", "building", "claimed"])
-        .limit(1);
-      if (inflight && inflight.length) {
-        research.enqueued = 1; // already dispatched on a prior beat — classification IS flowing box-side
-      } else {
-        const { error } = await admin.from("agent_jobs").insert({
-          workspace_id: workspaceId,
-          spec_slug: "research",
-          kind: "research",
-          status: "queued",
-          created_by: null,
-        });
-        if (!error) research.enqueued = 1;
-        else console.error(`[acquisition-cadence] research enqueue failed ws=${workspaceId}: ${error.message}`);
-      }
-    }
-  } catch (err) {
-    console.error(`[acquisition-cadence] research pick/enqueue failed ws=${workspaceId}:`, err);
-  }
+  // Rhea's `research` enqueue moved to research-sensor-cron (rhea-research-automation Phase 1) —
+  // the paced hourly claim supersedes the once-a-day stub. Nothing to do for research here.
 
-  return { workspaceId, promoted, promotedWhitelisted, adGaps, graded, research };
+  return { workspaceId, promoted, promotedWhitelisted, adGaps, graded };
 }
 
 export const acquisitionResearchCadenceCron = inngest.createFunction(
