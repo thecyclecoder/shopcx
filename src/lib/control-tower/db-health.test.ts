@@ -137,6 +137,59 @@ test("statement_timeout_pressure does NOT fire when the `authenticated` timeout 
   assert.equal(findings.find((f) => f.cause === "statement_timeout_pressure"), undefined);
 });
 
+// db-investigate-timeouts-instance — the offender samples show up in the finding evidence when
+// the box captured them, so the operator can route the specific query to the right slow-query fix
+// without a separate pg_stat_activity probe. Un-actionable "1 live query near timeout" was the gap.
+test("statement_timeout_pressure evidence names the OFFENDER when nearTimeoutSamples are provided", () => {
+  const input = incidentInput();
+  input.statementsNearTimeout = 2;
+  input.nearTimeoutSamples = [
+    { durationSec: 7, query: "select tag from tickets where tags @> $1" },
+    { durationSec: 5, query: "select count(*) from   sms_campaign_recipients   where message_sid = $1" },
+  ];
+  const findings = analyzeInstanceHealth(input);
+  const timeout = findings.find((f) => f.cause === "statement_timeout_pressure");
+  assert.ok(timeout, "expected a statement_timeout_pressure finding");
+  assert.match(timeout!.evidence, /Near-timeout offenders/);
+  assert.match(timeout!.evidence, /7s — `select tag from tickets where tags @> \$1`/);
+  // Whitespace in the second query is collapsed by the preview.
+  assert.match(timeout!.evidence, /5s — `select count\(\*\) from sms_campaign_recipients where message_sid = \$1`/);
+});
+
+test("statement_timeout_pressure evidence works WITHOUT nearTimeoutSamples (back-compat)", () => {
+  const input = incidentInput();
+  input.statementsNearTimeout = 1;
+  delete input.nearTimeoutSamples;
+  const findings = analyzeInstanceHealth(input);
+  const timeout = findings.find((f) => f.cause === "statement_timeout_pressure");
+  assert.ok(timeout, "expected a statement_timeout_pressure finding");
+  // No offender lines when the box didn't capture samples — the count still fires the signal.
+  assert.doesNotMatch(timeout!.evidence, /Near-timeout offender/);
+  assert.match(timeout!.evidence, /Live queries past 50% of the ceiling: 1/);
+});
+
+test("statement_timeout_pressure caps the offender-sample lines at 3 (evidence stays readable)", () => {
+  const input = incidentInput();
+  input.statementsNearTimeout = 10;
+  input.nearTimeoutSamples = Array.from({ length: 6 }, (_, i) => ({ durationSec: 4 + i, query: `select q_${i}` }));
+  const findings = analyzeInstanceHealth(input);
+  const timeout = findings.find((f) => f.cause === "statement_timeout_pressure");
+  assert.ok(timeout);
+  const matches = timeout!.evidence.match(/^ {2}- \d+s — /gm) ?? [];
+  assert.equal(matches.length, 3, `expected ≤3 sample lines; got ${matches.length}`);
+});
+
+test("statement_timeout_pressure long offender queries are truncated in the preview", () => {
+  const long = "select ".repeat(80); // > 500 chars
+  const input = incidentInput();
+  input.statementsNearTimeout = 1;
+  input.nearTimeoutSamples = [{ durationSec: 6, query: long }];
+  const findings = analyzeInstanceHealth(input);
+  const timeout = findings.find((f) => f.cause === "statement_timeout_pressure");
+  assert.ok(timeout);
+  assert.match(timeout!.evidence, /…`/);
+});
+
 test("connection_saturation fires when active+waiting cross the flag", () => {
   const input = healthyInput();
   input.activeBackends = 70;

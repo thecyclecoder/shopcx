@@ -3023,7 +3023,16 @@ async function runDbHealthInstanceJob(): Promise<void> {
     // 3) pg_stat_activity — active + waiting backends, max_connections, and the count of live
     //    queries past a fraction of the `authenticated` statement_timeout (the pressure signal
     //    BEFORE the rollback lands). Excludes idle / this backend / autovacuum.
+    //
+    //    db-investigate-timeouts-instance: the near-timeout SELECT is filtered to
+    //    `usename = 'authenticated'` — only queries under that role face the 8s ceiling, so a
+    //    `supabase_admin` dashboard SELECT or a `postgres` maintenance statement running past 4s
+    //    is not going to be killed by it and doesn't belong in this signal. Mirrors how the
+    //    slow-query pass drops supabase_admin / pg_catalog noise via `isForeignQuery`. We also
+    //    capture the TOP offender rows (query text + duration) so the finding's evidence names
+    //    which query is about to be killed — un-actionable without it.
     let activeBackends = 0, waitingBackends = 0, maxConnections = 0, statementsNearTimeout = 0;
+    let nearTimeoutSamples: Array<{ durationSec: number; query: string }> = [];
     try {
       const actRes = await c.query(
         `select
@@ -3041,15 +3050,25 @@ async function runDbHealthInstanceJob(): Promise<void> {
           (await import("../src/lib/control-tower/db-health")).INSTANCE_TIMEOUT_HEADROOM_FRACTION
         ));
         const nearRes = await c.query(
-          `select count(*)::int as n
-             from pg_stat_activity
-            where state = 'active'
-              and pid <> pg_backend_pid()
-              and query_start is not null
-              and now() - query_start > ($1 || ' milliseconds')::interval`,
+          `select
+             floor(extract(epoch from (now() - query_start)))::int as duration_sec,
+             query
+           from pg_stat_activity
+          where state = 'active'
+            and pid <> pg_backend_pid()
+            and usename = 'authenticated'
+            and query_start is not null
+            and now() - query_start > ($1 || ' milliseconds')::interval
+          order by query_start asc
+          limit 25`,
           [String(headroomMs)],
         );
-        statementsNearTimeout = Number(((nearRes.rows[0] ?? {}) as Record<string, unknown>).n ?? 0);
+        const rows = (nearRes.rows as Array<Record<string, unknown>>);
+        statementsNearTimeout = rows.length;
+        nearTimeoutSamples = rows.slice(0, 3).map((r) => ({
+          durationSec: Number(r.duration_sec ?? 0),
+          query: String(r.query ?? ""),
+        }));
       }
     } catch {
       /* best-effort: partial signals are still worth beating */
@@ -3067,6 +3086,7 @@ async function runDbHealthInstanceJob(): Promise<void> {
       waitingBackends,
       maxConnections,
       statementsNearTimeout,
+      nearTimeoutSamples,
       authenticatedStatementTimeoutMs,
     };
     const findings = mod.analyzeInstanceHealth(input);
@@ -3114,6 +3134,13 @@ async function runDbHealthInstanceJob(): Promise<void> {
           waiting_backends: input.waitingBackends,
           max_connections: input.maxConnections,
           statements_near_timeout: input.statementsNearTimeout,
+          // db-investigate-timeouts-instance: name the offender(s) so the panel/tile isn't just
+          // "1 near timeout" but "1 near timeout — <query preview> · 5s". Read-only preview; the
+          // full text is already the safe pg_stat_activity.query column (normalized `$1` in Supabase).
+          near_timeout_samples: (input.nearTimeoutSamples ?? []).map((s) => ({
+            duration_sec: s.durationSec,
+            query: s.query,
+          })),
           authenticated_statement_timeout_ms: input.authenticatedStatementTimeoutMs,
         },
       },

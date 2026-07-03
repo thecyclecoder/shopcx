@@ -160,14 +160,43 @@ export interface InstanceHealthInput {
    * `authenticated` statement_timeout (see INSTANCE_TIMEOUT_HEADROOM_FRACTION). >0 means at least
    * one live query is about to be killed by the 8s ceiling; a proxy for "the timeout is the reason
    * we roll back", visible BEFORE the rollback lands.
+   *
+   * db-investigate-timeouts-instance: this count is FILTERED to `usename = 'authenticated'` at the
+   * SQL layer — only queries running under the role subject to the 8s ceiling can be killed by it.
+   * `supabase_admin` dashboard queries + `postgres` / `service_role` writes have their own timeouts
+   * (or none) and don't belong in this signal; leaving them in it produced false positives that the
+   * instance pass had no way to distinguish from a real app-side offender. Mirrors `isForeignQuery`
+   * in the slow-query path.
    */
   statementsNearTimeout: number;
+  /**
+   * Up to a few near-timeout offender samples (the same row set the count is derived from), so the
+   * finding evidence can name the OFFENDER — not just "1 live query near timeout" — and the operator
+   * can route to the right slow-query fix without a separate pg_stat_activity probe. Each sample
+   * carries the (normalized) query text + how long it had been running when we sampled it. Optional
+   * — the count alone still fires the signal; samples enrich the evidence when the box captured them.
+   * db-investigate-timeouts-instance.
+   */
+  nearTimeoutSamples?: NearTimeoutSample[];
   /**
    * pg_roles.rolconfig for role='authenticated' (the Supabase REST/anon-key role): the statement
    * timeout, in milliseconds, that kills a query under load. `null` when unset (no ceiling on that
    * role). Quoted verbatim in the evidence so the operator sees the exact ceiling being hit.
    */
   authenticatedStatementTimeoutMs: number | null;
+}
+
+/**
+ * One near-timeout live-query offender the box captured out of pg_stat_activity when the instance
+ * pass ran. Enriches the `statement_timeout_pressure` finding's evidence with the OFFENDER (query
+ * text + how long it had been running) so the operator can route to the right slow-query fix
+ * without a separate probe. db-investigate-timeouts-instance.
+ */
+export interface NearTimeoutSample {
+  /** Whole seconds the query had already been running when we sampled it. */
+  durationSec: number;
+  /** Trimmed query text from pg_stat_activity.query (a normalized `$1` statement in Supabase). */
+  query: string;
 }
 
 // ── Thresholds (tunable constants — the bounded proxy's guardrails) ───────────
@@ -723,8 +752,19 @@ export function analyzeInstanceHealth(
 
   // 1) statement_timeout_pressure — live queries running past a big fraction of the `authenticated`
   //    ceiling. This fires BEFORE the rollback lands, so an operator sees the pressure early.
+  //    db-investigate-timeouts-instance: when the box captured OFFENDER samples out of
+  //    pg_stat_activity, name them in the evidence — the operator can route the offender to the
+  //    right slow-query fix without a separate probe. Filtered at the SQL layer to `authenticated`
+  //    (only queries under that role are subject to the 8s ceiling).
   if (input.statementsNearTimeout > 0 && input.authenticatedStatementTimeoutMs != null) {
     const impact = `${input.statementsNearTimeout} live query(ies) past ${pct(timeoutHeadroom)} of the ${timeoutSecs}s \`authenticated\` statement_timeout — about to be killed`;
+    const samples = (input.nearTimeoutSamples ?? []).slice(0, 3);
+    const sampleLines = samples.length > 0
+      ? [
+          `Near-timeout offender${samples.length === 1 ? "" : "s"} (from pg_stat_activity, \`authenticated\` role only):`,
+          ...samples.map((s) => `  - ${s.durationSec}s — \`${previewQuery(s.query)}\``),
+        ]
+      : [];
     findings.push({
       signature: `dbhealth:instance:statement_timeout_pressure`,
       category: "instance",
@@ -737,6 +777,7 @@ export function analyzeInstanceHealth(
       evidence: [
         `Per-role \`authenticated\` \`statement_timeout\` = ${input.authenticatedStatementTimeoutMs} ms (${timeoutSecs}s) — queries exceeding this are killed.`,
         `Live queries past ${pct(timeoutHeadroom)} of the ceiling: ${input.statementsNearTimeout}.`,
+        ...sampleLines,
         `Rollback ratio (context): ${pct(rollbackRatio)} of ${totalXact.toLocaleString()} transactions (${input.xactRollback.toLocaleString()} rolled back).`,
         `This is the 2026-07-02-class signal: queries running under load hit the ${timeoutSecs}s ceiling and roll back — the per-query slow-query pass EXPLAINs each statement in isolation on an idle pooler connection so it never sees this.`,
       ].join("\n"),
@@ -1396,4 +1437,15 @@ function humanBytes(n: number): string {
 
 function pct(frac: number): string {
   return `${Math.round(frac * 100)}%`;
+}
+
+/**
+ * Preview a near-timeout offender query in the finding evidence: collapse whitespace + truncate.
+ * The full query text is already on `NearTimeoutSample.query`; this only shapes the human-readable
+ * evidence line. db-investigate-timeouts-instance.
+ */
+function previewQuery(q: string): string {
+  const compact = q.replace(/\s+/g, " ").trim();
+  const MAX = 200;
+  return compact.length > MAX ? `${compact.slice(0, MAX - 1)}…` : compact;
 }
