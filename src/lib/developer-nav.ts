@@ -15,6 +15,15 @@
 
 export const DEVELOPER_OVERVIEW_HREF = "/dashboard/developer";
 
+/** The founder-pulse read-only context-reconstitution surface (founder-pulse spec Phase 3).
+ *  Rendered directly beneath the Overview link in the developer sidebar takeover — separate
+ *  from `DEVELOPER_GROUPS` because it is the founder's "where was I?" home, not a group member. */
+export const DEVELOPER_PULSE_HREF = "/dashboard/developer/pulse";
+
+/** Heroicon path for the Pulse link — a stylized pulse waveform. */
+export const DEVELOPER_PULSE_ICON =
+  "M3.75 12h3l2.25-6 4.5 12 2.25-6h4.5";
+
 /** A "needs you" count key — the sidebar/Overview look these up to render a live badge. */
 export type DeveloperBadgeKey = "approvals" | "security" | "regressions" | "humanQA" | "branches";
 
@@ -170,9 +179,10 @@ export const DEVELOPER_OVERVIEW_ICON =
 /** The "Developer" portal icon in the main tree (angle brackets). */
 export const DEVELOPER_PORTAL_ICON = "M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5";
 
-/** Is `pathname` inside the Developer portal? (any sub-surface, or the Overview itself). */
+/** Is `pathname` inside the Developer portal? (any sub-surface, or the Overview itself, or Pulse). */
 export function isInDeveloperPortal(pathname: string): boolean {
   if (pathname === DEVELOPER_OVERVIEW_HREF || pathname.startsWith(DEVELOPER_OVERVIEW_HREF + "/")) return true;
+  if (pathname === DEVELOPER_PULSE_HREF || pathname.startsWith(DEVELOPER_PULSE_HREF + "/")) return true;
   return DEVELOPER_NAV.some((i) => pathname === i.href || pathname.startsWith(i.href + "/"));
 }
 

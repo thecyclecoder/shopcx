@@ -28,10 +28,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/resellers/page.tsx` — the page itself
 
-## Related
-
-[[../tables/known_resellers]] · [[../tables/amazon_asins]] · [[../lifecycles/fraud-detection]] · [[../inngest/reseller-discovery]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

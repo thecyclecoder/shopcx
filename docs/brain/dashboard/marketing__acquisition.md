@@ -1,24 +1,36 @@
 # Dashboard · marketing/acquisition
 
-The **Acquisition Research Hub** — one owner-only surface for the [[../goals/acquisition-research-engine|Acquisition Research Engine]] ([[../specs/acquisition-research-hub]], M4). Competitor sets + both scouts' findings + the unified gap queue → approve routes a gap to Build / the storefront optimizer, tracked through to shipped / won.
+_TODO: page purpose._
 
-**Route:** `/dashboard/marketing/acquisition` · **owner-only** (nav item `ownerOnly`; the API returns 403 for non-owners).
+**Route:** `/dashboard/marketing/acquisition`
 
 ## Features
 
 **Page title:** Acquisition Research
 
+**Visible buttons (heuristic — actual labels in source):**
+- Override
+- Reject
+
 **Rendering:** `"use client"` component (client-side state + fetch).
 
-- **Throughput cards** — Proposed · Approved · Shipped · Won (the goal's success metric, [[../libraries/acquisition-hub]] `GapThroughput`).
-- **Product selector** — scopes competitors + lander gaps/snapshots to a product (ad gaps are workspace-level, always shown).
-- **Gap queue** — the unified ad + lander gap list with `source` / `route` / `status` / shipped / won badges; **Approve & route** / **Reject** on `proposed` gaps. Ad gaps POST `/api/ads/acquisition/gaps/[id]`; lander gaps POST the existing `/api/ads/lander-recommendations/[id]`.
-- **Competitor set** ([[../tables/competitors]]), **Ad findings** (the [[../libraries/ad-gap]] report), **Lander findings** ([[../tables/lander_snapshots]]) panels.
+## Sub-routes
+
+_None._
 
 ## API endpoints called
 
-- `GET /api/ads/acquisition?workspaceId=&productId=` → the whole hub payload ([[../libraries/acquisition-hub]] `loadHubData`).
-- `POST /api/ads/acquisition/gaps/[id]` — approve/reject an ad gap (owner-only).
-- `POST /api/ads/lander-recommendations/[id]` — approve/reject a lander gap (existing).
+- `/api/ads/acquisition`
+- `/api/ads/acquisition/grades/:x`
 
-See [[../specs/acquisition-research-hub]] · [[../libraries/acquisition-hub]] · [[../tables/ad_gap_recommendations]] · [[marketing__landers]] · [[storefront__optimizer]].
+## Permissions
+
+All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.
+
+## Files touched
+
+- `src/app/dashboard/marketing/acquisition/page.tsx` — the page itself
+
+---
+
+[[../README]] · [[../../CLAUDE]]

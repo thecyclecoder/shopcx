@@ -15,17 +15,23 @@ Dashboard home — workspace overview, KPI cards (open tickets, customers, reten
 
 ## Sub-routes
 
+- `agents/` → [[agents]]
 - `ai-analysis/` → [[ai-analysis]]
+- `brain/` → [[brain]]
+- `branches/` → [[branches]]
 - `chargebacks/` → [[chargebacks]]
+- `comp-subscriptions/` → [[comp-subscriptions]]
 - `conversations/` → [[conversations]]
 - `crisis/` → [[crisis]]
 - `csat/` → [[csat]]
 - `customers/` → [[customers]]
 - `demographics/` → [[demographics]]
+- `developer/` → [[developer]]
 - `fraud/` → [[fraud]]
 - `knowledge-base/` → [[knowledge-base]]
 - `loyalty/` → [[loyalty]]
 - `macros/` → [[macros]]
+- `migrations/` → [[migrations]]
 - `orders/` → [[orders]]
 - `portal-analytics/` → [[portal-analytics]]
 - `products/` → [[products]]
@@ -33,6 +39,7 @@ Dashboard home — workspace overview, KPI cards (open tickets, customers, reten
 - `resellers/` → [[resellers]]
 - `returns/` → [[returns]]
 - `reviews/` → [[reviews]]
+- `roadmap/` → [[roadmap]]
 - `settings/` → [[settings]]
 - `social-comments/` → [[social-comments]]
 - `subscriptions/` → [[subscriptions]]
@@ -53,17 +60,23 @@ All workspace members. No role gate in the page itself; gated only by middleware
 ## Files touched
 
 - `src/app/dashboard/page.tsx` — the page itself
+- `src/app/dashboard/agents/page.tsx` — sub-route
 - `src/app/dashboard/ai-analysis/page.tsx` — sub-route
+- `src/app/dashboard/brain/page.tsx` — sub-route
+- `src/app/dashboard/branches/page.tsx` — sub-route
 - `src/app/dashboard/chargebacks/page.tsx` — sub-route
+- `src/app/dashboard/comp-subscriptions/page.tsx` — sub-route
 - `src/app/dashboard/conversations/page.tsx` — sub-route
 - `src/app/dashboard/crisis/page.tsx` — sub-route
 - `src/app/dashboard/csat/page.tsx` — sub-route
 - `src/app/dashboard/customers/page.tsx` — sub-route
 - `src/app/dashboard/demographics/page.tsx` — sub-route
+- `src/app/dashboard/developer/page.tsx` — sub-route
 - `src/app/dashboard/fraud/page.tsx` — sub-route
 - `src/app/dashboard/knowledge-base/page.tsx` — sub-route
 - `src/app/dashboard/loyalty/page.tsx` — sub-route
 - `src/app/dashboard/macros/page.tsx` — sub-route
+- `src/app/dashboard/migrations/page.tsx` — sub-route
 - `src/app/dashboard/orders/page.tsx` — sub-route
 - `src/app/dashboard/portal-analytics/page.tsx` — sub-route
 - `src/app/dashboard/products/page.tsx` — sub-route
@@ -71,18 +84,15 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/resellers/page.tsx` — sub-route
 - `src/app/dashboard/returns/page.tsx` — sub-route
 - `src/app/dashboard/reviews/page.tsx` — sub-route
+- `src/app/dashboard/roadmap/page.tsx` — sub-route
 - `src/app/dashboard/settings/page.tsx` — sub-route
 - `src/app/dashboard/social-comments/page.tsx` — sub-route
 - `src/app/dashboard/subscriptions/page.tsx` — sub-route
 - `src/app/dashboard/team/page.tsx` — sub-route
 - `src/app/dashboard/tickets/page.tsx` — sub-route
 - `src/app/dashboard/layout.tsx` — component
-- `src/app/dashboard/sidebar.tsx` — component. Mounted for **every** user on **every** dashboard page; its `fetchCounts` effect issues ~11 authenticated API requests per tick (ticket-views, escalation counts, fraud-cases, reviews, todos, improve-queue, branches, spec-test human-queue, …). It polls at **30 000 ms** (`setInterval(fetchCounts, 30000)`), **not** 10s — badge counts tolerate 30s staleness, and the always-on, authenticated REST rate is the dominant source of PostgREST's per-request RLS-context `set_config` statement (the highest-call-volume query in `pg_stat_statements`). Widening it 10s→30s cut that always-on round-trip rate ~3× — the canonical shipped [[../libraries/db-health|DB Health Agent]] `high_call_volume → reduce_calls` fix. Don't tighten this poll without a reason.
+- `src/app/dashboard/sidebar.tsx` — component
 - `src/app/dashboard/layout.tsx` — layout wrapper
-
-## Related
-
-[[../README]] · [[../lifecycles/ticket-lifecycle]] · [[../lifecycles/dunning]] · [[../lifecycles/subscription-billing]]
 
 ---
 

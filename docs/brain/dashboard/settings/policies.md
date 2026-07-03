@@ -27,10 +27,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/settings/policies/page.tsx` — the page itself
 - `src/app/dashboard/settings/policies/[slug]/page.tsx` — sub-route
 
-## Related
-
-[[../../tables/policies]] · [[../../tables/sonnet_prompts]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

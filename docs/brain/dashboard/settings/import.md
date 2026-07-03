@@ -31,10 +31,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/settings/import/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/import_jobs]] · [[../../tables/sync_jobs]] · [[../../inngest/sync-shopify]] · [[../../inngest/klaviyo-events-import]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

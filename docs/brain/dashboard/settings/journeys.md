@@ -33,10 +33,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/journeys/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/journey_definitions]] · [[../../tables/journey_sessions]] · [[../../journeys/README]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

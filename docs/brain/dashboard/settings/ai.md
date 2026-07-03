@@ -38,10 +38,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/settings/ai/grader-rules/page.tsx` — sub-route
 - `src/app/dashboard/settings/ai/prompts/page.tsx` — sub-route
 
-## Related
-
-[[../../tables/ai_channel_config]] · [[../../tables/ai_personalities]] · [[../../tables/sonnet_prompts]] · [[../../lifecycles/ai-multi-turn]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

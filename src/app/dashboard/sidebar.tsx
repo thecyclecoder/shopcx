@@ -12,6 +12,8 @@ import {
   DEVELOPER_OVERVIEW_HREF,
   DEVELOPER_OVERVIEW_ICON,
   DEVELOPER_PORTAL_ICON,
+  DEVELOPER_PULSE_HREF,
+  DEVELOPER_PULSE_ICON,
   isInDeveloperPortal,
   isDeveloperHrefActive,
   type DeveloperBadgeKey,
@@ -429,6 +431,19 @@ export default function Sidebar({
             >
               <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={DEVELOPER_OVERVIEW_ICON} /></svg>
               Overview
+            </Link>
+            {/* founder-pulse Phase 3 — Pulse sits directly beneath Overview (per spec), before the DEVELOPER_GROUPS
+                render, reusing Overview's active-state styling so the visual weight matches. */}
+            <Link
+              href={DEVELOPER_PULSE_HREF}
+              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                pathname === DEVELOPER_PULSE_HREF
+                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
+                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              }`}
+            >
+              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d={DEVELOPER_PULSE_ICON} /></svg>
+              Pulse
             </Link>
             {DEVELOPER_GROUPS.map((group) => (
               <div key={group.heading} className="pt-1">

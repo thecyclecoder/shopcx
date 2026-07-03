@@ -1,23 +1,31 @@
-# Dashboard · Marketing → Landers
+# Dashboard · marketing/landers
 
-`/dashboard/marketing/landers` — lists every auto-generated, ad-matched landing page (the [[../lifecycles/advertorial-landers|advertorial + before/after landers]]) with its public URL, so an operator can grab a lander link for a Meta ad.
+_TODO: page purpose._
 
-## What it shows
-Reads [[../tables/advertorial_pages]] for the workspace (one row per product × angle × variant) and renders a table: **product · type (Advertorial / Before-After) · headline · URL** (with a copy button).
+**Route:** `/dashboard/marketing/landers`
 
-## URL construction (in-house storefront only)
-URLs are built on the **in-house storefront domain** (`workspaces.storefront_domain`, e.g. `shop.superfoodscompany.com`), NOT the Shopify store (`superfoodscompany.com/products/...` — that domain has no lander code):
+## Features
 
-```
-https://{storefront_domain}/{product.handle}?variant={advertorial|beforeafter}&angle={slug}
-```
+**Page title:** Landers
 
-Before/after rows use the `{base-slug}-ba` slug (variant + slug both filter the read). Fallback when there's no custom domain: `https://shopcx.ai/store/{storefront_slug}/{handle}?...`.
+**Rendering:** `"use client"` component (client-side state + fetch).
 
-## Wiring
-- Page: `src/app/dashboard/marketing/landers/page.tsx` (client; `useWorkspace` → `GET /api/ads/landers`).
-- API: `src/app/api/ads/landers/route.ts` (owner/admin; joins `advertorial_pages` + `products.handle` + `workspaces.storefront_domain`).
-- Sidebar: under **Marketing** (`src/app/dashboard/sidebar.tsx`), between Ads and Social.
+## Sub-routes
 
-## Related
-[[../lifecycles/advertorial-landers]] · [[../tables/advertorial_pages]] · [[../ad-creative-rules]]
+_None._
+
+## API endpoints called
+
+- `/api/ads/landers`
+
+## Permissions
+
+All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.
+
+## Files touched
+
+- `src/app/dashboard/marketing/landers/page.tsx` — the page itself
+
+---
+
+[[../README]] · [[../../CLAUDE]]

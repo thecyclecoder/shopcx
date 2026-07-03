@@ -32,10 +32,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 - `src/app/dashboard/crisis/[id]/page.tsx` — sub-route
 - `src/app/dashboard/crisis/new/page.tsx` — sub-route
 
-## Related
-
-[[../tables/crisis_events]] · [[../tables/crisis_customer_actions]] · [[../lifecycles/crisis-campaign]] · [[../journeys/crisis-tier1-flavor-swap]] · [[../journeys/crisis-tier2-product-swap]] · [[../journeys/crisis-tier3-pause-remove]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

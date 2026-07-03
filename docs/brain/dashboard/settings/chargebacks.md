@@ -26,10 +26,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/settings/chargebacks/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/chargeback_events]] · [[../../lifecycles/chargeback-pipeline]] · [[../chargebacks]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

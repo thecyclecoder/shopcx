@@ -31,10 +31,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/fraud/page.tsx` — the page itself
 - `src/app/dashboard/fraud/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/fraud_cases]] · [[../tables/fraud_rules]] · [[../tables/known_resellers]] · [[../tables/fraud_action_log]] · [[../lifecycles/fraud-detection]] · [[settings/fraud]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

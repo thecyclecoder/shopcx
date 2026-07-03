@@ -41,10 +41,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/text-marketing/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/sms_campaigns]] · [[../../tables/marketing_shortlinks]] · [[../../integrations/twilio]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

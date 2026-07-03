@@ -44,10 +44,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/returns/page.tsx` — the page itself
 - `src/app/dashboard/returns/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/returns]] · [[../lifecycles/return-pipeline]] · [[../recipes/create-return]] · [[../recipes/issue-refund]] · [[../recipes/partial-refund]] · [[../integrations/easypost]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]
