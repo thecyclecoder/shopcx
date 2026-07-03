@@ -15058,6 +15058,40 @@ async function routeSecurityFix(
  * poll never picks it). Same sinks — the fused branch gets the same terminal state (agent_jobs
  * status + director_activity + optional authored fix spec + routed build) without a fresh Max session.
  */
+/**
+ * Map a fused security envelope's findings → pre-merge "failing checks" so a real-vuln on an IN-FLIGHT
+ * branch flows through the SAME fixes-as-phases path as a RED spec-test (spawnPreMergeFix). Each finding
+ * gets a STABLE `check_key` (`sec:<check>[:<location>]`) so spawnPreMergeFix's per-key dedup + loop-guard
+ * fire — no endless Fix N for the same finding. Falls back to one review/spec-derived check when the
+ * envelope carries no per-check findings.
+ */
+function buildSecurityFailingChecks(
+  env: Record<string, unknown> | null,
+): { text: string; evidence: string | null; check_key: string }[] {
+  const rawChecks = env && Array.isArray(env.checks) ? (env.checks as unknown[]) : [];
+  const spec =
+    env && env.spec && typeof env.spec === "object" && !Array.isArray(env.spec)
+      ? (env.spec as Record<string, unknown>)
+      : null;
+  const fix = spec ? String(spec.fix ?? "") : "";
+  const findings = rawChecks
+    .filter(
+      (c): c is Record<string, unknown> =>
+        !!c && typeof c === "object" && !Array.isArray(c) && String((c as Record<string, unknown>).verdict) === "finding",
+    )
+    .map((c) => {
+      const check = String(c.check ?? "security");
+      const location = String(c.location ?? "");
+      const severity = String(c.severity ?? "");
+      const key = `sec:${check}${location ? ":" + location.replace(/\s+/g, "") : ""}`;
+      const text = `Security finding [${check}${severity ? " · " + severity : ""}]${location ? " @ " + location : ""}: ${String(c.evidence ?? "")}${fix ? ` — FIX: ${fix}` : ""}`;
+      return { text: text.slice(0, 2000), evidence: location || null, check_key: key };
+    });
+  if (findings.length > 0) return findings;
+  const review = (env ? String(env.review ?? "") : "") || (spec ? String(spec.intent ?? "") : "") || "security review found a real vulnerability on the branch";
+  return [{ text: `Security fix required: ${review}${fix ? ` — FIX: ${fix}` : ""}`.slice(0, 2000), evidence: null, check_key: "sec:real-vuln" }];
+}
+
 async function applySecurityVerdictToJob(
   job: Job,
   args: {
@@ -15201,6 +15235,68 @@ async function applyFusedSecurityAsBranchVerdict(args: {
   }
 
   const syntheticJob = inserted as unknown as Job;
+
+  // ⭐ security-findings-as-fix-phases — a real-vuln on an IN-FLIGHT build branch appends a security Fix
+  // phase to the ORIGIN spec + resumes its build (mirroring the RED spec-test path, src/lib/pre-merge-fix.ts),
+  // instead of authoring a STANDALONE fix spec. Standalone security fix specs on pre-merge branches raced
+  // the origin's own merge and produced superseded duplicate PRs (#1070/#1071, 2026-07-03). Post-merge
+  // (diff-mode) findings are unchanged — they still author a follow-up spec (no live branch build to append
+  // to). spawnPreMergeFix carries the loop-guard + per-check-key dedup (no endless Fix N), and when the fix
+  // phase ships the origin re-tests via the SAME fused (Vera + Vault) pre-merge session that cleared it.
+  if (verdict === "real-vuln") {
+    const specLabel = `unmerged ${slug} (${branch})`;
+    const failing = buildSecurityFailingChecks(envAsObj);
+    let originTitle = slug;
+    try {
+      const { getSpec } = await import("../src/lib/specs-table");
+      const s = await getSpec(job.workspace_id, slug);
+      if (s?.title) originTitle = s.title;
+    } catch {
+      /* best-effort — degrade to slug */
+    }
+    const { spawnPreMergeFix } = await import("../src/lib/pre-merge-fix");
+    const out = await spawnPreMergeFix(db, {
+      workspaceId: job.workspace_id,
+      originSlug: slug,
+      originTitle,
+      branch,
+      failing,
+    });
+    const outcome = out.spawned
+      ? `security Fix phase appended to [[${slug}]] + build resumed (attempt ${out.attempts + 1})`
+      : out.escalated
+        ? `loop-guard escalated (${out.attempts} prior fix phase(s)) — held for the owner`
+        : `no fix phase spawned (${out.reason})`;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: SECURITY_DIRECTOR_FUNCTION,
+      actionKind: "authored_fix",
+      specSlug: slug,
+      reason: `Fused pre-merge security review of ${specLabel}: real-vuln → ${outcome} (fixes-as-phases; no standalone fix spec).`.slice(0, 4000),
+      metadata: {
+        branch,
+        preview_origin: previewOrigin,
+        fused_from_job_id: job.id,
+        classification: verdictInfo.classification,
+        per_check: verdictInfo.perCheck,
+        finding_count: verdictInfo.findingCount,
+        routed: "fixes-as-phases",
+        fix_check_keys: failing.map((f) => f.check_key),
+        spawn_escalated: out.escalated ?? false,
+      },
+    });
+    // Terminal but NOT security-green: the verdict stays 'real-vuln' so isSecurityGreenForBranch holds the PR
+    // until the fix phase ships and a FRESH fused (Vera + Vault) re-review of the origin's branch clears it.
+    await update(inserted.id, {
+      status: "completed",
+      error: null,
+      instructions: JSON.stringify({ ...instrJson, verdict, routed: "fixes-as-phases" }),
+      log_tail: `real-vuln → ${outcome}`.slice(-2000),
+    });
+    console.log(`${tag} fused real-vuln on ${branch} → ${outcome}`);
+    return;
+  }
+
   const parsedForApplier: Record<string, unknown> = {
     review,
     spec: envAsObj?.spec,
