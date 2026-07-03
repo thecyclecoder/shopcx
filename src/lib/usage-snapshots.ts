@@ -303,6 +303,297 @@ export async function discoverLimit(
   }
 }
 
+// ── Phase 2 — Mac reporter ingest ─────────────────────────────────────────────
+// The shape POST /api/developer/usage/report accepts. The Mac reporter's
+// scripts/usage-report.ts maps `ccusage blocks --json` (Claude + Codex) into
+// this + POSTs with an owner bearer token. Same unique key as Phase 1 so a
+// re-report REPLACES the prior mac slice.
+
+export interface MacSnapshotInput {
+  account: string;
+  runtime: UsageRuntime;
+  /** '5h' or 'weekly' — the JS-side name; UPSERT maps this to the DB column
+   * window_kind (`window` is a SQL reserved-ish keyword). */
+  window: UsageWindow;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  window_start?: string | null;
+  window_reset_at?: string | null;
+  capped?: boolean;
+  capped_until?: string | null;
+  /** Codex only — the reported /status %. Claude leaves this null. */
+  limit_pct?: number | null;
+  captured_at?: string | null;
+}
+
+export interface MacReportPayload {
+  workspace_id: string;
+  snapshots: MacSnapshotInput[];
+}
+
+export type MacReportValidation =
+  | { ok: true; payload: MacReportPayload }
+  | { ok: false; error: string };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isString(v: unknown): v is string {
+  return typeof v === "string";
+}
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+function isBoolean(v: unknown): v is boolean {
+  return typeof v === "boolean";
+}
+function toNonNegInt(v: unknown): number | null {
+  if (!isFiniteNumber(v)) return null;
+  if (v < 0) return null;
+  return Math.round(v);
+}
+function normISO(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (!isString(v) || !v) return null;
+  const t = Date.parse(v);
+  if (Number.isNaN(t)) return null;
+  return new Date(t).toISOString();
+}
+
+/**
+ * Validate the Mac reporter's payload. Pure — accepts an unknown parsed JSON
+ * value and returns a discriminated result. The route uses this to translate
+ * a malformed / missing-field body into a 400 (never a 500).
+ *
+ * Contract:
+ *  - workspace_id: UUID (matches the row's RLS scope)
+ *  - snapshots: non-empty array; each entry MUST carry account, runtime,
+ *    window, and the four token counters (non-negative integers). All other
+ *    fields are optional / null-coerced.
+ */
+export function validateMacReportPayload(input: unknown): MacReportValidation {
+  if (!input || typeof input !== "object") return { ok: false, error: "body must be a JSON object" };
+  const body = input as Record<string, unknown>;
+
+  const workspaceId = body.workspace_id;
+  if (!isString(workspaceId) || !UUID_RE.test(workspaceId)) {
+    return { ok: false, error: "workspace_id must be a UUID string" };
+  }
+
+  const raw = body.snapshots;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: "snapshots must be a non-empty array" };
+  }
+
+  const snapshots: MacSnapshotInput[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const s = raw[i];
+    if (!s || typeof s !== "object") return { ok: false, error: `snapshots[${i}] must be an object` };
+    const r = s as Record<string, unknown>;
+
+    if (!isString(r.account) || !r.account) return { ok: false, error: `snapshots[${i}].account is required` };
+    if (r.runtime !== "claude" && r.runtime !== "codex") return { ok: false, error: `snapshots[${i}].runtime must be 'claude' or 'codex'` };
+    if (r.window !== "5h" && r.window !== "weekly") return { ok: false, error: `snapshots[${i}].window must be '5h' or 'weekly'` };
+
+    const input_tokens = toNonNegInt(r.input_tokens);
+    const output_tokens = toNonNegInt(r.output_tokens);
+    const cache_creation_tokens = toNonNegInt(r.cache_creation_tokens);
+    const cache_read_tokens = toNonNegInt(r.cache_read_tokens);
+    if (input_tokens === null || output_tokens === null || cache_creation_tokens === null || cache_read_tokens === null) {
+      return { ok: false, error: `snapshots[${i}] token counters must be non-negative integers (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)` };
+    }
+
+    const window_start = normISO(r.window_start);
+    const window_reset_at = normISO(r.window_reset_at);
+    const capped_until = normISO(r.capped_until);
+    const captured_at = normISO(r.captured_at);
+    const capped = isBoolean(r.capped) ? r.capped : false;
+    const limit_pct = isFiniteNumber(r.limit_pct) ? Math.max(0, Math.min(100, r.limit_pct)) : null;
+
+    snapshots.push({
+      account: r.account,
+      runtime: r.runtime,
+      window: r.window,
+      input_tokens,
+      output_tokens,
+      cache_creation_tokens,
+      cache_read_tokens,
+      window_start,
+      window_reset_at,
+      capped,
+      capped_until,
+      limit_pct,
+      captured_at,
+    });
+  }
+
+  return { ok: true, payload: { workspace_id: workspaceId, snapshots } };
+}
+
+/**
+ * UPSERT the Mac reporter's snapshots into account_usage_snapshots with
+ * source='mac'. Same unique key as the box writer (workspace_id, source,
+ * account, window_kind) — a re-report REPLACES the prior mac slice.
+ * Returns the number of rows upserted.
+ */
+export async function upsertMacSnapshots(
+  admin: ReturnType<typeof createAdminClient>,
+  payload: MacReportPayload,
+): Promise<number> {
+  const now = new Date().toISOString();
+  const rows = payload.snapshots.map((s) => ({
+    workspace_id: payload.workspace_id,
+    source: "mac" as const,
+    runtime: s.runtime,
+    account: s.account,
+    // JS-side field is `window`; the DB column is `window_kind` (WINDOW is a SQL keyword).
+    window_kind: s.window,
+    window_start: s.window_start ?? null,
+    window_reset_at: s.window_reset_at ?? null,
+    input_tokens: s.input_tokens,
+    output_tokens: s.output_tokens,
+    cache_creation_tokens: s.cache_creation_tokens,
+    cache_read_tokens: s.cache_read_tokens,
+    capped: !!s.capped,
+    capped_until: s.capped_until ?? null,
+    limit_pct: s.limit_pct ?? null,
+    captured_at: s.captured_at ?? now,
+    updated_at: now,
+  }));
+  const { error } = await admin
+    .from("account_usage_snapshots")
+    .upsert(rows, { onConflict: "workspace_id,source,account,window_kind" });
+  if (error) throw error;
+  return rows.length;
+}
+
+// ── ccusage → payload mapper (pure) ──────────────────────────────────────────
+// The Mac reporter calls `ccusage blocks --json` twice (once for ~/.claude,
+// once for ~/.codex/sessions) and passes the parsed output to this mapper.
+// Pure so a fixture harness proves the mapping without needing live ccusage.
+
+export interface CcusageBlockLike {
+  /** Rolling 5h block start (ISO). */
+  startTime?: string;
+  /** Block end / reset (ISO). */
+  endTime?: string;
+  /** Actual last activity (ISO). */
+  actualEndTime?: string;
+  /** True while the block is the currently-burning 5h window. */
+  isActive?: boolean;
+  /** Gap markers ccusage inserts between clusters — skip. */
+  isGap?: boolean;
+  /** Per-block token totals. ccusage's field names have drifted between
+   * versions; accept both camelCase and snake_case, both nested + flat. */
+  tokenCounts?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheCreationInputTokens?: number;
+    cacheReadInputTokens?: number;
+  };
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  /** ccusage projection block — future spend, not a real burn — skip. */
+  projection?: unknown;
+}
+
+export interface CcusageOutputLike {
+  blocks?: CcusageBlockLike[];
+}
+
+function extractTokens(b: CcusageBlockLike): { input: number; output: number; cacheCreate: number; cacheRead: number } {
+  const t = b.tokenCounts || {};
+  return {
+    input: Math.max(0, Math.round(t.inputTokens ?? b.inputTokens ?? 0)),
+    output: Math.max(0, Math.round(t.outputTokens ?? b.outputTokens ?? 0)),
+    cacheCreate: Math.max(0, Math.round(t.cacheCreationInputTokens ?? b.cacheCreationInputTokens ?? 0)),
+    cacheRead: Math.max(0, Math.round(t.cacheReadInputTokens ?? b.cacheReadInputTokens ?? 0)),
+  };
+}
+
+export interface CcusageMapOpts {
+  /** The account label to attribute the rollup to. Claude → 'Round Robin 1'..
+   * (or a caller-chosen Mac lane); Codex → 'codex'. */
+  account: string;
+  runtime: UsageRuntime;
+  /** now() override for testing. */
+  now?: number;
+}
+
+/**
+ * Map a `ccusage blocks --json` output to two Mac snapshot payloads:
+ *   • '5h'     = the currently ACTIVE block (or the most recent non-projection block if none active)
+ *   • 'weekly' = the trailing 7-day sum across all real (non-projection, non-gap) blocks
+ *
+ * Never throws — a missing / empty ccusage output yields zeroed snapshots so
+ * the reporter still emits the two-per-account contract Phase 1's rollup
+ * asserts. Pure — no filesystem, no network.
+ */
+export function mapCcusageToSnapshots(
+  ccusage: CcusageOutputLike | null | undefined,
+  opts: CcusageMapOpts,
+): [MacSnapshotInput, MacSnapshotInput] {
+  const now = opts.now ?? Date.parse("2026-01-01T00:00:00.000Z");
+  const nowIso = new Date(now).toISOString();
+  const weeklyStartMs = now - SEVEN_DAYS_MS;
+  const rawBlocks = Array.isArray(ccusage?.blocks) ? ccusage!.blocks! : [];
+  const real = rawBlocks.filter((b) => b && !b.isGap && !b.projection);
+
+  // 5h — the currently active block; else the most recent real block.
+  const active = real.find((b) => !!b.isActive) ?? real[real.length - 1];
+  const activeTok = active ? extractTokens(active) : { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 };
+  const activeStart = active?.startTime ?? new Date(now - FIVE_HOURS_MS).toISOString();
+  const activeEnd = active?.endTime ?? null;
+  const fiveH: MacSnapshotInput = {
+    account: opts.account,
+    runtime: opts.runtime,
+    window: "5h",
+    input_tokens: activeTok.input,
+    output_tokens: activeTok.output,
+    cache_creation_tokens: activeTok.cacheCreate,
+    cache_read_tokens: activeTok.cacheRead,
+    window_start: activeStart,
+    window_reset_at: activeEnd,
+    capped: false,
+    capped_until: null,
+    limit_pct: null,
+    captured_at: nowIso,
+  };
+
+  // Weekly — sum all real blocks whose end (or start, if end missing) is
+  // within the trailing 7 days. Robust to ccusage's mix of shapes.
+  let wI = 0, wO = 0, wCC = 0, wCR = 0;
+  for (const b of real) {
+    const endT = b.endTime ? Date.parse(b.endTime) : b.startTime ? Date.parse(b.startTime) : NaN;
+    if (Number.isNaN(endT) || endT < weeklyStartMs) continue;
+    const t = extractTokens(b);
+    wI += t.input;
+    wO += t.output;
+    wCC += t.cacheCreate;
+    wCR += t.cacheRead;
+  }
+  const weekly: MacSnapshotInput = {
+    account: opts.account,
+    runtime: opts.runtime,
+    window: "weekly",
+    input_tokens: wI,
+    output_tokens: wO,
+    cache_creation_tokens: wCC,
+    cache_read_tokens: wCR,
+    window_start: new Date(weeklyStartMs).toISOString(),
+    window_reset_at: null,
+    capped: false,
+    capped_until: null,
+    limit_pct: null,
+    captured_at: nowIso,
+  };
+
+  return [fiveH, weekly];
+}
+
 /**
  * Codex-turn overlay for the meterAgentJob → recordAgentJobCost params — a
  * pure mapping, unit-testable without importing the 18k-line builder-worker.
