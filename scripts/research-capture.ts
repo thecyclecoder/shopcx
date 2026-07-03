@@ -293,10 +293,18 @@ export async function captureOne(input: ResearchCaptureInput, stamp: string): Pr
  * Capture a batch. Sequential (a single Chromium at a time keeps memory bounded on the box) and
  * best-effort per URL — a crash on one URL never wedges the rest.
  */
-export async function captureBatch(inputs: ResearchCaptureInput[], stamp: string): Promise<ResearchCaptureResult[]> {
+export async function captureBatch(
+  inputs: ResearchCaptureInput[],
+  stamp: string,
+  onProgress?: (done: number, total: number, url: string) => void | Promise<void>,
+): Promise<ResearchCaptureResult[]> {
   await ensureBucket();
   const out: ResearchCaptureResult[] = [];
-  for (const input of inputs) {
+  for (let i = 0; i < inputs.length; i++) {
+    const input = inputs[i];
+    // Un-black-box the capture phase: report which URL we're about to render (the box card
+    // otherwise sits silent through the whole Playwright pass — no claude session exists yet).
+    await Promise.resolve(onProgress?.(i, inputs.length, input.url)).catch(() => {});
     const r = await captureOne(input, stamp).catch((e) => ({
       id: input.id,
       url: input.url,

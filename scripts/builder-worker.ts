@@ -14867,6 +14867,20 @@ async function runResearchJob(job: Job) {
   // Playwright). One Chromium at a time — memory-bounded — and best-effort per URL (a crash on one
   // never wedges the rest).
   console.log(`${tag} capture ${rows.length} URL(s)…`);
+  // Box-session transparency (un-black-box the capture phase): the deterministic Playwright pass runs
+  // BEFORE any claude session exists, so without this the card sits blank for minutes. Write the plan
+  // + a per-URL progress note directly (light patch — skips the update() classifier churn; the claude
+  // session's makeChecklistWriter takes over the checklist once it starts).
+  const host = (u: string) => { try { const x = new URL(u); return x.host + x.pathname.replace(/\/+$/, ""); } catch { return u; } };
+  const noteJob = (patch: Record<string, unknown>) => a.from("agent_jobs").update(patch).eq("id", job.id).then(() => {}, () => {});
+  await noteJob({
+    session_note: `Researching ${rows.length} competitor landers — rendering the first now…`,
+    session_checklist: [
+      { step: `Capture ${rows.length} competitor landers (mobile render + overlay-kill + chapter)`, status: "in_progress", note: `0/${rows.length}` },
+      { step: "Classify each — is it a lander worth studying?", status: "pending", note: "" },
+      { step: "Tear down the worthy funnels into a recipe", status: "pending", note: "" },
+    ],
+  });
   let captures: Array<{
     id: string; url: string; status: "captured" | "unviewable"; strategy: string;
     chapters: Array<{ index: number; label: string; screenshot_path: string }>;
@@ -14878,6 +14892,7 @@ async function runResearchJob(job: Job) {
     captures = await captureBatch(
       rows.map((r) => ({ id: r.id, url: r.url })),
       stamp,
+      (done, total, url) => noteJob({ session_note: `Researching (${done + 1}/${total}) ${host(url)} — rendering + chaptering` }),
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
