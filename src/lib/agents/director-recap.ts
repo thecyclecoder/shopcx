@@ -14,7 +14,8 @@
  * See docs/brain/libraries/director-recap.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getRoadmap, getFunctions } from "@/lib/brain-roadmap";
+import { getFunctions } from "@/lib/brain-roadmap";
+import { shippedSpecsByOwner } from "@/lib/agents/director-kpis";
 import { getPersona } from "@/lib/agents/personas";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { DAILY_SUMMARY_TYPE } from "@/lib/agents/inbox";
@@ -300,28 +301,21 @@ export async function generateDirectorRecap(workspaceId: string, date: string): 
   const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
   const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-  const [{ specs }, functions] = await Promise.all([getRoadmap(), getFunctions()]);
+  const functions = await getFunctions();
 
   // Seed a zeroed entry for every known director — we only ever attribute to a real function.
   const byFn: DirectorRecapMap = {};
   for (const fn of functions) byFn[fn.slug] = emptyStats();
 
-  // spec slug → owner function (live specs only — a folded spec leaves specs/, a display proxy like XP).
-  const ownerBySpec = new Map<string, string>();
-  for (const s of specs) if (s.owner) ownerBySpec.set(s.slug, s.owner);
-
   // 1. specsShipped — builds that merged today, owned by the function (updated_at = the merge flip).
-  const { data: merged } = await admin
-    .from("agent_jobs")
-    .select("spec_slug")
-    .eq("workspace_id", workspaceId)
-    .eq("kind", "build")
-    .eq("status", "merged")
-    .gte("updated_at", dayStart)
-    .lt("updated_at", dayEnd);
-  for (const row of (merged ?? []) as { spec_slug: string | null }[]) {
-    const owner = row.spec_slug ? ownerBySpec.get(row.spec_slug) : undefined;
-    if (owner && byFn[owner]) byFn[owner].specsShipped++;
+  //    Sourced from [[director-kpis]] `shippedSpecsByOwner`, which builds the slug→owner map from
+  //    the FULL spec set (`listSpecs`) so a same-day-folded spec still attributes to its owner.
+  const { countsByOwner } = await shippedSpecsByOwner(workspaceId, {
+    startIso: dayStart,
+    endIso: dayEnd,
+  });
+  for (const [owner, n] of Object.entries(countsByOwner)) {
+    if (byFn[owner]) byFn[owner].specsShipped = n;
   }
 
   // 2. approvals — approved decisions today, split into bugs (repair/regression) · migrations · other.
