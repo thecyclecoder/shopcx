@@ -954,9 +954,15 @@ export async function setSpecStatus(
     stored = null;
   }
   const admin = createAdminClient();
+  // Park signal lives on the `deferred` BOOLEAN column, not `status`. The board's `deriveSpecCardStatus`
+  // reads `row.deferred` (brain-roadmap.ts) — it never checks `status === 'deferred'` — so a status-only
+  // write silently FAILS to park the spec (it falls through to the in_testing overlay; the 2026-07-03
+  // incident). Keep the boolean in lockstep with the override here so `setSpecStatus` alone actually parks:
+  // `deferred` when parking, cleared for EVERY other destination (folded / in_review / null all un-park).
+  // This matches the canonical flag path (spec-card-state `upsertCardState` → dualWriteSpecRow → specs.deferred).
   const { error } = await admin
     .from("specs")
-    .update({ status: stored, updated_at: new Date().toISOString() })
+    .update({ status: stored, deferred: stored === "deferred", updated_at: new Date().toISOString() })
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
