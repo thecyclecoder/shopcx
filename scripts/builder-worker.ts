@@ -10980,10 +10980,15 @@ async function applyOutOfLeashRequestActionInline(
   let skepticVerdict: { dataLossing: boolean; confidence: number; reason: string; additionalMatches?: string[] } | undefined;
   let skepticSkipped = true;
   try {
-    const { runSkepticPass } = await import("../src/lib/migration-safety");
+    const { runSkepticPass, deterministicDataLossSkeptic } = await import("../src/lib/migration-safety");
     const skepticResult = await runSkepticPass(
       dryRunSql,
       blastRadius as unknown as Parameters<typeof runSkepticPass>[1],
+      // Fix 1 — inject the deterministic data-loss skeptic so a REAL adversarial pass runs
+      // (the defaultLenientSkeptic just echoed the classifier). This one independently scans
+      // for CTE writes without WHERE, FK/constraint drops on business tables, and belt-and-
+      // suspenders agrees with the classifier when severity !== 'additive'.
+      { skeptic: deterministicDataLossSkeptic },
     );
     skepticSkipped = skepticResult.skipped;
     skepticVerdict = skepticResult.verdict;
@@ -11444,6 +11449,29 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   }
 
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
+  const { writeDestructiveActionDecisionGrade } = await import("../src/lib/migration-safety");
+
+  // Phase 4/Fix-1 — write a director_decision_grades row for every destructive-action
+  // approval decision so Dylan reviews Ada's decision QUALITY async via the standard
+  // director-grade sweep, satisfying the destructive-migration-safety-rails Phase 4
+  // accountability rail even though the CEO — not Ada — decided this specific approval.
+  // Best-effort; a grade-write failure never blocks the executor.
+  const blastRadiusMeta = (instr.blast_radius as { severity?: string; measured?: boolean; summary?: string } | undefined) ?? undefined;
+  const destructiveRouteMeta = (instr.destructive_route as { routedToFunction?: string; reason?: string } | undefined) ?? undefined;
+  const isDestructiveDecision = !!blastRadiusMeta && blastRadiusMeta.severity !== undefined && blastRadiusMeta.severity !== "additive";
+  if (isDestructiveDecision) {
+    try {
+      await writeDestructiveActionDecisionGrade(db, {
+        workspaceId: job.workspace_id,
+        agentJobId: job.id,
+        directorFunction,
+        blastRadiusSummary: blastRadiusMeta?.summary ?? null,
+        routeReason: destructiveRouteMeta?.reason ?? null,
+      });
+    } catch (e) {
+      console.warn(`${tag} writeDestructiveActionDecisionGrade failed (continuing): ${e instanceof Error ? e.message : e}`);
+    }
+  }
 
   const summaries: string[] = [];
   let anyDeclined = false;

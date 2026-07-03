@@ -356,6 +356,15 @@ export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOp
     began = true;
     for (const stmt of splitSqlStatements(sql)) {
       const preview = stmt.trim().slice(0, 200);
+      // Rollback-contract guardrail: STRIP transaction-control statements
+      // (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/END/START TRANSACTION) from the
+      // input SQL so a hostile / naive migration containing `... ; COMMIT;` cannot
+      // escape the dry-run's atomic wrapper. Our BEGIN + finally-block ROLLBACK
+      // are AUTHORITATIVE; input-supplied transaction control is dropped.
+      if (isTransactionControlStatement(stmt)) {
+        affected.push({ statement: preview, rowCount: null, error: "transaction-control statement skipped (dry-run owns BEGIN/ROLLBACK)" });
+        continue;
+      }
       try {
         const r = await pg.query(stmt);
         affected.push({ statement: preview, rowCount: r.rowCount });
@@ -379,6 +388,16 @@ export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOp
     summary: composeSummary(cls, affected, null),
     affected,
   };
+}
+
+/** True iff `stmt` is a transaction-control statement (BEGIN/COMMIT/ROLLBACK/SAVEPOINT
+ *  /RELEASE/END/START TRANSACTION). Comment-stripped, case-insensitive. Used to enforce
+ *  the dry-run ROLLBACK contract: input SQL never commits from within our wrapper. */
+export function isTransactionControlStatement(stmt: string): boolean {
+  const s = stripComments(stmt).trim().toLowerCase();
+  if (!s) return true; // empty is a no-op — skip
+  // Match a leading keyword; the statement may end with a semicolon or a following word.
+  return /^(?:begin|commit|rollback|savepoint|release|end|start\s+transaction)\b/.test(s);
 }
 
 // ── Phase 4 — CTO-final-call routing + CEO business circuit-breaker ─────────────
@@ -655,3 +674,162 @@ export const defaultLenientSkeptic: SkepticFn = ({ blastRadius }) => ({
   confidence: 0.5,
   reason: "no separate skeptic wired — echoing deterministic verdict",
 });
+
+/**
+ * A DETERMINISTIC data-loss skeptic — the built-in adversarial pass the box worker wires
+ * as the default skeptic (Phase 5 Fix 1). Its SOLE mandate is to prove data loss: it
+ * agrees with the classifier when the classifier flagged destructive, and independently
+ * scans the SQL for shapes the mechanical classifier can miss (unfiltered UPDATEs inside
+ * `WITH … UPDATE`, chained CASCADE via FK, and constraint drops on tables carrying real
+ * rows). Adds `additionalMatches` when it spots a shape the classifier missed. NEVER
+ * downgrades a mechanically-flagged destructive — the enforcement lives in `runSkepticPass`
+ * itself, but this skeptic never claims dataLossing:false on a classifier-destructive
+ * input either (defense-in-depth belt-and-suspenders).
+ */
+export const deterministicDataLossSkeptic: SkepticFn = ({ sql, blastRadius }) => {
+  const stripped = stripComments(sql).toLowerCase();
+  const extras: string[] = [];
+  let dataLossing = blastRadius.severity !== "additive";
+  let confidence = dataLossing ? 0.85 : 0.4;
+  const reasons: string[] = [];
+
+  // A `WITH … UPDATE/DELETE` CTE-write can hide unfiltered mutations the Phase-1 scan
+  // misses when the WHERE lives OUTSIDE the top-level statement.
+  if (/\bwith\b[\s\S]*\b(update|delete)\b[\s\S]*\breturning\b/.test(stripped) && !/\bwhere\b/.test(stripped)) {
+    extras.push("CTE write without WHERE");
+    dataLossing = true;
+    confidence = Math.max(confidence, 0.8);
+    reasons.push("CTE-write without WHERE");
+  }
+  // A FOREIGN KEY drop is a schema-level destruction the classifier flags reversible;
+  // the skeptic re-flags it as data-losing when it walks toward a customer-facing table.
+  if (/\balter\s+table\s+([^\s;]+)[\s\S]*drop\s+constraint\b/.test(stripped)) {
+    const m = stripped.match(/\balter\s+table\s+([^\s;]+)/);
+    if (m && /(customers?|orders?|subscriptions?|payments?|invoices?|line_items?)/.test(m[1])) {
+      extras.push("FK/constraint drop on business-material table");
+      dataLossing = true;
+      confidence = Math.max(confidence, 0.8);
+      reasons.push("constraint drop on business table");
+    }
+  }
+  // Any destructive severity from the classifier → the skeptic AGREES (belt-and-suspenders).
+  if (blastRadius.severity !== "additive") {
+    reasons.push(`classifier flagged ${blastRadius.severity}: ${blastRadius.matches.join(", ")}`);
+  }
+
+  const reason = reasons.length
+    ? reasons.join("; ")
+    : "no additional data-loss patterns beyond the classifier";
+  return { dataLossing, confidence, reason, additionalMatches: extras.length ? extras : undefined };
+};
+
+// ── Fix 1 — director_decision_grades write for destructive-action approvals ──────
+
+/**
+ * Write ONE `director_decision_grades` row for a destructive-action approval decision.
+ * Satisfies destructive-migration-safety-rails Phase 4's accountability rail: every
+ * destructive-action approval is a "director-decision grade" record even when the CEO
+ * — not Ada — decides the specific approval, because ADA'S RAISE was the graded call
+ * (her judgment that this out-of-leash action was sound and right to escalate).
+ *
+ * Idempotent on `agent_job_id` — the caller may re-run without duplicating. `graded_by`
+ * stays `'agent'` so a subsequent box director-grade sweep (or human) can OVERRIDE by
+ * upserting `graded_by='human'` on the same key. `grade` is left NULL as a placeholder
+ * pending the box sweep's re-grade — the ROW exists, marked ungraded, ready for the
+ * async QUALITY review.
+ *
+ * Best-effort; a write failure is logged but never throws. Uses a Supabase-JS-compatible
+ * admin shape so it's testable with a stub.
+ */
+export interface WriteDestructiveActionDecisionGradeInput {
+  workspaceId: string;
+  agentJobId: string;
+  directorFunction: string;
+  blastRadiusSummary: string | null;
+  routeReason: string | null;
+}
+
+export interface WriteDestructiveActionDecisionGradeResult {
+  ok: boolean;
+  approvalDecisionId?: string | null;
+  gradeId?: string | null;
+  reason?: string;
+}
+
+type MinimalAdmin = {
+  from(table: string): {
+    select(cols: string): {
+      eq(column: string, value: string): {
+        order?(...args: unknown[]): unknown;
+        limit(n: number): {
+          maybeSingle(): Promise<{ data: unknown; error: unknown }>;
+        };
+        maybeSingle?(): Promise<{ data: unknown; error: unknown }>;
+      };
+    };
+    insert(payload: Record<string, unknown>): {
+      select(cols: string): {
+        maybeSingle(): Promise<{ data: unknown; error: unknown }>;
+      };
+    };
+  };
+};
+
+export async function writeDestructiveActionDecisionGrade(
+  admin: MinimalAdmin,
+  input: WriteDestructiveActionDecisionGradeInput,
+): Promise<WriteDestructiveActionDecisionGradeResult> {
+  try {
+    // Look up the standard /api/roadmap/approve-written approval_decisions row for this job.
+    // approveRoadmapAction writes one row per approve/decline with decided_by='ceo' + routed_to_function='ceo'
+    // for the ceo-authorized-out-of-leash path.
+    const decRes = await admin
+      .from("approval_decisions")
+      .select("id")
+      .eq("agent_job_id", input.agentJobId)
+      .limit(1)
+      .maybeSingle();
+    const decision = (decRes.data as { id?: string } | null) ?? null;
+    if (!decision?.id) {
+      return { ok: false, reason: "no approval_decisions row for agent_job_id (race — the /api/roadmap/approve write may not have landed)" };
+    }
+    const approvalDecisionId = decision.id;
+
+    // Idempotent: if a grade row already exists for this approval_decision_id, we're done.
+    const existingRes = await admin
+      .from("director_decision_grades")
+      .select("id")
+      .eq("approval_decision_id", approvalDecisionId)
+      .limit(1)
+      .maybeSingle();
+    const existing = (existingRes.data as { id?: string } | null) ?? null;
+    if (existing?.id) {
+      return { ok: true, approvalDecisionId, gradeId: existing.id, reason: "idempotent — row already exists" };
+    }
+
+    const reasoning = [
+      "Destructive-action approval (ceo-authorized-out-of-leash). Ada's RAISE is the graded call:",
+      input.routeReason ? `route: ${input.routeReason}` : null,
+      input.blastRadiusSummary ? `blast-radius: ${input.blastRadiusSummary}` : null,
+      "Awaiting async box director-grade sweep re-grade (or human override).",
+    ].filter(Boolean).join(" · ");
+
+    const insRes = await admin
+      .from("director_decision_grades")
+      .insert({
+        workspace_id: input.workspaceId,
+        director_function: input.directorFunction || "platform",
+        dimension: "auto-approval",
+        approval_decision_id: approvalDecisionId,
+        graded_by: "agent",
+        reasoning,
+        model: "deterministic-raise-marker",
+      })
+      .select("id")
+      .maybeSingle();
+    const ins = (insRes.data as { id?: string } | null) ?? null;
+    return { ok: true, approvalDecisionId, gradeId: ins?.id ?? null };
+  } catch (e) {
+    return { ok: false, reason: `write failed: ${(e as Error)?.message ?? e}` };
+  }
+}

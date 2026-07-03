@@ -131,6 +131,20 @@ Rules:
 
 Production wires a Max `claude -p` session as the injected skeptic; tests inject a fake. The `defaultLenientSkeptic` (also exported) echoes the deterministic verdict — provided so callers that haven't wired a real skeptic yet still exercise the severity-preservation contract end-to-end.
 
+### `deterministicDataLossSkeptic` — SkepticFn
+
+The built-in adversarial pass the box worker wires as the default skeptic (Phase 5 Fix 1). Its SOLE mandate is to prove data loss: it agrees with the classifier when the classifier flagged destructive AND independently scans for shapes the mechanical classifier can miss — `WITH … UPDATE/DELETE … RETURNING` CTE writes without WHERE, and `ALTER TABLE … DROP CONSTRAINT` on a business-material table (customers/orders/subscriptions/…). Adds `additionalMatches` when it surfaces a new shape. Never claims `dataLossing:false` on a classifier-destructive input (belt-and-suspenders — even before `runSkepticPass`'s severity-preservation rule fires).
+
+### `writeDestructiveActionDecisionGrade` — async function (Phase 4 accountability rail, Fix 1)
+
+Writes ONE `director_decision_grades` row for a destructive-action approval decision — Ada's raise is the graded call even when the CEO decides the specific approval. Idempotent on `agent_job_id`; `graded_by='agent'`, `grade=null`; a subsequent box director-grade sweep (or human) overrides via the same key. Best-effort; failures logged, never thrown.
+
+Called from `runCeoAuthorizedOutOfLeashJob` (scripts/builder-worker.ts) after every destructive-action approval decision, keyed on `blast_radius.severity !== 'additive'`.
+
+### `isTransactionControlStatement(sql)` — function (Fix 1)
+
+Comment-stripped, case-insensitive — true for `BEGIN` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` / `RELEASE` / `END` / `START TRANSACTION`. Used by `computeBlastRadius` to STRIP transaction-control from the input SQL so a hostile / naive migration containing `... ; COMMIT;` cannot escape the dry-run's atomic wrapper — the dry-run OWNS `BEGIN` / `ROLLBACK`.
+
 ### `SkepticVerdict` · `SkepticFn` · `RunSkepticPassOpts` · `SkepticPassResult` — types
 
 ### `BlastRadius` · `BlastRadiusStatement` · `DestructiveRoute` · `RouteDestination` · `MigrationSeverity` · `MigrationClassification` — types / interfaces

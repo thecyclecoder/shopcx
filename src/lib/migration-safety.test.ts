@@ -24,6 +24,9 @@ import {
   routeDestructiveAction,
   runSkepticPass,
   defaultLenientSkeptic,
+  deterministicDataLossSkeptic,
+  isTransactionControlStatement,
+  writeDestructiveActionDecisionGrade,
   BUSINESS_MATERIAL_ROW_THRESHOLD,
   type BlastRadius,
   type PgLike,
@@ -524,4 +527,185 @@ test("runSkepticPass: default lenient skeptic echoes deterministic verdict (seve
 
   const rAdd = await runSkepticPass("ALTER TABLE x ADD COLUMN y int;", additiveBRForSkeptic);
   assert.equal(rAdd.skipped, true); // additive → skipped entirely
+});
+
+// ── Fix 1: transaction-control statements never escape the dry-run wrapper ─────
+
+test("isTransactionControlStatement flags BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/END/START TRANSACTION", () => {
+  for (const s of ["BEGIN;", "commit", " ROLLBACK ", "SAVEPOINT sp1", "RELEASE SAVEPOINT sp1", "END;", "START TRANSACTION;"]) {
+    assert.equal(isTransactionControlStatement(s), true, `should flag: ${s}`);
+  }
+  for (const s of ["DELETE FROM x WHERE id=1;", "ALTER TABLE x ADD COLUMN y int;", "SELECT 1;"]) {
+    assert.equal(isTransactionControlStatement(s), false, `should NOT flag: ${s}`);
+  }
+});
+
+test("computeBlastRadius: rollback contract HOLDS even when input SQL contains COMMIT (Fix 1)", async () => {
+  // Fault-injection harness from the failing pre-merge check evidence:
+  //   `DELETE FROM orders WHERE id IS NOT NULL; COMMIT;`
+  // Before the fix: our per-statement loop executed COMMIT from the input, committing the
+  // transaction; the trailing ROLLBACK found nothing to roll back. After the fix: COMMIT is
+  // stripped as a transaction-control statement, so BEGIN + DELETE run, then our finally
+  // block's ROLLBACK unwinds cleanly.
+  class HarnessPg implements PgLike {
+    calls: string[] = [];
+    committed = false;
+    rollbackCalled = false;
+    async query(sql: string) {
+      this.calls.push(sql);
+      const upper = sql.trim().toUpperCase();
+      if (upper.startsWith("BEGIN")) return { rowCount: null, rows: [] };
+      if (upper.startsWith("COMMIT")) { this.committed = true; return { rowCount: null, rows: [] }; }
+      if (upper.startsWith("ROLLBACK")) { this.rollbackCalled = true; return { rowCount: null, rows: [] }; }
+      if (upper.startsWith("DELETE FROM ORDERS")) return { rowCount: 10, rows: [] };
+      return { rowCount: null, rows: [] };
+    }
+  }
+  const pg = new HarnessPg();
+  const r = await computeBlastRadius("DELETE FROM orders WHERE id IS NOT NULL; COMMIT;", { pg });
+  assert.equal(r.measured, true);
+  // The DELETE's row count is measured …
+  const del = r.affected?.find((a) => a.statement.toUpperCase().startsWith("DELETE"));
+  assert.equal(del?.rowCount, 10);
+  // … and the ROLLBACK contract HOLDS: pg observed ROLLBACK (not COMMIT) at the end.
+  assert.equal(pg.committed, false, "input COMMIT must be stripped — the tx never commits");
+  assert.equal(pg.rollbackCalled, true, "ROLLBACK still fires from the finally block");
+  // The COMMIT statement is recorded as skipped-with-reason on the affected list.
+  const commit = r.affected?.find((a) => a.statement.toUpperCase().startsWith("COMMIT"));
+  assert.match(commit?.error ?? "", /transaction-control statement skipped/);
+});
+
+// ── Fix 1: deterministic data-loss skeptic actually runs ──────────────────────
+
+test("deterministicDataLossSkeptic: agrees with the classifier on a mechanically-flagged destructive", async () => {
+  const v = await deterministicDataLossSkeptic({ sql: "DROP TABLE customers;", blastRadius: irrevBRForSkeptic() });
+  assert.equal(v.dataLossing, true);
+  assert.ok(v.confidence >= 0.7);
+  assert.match(v.reason, /classifier flagged irreversible_destructive/);
+});
+
+test("deterministicDataLossSkeptic: SURFACES a CTE-write without WHERE (a Phase-1 blind spot)", async () => {
+  const sql = "WITH bad AS (DELETE FROM widgets RETURNING id) SELECT count(*) FROM bad;";
+  const v = await deterministicDataLossSkeptic({ sql, blastRadius: additiveBRForSkeptic });
+  assert.equal(v.dataLossing, true);
+  assert.ok(v.additionalMatches?.includes("CTE write without WHERE"));
+});
+
+test("deterministicDataLossSkeptic: SURFACES a constraint drop on a business-material table", async () => {
+  const sql = "ALTER TABLE customers DROP CONSTRAINT customers_email_uk;";
+  const v = await deterministicDataLossSkeptic({ sql, blastRadius: revBRForSkeptic() });
+  assert.ok(v.additionalMatches?.some((m) => /constraint drop on business-material/i.test(m)));
+});
+
+test("deterministicDataLossSkeptic: additive migration returns dataLossing:false with no extras", async () => {
+  const v = await deterministicDataLossSkeptic({ sql: "ALTER TABLE x ADD COLUMN y int;", blastRadius: additiveBRForSkeptic });
+  assert.equal(v.dataLossing, false);
+  assert.equal(v.additionalMatches, undefined);
+});
+
+test("runSkepticPass wired with the deterministic skeptic: destructive migration returns a data-loss finding", async () => {
+  const r = await runSkepticPass("DROP TABLE customers;", irrevBRForSkeptic(), { skeptic: deterministicDataLossSkeptic });
+  assert.equal(r.skipped, false);
+  assert.equal(r.verdict?.dataLossing, true);
+  assert.match(r.finalBlastRadius.summary, /data loss confirmed/);
+});
+
+test("runSkepticPass wired with the deterministic skeptic: additive migration passes without a skeptic escalation", async () => {
+  const r = await runSkepticPass("ALTER TABLE x ADD COLUMN y int;", additiveBRForSkeptic, { skeptic: deterministicDataLossSkeptic });
+  assert.equal(r.skipped, true); // additive → nothing to refute → skipped entirely
+  assert.equal(r.verdict, undefined);
+});
+
+// ── Fix 1: director_decision_grades row is written on destructive approval ─────
+
+test("writeDestructiveActionDecisionGrade: writes an auto-approval grade row for the linked approval_decisions row", async () => {
+  const inserted: Array<{ table: string; payload: Record<string, unknown> }> = [];
+  const admin = {
+    from(table: string) {
+      return {
+        select() {
+          return {
+            eq(_col: string, _val: string) {
+              return {
+                limit(_n: number) {
+                  return {
+                    async maybeSingle() {
+                      if (table === "approval_decisions") return { data: { id: "dec-1" }, error: null };
+                      if (table === "director_decision_grades") return { data: null, error: null }; // not yet graded
+                      return { data: null, error: null };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        insert(payload: Record<string, unknown>) {
+          inserted.push({ table, payload });
+          return {
+            select() {
+              return { async maybeSingle() { return { data: { id: "grade-1" }, error: null }; } };
+            },
+          };
+        },
+      };
+    },
+  };
+  const r = await writeDestructiveActionDecisionGrade(admin, {
+    workspaceId: "ws-1",
+    agentJobId: "job-1",
+    directorFunction: "platform",
+    blastRadiusSummary: "deletes 48,201 rows from orders — irreversible",
+    routeReason: "irreversible_destructive + business-material — CEO circuit-break",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.approvalDecisionId, "dec-1");
+  assert.equal(r.gradeId, "grade-1");
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0].table, "director_decision_grades");
+  assert.equal(inserted[0].payload.dimension, "auto-approval");
+  assert.equal(inserted[0].payload.approval_decision_id, "dec-1");
+  assert.equal(inserted[0].payload.graded_by, "agent");
+  assert.match(inserted[0].payload.reasoning as string, /deletes 48,201 rows/);
+});
+
+test("writeDestructiveActionDecisionGrade: idempotent — a second call skips the insert when a row already exists", async () => {
+  const inserted: unknown[] = [];
+  const admin = {
+    from(table: string) {
+      return {
+        select() {
+          return {
+            eq(_col: string, _val: string) {
+              return {
+                limit(_n: number) {
+                  return {
+                    async maybeSingle() {
+                      if (table === "approval_decisions") return { data: { id: "dec-1" }, error: null };
+                      if (table === "director_decision_grades") return { data: { id: "existing-grade" }, error: null };
+                      return { data: null, error: null };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        insert(payload: Record<string, unknown>) {
+          inserted.push(payload);
+          return { select() { return { async maybeSingle() { return { data: null, error: null }; } }; } };
+        },
+      };
+    },
+  };
+  const r = await writeDestructiveActionDecisionGrade(admin, {
+    workspaceId: "ws-1",
+    agentJobId: "job-1",
+    directorFunction: "platform",
+    blastRadiusSummary: "x",
+    routeReason: "y",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.gradeId, "existing-grade");
+  assert.equal(inserted.length, 0, "insert must NOT run when a grade row already exists");
 });
