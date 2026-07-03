@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
 - **Ada grades a sampled, cadenced, adaptive-by-rollup batch — not every concluded job** · verified 2026-07-02 · → [[../libraries/agent-grader]]
 - **AdLibrary search freshness gate** · verified 2026-07-02 · → [[lifecycles/creative-finder]]
