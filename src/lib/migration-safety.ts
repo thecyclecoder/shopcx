@@ -552,6 +552,56 @@ export function routeDestructiveAction(sql: string, blastRadius: BlastRadius): D
   };
 }
 
+/**
+ * secure-destructive-migration-preapproval-boundary — the OUT-OF-LEASH-caller wrapper around
+ * `routeDestructiveAction`. Adds two hard gates BEFORE consulting the Phase-4 routing table:
+ *
+ *   1. `actionType` must be `apply_migration`. A `run_prod_script` is a bounded shell command, not
+ *      SQL — the deterministic classifier + dry-run cannot inspect its blast radius, so it can
+ *      NEVER be validated onto the Platform lane. Every other actionType routes to CEO fail-safe.
+ *   2. Blast-radius `severity` must be `reversible_destructive`. `additive` still needs CEO (Ada
+ *      is out of leash, she does not silently self-approve additive-but-out-of-leash asks);
+ *      `irreversible_destructive` always needs CEO (circuit-breaker); only the middle rung is
+ *      eligible for the Ada-owns-final-call lane where the rename-and-expire / non-material rails
+ *      keep it safe.
+ *
+ * The Phase-4 rules for reversible_destructive stay unchanged — `routeDestructiveAction` decides
+ * platform vs ceo based on rename-and-expire × business-materiality. This wrapper's job is only
+ * to close the two authority-bypass paths (`run_prod_script`-as-platform / `additive`-as-platform)
+ * introduced when the raise path bundled a self-declared severity onto the pending action.
+ *
+ * The output is the same DestructiveRoute shape — callers store `routed_to_function_override` on
+ * the pending action, and `routingOwnerForJob` (approval-inbox) RE-VALIDATES the override at
+ * read-time against action.type + action.blastRadius.severity so a hostile row cannot install a
+ * Platform override by hand.
+ */
+export function routeOutOfLeashAction(
+  actionType: string,
+  sql: string,
+  blastRadius: BlastRadius,
+): DestructiveRoute {
+  if (actionType !== "apply_migration") {
+    return {
+      routedToFunction: "ceo",
+      renameAndExpire: false,
+      businessMaterial: false,
+      reason: `actionType=${actionType || "unknown"} is not SQL — blast-radius cannot validate it; CEO fail-safe`,
+    };
+  }
+  if (blastRadius.severity !== "reversible_destructive") {
+    return {
+      routedToFunction: "ceo",
+      renameAndExpire: isRenameAndExpire(sql),
+      businessMaterial: isBusinessMaterial(blastRadius),
+      reason: `severity=${blastRadius.severity} is not eligible for the Platform lane — CEO fail-safe`,
+    };
+  }
+  const routed = routeDestructiveAction(sql, blastRadius);
+  // routeDestructiveAction MAY still route reversible_destructive to CEO (business-material + not
+  // rename-form). Preserve that decision verbatim — we never widen a CEO route back to platform.
+  return routed;
+}
+
 // ── Phase 5 — Adversarial skeptic pass (defense-in-depth, not load-bearing) ─────
 //
 // Before any destructive migration surfaces to a human, run a read-only skeptic
