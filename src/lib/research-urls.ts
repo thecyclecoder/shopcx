@@ -51,6 +51,59 @@ export type ResearchUrlClassification =
 /** teardown_verdict vocab (matches the CHECK constraint). */
 export type ResearchUrlVerdict = "worthy" | "not_worthy" | "unreviewed";
 
+/**
+ * Lever vocab for `TeardownRecipe.levers[].lever` — the tagged persuasion primitives Rhea
+ * spots on a worthy lander. Union kept small on purpose (the point is a stable vocabulary
+ * Cleo can gap-analyze against our storefront); extending it is a spec change.
+ */
+export type TeardownLever =
+  | "authority"
+  | "social_proof"
+  | "ugc"
+  | "urgency"
+  | "price_anchor"
+  | "risk_reversal"
+  | "value_stack"
+  | "objection_handling"
+  | "specificity"
+  | "bandwagon"
+  | "choice_simplicity";
+
+/**
+ * The structured teardown of a worthy lander — the artifact Cleo (slice 3) reads to diff
+ * against our storefront and emit a build blueprint. Written by `setTeardown` after Rhea's
+ * one-session pass over the already-captured chapters (no re-render). See
+ * docs/brain/specs/rhea-teardown-recipe.md Phase 1.
+ */
+export interface TeardownRecipe {
+  /** Broad funnel classification (e.g. "advertorial-listicle", "quiz", "generic_pdp"). */
+  funnel_type: string;
+  /** One-sentence strategy summary Rhea derived from what she saw. */
+  strategy: string;
+  /** Ordered chapter roles top-to-bottom of the lander (hero, intro/proof, …, offer, faq). */
+  architecture: { chapter_role: string; purpose: string }[];
+  /** Optional emotion→logic sequence — populated for listicle-style landers. */
+  reason_sequence?: {
+    order: number;
+    benefit: string;
+    appeal: "emotion" | "logic";
+    mechanism: string;
+  }[];
+  /** Tagged persuasion levers, each with the concrete evidence Rhea saw. */
+  levers: { lever: TeardownLever; evidence: string }[];
+  /** The offer chapter parsed into discrete pieces. `options` is the count of purchase paths. */
+  offer: {
+    discount?: string;
+    bundle?: string;
+    bonuses?: string[];
+    guarantee?: string;
+    urgency?: string;
+    options: number;
+  };
+  /** The product-agnostic skeleton — the pattern we could transfer to a Superfoods lander. */
+  transferable_pattern: string;
+}
+
 export interface ResearchUrl {
   id: string;
   workspace_id: string;
@@ -66,6 +119,7 @@ export interface ResearchUrl {
   teardown_verdict: ResearchUrlVerdict;
   rationale: string | null;
   capture_ref: string | null;
+  teardown: TeardownRecipe | null;
   classified_at: string | null;
   classified_by: string | null;
   created_at: string;
@@ -319,4 +373,104 @@ export async function setCaptureRef(workspaceId: string, id: string, captureRef:
     .eq("id", id)
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setCaptureRef: ${error.message}`);
+}
+
+/** Lever vocab guard — kept next to the write so the validator can reject typos. */
+const TEARDOWN_LEVERS: readonly TeardownLever[] = [
+  "authority",
+  "social_proof",
+  "ugc",
+  "urgency",
+  "price_anchor",
+  "risk_reversal",
+  "value_stack",
+  "objection_handling",
+  "specificity",
+  "bandwagon",
+  "choice_simplicity",
+];
+
+/**
+ * Validate a `TeardownRecipe` before it hits the row. Mirrors the author-spec gate discipline:
+ * a half-formed recipe (empty architecture / levers / transferable_pattern, or a lever tag
+ * outside the vocabulary) is REJECTED here — the SDK is the only write path, so this is where
+ * we keep the artifact honest. Throws on any failure; returns void on pass.
+ */
+export function validateTeardownRecipe(recipe: TeardownRecipe): void {
+  if (!recipe || typeof recipe !== "object") {
+    throw new Error("setTeardown: recipe must be an object");
+  }
+  if (!recipe.funnel_type || typeof recipe.funnel_type !== "string") {
+    throw new Error("setTeardown: recipe.funnel_type is required");
+  }
+  if (!recipe.strategy || typeof recipe.strategy !== "string") {
+    throw new Error("setTeardown: recipe.strategy is required");
+  }
+  if (!Array.isArray(recipe.architecture) || recipe.architecture.length === 0) {
+    throw new Error("setTeardown: recipe.architecture must be a non-empty array");
+  }
+  for (const chapter of recipe.architecture) {
+    if (!chapter || !chapter.chapter_role || !chapter.purpose) {
+      throw new Error("setTeardown: every architecture entry needs chapter_role + purpose");
+    }
+  }
+  if (!Array.isArray(recipe.levers) || recipe.levers.length === 0) {
+    throw new Error("setTeardown: recipe.levers must be a non-empty array");
+  }
+  for (const lever of recipe.levers) {
+    if (!lever || !lever.evidence) {
+      throw new Error("setTeardown: every lever entry needs evidence");
+    }
+    if (!TEARDOWN_LEVERS.includes(lever.lever)) {
+      throw new Error(`setTeardown: unknown lever '${lever.lever}'`);
+    }
+  }
+  if (recipe.reason_sequence !== undefined) {
+    if (!Array.isArray(recipe.reason_sequence)) {
+      throw new Error("setTeardown: recipe.reason_sequence must be an array when present");
+    }
+    for (const item of recipe.reason_sequence) {
+      if (
+        !item
+        || typeof item.order !== "number"
+        || !item.benefit
+        || (item.appeal !== "emotion" && item.appeal !== "logic")
+        || !item.mechanism
+      ) {
+        throw new Error(
+          "setTeardown: every reason_sequence entry needs order + benefit + appeal ∈ emotion|logic + mechanism",
+        );
+      }
+    }
+  }
+  if (!recipe.offer || typeof recipe.offer !== "object") {
+    throw new Error("setTeardown: recipe.offer is required");
+  }
+  if (typeof recipe.offer.options !== "number" || recipe.offer.options < 1) {
+    throw new Error("setTeardown: recipe.offer.options must be a positive number");
+  }
+  if (!recipe.transferable_pattern || typeof recipe.transferable_pattern !== "string") {
+    throw new Error("setTeardown: recipe.transferable_pattern is required");
+  }
+}
+
+/**
+ * Rhea's teardown-recipe write (Phase 2 driver). Validates the recipe (rejects a half-formed
+ * one with no architecture / levers / transferable_pattern — same gate discipline as author-spec)
+ * then persists it to `research_urls.teardown` via the admin client. The ONLY write path for the
+ * teardown column.
+ */
+export async function setTeardown(
+  workspaceId: string,
+  id: string,
+  recipe: TeardownRecipe,
+): Promise<void> {
+  validateTeardownRecipe(recipe);
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("research_urls")
+    .update({ teardown: recipe })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`setTeardown: ${error.message}`);
 }

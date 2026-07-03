@@ -24,6 +24,7 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 | `teardown_verdict` | `text` | — | default `'unreviewed'` · CHECK ∈ `worthy` \| `not_worthy` \| `unreviewed`. Phase 1 always writes `unreviewed`; Phase 2 flips based on Rhea's rationale. |
 | `rationale` | `text` | ✓ | Rhea's one-sentence citation of what she saw (why worthy / not_worthy). Null on `unreviewed`. |
 | `capture_ref` | `text` | ✓ | Pointer into the private `research-shots` Storage bucket — the path prefix under which the chapter shots for the last capture live. Written by [[../libraries/research-urls]] `setCaptureRef` after a successful Playwright capture ([[../recipes/lander-capture]]). Null until Phase 2 captures. |
+| `teardown` | `jsonb` | ✓ | Rhea's structured teardown recipe for a worthy lander (`TeardownRecipe` — funnel_type + strategy + architecture[] + reason_sequence[]? + levers[] + offer + transferable_pattern). Written by [[../libraries/research-urls]] `setTeardown` in the same `runResearchJob` session as the classify pass (no re-render — reuses the captured chapters). Null on `not_worthy` / `unviewable` / pre-teardown rows. The artifact [[../functions/growth]]'s Cleo (slice 3) reads to diff against our storefront and emit a build blueprint. See [[../specs/rhea-teardown-recipe]]. |
 | `classified_at` | `timestamptz` | ✓ | When `classification` was set. |
 | `classified_by` | `text` | ✓ | `'rhea'` for the box classifier; operator email on manual override. Free-text on purpose. |
 | `created_at` | `timestamptz` | — | default `now()` |
@@ -56,4 +57,4 @@ Rhea's URL sensor — one row per distinct ad-scout destination for a workspace.
 
 ## Related
 
-[[../specs/rhea-url-sensor]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../libraries/landing-page-scout]] · [[../functions/growth]]
+[[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../libraries/landing-page-scout]] · [[../functions/growth]]
