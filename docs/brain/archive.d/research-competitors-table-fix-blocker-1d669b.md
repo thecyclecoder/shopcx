@@ -1,0 +1,1 @@
+- **research-competitors-table — fix the blocker uncovered by the build** · verified 2026-07-03 · → [[../libraries/spec-test-runs]]
