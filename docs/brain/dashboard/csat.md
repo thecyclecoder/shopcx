@@ -16,11 +16,14 @@ _None._
 
 ## API endpoints called
 
-- `/api/workspaces/:x/csat`
+- `GET /api/workspaces/:x/csat` — stats + recent responses. Stats aggregates drop `excluded_at IS NOT NULL` rows; the list still includes them (carrying `excluded_at` + `exclusion_reason`) so the owner can see + reverse.
+- `POST /api/workspaces/:x/csat` with `action:'exclude'` (owner-only, body: `{ csat_id, reason }`) sets `excluded_at=now`, `excluded_by=user.id`, `exclusion_reason`.
+- `POST /api/workspaces/:x/csat` with `action:'include'` (owner-only, body: `{ csat_id }`) clears all three columns.
+- `POST /api/workspaces/:x/csat` with `action:'create_ticket'` (owner/admin/agent) — unchanged.
 
 ## Permissions
 
-All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.
+All workspace members can view. The **Exclude from stats / Include** control on each CSAT row is OWNER-only — non-owners never see the button, and a direct `POST action:'exclude'` returns 403. See [[../tables/ticket_csat]] `excluded_at` / `excluded_by` / `exclusion_reason`.
 
 ## Files touched
 

@@ -14,6 +14,8 @@ interface CsatResponse {
   ticket_id: string;
   ticket_subject: string | null;
   customer_name: string | null;
+  excluded_at: string | null;
+  exclusion_reason: string | null;
 }
 
 interface CsatStats {
@@ -30,12 +32,14 @@ const WINDOWS = [7, 30, 90, 365] as const;
 
 export default function CsatPage() {
   const router = useRouter();
-  const { id: workspaceId } = useWorkspace();
+  const { id: workspaceId, role } = useWorkspace();
+  const isOwner = role === "owner";
   const [days, setDays] = useState<number>(30);
   const [stats, setStats] = useState<CsatStats | null>(null);
   const [responses, setResponses] = useState<CsatResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [creatingTicketFor, setCreatingTicketFor] = useState<string | null>(null);
+  const [togglingExcludeFor, setTogglingExcludeFor] = useState<string | null>(null);
 
   async function createTicketFromCsat(csatId: string) {
     setCreatingTicketFor(csatId);
@@ -63,6 +67,34 @@ export default function CsatPage() {
     setResponses(data.responses || []);
     setLoading(false);
   }, [workspaceId, days]);
+
+  async function toggleExclude(r: CsatResponse) {
+    if (!isOwner) return;
+    const excluding = r.excluded_at == null;
+    let reason: string | null = null;
+    if (excluding) {
+      const entered = window.prompt("Why exclude this CSAT from the stats? (e.g. product complaint, not service)");
+      if (entered == null) return;
+      reason = entered.trim();
+    }
+    setTogglingExcludeFor(r.id);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/csat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          excluding
+            ? { action: "exclude", csat_id: r.id, reason }
+            : { action: "include", csat_id: r.id },
+        ),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert(data.error || "Failed to update"); return; }
+      await load();
+    } finally {
+      setTogglingExcludeFor(null);
+    }
+  }
 
   useEffect(() => { void load(); }, [load]);
 
@@ -135,8 +167,10 @@ export default function CsatPage() {
           <div className="mt-6 rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="border-b border-zinc-100 p-4 text-sm font-medium text-zinc-900 dark:border-zinc-800 dark:text-zinc-100">Recent responses</h2>
             <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {responses.map(r => (
-                <li key={r.id} className="p-4">
+              {responses.map(r => {
+                const excluded = r.excluded_at != null;
+                return (
+                <li key={r.id} className={`p-4 ${excluded ? "opacity-60" : ""}`}>
                   <div className="flex items-start gap-3">
                     <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-base font-semibold ${
                       r.rating >= 4 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" :
@@ -154,26 +188,52 @@ export default function CsatPage() {
                         {r.customer_name || "(no customer)"}
                         {r.points_awarded > 0 && <span className="ml-2">· +{r.points_awarded} pts</span>}
                       </p>
+                      {excluded && (
+                        <p
+                          className="mt-1 inline-block rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                          title={r.exclusion_reason || "No reason recorded"}
+                        >
+                          Excluded from stats{r.exclusion_reason ? ` · ${r.exclusion_reason}` : ""}
+                        </p>
+                      )}
                       {r.comment && (
                         <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{r.comment}</p>
                       )}
-                      <button
-                        type="button"
-                        disabled={creatingTicketFor === r.id}
-                        onClick={() => createTicketFromCsat(r.id)}
-                        className="mt-2 rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
-                        title={r.comment ? "Use the CSAT comment as the first inbound message" : "Start a fresh ticket on this customer — empty, agent opens the conversation"}
-                      >
-                        {creatingTicketFor === r.id
-                          ? "Creating…"
-                          : r.comment
-                            ? "Create ticket from this comment"
-                            : "Create ticket for this customer"}
-                      </button>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={creatingTicketFor === r.id}
+                          onClick={() => createTicketFromCsat(r.id)}
+                          className="rounded-md border border-blue-300 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950"
+                          title={r.comment ? "Use the CSAT comment as the first inbound message" : "Start a fresh ticket on this customer — empty, agent opens the conversation"}
+                        >
+                          {creatingTicketFor === r.id
+                            ? "Creating…"
+                            : r.comment
+                              ? "Create ticket from this comment"
+                              : "Create ticket for this customer"}
+                        </button>
+                        {isOwner && (
+                          <button
+                            type="button"
+                            disabled={togglingExcludeFor === r.id}
+                            onClick={() => toggleExclude(r)}
+                            className="rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            title={excluded ? "Add this CSAT back into the stats" : "Drop this CSAT from Avg rating + Responses (owner only)"}
+                          >
+                            {togglingExcludeFor === r.id
+                              ? "Saving…"
+                              : excluded
+                                ? "Include"
+                                : "Exclude from stats"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           </div>
         </>
