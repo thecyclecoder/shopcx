@@ -422,41 +422,71 @@ export async function syncResearchUrlsFromCreatives(workspaceId: string): Promis
   // pre-stamped with classification + teardown_verdict + rationale + classified_by so they're
   // INVISIBLE to the research-sensor claim (`classification IS NULL`).
   const nowIso = new Date().toISOString();
-  const payload = [...byUrl.values()].map((a) => {
-    const base = {
-      workspace_id: workspaceId,
-      url: a.url,
-      domain: a.domain,
-      brand: a.brand,
-      source: "ad_scout",
-      ad_count: a.ad_count,
-      first_seen: a.first_seen,
-      last_seen: a.last_seen,
-    };
-    if (a.gate) {
-      if (a.gate.classification === "excluded") gatedExcluded++;
-      else gatedCheckout++;
-      return {
-        ...base,
-        classification: a.gate.classification,
-        teardown_verdict: "not_worthy" as const,
-        rationale: a.gate.rationale,
-        classified_by: "deterministic",
-        classified_at: nowIso,
-      };
-    }
-    return { ...base, teardown_verdict: "unreviewed" as const };
-  });
 
-  const { error: upErr } = await admin
+  // CRITICAL — never clobber Rhea's classification work on a re-sync. The old code upserted a MIXED
+  // payload (gated rows carry classification/verdict/…, ungated rows don't), so Supabase built ONE
+  // `ON CONFLICT DO UPDATE` across the UNION of columns — resetting classification→NULL and
+  // teardown_verdict→'unreviewed' on EVERY existing row each sync, silently erasing her judgments and
+  // leaving only the orphaned teardown jsonb. Fix: INSERT only NEW urls; for EXISTING rows refresh
+  // ONLY the volatile ad-signal (ad_count/last_seen). classification/verdict/teardown/rationale/
+  // classified_* are Rhea-owned and MUST survive a re-sync.
+  const aggs = [...byUrl.values()];
+  for (const a of aggs) {
+    if (a.gate) { if (a.gate.classification === "excluded") gatedExcluded++; else gatedCheckout++; }
+  }
+
+  const { data: existingRows, error: exErr } = await admin
     .from("research_urls")
-    .upsert(payload, { onConflict: "workspace_id,url", ignoreDuplicates: false });
-  if (upErr) throw new Error(`syncResearchUrlsFromCreatives upsert: ${upErr.message}`);
+    .select("url")
+    .eq("workspace_id", workspaceId);
+  if (exErr) throw new Error(`syncResearchUrlsFromCreatives read-existing: ${exErr.message}`);
+  const existing = new Set((existingRows || []).map((r) => (r as { url: string }).url));
+
+  const newRows = aggs
+    .filter((a) => !existing.has(a.url))
+    .map((a) => {
+      const base = {
+        workspace_id: workspaceId,
+        url: a.url,
+        domain: a.domain,
+        brand: a.brand,
+        source: "ad_scout",
+        ad_count: a.ad_count,
+        first_seen: a.first_seen,
+        last_seen: a.last_seen,
+      };
+      return a.gate
+        ? {
+            ...base,
+            classification: a.gate.classification,
+            teardown_verdict: "not_worthy" as const,
+            rationale: a.gate.rationale,
+            classified_by: "deterministic",
+            classified_at: nowIso,
+          }
+        : { ...base, teardown_verdict: "unreviewed" as const };
+    });
+  if (newRows.length) {
+    const { error: insErr } = await admin.from("research_urls").insert(newRows);
+    if (insErr) throw new Error(`syncResearchUrlsFromCreatives insert: ${insErr.message}`);
+  }
+
+  // Refresh the volatile ad-signal on EXISTING rows only — never their classification/verdict.
+  let refreshed = 0;
+  for (const a of aggs) {
+    if (!existing.has(a.url)) continue;
+    const { error: uErr } = await admin
+      .from("research_urls")
+      .update({ ad_count: a.ad_count, last_seen: a.last_seen, updated_at: nowIso })
+      .eq("workspace_id", workspaceId)
+      .eq("url", a.url);
+    if (!uErr) refreshed++;
+  }
 
   return {
     scanned: rows.length,
     distinct,
-    upserted: payload.length,
+    upserted: newRows.length + refreshed,
     gatedExcluded,
     gatedCheckout,
     skippedJunk: gatedExcluded + gatedCheckout,
