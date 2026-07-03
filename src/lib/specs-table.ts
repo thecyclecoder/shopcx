@@ -251,7 +251,33 @@ const SPEC_COLUMNS =
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, kind, origin_check_keys, created_at, updated_at";
 
+/**
+ * Phase lifecycle status is 100% DERIVED from provenance — NEVER trusted from the stored `status` column.
+ * The build pipeline used to STAMP `status` ('in_progress' at build-start + build-commit), which drifts (a
+ * resume-no-edits that never re-stamps, a missed hook) and desyncs the roadmap from the real pipeline. Per
+ * the "nothing stamps a lifecycle status" invariant, the stored `spec_phases.status` is OVERRIDE-ONLY: only
+ * `rejected` (a cut phase) and a deliberate fold-now/short-circuit `shipped` close survive; every other
+ * value is re-derived here from `build_sha` / `pr` / `merge_sha` at read time. The visual "in progress"
+ * (a build is running before any build_sha lands) is a SPEC-level, live-build-job-driven overlay in
+ * [[brain-roadmap]] — not a phase concern.
+ */
+export function derivePhaseStatus(row: {
+  status?: string | null;
+  build_sha?: string | null;
+  pr?: number | null;
+  merge_sha?: string | null;
+}): Phase {
+  if (row.status === "rejected") return "rejected"; // explicit cut — a real override
+  if ((row.merge_sha ?? null) !== null || (row.pr ?? null) !== null) return "shipped"; // promoted to main
+  if (row.status === "shipped") return "shipped"; // deliberate fold-now / short-circuit close (no provenance)
+  if ((row.build_sha ?? null) !== null) return "in_progress"; // built on the branch, not yet shipped
+  return "planned"; // nothing built yet
+}
+
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
+  // Derive every phase's lifecycle status from provenance at the SDK read boundary, so EVERY consumer of
+  // getSpec/listSpecs (board, gates, chained-phase picker) sees the derived status — never the stamped one.
+  phases = phases.map((p) => ({ ...p, status: derivePhaseStatus(p) }));
   return {
     id: db.id,
     workspace_id: db.workspace_id,
@@ -610,7 +636,10 @@ export async function stampPhaseBuilt(
   const { error } = await admin
     .from("spec_phases")
     .update({
-      status: "in_progress", // built on the branch — NOT shipped (merge_sha/shipped stay for M5 promotion)
+      // NOTHING-STAMPS-LIFECYCLE-STATUS: we write ONLY the build_sha provenance. The phase's lifecycle
+      // status ('in_progress' once a build_sha exists) is DERIVED on read (`derivePhaseStatus`), never
+      // stored — so a resume-no-edits or a missed hook can no longer leave the status out of sync with the
+      // provenance. build_sha alone is the "built on the branch" signal.
       build_sha: provenance.build_sha,
       updated_at: new Date().toISOString(),
     })
@@ -683,35 +712,14 @@ export async function isSpecAccumulationComplete(
  * position it flipped, or null when it made no change. Best-effort at the call site — a failure must never
  * break the build start.
  */
-export async function markPhaseInProgress(workspaceId: string, slug: string): Promise<number | null> {
-  const admin = createAdminClient();
-  const { data: spec, error: sErr } = await admin
-    .from("specs")
-    .select("id")
-    .eq("workspace_id", workspaceId)
-    .eq("slug", slug)
-    .maybeSingle();
-  if (sErr) throw sErr;
-  if (!spec) return null;
-  const specId = (spec as { id: string }).id;
-  const { data: phases, error: pErr } = await admin
-    .from("spec_phases")
-    .select("position, status")
-    .eq("spec_id", specId)
-    .order("position", { ascending: true });
-  if (pErr) throw pErr;
-  const rows = (phases ?? []) as { position: number; status: Phase }[];
-  if (!rows.length) return null; // one-shot spec — no phase to advance
-  if (rows.some((p) => p.status === "in_progress")) return null; // already signaled
-  const next = rows.find((p) => p.status === "planned");
-  if (!next) return null; // nothing planned left to start
-  const { error } = await admin
-    .from("spec_phases")
-    .update({ status: "in_progress", updated_at: new Date().toISOString() })
-    .eq("spec_id", specId)
-    .eq("position", next.position);
-  if (error) throw error;
-  return next.position;
+export async function markPhaseInProgress(_workspaceId: string, _slug: string): Promise<number | null> {
+  // NO-OP (nothing-stamps-lifecycle-status). This used to stamp the next planned phase `in_progress` at
+  // BUILD START so the card read in_progress before a build_sha existed. That stored lifecycle status is now
+  // DERIVED — the roadmap shows "in progress" from a LIVE BUILD JOB (the `hasLiveBuild` overlay in
+  // [[brain-roadmap]]) the instant a build is claimed, with ZERO DB write, so it's genuinely real-time.
+  // Kept as a no-op so existing callers (roadmap/status route, platform-director, builder-worker) are
+  // unchanged; it never mutates a phase's status again.
+  return null;
 }
 
 /**
