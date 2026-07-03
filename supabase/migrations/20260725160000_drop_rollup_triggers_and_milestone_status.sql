@@ -49,4 +49,4 @@ drop function if exists public.roll_up_goal_status(uuid);
 -- ──────────────────────────────────────────────────────────────────────────────
 -- 3. Drop goal_milestones.status — purely derivable from child specs, nothing reads it now.
 -- ──────────────────────────────────────────────────────────────────────────────
-alter table public.goal_milestones drop column if exists status;
+alter table public.goal_milestones drop column if exists status;   -- reversible: derived from child specs, no reader after rollup retirement
