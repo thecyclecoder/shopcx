@@ -305,3 +305,18 @@ export async function setTeardownVerdict(
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setTeardownVerdict: ${error.message}`);
 }
+
+/**
+ * Rhea's capture pointer write (Phase 2). Stamps the storage-path prefix into the private
+ * `research-shots` bucket where the captured chapters live — the box lane calls this after a
+ * successful capture so the manifest can be re-opened later.
+ */
+export async function setCaptureRef(workspaceId: string, id: string, captureRef: string): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("research_urls")
+    .update({ capture_ref: captureRef })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`setCaptureRef: ${error.message}`);
+}
