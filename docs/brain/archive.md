@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
+- **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
 - **Ada grades a sampled, cadenced, adaptive-by-rollup batch — not every concluded job** · verified 2026-07-02 · → [[../libraries/agent-grader]]
 - **AdLibrary search freshness gate** · verified 2026-07-02 · → [[lifecycles/creative-finder]]
 - **Harden the Devi agent — roll persistent coaching into its mandate** · verified 2026-07-02 · → [[../libraries/db-health]]
