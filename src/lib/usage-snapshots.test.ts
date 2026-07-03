@@ -59,11 +59,11 @@ test("codexCostOverride: composed recordAgentJobCost params for a Codex turn.com
 
 // ── discoverLimit ─────────────────────────────────────────────────────────────
 
-function fakeAdminWithWallEvents(rows: Array<{ account: string; window: "5h" | "weekly"; runtime: "claude" | "codex"; tokens_at_wall: number }>): UsageSnapshotsAdmin {
+function fakeAdminWithWallEvents(rows: Array<{ account: string; window_kind: "5h" | "weekly"; runtime: "claude" | "codex"; tokens_at_wall: number }>): UsageSnapshotsAdmin {
   return {
     from(table: string) {
       assert.equal(table, "usage_wall_events");
-      let filter: Record<string, string | number> = {};
+      const filter: Record<string, string | number> = {};
       const q = {
         select(_cols: string) {
           return {
@@ -73,7 +73,7 @@ function fakeAdminWithWallEvents(rows: Array<{ account: string; window: "5h" | "
                 async eq(col2: string, val2: string | number) {
                   filter[col2] = val2;
                   const data = rows
-                    .filter((r) => r.account === filter.account && r.window === filter.window)
+                    .filter((r) => r.account === filter.account && r.window_kind === filter.window_kind)
                     .map((r) => ({ tokens_at_wall: r.tokens_at_wall, runtime: r.runtime }));
                   return { data, error: null };
                 },
@@ -95,11 +95,11 @@ test("discoverLimit: no walls sampled → { limit: null, wallCount: 0 } ('learni
 
 test("discoverLimit: Claude account → MAX(tokens_at_wall) over the seeded walls (tightens toward true limit)", async () => {
   const admin = fakeAdminWithWallEvents([
-    { account: "Round Robin 2", window: "5h", runtime: "claude", tokens_at_wall: 1_500_000 },
-    { account: "Round Robin 2", window: "5h", runtime: "claude", tokens_at_wall: 2_100_000 }, // ← max
-    { account: "Round Robin 2", window: "5h", runtime: "claude", tokens_at_wall: 900_000 },
-    { account: "Round Robin 2", window: "weekly", runtime: "claude", tokens_at_wall: 9_999_999 }, // different window — ignored
-    { account: "Round Robin 3", window: "5h", runtime: "claude", tokens_at_wall: 5_000_000 }, // different account — ignored
+    { account: "Round Robin 2", window_kind: "5h", runtime: "claude", tokens_at_wall: 1_500_000 },
+    { account: "Round Robin 2", window_kind: "5h", runtime: "claude", tokens_at_wall: 2_100_000 }, // ← max
+    { account: "Round Robin 2", window_kind: "5h", runtime: "claude", tokens_at_wall: 900_000 },
+    { account: "Round Robin 2", window_kind: "weekly", runtime: "claude", tokens_at_wall: 9_999_999 }, // different window — ignored
+    { account: "Round Robin 3", window_kind: "5h", runtime: "claude", tokens_at_wall: 5_000_000 }, // different account — ignored
   ]);
   const r = await discoverLimit("Round Robin 2", "5h", admin);
   assert.equal(r.limit, 2_100_000);
@@ -108,8 +108,8 @@ test("discoverLimit: Claude account → MAX(tokens_at_wall) over the seeded wall
 
 test("discoverLimit: Codex account → limit is null (real limit lives in /status %); wallCount still reports the sampled walls", async () => {
   const admin = fakeAdminWithWallEvents([
-    { account: "codex", window: "5h", runtime: "codex", tokens_at_wall: 800_000 },
-    { account: "codex", window: "5h", runtime: "codex", tokens_at_wall: 1_400_000 },
+    { account: "codex", window_kind: "5h", runtime: "codex", tokens_at_wall: 800_000 },
+    { account: "codex", window_kind: "5h", runtime: "codex", tokens_at_wall: 1_400_000 },
   ]);
   const r = await discoverLimit("codex", "5h", admin);
   assert.equal(r.limit, null);
@@ -118,9 +118,9 @@ test("discoverLimit: Codex account → limit is null (real limit lives in /statu
 
 test("discoverLimit: weekly window is scoped independently of the 5h window (each has its own MAX)", async () => {
   const admin = fakeAdminWithWallEvents([
-    { account: "Round Robin 1", window: "5h", runtime: "claude", tokens_at_wall: 500_000 },
-    { account: "Round Robin 1", window: "weekly", runtime: "claude", tokens_at_wall: 12_000_000 },
-    { account: "Round Robin 1", window: "weekly", runtime: "claude", tokens_at_wall: 15_500_000 },
+    { account: "Round Robin 1", window_kind: "5h", runtime: "claude", tokens_at_wall: 500_000 },
+    { account: "Round Robin 1", window_kind: "weekly", runtime: "claude", tokens_at_wall: 12_000_000 },
+    { account: "Round Robin 1", window_kind: "weekly", runtime: "claude", tokens_at_wall: 15_500_000 },
   ]);
   const five = await discoverLimit("Round Robin 1", "5h", admin);
   const weekly = await discoverLimit("Round Robin 1", "weekly", admin);

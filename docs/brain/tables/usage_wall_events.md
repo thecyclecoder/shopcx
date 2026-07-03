@@ -20,14 +20,14 @@ One row per detected Max/Claude usage wall — stamped with the current window's
 | `workspace_id` | `uuid` | NOT NULL · → [[workspaces]].id · ON DELETE CASCADE |
 | `account` | `text` | NOT NULL · matches [[account_usage_snapshots]].`account` labels — `'Round Robin 1'..'Round Robin 4'` for Max, `'codex'` for Codex |
 | `runtime` | `text` | NOT NULL · CHECK `in ('claude','codex')` |
-| `window` | `text` | NOT NULL · CHECK `in ('5h','weekly')` — which window the wall belonged to. Classified via `isWeeklyWall(wall_text)` in the worker (`weekly limit`, `seven_day`, `opus_weekly`, `monthly limit`, `thirty_day` → `weekly`; else `5h`) |
+| `window_kind` | `text` | NOT NULL · CHECK `in ('5h','weekly')` — which window the wall belonged to. Classified via `isWeeklyWall(wall_text)` in the worker (`weekly limit`, `seven_day`, `opus_weekly`, `monthly limit`, `thirty_day` → `weekly`; else `5h`). Named `window_kind` (not `window`) — same SQL-keyword avoidance as [[account_usage_snapshots]] |
 | `tokens_at_wall` | `bigint` | NOT NULL · default `0` — the token burn recorded for `(account, window)` at the moment the wall hit. `MAX` over this column across sampled walls is the running lower-bound estimate of the true hidden Max limit |
 | `wall_text` | `text?` | the raw wall text (429 body / "usage limit reached …"). Retained for classification + debugging; **never** surfaced to a non-owner |
 | `wall_reset_at` | `timestamptz?` | the wall's stated reset time (`parseResetTime` on `wall_text`), when parseable |
 | `observed_at` | `timestamptz` | NOT NULL · default `now()` — wall-clock the wall was detected |
 | `created_at` | `timestamptz` | default `now()` |
 
-**Indexes:** `usage_wall_events_ws_account_idx` on `(workspace_id, account, window, observed_at DESC)` — the read spine for `discoverLimit`. `usage_wall_events_observed_idx` on `observed_at DESC` — freshness ordering.
+**Indexes:** `usage_wall_events_ws_account_idx` on `(workspace_id, account, window_kind, observed_at DESC)` — the read spine for `discoverLimit`. `usage_wall_events_observed_idx` on `observed_at DESC` — freshness ordering.
 
 ## Who writes / reads
 

@@ -25,7 +25,7 @@ Written by:
 | `source` | `text` | NOT NULL · CHECK `in ('box','mac')` · WHERE the snapshot was captured — the box's `rollupBoxAccountUsage` writer or the Mac reporter's authed POST |
 | `runtime` | `text` | NOT NULL · CHECK `in ('claude','codex')` · which agent runtime the account runs — `claude` = a Max Round Robin lane; `codex` = the ChatGPT-plan device-code login |
 | `account` | `text` | NOT NULL · human label for the account. Matches the live [[agent_job_costs]].`account` values: `'Round Robin 1'..'Round Robin 4'` for Max, `'codex'` for Codex |
-| `window` | `text` | NOT NULL · CHECK `in ('5h','weekly')` · rolling 5-hour session window OR the trailing 7-day / weekly / opus_weekly wall window |
+| `window_kind` | `text` | NOT NULL · CHECK `in ('5h','weekly')` · rolling 5-hour session window OR the trailing 7-day / weekly / opus_weekly wall window. Named `window_kind` (not `window`) — `WINDOW` is a SQL non-reserved keyword that parses ambiguously in `CHECK` clauses |
 | `window_start` | `timestamptz?` | wall-clock the window started (or `now - windowLength` for a trailing window). Informational — the unique key is `(workspace, source, account, window)` |
 | `window_reset_at` | `timestamptz?` | when the window is scheduled to reset (from the parsed wall message when known, or the account's live `cappedUntil`) |
 | `input_tokens` | `integer` | NOT NULL · SUM over [[agent_job_costs]].`input_tokens` for `(account, window)` on `source='box'`; the ccusage per-block total on `source='mac'` |
@@ -39,9 +39,9 @@ Written by:
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | default `now()` · auto-bumped by `account_usage_snapshots_touch_updated_at` trigger |
 
-**Unique:** `(workspace_id, source, account, window)` — one snapshot per (workspace, source, account, window). The box's `rollupBoxAccountUsage` tick and the Mac reporter's POST both UPSERT on this key so a re-write REPLACES the prior slice.
+**Unique:** `(workspace_id, source, account, window_kind)` — one snapshot per (workspace, source, account, window). The box's `rollupBoxAccountUsage` tick and the Mac reporter's POST both UPSERT on this key so a re-write REPLACES the prior slice.
 
-**Indexes:** `account_usage_snapshots_ws_idx` on `(workspace_id, account, window)` — the read spine of the cockpit `GET /api/developer/usage`. `account_usage_snapshots_captured_idx` on `captured_at DESC` — freshness ordering.
+**Indexes:** `account_usage_snapshots_ws_idx` on `(workspace_id, account, window_kind)` — the read spine of the cockpit `GET /api/developer/usage`. `account_usage_snapshots_captured_idx` on `captured_at DESC` — freshness ordering.
 
 ## Triggers
 

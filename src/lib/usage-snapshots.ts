@@ -136,13 +136,13 @@ export async function rollupBoxAccountUsage(opts: RollupBoxAccountUsageOpts): Pr
     const live = liveByAccount.get(account);
     const capped = !!live?.capped;
     const cappedUntilIso = live?.cappedUntil ? new Date(live.cappedUntil).toISOString() : null;
-    for (const window of ["5h", "weekly"] as const) {
-      const sinceIso = window === "5h" ? fiveHrStart : weeklyStart;
+    for (const windowKind of ["5h", "weekly"] as const) {
+      const sinceIso = windowKind === "5h" ? fiveHrStart : weeklyStart;
       let sums: TokenSums;
       try {
         sums = await sumAccountCosts(admin, opts.workspaceId, account, sinceIso);
       } catch (err) {
-        console.error(`[usage-snapshots] sum failed for ${account} ${window} — skipping:`, err);
+        console.error(`[usage-snapshots] sum failed for ${account} ${windowKind} — skipping:`, err);
         continue;
       }
       try {
@@ -154,7 +154,8 @@ export async function rollupBoxAccountUsage(opts: RollupBoxAccountUsageOpts): Pr
               source: "box",
               runtime,
               account,
-              window,
+              // window is a SQL reserved-ish keyword — the DB column is window_kind.
+              window_kind: windowKind,
               window_start: sinceIso,
               window_reset_at: cappedUntilIso,
               input_tokens: sums.input_tokens,
@@ -167,12 +168,12 @@ export async function rollupBoxAccountUsage(opts: RollupBoxAccountUsageOpts): Pr
               captured_at: capturedAt,
               updated_at: capturedAt,
             },
-            { onConflict: "workspace_id,source,account,window" },
+            { onConflict: "workspace_id,source,account,window_kind" },
           );
         if (error) throw error;
         upserted++;
       } catch (err) {
-        console.error(`[usage-snapshots] upsert failed for ${account} ${window} — skipping:`, err);
+        console.error(`[usage-snapshots] upsert failed for ${account} ${windowKind} — skipping:`, err);
       }
     }
   }
@@ -221,7 +222,8 @@ export async function recordWallEvent(p: RecordWallEventParams): Promise<boolean
       workspace_id: p.workspaceId,
       account: p.account,
       runtime: p.runtime,
-      window: p.window,
+      // window is a SQL reserved-ish keyword — the DB column is window_kind.
+      window_kind: p.window,
       tokens_at_wall: Math.max(0, Math.round(p.tokensAtWall || 0)),
       wall_text: p.wallText ?? null,
       wall_reset_at: p.wallResetAt ?? null,
@@ -279,7 +281,8 @@ export async function discoverLimit(
       .from("usage_wall_events")
       .select("tokens_at_wall, runtime")
       .eq("account", account)
-      .eq("window", window);
+      // window is a SQL reserved-ish keyword — the DB column is window_kind.
+      .eq("window_kind", window);
     if (error) throw error;
     const rows = data || [];
     if (!rows.length) return { limit: null, wallCount: 0 };

@@ -36,7 +36,7 @@ create table if not exists public.account_usage_snapshots (
   -- Which usage window this row rolls up. '5h' = Anthropic's rolling 5-hour
   -- session window (Codex reuses the same slot for its rolling window). 'weekly'
   -- = the trailing 7-day window (the seven_day / weekly / opus_weekly wall).
-  window text not null check (window in ('5h','weekly')),
+  window_kind text not null check (window_kind in ('5h','weekly')),
   -- Wall-clock the window started (or "now - windowLength" for a trailing
   -- window when no exact start is known). Informational — the unique key is
   -- (workspace, source, account, window) so a re-rollup replaces the prior row.
@@ -64,7 +64,7 @@ create table if not exists public.account_usage_snapshots (
   captured_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (workspace_id, source, account, window)
+  unique (workspace_id, source, account, window_kind)
 );
 
 comment on table public.account_usage_snapshots is
@@ -72,7 +72,7 @@ comment on table public.account_usage_snapshots is
   'The Phase-3 /developer/usage cockpit SUMs box+mac per account. No customer_id → the Sonnet data tool rule does not apply.';
 
 create index if not exists account_usage_snapshots_ws_idx
-  on public.account_usage_snapshots (workspace_id, account, window);
+  on public.account_usage_snapshots (workspace_id, account, window_kind);
 create index if not exists account_usage_snapshots_captured_idx
   on public.account_usage_snapshots (captured_at desc);
 
@@ -113,7 +113,7 @@ create table if not exists public.usage_wall_events (
   runtime text not null check (runtime in ('claude','codex')),
   -- Which window the wall belonged to ('5h' = session, 'weekly' = seven_day /
   -- monthly). Classified via isWeeklyWall(wall_text) in builder-worker.
-  window text not null check (window in ('5h','weekly')),
+  window_kind text not null check (window_kind in ('5h','weekly')),
   -- The token burn recorded for the account+window at the moment the wall hit
   -- — this is the LOWER-BOUND estimate of the true hidden Max limit. MAX over
   -- this column across walls converges toward the real ceiling.
@@ -132,7 +132,7 @@ comment on table public.usage_wall_events is
   'discoverLimit(account, window) reads MAX(tokens_at_wall). Codex uses /status %; Codex wall events are recorded but discoverLimit returns null for them.';
 
 create index if not exists usage_wall_events_ws_account_idx
-  on public.usage_wall_events (workspace_id, account, window, observed_at desc);
+  on public.usage_wall_events (workspace_id, account, window_kind, observed_at desc);
 create index if not exists usage_wall_events_observed_idx
   on public.usage_wall_events (observed_at desc);
 
