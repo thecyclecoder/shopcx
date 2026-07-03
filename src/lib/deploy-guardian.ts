@@ -147,13 +147,15 @@ export function reasonExcludedFromDeployRegressionLoop(loopId: string): string |
  * `newRedLoops`:
  *
  *  - `kpi_drift:<metric>:<cadence>` loops for an AUDIT-SKIPPED metric — the `liveSpecSetDependent`
- *    weekly-aggregate / live-spec-set meta-metrics (`specs_per_week`, `regression_coverage_pct`, …)
- *    and the `currentState` point-reads (kpi-audit-skip-live-spec-set-dependent-metrics, #848). These
- *    reflect PM VOLUME / a moving-population membership delta (how many specs shipped this week + their
- *    regression coverage), NOT the deployed code — a no-op spec's deploy cannot move them. Reusing the
- *    SAME `liveSpecSetDependent`/`currentState` registry flags #848 introduced ([[platform-scorecard]]
- *    `isAuditSkippedKpiDriftLoop` — single source of truth) keeps the audit skip and the deploy-
- *    attribution gate from drifting apart.
+ *    weekly-aggregate / live-spec-set meta-metrics (today: `regression_coverage_pct`; `specs_per_week`
+ *    was in this class until director-kpi-sdk Phase 1 repointed its slug→owner map at the folded-
+ *    inclusive [[director-kpis]] SDK, which stabilized its snapshot/audit population and removed the
+ *    flag) and the `currentState` point-reads (kpi-audit-skip-live-spec-set-dependent-metrics, #848).
+ *    These reflect PM VOLUME / a moving-population membership delta (how many specs shipped this
+ *    week + their regression coverage), NOT the deployed code — a no-op spec's deploy cannot move
+ *    them. Reusing the SAME `liveSpecSetDependent`/`currentState` registry flags #848 introduced
+ *    ([[platform-scorecard]] `isAuditSkippedKpiDriftLoop` — single source of truth) keeps the audit
+ *    skip and the deploy-attribution gate from drifting apart.
  *  - Any `kpi_drift:<metric>:monthly` loop (regardless of the metric's registry flags) — the cadence
  *    itself makes the signal too laggy to attribute to one deploy inside a canary window
  *    ({@link isMonthlyKpiDriftLoop}). This is the blog-pixel-tracking false-revert class.

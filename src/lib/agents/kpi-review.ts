@@ -228,14 +228,15 @@ function displayFor(cadence: Cadence, metricKey: string): { label: string; polar
  * `loop:kpi_drift:lane_utilization:daily`, `loop:kpi_drift:loop_health:daily`, and
  * `loop:kpi_drift:needs_attention:daily`.
  *
- * **Live-spec-set guard:** metrics flagged `MetricDef.liveSpecSetDependent` (today: `specs_per_week`,
+ * **Live-spec-set guard:** metrics flagged `MetricDef.liveSpecSetDependent` (today: only
  * `regression_coverage_pct`) derive ground truth from the LIVE brain-roadmap spec set
  * (`getRoadmap()`). The live set churns between snapshot write and audit re-read — specs fold or
  * archive on their own cadence — so the re-run sees a different population than the snapshot did and
  * the membership delta surfaces as "drift" that isn't engine drift. Same false-positive class as
  * `currentState` (frozen snapshot vs moving target) — different axis (the population definition
- * moved, not the underlying counter). Repair Agent verdict on signature
- * `loop:kpi_drift:specs_per_week:weekly`.
+ * moved, not the underlying counter). `specs_per_week` USED to be flagged too; director-kpi-sdk
+ * Phase 1 repointed it at the FULL spec set (via [[director-kpis]] `shippedSpecsByOwner`) so its
+ * slug→owner map is folded-inclusive + stable across snapshot/audit — it's no longer flagged.
  */
 export async function auditKpi(
   workspaceId: string,
@@ -343,8 +344,9 @@ export async function auditAllKpis(
     // not drift. Same false-positive class as the in-flight daily window guard (different axis).
     if (m.currentState) continue;
     // Live-spec-set guard — skip metrics whose ground truth depends on the live brain-roadmap spec
-    // set (specs_per_week, regression_coverage_pct). The live set churns between snapshot write and
-    // audit re-read (specs fold/archive), so the re-run sees a different population than the
+    // set (today: only regression_coverage_pct — specs_per_week moved to the folded-inclusive
+    // director-kpis SDK in director-kpi-sdk Phase 1). The live set churns between snapshot write
+    // and audit re-read (specs fold/archive), so the re-run sees a different population than the
     // snapshot did and the membership delta surfaces as "drift" that isn't engine drift. See
     // `auditKpi` above for the full rationale.
     if (m.liveSpecSetDependent) continue;
