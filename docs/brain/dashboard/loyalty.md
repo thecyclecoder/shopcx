@@ -31,10 +31,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/loyalty/page.tsx` — the page itself
 - `src/app/dashboard/loyalty/[memberId]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/loyalty_members]] · [[../tables/loyalty_redemptions]] · [[../tables/loyalty_transactions]] · [[../recipes/redeem-loyalty]] · [[../recipes/apply-loyalty-coupon]] · [[settings/loyalty]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

@@ -36,10 +36,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/social-comments/analysis/page.tsx` — sub-route
 - `src/app/dashboard/social-comments/banned/page.tsx` — sub-route
 
-## Related
-
-[[../tables/social_comments]] · [[../tables/social_comment_replies]] · [[../tables/meta_sender_customer_links]] · [[../lifecycles/social-comment-moderation]] · [[../recipes/hide-comment]] · [[../recipes/ban-meta-user]] · [[../recipes/link-meta-sender-to-customer]] · [[../integrations/meta-graph]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

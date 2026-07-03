@@ -29,10 +29,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/email-filters/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/email_filters]] · [[../../integrations/resend]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

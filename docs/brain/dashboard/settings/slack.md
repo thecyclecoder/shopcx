@@ -30,10 +30,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/slack/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/slack_notification_rules]] · [[../../libraries/slack-notify]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

@@ -27,10 +27,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/dunning/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/dunning_cycles]] · [[../../tables/payment_failures]] · [[../../lifecycles/dunning]] · [[../../integrations/appstle]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

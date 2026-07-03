@@ -32,10 +32,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/chat-widget/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/widget_sessions]] · [[../../tables/widget_path_mappings]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

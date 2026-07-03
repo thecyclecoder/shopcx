@@ -15,6 +15,7 @@ Settings hub — cards linking to every workspace-level configuration page.
 
 ## Sub-routes
 
+- `ad-tool/` → [[settings/ad-tool]]
 - `ai/` → [[settings/ai]]
 - `amazon-pricing/` → [[settings/amazon-pricing]]
 - `auto-close/` → [[settings/auto-close]]
@@ -61,6 +62,7 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 ## Files touched
 
 - `src/app/dashboard/settings/page.tsx` — the page itself
+- `src/app/dashboard/settings/ad-tool/page.tsx` — sub-route
 - `src/app/dashboard/settings/ai/page.tsx` — sub-route
 - `src/app/dashboard/settings/amazon-pricing/page.tsx` — sub-route
 - `src/app/dashboard/settings/auto-close/page.tsx` — sub-route

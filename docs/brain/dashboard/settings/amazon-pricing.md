@@ -32,10 +32,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/amazon-pricing/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/amazon_asins]] · [[../../tables/amazon_sales_channels]] · [[../../tables/amazon_connections]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

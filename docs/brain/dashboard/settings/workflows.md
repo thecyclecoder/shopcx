@@ -34,10 +34,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/settings/workflows/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/workflows]] · [[../../tables/ai_workflows]] · [[../../libraries/workflow-executor]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

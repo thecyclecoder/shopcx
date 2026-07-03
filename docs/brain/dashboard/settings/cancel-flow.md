@@ -37,10 +37,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/cancel-flow/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/remedies]] · [[../../tables/remedy_outcomes]] · [[../../tables/coupon_mappings]] · [[../../journeys/cancel]] · [[../../lifecycles/cancel-flow]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

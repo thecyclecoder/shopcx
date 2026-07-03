@@ -31,10 +31,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/replacements/page.tsx` — the page itself
 - `src/app/dashboard/replacements/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/replacements]] · [[../tables/orders]] · [[../recipes/issue-replacement]] · [[../playbooks/replacement-order]] · [[../lifecycles/return-pipeline]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

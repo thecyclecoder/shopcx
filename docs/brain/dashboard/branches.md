@@ -1,30 +1,32 @@
-# dashboard/branches
+# Dashboard · branches
 
-Single surface for every open `claude/*` PR the To-Do routine has created (from `brain_doc_edit` / `code_change` / `grader_prompt_edit` / `escalation_rule_fix` todos).
+_TODO: page purpose._
 
-**Route:** `/dashboard/branches` · **File:** `src/app/dashboard/branches/page.tsx` · **API:** `GET /api/branches`
-**Sidebar:** top-level **Branches** (owner only), bubble = number of open `claude/*` PRs.
+**Route:** `/dashboard/branches`
 
-## Build box banner
-At the top, a **Build box** health banner ([[../specs/worker-self-update]] Phase 3) from the [[../tables/worker_heartbeats]] singleton (`GET /api/branches` returns a `worker` object): `worker <sha> · healthy/idle/building/self-updating · last poll Ns ago`. Green when the last poll is < 90s old, **red** when stale (box down) or `status='needs_attention'` (crash-loop guard tripped). Answers "is the box behind / healthy?" without SSH. Absent until the worker first ticks.
+## Features
 
-## List
-Queries the GitHub REST API for open PRs whose head ref starts with `claude/`. Columns: Title (+ branch + file count) · Source todo (links back via `execution_result.pr_url` match) · Age · CI status (combined status of the head sha: passing/failing/pending) · Mergeability · **Squash & merge** / **Open in GitHub**.
+**Page title:** Branches
 
-For each PR the API also does a single-PR GET (`/repos/{repo}/pulls/{number}`) — the LIST endpoint doesn't populate `mergeable` / `mergeable_state` / `changed_files`. From those it computes `safe_to_merge = mergeable === true && (mergeable_state === "clean" || "behind") && ci not in (failure, pending)`. `behind` (base advanced) is allowed — still a conflict-free squash; only `dirty`/`blocked`/`draft`/`unknown` are blocked.
+**Rendering:** `"use client"` component (client-side state + fetch).
 
-Also surfaced **inline on the todo detail page** ([[tickets__todos__id]]) as a PR card whenever `execution_result.pr_url` is set.
+## Sub-routes
 
-## Merge
-`POST /api/branches/[number]/merge` squash-merges a PR from the dashboard. **Owner-only** (mirrors the owner-only approval of `code_change` / `brain_doc_edit` — merging to main is owner-level). Re-validates safety **server-side** before merging (PR open, `claude/*` head, `mergeable === true`, `mergeable_state` ∈ {`clean`, `behind`}) so a stale client can't merge a conflicting/behind/blocked PR. On success it best-effort stamps the originating todo's `execution_result.merged_at` and deletes the branch. The **Squash & merge** button only renders when `safe_to_merge` AND the viewer's role is `owner`; everyone else uses **Open in GitHub**. Code still never *auto*-merges — this is a human (owner) click.
+_None._
 
-## Config
-Needs a GitHub token in env: `GITHUB_TOKEN` (or `AGENT_TODO_GITHUB_TOKEN`); repo from `AGENT_TODO_REPO` (default `thecyclecoder/shopcx`). Without a token the API returns `{ configured: false }` and the page shows a setup hint.
+## API endpoints called
 
-## Auto-merge policy
-- `auto_merge_brain_docs` — default false; when on, brain-doc PRs auto-merge once CI passes (low risk; revert via git).
-- `auto_merge_code_changes` — **always false, hard-coded.** Code never auto-merges; merges to main are human-driven via GitHub review.
-- **CI gate** — the routine runs `npx tsc --noEmit` before pushing. On failure no PR opens and the todo is `failed` with the compile error in `execution_result.error`. No broken PRs reach this surface.
+- `/api/branches`
+- `/api/branches/:x/merge`
 
-## Related
-[[tickets__todos__id]] · [[../tables/agent_todos]] · [[../tables/worker_heartbeats]] · [[../specs/worker-self-update]] · [[../recipes/build-box-setup]] · [[../inngest/agent-todo-routine]] · [[../lifecycles/agent-todo-system]]
+## Permissions
+
+Role-aware UI — the page reads `workspace.role` to show / hide controls.
+
+## Files touched
+
+- `src/app/dashboard/branches/page.tsx` — the page itself
+
+---
+
+[[../README]] · [[../../CLAUDE]]

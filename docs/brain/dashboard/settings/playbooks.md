@@ -44,10 +44,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 
 - `src/app/dashboard/settings/playbooks/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/playbooks]] · [[../../tables/playbook_steps]] · [[../../tables/playbook_policies]] · [[../../tables/playbook_exceptions]] · [[../../playbooks/README]] · [[../../playbooks/refund]] · [[../../playbooks/replacement-order]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

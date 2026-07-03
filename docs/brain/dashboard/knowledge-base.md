@@ -33,10 +33,6 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/knowledge-base/page.tsx` — the page itself
 - `src/app/dashboard/knowledge-base/[id]/page.tsx` — sub-route
 
-## Related
-
-[[../tables/knowledge_base]] · [[../tables/kb_chunks]] · [[../inngest/kb-embed]] · [[../inngest/scrape-help-center]] · [[settings/knowledge-base]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]

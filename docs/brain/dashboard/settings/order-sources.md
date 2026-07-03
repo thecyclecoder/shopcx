@@ -26,10 +26,6 @@ Role-aware UI — the page reads `workspace.role` to show / hide controls.
 
 - `src/app/dashboard/settings/order-sources/page.tsx` — the page itself
 
-## Related
-
-[[../../tables/orders]] · [[../../integrations/shopify]]
-
 ---
 
 [[../README]] · [[../../CLAUDE]]
