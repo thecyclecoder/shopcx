@@ -50,6 +50,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
 - [[write-a-migration-apply-script]] — `scripts/apply-*.ts` pattern using `pg` client
+- [[pitr-disaster-recovery]] — the under-fire runbook when a migration/agent destroyed live data: scoped loss → restore-to-a-new-project + extract + re-import (zero prod downtime); total → in-place PITR restore. The reversibility backstop for [[../specs/destructive-migration-safety-rails]]
 - [[raise-work-mem]] — owner-approval-only raise of `work_mem` on the `authenticated` role (the DB Health Agent's `raise_work_mem` fix for the `dbhealth:instance:temp_spill_pressure` signature — sizing math + rollback + verification)
 - [[dev-message-center-db]] — read-only prod-DB queries from the Developer Message Center (throwaway `scripts/_*.ts`, SELECT-only, never committed)
 - [[what-makes-a-buildable-spec]] — the single definition of a sound, buildable spec (owner/parent/intent/verification/grounding). Authors write to it; Vale's [[../../.claude/skills/spec-review|spec-review]] gates on it — one referenced artifact so author + reviewer can't drift. The [[../../.claude/skills/submit-spec|submit-spec]] skill points here.
