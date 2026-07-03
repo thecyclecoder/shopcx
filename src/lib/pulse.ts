@@ -348,6 +348,31 @@ export function synthesizeDeterministic(fixtures: BuildPulseFixtures, opts?: { s
     lenses[key] = lenses[key].filter((c) => c.cite_ids.length > 0 && c.claim.trim().length > 0);
   }
 
+  // Dedup near-identical claims + cap each lens to a BRIEFING size. The join emits one item per thread
+  // across up to 40 digests → a ~160-claim firehose that (a) reads as noise, not a pulse, and (b) blows the
+  // narrate pass's 2400-token output budget → the JSON truncates → silent deterministic fallback. Digests
+  // arrive newest-first, so keep the most recent, merging the cite ids of any collapsed duplicate.
+  const LENS_CAPS: Record<keyof PulseLenses, number> = {
+    whats_working: 8,
+    where_you_left_off: 10,
+    rabbit_holes: 6,
+    next_moves: 5,
+    threads_in_flight: 10,
+  };
+  for (const key of LENS_KEYS) {
+    const seen = new Map<string, LensClaim>();
+    for (const c of lenses[key]) {
+      const norm = normalizeForMatch(c.claim);
+      const prev = seen.get(norm);
+      if (prev) {
+        for (const id of c.cite_ids) if (!prev.cite_ids.includes(id)) prev.cite_ids.push(id);
+      } else {
+        seen.set(norm, { claim: c.claim, cite_ids: [...c.cite_ids] });
+      }
+    }
+    lenses[key] = [...seen.values()].slice(0, LENS_CAPS[key]);
+  }
+
   return {
     subject,
     lenses,
@@ -376,7 +401,7 @@ export async function narrateWithModel(base: PulseSnapshot, model = HAIKU_MODEL)
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model, max_tokens: 1400, system, messages: [{ role: "user", content: user }] }),
+      body: JSON.stringify({ model, max_tokens: 2400, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) return base;
     const json = (await res.json()) as { content?: Array<{ type: string; text?: string }>; usage?: unknown };
