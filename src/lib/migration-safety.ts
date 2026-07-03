@@ -532,3 +532,126 @@ export function routeDestructiveAction(sql: string, blastRadius: BlastRadius): D
     reason: "irreversible_destructive — CEO circuit-break (unfamiliar destructive shape)",
   };
 }
+
+// ── Phase 5 — Adversarial skeptic pass (defense-in-depth, not load-bearing) ─────
+//
+// Before any destructive migration surfaces to a human, run a read-only skeptic
+// whose SOLE mandate is to prove the migration is data-losing — mirroring the
+// solver→skeptic→quorum pattern used for escalations. The skeptic is a BONUS
+// layer over the Phase-1 classifier + Phase-3 dry-run; the deterministic
+// severity stays AUTHORITATIVE for the leash decision. The skeptic can
+// ESCALATE (find something the classifier missed) but NEVER DOWNGRADE a
+// mechanically-flagged destructive migration to additive.
+
+export interface SkepticVerdict {
+  /** True iff the skeptic believes the migration causes data loss (or agrees with the classifier). */
+  dataLossing: boolean;
+  /** Confidence in [0, 1] — a high-confidence data-loss finding can escalate severity to irreversible. */
+  confidence: number;
+  /** One-line reason surfaced on the CEO card + director_activity audit row. */
+  reason: string;
+  /** Additional destructive patterns the skeptic spotted that the mechanical classifier missed. */
+  additionalMatches?: string[];
+}
+
+/**
+ * The skeptic is injected by the caller — production runs a Max `claude -p` session
+ * whose ONLY prompt is "try to refute; find data loss the classifier missed", tests
+ * supply a fake. Returning a plain object OR a Promise is both fine.
+ */
+export type SkepticFn = (input: { sql: string; blastRadius: BlastRadius }) => Promise<SkepticVerdict> | SkepticVerdict;
+
+export interface RunSkepticPassOpts {
+  /** The skeptic to run. When omitted, a lenient default echoes the deterministic verdict. */
+  skeptic?: SkepticFn;
+}
+
+export interface SkepticPassResult {
+  /** True when the classifier said additive and there was nothing for the skeptic to check. */
+  skipped: boolean;
+  /** The skeptic's verdict — attached to the approval payload for the CEO/Ada to read. */
+  verdict?: SkepticVerdict;
+  /** The FINAL blast-radius after attaching the skeptic. Severity NEVER downgrades — a lenient
+   *  skeptic cannot demote a mechanically-flagged destructive back to additive. Matches are the
+   *  union of Phase-1 matches + any additional patterns the skeptic surfaced. Summary carries the
+   *  skeptic's one-line + a note that deterministic severity remains authoritative when the skeptic
+   *  was lenient. */
+  finalBlastRadius: BlastRadius;
+}
+
+/** Merge two severities, always returning the more severe one. */
+function maxSeverity(a: MigrationSeverity, b: MigrationSeverity): MigrationSeverity {
+  const order: Record<MigrationSeverity, number> = { additive: 0, reversible_destructive: 1, irreversible_destructive: 2 };
+  return order[a] >= order[b] ? a : b;
+}
+
+/** Map a data-loss verdict to a severity floor (based on confidence). */
+function verdictSeverityFloor(v: SkepticVerdict): MigrationSeverity {
+  if (!v.dataLossing) return "additive"; // no floor imposed
+  return v.confidence >= 0.7 ? "irreversible_destructive" : "reversible_destructive";
+}
+
+/**
+ * Run the Phase-5 adversarial skeptic. Skips when the classifier said additive + no
+ * matches (there's nothing to refute — the bonus layer costs nothing to skip). On a
+ * destructive raise, runs the injected skeptic and returns a FINAL blast-radius that
+ *   • preserves the deterministic severity (never downgrades — mechanical flag wins),
+ *   • ESCALATES severity if the skeptic's `verdictSeverityFloor` is higher (a
+ *     high-confidence data-loss finding on a `reversible_destructive` bumps to
+ *     `irreversible_destructive`),
+ *   • unions any `additionalMatches` the skeptic surfaced into `matches`, and
+ *   • appends a `skeptic: …` note to the summary so the CEO card reads it inline.
+ *
+ * PURE apart from the injected skeptic (which itself may await a Max session).
+ */
+export async function runSkepticPass(
+  sql: string,
+  blastRadius: BlastRadius,
+  opts: RunSkepticPassOpts = {},
+): Promise<SkepticPassResult> {
+  if (blastRadius.severity === "additive" && blastRadius.matches.length === 0) {
+    return { skipped: true, finalBlastRadius: blastRadius };
+  }
+
+  const skepticFn = opts.skeptic ?? defaultLenientSkeptic;
+  const verdict = await Promise.resolve(skepticFn({ sql, blastRadius }));
+
+  // Deterministic severity is authoritative — the skeptic can ESCALATE (their verdict-severity floor
+  // may exceed the classifier's) but NEVER downgrade the classifier's severity to a lower rung.
+  const proposedFloor = verdictSeverityFloor(verdict);
+  const finalSeverity = maxSeverity(blastRadius.severity, proposedFloor);
+
+  const extras = (verdict.additionalMatches ?? []).filter((m) => !blastRadius.matches.includes(m));
+  const finalMatches = [...blastRadius.matches, ...extras];
+
+  const confStr = verdict.confidence.toFixed(2);
+  const skepticLine = verdict.dataLossing
+    ? `skeptic: data loss confirmed — ${verdict.reason} (confidence ${confStr})`
+    : `skeptic: no additional data loss found — ${verdict.reason} (confidence ${confStr}); deterministic severity remains authoritative`;
+  const finalSummary = `${blastRadius.summary}\n${skepticLine}`;
+
+  return {
+    skipped: false,
+    verdict,
+    finalBlastRadius: {
+      ...blastRadius,
+      severity: finalSeverity,
+      matches: finalMatches,
+      summary: finalSummary,
+    },
+  };
+}
+
+/**
+ * Default lenient skeptic — matches the classifier's verdict and adds no signal.
+ * Real production supplies a Max `claude -p` session whose sole mandate is to try
+ * to refute the classifier; tests supply a fake with programmed verdicts. Provided
+ * so a caller that hasn't wired a real skeptic yet still gets a well-formed
+ * `SkepticPassResult` (the CEO card still reads a "skeptic: …" line, and the
+ * severity-preservation contract is exercised end-to-end).
+ */
+export const defaultLenientSkeptic: SkepticFn = ({ blastRadius }) => ({
+  dataLossing: blastRadius.severity !== "additive",
+  confidence: 0.5,
+  reason: "no separate skeptic wired — echoing deterministic verdict",
+});

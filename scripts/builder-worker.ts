@@ -10970,13 +10970,40 @@ async function applyOutOfLeashRequestActionInline(
     blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
   }
 
+  // Phase 5: adversarial skeptic pass — a BONUS defense-in-depth layer over the
+  // Phase-1 classifier + Phase-3 dry-run. Runs read-only, can ESCALATE severity if
+  // it spots data-loss the mechanical classifier missed, but NEVER downgrades a
+  // mechanically-flagged destructive back to additive. Verdict is attached to the
+  // payload so the CEO sees the second opinion, but the deterministic severity
+  // stays authoritative for the leash decision downstream. Skipped when the
+  // classifier said additive + no matches (nothing to refute).
+  let skepticVerdict: { dataLossing: boolean; confidence: number; reason: string; additionalMatches?: string[] } | undefined;
+  let skepticSkipped = true;
+  try {
+    const { runSkepticPass } = await import("../src/lib/migration-safety");
+    const skepticResult = await runSkepticPass(
+      dryRunSql,
+      blastRadius as unknown as Parameters<typeof runSkepticPass>[1],
+    );
+    skepticSkipped = skepticResult.skipped;
+    skepticVerdict = skepticResult.verdict;
+    // finalBlastRadius carries the (possibly-escalated) severity + skeptic-annotated summary.
+    blastRadius = skepticResult.finalBlastRadius as unknown as typeof blastRadius;
+  } catch (e) {
+    // Best-effort — a skeptic failure never blocks the raise. The classifier + dry-run
+    // remain load-bearing; the skeptic is a bonus layer.
+    skepticSkipped = false;
+    skepticVerdict = { dataLossing: false, confidence: 0, reason: `skeptic pass failed: ${(e as Error)?.message ?? e}` };
+  }
+
   // Phase 4: routing on (severity × rename-and-expire × business-materiality). A
   // reversible_destructive that passes the Phase-2 rails routes to PLATFORM (Ada
   // owns the final call, PITR is the backstop); irreversible+material routes to the
   // CEO circuit-breaker with the computed blast-radius on the card (no raw SQL
   // required to decide). Every destructive-action approval writes a
   // director_decision_grades row async via the existing box director-grade sweep,
-  // so accountability is grading, not per-decision pre-approval.
+  // so accountability is grading, not per-decision pre-approval. Uses the
+  // SKEPTIC-adjusted blast-radius so a skeptic escalation flows into routing.
   let destructiveRoute: { routedToFunction: "platform" | "ceo"; renameAndExpire: boolean; businessMaterial: boolean; reason: string } = {
     routedToFunction: "ceo",
     renameAndExpire: false,
@@ -11078,16 +11105,26 @@ async function applyOutOfLeashRequestActionInline(
     // (Ada owns final call); irreversible + business-material → 'ceo' circuit-breaker.
     routed_to_function_override: destructiveRoute.routedToFunction,
     destructive_route: destructiveRoute,
+    // Phase 5 — adversarial skeptic verdict. Attached FOR the CEO/Ada to read; the
+    // deterministic Phase-1 severity remains authoritative for the leash decision.
+    skeptic_verdict: skepticVerdict ?? null,
+    skeptic_skipped: skepticSkipped,
   };
   const routedTag = destructiveRoute.routedToFunction === "ceo"
     ? "CEO circuit-break"
     : "Platform / Ada (final call)";
+  const skepticLogLine = skepticSkipped
+    ? "Skeptic: skipped (additive — nothing to refute)"
+    : skepticVerdict
+      ? `Skeptic: ${skepticVerdict.dataLossing ? "data-loss confirmed" : "no additional data-loss found"} — ${skepticVerdict.reason} (confidence ${skepticVerdict.confidence.toFixed(2)})`
+      : "Skeptic: (unavailable)";
   const logTail = [
     `🛠️ Ada (${directorFunction}) raised an out-of-leash Approval Request → ${routedTag}.`,
     founderAsk ? `Founder's ask: ${founderAsk}` : "",
     `Action (${actionType}): ${summary}`,
     `Reasoning: ${reasoning}`,
     blastRadiusLine + (irreversible ? " (flagged irreversible)" : ""),
+    skepticLogLine,
     `Routing: ${destructiveRoute.reason}`,
     leashRail ? `Leash rail: ${leashRail}` : "",
     `$ ${cmd}`,
@@ -11114,6 +11151,11 @@ async function applyOutOfLeashRequestActionInline(
     // Phase 4 — persist the routing decision so the executor's audit rows record
     // WHO owned the call (Platform/Ada or CEO circuit-break) alongside the decision.
     destructive_route: destructiveRoute,
+    // Phase 5 — persist the adversarial skeptic verdict alongside the mechanical
+    // classifier's severity so the audit row shows BOTH the deterministic call
+    // AND the second opinion the CEO/Ada saw at decision time.
+    skeptic_verdict: skepticVerdict ?? null,
+    skeptic_skipped: skepticSkipped,
   });
 
   const { data: inserted, error } = await db
@@ -11159,6 +11201,10 @@ async function applyOutOfLeashRequestActionInline(
         route_reason: destructiveRoute.reason,
         rename_and_expire: destructiveRoute.renameAndExpire,
         business_material: destructiveRoute.businessMaterial,
+        // Phase 5 — the adversarial skeptic verdict recorded on the audit row so a later
+        // grader can see both the mechanical severity + the skeptic's second opinion.
+        skeptic_verdict: skepticVerdict ?? null,
+        skeptic_skipped: skepticSkipped,
       },
     });
   } catch { /* audit best-effort */ }

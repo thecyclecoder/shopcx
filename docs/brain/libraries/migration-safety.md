@@ -105,14 +105,42 @@ Matches the Phase-2 reversible-by-default conventions (see [[../operational-rule
 
 True when any dry-run-measured affected row count exceeds `BUSINESS_MATERIAL_ROW_THRESHOLD` (100) OR any affected statement touches a business-material table (customers / orders / subscriptions / payments / invoices / tickets / billing / ledger). Falls back conservatively when `measured:false`: an unmeasured irreversible destructive is treated as material by default so a lock-heavy `DROP TABLE public.customers` still surfaces to the CEO circuit-breaker.
 
+### `runSkepticPass` — async function ([[../specs/destructive-migration-safety-rails]] Phase 5)
+
+```ts
+async function runSkepticPass(
+  sql: string,
+  blastRadius: BlastRadius,
+  opts?: { skeptic?: SkepticFn },
+): Promise<{
+  skipped: boolean;               // true when classifier said additive (nothing to refute)
+  verdict?: SkepticVerdict;       // { dataLossing, confidence, reason, additionalMatches? }
+  finalBlastRadius: BlastRadius;  // severity NEVER downgrades; extras unioned into matches
+}>;
+```
+
+Adversarial skeptic — a BONUS defense-in-depth layer over the Phase-1 classifier + Phase-3 dry-run. The skeptic's SOLE mandate is to prove data loss, mirroring the solver→skeptic→quorum shape used for escalations. The Phase-1 severity stays AUTHORITATIVE for the leash decision — a lenient skeptic can NEVER downgrade a mechanically-flagged destructive migration to additive.
+
+Rules:
+- Classifier said `additive` + no matches → `skipped:true`, blastRadius passes through untouched (the bonus layer costs nothing to skip).
+- Skeptic verdict `dataLossing:true` with `confidence ≥ 0.7` → severity floor `irreversible_destructive` (can ESCALATE `reversible_destructive` → `irreversible_destructive`).
+- Skeptic verdict `dataLossing:true` with `confidence < 0.7` → severity floor `reversible_destructive` (can ESCALATE `additive` — but that combination never reaches the skeptic because we skip additive up front).
+- Skeptic verdict `dataLossing:false` → severity floor `additive` (no escalation), but the CLASSIFIER's severity is preserved (`maxSeverity(classifier, floor)`).
+- Any `additionalMatches` the skeptic surfaces are unioned into `blastRadius.matches`.
+- A one-line `skeptic: …` note is appended to `blastRadius.summary` so the CEO card reads it inline; lenient verdicts carry `deterministic severity remains authoritative`.
+
+Production wires a Max `claude -p` session as the injected skeptic; tests inject a fake. The `defaultLenientSkeptic` (also exported) echoes the deterministic verdict — provided so callers that haven't wired a real skeptic yet still exercise the severity-preservation contract end-to-end.
+
+### `SkepticVerdict` · `SkepticFn` · `RunSkepticPassOpts` · `SkepticPassResult` — types
+
 ### `BlastRadius` · `BlastRadiusStatement` · `DestructiveRoute` · `RouteDestination` · `MigrationSeverity` · `MigrationClassification` — types / interfaces
 
 ## Callers
 
 - `src/lib/agents/platform-director.ts` — `categoryFor` runs the classifier over the pending action's `cmd`+`preview` before returning `additive_migration` / `additive_backfill`; a non-additive severity forces `null` (out of leash, whole bundle escalates).
-- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the measured summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. **Phase 4**: the same call site runs `routeDestructiveAction` and stamps `routed_to_function_override: 'platform' | 'ceo'` on the pending action; the reconciler's `routingOwnerForJob` honors it so a reversible+rename-safe raise lands in Ada's inbox instead of the CEO's, and the raised `director_activity` row records the route + reason.
+- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the measured summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. **Phase 4**: the same call site runs `routeDestructiveAction` and stamps `routed_to_function_override: 'platform' | 'ceo'` on the pending action; the reconciler's `routingOwnerForJob` honors it so a reversible+rename-safe raise lands in Ada's inbox instead of the CEO's, and the raised `director_activity` row records the route + reason. **Phase 5**: `runSkepticPass` runs BEFORE `routeDestructiveAction` (so a skeptic escalation flows into routing); its verdict is attached to the pending action + log_tail + instructions + `director_activity`. The deterministic Phase-1 severity remains authoritative — a lenient skeptic never downgrades a mechanically-flagged destructive.
 - `src/lib/agents/approval-inbox.ts` — `routingOwnerForJob` honors the pending action's Phase-4 `routed_to_function_override` (whitelist `'platform' | 'ceo'`) before falling back to `KIND_TO_FUNCTION`, so a reversible_destructive + rename-and-expire raise routes to Platform (Ada owns the final call) and irreversible+business-material stays on the CEO circuit-breaker.
-- `src/lib/migration-safety.test.ts` — pins the Phase-1 + Phase-3 + Phase-4 verification cases (`npm run test:migration-safety`).
+- `src/lib/migration-safety.test.ts` — pins the Phase-1 + Phase-3 + Phase-4 + Phase-5 verification cases (`npm run test:migration-safety`).
 
 ## Gotchas
 

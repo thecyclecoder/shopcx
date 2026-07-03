@@ -22,9 +22,12 @@ import {
   isRenameAndExpire,
   isBusinessMaterial,
   routeDestructiveAction,
+  runSkepticPass,
+  defaultLenientSkeptic,
   BUSINESS_MATERIAL_ROW_THRESHOLD,
   type BlastRadius,
   type PgLike,
+  type SkepticFn,
 } from "./migration-safety";
 import { directorLeashCandidates, type DirectorTargetJob } from "./agents/platform-director";
 import { routingOwnerForJob } from "./agents/approval-inbox";
@@ -435,4 +438,90 @@ test("routingOwnerForJob: falls through to KIND_TO_FUNCTION when no valid overri
   };
   // ceo-authorized-out-of-leash is UNMAPPED in KIND_TO_FUNCTION → null → CEO fail-safe.
   assert.equal(routingOwnerForJob(job), null);
+});
+
+// ── Phase 5: adversarial skeptic pass ─────────────────────────────────────────
+
+const additiveBRForSkeptic: BlastRadius = { measured: true, severity: "additive", matches: [], summary: "additive" };
+const irrevBRForSkeptic = (opts: Partial<BlastRadius> = {}): BlastRadius => ({
+  measured: true,
+  severity: "irreversible_destructive",
+  matches: ["DROP TABLE"],
+  summary: "DROP TABLE customers — irreversible",
+  affected: [{ statement: "drop table customers", rowCount: null }],
+  ...opts,
+});
+const revBRForSkeptic = (opts: Partial<BlastRadius> = {}): BlastRadius => ({
+  measured: true,
+  severity: "reversible_destructive",
+  matches: ["ALTER … DROP CONSTRAINT"],
+  summary: "reversible destructive",
+  affected: [{ statement: "alter table t drop constraint t_fk", rowCount: null }],
+  ...opts,
+});
+
+test("runSkepticPass: additive migration → skipped:true, no verdict, blastRadius unchanged", async () => {
+  const r = await runSkepticPass("CREATE TABLE foo (id uuid);", additiveBRForSkeptic);
+  assert.equal(r.skipped, true);
+  assert.equal(r.verdict, undefined);
+  assert.strictEqual(r.finalBlastRadius, additiveBRForSkeptic);
+});
+
+test("runSkepticPass: destructive migration returns a data-loss finding when the skeptic confirms it", async () => {
+  const skeptic: SkepticFn = () => ({ dataLossing: true, confidence: 0.95, reason: "DROP TABLE on a customer-facing ledger" });
+  const r = await runSkepticPass("DROP TABLE customers;", irrevBRForSkeptic(), { skeptic });
+  assert.equal(r.skipped, false);
+  assert.equal(r.verdict?.dataLossing, true);
+  assert.match(r.finalBlastRadius.summary, /data loss confirmed/);
+  assert.equal(r.finalBlastRadius.severity, "irreversible_destructive");
+});
+
+test("runSkepticPass: skeptic CANNOT downgrade a mechanically-flagged destructive to additive (severity contract)", async () => {
+  // The skeptic is LENIENT — it says no data loss found. The Phase-1 classifier already flagged
+  // irreversible_destructive. The severity MUST stay irreversible_destructive.
+  const lenient: SkepticFn = () => ({ dataLossing: false, confidence: 0.9, reason: "looks fine to me" });
+  const r = await runSkepticPass("DROP TABLE customers;", irrevBRForSkeptic(), { skeptic: lenient });
+  assert.equal(r.finalBlastRadius.severity, "irreversible_destructive");
+  assert.match(r.finalBlastRadius.summary, /deterministic severity remains authoritative/);
+});
+
+test("runSkepticPass: high-confidence data-loss ESCALATES a reversible_destructive to irreversible_destructive", async () => {
+  const escalating: SkepticFn = () => ({ dataLossing: true, confidence: 0.85, reason: "constraint drop cascades to unrecoverable rows" });
+  const r = await runSkepticPass("ALTER TABLE t DROP CONSTRAINT t_fk;", revBRForSkeptic(), { skeptic: escalating });
+  assert.equal(r.finalBlastRadius.severity, "irreversible_destructive");
+});
+
+test("runSkepticPass: low-confidence data-loss does NOT escalate a reversible_destructive", async () => {
+  const softEscalating: SkepticFn = () => ({ dataLossing: true, confidence: 0.5, reason: "maybe" });
+  const r = await runSkepticPass("ALTER TABLE t DROP CONSTRAINT t_fk;", revBRForSkeptic(), { skeptic: softEscalating });
+  assert.equal(r.finalBlastRadius.severity, "reversible_destructive");
+});
+
+test("runSkepticPass: additional matches from the skeptic are unioned into blastRadius.matches", async () => {
+  const skeptic: SkepticFn = () => ({ dataLossing: true, confidence: 0.8, reason: "hidden trigger destruction", additionalMatches: ["TRIGGER DROP"] });
+  const r = await runSkepticPass("DROP TABLE customers;", irrevBRForSkeptic(), { skeptic });
+  assert.ok(r.finalBlastRadius.matches.includes("DROP TABLE"));
+  assert.ok(r.finalBlastRadius.matches.includes("TRIGGER DROP"));
+});
+
+test("runSkepticPass: verdict is ATTACHED to the finalBlastRadius even when lenient (for the CEO card)", async () => {
+  const lenient: SkepticFn = () => ({ dataLossing: false, confidence: 0.4, reason: "cannot reproduce" });
+  const r = await runSkepticPass("DROP TABLE customers;", irrevBRForSkeptic(), { skeptic: lenient });
+  assert.equal(r.verdict?.reason, "cannot reproduce");
+  assert.match(r.finalBlastRadius.summary, /skeptic: no additional data loss/);
+});
+
+test("runSkepticPass: an async (Promise-returning) skeptic works", async () => {
+  const asyncSkeptic: SkepticFn = async () => Promise.resolve({ dataLossing: true, confidence: 0.9, reason: "async proof" });
+  const r = await runSkepticPass("DROP TABLE customers;", irrevBRForSkeptic(), { skeptic: asyncSkeptic });
+  assert.equal(r.verdict?.reason, "async proof");
+});
+
+test("runSkepticPass: default lenient skeptic echoes deterministic verdict (severity preserved either way)", async () => {
+  const rIrrev = await runSkepticPass("DROP TABLE x;", irrevBRForSkeptic(), { skeptic: defaultLenientSkeptic });
+  assert.equal(rIrrev.finalBlastRadius.severity, "irreversible_destructive");
+  assert.equal(rIrrev.verdict?.dataLossing, true);
+
+  const rAdd = await runSkepticPass("ALTER TABLE x ADD COLUMN y int;", additiveBRForSkeptic);
+  assert.equal(rAdd.skipped, true); // additive → skipped entirely
 });
