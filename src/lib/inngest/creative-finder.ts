@@ -33,6 +33,7 @@ import {
 } from "@/lib/creative-skeleton";
 import { hasFfmpeg, processVideoPending, type VideoProcessResult } from "@/lib/video-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { syncResearchUrlsFromCreatives } from "@/lib/research-urls";
 
 const SWEEP_DELAY_MS = 7000; // ~8 searches/min — under AdLibrary's 10/min cap
 
@@ -104,6 +105,10 @@ export const creativeFinderDailyCron = inngest.createFunction(
         // Whitelisted-page promotion: affiliate/advertorial/creator pages fronting a KNOWN
         // competitor (destination_domain join) surface as 'proposed' whitelisted rows.
         await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
+        // Rhea's URL sensor (rhea-url-sensor Phase 1): walk creative_skeletons for the
+        // workspace and upsert one research_urls row per distinct destination. Idempotent
+        // — the SDK dedups by normalized URL and skips a JUNK_DOMAINS list.
+        await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
       }
       return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, freshnessDays };
     })();
@@ -151,6 +156,8 @@ export const creativeFinderManualSweep = inngest.createFunction(
       }
       await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
       await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
+      // Rhea's URL sensor — same deterministic sync the daily cron runs (rhea-url-sensor Phase 1).
+      await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
     }
     return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, forced: force, freshnessDays };
   },
