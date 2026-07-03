@@ -189,6 +189,23 @@ export interface ComputeBlastRadiusOpts {
   skipDryRun?: boolean;
   /** Override the auto lock-heavy detection (e.g. force it on for testing). */
   lockHeavy?: boolean;
+  /**
+   * Ephemeral/is_test capability assertion — the caller PROVES the injected `pg`
+   * points to an isolated database (an ephemeral Supabase branch DB or an explicitly
+   * `is_test` DB) where no persistent state matters. Without this, `computeBlastRadius`
+   * REFUSES to execute SQL and returns `measured:false` with the static Phase-1
+   * severity. The invariant: NO unapproved arbitrary SQL escapes to production, EVER.
+   * A prod pg client is never sufficient to unlock measurement — see the [[destructive-
+   * migration-safety-rails]] Phase 1 / prevent-prod-dry-run-transaction-escape follow-up.
+   */
+  ephemeral?: {
+    /** Human-readable reason surfaced on the audit summary (e.g. "supabase branch db `pr-1234`"). */
+    reason: string;
+    /** Set true when the target DB carries the `is_test` marker. */
+    isTest?: boolean;
+    /** Set true when the target DB is an ephemeral / branch DB (survives only the request). */
+    branchDb?: boolean;
+  };
 }
 
 /**
@@ -318,24 +335,62 @@ function composeSummary(cls: MigrationClassification, affected: BlastRadiusState
  *
  * Contract:
  *   1. Classify the SQL with the Phase-1 classifier — `severity` + `matches`.
- *   2. If lock-heavy (auto or explicit) or `pg` missing → return `measured:false`
+ *   2. PRE-FLIGHT REJECT — before ANY pg call — if the input SQL carries a
+ *      transaction-control statement (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`/…)
+ *      or any statement whose effect survives / bypasses the ROLLBACK contract
+ *      (`VACUUM`, `CLUSTER`, `CHECKPOINT`, `ALTER SYSTEM`, `LISTEN`/`NOTIFY`/
+ *      `UNLISTEN`, `COPY … FROM/TO`, `LOAD`, `pg_notify(…)`, `dblink_exec(…)`,
+ *      `CREATE/DROP DATABASE`, `CREATE INDEX CONCURRENTLY`, `REINDEX
+ *      CONCURRENTLY`). Return `measured:false` with the static severity + a
+ *      specific reason; `PgLike` NEVER receives `BEGIN` or the following statement.
+ *      This is the anti-escape rail: a hostile input like `DELETE FROM t; COMMIT;`
+ *      is rejected pre-flight; the dry-run harness refuses to run any of it.
+ *   3. CAPABILITY GATE — if `pg` is provided but `opts.ephemeral` is not asserted,
+ *      REFUSE to execute. Return `measured:false` with the static severity and a
+ *      "no ephemeral/is_test capability" reason. `PgLike` is never called. The
+ *      invariant: no unapproved arbitrary SQL ever runs against production.
+ *   4. If lock-heavy (auto or explicit) or `pg` missing → return `measured:false`
  *      with a `measurementSkipped` reason. NEVER acquires a prod lock to measure.
- *   3. Otherwise: `BEGIN` → run each statement in order → `ROLLBACK` in a `finally`
- *      so the transaction never persists, EVER, even on error mid-run. A statement
- *      that errors is captured with its error string and the loop continues so we
- *      report as much of the migration as we can.
+ *   5. Otherwise (pg present + ephemeral asserted + safe SQL): `BEGIN` → run each
+ *      statement in order → `ROLLBACK` in a `finally` so the transaction never
+ *      persists, EVER, even on error mid-run. A statement that errors is captured
+ *      with its error string and the loop continues so we report as much of the
+ *      migration as we can.
  *
- * Verification (destructive-migration-safety-rails Phase 3):
- *   • `computeBlastRadius` on a `DELETE FROM t WHERE …` returns the real affected-
- *     row count AND the table's row count is unchanged afterward (proved by
- *     the ROLLBACK contract — the pg client sees the pre-tx count post-call).
+ * Verification:
+ *   • [[destructive-migration-safety-rails]] Phase 3 — `computeBlastRadius` on a
+ *     `DELETE FROM t WHERE …` (against an ephemeral DB) returns the real affected-
+ *     row count AND the table's row count is unchanged afterward (proved by the
+ *     ROLLBACK contract — the pg spy sees the pre-tx count post-call).
  *   • A lock-heavy DDL returns `measured:false` with the static severity instead
  *     of acquiring a prod lock.
+ *   • [[prevent-prod-dry-run-transaction-escape]] — a fault-injection
+ *     `DELETE FROM t WHERE …; COMMIT;` is rejected before `PgLike` receives
+ *     BEGIN or DELETE; a prod caller (no `ephemeral`) gets `measured:false` +
+ *     static severity with no SQL executed.
  */
 export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOpts = {}): Promise<BlastRadius> {
   const cls = classifyMigrationSql(sql);
   const lockHeavy = opts.lockHeavy === true || detectLockHeavy(sql);
   const stripped = stripComments(sql).trim();
+
+  // Pre-flight: reject transaction-control OR non-transactional-effectful statements
+  // BEFORE touching PgLike. A hostile input like `DELETE FROM t; COMMIT;` never
+  // reaches BEGIN — the harness refuses to run any of it (the whole batch is
+  // marked measured:false with a specific reason).
+  const unsafeStmt = firstUnsafeStatement(sql);
+  if (unsafeStmt) {
+    const cause = `${unsafeStmt.reason} — dry-run harness refuses to execute (input SQL cannot escape our BEGIN/ROLLBACK); statement: "${unsafeStmt.preview}"`;
+    return { measured: false, severity: cls.severity, matches: cls.matches, summary: composeSummary(cls, null, cause), measurementSkipped: cause };
+  }
+
+  // Capability gate: pg without a proved ephemeral/is_test target is refused —
+  // the injected pg client MUST NOT be a production client. Absent this proof,
+  // no BEGIN, no DELETE, no anything — we return the deterministic static severity.
+  if (opts.pg && !opts.ephemeral) {
+    const cause = "pg client provided but ephemeral/is_test capability not asserted (refusing to run arbitrary SQL against a possibly-production DB — the caller must pass opts.ephemeral to unlock measurement)";
+    return { measured: false, severity: cls.severity, matches: cls.matches, summary: composeSummary(cls, null, cause), measurementSkipped: cause };
+  }
 
   if (opts.skipDryRun || !opts.pg || lockHeavy || !stripped) {
     const cause = lockHeavy
@@ -356,15 +411,6 @@ export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOp
     began = true;
     for (const stmt of splitSqlStatements(sql)) {
       const preview = stmt.trim().slice(0, 200);
-      // Rollback-contract guardrail: STRIP transaction-control statements
-      // (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/END/START TRANSACTION) from the
-      // input SQL so a hostile / naive migration containing `... ; COMMIT;` cannot
-      // escape the dry-run's atomic wrapper. Our BEGIN + finally-block ROLLBACK
-      // are AUTHORITATIVE; input-supplied transaction control is dropped.
-      if (isTransactionControlStatement(stmt)) {
-        affected.push({ statement: preview, rowCount: null, error: "transaction-control statement skipped (dry-run owns BEGIN/ROLLBACK)" });
-        continue;
-      }
       try {
         const r = await pg.query(stmt);
         affected.push({ statement: preview, rowCount: r.rowCount });
@@ -391,13 +437,98 @@ export async function computeBlastRadius(sql: string, opts: ComputeBlastRadiusOp
 }
 
 /** True iff `stmt` is a transaction-control statement (BEGIN/COMMIT/ROLLBACK/SAVEPOINT
- *  /RELEASE/END/START TRANSACTION). Comment-stripped, case-insensitive. Used to enforce
- *  the dry-run ROLLBACK contract: input SQL never commits from within our wrapper. */
+ *  /RELEASE/END/START TRANSACTION/PREPARE TRANSACTION/COMMIT PREPARED/ROLLBACK PREPARED).
+ *  Comment-stripped, case-insensitive. Used to enforce the dry-run ROLLBACK contract:
+ *  input SQL never commits from within our wrapper. Any occurrence in the input SQL is
+ *  a pre-flight reject — the harness OWNS BEGIN/ROLLBACK and refuses input that tries
+ *  to steer them. */
 export function isTransactionControlStatement(stmt: string): boolean {
   const s = stripComments(stmt).trim().toLowerCase();
   if (!s) return true; // empty is a no-op — skip
   // Match a leading keyword; the statement may end with a semicolon or a following word.
-  return /^(?:begin|commit|rollback|savepoint|release|end|start\s+transaction)\b/.test(s);
+  return /^(?:begin|commit(?:\s+prepared)?|rollback(?:\s+prepared)?|savepoint|release|end|start\s+transaction|prepare\s+transaction)\b/.test(s);
+}
+
+/**
+ * True iff `stmt` is NON-TRANSACTIONAL or has effects that BYPASS a ROLLBACK.
+ * Any of these in the input SQL means our BEGIN → … → ROLLBACK wrapper cannot
+ * guarantee the "no persistent change" contract, so we refuse to execute.
+ *
+ * Covered families (comment-stripped, case-insensitive, leading keyword):
+ *   • `VACUUM` / `CLUSTER` / `CHECKPOINT` — cannot run inside a transaction block;
+ *      Postgres either errors or forces an autocommit.
+ *   • `ALTER SYSTEM` — mutates server-wide config; survives ROLLBACK.
+ *   • `LISTEN` / `NOTIFY` / `UNLISTEN` — session-scope side effect + committed
+ *      notifications survive rollback conceptually (LISTEN backend state leaks).
+ *   • `COPY` — reads/writes files or external streams; effects survive rollback.
+ *   • `LOAD` — loads a shared library; server-scoped side effect.
+ *   • `CREATE DATABASE` / `DROP DATABASE` — not permitted inside a transaction.
+ *   • `CREATE INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY` —
+ *      cannot run inside a transaction (Postgres commits them separately).
+ *   • `REFRESH MATERIALIZED VIEW CONCURRENTLY` — likewise, and it commits.
+ *   • Function calls to `pg_notify(…)` / `dblink_exec(…)` / `dblink(…)` — side
+ *      effects escape rollback (dblink runs on a remote server; pg_notify queues a
+ *      commit-fires notification whose queue state survives our rollback).
+ *   • `DO` blocks that contain `COMMIT` / `ROLLBACK` inside the plpgsql body —
+ *      procedural commits inside a DO block bypass our wrapper.
+ *   • `CALL <procedure>` — a procedure with transaction-control inside cannot be
+ *      wrapped safely, so we reject any CALL by shape.
+ *   • `SET SESSION` / `SET ` (session-level) — leaks past ROLLBACK. `SET LOCAL`
+ *      is fine (transaction-scoped) but we err on the safe side and refuse `SET`
+ *      when it isn't `SET LOCAL`.
+ *
+ * Errs SAFE: on ambiguity the caller either strips the statement OR uses skipDryRun.
+ */
+export function isNonTransactionalOrEffectfulStatement(stmt: string): boolean {
+  const s = stripComments(stmt).trim().toLowerCase();
+  if (!s) return false;
+  if (/^vacuum\b/.test(s)) return true;
+  if (/^cluster\b/.test(s)) return true;
+  if (/^checkpoint\b/.test(s)) return true;
+  if (/^alter\s+system\b/.test(s)) return true;
+  if (/^(?:un)?listen\b/.test(s)) return true;
+  if (/^notify\b/.test(s)) return true;
+  if (/^copy\b/.test(s)) return true;
+  if (/^load\b/.test(s)) return true;
+  if (/^create\s+database\b/.test(s)) return true;
+  if (/^drop\s+database\b/.test(s)) return true;
+  if (/^create\s+(?:unique\s+)?index\s+concurrently\b/.test(s)) return true;
+  if (/^reindex\s+.*\bconcurrently\b/.test(s)) return true;
+  if (/^drop\s+index\s+concurrently\b/.test(s)) return true;
+  if (/^refresh\s+materialized\s+view\s+concurrently\b/.test(s)) return true;
+  if (/\bpg_notify\s*\(/.test(s)) return true;
+  if (/\bdblink(?:_exec)?\s*\(/.test(s)) return true;
+  if (/^call\s+\w/.test(s)) return true;
+  if (/^do\s+.*\$\$[\s\S]*?\b(?:commit|rollback)\b/.test(s)) return true;
+  // `SET x = y` (session-level) leaks past rollback; `SET LOCAL …` is safe.
+  if (/^set\s+(?!local\b)/.test(s)) return true;
+  return false;
+}
+
+/**
+ * Scan the input SQL statement-by-statement for the first statement that would
+ * BREAK the dry-run's atomic BEGIN → … → ROLLBACK contract (transaction-control
+ * or non-transactional / effectful). Returns null when every statement is safe
+ * to wrap. Used by `computeBlastRadius`'s pre-flight to REFUSE the whole batch
+ * — pg is never touched.
+ */
+export function firstUnsafeStatement(sql: string): { reason: string; preview: string } | null {
+  if (!sql || typeof sql !== "string") return null;
+  for (const stmt of splitSqlStatements(sql)) {
+    // Skip pure-comment / whitespace chunks — isTransactionControlStatement returns
+    // true for empty (so mid-loop callers can treat empty as a no-op skip), but a
+    // comment-only chunk is not a real transaction-control statement.
+    const stripped = stripComments(stmt).trim();
+    if (!stripped) continue;
+    const preview = stmt.trim().slice(0, 200);
+    if (isTransactionControlStatement(stmt)) {
+      return { reason: "input SQL contains a transaction-control statement (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/…); the dry-run harness OWNS BEGIN/ROLLBACK and cannot let input steer them", preview };
+    }
+    if (isNonTransactionalOrEffectfulStatement(stmt)) {
+      return { reason: "input SQL contains a non-transactional or externally effectful statement (VACUUM/COPY/NOTIFY/ALTER SYSTEM/CONCURRENTLY/CALL/DO with commit/pg_notify/dblink/…); its effects would survive our ROLLBACK", preview };
+    }
+  }
+  return null;
 }
 
 // ── Phase 4 — CTO-final-call routing + CEO business circuit-breaker ─────────────

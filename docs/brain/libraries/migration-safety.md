@@ -42,13 +42,18 @@ function classifyMigrationSql(sql: string): {
 };
 ```
 
-### `computeBlastRadius` — async function ([[../specs/destructive-migration-safety-rails]] Phase 3)
+### `computeBlastRadius` — async function ([[../specs/destructive-migration-safety-rails]] Phase 3 · [[../specs/prevent-prod-dry-run-transaction-escape]])
 
 ```ts
 async function computeBlastRadius(sql: string, opts?: {
   pg?: PgLike;              // injected client; when absent → measured:false
   skipDryRun?: boolean;     // caller declares "don't dry-run this against prod"
   lockHeavy?: boolean;      // force lock-heavy classification (usually auto-detected)
+  ephemeral?: {             // caller PROVES pg points at an isolated DB (see below)
+    reason: string;
+    isTest?: boolean;
+    branchDb?: boolean;
+  };
 }): Promise<{
   measured: boolean;                                // false when skipped
   severity: MigrationSeverity;                      // Phase-1 static severity (authoritative)
@@ -61,7 +66,12 @@ async function computeBlastRadius(sql: string, opts?: {
 
 Runs the migration inside `BEGIN → each statement → ROLLBACK` on the injected `PgLike` (typically a `pg.Client` connected to the Supabase pooler). The transaction NEVER commits — the `ROLLBACK` sits in a `finally` so even a mid-migration exception unwinds cleanly. Per-statement rowcounts are captured and rolled into a human summary (e.g. `deletes 48,201 rows from orders — irreversible`). The Phase-1 static severity stays authoritative for the leash decision — a measured 0-row DELETE still classifies destructive if the classifier flagged the SQL.
 
-**Never locks prod to measure.** Lock-heavy DDL (`ALTER TABLE … ALTER COLUMN … SET DATA TYPE` — a table rewrite that holds `ACCESS EXCLUSIVE`) is detected up front and returns `{ measured: false }` with a `measurementSkipped: "lock-heavy DDL …"` reason instead. The caller can pass `skipDryRun: true` for an explicit bypass. An ephemeral Supabase branch DB is the future path — the injected-`PgLike` accepts one unchanged.
+**Never locks prod to measure.** Lock-heavy DDL (`ALTER TABLE … ALTER COLUMN … SET DATA TYPE` — a table rewrite that holds `ACCESS EXCLUSIVE`) is detected up front and returns `{ measured: false }` with a `measurementSkipped: "lock-heavy DDL …"` reason instead. The caller can pass `skipDryRun: true` for an explicit bypass.
+
+**Never runs arbitrary SQL against prod ([[../specs/prevent-prod-dry-run-transaction-escape]]).** Two hardening rails apply BEFORE any pg call:
+
+1. **Pre-flight statement reject.** The input SQL is walked statement-by-statement (`firstUnsafeStatement`); if ANY statement is a transaction-control (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`/`RELEASE`/`END`/`START|PREPARE TRANSACTION`) or a non-transactional / externally-effectful shape (`VACUUM`, `CLUSTER`, `CHECKPOINT`, `ALTER SYSTEM`, `LISTEN`/`NOTIFY`/`UNLISTEN`, `COPY`, `LOAD`, `CREATE`/`DROP DATABASE`, `CREATE INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`, `REFRESH MATERIALIZED VIEW CONCURRENTLY`, `pg_notify(…)`, `dblink[_exec](…)`, `CALL`, `DO … $$ … COMMIT|ROLLBACK … $$`, session-level `SET`), the whole batch is REFUSED — `PgLike` is never touched. This is the anti-escape rail: a hostile input like `DELETE FROM t; COMMIT;` is stopped BEFORE `BEGIN` or `DELETE` reach the pg client.
+2. **Ephemeral capability gate.** Even a well-formed SQL is refused if `opts.pg` is provided without `opts.ephemeral`. The caller must ASSERT the pg client points at an isolated database (an `is_test`-marked DB or an ephemeral Supabase branch); absent this proof, `measured:false` returns with the deterministic Phase-1 severity — the routing layer (Phase 4) then circuit-breaks to the CEO on destructive raises without any SQL having run. Production callers (`scripts/builder-worker.ts` — a pooler client to prod) OMIT `pg` entirely; the ephemeral-branch future path passes BOTH `pg` and `opts.ephemeral`.
 
 ### `splitSqlStatements` — function
 
@@ -143,9 +153,17 @@ Called from `runCeoAuthorizedOutOfLeashJob` (scripts/builder-worker.ts) after ev
 
 **Phase 7 / Fix 2 (spec-test check `74b737bdbda6fa8d`):** the insert result's `error` is now inspected — a DB reject (RLS / unique violation / constraint) returns `{ok:false, reason: 'insert failed: …'}` instead of silently reporting `{ok:true, gradeId:null}`. Silent-swallow previously left the accountability rail invisible whenever the insert failed. A missing returned `id` is also treated as failure.
 
-### `isTransactionControlStatement(sql)` — function (Fix 1)
+### `isTransactionControlStatement(sql)` — function
 
-Comment-stripped, case-insensitive — true for `BEGIN` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` / `RELEASE` / `END` / `START TRANSACTION`. Used by `computeBlastRadius` to STRIP transaction-control from the input SQL so a hostile / naive migration containing `... ; COMMIT;` cannot escape the dry-run's atomic wrapper — the dry-run OWNS `BEGIN` / `ROLLBACK`.
+Comment-stripped, case-insensitive — true for `BEGIN` / `COMMIT` (incl. `COMMIT PREPARED`) / `ROLLBACK` (incl. `ROLLBACK PREPARED`) / `SAVEPOINT` / `RELEASE` / `END` / `START TRANSACTION` / `PREPARE TRANSACTION`. Used by `firstUnsafeStatement` to REJECT any input SQL that carries one of these — the dry-run OWNS `BEGIN` / `ROLLBACK` and cannot let input steer them ([[../specs/prevent-prod-dry-run-transaction-escape]]).
+
+### `isNonTransactionalOrEffectfulStatement(sql)` — function
+
+Comment-stripped, case-insensitive — true for statements whose effects survive or bypass a `ROLLBACK`: `VACUUM`, `CLUSTER`, `CHECKPOINT`, `ALTER SYSTEM`, `LISTEN`/`NOTIFY`/`UNLISTEN`, `COPY`, `LOAD`, `CREATE`/`DROP DATABASE`, `CREATE INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REFRESH MATERIALIZED VIEW CONCURRENTLY`, `pg_notify(…)`, `dblink[_exec](…)`, `CALL <procedure>`, `DO $$ … COMMIT|ROLLBACK … $$`, session-level `SET`. `SET LOCAL` is transaction-scoped and safe. Used by `firstUnsafeStatement`.
+
+### `firstUnsafeStatement(sql)` — function
+
+Splits the input SQL, returns the first statement that would break the atomic BEGIN → … → ROLLBACK contract (transaction-control OR non-transactional / effectful), or `null` when every statement is safe to wrap. `computeBlastRadius` uses it as the pre-flight rail: any unsafe statement means the whole batch is refused BEFORE any pg call — the safe production behavior when a caller passes an unproven `pg`.
 
 ### `SkepticVerdict` · `SkepticFn` · `RunSkepticPassOpts` · `SkepticPassResult` — types
 

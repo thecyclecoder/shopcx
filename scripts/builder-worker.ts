@@ -10950,22 +10950,19 @@ async function applyOutOfLeashRequestActionInline(
   const dryRunSql = `${preview}\n${cmd}`;
   try {
     const { computeBlastRadius } = await import("../src/lib/migration-safety");
-    const { pgClient } = await import("./_bootstrap");
-    let pg: { query: (s: string) => Promise<{ rowCount: number | null; rows: unknown[] }> } | undefined;
-    let pgClose: (() => Promise<void>) | undefined;
-    try {
-      const client = pgClient();
-      await client.connect();
-      pg = { query: (s: string) => client.query(s) as unknown as Promise<{ rowCount: number | null; rows: unknown[] }> };
-      pgClose = async () => { try { await client.end(); } catch { /* best-effort */ } };
-    } catch {
-      pg = undefined; // pooler unreachable / no creds → measured:false, static severity
-    }
-    try {
-      blastRadius = await computeBlastRadius(dryRunSql, { pg });
-    } finally {
-      if (pgClose) await pgClose();
-    }
+    // [[prevent-prod-dry-run-transaction-escape]] — the box's `pgClient()` from
+    // `./_bootstrap` is a PRODUCTION connection (Supabase pooler, service creds).
+    // Handing it to computeBlastRadius previously ran arbitrary migration SQL
+    // against prod inside our BEGIN/ROLLBACK wrapper — a rollback contract that
+    // an input `... ; COMMIT;` could escape. The permanent fix: NEVER pass the
+    // prod pg client. computeBlastRadius refuses to execute without an
+    // `opts.ephemeral` capability assertion (proving the pg points at an isolated
+    // is_test / branch DB), so the safe production behavior is measured:false
+    // with the deterministic Phase-1 severity — exactly what routing needs to
+    // circuit-break to the CEO on a destructive raise. When we wire an ephemeral
+    // Supabase branch DB (or an is_test target) in the future, pass BOTH `pg` +
+    // `opts.ephemeral: { reason, branchDb / isTest: true }` to unlock measurement.
+    blastRadius = await computeBlastRadius(dryRunSql /* no pg — production-safe path */);
   } catch (e) {
     blastRadius = { measured: false, severity: "additive", matches: [], summary: `blast-radius compute failed: ${(e as Error)?.message ?? e}`, measurementSkipped: "compute error" };
   }

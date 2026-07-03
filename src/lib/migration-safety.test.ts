@@ -26,12 +26,20 @@ import {
   defaultLenientSkeptic,
   deterministicDataLossSkeptic,
   isTransactionControlStatement,
+  isNonTransactionalOrEffectfulStatement,
+  firstUnsafeStatement,
   writeDestructiveActionDecisionGrade,
   BUSINESS_MATERIAL_ROW_THRESHOLD,
   type BlastRadius,
   type PgLike,
   type SkepticFn,
 } from "./migration-safety";
+
+/** Test-only ephemeral capability assertion — proves the injected pg spy points at
+ *  an isolated DB (not prod). Every existing test that supplied `{ pg }` originally
+ *  meant "measure this against a safe target"; now that computeBlastRadius refuses
+ *  to run against an unconfirmed pg, tests must express the same intent explicitly. */
+const EPHEMERAL_TEST = { reason: "unit-test pg spy — no real DB", isTest: true } as const;
 import { directorLeashCandidates, type DirectorTargetJob } from "./agents/platform-director";
 import { routingOwnerForJob } from "./agents/approval-inbox";
 
@@ -220,7 +228,10 @@ class PgSpy implements PgLike {
 
 test("computeBlastRadius: DELETE FROM t WHERE … returns real affected-row count and ROLLBACKs (unchanged after)", async () => {
   const pg = new PgSpy({ "DELETE FROM orders": 48201 });
-  const r = await computeBlastRadius("DELETE FROM orders WHERE created_at < now() - interval '90 days';", { pg });
+  const r = await computeBlastRadius(
+    "DELETE FROM orders WHERE created_at < now() - interval '90 days';",
+    { pg, ephemeral: EPHEMERAL_TEST },
+  );
   assert.equal(r.measured, true);
   assert.equal(r.severity, "additive"); // WHERE-scoped DELETE is not destructive per Phase-1
   assert.ok(r.affected && r.affected[0].rowCount === 48201);
@@ -234,7 +245,7 @@ test("computeBlastRadius: DELETE FROM t WHERE … returns real affected-row coun
 
 test("computeBlastRadius: an unfiltered DELETE FROM t reports the destructive severity + the measured count", async () => {
   const pg = new PgSpy({ "DELETE FROM orders": 1_234_567 });
-  const r = await computeBlastRadius("DELETE FROM orders;", { pg });
+  const r = await computeBlastRadius("DELETE FROM orders;", { pg, ephemeral: EPHEMERAL_TEST });
   assert.equal(r.measured, true);
   assert.equal(r.severity, "irreversible_destructive");
   assert.match(r.summary, /1,234,567 rows from orders/);
@@ -244,7 +255,10 @@ test("computeBlastRadius: an unfiltered DELETE FROM t reports the destructive se
 
 test("computeBlastRadius: a lock-heavy DDL (ALTER COLUMN TYPE) returns measured:false with the static severity", async () => {
   const pg = new PgSpy();
-  const r = await computeBlastRadius("ALTER TABLE big_events ALTER COLUMN payload SET DATA TYPE jsonb;", { pg });
+  const r = await computeBlastRadius(
+    "ALTER TABLE big_events ALTER COLUMN payload SET DATA TYPE jsonb;",
+    { pg, ephemeral: EPHEMERAL_TEST },
+  );
   assert.equal(r.measured, false);
   assert.equal(r.severity, "additive"); // classifier doesn't flag a plain ALTER TYPE (Phase 1 patterns)
   assert.match(r.measurementSkipped ?? "", /lock-heavy/i);
@@ -261,7 +275,10 @@ test("computeBlastRadius: no pg client → measured:false with static Phase-1 se
 
 test("computeBlastRadius: skipDryRun bypasses even when pg is provided", async () => {
   const pg = new PgSpy({ "DELETE FROM x": 100 });
-  const r = await computeBlastRadius("DELETE FROM x;", { pg, skipDryRun: true });
+  const r = await computeBlastRadius(
+    "DELETE FROM x;",
+    { pg, ephemeral: EPHEMERAL_TEST, skipDryRun: true },
+  );
   assert.equal(r.measured, false);
   assert.equal(r.severity, "irreversible_destructive");
   assert.equal(pg.calls.length, 0);
@@ -279,7 +296,10 @@ test("computeBlastRadius: ROLLBACK still runs when a statement mid-migration thr
     }
   }
   const pg = new FailingPg();
-  const r = await computeBlastRadius("DELETE FROM x WHERE id = 1;", { pg });
+  const r = await computeBlastRadius(
+    "DELETE FROM x WHERE id = 1;",
+    { pg, ephemeral: EPHEMERAL_TEST },
+  );
   assert.equal(r.measured, true);
   assert.ok(r.affected && r.affected[0].error);
   assert.equal(pg.rollbackCalled, true);
@@ -287,7 +307,10 @@ test("computeBlastRadius: ROLLBACK still runs when a statement mid-migration thr
 
 test("computeBlastRadius: additive migration reports 'no destructive rows affected'", async () => {
   const pg = new PgSpy();
-  const r = await computeBlastRadius("ALTER TABLE x ADD COLUMN y int;", { pg });
+  const r = await computeBlastRadius(
+    "ALTER TABLE x ADD COLUMN y int;",
+    { pg, ephemeral: EPHEMERAL_TEST },
+  );
   assert.equal(r.measured, true);
   assert.equal(r.severity, "additive");
   assert.match(r.summary, /no destructive rows affected/);
@@ -540,39 +563,158 @@ test("isTransactionControlStatement flags BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEAS
   }
 });
 
-test("computeBlastRadius: rollback contract HOLDS even when input SQL contains COMMIT (Fix 1)", async () => {
-  // Fault-injection harness from the failing pre-merge check evidence:
+test("computeBlastRadius: fault-injection `DELETE …; COMMIT;` is REJECTED pre-flight — pg receives NOTHING (prevent-prod-dry-run-transaction-escape)", async () => {
+  // Fault-injection payload from the [[prevent-prod-dry-run-transaction-escape]] spec:
   //   `DELETE FROM orders WHERE id IS NOT NULL; COMMIT;`
-  // Before the fix: our per-statement loop executed COMMIT from the input, committing the
-  // transaction; the trailing ROLLBACK found nothing to roll back. After the fix: COMMIT is
-  // stripped as a transaction-control statement, so BEGIN + DELETE run, then our finally
-  // block's ROLLBACK unwinds cleanly.
+  // The dry-run harness OWNS BEGIN/ROLLBACK; any transaction-control statement in the
+  // INPUT SQL must be rejected BEFORE PgLike sees BEGIN OR the following DELETE. No
+  // stripping, no partial execution — the whole batch is refused.
   class HarnessPg implements PgLike {
     calls: string[] = [];
-    committed = false;
-    rollbackCalled = false;
     async query(sql: string) {
       this.calls.push(sql);
-      const upper = sql.trim().toUpperCase();
-      if (upper.startsWith("BEGIN")) return { rowCount: null, rows: [] };
-      if (upper.startsWith("COMMIT")) { this.committed = true; return { rowCount: null, rows: [] }; }
-      if (upper.startsWith("ROLLBACK")) { this.rollbackCalled = true; return { rowCount: null, rows: [] }; }
-      if (upper.startsWith("DELETE FROM ORDERS")) return { rowCount: 10, rows: [] };
       return { rowCount: null, rows: [] };
     }
   }
   const pg = new HarnessPg();
-  const r = await computeBlastRadius("DELETE FROM orders WHERE id IS NOT NULL; COMMIT;", { pg });
+  const r = await computeBlastRadius(
+    "DELETE FROM orders WHERE id IS NOT NULL; COMMIT;",
+    { pg, ephemeral: EPHEMERAL_TEST },
+  );
+  // measured:false — the whole batch is refused before any pg call.
+  assert.equal(r.measured, false);
+  // Static Phase-1 severity is preserved (the WHERE-scoped DELETE is additive per Phase-1).
+  assert.equal(r.severity, "additive");
+  // CRITICAL: pg received NOTHING — no BEGIN, no DELETE, no COMMIT, no ROLLBACK.
+  assert.equal(pg.calls.length, 0, "pg must receive zero queries when input contains transaction-control");
+  // The reason surfaces the specific rejection so the audit log can read it inline.
+  assert.match(r.measurementSkipped ?? "", /transaction-control/i);
+  assert.match(r.measurementSkipped ?? "", /COMMIT/i);
+});
+
+test("computeBlastRadius: production caller (pg provided, no `ephemeral` capability) refuses to execute — measured:false with static severity", async () => {
+  // The core [[prevent-prod-dry-run-transaction-escape]] invariant: the box's
+  // pgClient() connects to prod. Handing it to computeBlastRadius must NOT run
+  // arbitrary SQL. Without the `ephemeral` capability assertion, the harness
+  // refuses. The deterministic Phase-1 severity flows through so routing still
+  // circuit-breaks to the CEO on a destructive raise.
+  const pg = new PgSpy({ "DELETE FROM orders": 999999 });
+  const r = await computeBlastRadius("DELETE FROM orders;", { pg /* no ephemeral */ });
+  assert.equal(r.measured, false);
+  assert.equal(r.severity, "irreversible_destructive"); // Phase-1 still flags
+  assert.equal(pg.calls.length, 0, "pg must NOT be touched without an ephemeral/is_test capability");
+  assert.match(r.measurementSkipped ?? "", /ephemeral.*capability/i);
+});
+
+test("computeBlastRadius: exact-count measurement REMAINS available with an explicitly ephemeral pg — before/after counts equal (ROLLBACK contract)", async () => {
+  // The Verification bullet: "Exact-count measurement remains available only with an
+  // explicitly isolated ephemeral/is_test database, and before/after counts are equal."
+  // A spy that models a real row-count SELECT: before the dry-run runs, count=N; the
+  // DELETE reports N rows affected; after ROLLBACK, count is still N (proved by the
+  // wrapper — nothing committed).
+  class CountingPg implements PgLike {
+    private tableCount = 48201;
+    calls: string[] = [];
+    committed = false;
+    async query(sql: string) {
+      this.calls.push(sql);
+      const upper = sql.trim().toUpperCase();
+      if (upper === "BEGIN") return { rowCount: null, rows: [] };
+      if (upper === "COMMIT") { this.committed = true; return { rowCount: null, rows: [] }; }
+      if (upper === "ROLLBACK") return { rowCount: null, rows: [] };
+      if (upper.startsWith("SELECT COUNT")) return { rowCount: null, rows: [{ count: this.tableCount }] };
+      if (upper.startsWith("DELETE FROM ORDERS")) {
+        // A REAL delete would decrement the table count inside the transaction, but our
+        // ROLLBACK reverts. Our spy models: report affected count, don't mutate storage.
+        return { rowCount: this.tableCount, rows: [] };
+      }
+      return { rowCount: null, rows: [] };
+    }
+  }
+  const pg = new CountingPg();
+  const preCount = (await pg.query("SELECT COUNT(*) FROM orders")).rows[0] as { count: number };
+  const r = await computeBlastRadius(
+    "DELETE FROM orders WHERE created_at < now() - interval '90 days';",
+    { pg, ephemeral: { reason: "test branch db", branchDb: true } },
+  );
+  const postCount = (await pg.query("SELECT COUNT(*) FROM orders")).rows[0] as { count: number };
   assert.equal(r.measured, true);
-  // The DELETE's row count is measured …
-  const del = r.affected?.find((a) => a.statement.toUpperCase().startsWith("DELETE"));
-  assert.equal(del?.rowCount, 10);
-  // … and the ROLLBACK contract HOLDS: pg observed ROLLBACK (not COMMIT) at the end.
-  assert.equal(pg.committed, false, "input COMMIT must be stripped — the tx never commits");
-  assert.equal(pg.rollbackCalled, true, "ROLLBACK still fires from the finally block");
-  // The COMMIT statement is recorded as skipped-with-reason on the affected list.
-  const commit = r.affected?.find((a) => a.statement.toUpperCase().startsWith("COMMIT"));
-  assert.match(commit?.error ?? "", /transaction-control statement skipped/);
+  assert.equal(r.affected?.[0].rowCount, 48201);
+  // Before / after row count identical — the exact-count measurement did NOT persist.
+  assert.equal(preCount.count, postCount.count);
+  assert.equal(pg.committed, false, "the transaction never commits; the exact-count is measured then rolled back");
+});
+
+test("computeBlastRadius: pre-flight rejects non-transactional / effectful statements (VACUUM, COPY, NOTIFY, ALTER SYSTEM, CONCURRENTLY, DO with COMMIT)", async () => {
+  const cases: [string, RegExp][] = [
+    ["VACUUM FULL orders;", /VACUUM/],
+    ["COPY orders TO '/tmp/leak.csv';", /COPY/],
+    ["NOTIFY channel, 'leaked';", /NOTIFY/],
+    ["ALTER SYSTEM SET shared_buffers = '4GB';", /ALTER SYSTEM/],
+    ["CREATE INDEX CONCURRENTLY idx ON orders(id);", /CONCURRENTLY/],
+    ["SELECT pg_notify('leaked', 'x');", /pg_notify/],
+    ["SELECT dblink_exec('db','DELETE FROM orders');", /dblink/],
+    ["CALL do_stuff();", /CALL/],
+    // A DO block whose plpgsql body commits mid-transaction escapes our wrapper too.
+    ["DO $$ BEGIN DELETE FROM x; COMMIT; END $$;", /DO/],
+    ["SET session_replication_role = 'replica';", /SET/],
+  ];
+  for (const [sql, reasonPat] of cases) {
+    const pg = new PgSpy();
+    const r = await computeBlastRadius(sql, { pg, ephemeral: EPHEMERAL_TEST });
+    assert.equal(r.measured, false, `should refuse: ${sql}`);
+    assert.equal(pg.calls.length, 0, `pg must receive nothing for: ${sql}`);
+    assert.match(r.measurementSkipped ?? "", reasonPat, `reason should mention ${reasonPat} for: ${sql}`);
+  }
+  // Sanity: `SET LOCAL` is TRANSACTION-scoped and safe — pre-flight lets it through.
+  assert.equal(firstUnsafeStatement("SET LOCAL statement_timeout = '5s';"), null);
+});
+
+test("isNonTransactionalOrEffectfulStatement: leading-keyword shape matcher", () => {
+  const yes = [
+    "VACUUM;",
+    "vacuum full orders;",
+    "CLUSTER foo USING idx;",
+    "CHECKPOINT;",
+    "ALTER SYSTEM SET x = 1;",
+    "LISTEN ch;",
+    "NOTIFY ch, 'hi';",
+    "UNLISTEN *;",
+    "COPY x FROM STDIN;",
+    "LOAD 'auto_explain';",
+    "CREATE DATABASE d;",
+    "DROP DATABASE d;",
+    "CREATE INDEX CONCURRENTLY idx ON x(y);",
+    "CREATE UNIQUE INDEX CONCURRENTLY idx ON x(y);",
+    "REINDEX TABLE CONCURRENTLY x;",
+    "DROP INDEX CONCURRENTLY idx;",
+    "REFRESH MATERIALIZED VIEW CONCURRENTLY mv;",
+    "SELECT pg_notify('ch','msg');",
+    "SELECT dblink_exec('db','x');",
+    "CALL myproc();",
+    "SET session_replication_role = 'replica';",
+  ];
+  for (const s of yes) assert.equal(isNonTransactionalOrEffectfulStatement(s), true, `should flag: ${s}`);
+  const no = [
+    "DELETE FROM x WHERE id = 1;",
+    "ALTER TABLE x ADD COLUMN y int;",
+    "SELECT 1;",
+    "CREATE INDEX idx ON x(y);", // non-concurrently — transactional
+    "SET LOCAL statement_timeout = '5s';",
+    "INSERT INTO x (y) VALUES (1);",
+  ];
+  for (const s of no) assert.equal(isNonTransactionalOrEffectfulStatement(s), false, `should NOT flag: ${s}`);
+});
+
+test("firstUnsafeStatement: returns null on all-safe input; returns first offender on mixed input", () => {
+  assert.equal(firstUnsafeStatement("DELETE FROM x WHERE id = 1; ALTER TABLE x ADD COLUMN y int;"), null);
+  const commitCase = firstUnsafeStatement("DELETE FROM x WHERE id = 1; COMMIT;");
+  assert.ok(commitCase);
+  assert.match(commitCase!.reason, /transaction-control/);
+  assert.match(commitCase!.preview, /COMMIT/i);
+  const vacCase = firstUnsafeStatement("ALTER TABLE x ADD COLUMN y int; VACUUM;");
+  assert.ok(vacCase);
+  assert.match(vacCase!.reason, /non-transactional/);
 });
 
 // ── Fix 1: deterministic data-loss skeptic actually runs ──────────────────────
