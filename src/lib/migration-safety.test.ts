@@ -669,6 +669,58 @@ test("writeDestructiveActionDecisionGrade: writes an auto-approval grade row for
   assert.match(inserted[0].payload.reasoning as string, /deletes 48,201 rows/);
 });
 
+// ── Phase 7/Fix-2 (check 74b737bdbda6fa8d) — insert failures surface, marker rows re-graded ───
+
+test("writeDestructiveActionDecisionGrade: fault-injected insert error returns ok:false (does NOT swallow the failure)", async () => {
+  const admin = {
+    from(table: string) {
+      return {
+        select() {
+          return {
+            eq(_col: string, _val: string) {
+              return {
+                limit(_n: number) {
+                  return {
+                    async maybeSingle() {
+                      if (table === "approval_decisions") return { data: { id: "dec-1" }, error: null };
+                      if (table === "director_decision_grades") return { data: null, error: null }; // not yet graded
+                      return { data: null, error: null };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        insert(_payload: Record<string, unknown>) {
+          return {
+            select() {
+              return {
+                async maybeSingle() {
+                  // Fault-injection: the DB (RLS reject / unique violation / constraint) refused
+                  // the insert. The marker writer MUST report the failure — previously it silently
+                  // returned ok:true+gradeId:null, so the director-grade sweep had nothing to pick.
+                  return { data: null, error: { message: "row-level security policy violation" } };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const r = await writeDestructiveActionDecisionGrade(admin, {
+    workspaceId: "ws-1",
+    agentJobId: "job-1",
+    directorFunction: "platform",
+    blastRadiusSummary: "x",
+    routeReason: "y",
+  });
+  assert.equal(r.ok, false, "an insert error must NOT be reported as ok:true");
+  assert.equal(r.approvalDecisionId, "dec-1", "the approval decision lookup succeeded, so id is still returned");
+  assert.match(r.reason || "", /row-level security policy violation/);
+});
+
 test("writeDestructiveActionDecisionGrade: idempotent — a second call skips the insert when a row already exists", async () => {
   const inserted: unknown[] = [];
   const admin = {

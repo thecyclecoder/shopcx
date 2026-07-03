@@ -135,11 +135,13 @@ Production wires a Max `claude -p` session as the injected skeptic; tests inject
 
 The built-in adversarial pass the box worker wires as the default skeptic (Phase 5 Fix 1). Its SOLE mandate is to prove data loss: it agrees with the classifier when the classifier flagged destructive AND independently scans for shapes the mechanical classifier can miss — `WITH … UPDATE/DELETE … RETURNING` CTE writes without WHERE, and `ALTER TABLE … DROP CONSTRAINT` on a business-material table (customers/orders/subscriptions/…). Adds `additionalMatches` when it surfaces a new shape. Never claims `dataLossing:false` on a classifier-destructive input (belt-and-suspenders — even before `runSkepticPass`'s severity-preservation rule fires).
 
-### `writeDestructiveActionDecisionGrade` — async function (Phase 4 accountability rail, Fix 1)
+### `writeDestructiveActionDecisionGrade` — async function (Phase 4 accountability rail, Fix 1 · Phase 7 Fix 2 hardening)
 
-Writes ONE `director_decision_grades` row for a destructive-action approval decision — Ada's raise is the graded call even when the CEO decides the specific approval. Idempotent on `agent_job_id`; `graded_by='agent'`, `grade=null`; a subsequent box director-grade sweep (or human) overrides via the same key. Best-effort; failures logged, never thrown.
+Writes ONE `director_decision_grades` row for a destructive-action approval decision — Ada's raise is the graded call even when the CEO decides the specific approval. Idempotent on `agent_job_id`; `graded_by='agent'`, `grade=null`, `model='deterministic-raise-marker'` so the picker can tell a MARKER row from a real grade; a subsequent box director-grade sweep (or human) overrides via the same key. Best-effort; failures logged, never thrown.
 
 Called from `runCeoAuthorizedOutOfLeashJob` (scripts/builder-worker.ts) after every destructive-action approval decision, keyed on `blast_radius.severity !== 'additive'`.
+
+**Phase 7 / Fix 2 (spec-test check `74b737bdbda6fa8d`):** the insert result's `error` is now inspected — a DB reject (RLS / unique violation / constraint) returns `{ok:false, reason: 'insert failed: …'}` instead of silently reporting `{ok:true, gradeId:null}`. Silent-swallow previously left the accountability rail invisible whenever the insert failed. A missing returned `id` is also treated as failure.
 
 ### `isTransactionControlStatement(sql)` — function (Fix 1)
 

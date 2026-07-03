@@ -288,7 +288,23 @@ export async function applyBoxDirectorGrade(opts: {
       .maybeSingle();
     if (!dec) return { ok: false, reason: "decision_not_found" };
     const decision = dec as { id: string; workspace_id: string; agent_job_id: string | null; decided_by: string; decision: string; autonomous: boolean };
-    if (decision.decided_by !== "director" || decision.decision !== "approved") return { ok: false, reason: "not_a_director_approval" };
+
+    // Phase 7/Fix-2 (check 74b737bdbda6fa8d): a destructive-action approval is decided_by='ceo'
+    // (the human decided Ada's out-of-leash raise) but Ada's RAISE is the graded call. It carries
+    // a `deterministic-raise-marker` row written by [[migration-safety]]
+    // `writeDestructiveActionDecisionGrade`. Look up the existing row FIRST so we can accept the
+    // ceo-decided path when it's marker-anchored — the standard director-decided gate would
+    // otherwise reject with `not_a_director_approval` and starve the accountability rail.
+    const { data: existing } = await admin
+      .from("director_decision_grades")
+      .select("id, grade, graded_by, model")
+      .eq("approval_decision_id", decision.id)
+      .maybeSingle();
+    const existingRow = (existing as (ExistingGradeRow & { model?: string | null }) | null) ?? null;
+    const isDestructiveMarker = existingRow?.model === "deterministic-raise-marker";
+
+    const isDirectorApproved = decision.decided_by === "director" && decision.decision === "approved";
+    if (!isDirectorApproved && !isDestructiveMarker) return { ok: false, reason: "not_a_director_approval" };
 
     // Re-check the target build's terminal-status — a benign TOCTOU: the box picked while terminal,
     // director triage re-queued it back to `queued` before the box's grade landed.
@@ -303,12 +319,6 @@ export async function applyBoxDirectorGrade(opts: {
       }
     }
 
-    const { data: existing } = await admin
-      .from("director_decision_grades")
-      .select("id, grade, graded_by")
-      .eq("approval_decision_id", decision.id)
-      .maybeSingle();
-    const existingRow = (existing as ExistingGradeRow) ?? null;
     if (existingRow && existingRow.graded_by === "human") {
       return { ok: true, grade_id: existingRow.id, dimension: "auto-approval", grade: existingRow.grade ?? undefined, idempotent_update: true };
     }
@@ -890,21 +900,74 @@ export async function pickDirectorGradeBatch(opts: {
     // session.
     const gradedApprovals = new Set<string>();
     const gradedEscorts = new Set<string>();
+    // Phase 7/Fix-2 (check 74b737bdbda6fa8d): destructive-action approvals carry a
+    // `deterministic-raise-marker` placeholder row written by [[migration-safety]]
+    // `writeDestructiveActionDecisionGrade`. It is a MARKER, not a real grade — the box
+    // sweep still needs to re-grade it. Track those approval_decision_ids so we can
+    // re-surface them as candidates (below) even though a row already exists in
+    // director_decision_grades. Also carries the recorded director_function so the
+    // candidate routes to the raising director (Ada / Platform) rather than the CEO
+    // fallback the routed_to_function='ceo' decision alone would imply.
+    const markerCandidates = new Map<string, string>();
     for (let from = 0; ; from += 1000) {
       const { data: gradeRows } = await admin
         .from("director_decision_grades")
-        .select("dimension, approval_decision_id, goal_slug, milestone")
+        .select("dimension, approval_decision_id, goal_slug, milestone, model, director_function")
         .eq("workspace_id", opts.workspaceId)
         .range(from, from + 999);
-      const rows = (gradeRows as Array<{ dimension: string; approval_decision_id: string | null; goal_slug: string | null; milestone: string | null }>) || [];
+      const rows = (gradeRows as Array<{ dimension: string; approval_decision_id: string | null; goal_slug: string | null; milestone: string | null; model: string | null; director_function: string | null }>) || [];
       for (const r of rows) {
-        if (r.dimension === "auto-approval" && r.approval_decision_id) gradedApprovals.add(r.approval_decision_id);
-        else if (r.dimension === "goal-escort" && r.goal_slug) gradedEscorts.add(`${r.goal_slug}:${r.milestone ?? ""}`);
+        if (r.dimension === "auto-approval" && r.approval_decision_id) {
+          if (r.model === "deterministic-raise-marker") {
+            // A marker row is UNGRADED — still owes a real box-sweep grade. Keep it OUT
+            // of the graded set so the destructive approval remains a candidate.
+            markerCandidates.set(r.approval_decision_id, r.director_function || PLATFORM);
+          } else {
+            gradedApprovals.add(r.approval_decision_id);
+          }
+        } else if (r.dimension === "goal-escort" && r.goal_slug) gradedEscorts.add(`${r.goal_slug}:${r.milestone ?? ""}`);
       }
       if (rows.length < 1000) break;
     }
 
-    // ── auto-approval candidates ─────────────────────────────────────────────────────────────────
+    // ── destructive-action (marker-anchored) candidates ─────────────────────────────────────────
+    // Phase 7/Fix-2: destructive-action approvals are decided_by='ceo' (the human decided the
+    // out-of-leash raise), which the director-decided query below intentionally excludes.
+    // Surface them here via the marker row so the box director-grade sweep grades the RAISE
+    // even though the CEO — not Ada — decided the specific approval. Still terminal-gated by
+    // the target agent_job's status.
+    if (markerCandidates.size) {
+      const markerIds = Array.from(markerCandidates.keys());
+      const { data: mDecs } = await admin
+        .from("approval_decisions")
+        .select("id, agent_job_id")
+        .in("id", markerIds);
+      const mDecRows = (mDecs as Array<{ id: string; agent_job_id: string | null }>) || [];
+      const mJobIds = Array.from(new Set(mDecRows.map((d) => d.agent_job_id).filter((x): x is string => !!x)));
+      const mTerminal = new Set<string>();
+      if (mJobIds.length) {
+        const { data: mJobRows } = await admin
+          .from("agent_jobs")
+          .select("id, status")
+          .in("id", mJobIds);
+        for (const j of ((mJobRows as Array<{ id: string; status: string }>) || [])) {
+          if (TERMINAL_JOB_STATUSES.has(j.status)) mTerminal.add(j.id);
+        }
+      }
+      for (const d of mDecRows) {
+        if (out.length >= cap) break;
+        // Same terminal-gate as the director-decided path: a marker-anchored approval whose
+        // target build is still in-flight defers to the next beat.
+        if (d.agent_job_id && !mTerminal.has(d.agent_job_id)) continue;
+        out.push({
+          dimension: "auto-approval",
+          approval_decision_id: d.id,
+          director_function: markerCandidates.get(d.id) || PLATFORM,
+        });
+      }
+    }
+
+    // ── auto-approval candidates (director-decided, autonomous) ─────────────────────────────────
     const { data: decisions } = await admin
       .from("approval_decisions")
       .select("id, agent_job_id, routed_to_function")
@@ -916,7 +979,7 @@ export async function pickDirectorGradeBatch(opts: {
       .limit(500);
 
     const ungradedDecisions = ((decisions as Array<{ id: string; agent_job_id: string | null; routed_to_function: string | null }>) || []).filter(
-      (d) => !gradedApprovals.has(d.id),
+      (d) => !gradedApprovals.has(d.id) && !markerCandidates.has(d.id),
     );
 
     if (ungradedDecisions.length) {

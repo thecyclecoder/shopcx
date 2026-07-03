@@ -827,8 +827,21 @@ export async function writeDestructiveActionDecisionGrade(
       })
       .select("id")
       .maybeSingle();
+    // Phase 7/Fix-2 (check 74b737bdbda6fa8d): the previous version silently swallowed insert
+    // failures and reported ok:true+gradeId:null, so a DB reject (RLS, unique-violation,
+    // constraint) produced NO marker row and the box director-grade sweep therefore had
+    // nothing to pick — the accountability rail was invisible. Propagate the error so the
+    // caller (and the failure-injection harness) sees the truth.
+    if (insRes.error) {
+      const errMsg = (insRes.error as { message?: string } | null)?.message
+        ?? String(insRes.error);
+      return { ok: false, approvalDecisionId, reason: `insert failed: ${errMsg}` };
+    }
     const ins = (insRes.data as { id?: string } | null) ?? null;
-    return { ok: true, approvalDecisionId, gradeId: ins?.id ?? null };
+    if (!ins?.id) {
+      return { ok: false, approvalDecisionId, reason: "insert returned no id (silent DB reject)" };
+    }
+    return { ok: true, approvalDecisionId, gradeId: ins.id };
   } catch (e) {
     return { ok: false, reason: `write failed: ${(e as Error)?.message ?? e}` };
   }
