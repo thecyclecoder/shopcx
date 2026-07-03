@@ -16,6 +16,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
 - **Investigate temp-file spill pressure on the instance** · verified 2026-07-03 · → [[../recipes/raise-work-mem]]
 - **Director-KPI SDK — one DB-derived source for every scorecard/recap metric** · verified 2026-07-03 · → [[libraries/director-kpis]]
+- **Internal renewal: advance next_billing_date on zero-total skip so 100%-off subs don't stall the renewal tile** · verified 2026-07-03 · → [[../inngest/internal-subscription-renewals]]
 - **Research → Competitors: the product filter + table (finish Phase 2)** · verified 2026-07-03 · → [[../dashboard/research__competitors]]
 - **research-competitors-table — fix the blocker uncovered by the build** · verified 2026-07-03 · → [[../libraries/spec-test-runs]]
 - **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
