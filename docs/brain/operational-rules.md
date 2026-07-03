@@ -4,7 +4,7 @@ Code + operational invariants that apply across the codebase. Migrated from agen
 
 ## ⭐ North star — supervisable autonomy
 
-**The single rule every autonomous tool/agent we build answers to.** Every autonomous tool optimizes a **proxy** (a metric, a rule, a setpoint), so every tool can reach a **degenerate state** that satisfies the proxy while destroying the real objective (Goodhart's law — e.g. the [[specs/storefront-iteration-engine|storefront iteration engine]] scaling ad budget to ~0 when nothing wins: ROAS "fixed," revenue gone).
+**The single rule every autonomous tool/agent we build answers to.** Every autonomous tool optimizes a **proxy** (a metric, a rule, a setpoint), so every tool can reach a **degenerate state** that satisfies the proxy while destroying the real objective (Goodhart's law — e.g. the [[specs/storefront-iteration-engine|storefront iteration engine]] scaling ad budget to ~0 when nothing wins: ROAS "fixed," revenue gone). The canonical worked example is the [[incidents/2026-07-03-security-spec-avalanche|security-review spec avalanche]] (2026-07-03): a fix-authoring tool reviewed its own fixes and spawned an endless chain of near-duplicate specs — the incident that produced the mechanical rail every proxy-optimizer now needs (a runaway-authoring **circuit-breaker**, not just the principle).
 
 So the top-level invariant:
 
