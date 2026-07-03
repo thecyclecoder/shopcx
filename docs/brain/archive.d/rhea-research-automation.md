@@ -1,0 +1,1 @@
+- **Rhea's research automation — hourly trigger + deterministic gate + Cleo handoff** · verified 2026-07-03 · → [[../inngest/research-sensor]]

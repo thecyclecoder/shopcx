@@ -24,6 +24,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Research → Competitors: the product filter + table (finish Phase 2)** · verified 2026-07-03 · → [[../dashboard/research__competitors]]
 - **research-competitors-table — fix the blocker uncovered by the build** · verified 2026-07-03 · → [[../libraries/spec-test-runs]]
 - **Research → Lander Teardowns viewer (visualize the captured funnels)** · verified 2026-07-03 · → [[dashboard/research__teardowns]]
+- **Rhea's research automation — hourly trigger + deterministic gate + Cleo handoff** · verified 2026-07-03 · → [[../inngest/research-sensor]]
 - **Rhea's lander teardown → structured recipe (research slice 2)** · verified 2026-07-03 · → [[../lifecycles/research-and-heal]]
 - **Rhea's URL sensor — research_urls table + Playwright capture + classification** · verified 2026-07-03 · → [[../tables/research_urls]]
 - **Secure destructive-migration preapproval execution and routing** · verified 2026-07-03 · → [[../libraries/approval-inbox]]
