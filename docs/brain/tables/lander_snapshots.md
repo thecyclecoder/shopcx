@@ -53,4 +53,4 @@ Per-chapter mobile snapshots of competitor landing pages **and ours** — the ca
 
 ## Related
 
-[[../specs/landing-page-scout]] · [[../libraries/landing-page-scout]] · [[../inngest/landing-page-scout]] · [[lander_recommendations]] · [[competitors]] · [[storefront_events]] · [[../dashboard/research__teardowns]] (the owner-facing viewer — Research → Lander Teardowns)
+[[../specs/landing-page-scout]] · [[../libraries/landing-page-scout]] · [[../inngest/landing-page-scout]] · [[lander_recommendations]] · [[competitors]] · [[storefront_events]]
