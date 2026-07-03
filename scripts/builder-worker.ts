@@ -18,6 +18,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
+import type { TeardownRecipe } from "../src/lib/research-urls";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
 
@@ -14812,11 +14813,34 @@ async function runResearchClaude(prompt: string, sessionId: string | null, cwd: 
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "research", sandbox: "max", timeout: RESEARCH_TIMEOUT_MS });
 }
 
+interface ResearchTeardownJson {
+  funnel_type: string;
+  strategy: string;
+  architecture: { chapter_role: string; purpose: string }[];
+  reason_sequence?: { order: number; benefit: string; appeal: "emotion" | "logic"; mechanism: string }[];
+  levers: { lever: string; evidence: string }[];
+  offer: {
+    discount?: string;
+    bundle?: string;
+    bonuses?: string[];
+    guarantee?: string;
+    urgency?: string;
+    options: number;
+  };
+  transferable_pattern: string;
+}
+
 interface ResearchDecisionJson {
   research_url_id: string;
   classification: "advertorial" | "quiz" | "generic_pdp" | "homepage" | "spam" | "unviewable";
   teardown_verdict: "worthy" | "not_worthy";
   rationale: string;
+  /**
+   * Same-session teardown recipe — required for `worthy`, omitted (or ignored) for `not_worthy`.
+   * Rhea derives this from the SAME captured chapters (no re-render — Phase 2 one-session
+   * invariant). The worker validates and persists via setTeardown (SDK chokepoint).
+   */
+  teardown?: ResearchTeardownJson;
 }
 
 async function runResearchJob(job: Job) {
@@ -14864,7 +14888,7 @@ async function runResearchJob(job: Job) {
 
   // A URL whose capture returned 'unviewable' after retries is classified UNVIEWABLE deterministically
   // (Rhea never sees a page she couldn't render — the spec's rule: unviewable is NOT not_worthy).
-  const { setUrlClassification, setTeardownVerdict, setCaptureRef } = await import("../src/lib/research-urls");
+  const { setUrlClassification, setTeardownVerdict, setCaptureRef, setTeardown } = await import("../src/lib/research-urls");
   const unviewable = captures.filter((c) => c.status === "unviewable");
   for (const c of unviewable) {
     await setUrlClassification(job.workspace_id, c.id, "unviewable", "rhea").catch(() => {});
@@ -14895,12 +14919,13 @@ async function runResearchJob(job: Job) {
     .join("\n\n");
 
   const prompt = [
-    `You are Rhea (Growth research agent) of ShopCX on Max, classifying captured ad-scout URLs using the research skill (cwd is the repo root). Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against everything except research_urls — the WORKER (deterministic Node) is the only mutator; you propose, it applies via setUrlClassification / setTeardownVerdict.`,
+    `You are Rhea (Growth research agent) of ShopCX on Max, classifying captured ad-scout URLs using the research skill (cwd is the repo root). Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against everything except research_urls — the WORKER (deterministic Node) is the only mutator; you propose, it applies via setUrlClassification / setTeardownVerdict / setTeardown.`,
     ``,
     `Your job: for each URL below, read its chapter screenshots (fetch a signed URL from the private ${RESEARCH_SHOTS_BUCKET_NAME} bucket via Read + createAdminClient() if you need to inspect one) and emit ONE JSON verdict per URL with:`,
     `  • classification — one of: advertorial | quiz | generic_pdp | homepage | spam. (unviewable is set deterministically by the worker on capture failure, NEVER by you.)`,
     `  • teardown_verdict — worthy (a lander whose funnel we should teardown for lessons) | not_worthy (a lander that offers nothing new — a bare PDP, a homepage, a social spam page).`,
     `  • rationale — one sentence citing what you saw (a specific beat / offer / structure). Not a summary — evidence.`,
+    `  • teardown — REQUIRED when teardown_verdict is 'worthy'; OMIT for not_worthy. See the research skill's "Teardown recipe (worthy only)" section for the exact shape + the worked erthlabs example. Derive it from the SAME chapters you already have — DO NOT re-render / re-capture (one-session invariant).`,
     ``,
     `CLASSIFICATION VOCAB (reuse src/lib/landing-page-scout.ts page_type labels):`,
     `  advertorial   — a listicle / story article-styled lander that funnels to a PDP (worthy by default)`,
@@ -14914,10 +14939,10 @@ async function runResearchJob(job: Job) {
     captureBlocks,
     ``,
     `🚨 Read-only: NEVER edit a file outside a subprocess Bash, NEVER commit, NEVER write research_urls yourself. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
-    `  {"status":"completed","decisions":[{"research_url_id":"…","classification":"advertorial|quiz|generic_pdp|homepage|spam","teardown_verdict":"worthy|not_worthy","rationale":"<one sentence evidence>"}]}`,
+    `  {"status":"completed","decisions":[{"research_url_id":"…","classification":"advertorial|quiz|generic_pdp|homepage|spam","teardown_verdict":"worthy|not_worthy","rationale":"<one sentence evidence>","teardown":{...worthy-only, see skill...}}]}`,
     `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
     ``,
-    `Every URL in the batch MUST appear once in decisions[].`,
+    `Every URL in the batch MUST appear once in decisions[]. Every worthy decision MUST carry a teardown.`,
   ].join("\n");
 
   try {
@@ -14945,6 +14970,8 @@ async function runResearchJob(job: Job) {
 
     let applied = 0;
     let skipped = 0;
+    let teardownsLanded = 0;
+    let teardownsRejected = 0;
     for (const d of parsed.decisions) {
       if (!d || typeof d.research_url_id !== "string" || !captureById.has(d.research_url_id)) { skipped++; continue; }
       if (!validClassifications.has(d.classification)) { skipped++; continue; }
@@ -14958,13 +14985,30 @@ async function runResearchJob(job: Job) {
         // this file never touches research_urls directly — the CI grep stays clean.
         const cap = captureById.get(d.research_url_id)!;
         if (cap.capture_ref) await setCaptureRef(job.workspace_id, d.research_url_id, cap.capture_ref);
+        // Worthy → persist Rhea's teardown recipe (Phase 2). setTeardown validates the recipe
+        // shape and throws on a half-formed one; we count it as rejected but the classification
+        // + verdict still landed above (the row is not left half-written on the recipe alone).
+        // not_worthy / unviewable → skip; the teardown column stays null (spec's one-session,
+        // worthy-only rule).
+        if (d.teardown_verdict === "worthy") {
+          if (d.teardown) {
+            try {
+              await setTeardown(job.workspace_id, d.research_url_id, d.teardown as unknown as TeardownRecipe);
+              teardownsLanded++;
+            } catch {
+              teardownsRejected++;
+            }
+          } else {
+            teardownsRejected++;
+          }
+        }
         applied++;
       } catch {
         skipped++;
       }
     }
 
-    const tail = `classified ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · unviewable=${unviewable.length} · captured=${captured.length}`;
+    const tail = `classified ${applied}/${parsed.decisions.length}${skipped ? ` · skipped ${skipped}` : ""} · unviewable=${unviewable.length} · captured=${captured.length} · teardowns=${teardownsLanded}${teardownsRejected ? `/rejected=${teardownsRejected}` : ""}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {

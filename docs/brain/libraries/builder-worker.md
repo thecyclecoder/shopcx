@@ -35,21 +35,21 @@ CI static check `scripts/_check-worker-lanes.ts` enforces that every kind in the
 | `platform-director` / `director-bounce-back` / `growth-director` | (directors) | [[platform-director]] · [[growth-director]] |
 | … | | See `Job.kind` union in `scripts/builder-worker.ts` for the complete set. |
 
-## The `research` lane (Rhea's URL sensor, [[../specs/rhea-url-sensor]] Phase 2)
+## The `research` lane (Rhea's URL sensor, [[../specs/rhea-url-sensor]] Phase 2 + [[../specs/rhea-teardown-recipe]] Phase 2)
 
-The Growth-owned lane that classifies unreviewed [[../tables/research_urls]] rows into `advertorial | quiz | generic_pdp | homepage | spam` + `worthy | not_worthy` verdicts with a rationale.
+The Growth-owned lane that classifies unreviewed [[../tables/research_urls]] rows into `advertorial | quiz | generic_pdp | homepage | spam` + `worthy | not_worthy` verdicts with a rationale — and, in the SAME session, reverse-engineers every worthy URL into a structured [[../recipes/lander-teardown]] recipe (`TeardownRecipe`) persisted via `setTeardown`. Cleo (slice 3) reads those recipes to diff against our storefront and emit a build blueprint.
 
 - **Enqueue** — [[../inngest/acquisition-research-cadence]]'s daily cron: for any ad-tool workspace with `research_urls` rows at `teardown_verdict='unreviewed'`, insert ONE `kind='research'` `agent_jobs` row (dedup-gated on any in-flight `research` job for the workspace — same pattern as `gap-grade`).
 - **Cap** — `MAX_RESEARCH=1` concurrency lane, `RESEARCH_TIMEOUT_MS=30 min`, `RESEARCH_BATCH_CAP=8` URLs per pass. Bumping the batch size is a knob (env-tunable), not a code change.
 - **`runResearchJob(job)`** (the runner, in `scripts/builder-worker.ts`):
   1. Read the top-N unreviewed `research_urls` for the workspace, biggest `ad_count` first.
-  2. Deterministic capture — dynamically import [[../../scripts/research-capture.ts]] and `captureBatch(...)`: mobile Playwright renders + geometric overlay-kill + DOM-first `<section>` chaptering with a vision-tile fallback ([[../recipes/lander-capture]]). Shots go to the private `research-shots` Storage bucket.
+  2. Deterministic capture — dynamically import [[../../scripts/research-capture.ts]] and `captureBatch(...)`: mobile Playwright renders + geometric overlay-kill + DOM-first `<section>` chaptering with a vision-tile fallback ([[../recipes/lander-capture]]). Shots go to the private `research-shots` Storage bucket. Runs EXACTLY ONCE per URL (one-session invariant — no second render).
   3. Any URL whose capture returned `unviewable` after retries is marked `classification='unviewable'` deterministically via [[research-urls]] `setUrlClassification` (Rhea never guesses worthiness of a page she couldn't see — `unviewable ≠ not_worthy`).
-  4. Hand the captured manifest to a Max session running the `research` skill (Rhea reads the chapter shots and returns one JSON verdict per URL).
-  5. Parse Rhea's JSON via `extractJson`, validate against the CHECK-constraint vocab, and apply each decision via [[research-urls]] `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef`.
-- **Skill** — `.claude/skills/research/SKILL.md` (Rhea's persona + output contract).
+  4. Hand the captured manifest to a Max session running the `research` skill (Rhea reads the chapter shots and returns one JSON verdict per URL — for a worthy verdict she ALSO returns a full `teardown` recipe derived from the SAME chapters, no re-render).
+  5. Parse Rhea's JSON via `extractJson`, validate against the CHECK-constraint vocab, and apply each decision via [[research-urls]] `setUrlClassification` / `setTeardownVerdict` / `setCaptureRef` — plus, for worthy decisions carrying a `teardown`, `setTeardown` (validator-gated; a half-formed recipe is rejected without leaving the row inconsistent — the classification + verdict already landed). `log_tail` includes `teardowns=<landed>/rejected=<n>` so the Phase-2 verification can observe recipe throughput.
+- **Skill** — `.claude/skills/research/SKILL.md` (Rhea's persona + output contract + the erthlabs 8-reasons worked teardown example).
 - **Write chokepoint** — every `research_urls` mutation flows through [[research-urls]]. The worker never touches the table directly (CI grep enforces).
 
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[research-urls]] · [[acquisition-gap-grader]] · [[../operational-rules]]
+[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[acquisition-gap-grader]] · [[../operational-rules]]
