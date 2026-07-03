@@ -108,34 +108,57 @@ export function ownerFunctionForKind(kind: string): string | null {
  * change resolves UP to its director, a director's own change is unmapped ⇒ the CEO. Every other kind
  * routes by its own kind, unchanged.
  *
- * destructive-migration-safety-rails Phase 4 — a raised out-of-leash action carries a
- * `routed_to_function_override` on its pending action naming who OWNS the decision
- * (Ada or CEO), computed by `routeDestructiveAction` from the Phase-1 severity ×
- * Phase-2 rename-and-expire × business-materiality. When present, it wins over the
- * `KIND_TO_FUNCTION` default (which for `ceo-authorized-out-of-leash` is null →
- * CEO fail-safe): a reversible_destructive + rename-and-expire lands in Ada's inbox
- * (she owns the final call, PITR is the backstop), while irreversible + business-material
- * stays on the CEO's circuit-breaker path. The override is trusted only to the values
- * 'platform' | 'ceo' — any other string is ignored and we fall through to the kind default.
+ * destructive-migration-safety-rails Phase 4 + secure-destructive-migration-preapproval-boundary —
+ * a raised out-of-leash action MAY carry a `routed_to_function_override` on its pending action
+ * naming who OWNS the decision (Ada or CEO), computed by `routeOutOfLeashAction` from
+ * (actionType × Phase-1 severity × Phase-2 rename-and-expire × business-materiality). We honor
+ * the override ONLY when RE-VALIDATED at read-time against the action shape:
+ *
+ *   • job.kind must be `ceo-authorized-out-of-leash` (the only shape whose raiser sets an override);
+ *   • the pending action's `type` must be `apply_migration` (a `run_prod_script` is a bounded shell
+ *     command whose blast-radius the classifier cannot inspect — it can never earn a Platform lane);
+ *   • the action's persisted `blastRadius.severity` must be `reversible_destructive` (additive still
+ *     goes to CEO because Ada is out of leash; irreversible always to CEO circuit-breaker);
+ *   • the override string must be one of the whitelist `'platform' | 'ceo'`.
+ *
+ * Any missed check → we IGNORE the override and fall through to the `KIND_TO_FUNCTION` default
+ * (unmapped kind → null → CEO fail-safe). A hostile pending_actions row that hand-installs a
+ * `routed_to_function_override: 'platform'` on a `run_prod_script` or on an unrelated job kind
+ * cannot install a Platform override — the read-time gates re-derive the routing from the same
+ * server-persisted facts the raise path did.
  */
 export function routingOwnerForJob(job: { kind: string; pending_actions?: PendingActionLike[] | null }): string | null {
   if (job.kind === MODEL_TIER_PROPOSAL_KIND) {
     const a = (job.pending_actions || []).find((x) => x.type === APPLY_MODEL_TIER_ACTION_TYPE);
     if (a?.target_kind) return ownerFunctionForKind(a.target_kind);
   }
-  const override = destructiveRouteOverride(job.pending_actions ?? []);
+  const override = destructiveRouteOverride(job);
   if (override) return override;
   return ownerFunctionForKind(job.kind);
 }
 
-/** Read the Phase-4 destructive-action routing override off a pending action. Trusts only
- *  the whitelist ('platform' | 'ceo'); anything else returns null (fall through to the
- *  KIND_TO_FUNCTION default → CEO fail-safe). */
-function destructiveRouteOverride(pending: PendingActionLike[]): string | null {
-  for (const a of pending) {
+/**
+ * Read the Phase-4 destructive-action routing override off a pending action, but ONLY after
+ * re-validating the surrounding action shape at read-time (see `routingOwnerForJob` header).
+ * Every other job kind + action shape ignores any override — this is the boundary that prevents
+ * a hand-crafted `routed_to_function_override` field from silently installing a Platform route.
+ */
+function destructiveRouteOverride(job: { kind: string; pending_actions?: PendingActionLike[] | null }): string | null {
+  if (job.kind !== "ceo-authorized-out-of-leash") return null;
+  for (const a of job.pending_actions ?? []) {
+    if (a.type !== "apply_migration") continue;
     const rec = a as unknown as Record<string, unknown>;
     const raw = rec["routed_to_function_override"];
-    if (raw === "platform" || raw === "ceo") return raw;
+    if (raw !== "platform" && raw !== "ceo") continue;
+    const br = rec["blastRadius"];
+    const severity = br && typeof br === "object" && typeof (br as { severity?: unknown }).severity === "string"
+      ? (br as { severity: string }).severity
+      : null;
+    // Only `reversible_destructive` is eligible for a Platform lane. `additive` and
+    // `irreversible_destructive` — plus any missing / malformed blastRadius — fall through
+    // to CEO fail-safe.
+    if (severity !== "reversible_destructive") continue;
+    return raw;
   }
   return null;
 }

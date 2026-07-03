@@ -95,6 +95,23 @@ Route a destructive-action raise on (Phase-1 severity × Phase-2 rename-and-expi
 
 Every destructive-action approval writes a `director_decision_grades` row via the existing box director-grade sweep (Ada's approvals only — CEO circuit-break decisions aren't self-graded). Accountability is grading, not per-decision pre-approval. See [[../operational-rules]] § *North star*.
 
+### `routeOutOfLeashAction` — function ([[../specs/secure-destructive-migration-preapproval-boundary]])
+
+```ts
+function routeOutOfLeashAction(
+  actionType: string,
+  sql: string,
+  blastRadius: BlastRadius,
+): DestructiveRoute;
+```
+
+The wrapper the raise path (`applyOutOfLeashRequestActionInline`) calls INSTEAD OF `routeDestructiveAction`. Two hard gates BEFORE the Phase-4 table is consulted, closing the authority-bypass paths the safety-rails PR left open:
+
+1. `actionType !== 'apply_migration'` → CEO. A `run_prod_script` is a bounded shell command; its blast radius the classifier cannot inspect, so it can never earn the Platform lane.
+2. `blastRadius.severity !== 'reversible_destructive'` → CEO. `additive` still needs CEO (Ada is out of leash; she does not silently self-approve additive out-of-leash asks); `irreversible_destructive` always needs the CEO circuit-breaker.
+
+Only when both gates pass does the wrapper delegate to `routeDestructiveAction` for the Ada-vs-CEO split (rename-and-expire × business-materiality). A hostile `run_prod_script` masquerading as reversible cannot install a Platform override — the actionType gate is authoritative.
+
 ### `isRenameAndExpire(sql)` — function
 
 Matches the Phase-2 reversible-by-default conventions (see [[../operational-rules]] § Reversible-by-default DB changes):
@@ -154,8 +171,9 @@ Comment-stripped, case-insensitive — true for `BEGIN` / `COMMIT` / `ROLLBACK` 
 ## Callers
 
 - `src/lib/agents/platform-director.ts` — `categoryFor` runs the classifier over the pending action's `cmd`+`preview` before returning `additive_migration` / `additive_backfill`; a non-additive severity forces `null` (out of leash, whole bundle escalates).
-- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the measured summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. **Phase 4**: the same call site runs `routeDestructiveAction` and stamps `routed_to_function_override: 'platform' | 'ceo'` on the pending action; the reconciler's `routingOwnerForJob` honors it so a reversible+rename-safe raise lands in Ada's inbox instead of the CEO's, and the raised `director_activity` row records the route + reason. **Phase 5**: `runSkepticPass` runs BEFORE `routeDestructiveAction` (so a skeptic escalation flows into routing); its verdict is attached to the pending action + log_tail + instructions + `director_activity`. The deterministic Phase-1 severity remains authoritative — a lenient skeptic never downgrades a mechanically-flagged destructive.
-- `src/lib/agents/approval-inbox.ts` — `routingOwnerForJob` honors the pending action's Phase-4 `routed_to_function_override` (whitelist `'platform' | 'ceo'`) before falling back to `KIND_TO_FUNCTION`, so a reversible_destructive + rename-and-expire raise routes to Platform (Ada owns the final call) and irreversible+business-material stays on the CEO circuit-breaker.
+- `scripts/builder-worker.ts` — `applyOutOfLeashRequestActionInline` runs `computeBlastRadius` on the raised out-of-leash `apply_migration` / `run_prod_script` action; the (necessarily unmeasured) summary replaces the self-declared `reversibility` string on the pending action's `preview` + `reversibility` field + `log_tail`, and the structured `blastRadius` object is persisted on the pending action + the job's `instructions` JSON. **secure-destructive-migration-preapproval-boundary**: this caller NEVER passes `pg` — a real dry-run against the shared production pooler on the approval-raising path was a preapproval SQL-execution primitive (attacker-controlled SELECT/function-call SQL reached `pg.query` on the shared production client before any human approved), so we run only the pure Phase-1 classifier here. **Phase 4**: the same call site runs `routeOutOfLeashAction` (not `routeDestructiveAction`) and stamps `routed_to_function_override: 'platform' | 'ceo'` on the pending action; the reconciler's `routingOwnerForJob` re-validates the override at read-time so a reversible+rename-safe `apply_migration` lands in Ada's inbox instead of the CEO's, while every other actionType / severity falls through to the CEO fail-safe. **Phase 5**: `runSkepticPass` runs BEFORE `routeOutOfLeashAction` (so a skeptic escalation flows into routing); its verdict is attached to the pending action + log_tail + instructions + `director_activity`. The deterministic Phase-1 severity remains authoritative — a lenient skeptic never downgrades a mechanically-flagged destructive.
+- `scripts/builder-worker.ts` — `runCeoAuthorizedOutOfLeashJob` reads `instructions.destructive_route.routedToFunction` to stamp `authorized_by: 'platform' | 'ceo'` on the pending action + audit rows, preserving the ACTUAL approver identity instead of unconditionally reporting the CEO on a Platform-routed decision.
+- `src/lib/agents/approval-inbox.ts` — `routingOwnerForJob` honors the pending action's Phase-4 `routed_to_function_override` (whitelist `'platform' | 'ceo'`) only after RE-VALIDATING at read-time that (a) job.kind === `ceo-authorized-out-of-leash`, (b) the pending action's type === `apply_migration`, and (c) the persisted `blastRadius.severity === 'reversible_destructive'`. Every other job kind or action shape ignores the override and falls through to `KIND_TO_FUNCTION` (unmapped kind → null → CEO fail-safe). Hand-installed overrides on unrelated jobs / `run_prod_script` actions / additive or irreversible severities cannot install a Platform route.
 - `src/lib/migration-safety.test.ts` — pins the Phase-1 + Phase-3 + Phase-4 + Phase-5 verification cases (`npm run test:migration-safety`).
 
 ## Gotchas
