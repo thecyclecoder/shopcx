@@ -277,6 +277,14 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
+  "sms-marketing": {
+    key: "sms-marketing", name: "Margo", role: "SMS Marketing", emoji: "📣",
+    personality: "Runs owned-channel SMS promos under Iris — picks the sale theme (VIP / Weekend), tailors the copy per segment, and schedules the cadence to grow attributed revenue-per-send. Autonomous within Iris's leash (weekly cap + segment scope + send windows); blocks + escalates on a stale audience or a missing coupon rather than blasting a bad send.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default",
+    chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
+    dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
+  },
 };
 
 /**
@@ -286,6 +294,12 @@ export const PERSONAS: Record<string, AgentPersona> = {
  * (`functions/*.md` mandates / `goals/*.md`). Reskinnable here in one place.
  */
 const RESPONSIBILITIES: Record<string, string[]> = {
+  "sms-marketing": [
+    "Pick the sale theme (VIP / Weekend) for each cadence window and tailor the hook per segment",
+    "Schedule 1-2 promotional sends/week within Iris's cap, segment scope, and send windows",
+    "Refresh + verify the audience first; block + escalate on a stale book or a missing coupon",
+    "Grow attributed revenue-per-send; surface every send + its reasoning to Iris",
+  ],
   repair: [
     "Triage every inbound error the Control Tower raises",
     "Root-cause the failure, not just the symptom",
