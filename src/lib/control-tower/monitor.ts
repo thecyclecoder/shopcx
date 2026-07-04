@@ -822,6 +822,12 @@ interface AssertionInputs {
   renewalBaseline: RenewalOutcomeCounts;
   /** dunning_cycles still 'retrying' more than the grace past next_retry_at (stuck). */
   stuckDunningCycles: number;
+  /** SMS-subscribed customers (segment-coverage assertion): total in the book. */
+  smsSubscribedTotal: number;
+  /** SMS-subscribed customers with segments_refreshed_at within 26h (fresh cohort). */
+  smsSubscribedFresh26h: number;
+  /** SMS-subscribed customers with segments_refreshed_at older than 48h OR null (stale tail). */
+  smsSubscribedStale48h: number;
 }
 
 // ── Outcome-distribution + stuck-dunning thresholds (control-tower-renewal-integrity-assertions, P1) ──
@@ -841,6 +847,14 @@ const RENEWAL_MIN_BASELINE_SAMPLE = 50;
 const STUCK_DUNNING_GRACE_MS = 48 * 60 * 60_000;
 /** How far back to read renewal outcome beats for the rolling baseline. */
 const RENEWAL_BASELINE_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
+// ── segment-coverage thresholds (fix-segment-refresh-coverage P2) ──
+/** Fresh-cohort ratio (segments_refreshed_at within 26h) below this trips the assertion. */
+const SEGMENT_COVERAGE_MIN_RATIO = 0.95;
+/** A subscribed customer whose segments_refreshed_at is older than this (or NULL) is a stale tail. */
+const SEGMENT_COVERAGE_MAX_AGE_MS = 48 * 60 * 60_000;
+/** Below this book size don't judge — a workspace with 0-99 subscribers can noise-fire. */
+const SEGMENT_COVERAGE_MIN_SAMPLE = 100;
 
 /** Sum the anomalous ("bad") outcomes in a renewal breakdown. */
 function badOutcomeCount(c: RenewalOutcomeCounts): number {
@@ -990,6 +1004,45 @@ function evalOutputAssertion(
         },
       };
     }
+    case "segment-coverage": {
+      // fix-segment-refresh-coverage P2: the refresh-customer-segments cron is fresh + green on
+      // P1, but the WHOLE-BOOK coverage is broken — < 95% of SMS-subscribed rows have
+      // segments_refreshed_at within 26h, OR any subscribed row's segments_refreshed_at is
+      // older than 48h / NULL. The 2026-07 regression (PostgREST 1000-row cap + STEP_BATCH=2000
+      // → cursor nulled after page 1 → 1000/138K refreshed daily, back half 29d stale) went
+      // undetected for weeks because P1 was green: the cron fired every day on schedule. This
+      // assertion polls the LIVE customers table each monitor tick — the number in
+      // produced.sms_subscribed_* is for the tile, the DECISION is on the live probe so a
+      // silently-lying beat can't hide it. Sample-guarded (book must have MIN_SAMPLE
+      // subscribers) so a fresh/tiny workspace never false-fires.
+      const total = inputs.smsSubscribedTotal;
+      if (total < SEGMENT_COVERAGE_MIN_SAMPLE) return null;
+      const fresh = inputs.smsSubscribedFresh26h;
+      const stale = inputs.smsSubscribedStale48h;
+      const ratio = fresh / total;
+      const minPct = Math.round(SEGMENT_COVERAGE_MIN_RATIO * 100);
+      const maxAgeH = Math.round(SEGMENT_COVERAGE_MAX_AGE_MS / 3_600_000);
+      if (ratio < SEGMENT_COVERAGE_MIN_RATIO) {
+        const pct = Math.round(ratio * 100);
+        return {
+          statusText: `only ${pct}% of subscribers fresh (${fresh}/${total}, need ${minPct}%)`,
+          violation: {
+            reason: "segment_coverage",
+            detail: `Segment refresh coverage break: only ${fresh}/${total} SMS-subscribed customers (${pct}%) have segments_refreshed_at within 26h — below the ${minPct}% floor. The cron ran but did not refresh the whole book (2026-07 PostgREST-cap regression signature: back half stayed stale).`,
+          },
+        };
+      }
+      if (stale > 0) {
+        return {
+          statusText: `${stale} subscriber${stale === 1 ? "" : "s"} stale >${maxAgeH}h`,
+          violation: {
+            reason: "segment_coverage",
+            detail: `Segment refresh stale-tail: ${stale} SMS-subscribed customer${stale === 1 ? "" : "s"} ${stale === 1 ? "has" : "have"} segments_refreshed_at older than ${maxAgeH}h (or NULL). The cron ran but part of the book didn't refresh.`,
+          },
+        };
+      }
+      return null;
+    }
     case "migration-drift": {
       // The box's migration-drift check parses every supabase/migrations/*.sql for the tables they
       // CREATE (net of drops) and diffs the live public schema; an expected-but-absent table = a
@@ -1019,8 +1072,11 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   startOfToday.setUTCHours(0, 0, 0, 0);
   // A dunning cycle still 'retrying' more than the grace past next_retry_at is stuck.
   const stuckBeforeIso = new Date(Date.now() - STUCK_DUNNING_GRACE_MS).toISOString();
+  // Segment-coverage window bounds (fix-segment-refresh-coverage P2).
+  const segFreshCutoffIso = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+  const segStaleCutoffIso = new Date(Date.now() - SEGMENT_COVERAGE_MAX_AGE_MS).toISOString();
 
-  const [escalated, oldestEscalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning] = await Promise.all([
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -1062,6 +1118,29 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .lt("next_retry_at", stuckBeforeIso)
       // Exclude the spec-test sandbox: a deliberately-stuck dunning fixture isn't a real anomaly.
       .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
+    // Segment refresh coverage inputs (fix-segment-refresh-coverage P2). Three global head-counts
+    // over the SMS-subscribed set, excluding the spec-test sandbox tenant. Each is index-friendly
+    // (sms_marketing_status + segments_refreshed_at) and head:true (no row payload), so this stays
+    // cheap even on a 100K+ book.
+    admin
+      .from("customers")
+      .select("id", { count: "exact", head: true })
+      .eq("sms_marketing_status", "subscribed")
+      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
+    admin
+      .from("customers")
+      .select("id", { count: "exact", head: true })
+      .eq("sms_marketing_status", "subscribed")
+      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
+      .gte("segments_refreshed_at", segFreshCutoffIso),
+    // Stale tail: segments_refreshed_at older than 48h OR NULL. `.or` gives us both branches in
+    // one count (NULL-safe: `is.null` matches never-refreshed rows the `lt` branch would skip).
+    admin
+      .from("customers")
+      .select("id", { count: "exact", head: true })
+      .eq("sms_marketing_status", "subscribed")
+      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
+      .or(`segments_refreshed_at.is.null,segments_refreshed_at.lt.${segStaleCutoffIso}`),
   ]);
 
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
@@ -1082,6 +1161,9 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     renewalCurrent,
     renewalBaseline,
     stuckDunningCycles: stuckDunning.count ?? 0,
+    smsSubscribedTotal: smsTotal.count ?? 0,
+    smsSubscribedFresh26h: smsFresh.count ?? 0,
+    smsSubscribedStale48h: smsStale.count ?? 0,
   };
 }
 

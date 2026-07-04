@@ -21,6 +21,19 @@ Two functions, fan-out architecture (the cron only dispatches; the per-workspace
 
 > **PostgREST 1000-row cap — page-size invariant (2026-07-04 fix):** the Supabase/PostgREST server silently truncates `.select().limit(N)` to `max-rows = 1000` — a `.limit(2000)` returns at most 1000. `processBatch` (the per-page fetch) infers "done" from `batch.length < limit`, so any `STEP_BATCH > 1000` returns a 1000-row page that reads as short → cursor nulls → the loop breaks after **one page** and the back half of the book stays stale. The 2026-07 whole-book-coverage regression was exactly this: only ~1000 of ~138K subscribers refreshed per cron. **Invariant:** `STEP_BATCH` MUST be ≤ 1000 (currently 1000 = exact match; a full page then equals `limit` and the cursor advances; the natural terminator is `if (!idRows?.length)` on the next fetch). Mirrored in `scripts/refresh-customer-segments.ts`. If the max-rows cap is ever raised at the PostgREST layer, this invariant relaxes correspondingly.
 
+## Coverage heartbeat + `segment-coverage` output assertion (Phase 2)
+
+The cron's end-of-run heartbeat carries three fields in `produced`:
+
+- `fanned_out` — # workspaces the cron sent a `segments/refresh-workspace` event to.
+- `sms_subscribed_total` — global count of `sms_marketing_status='subscribed'` customers.
+- `sms_subscribed_fresh_26h` — subset whose `segments_refreshed_at` is within 26h.
+- `coverage_ratio` — `fresh / total` rounded to 4 decimals (or `null` on an empty book).
+
+These snapshot the STATE BEFORE the fanout's workspace runs land (fanout is async — the runs kick off but haven't finished when the cron returns). The number that matters at monitor time is on the LIVE `customers` table, not the beat, so the tile probes state directly.
+
+The [[../libraries/control-tower.md]] `segment-coverage` output assertion runs each monitor tick (~15 min): it head-counts SMS-subscribed customers globally + the fresh-cohort (within 26h) + the stale-tail (older than 48h or NULL), and flips the tile RED if **coverage < 95%** OR **any subscribed row is >48h stale**. Sample-guarded (<100 subscribers ⇒ skip) so an empty/tiny workspace can't false-fire. This is the alarm that would have caught the 2026-07 1000/138K state — a 0.7% coverage tile hard-red hours after the cron, not weeks later on a delivery post-mortem.
+
 ## Segments produced
 
 The function **replaces** the whole `customers.segments` array each run (so any tag must be (re)derived here — a hand-added tag is wiped on the next run). Archetype (mutually exclusive, order-cadence based): `cold` · `single_order` · `just_ordered` · `cycle_hitter` · `lapsed` · `deep_lapsed`. Additive flags: `engaged` (orders ≥1 + recent email-click/ATC/checkout/2× product-view), `active_sub` (any `status='active'` subscription), `storefront_signup` (customer id appears in [[../tables/storefront_leads]] — captured via the new storefront's signup surfaces; origin attribute, not time-decaying; lets SMS target net-new signups instead of the huge `cold` pool, since a no-order storefront signup is otherwise just `cold`). The manual escape hatch `scripts/refresh-customer-segments.ts` mirrors this logic (default scope = SMS-subscribed; `--all` = everyone).
