@@ -17,7 +17,7 @@
  *
  * See docs/brain/integrations/vercel-log-drain.md · docs/brain/specs/error-feed-monitoring.md.
  */
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import crypto from "crypto";
 import {
   recordError,
@@ -131,12 +131,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  // Liveness: a verified delivery (even a clean batch with zero errors) proves the drain
-  // is wired + live, so the Control Tower panel can show green "connected" instead of a
-  // misleading green "0 errors" while disconnected. Best-effort — never blocks the 200.
-  await recordFeedDelivery("vercel");
-
   // Defensive re-filter, then group the batch so a burst of the same error → ONE incident.
+  // Grouping is pure/in-memory so response time stays bounded by sig-verify + JSON.parse +
+  // this loop — it cannot reach the 300s Vercel Runtime Timeout regardless of batch size.
   const groups = new Map<string, { path: string; status: number; message: string; count: number; sample: VercelLog }>();
   for (const log of logs) {
     if (!isError(log)) continue;
@@ -146,42 +143,54 @@ export async function POST(request: Request) {
     else groups.set(g.key, { path: g.path, status: g.status, message: g.message, count: 1, sample: log });
   }
 
-  let recorded = 0;
-  for (const g of groups.values()) {
-    // Inngest STEP-RETRY noise (a `step.run` throwing to trigger its own retry — attempt
-    // N/M with N<M; the function body never finally-failed) OR a Shopify webhook HMAC-
-    // failure log on /api/webhooks/shopify(-returns) (a one-off probe with an invalid
-    // signature — Shopify's own wiring check, a scanner, a stale-secret retry) OR a
-    // Supabase Cloudflare-edge SSL-handshake HTML blob leaked into an app-layer
-    // `console.error` (the shortlink route's best-effort click-logging RPC — the redirect
-    // itself already ships fine): classify it `transient` so recordError auto-resolves a
-    // first sighting (no page) and only escalates to a real open+page on recurrence
-    // within the window — one-off blips are dropped while a function that throws on every
-    // retry / a chronic signing bug / a chronic upstream Supabase edge outage still
-    // surfaces.
-    const transient =
-      isTransientInngestStepRetryThrow(g.path, g.message) ||
-      isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
-      isTransientSupabaseEdgeHandshakeError(g.message);
-    await recordError({
-      source: "vercel",
-      // Group on path + status + normalized message (stable bits, not requestId/deploymentId).
-      keyParts: [g.path, String(g.status), g.message],
-      title: `${g.status || "ERR"} ${g.path}: ${g.message}`.slice(0, 300),
-      detail: g.message,
-      sample: {
-        path: g.path,
-        status: g.status,
-        host: g.sample.host ?? null,
-        source: g.sample.source ?? null,
-        requestId: g.sample.requestId ?? null,
-        deploymentId: g.sample.deploymentId ?? null,
-      },
-      occurrences: g.count,
-      transient,
-    });
-    recorded++;
-  }
+  // ACK the drain immediately: the unbounded per-signature Supabase / Slack / agent_jobs
+  // fan-out below used to be awaited inside the response path, so a real error storm with
+  // many brand-new signatures would push a single POST past 300s and Vercel would kill the
+  // function with a Runtime Timeout — which is itself a level='error' log the drain then
+  // re-delivered to this same endpoint (the failure self-fed). Now we group in-memory, ACK
+  // 200 as soon as the groups map is built, and do the heavy work in after() — it runs on
+  // the same Lambda invocation but no longer counts against the drain's response deadline.
+  after(async () => {
+    // Liveness: a verified delivery (even a clean batch with zero errors) proves the drain
+    // is wired + live, so the Control Tower panel can show green "connected" instead of a
+    // misleading green "0 errors" while disconnected. Best-effort — never blocks the 200.
+    await recordFeedDelivery("vercel");
 
-  return NextResponse.json({ received: logs.length, incidents: recorded });
+    for (const g of groups.values()) {
+      // Inngest STEP-RETRY noise (a `step.run` throwing to trigger its own retry — attempt
+      // N/M with N<M; the function body never finally-failed) OR a Shopify webhook HMAC-
+      // failure log on /api/webhooks/shopify(-returns) (a one-off probe with an invalid
+      // signature — Shopify's own wiring check, a scanner, a stale-secret retry) OR a
+      // Supabase Cloudflare-edge SSL-handshake HTML blob leaked into an app-layer
+      // `console.error` (the shortlink route's best-effort click-logging RPC — the redirect
+      // itself already ships fine): classify it `transient` so recordError auto-resolves a
+      // first sighting (no page) and only escalates to a real open+page on recurrence
+      // within the window — one-off blips are dropped while a function that throws on every
+      // retry / a chronic signing bug / a chronic upstream Supabase edge outage still
+      // surfaces.
+      const transient =
+        isTransientInngestStepRetryThrow(g.path, g.message) ||
+        isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
+        isTransientSupabaseEdgeHandshakeError(g.message);
+      await recordError({
+        source: "vercel",
+        // Group on path + status + normalized message (stable bits, not requestId/deploymentId).
+        keyParts: [g.path, String(g.status), g.message],
+        title: `${g.status || "ERR"} ${g.path}: ${g.message}`.slice(0, 300),
+        detail: g.message,
+        sample: {
+          path: g.path,
+          status: g.status,
+          host: g.sample.host ?? null,
+          source: g.sample.source ?? null,
+          requestId: g.sample.requestId ?? null,
+          deploymentId: g.sample.deploymentId ?? null,
+        },
+        occurrences: g.count,
+        transient,
+      });
+    }
+  });
+
+  return NextResponse.json({ received: logs.length, incidents: groups.size });
 }

@@ -94,6 +94,10 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/sidebar.tsx` — component
 - `src/app/dashboard/layout.tsx` — layout wrapper
 
+## Status / open work
+
+**Performance tuning:** The always-on sidebar's `fetchCounts()` poll interval was widened 30s→60s (2026-07-04, spec `db-reduce-calls-q-7726440967385220442`) to cut authenticated RLS `set_config(...)` call volume — a follow-on to the prior 10s→30s widen targeting the same high-frequency round-trip family. Both changes reduce the dominant authenticated load source without materially hurting responsiveness (badge counts tolerate 60s staleness).
+
 ---
 
 [[../README]] · [[../../CLAUDE]]
