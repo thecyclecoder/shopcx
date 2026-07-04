@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
 - **Reduce call volume / cache the hot query on query -7726440967385220442** · verified 2026-07-04 · → [[../dashboard/home]]
+- **Vacuum / autovacuum-tune orders (bloat)** · verified 2026-07-04 · → [[recipes/db-vacuum-tune-orders]]
 - **Error feed: drop the Inngest step wrapped-non-Error log from the Vercel feed** · verified 2026-07-04 · → [[integrations/vercel-log-drain]]
 - **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-supabase-edge-ssl-handshake-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]

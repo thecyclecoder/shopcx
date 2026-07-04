@@ -265,6 +265,11 @@ const MAX_RESEARCH = Number(process.env.AGENT_TODO_MAX_RESEARCH || 1);
 // (RESEARCH_BATCH_CAP=8) so the wall-clock stays comparable to the other supervisory lanes.
 const RESEARCH_TIMEOUT_MS = 30 * 60 * 1000;
 const RESEARCH_BATCH_CAP = 8;
+// carrie-dr-content Phase 2 — one Carrie session per queued lander_blueprint. Read-heavy prompt
+// (product intelligence + skeleton) then per-image-slot she classifies; the worker executes the
+// generate/flag deterministically. 30 min mirrors the research lane cap.
+const DR_CONTENT_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -15200,6 +15205,394 @@ async function runResearchJob(job: Job) {
 // (avoids a top-of-file Playwright import; the module is dynamically loaded per-job in runResearchJob).
 const RESEARCH_SHOTS_BUCKET_NAME = "research-shots";
 
+// ── Carrie's DR content lane — kind='dr-content' (carrie-dr-content Phase 2) ──────────────────
+// A `dr-content` box lane. Cleo enqueues one row per newly-landed lander_blueprint (blueprint id
+// carried in `spec_slug` — see src/lib/cleo-blueprint.ts). Carrie's session on Max reads the
+// product's intelligence + the blueprint skeleton and, per block, emits DR copy + per-image-slot
+// verdicts (generate vs. flag_gap). The deterministic worker below executes each verdict: a
+// generatable slot lands via generateNanoBananaProCombine + writeCategorizedProductMedia
+// (source='generated', keyed by product_id + category); a real-evidence slot with no matching
+// existing product_media row opens a lander_content_gaps row (route: growth → Max via
+// approval-inbox `ownerFunctionForKind('dr-content')='growth'`). She NEVER generates a fake
+// customer result (never-fake-a-customer-result line — real-evidence categories always flag,
+// never generate). The blueprint content bucket is written via setBlueprintContent; the status
+// advances to `content_complete` (zero open gaps) or `awaiting_upload` (else).
+async function runDrContentClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "dr-content", sandbox: "max", timeout: DR_CONTENT_TIMEOUT_MS });
+}
+
+interface DrContentImageSlotJson {
+  /**
+   * Persuasive job of the missing image. Restricted to the CHECK vocabularies:
+   *   • generatable — `hero` | `ingredient` | `mechanism` | `lifestyle`
+   *   • real-evidence — `before_after` | `ugc` | `testimonial_photo` | `press_logo` (NEVER generated)
+   *   • `other` — escape hatch (routes to a gap; the worker refuses to generate an ambiguous slot).
+   */
+  asset_role: string;
+  /** `generate` (worker calls Nano Banana Pro) | `flag_gap` (worker opens a lander_content_gaps row). */
+  kind: "generate" | "flag_gap";
+  /** For `generate`: the prompt Carrie wrote for Nano Banana Pro (identity-locked to our product). */
+  prompt?: string;
+  /** For `generate`: output aspect ratio hint. Optional. */
+  aspect_ratio?: string;
+  /** For `generate`: DR caption Carrie wrote to sit next to the image (Carrie's voice). */
+  caption?: string;
+  /** For `flag_gap`: plain-language description for the founder (no jargon, no lever names). */
+  description?: string;
+}
+
+interface DrContentBlockJson {
+  /** Matches skeleton.blocks[i].role. */
+  role: string;
+  /** DR copy for this block — Carrie's voice, benefit-traceable, never brand fluff. */
+  copy: string;
+  /** Zero or more image slots on this block. */
+  image_slots?: DrContentImageSlotJson[];
+}
+
+interface DrContentDecisionJson {
+  status?: string;
+  error?: string;
+  blocks?: DrContentBlockJson[];
+  /** Optional overall CTA copy for the lander. */
+  cta?: string;
+}
+
+const DR_CONTENT_GENERATABLE_CATEGORIES = new Set(["hero", "ingredient", "mechanism", "lifestyle"]);
+const DR_CONTENT_REAL_EVIDENCE_CATEGORIES = new Set(["before_after", "ugc", "testimonial_photo", "press_logo"]);
+const DR_CONTENT_GAP_ASSET_ROLES = new Set(["before_after", "ugc", "testimonial_photo", "press_logo", "other"]);
+const DR_CONTENT_NANO_ASPECTS = new Set(["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]);
+const DR_CONTENT_PRODUCT_MEDIA_BUCKET = "product-media";
+
+async function runDrContentJob(job: Job) {
+  const tag = `[dr-content:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+
+  const blueprintId = job.spec_slug;
+  if (!blueprintId) {
+    await update(job.id, { status: "failed", error: "dr-content job missing blueprint id (spec_slug)" });
+    console.error(`${tag} missing blueprint id`);
+    return;
+  }
+
+  // Load the blueprint through the SDK chokepoint (never a raw select — matches the chokepoint
+  // discipline that this file's other lanes follow for their SDK-owned tables).
+  const {
+    getBlueprint,
+    setBlueprintContent,
+    setBlueprintStatus,
+    writeCategorizedProductMedia,
+    listCategorizedProductMedia,
+    openContentGap,
+    listContentGaps,
+    REAL_EVIDENCE_CATEGORIES: SDK_REAL_EVIDENCE_CATEGORIES,
+  } = await import("../src/lib/lander-blueprints");
+  void SDK_REAL_EVIDENCE_CATEGORIES; // imported to keep the SDK vocabulary explicit — re-declared locally as a Set for O(1) checks.
+
+  const blueprint = await getBlueprint(job.workspace_id, blueprintId).catch((e) => {
+    console.error(`${tag} getBlueprint failed: ${e instanceof Error ? e.message : e}`);
+    return null;
+  });
+  if (!blueprint) {
+    await update(job.id, { status: "failed", error: `blueprint ${blueprintId} not found in workspace ${job.workspace_id}` });
+    return;
+  }
+  if (blueprint.status !== "content_in_progress" && blueprint.status !== "awaiting_upload") {
+    // The upstream sweep only enqueues on content_in_progress; a re-run against a terminal
+    // blueprint would clobber a submitted build. Idempotent no-op instead.
+    await update(job.id, { status: "completed", log_tail: `blueprint ${blueprintId} status='${blueprint.status}' — nothing to do` });
+    console.log(`${tag} blueprint already past dr-content stage (${blueprint.status}) — no-op`);
+    return;
+  }
+
+  // Product intelligence bundle — read-only, straight through supabase-js. Every read is scoped by
+  // (workspace_id, product_id); Carrie writes NOTHING back to these tables (spec's read-only rule).
+  const productId = blueprint.product_id;
+  const [productR, ingredientsR, benefitsR, analysisR] = await Promise.all([
+    a.from("products").select("id, title, target_customer, certifications").eq("workspace_id", job.workspace_id).eq("id", productId).maybeSingle(),
+    a.from("product_ingredients").select("id, name, dosage_display, display_order").eq("workspace_id", job.workspace_id).eq("product_id", productId).order("display_order"),
+    a.from("product_benefit_selections").select("benefit_name, role, display_order, customer_phrases, notes").eq("workspace_id", job.workspace_id).eq("product_id", productId).in("role", ["lead", "supporting"]).order("display_order"),
+    a.from("product_review_analysis").select("top_benefits, before_after_pain_points, skeptic_conversions, surprise_benefits, most_powerful_phrases").eq("workspace_id", job.workspace_id).eq("product_id", productId).maybeSingle(),
+  ]);
+  const product = productR.data as { id: string; title: string; target_customer: string | null; certifications: string[] | null } | null;
+  if (!product) {
+    await update(job.id, { status: "failed", error: `product ${productId} not found for blueprint ${blueprintId}` });
+    return;
+  }
+  const ingredients = (ingredientsR.data || []) as Array<{ id: string; name: string; dosage_display: string | null }>;
+  const benefits = (benefitsR.data || []) as Array<{ benefit_name: string; role: string; customer_phrases: string[] | null; notes: string | null }>;
+  const analysis = (analysisR.data || {}) as {
+    top_benefits?: string[];
+    before_after_pain_points?: string[];
+    skeptic_conversions?: string[];
+    surprise_benefits?: string[];
+    most_powerful_phrases?: string[];
+  };
+
+  // Existing categorized product_media — the reuse-vs-open-gap probe input. A real-evidence slot
+  // whose category already has a row here is REUSED (no gap opened); a generatable slot whose
+  // category already has a row is regenerated only when Carrie says so (new context per blueprint).
+  const categorizedMedia = await listCategorizedProductMedia(job.workspace_id, productId).catch(() => []);
+  const mediaByCategory = new Map<string, typeof categorizedMedia>();
+  for (const m of categorizedMedia) {
+    if (!m.category) continue;
+    const list = mediaByCategory.get(m.category) || [];
+    list.push(m);
+    mediaByCategory.set(m.category, list);
+  }
+
+  // Pick a hero reference image for the Nano Banana Pro combine — the "compose our real product"
+  // rule. Any product_media row whose slot='hero' + has a URL (the bag hero) qualifies. Fallback:
+  // an existing category='hero' DR row. Absent both → skip generate calls (open a gap for those
+  // slots instead — see the loop below).
+  const heroRef = (categorizedMedia.find((m) => m.category === "hero" && !!m.url)
+    || categorizedMedia.find((m) => m.slot === "hero" && !!m.url))?.url
+    || (await a.from("product_media").select("url").eq("workspace_id", job.workspace_id).eq("product_id", productId).eq("slot", "hero").not("url", "is", null).limit(1).maybeSingle()).data?.url as string | undefined
+    || null;
+
+  // Compact intelligence summary + skeleton for the prompt. Carrie writes copy from this — the
+  // spec calls out benefit-traceability + customer-phrase mirroring + urgency/emotion; those are
+  // her voice discipline, enforced in the SKILL (Phase 3), not schema-checked here.
+  const skeleton = blueprint.skeleton;
+  const skeletonSummary = (skeleton.blocks || []).map((b, i) => ({
+    index: i,
+    role: b.role,
+    purpose: b.purpose,
+    levers: b.levers || [],
+    notes: b.notes || "",
+  }));
+  const mediaSummary = categorizedMedia
+    .filter((m) => !!m.url)
+    .map((m) => ({ id: m.id, slot: m.slot, category: m.category, source: m.source, caption: m.caption }));
+
+  const prompt = [
+    `You are Carrie (Growth's DR-content agent) of ShopCX on Max, filling a lander blueprint's content bucket using the dr-content skill (cwd is the repo root). Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against everything except lander_blueprints / lander_content_gaps / product_media — and even those the WORKER (deterministic Node) writes for you. You propose; it applies via setBlueprintContent / writeCategorizedProductMedia / openContentGap / setBlueprintStatus.`,
+    ``,
+    `LANE INVARIANTS (obey — the worker post-checks these and drops verdicts that violate):`,
+    `  • Real-evidence categories — before_after | ugc | testimonial_photo | press_logo — MUST be kind:"flag_gap". NEVER kind:"generate". A generated selfie/before-after fabricates a customer result and is the whole reason this lane exists as a supervised leash.`,
+    `  • Generatable categories — hero | ingredient | mechanism | lifestyle — MUST be kind:"generate" with a Nano Banana Pro prompt. NEVER kind:"flag_gap" for these (there is no real-world blocker; the model composes them from our product hero).`,
+    `  • DR copy = intense, emotional, urgency-driven, benefit-traceable to our actives, mirroring the review-analysis phrases when apt. No brand fluff, no generic wellness prose. Under 2 sentences per paragraph (mirrors our AI-response voice).`,
+    ``,
+    `BLUEPRINT — id=${blueprint.id}, funnel_type=${blueprint.funnel_type}, hypothesis=${JSON.stringify(skeleton.hypothesis || "")}`,
+    ``,
+    `SKELETON BLOCKS (ordered top-to-bottom):`,
+    JSON.stringify(skeletonSummary, null, 2),
+    ``,
+    `PRODUCT — ${product.title} · target_customer=${product.target_customer || "general adult"} · certifications=${JSON.stringify(product.certifications || [])}`,
+    ``,
+    `LEAD + SUPPORTING BENEFITS (benefit-traceability source):`,
+    JSON.stringify(benefits, null, 2),
+    ``,
+    `INGREDIENTS (with dosages — Carrie's actives to cite when writing mechanism copy):`,
+    JSON.stringify(ingredients, null, 2),
+    ``,
+    `REVIEW-ANALYSIS PHRASES (mirror these — customer language, not brand language):`,
+    JSON.stringify(analysis, null, 2),
+    ``,
+    `EXISTING CATEGORIZED product_media FOR THIS PRODUCT (reuse before opening a gap for a real-evidence slot):`,
+    JSON.stringify(mediaSummary, null, 2),
+    ``,
+    `EMIT ONE JSON OBJECT — no prose before/after (if fenced, the JSON is the last thing):`,
+    `  {"status":"completed","blocks":[{"role":"<matches skeleton.blocks[i].role>","copy":"<DR copy>","image_slots":[{"asset_role":"<category>","kind":"generate","prompt":"<Nano Banana Pro prompt>","aspect_ratio":"1:1|4:5|16:9|9:16","caption":"<DR caption>"}|{"asset_role":"before_after|ugc|testimonial_photo|press_logo|other","kind":"flag_gap","description":"<plain-language description written for the FOUNDER — no jargon, no lever names>"}]}],"cta":"<optional overall CTA>"}`,
+    `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ``,
+    `EVERY skeleton block MUST appear once in blocks[] (same role, in order). image_slots MAY be empty for a copy-only block (e.g. faq).`,
+    `🚨 Read-only: NEVER edit a file outside a subprocess Bash, NEVER commit, NEVER write lander_blueprints / product_media / lander_content_gaps yourself — the worker owns every mutation.`,
+  ].join("\n");
+
+  try {
+    const { session, resultText, isError, raw, usage, model, configDir: drDir } = await runBoxLane(
+      (cfg, sid) => runDrContentClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, drDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<DrContentDecisionJson>(resultText);
+    if (parsed?.status === "error") {
+      await update(job.id, { status: "needs_attention", error: `dr-content error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} agent reported error: ${parsed.error}`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.blocks) || parsed.blocks.length === 0) {
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "dr-content produced no parseable blocks", log_tail: raw.slice(-2000) });
+      console.error(`${tag} no parseable blocks`);
+      return;
+    }
+
+    // Zip Carrie's blocks against the skeleton by role (order preserved). A block whose role
+    // does not match a skeleton role is dropped (the worker never trusts the LLM to invent a
+    // block that was never planned — the blueprint's skeleton is the source of truth).
+    const skeletonRoles = (skeleton.blocks || []).map((b) => b.role);
+    const carrieByRole = new Map<string, DrContentBlockJson>();
+    for (const b of parsed.blocks) {
+      if (b && typeof b.role === "string" && typeof b.copy === "string" && b.copy.trim()) {
+        carrieByRole.set(b.role, b);
+      }
+    }
+
+    let generated = 0;
+    let flagged = 0;
+    let reused = 0;
+    let refused = 0;
+    let generateFailures = 0;
+    const contentBlocks: Array<{ role: string; copy: string; assets?: Array<{ kind: string; ref: string }> }> = [];
+
+    for (const role of skeletonRoles) {
+      const carrieBlock = carrieByRole.get(role);
+      if (!carrieBlock) {
+        // Missing block from Carrie — carry the skeleton role forward with empty copy so the
+        // content bucket zip stays aligned; the missing copy is visible in the follow-up review.
+        contentBlocks.push({ role, copy: "" });
+        continue;
+      }
+      const assets: Array<{ kind: string; ref: string }> = [];
+      for (const slot of carrieBlock.image_slots || []) {
+        const assetRole = typeof slot.asset_role === "string" ? slot.asset_role : "";
+
+        // Real-evidence branch — the never-fake-a-customer-result rail. A worker-side hard block
+        // even if the LLM asked to generate (defense-in-depth against a hallucinated verdict).
+        if (DR_CONTENT_REAL_EVIDENCE_CATEGORIES.has(assetRole)) {
+          if (slot.kind === "generate") {
+            refused++;
+            console.warn(`${tag} refused generate on real-evidence category '${assetRole}' — routing to gap instead`);
+          }
+          const existing = mediaByCategory.get(assetRole);
+          if (existing && existing.length > 0 && existing[0].url) {
+            assets.push({ kind: "image_ref", ref: existing[0].url });
+            reused++;
+            continue;
+          }
+          const description = (slot.description || "").trim() || `Please supply a real ${assetRole.replace(/_/g, " ")} asset for the "${role}" block on this lander.`;
+          try {
+            await openContentGap({
+              workspace_id: job.workspace_id,
+              blueprint_id: blueprint.id,
+              asset_role: assetRole as "before_after" | "ugc" | "testimonial_photo" | "press_logo",
+              block_ref: role,
+              description,
+            });
+            flagged++;
+            assets.push({ kind: "gap", ref: assetRole });
+          } catch (e) {
+            console.error(`${tag} openContentGap failed for role=${role} asset_role=${assetRole}: ${e instanceof Error ? e.message : e}`);
+          }
+          continue;
+        }
+
+        // Generatable branch — Nano Banana Pro combines from the product hero.
+        if (DR_CONTENT_GENERATABLE_CATEGORIES.has(assetRole) && slot.kind === "generate") {
+          if (!heroRef) {
+            // No product hero to compose from — degrade gracefully into an `other` gap. The
+            // founder resolving it by uploading a hero will unlock the next Carrie pass.
+            try {
+              await openContentGap({
+                workspace_id: job.workspace_id,
+                blueprint_id: blueprint.id,
+                asset_role: "other",
+                block_ref: role,
+                description: `Nano Banana Pro needs a product hero image for this product before we can generate the ${assetRole} shot on the "${role}" block. Please upload the bag hero.`,
+              });
+              flagged++;
+              assets.push({ kind: "gap", ref: "other" });
+            } catch { /* swallow */ }
+            continue;
+          }
+          const nbPrompt = (slot.prompt || "").trim();
+          if (!nbPrompt) { refused++; continue; }
+          const aspect = slot.aspect_ratio && DR_CONTENT_NANO_ASPECTS.has(slot.aspect_ratio) ? slot.aspect_ratio : undefined;
+          try {
+            const { generateNanoBananaProCombine } = await import("../src/lib/gemini");
+            const gen = await generateNanoBananaProCombine({
+              workspaceId: job.workspace_id,
+              prompt: nbPrompt,
+              imageUrls: [heroRef],
+              aspectRatio: aspect as "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "4:5" | "5:4" | "9:16" | "16:9" | "21:9" | undefined,
+            });
+            const ext = gen.mimeType.includes("jpeg") ? "jpg" : "png";
+            const slug = `${blueprint.id}-${role.replace(/[^a-z0-9_]/gi, "_")}-${assetRole}`;
+            const storagePath = `${productId}/dr-content/${slug}.${ext}`;
+            const { error: upErr } = await a.storage
+              .from(DR_CONTENT_PRODUCT_MEDIA_BUCKET)
+              .upload(storagePath, gen.buffer, { contentType: gen.mimeType, upsert: true });
+            if (upErr) throw new Error(`storage.upload: ${upErr.message}`);
+            const url = a.storage.from(DR_CONTENT_PRODUCT_MEDIA_BUCKET).getPublicUrl(storagePath).data.publicUrl;
+            const caption = (slot.caption || "").trim() || null;
+            const written = await writeCategorizedProductMedia({
+              workspace_id: job.workspace_id,
+              product_id: productId,
+              slot: `dr_${slug}`,
+              url,
+              storage_path: storagePath,
+              category: assetRole as "hero" | "ingredient" | "mechanism" | "lifestyle",
+              source: "generated",
+              caption,
+              alt_text: caption ?? "",
+              mime_type: gen.mimeType,
+            });
+            generated++;
+            assets.push({ kind: "image_ref", ref: written.url ?? url });
+          } catch (e) {
+            generateFailures++;
+            console.warn(`${tag} generate failed role=${role} asset_role=${assetRole}: ${e instanceof Error ? e.message : e}`);
+          }
+          continue;
+        }
+
+        // `other` bucket (or any category we don't classify) — the LLM's escape hatch. Open a
+        // gap; the worker never generates an ambiguous asset (never-fake discipline extends).
+        if (slot.kind === "flag_gap") {
+          const description = (slot.description || "").trim() || `Please supply a real asset for the "${role}" block on this lander.`;
+          try {
+            await openContentGap({
+              workspace_id: job.workspace_id,
+              blueprint_id: blueprint.id,
+              asset_role: DR_CONTENT_GAP_ASSET_ROLES.has(assetRole) ? (assetRole as "before_after" | "ugc" | "testimonial_photo" | "press_logo" | "other") : "other",
+              block_ref: role,
+              description,
+            });
+            flagged++;
+            assets.push({ kind: "gap", ref: assetRole || "other" });
+          } catch (e) {
+            console.error(`${tag} openContentGap (fallback) failed: ${e instanceof Error ? e.message : e}`);
+          }
+        } else {
+          refused++;
+        }
+      }
+      contentBlocks.push({ role, copy: carrieBlock.copy.trim(), assets: assets.length ? assets : undefined });
+    }
+
+    // Write the content bucket + advance the blueprint status. The transition rule is the whole
+    // point of the gap store: any open gap → awaiting_upload; zero → content_complete.
+    try {
+      await setBlueprintContent(job.workspace_id, blueprint.id, {
+        blocks: contentBlocks.map((b) => ({ role: b.role, copy: b.copy, assets: b.assets })),
+        cta: typeof parsed.cta === "string" ? parsed.cta : undefined,
+      });
+    } catch (e) {
+      await update(job.id, { status: "needs_attention", error: `setBlueprintContent: ${e instanceof Error ? e.message : e}`, log_tail: raw.slice(-2000) });
+      return;
+    }
+
+    const openGaps = await listContentGaps(job.workspace_id, { blueprint_id: blueprint.id, status: "open" }).catch(() => []);
+    const nextStatus: "content_complete" | "awaiting_upload" = openGaps.length === 0 ? "content_complete" : "awaiting_upload";
+    try {
+      await setBlueprintStatus(job.workspace_id, blueprint.id, nextStatus);
+    } catch (e) {
+      await update(job.id, { status: "needs_attention", error: `setBlueprintStatus: ${e instanceof Error ? e.message : e}`, log_tail: raw.slice(-2000) });
+      return;
+    }
+
+    const tail = `blueprint=${blueprint.id} · blocks=${contentBlocks.length}/${skeletonRoles.length} · generated=${generated}${generateFailures ? `/failed=${generateFailures}` : ""} · flagged=${flagged} · reused=${reused}${refused ? ` · refused=${refused}` : ""} · status→${nextStatus}`;
+    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
+    console.log(`${tag} ✓ ${tail}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await update(job.id, { status: "failed", error: msg });
+    console.error(`${tag} failed: ${msg}`);
+  }
+}
+
 // A kind='security-review' job runs read-only on Max, the supervisor on the auto-merge proxy. Two modes
 // (instructions.mode): 'diff' — a per-merged-diff security pass (injection / secret-leak / authz / RLS /
 // unsafe admin-client / _encrypted handling) over the merged claude/* commit; 'dep-watch' — the daily
@@ -16762,6 +17155,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "campaign-grade") return runCampaignGradeJob(job);
   if (job.kind === "gap-grade") return runGapGradeJob(job);
   if (job.kind === "research") return runResearchJob(job);
+  if (job.kind === "dr-content") return runDrContentJob(job);
   if (job.kind === "agent-coach") return runAgentCoachJob(job);
   if (job.kind === "storefront-optimizer") return runStorefrontOptimizerJob(job);
   if (job.kind === "db_health") return runDbHealthJob(job);
@@ -17794,7 +18188,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -17854,6 +18248,7 @@ async function main() {
   const countCampaignGrade = () => [...active.values()].filter((v) => v.kind === "campaign-grade").length;
   const countGapGrade = () => [...active.values()].filter((v) => v.kind === "gap-grade").length;
   const countResearch = () => [...active.values()].filter((v) => v.kind === "research").length;
+  const countDrContent = () => [...active.values()].filter((v) => v.kind === "dr-content").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -18215,6 +18610,19 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed research ${job.id.slice(0, 8)} → ${countResearch() + 1}/${MAX_RESEARCH} research lane`);
+        launch(job);
+      }
+      // Fill the dr-content lane (carrie-dr-content Phase 2): the box-hosted Carrie session —
+      // one Max session per queued lander_blueprint reads the product intelligence + skeleton,
+      // writes per-block DR copy + per-image-slot verdicts. The deterministic worker below the
+      // session executes each verdict via the lander-blueprints SDK chokepoint
+      // (writeCategorizedProductMedia / openContentGap / setBlueprintContent / setBlueprintStatus).
+      // Concurrency-1 mirrors research; enqueued by Cleo's blueprint sweep in cleo-blueprint.ts.
+      while (!claudeDown && countDrContent() < MAX_DR_CONTENT) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dr-content"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed dr-content ${job.id.slice(0, 8)} → ${countDrContent() + 1}/${MAX_DR_CONTENT} dr-content lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
