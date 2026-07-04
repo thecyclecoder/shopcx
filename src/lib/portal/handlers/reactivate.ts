@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -33,7 +33,7 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-      await fetch(
+      await portalFetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
         { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" }
       );
