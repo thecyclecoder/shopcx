@@ -1,0 +1,1 @@
+- **Vacuum / autovacuum-tune customers (bloat)** · verified 2026-07-04 · → [[recipes/db-vacuum-tune-customers]]
