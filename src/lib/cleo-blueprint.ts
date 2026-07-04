@@ -22,7 +22,12 @@
  * `createAdminClient()` (unchanged).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createBlueprint, type LanderBlueprintSkeleton, type LanderBlueprintBlock } from "@/lib/lander-blueprints";
+import {
+  createBlueprint,
+  hasBlueprintForProductType,
+  type LanderBlueprintSkeleton,
+  type LanderBlueprintBlock,
+} from "@/lib/lander-blueprints";
 import {
   listNewTeardowns,
   markTeardownReviewed,
@@ -177,28 +182,165 @@ export function decideBlueprintForTeardown(
 }
 
 /**
- * Pick the target product for a teardown — the product whose benefit tree matches the
- * teardown's category. For Phase 2 the mapping is intentionally minimal: pick the FIRST
- * ACTIVE product in the workspace (deterministic order — by created_at ASC — so a repeat
- * sweep picks the same target). A richer category → product mapping (e.g. matching
- * teardown.brand or the teardown's product_type against products.tags / product_type) is
- * a Phase 3+ refinement — the spec verification's expectation ("Amazing Coffee for a
- * superfood-coffee teardown") already assumes the target workspace has a matching product
- * as its primary. Returns null when the workspace has no active product (skip the teardown).
+ * Minimal token summary of a product — everything `matchProductToTeardown` needs to score
+ * the product against a teardown text blob. Split from the DB row so unit tests can pin
+ * the matcher without a Supabase client.
  */
-export async function pickTargetProduct(workspaceId: string): Promise<{ id: string; title: string } | null> {
+export interface ProductForMatch {
+  id: string;
+  title: string;
+  handle?: string | null;
+}
+
+/**
+ * Tiny English stopword set — the tokens we drop when tokenizing product title/handle
+ * (and the teardown blob). Kept small on purpose: the matcher scores by whole-word
+ * OVERLAP between the product and the teardown, so stopwords like "the" / "our" would
+ * cause false-positive matches ("The Longevity Answer" would score against "The Coffee
+ * Roast") if we kept them in. Extend cautiously — the head-noun rule already carries
+ * the semantic weight.
+ */
+const PRODUCT_TOKEN_STOPWORDS: ReadonlySet<string> = new Set([
+  "a", "an", "the", "and", "or", "with", "of", "for", "to", "in", "on", "at",
+  "our", "your", "my", "by", "from", "is", "it", "as", "be", "we", "us",
+]);
+
+/**
+ * Split a free-text string into lowercased, deduped word tokens (min length 2, no
+ * stopwords). Non-word chars are the split boundary — so `"amazing-coffee"` and
+ * `"amazing_coffee"` both become `["amazing", "coffee"]`. Deterministic + pure.
+ */
+export function tokenizeForMatch(text: string): string[] {
+  const s = String(text || "").toLowerCase();
+  const raw = s.split(/[^a-z0-9]+/g).filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of raw) {
+    if (t.length < 2) continue;
+    if (PRODUCT_TOKEN_STOPWORDS.has(t)) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Extract the head-noun of a product title — the LAST non-stopword token, lowercased.
+ * `"Amazing Coffee"` → `"coffee"`; `"Superfood Tabs"` → `"tabs"`; `"The Longevity Answer"`
+ * → `"answer"` (drops "the"; picks the last content word). Returns null when the title
+ * is empty or contains only stopwords. Deterministic + pure.
+ */
+export function productHeadNoun(title: string): string | null {
+  const tokens = tokenizeForMatch(title);
+  if (!tokens.length) return null;
+  return tokens[tokens.length - 1];
+}
+
+/**
+ * Build the teardown text blob the matcher scores against — brand + funnel_type +
+ * strategy + transferable_pattern, joined by spaces. The FOUR fields the spec calls out
+ * (docs/brain/specs/cleo-blueprint-product-matching.md Phase 1). Kept separate so the
+ * unit tests can construct a blob without a full ResearchUrl row.
+ */
+export function teardownMatchBlob(brand: string | null | undefined, recipe: TeardownRecipe | null | undefined): string {
+  const parts: string[] = [];
+  if (brand) parts.push(brand);
+  if (recipe?.funnel_type) parts.push(recipe.funnel_type);
+  if (recipe?.strategy) parts.push(recipe.strategy);
+  if (recipe?.transferable_pattern) parts.push(recipe.transferable_pattern);
+  return parts.join(" ");
+}
+
+/**
+ * Pure category matcher — pick the product whose title/handle head-noun (weight 2) +
+ * other title/handle tokens (weight 1) appear as WHOLE WORDS in the teardown's text blob
+ * (`brand` + recipe `funnel_type` + `strategy` + `transferable_pattern`), highest score
+ * wins. Score-0 products are DROPPED (return null — we don't sell that category, so
+ * we skip rather than blueprinting the wrong product).
+ *
+ *   Superfood-coffee teardown blob contains `"coffee"` → Amazing Coffee scores ≥2 (head-
+ *   noun hit) + optionally 1 for `"amazing"` in the blob; Superfood Tabs scores at most 1
+ *   (`"superfood"` in the blob but head-noun `"tabs"` misses) → Amazing Coffee wins.
+ *
+ *   Longevity teardown blob contains none of `"amazing"`, `"coffee"`, `"superfood"`,
+ *   `"tabs"` → every product scores 0 → return null (skip — we don't sell longevity).
+ *
+ * Ties break by input order (first product wins). The `products` list is expected to be
+ * ordered deterministically by the caller (created_at ASC) so a repeat sweep picks the
+ * same target. Pure — no DB, no clock, no randomness.
+ */
+export function matchProductToTeardown(
+  teardown: Pick<ResearchUrl, "brand" | "teardown">,
+  products: ReadonlyArray<ProductForMatch>,
+): ProductForMatch | null {
+  if (!products.length) return null;
+  const blobTokens = new Set(tokenizeForMatch(teardownMatchBlob(teardown.brand, teardown.teardown)));
+  if (!blobTokens.size) return null;
+  let best: { product: ProductForMatch; score: number } | null = null;
+  for (const product of products) {
+    const titleTokens = tokenizeForMatch(product.title);
+    const handleTokens = tokenizeForMatch(product.handle ?? "");
+    const head = productHeadNoun(product.title);
+    // Union title + handle tokens (excluding head-noun — head-noun scored separately at
+    // weight 2). Handle tokens exist to catch cases where the handle carries a token the
+    // title doesn't ("amazing-coffee" handle for a "The Coffee" product).
+    const otherTokens = new Set<string>();
+    for (const t of titleTokens) if (t !== head) otherTokens.add(t);
+    for (const t of handleTokens) if (t !== head) otherTokens.add(t);
+    let score = 0;
+    if (head && blobTokens.has(head)) score += 2;
+    for (const t of otherTokens) if (blobTokens.has(t)) score += 1;
+    if (score <= 0) continue;
+    if (!best || score > best.score) {
+      best = { product, score };
+    }
+  }
+  return best?.product ?? null;
+}
+
+/**
+ * Load every ACTIVE product in the workspace, deterministically ordered (created_at ASC)
+ * — the input to `matchProductToTeardown`. Extracted so the sweep can load once and
+ * reuse across all teardowns in a run (was a per-sweep single-product punt in Phase 2).
+ */
+export async function listActiveProducts(workspaceId: string): Promise<ProductForMatch[]> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("products")
-    .select("id, title, status")
+    .select("id, title, handle, status")
     .eq("workspace_id", workspaceId)
     .eq("status", "active")
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (error) return null;
-  const row = (data as { id: string; title: string; status: string } | null) ?? null;
-  return row ? { id: row.id, title: row.title } : null;
+    .order("created_at", { ascending: true });
+  if (error) return [];
+  const rows = (data ?? []) as Array<{ id: string; title: string; handle: string | null; status: string }>;
+  return rows.map((r) => ({ id: r.id, title: r.title, handle: r.handle }));
+}
+
+/**
+ * Pick the target product for a teardown — the product whose head-noun/tokens overlap
+ * the teardown's text blob (brand + funnel_type + strategy + transferable_pattern). See
+ * `matchProductToTeardown` for the scoring rule. Returns null when no product's category
+ * matches (we don't sell that category — the sweep SKIPS instead of blueprinting the
+ * wrong product).
+ *
+ * The `teardown` argument is optional for BACK-COMPAT with the pre-Phase-1 signature: if
+ * omitted, we fall back to the deterministic first-active-product punt (the original
+ * behavior). Every in-tree caller passes a teardown; the fallback is preserved so
+ * external test-harness / probe scripts that call this without one still work.
+ */
+export async function pickTargetProduct(
+  workspaceId: string,
+  teardown?: Pick<ResearchUrl, "brand" | "teardown">,
+): Promise<{ id: string; title: string } | null> {
+  const products = await listActiveProducts(workspaceId);
+  if (!products.length) return null;
+  if (!teardown) {
+    const first = products[0];
+    return { id: first.id, title: first.title };
+  }
+  const match = matchProductToTeardown(teardown, products);
+  return match ? { id: match.id, title: match.title } : null;
 }
 
 /**
@@ -292,21 +434,42 @@ export interface BlueprintSweepResult {
 }
 
 /**
+ * Deterministic dedup key for the `(product_id, funnel_type)` pair the spec's Phase 1
+ * verification pins ("AT MOST ONE blueprint per (product, funnel_type)"). Pure — used by
+ * both the within-sweep `seenKeys` set AND (in the sweep loop) checked against existing
+ * `lander_blueprints` rows via `hasBlueprintForProductType`. Extracted so unit tests can
+ * pin the dedup without a DB.
+ */
+export function blueprintDedupKey(productId: string, funnelType: string): string {
+  return `${productId}::${String(funnelType || "").trim()}`;
+}
+
+/**
  * Cleo's blueprint sweep — the deterministic loop over new teardowns for a workspace.
- * For each teardown: pick the target product, load its existing lander_types, run
- * `decideBlueprintForTeardown`, then act:
+ * Phase 1 rewrite (cleo-blueprint-product-matching): load every active product ONCE up
+ * front and, per teardown, match it to a product by category (head-noun / title token
+ * overlap on the teardown's brand + funnel_type + strategy + transferable_pattern blob);
+ * null match → skip (we don't sell that category). Then diff vs the target product's
+ * existing lander_types (cached per product across the loop) and, on a blueprint
+ * decision, DEDUP by `(product_id, funnel_type)` against both a this-sweep Set AND
+ * existing `lander_blueprints` rows via `hasBlueprintForProductType` — a second
+ * advertorial teardown for the same product is a SKIP, not a duplicate blueprint.
  *
  *   • blueprint → `createBlueprint` (with the adapted skeleton) + enqueue `dr-content`
- *                 job (deduped) + `markTeardownReviewed`.
+ *                 job (deduped) + `markTeardownReviewed`. Records the key in
+ *                 `seenKeys` so a later teardown in the same sweep can't create a dup.
+ *   • dup       → `markTeardownReviewed` only — the target-product+funnel_type already
+ *                 has a blueprint (either from earlier in this sweep or a prior sweep).
  *   • bandit    → `markTeardownReviewed` only (bandit path is unchanged — the teardown
  *                 is Cleo's information, not a job it needs to run).
- *   • skip      → `markTeardownReviewed` only (nothing to route).
+ *   • skip      → `markTeardownReviewed` only (nothing to route — no product match, or
+ *                 the recipe was missing).
  *
  * Idempotent under retries — `markTeardownReviewed` drops the row out of
  * `listNewTeardowns`, so a second sweep sees zero new teardowns. If a blueprint is
  * created but the sweep dies before the watermark stamps, the next sweep re-runs the
- * decision, the dedup gate catches the in-flight `dr-content` job, and the watermark
- * lands — no ghost writes.
+ * decision, the `hasBlueprintForProductType` gate catches the just-created blueprint,
+ * the dedup fires, and the watermark lands — no ghost writes, no duplicate blueprints.
  *
  * Errors are contained per-teardown (each iteration try/caught) so one bad row never
  * poisons the sweep. Returns a structured summary — the caller (Cleo's lane in
@@ -328,8 +491,8 @@ export async function runCleoBlueprintSweep(
   result.scanned = teardowns.length;
   if (!teardowns.length) return result;
 
-  const target = await pickTargetProduct(workspaceId);
-  if (!target) {
+  const products = await listActiveProducts(workspaceId);
+  if (!products.length) {
     for (const t of teardowns) {
       try { await markTeardownReviewed(workspaceId, t.id); } catch { /* leave watermark for next sweep */ }
       entries.push({
@@ -342,21 +505,54 @@ export async function runCleoBlueprintSweep(
     return result;
   }
 
-  const existingTypes = await existingLanderTypesForProduct(workspaceId, target.id);
+  // Per-product caches — the existing `storefront_experiments.lander_type` set (input to
+  // `decideBlueprintForTeardown`) and the per-sweep `(product_id, funnel_type)` dedup set.
+  // Both filled lazily on first hit so we never load state for products no teardown maps to.
+  const existingTypesByProduct = new Map<string, Set<StorefrontLanderType>>();
+  const seenKeys = new Set<string>();
 
   for (const teardown of teardowns) {
     try {
+      const match = matchProductToTeardown(teardown, products);
+      if (!match) {
+        await markTeardownReviewed(workspaceId, teardown.id);
+        entries.push({
+          research_url_id: teardown.id,
+          decision: "skip",
+          rationale: "no product in our catalog matches this teardown's category",
+        });
+        result.skipped++;
+        continue;
+      }
+      let existingTypes = existingTypesByProduct.get(match.id);
+      if (!existingTypes) {
+        existingTypes = await existingLanderTypesForProduct(workspaceId, match.id);
+        existingTypesByProduct.set(match.id, existingTypes);
+      }
       const decision = decideBlueprintForTeardown(teardown, existingTypes);
       if (decision.kind === "blueprint") {
+        const key = blueprintDedupKey(match.id, decision.funnel_type);
+        if (seenKeys.has(key) || (await hasBlueprintForProductType(workspaceId, match.id, decision.funnel_type))) {
+          await markTeardownReviewed(workspaceId, teardown.id);
+          entries.push({
+            research_url_id: teardown.id,
+            decision: "skip",
+            rationale: `duplicate — blueprint for (${match.title}, funnel_type='${decision.funnel_type}') already exists; skipping to hold ONE-per-(product, funnel_type)`,
+            target_product_id: match.id,
+          });
+          result.skipped++;
+          continue;
+        }
         const bp = await createBlueprint({
           workspace_id: workspaceId,
-          product_id: target.id,
+          product_id: match.id,
           research_url_id: teardown.id,
           funnel_type: decision.funnel_type,
           skeleton: decision.skeleton,
           rationale: decision.rationale,
           created_by: opts.createdBy ?? "cleo",
         });
+        seenKeys.add(key);
         const jobId = await enqueueDrContentJob(workspaceId, bp.id, opts.createdBy ?? null);
         await markTeardownReviewed(workspaceId, teardown.id);
         entries.push({
@@ -365,7 +561,7 @@ export async function runCleoBlueprintSweep(
           rationale: decision.rationale,
           blueprint_id: bp.id,
           dr_content_job_id: jobId ?? undefined,
-          target_product_id: target.id,
+          target_product_id: match.id,
         });
         result.blueprints_created++;
       } else if (decision.kind === "bandit") {
@@ -374,7 +570,7 @@ export async function runCleoBlueprintSweep(
           research_url_id: teardown.id,
           decision: "bandit",
           rationale: decision.rationale,
-          target_product_id: target.id,
+          target_product_id: match.id,
         });
         result.bandit_routed++;
       } else {
@@ -383,6 +579,7 @@ export async function runCleoBlueprintSweep(
           research_url_id: teardown.id,
           decision: "skip",
           rationale: decision.rationale,
+          target_product_id: match.id,
         });
         result.skipped++;
       }
