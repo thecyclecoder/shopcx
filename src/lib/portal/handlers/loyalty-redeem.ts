@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, findCustomer, checkPortalBan, portalFetch } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getLoyaltySettings,
@@ -63,7 +63,7 @@ export const loyaltyRedeem: RouteHandler = async ({ auth, route, req }) => {
   try {
     const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
 
-    const res = await portalFetch(
+    const res = await fetch(
       `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
       {
         method: "POST",
