@@ -439,8 +439,12 @@ export function isTransientSupabaseLogNoise(
     // browser unmounting while supabase.auth.getUser() is in-flight. That's a healthy
     // browser-abort signal, not an auth failure; scope it into the transient class the
     // same way the postgres branch scopes `canceling statement due to` / `statement
-    // timeout`. Anything else on auth (invalid JWT, rate limit, signature mismatch) still
-    // pages on first sighting.
+    // timeout`. The API tier's 504 handler wraps the same underlying deadline as
+    // `504: Processing this request timed out, please retry after a moment.` — the
+    // nested `error` field on those log rows is literally `context deadline exceeded`,
+    // so the wrapper is just a second surface for the same transient class. Anything
+    // else on auth (invalid JWT, rate limit, signature mismatch) still pages on first
+    // sighting.
     //
     // The same browser-abort also surfaces as Go's `net.OpError` phrasing when the request
     // context dies MID-DIAL against the GoTrue → Postgres socket: `failed to connect to
@@ -452,6 +456,7 @@ export function isTransientSupabaseLogNoise(
     return (
       msg.includes("context canceled") ||
       msg.includes("context deadline exceeded") ||
+      msg.includes("processing this request timed out") ||
       msg.includes("operation was canceled") ||
       /\bdial\b[^\n]*\bcanceled\b/.test(msg)
     );
