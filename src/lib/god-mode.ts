@@ -25,16 +25,27 @@ import { sendSMS } from "@/lib/twilio";
 // against a 4-6 digit PIN in seconds. N=2^15 is the standard "interactive
 // login" cost — a few hundred ms per verify on the box, negligible under the
 // once-per-destructive-approval call rate.
+//
+// maxmem MUST be passed explicitly: N=2^15 · r=8 needs 128·(N+2)·r ≈ 33,556,480
+// bytes, which is 2 KB over Node's default 32 MiB scrypt cap — every call
+// throws `RangeError: memory limit exceeded` without a higher cap. 64 MiB
+// gives comfortable headroom without changing the derived-hash format.
 const SCRYPT_N = 1 << 15;
 const SCRYPT_r = 8;
 const SCRYPT_p = 1;
 const SCRYPT_KEYLEN = 32;
+const SCRYPT_MAXMEM = 64 * 1024 * 1024;
 const HASH_VERSION = "v1";
 
 /** Hash a PIN for storage on workspaces.god_mode_pin_hash. Format: `scrypt:v1:<saltHex>:<hashHex>`. */
 export function hashPin(pin: string): string {
   const salt = randomBytes(16);
-  const derived = scryptSync(pin, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_r, p: SCRYPT_p });
+  const derived = scryptSync(pin, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N,
+    r: SCRYPT_r,
+    p: SCRYPT_p,
+    maxmem: SCRYPT_MAXMEM,
+  });
   return `scrypt:${HASH_VERSION}:${salt.toString("hex")}:${derived.toString("hex")}`;
 }
 
@@ -48,7 +59,12 @@ export function verifyPin(candidate: string, stored: string | null | undefined):
   if (salt.length !== 16 || expected.length !== SCRYPT_KEYLEN) return false;
   let derived: Buffer;
   try {
-    derived = scryptSync(candidate, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_r, p: SCRYPT_p });
+    derived = scryptSync(candidate, salt, SCRYPT_KEYLEN, {
+      N: SCRYPT_N,
+      r: SCRYPT_r,
+      p: SCRYPT_p,
+      maxmem: SCRYPT_MAXMEM,
+    });
   } catch {
     return false;
   }
