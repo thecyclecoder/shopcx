@@ -346,7 +346,7 @@ export function isTransientShopifyWebhookHmacFailure(
  * Every browser has a fixed TypeError message it throws when a `fetch()` is CANCELLED or
  * the network drops mid-flight — Safari 'Load failed', Chrome/Firefox 'Failed to fetch' /
  * 'NetworkError when attempting to fetch resource', iOS URLSession 'The network
- * connection was lost'. These are the browser counterpart to the Node stream-abort +
+ * connection was lost', Chrome bare 'network error'. These are the browser counterpart to the Node stream-abort +
  * Inngest transport-reset noise the feed already tags as transient: the request never
  * completed (mobile tab backgrounded, signal lost mid-navigation, page unload aborted an
  * in-flight fetch), and the session recovers by itself. Minting a fresh OPEN incident
@@ -370,6 +370,8 @@ const CLIENT_NETWORK_ABORT_MESSAGES = new Set([
   "networkerror when attempting to fetch resource.",
   "the network connection was lost",
   "the network connection was lost.",
+  "network error",
+  "network error.",
 ]);
 
 export function isTransientClientNetworkAbort(

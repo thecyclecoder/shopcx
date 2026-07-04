@@ -423,6 +423,13 @@ test("isTransientClientNetworkAbort matches iOS URLSession 'The network connecti
   assert.equal(isTransientClientNetworkAbort("The network connection was lost.", ""), true);
 });
 
+test("isTransientClientNetworkAbort matches bare 'network error' with empty stack (Chrome fetch-abort TypeError)", () => {
+  assert.equal(isTransientClientNetworkAbort("network error", null), true);
+  assert.equal(isTransientClientNetworkAbort("Network error", ""), true);
+  assert.equal(isTransientClientNetworkAbort("network error.", null), true);
+  assert.equal(isTransientClientNetworkAbort("  Network Error  ", undefined), true);
+});
+
 test("isTransientClientNetworkAbort KEEPS the same message with a real stack (code-throw)", () => {
   // A real code-throw carrying the same literal string ships a stack with a frame in our
   // code — that's an application bug we want captured + paged, not swallowed as transient.
@@ -431,6 +438,10 @@ test("isTransientClientNetworkAbort KEEPS the same message with a real stack (co
     at DashboardRoadmap (webpack-internal:///./src/app/dashboard/roadmap/page.tsx:12:5)`;
   assert.equal(isTransientClientNetworkAbort("Load failed", realStack), false);
   assert.equal(isTransientClientNetworkAbort("Failed to fetch", "at foo (bar.js:1:1)"), false);
+  assert.equal(
+    isTransientClientNetworkAbort("network error", "at fetchRoadmap (page.tsx:1:1)"),
+    false,
+  );
 });
 
 test("isTransientClientNetworkAbort KEEPS an unrelated message (not the abort family)", () => {
