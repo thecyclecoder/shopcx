@@ -298,11 +298,31 @@ export function isSunsetQuery(query: string, allowlist: string[] = DB_HEALTH_SUN
 const FOREIGN_QUERY_RES: RegExp[] = [
   /wal\s*->>/i, // Supabase Realtime WAL decoder (logical-replication change feed)
   /\bpgrst_/i, // PostgREST internal helper functions / prepared statements
-  /\bpg_catalog\b/i, // Postgres system catalog
+  /\bpg_catalog\b/i, // Postgres system catalog (schema-qualified)
+  // Unqualified pg_catalog tables — PostgREST's schema-introspection query references these WITHOUT a
+  // `pg_catalog.` prefix, so `\bpg_catalog\b` alone missed it and the introspection query (queryid
+  // 4272184973515172242) fell through to a bogus add_index proposal on `(query)` (2026-07-04 db_health
+  // noise). Whole-word catalog identifiers only appear in system/introspection SQL, never a public.* app
+  // query. Deliberately NOT matching `pg_stat*` (a query reading pg_stat_statements is still not ours).
+  /\bpg_(class|attribute|attrdef|namespace|constraint|type|proc|enum|index|inherits|description|depend|rewrite|trigger|policy|am|range|collation|operator|cast|sequence|roles|auth_members|database|tablespace)\b/i,
   /\binformation_schema\b/i, // SQL-standard catalog views
   /\b_?realtime\s*\./i, // realtime / _realtime schema-qualified objects (subscriptions, etc.)
   /\bsupabase_admin\b/i, // supabase_admin-role maintenance/replication queries
 ];
+
+/**
+ * A maintenance command (VACUUM / ANALYZE / CLUSTER / REINDEX) that surfaced in pg_stat_statements is not
+ * an app slow-query to optimize — it has no calling endpoint to cache, no WHERE predicate to index, and no
+ * poll interval to widen. Without this guard a one-off `VACUUM (ANALYZE) public.orders` (~5s, calls=1)
+ * falls through the EXPLAIN-unavailable branch (it isn't a SELECT, so `isSafeSelect` is false) and is
+ * misclassified as `high_call_volume` → a nonsense `reduce_calls` proposal (queryids -7677994386067890637
+ * and 2919954756727600022, both rejected 2026-07-04). Anchored at the statement start so it only fires on a
+ * query that IS a maintenance command, not one that merely mentions the word.
+ */
+const MAINTENANCE_CMD_RE = /^\s*\(*\s*(vacuum|analyze|cluster|reindex)\b/i;
+export function isMaintenanceCommand(query: string): boolean {
+  return MAINTENANCE_CMD_RE.test(query || "");
+}
 
 export function isForeignQuery(query: string): boolean {
   const q = query || "";
@@ -446,6 +466,10 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
   // Gap 3 — a query against a sunset/retiring table (Klaviyo) gets no proposal: we don't tune what
   // we're turning off.
   if (isSunsetQuery(row.query)) return null;
+  // Gap 4 (2026-07-04) — a maintenance command (VACUUM/ANALYZE/CLUSTER/REINDEX) is not an app slow-query;
+  // there's no endpoint to cache or predicate to index. Without this it misclassifies as high_call_volume
+  // → a nonsense reduce_calls proposal.
+  if (isMaintenanceCommand(row.query)) return null;
 
   const overFloor = row.mean_exec_time >= SLOW_QUERY_MIN_MEAN_MS || row.total_exec_time >= SLOW_QUERY_MIN_TOTAL_MS;
   if (!overFloor) return null;

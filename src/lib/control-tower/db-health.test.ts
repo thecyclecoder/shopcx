@@ -20,6 +20,8 @@ import {
   classifyExplainPlan,
   enqueueDbHealthProposal,
   getDbHealthPanel,
+  isForeignQuery,
+  isMaintenanceCommand,
   type InstanceHealthInput,
   type DbHealthFinding,
   type SlowQueryRow,
@@ -456,6 +458,46 @@ test("analyzeSlowQuery — sms `message_sid = $1` at 31ms×157k diagnosed high_c
   assert.equal(finding!.cause, "high_call_volume");
   assert.equal(finding!.fixKind, "reduce_calls");
   assert.notEqual(finding!.fixKind, "vacuum_tuning");
+});
+
+test("isMaintenanceCommand — VACUUM/ANALYZE/CLUSTER/REINDEX are maintenance, a SELECT is not", () => {
+  assert.equal(isMaintenanceCommand("VACUUM (ANALYZE) public.orders"), true);
+  assert.equal(isMaintenanceCommand("  vacuum analyze orders"), true);
+  assert.equal(isMaintenanceCommand("ANALYZE public.customers"), true);
+  assert.equal(isMaintenanceCommand("REINDEX INDEX idx_foo"), true);
+  assert.equal(isMaintenanceCommand("CLUSTER orders USING idx_orders_pk"), true);
+  // A read query that merely MENTIONS the word (column/alias) must NOT be flagged.
+  assert.equal(isMaintenanceCommand("select id, analyze_result from reports where c = $1"), false);
+  assert.equal(isMaintenanceCommand("select * from orders where c = $1"), false);
+});
+
+test("analyzeSlowQuery — VACUUM maintenance command → NO proposal (2026-07-04 reduce_calls noise class)", () => {
+  // queryids -7677994386067890637 / 2919954756727600022: a one-off VACUUM (ANALYZE) public.orders that
+  // pg_stat_statements surfaced at ~5s. It isn't a SELECT (no EXPLAIN), was misclassified as
+  // high_call_volume, and produced a nonsense reduce_calls proposal. The maintenance guard drops it.
+  const row = slowRow({
+    queryid: "-7677994386067890637",
+    query: "VACUUM (ANALYZE) public.orders",
+    calls: 1,
+    total_exec_time: 4_602,
+    mean_exec_time: 4_602,
+    stddev_exec_time: 0,
+  });
+  assert.equal(analyzeSlowQuery(row, null), null);
+});
+
+test("isForeignQuery / analyzeSlowQuery — unqualified pg_catalog introspection is foreign → NO proposal (q4272 class)", () => {
+  // PostgREST's schema-introspection query references pg_constraint/pg_class/pg_attribute/pg_namespace
+  // WITHOUT a pg_catalog. prefix, so the old `\bpg_catalog\b`-only filter missed it and it produced a
+  // bogus add_index proposal on `(query)` (queryid 4272184973515172242).
+  const introspection =
+    "select c.conname, c.conrelid from pg_constraint c join pg_class r on r.oid = c.conrelid " +
+    "join pg_namespace n on n.oid = r.relnamespace join pg_attribute a on a.attrelid = r.oid";
+  assert.equal(isForeignQuery(introspection), true);
+  const row = slowRow({ queryid: "4272184973515172242", query: introspection });
+  assert.equal(analyzeSlowQuery(row, null), null);
+  // A normal public.* app query is NOT foreign.
+  assert.equal(isForeignQuery("select id from orders where customer_id = $1"), false);
 });
 
 test("analyzeSlowQuery — no plan available + bounded query → high_call_volume fallback (NEVER vacuum_tuning)", () => {
