@@ -140,6 +140,24 @@ The worker also passes `--dangerously-bypass-approvals-and-sandbox` on every `co
 
 **Controls.** `BOX_CODEX_ENABLED=0` (in `/root/shopcx-worker.env`) is the kill-switch → every kind reverts to Claude. `BOX_CODEX_MODEL` overrides the model (default: codex's `gpt-5-codex`). On a Codex usage wall, `markCodexCapped` cools Codex down (re-probe clamped like a session account) and routes to Claude until it clears — logged in **AST** (`[runtime] codex usage wall — routing to Claude until …`).
 
+## Bo agent's durable mandate ([[../specs/agent-mandate-hardening-build]] — shipped)
+
+The Bo build agent runs with a **DURABLE MANDATE** — five pieces of accumulated coaching that were baked into the permanent prompt in `scripts/builder-worker.ts` and the agent's personality in `src/lib/agents/personas.ts` (see [[../functions/platform]] "Autonomous build platform"). The mandate replaces ephemeral per-job `agent_instructions` for these five classes of mistakes — Bo now **always** behaves this way, and any new coaching flows through the ephemeral path only (closing the grade→coach→apply loop, moving recurring issues from coaching triage to durable code).
+
+**The five mandate items (lines ~14850–14900 in `scripts/builder-worker.ts`):**
+
+1. **START-STATE RECONCILE** — Before writing a single line, verify what a prior session or sibling PR already carries. `git log --oneline origin/main..HEAD` on `claude/build-<slug>` and `gh pr list --head claude/build-<slug>` — if commits exist for THIS phase, DO NOT rebuild from scratch; make only the follow-up edits needed to green tsc/next-build. If a PR already exists, ADOPT it (push follow-up commits only, or return no_changes_reason). Rebuild churn from ignoring an existing head is the #1 recurring build mistake.
+
+2. **PHASE-SCOPED COMMIT** — Read the assigned `Phase N` and commit ONLY that phase's files. Deliver a SINGLE-PHASE branch — never bundle Phase N+1 silently. If a later phase's file is unavoidable for THIS phase to compile, name it explicitly in the summary. The worker enforces one-phase-per-session and stamps from the branch's `Phase:` trailer; a bundled commit collides with the separately-queued later phase and produces a dirty/failed PR.
+
+3. **TEST-FIRST for a NAMED FAILING STATE** — When the spec names a concrete failing state (a gate omitting a disposition, an empty-body accepted via title/summary), write the smallest test that asserts the CORRECT state first, watch it fail, then change ONLY the predicate needed to make it pass. Skip only when the spec's verification is code inspection / grep-only and say so in the summary.
+
+4. **DERIVED-PHASE ALIGNMENT** — The phase you build MUST be the FIRST nonterminal `public.spec_phases` row whose `build_sha` is null. If the scope names `Phase N`, verify your commit trailer says `Phase: N` — the worker's `stampPhaseBuilt` reads it. A trailer mismatch leaves later phases' `build_sha` unstamped. Return no_changes_reason if the code is already on main.
+
+5. **ONE PHASE PER SESSION IS THE MANDATE** — The worker enforces this and AUTO-QUEUES the next phase's build. Do NOT power through Phase 2/3 in the same session. Ship THIS phase's diff, return completed, and let the auto-chain take the next — a clean single-phase PR merges faster than an ambitious bundled one that collides at merge.
+
+Bo's `personality` string in `src/lib/agents/personas.ts` summarizes the mandate so it's discoverable in the org chart. The permanent prompt block replaces the recurring coaching that was reaching Bo through 13+ ephemeral sessions; durable behavior now frees the coaching lane to handle fresh mistake classes instead of re-teaching the same five items every build.
+
 ## Day-to-day ops (over the tailnet)
 
 ```bash
