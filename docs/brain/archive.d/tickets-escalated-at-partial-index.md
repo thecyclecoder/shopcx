@@ -1,0 +1,1 @@
+- **Add partial btree on tickets(workspace_id, escalated_at DESC) WHERE escalated_at IS NOT NULL to unblock /api/escalated** · verified 2026-07-04 · → [[../lifecycles/ticket-lifecycle]]

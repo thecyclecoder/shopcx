@@ -28,6 +28,8 @@ import {
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
+  isTransientSupabaseEdgeHtmlBody,
+  isTransientUndiciHeadersTimeout,
 } from "@/lib/control-tower/error-feed";
 
 
@@ -147,15 +149,22 @@ export async function POST(request: Request) {
     // signature — Shopify's own wiring check, a scanner, a stale-secret retry) OR a
     // Supabase Cloudflare-edge SSL-handshake HTML blob leaked into an app-layer
     // `console.error` (the shortlink route's best-effort click-logging RPC — the redirect
-    // itself already ships fine): classify it `transient` so recordError auto-resolves a
-    // first sighting (no page) and only escalates to a real open+page on recurrence
-    // within the window — one-off blips are dropped while a function that throws on every
-    // retry / a chronic signing bug / a chronic upstream Supabase edge outage still
+    // itself already ships fine) OR an undici outbound-fetch headers-timeout (`TypeError:
+    // fetch failed` with cause `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` — a
+    // momentary upstream network stall the next batch self-heals) OR a Supabase-edge
+    // Cloudflare 5xx HTML body leaked into console.error text (`<!DOCTYPE html>` +
+    // `supabase.co` + `Web server`/521-524 — the next beat idempotently heals): classify
+    // it `transient` so recordError auto-resolves a first sighting (no page) and only
+    // escalates to a real open+page on recurrence within the window — one-off blips are
+    // dropped while a function that throws on every retry / a chronic signing bug / a
+    // chronic upstream outage still
     // surfaces.
     const transient =
       isTransientInngestStepRetryThrow(g.path, g.message) ||
       isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
-      isTransientSupabaseEdgeHandshakeError(g.message);
+      isTransientSupabaseEdgeHandshakeError(g.message) ||
+      isTransientUndiciHeadersTimeout(g.message) ||
+      isTransientSupabaseEdgeHtmlBody(g.message);
     await recordError({
       source: "vercel",
       // Group on path + status + normalized message (stable bits, not requestId/deploymentId).

@@ -13,11 +13,14 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
+- **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
 - **Guard /api/portal against 300s upstream hangs (Appstle/Shopify fetch timeout)** · verified 2026-07-04 · → [[libraries/portal__helpers]]
+- **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
 - **Research → Teardowns list + a Showcase "View HTML" teardown page** · verified 2026-07-04 · → [[../lifecycles/showcase]]
+- **Add partial btree on tickets(workspace_id, escalated_at DESC) WHERE escalated_at IS NOT NULL to unblock /api/escalated** · verified 2026-07-04 · → [[../lifecycles/ticket-lifecycle]]
 - **Guard crisis_pause action-executor handler against a missing contract_id** · verified 2026-07-03 · → [[../libraries/action-executor]]
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
