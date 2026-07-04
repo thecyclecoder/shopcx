@@ -1,0 +1,1 @@
+- **Scope Supabase Auth 504 gateway-timeout /user wrapper as transient in the error feed** · verified 2026-07-04 · → [[../libraries/control-tower]]

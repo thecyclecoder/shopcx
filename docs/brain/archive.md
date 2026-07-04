@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
+- **Carrie — DR content session (copy + AI imagery + real-asset gap flags)** · verified 2026-07-04 · → [[../functions/growth]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
 - **Reduce call volume / cache the hot query on query -7726440967385220442** · verified 2026-07-04 · → [[../dashboard/home]]
 - **Vacuum / autovacuum-tune orders (bloat)** · verified 2026-07-04 · → [[recipes/db-vacuum-tune-orders]]
@@ -21,6 +22,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **error-feed-drop-supabase-edge-ssl-handshake-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
+- **Scope Supabase Auth 504 gateway-timeout /user wrapper as transient in the error feed** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Scope GoTrue `operation was canceled` dial noise as transient in the Supabase log poller** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Add expression index for find_customers_by_phone last-10 comparison to unblock the Twilio marketing-sms webhook** · verified 2026-07-04 · → [[../tables/customers]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
