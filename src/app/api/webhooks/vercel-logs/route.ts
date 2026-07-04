@@ -27,6 +27,7 @@ import {
   isBareLifecycle,
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
+  isTransientSupabaseEdgeHtmlBody,
   isTransientUndiciHeadersTimeout,
 } from "@/lib/control-tower/error-feed";
 
@@ -147,7 +148,9 @@ export async function POST(request: Request) {
     // signature — Shopify's own wiring check, a scanner, a stale-secret retry) OR an
     // undici outbound-fetch headers-timeout (`TypeError: fetch failed` with cause
     // `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` — a momentary upstream network
-    // stall the next batch self-heals): classify it `transient` so recordError
+    // stall the next batch self-heals) OR a Supabase-edge Cloudflare 5xx HTML body leaked
+    // into console.error text (`<!DOCTYPE html>` + `supabase.co` + `Web server`/521-524 —
+    // the next beat idempotently heals): classify it `transient` so recordError
     // auto-resolves a first sighting (no page) and only escalates to a real open+page on
     // recurrence within the window — one-off blips are dropped while a function that
     // throws on every retry / a chronic signing bug / a chronic upstream outage still
@@ -155,7 +158,8 @@ export async function POST(request: Request) {
     const transient =
       isTransientInngestStepRetryThrow(g.path, g.message) ||
       isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
-      isTransientUndiciHeadersTimeout(g.message);
+      isTransientUndiciHeadersTimeout(g.message) ||
+      isTransientSupabaseEdgeHtmlBody(g.message);
     await recordError({
       source: "vercel",
       // Group on path + status + normalized message (stable bits, not requestId/deploymentId).
