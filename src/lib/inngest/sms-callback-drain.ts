@@ -33,10 +33,12 @@
  *     recount pattern as `marketing-text.ts` send-tick, not a naive
  *     increment (so a re-drained batch never double-counts).
  *
- * `profile_events` "Received SMS" insert on delivered is preserved from
- * the pre-fast-ack inline code path. Phase 4 moves it to a watermarked
- * rollup for true idempotency; the segmentation layer today treats
- * duplicates as one engagement slot.
+ * `profile_events` "Received SMS" is written by the Phase 4
+ * `received-sms-rollup-cron` at the bottom of this file — NOT here on
+ * the drain hot path. The cron reads `sms_campaign_recipients` where
+ * `delivered_at IS NOT NULL AND received_sms_logged_at IS NULL`,
+ * emits one event per row (`datetime = delivered_at`), then stamps
+ * the flag — exactly-once by construction.
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
