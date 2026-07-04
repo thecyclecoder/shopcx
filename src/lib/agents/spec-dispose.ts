@@ -87,12 +87,16 @@ export async function selectDispositionCandidates(
   _admin: Admin,
   workspaceId: string,
 ): Promise<DispositionCandidate[]> {
-  // Read the in_review cohort through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit). The JS
-  // filters below (vale_pass / ada_disposition / deferred / intended_status) all live on SpecRow.
-  const rows = await listSpecs(workspaceId, { status: "in_review" });
+  // specs-status-overrides-only: `status='in_review'` is no longer STORED, so Ada's cohort is selected by
+  // the disposition signals directly — `vale_pass === true` (Vale passed, awaiting disposition) is the real
+  // gate; it can only be set while the spec was in review and is CONSUMED once she disposes, so it precisely
+  // identifies the pending cohort without a status filter. `folded` is skipped defensively. SDK read
+  // (pm-db-agent-toolkit); the JS filters (vale_pass / ada_disposition / deferred / intended_status) all live on SpecRow.
+  const rows = await listSpecs(workspaceId);
   const out: DispositionCandidate[] = [];
   for (const r of rows) {
-    if (!r.vale_pass) continue; // Vale hasn't passed it yet — not Ada's turn.
+    if (r.status === "folded") continue; // archived — never Ada's turn.
+    if (!r.vale_pass) continue; // Vale hasn't passed it yet (null/false) — not Ada's turn.
     if (r.ada_disposition) continue; // already disposed (autonomous flip landed) or parked (pending_upgrade) — skip.
     if (r.deferred) continue; // an out-of-band defer already happened — leave it for the operator.
     const intended: "planned" | "deferred" = r.intended_status === "deferred" ? "deferred" : "planned";

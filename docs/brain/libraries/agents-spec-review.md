@@ -33,7 +33,7 @@ Regression-locked by [[../specs/agent-mandate-hardening-spec-review]] Phase 1 ve
 
 ### `selectUnreviewedInReviewSpecs(admin, workspaceId): Promise<string[]>`
 
-The current Vale queue for one workspace — every `public.specs` row with `status='in_review'` AND `deferred=false` AND **`vale_pass IS NULL`** (i.e. in_review specs that were NEVER verdicted). The `vale_pass` tri-state is the durable, content-keyed review signal:
+The current Vale queue for one workspace. Since `specs-status-overrides-only` (migration `20260907130000`) `in_review` is no longer a STORED status, so the pool is keyed off the durable review signals directly: every `public.specs` row that is NOT `folded`, `deferred=false`, **`vale_review_passed_at IS NULL`** (never durably passed — which excludes a DISPOSED spec whose transient `vale_pass` Ada consumed), AND **`vale_pass IS NULL`** (i.e. NEVER verdicted — the vale-instant-per-spec-review predicate; needs_fix `false` is OUT until re-authored). `markSpecCardBackToReview` NULLs BOTH `vale_pass` and `vale_review_passed_at` on every re-open / re-author, and a fresh authoring leaves them null (`upsertSpec` DB default). The `vale_pass` tri-state is the durable, content-keyed review signal:
 
 - `null` — never verdicted → **in Vale's queue**.
 - `true` — passed (`markSpecCardValePassed`) → parked for Ada's disposition lane, out of the queue.

@@ -138,15 +138,19 @@ export function rollupPhaseStatus(phaseStates: SpecCardPhaseState[]): Phase {
  * specs-status-override-only — the set of statuses that may be PERSISTED to the override-only `specs.status`
  * column. A spec's planned/in_progress/in_testing/shipped/rejected axis is PURELY DERIVED from the phase
  * rollup ([[brain-roadmap]] `deriveSpecCardStatus`), so those values must NEVER land in the stored column —
- * a derived destination clears it to NULL. Only the explicit lifecycle overrides survive in the column:
- *   - in_review — newly authored / sent back; the build pipeline holds it.
+ * a derived destination clears it to NULL. Only the two NON-DERIVABLE lifecycle overrides survive:
  *   - deferred  — CEO parked it (also mirrored on `specs.deferred`).
  *   - folded    — archived after a fold.
- * `in_testing` is itself a read-time derivation (never stored), so it is NOT an override. The CEO rule:
- * "there is only derived status" for everything else (a stored `planned` is the noop-pipeline-test-4 bug).
+ * `in_review` is NO LONGER an override (specs-status-overrides-only migration
+ * 20260907130000_specs_status_overrides_only_derive_in_review): it is DERIVED at read time from the phase
+ * rollup + `vale_review_passed_at` (`deriveSpecCardStatus`), so a stale stored `in_review` can never pin a
+ * built spec in the In Review column again — every writer that passes `status:'in_review'` now maps to NULL
+ * through this predicate. `in_testing` is likewise a read-time derivation (never stored). The CEO rule:
+ * "there is only derived status" for everything except deferred/folded (a stored `planned` is the
+ * noop-pipeline-test-4 bug).
  */
 export function isOverrideStatus(status: string | null | undefined): boolean {
-  return status === "in_review" || status === "deferred" || status === "folded";
+  return status === "deferred" || status === "folded";
 }
 
 // spec-readers-from-db-retire-parser Phase 3: `mergePhaseStates` is RETIRED. Per-phase status + PR/merge_sha

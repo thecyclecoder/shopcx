@@ -419,13 +419,15 @@ export async function upsertSpec(
   // Same preserve-on-undefined rule.
   if (row.parent_kind !== undefined) upsertRow.parent_kind = row.parent_kind;
   if (row.parent_ref !== undefined) upsertRow.parent_ref = row.parent_ref;
-  // specs-status-override-only: `specs.status` is OVERRIDE-ONLY (in_review / deferred / folded). When a caller
-  // passes an explicit status, persist it ONLY if it's a true override; a DERIVED value (planned /
-  // in_progress / shipped) is normalized to NULL so the rollup derives it (never a leaked stored derived
-  // state — the noop-pipeline-test-4 bug). Omitting status entirely keeps the DB default (`in_review`) for a
-  // brand-new spec, which is itself a real override (the build pipeline holds a freshly-authored spec).
+  // specs-status-override-only: `specs.status` is OVERRIDE-ONLY (deferred / folded — the two NON-DERIVABLE
+  // lifecycle states). When a caller passes an explicit status, persist it ONLY if it's a true override; a
+  // DERIVED value (planned / in_progress / shipped) OR `in_review` (now derived from the phase rollup +
+  // `vale_review_passed_at` — specs-status-overrides-only migration) is normalized to NULL so the readers
+  // derive it (never a leaked stored derived state — the noop-pipeline-test-4 bug). Omitting status entirely
+  // keeps the DB default (NULL) for a brand-new spec, which — with no phases and a null `vale_review_passed_at`
+  // — DERIVES `in_review` so the build pipeline still holds a freshly-authored spec.
   if (row.status !== undefined) {
-    const isOverride = row.status === "in_review" || row.status === "deferred" || row.status === "folded";
+    const isOverride = row.status === "deferred" || row.status === "folded";
     upsertRow.status = isOverride ? row.status : null;
   }
 
@@ -924,17 +926,19 @@ export async function specsForMilestone(workspaceId: string, milestoneId: string
 }
 
 /**
- * Write the EXPLICIT lifecycle override on `specs.status` — the states that are NOT derivable from the
- * phase rollup: `in_review` (newly authored, build pipeline holds), `deferred` (parked), `folded` (archived
- * after a fold). Mirrors goals-table `setGoalStatus`: a slug-resolved single UPDATE with an `actor` tag
- * bumped onto `updated_at` (the audit-grade trail lives elsewhere — director_activity rows).
+ * Write the EXPLICIT lifecycle override on `specs.status` — the two states NOT derivable from the phase
+ * rollup: `deferred` (parked) and `folded` (archived after a fold). Mirrors goals-table `setGoalStatus`: a
+ * slug-resolved single UPDATE with an `actor` tag bumped onto `updated_at` (the audit-grade trail lives
+ * elsewhere — director_activity rows).
  *
  * specs-status-override-only: `specs.status` is OVERRIDE-ONLY. Pass `null` to CLEAR the override so the
- * status is PURELY DERIVED from the phase rollup (the readers' `deriveSpecCardStatus`) — this is the
- * sanctioned way to flip a spec OUT of an override (e.g. in_review → the normal build flow) without
- * leaking a derived `planned`/`in_progress`/`shipped` into the stored column (the noop-pipeline-test-4 bug).
- * Passing a DERIVED value (planned/in_progress/shipped) is a CALLER bug; it's normalized to NULL here with a
- * warning so the override-only invariant can never be broken by a stray caller.
+ * status is PURELY DERIVED (the readers' `deriveSpecCardStatus`: the phase rollup, plus `in_review` derived
+ * from rollup===planned + `vale_review_passed_at IS NULL`) — this is the sanctioned way to flip a spec OUT
+ * of an override without leaking a derived value into the stored column (the noop-pipeline-test-4 bug).
+ * Passing a DERIVED value (planned/in_progress/shipped) OR `in_review` (now derived — specs-status-overrides-
+ * only migration) is normalized to NULL here with a warning so the override-only invariant can never be
+ * broken by a stray caller. NOTE: to actually SEND a spec back to review, NULL `vale_review_passed_at` via
+ * `markSpecCardBackToReview` — a status write alone no longer expresses "in review".
  *
  * This is the ONLY sanctioned `specs.status` writer outside `upsertSpec`. The deriving readers prefer the
  * phase rollup; this column carries the non-derivable overrides only (CLAUDE.md "Database is the spec":
@@ -947,10 +951,10 @@ export async function setSpecStatus(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _actor: string,
 ): Promise<void> {
-  // Override-only guard: a derived destination clears to NULL (never persisted to the override column).
+  // Override-only guard: a derived destination (including the now-derived `in_review`) clears to NULL.
   let stored: SpecStatus | null = status;
-  if (status !== null && !(status === "in_review" || status === "deferred" || status === "folded")) {
-    console.warn(`[specs-table.setSpecStatus] derived status '${status}' for ${slug} normalized to NULL (override-only column)`);
+  if (status !== null && !(status === "deferred" || status === "folded")) {
+    console.warn(`[specs-table.setSpecStatus] non-override status '${status}' for ${slug} normalized to NULL (override-only column: deferred/folded)`);
     stored = null;
   }
   const admin = createAdminClient();

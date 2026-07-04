@@ -4632,13 +4632,16 @@ export async function platformHasPendingWork(workspaceId: string): Promise<Platf
     if (alerts?.length) return { pending: true, reason: "open loop_alerts" };
   }
 
-  // (6) any non-terminal spec — every drive lane's input (in_review / planned / in_progress covers them).
+  // (6) any non-terminal spec — every drive lane's input. specs-status-overrides-only: the derived statuses
+  // (in_review / planned / in_progress / shipped) all carry a NULL stored `status`; only the two terminal-ish
+  // overrides (`deferred` / `folded`) are stored. So "non-terminal" = `status IS NULL` (a shipped-awaiting-fold
+  // spec is intentionally included — it still feeds the spec-test / fold drive lanes).
   {
     const { data } = await admin
       .from("specs")
       .select("slug")
       .eq("workspace_id", workspaceId)
-      .in("status", ["in_review", "planned", "in_progress"])
+      .is("status", null)
       .limit(1);
     if (data?.length) return { pending: true, reason: "non-terminal specs" };
   }
@@ -4656,12 +4659,18 @@ export async function platformHasPendingWork(workspaceId: string): Promise<Platf
   }
 
   // (8) coverage past freshness — a shipped spec with no spec_test_runs in the window (or never).
+  // specs-status-overrides-only: `shipped` is now DERIVED (no stored `status='shipped'`), so we proxy it via
+  // merge provenance — a spec that has merged at least once carries `last_merge_sha` — among non-terminal
+  // (`status IS NULL`) rows. This is a cheap DB-only wake gate (over-including a part-shipped spec is
+  // harmless: the freshness filter below still gates, and the downstream reconcileRegressionCoverage
+  // re-derives the true shipped set).
   try {
     const { data: shipped } = await admin
       .from("specs")
       .select("slug")
       .eq("workspace_id", workspaceId)
-      .eq("status", "shipped")
+      .is("status", null)
+      .not("last_merge_sha", "is", null)
       .limit(500);
     const shippedRows = (shipped ?? []) as Array<{ slug: string }>;
     if (shippedRows.length) {
