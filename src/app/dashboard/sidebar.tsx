@@ -163,9 +163,12 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       // Competitors under the Research section; supersedes the legacy 'Lander Teardowns' surface
       // (lander_snapshots) for competitor lander teardowns going forward.
       { href: "/dashboard/research/landers", label: "Landers", icon: "M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5m.75-9l3-3 2.148 2.148A12.061 12.061 0 0116.5 7.605" },
-      // Research › Lander Teardowns — owner-facing viewer for competitor funnels captured by the
-      // Landing Page Scout (Tool 4 / M3). Sibling to Competitors under the Research section.
-      { href: "/dashboard/research/teardowns", label: "Lander Teardowns", icon: "M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" },
+      // Research › Teardowns — the curated gallery of successful teardowns (research_urls rows
+      // carrying a structured TeardownRecipe), worthiest-first. Complements 'Landers' (all
+      // classified URLs) with just the ones worth studying. Each row opens the founder-approved
+      // HTML board on the Showcase (/showcase/tools/teardowns/examples/[id]). Supersedes the
+      // legacy lander_snapshots teardowns surface.
+      { href: "/dashboard/research/teardowns", label: "Teardowns", icon: "M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" },
     ],
   },
   // Developer is a PORTAL, not a collapsible section — clicking it lands on the Overview and the
