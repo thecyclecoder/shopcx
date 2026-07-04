@@ -19,6 +19,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Guard /api/portal against 300s upstream hangs (Appstle/Shopify fetch timeout)** · verified 2026-07-04 · → [[libraries/portal__helpers]]
 - **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
 - **Research → Teardowns list + a Showcase "View HTML" teardown page** · verified 2026-07-04 · → [[../lifecycles/showcase]]
+- **Add partial btree on tickets(workspace_id, escalated_at DESC) WHERE escalated_at IS NOT NULL to unblock /api/escalated** · verified 2026-07-04 · → [[../lifecycles/ticket-lifecycle]]
 - **Guard crisis_pause action-executor handler against a missing contract_id** · verified 2026-07-03 · → [[../libraries/action-executor]]
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
