@@ -22,6 +22,11 @@ Turn a decided piece of work into a DB spec row that the build pipeline will pic
 
 1. **Write to the checklist.** [[../../docs/brain/recipes/what-makes-a-buildable-spec]] is the single definition of a sound spec — the SAME bar Vale's [[spec-review]] gates on. Read it and author to it; don't restate its rules from memory. In short: a real function `owner` (who *operates* the tool, not who builds it — **Ada/Platform builds every spec**), a non-orphan `parent` (a mandate or goal milestone), and every phase carries an observable `verification`.
 
+   **⚠️ Parent — pick the RIGHT kind (the #1 Vale bounce).** The work hierarchy is `Function → (Mandate | Goal→Milestone) → Spec`. A spec's parent is EITHER a **function mandate** OR a **goal milestone** — **never a bare goal and never a bare function.**
+   - **One-off / standalone spec** (a fix, a hardening, a correctness pass — most specs) → parent a **function mandate**: `parentKind: "mandate"`, `parentRef: "{owner}#{mandate-slug}"`, and write the prose to name that mandate, e.g. `parent: '[[../functions/platform]] — "Infra & DevOps / reliability" mandate: <why>.'`. **A one-off does NOT need a goal — do not force it onto one.**
+   - **Goal-bound spec** (part of a finite, multi-spec goal) → parent a specific **milestone**: pass `milestoneId` (the `goal_milestones.id`) and/or anchor the wikilink `[[../goals/{slug}#{milestone}]]`. A `Parent:` that names ONLY the goal (no milestone) is a defect Vale bounces every pass.
+   - Find a function's mandates under `## Mandates (perpetual)` in `docs/brain/functions/{owner}.md` (e.g. growth: `ad-matched-landing-pages`, `static-ad-optimization`; platform: `autonomous-build-platform`, `infra-devops-reliability`). The authoring chokepoint now THROWS `InvalidParentError` on a bare-goal parent, so a bad parent fails fast instead of looping in review.
+
 2. **Probe before you assume shapes.** If the spec touches a table/enum/column, use the [[probe-db]] skill first — the body should describe real column names and real enum values, not guessed ones. Ground the body in actual `src/` files (`file:line`) and brain pages. Grounding + the Verification gate are what make the spec accurate.
 
 3. **Author it** with a disposable `scripts/_author-{slug}.ts` (`_` = throwaway/not a tracked tool), using the [[script-conventions]] `_bootstrap`:
@@ -43,7 +48,10 @@ Turn a decided piece of work into a DB spec row that the build pipeline will pic
          what: "Plain-language WHAT changes when it ships (REQUIRED).",
          summary: "1–3 sentences grounded in real file:line / table names.",
          owner: "growth",                        // a function, NOT a person
-         parent: "[[../goals/acquisition-research-engine]] (M4) — the operating home.",
+         // ONE-OFF spec → parent a function MANDATE (not a goal). Name the mandate in the prose AND
+         // pass the typed parentKind/parentRef below. (Goal-bound spec instead? pass milestoneId + a
+         // [[../goals/{slug}#{milestone}]] anchor.)
+         parent: '[[../functions/growth]] — "Ad-matched landing pages" mandate: <why this spec lives here>.',
          blocked_by: [],                          // other spec slugs that must ship first
          phases: [
            {
@@ -57,7 +65,13 @@ Turn a decided piece of work into a DB spec row that the build pipeline will pic
          ],
        },
        "planned",                                // intended_status: "planned" | "deferred"
-       { intendedStatusSetBy: "ceo" },           // + milestoneId to bind a goal milestone
+       {
+         intendedStatusSetBy: "ceo",
+         // ONE-OFF → declare the mandate parent (matches the `parent` prose above):
+         parentKind: "mandate",
+         parentRef: "growth#ad-matched-landing-pages",   // "{owner}#{mandate-slug}"
+         // GOAL-BOUND instead → drop parentKind/parentRef and pass: milestoneId: "<goal_milestones.id>"
+       },
      );
      console.log(ok ? "authored" : "author write failed");
    }

@@ -225,6 +225,64 @@ export class MissingIntentError extends Error {
 }
 
 /**
+ * Thrown when a spec is authored with a BARE-GOAL parent (one-off-spec-parent hotfix). CLAUDE.md's work
+ * hierarchy — `Function → (Mandate | Goal→Milestone) → Spec` — says a spec's parent is a function MANDATE
+ * or a goal MILESTONE, NEVER a bare goal. A one-off (standalone) spec parents to a function mandate; only a
+ * goal-bound spec parents to a specific milestone. The bug this closes: authoring surfaces (and the
+ * submit-spec skill's old worked example) handed one-off specs a bare `[[../goals/{slug}]]` parent with no
+ * milestone, which Vale then bounced as `needs_fix` on every review pass — an infinite re-review loop that
+ * never built. Sibling to `MissingVerificationError` — same "fail-loud-at-the-parse-step" pattern.
+ */
+export class InvalidParentError extends Error {
+  constructor(
+    public readonly parent: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "InvalidParentError";
+  }
+}
+
+const GOAL_PARENT_RE = /\[\[[^\]]*goals\/([a-z0-9][a-z0-9-]*)([^\]]*)\]\]/i;
+
+/**
+ * Guard the `Parent:` reference at the authoring chokepoint (one-off-spec-parent hotfix). Rejects the
+ * unambiguous "one-off forced onto a bare goal" shape: a `[[../goals/{slug}]]` wikilink with NO milestone
+ * anchor AND no `milestoneId` binding. A one-off spec should instead parent to a function MANDATE
+ * (`parentKind:"mandate"`, `parentRef:"{owner}#{mandate-slug}"`); a goal-bound spec must name a specific
+ * milestone (pass `milestoneId`, or anchor `[[../goals/{slug}#{milestone}]]`).
+ *
+ * CONSERVATIVE by design — it trusts a caller that has DECLARED a typed parent (`parentKind` mandate/
+ * milestone) or bound an explicit `milestoneId` (e.g. the blueprint→build path), and only guards the
+ * UN-TYPED authoring surface (the `_author-*.ts` one-offs / markdown / planner defaults) where the bug
+ * lives. The fuzzier bare-function / sibling-spec parent shapes are left to Vale + the authoring guidance
+ * (submit-spec skill + [[what-makes-a-buildable-spec]] recipe) — throwing on those risks false positives.
+ */
+export function assertValidParent(
+  parent: string,
+  opts: { milestoneId?: string | null; parentKind?: "function" | "mandate" | "milestone" | null } = {},
+): void {
+  // A caller that bound an explicit milestone FK, or declared a typed mandate/milestone parent, has taken
+  // responsibility for the anchor — trust it (don't break the blueprint→build path that passes
+  // parentKind:'milestone').
+  if (opts.milestoneId) return;
+  if (opts.parentKind === "mandate" || opts.parentKind === "milestone") return;
+  const m = (parent || "").trim().match(GOAL_PARENT_RE);
+  if (!m) return; // a mandate / function / prose parent — Vale is the backstop for the fuzzier shapes.
+  const anchor = m[2] || "";
+  // "names a milestone" = a wikilink `#anchor`, a "(M4)" tag, or an explicit "milestone" / bare "M<n>" token.
+  const namesMilestone = anchor.includes("#") || /\(\s*M\s*\d|milestone|\bM\d+\b/i.test(parent);
+  if (namesMilestone) return;
+  throw new InvalidParentError(
+    parent,
+    `Parent names goal "${m[1]}" with no specific milestone. A one-off spec should parent to a function ` +
+      `mandate (parentKind:"mandate", parentRef:"${"{owner}"}#{mandate-slug}"), NOT a goal; a goal-bound spec ` +
+      `must anchor to a milestone (pass milestoneId, or [[../goals/${m[1]}#{milestone}]]). ` +
+      `Don't force a one-off spec onto a bare goal.`,
+  );
+}
+
+/**
  * Plain-language lint for the intent columns (`why` / `what` / `outcome`). The intent fields are for a
  * SHARED human+agent read — code fences and `file:line` refs belong in the technical body, not here. This
  * check runs alongside `assertEveryNodeHasIntent` so a caller that stuffs code into `why` fails the same
@@ -817,6 +875,10 @@ export async function authorSpecRowStructured(
     if (!existing && isDerivativeFix && (await isRunawayFixAuthoring(workspaceId, slug))) {
       return false;
     }
+    // one-off-spec-parent: reject a bare-goal parent BEFORE the write (fail-loud, like the Verification/Intent
+    // gates) so a one-off spec never lands with a goal parent Vale will bounce forever. Trusts a declared
+    // typed parent / bound milestoneId (see assertValidParent).
+    assertValidParent(spec.parent, { milestoneId: opts.milestoneId, parentKind: opts.parentKind });
     const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
       position: i + 1,
       title: p.title,
@@ -972,6 +1034,10 @@ export async function authorSpecRowFromMarkdown(
 
   try {
     const card = parseAuthoredSpecMarkdown(slug, markdown);
+    // one-off-spec-parent: reject a bare-goal parent before the write (the markdown path never passes a typed
+    // parentKind, so this catches a markdown-authored one-off forced onto a bare goal). Thrown → caught below
+    // → author returns false (the spec never lands), same as any parse defect on this soft path.
+    assertValidParent(card.parent ?? "", { milestoneId: opts.milestoneId, parentKind: opts.parentKind });
     const regressionHeaders = extractRegressionHeaders(markdown);
     // pm-structured-intent-and-refs Phase 1 — extract plain-language intent headers from the markdown
     // (`**Why:**` / `**What:**`) when present. The markdown path is SOFT: if the surfaces haven't been
