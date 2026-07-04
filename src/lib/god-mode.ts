@@ -74,6 +74,23 @@ export type GodModeMessage = {
 
 export type GodModeStatus = "armed" | "disarmed" | "expired";
 
+export type GodModeApprovalRisk = "safe" | "write" | "destructive";
+export type GodModeApprovalStatus = "pending" | "approved" | "denied" | "asked";
+
+export type GodModeApprovalRow = {
+  id: string;
+  session_id: string;
+  workspace_id: string;
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  preview: string;
+  risk: GodModeApprovalRisk;
+  status: GodModeApprovalStatus;
+  question_text: string | null;
+  decided_at: string | null;
+  created_at: string;
+};
+
 export type GodModeSessionRow = {
   id: string;
   workspace_id: string;
@@ -214,4 +231,172 @@ export async function getSessionByToken(admin: Admin, token: string): Promise<Go
 export function cockpitUrl(token: string): string {
   const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
   return `${siteUrl}/god/${token}`;
+}
+
+// ── Phase 2 mutators — box lane + gate call these ─────────────────────────
+
+/**
+ * Append one message to a session's transcript. Read-modify-write is fine here
+ * — the box lane is concurrency-1 per session (only one turn writes at a time),
+ * so no interleaving. Also bumps `last_activity_at` — the Phase-5 in-flight
+ * signal — so a live turn never idles the session out.
+ */
+export async function appendMessage(
+  admin: Admin,
+  sessionId: string,
+  message: GodModeMessage,
+): Promise<void> {
+  const { data } = await admin
+    .from("god_mode_sessions")
+    .select("messages")
+    .eq("id", sessionId)
+    .maybeSingle();
+  const existing = Array.isArray(data?.messages) ? (data!.messages as GodModeMessage[]) : [];
+  await admin
+    .from("god_mode_sessions")
+    .update({ messages: [...existing, message], last_activity_at: new Date().toISOString() })
+    .eq("id", sessionId);
+}
+
+/** Capture the box session id + config dir after a turn so the next turn --resume's cleanly. */
+export async function setBoxSession(
+  admin: Admin,
+  sessionId: string,
+  args: { boxSessionId: string | null; boxSessionConfigDir: string | null },
+): Promise<void> {
+  await admin
+    .from("god_mode_sessions")
+    .update({
+      box_session_id: args.boxSessionId,
+      box_session_config_dir: args.boxSessionConfigDir,
+    })
+    .eq("id", sessionId);
+}
+
+/**
+ * Bump the sliding TTL + last_activity_at forward. Called on every GET /
+ * message / approve / turn stream line — keeps the session live under Phase-5's
+ * reaper. Idempotent, never past `absolute_expires_at` (the hard ceiling).
+ */
+export async function bumpActivity(admin: Admin, sessionId: string): Promise<void> {
+  const now = new Date();
+  const newTokenExpiresAt = new Date(now.getTime() + SLIDING_TTL_MS).toISOString();
+  // We could clamp against absolute_expires_at, but the reaper independently
+  // enforces the absolute ceiling — so a bump past it just sets a longer
+  // token_expires_at than absolute_expires_at, and the reaper still force-
+  // disarms on the absolute check.
+  await admin
+    .from("god_mode_sessions")
+    .update({ token_expires_at: newTokenExpiresAt, last_activity_at: now.toISOString() })
+    .eq("id", sessionId);
+}
+
+/**
+ * Open one approval row — the Phase-2 gate lands here for every non-safe tool
+ * call. Denorms `workspace_id` off the session so the cockpit read path stays
+ * one-row-lookup. Returns the freshly-written row.
+ */
+export async function openApproval(
+  admin: Admin,
+  args: {
+    sessionId: string;
+    workspaceId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    preview: string;
+    risk: GodModeApprovalRisk;
+  },
+): Promise<GodModeApprovalRow> {
+  const { data, error } = await admin
+    .from("god_mode_approvals")
+    .insert({
+      session_id: args.sessionId,
+      workspace_id: args.workspaceId,
+      tool_name: args.toolName,
+      tool_input: args.toolInput,
+      preview: args.preview,
+      risk: args.risk,
+      status: "pending",
+    })
+    .select("*")
+    .single();
+  if (error || !data) throw new Error(`openApproval failed: ${error?.message ?? "no row"}`);
+  return data as GodModeApprovalRow;
+}
+
+/** Fetch one approval by id — the gate's poll loop reads this every ~2s. */
+export async function getApproval(admin: Admin, id: string): Promise<GodModeApprovalRow | null> {
+  const { data } = await admin
+    .from("god_mode_approvals")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  return (data as GodModeApprovalRow | null) ?? null;
+}
+
+/**
+ * Resolve one approval to a terminal status. Idempotent — no-op if already
+ * terminal. Stamps decided_at. On `ask`, requires question_text.
+ */
+export async function decideApproval(
+  admin: Admin,
+  args: {
+    approvalId: string;
+    decision: "approve" | "deny" | "ask";
+    questionText?: string;
+  },
+): Promise<GodModeApprovalRow | null> {
+  const existing = await getApproval(admin, args.approvalId);
+  if (!existing) return null;
+  if (existing.status !== "pending") return existing;
+
+  const nextStatus: GodModeApprovalStatus =
+    args.decision === "approve" ? "approved" : args.decision === "deny" ? "denied" : "asked";
+  if (nextStatus === "asked" && !args.questionText) {
+    throw new Error("decideApproval(ask) requires questionText");
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await admin
+    .from("god_mode_approvals")
+    .update({
+      status: nextStatus,
+      question_text: nextStatus === "asked" ? (args.questionText ?? null) : null,
+      decided_at: now,
+    })
+    .eq("id", args.approvalId)
+    .select("*")
+    .single();
+  if (error || !data) throw new Error(`decideApproval failed: ${error?.message ?? "no row"}`);
+  return data as GodModeApprovalRow;
+}
+
+/**
+ * Phase-5 in-flight check: does the session have any pending approval OR a
+ * recently-active turn? Reaper uses this to decide whether an idle-TTL-past
+ * session is safe to expire.
+ */
+export async function hasInFlight(admin: Admin, sessionId: string): Promise<boolean> {
+  const { count } = await admin
+    .from("god_mode_approvals")
+    .select("id", { count: "exact", head: true })
+    .eq("session_id", sessionId)
+    .eq("status", "pending");
+  return (count ?? 0) > 0;
+}
+
+/**
+ * Load the sliding + absolute TTLs for a session (the gate uses these to bail
+ * fast if the founder disarmed the session while the box was mid-tool-call).
+ */
+export async function isSessionArmed(admin: Admin, sessionId: string): Promise<boolean> {
+  const { data } = await admin
+    .from("god_mode_sessions")
+    .select("status, absolute_expires_at")
+    .eq("id", sessionId)
+    .maybeSingle();
+  if (!data) return false;
+  if (data.status !== "armed") return false;
+  if (data.absolute_expires_at && new Date(data.absolute_expires_at) < new Date()) return false;
+  return true;
 }

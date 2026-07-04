@@ -18,14 +18,24 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 | `verifyPin(candidate, stored)` | Constant-time PIN verify. Parses the stored `scrypt:v1:<salt>:<hash>` string, re-derives, compares via `timingSafeEqual`. Returns `false` on missing/malformed stored value — never leaks validity beyond allow/deny. |
 | `SLIDING_TTL_MS` | 20 minutes. Sliding-TTL bump for the cockpit token — every Phase-3 GET/message/approve + every Phase-2 box turn extends `token_expires_at` this far. |
 | `ABSOLUTE_TTL_MS` | 12 hours. Hard ceiling for `absolute_expires_at`. Never bumped. |
-| `GodModeMessage` / `GodModeStatus` / `GodModeSessionRow` | Types. |
+| `appendMessage(admin, sessionId, message)` | Read-modify-write one entry onto the transcript. Bumps `last_activity_at` (Phase-5 in-flight signal). |
+| `setBoxSession(admin, sessionId, { boxSessionId, boxSessionConfigDir })` | Capture the Claude session id + config dir after a turn so the next turn `--resume`'s cleanly and pins to the SAME Max account. |
+| `bumpActivity(admin, sessionId)` | Slide `token_expires_at` forward `SLIDING_TTL_MS` + touch `last_activity_at`. Called on every GET/message/approve/turn line. |
+| `openApproval(admin, args)` | Insert one `god_mode_approvals` row (`status='pending'`, `risk`). Called by the Phase-2 permission gate for every non-safe tool call. Returns the row. |
+| `getApproval(admin, id)` | Poll a single approval row (~2s cadence in the gate). |
+| `decideApproval(admin, { approvalId, decision, questionText? })` | Terminal-flip one approval to `approved` / `denied` / `asked`. Idempotent (no-op if already terminal). `ask` requires `questionText`. |
+| `hasInFlight(admin, sessionId)` | Phase-5 reaper check — does the session hold any `pending` approval? A `true` blocks the idle-disarm. |
+| `isSessionArmed(admin, sessionId)` | Belt-and-suspenders check the gate uses to bail fast if the founder disarmed while a tool call was mid-flight. |
+| `GodModeMessage` / `GodModeStatus` / `GodModeSessionRow` / `GodModeApprovalRow` / `GodModeApprovalRisk` / `GodModeApprovalStatus` | Types. |
 
 ## Callers
 
 - `POST /api/god-mode/arm` — owner-gated. Calls `armSession` + returns `cockpit_url`.
 - `POST /api/god-mode/disarm` — owner-gated OR cockpit-token authed. Calls `disarmSession`.
 - `scripts/_set-god-mode-pin.ts` — disposable, env-fed. Calls `hashPin` to store ONLY the hash.
-- Phase 2+ box permission gate — will call `getSessionByToken` + a new `openApproval` / `decideApproval` pair (this file is the chokepoint they land under).
+- `scripts/builder-worker.ts` `runGodModeJob` — turn runner. Calls `disarmSession` (kill mode), `appendMessage`, `setBoxSession`, `bumpActivity`.
+- `scripts/god-mode-permission-gate.ts` — the box-side PreToolUse hook. Calls `isSessionArmed`, `openApproval`, `getApproval` in a poll loop.
+- Phase 3+ cockpit routes (`/api/god/[token]/*`) — will call `getSessionByToken` + `decideApproval` + `bumpActivity`.
 
 ## RLS + safety
 
