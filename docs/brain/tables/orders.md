@@ -138,6 +138,16 @@ const { count } = await admin.from("orders")
 
 - `orders_workspace_id_created_at_idx (workspace_id, created_at DESC)` — backs workspace order timelines / recent-orders loaders (filter `workspace_id` + sort `created_at DESC` in one index scan, no separate Sort). Diagnosed by the [[../specs/db-index-orders]] DB Health Agent finding; applied to PROD via `CREATE INDEX CONCURRENTLY` (`scripts/apply-orders-workspace-created-at-index.ts`), recorded plain in `20260630120000_orders_workspace_created_at_index.sql` for fresh/local builds.
 
+## Autovacuum tuning
+
+Per-table `reloptions` are tightened on `public.orders` — the cluster default `autovacuum_vacuum_scale_factor = 0.20` is too loose for the fulfillment-status/UTM/address churn on this table, so the DB Health Agent's [[../libraries/db-health|bloat pass]] flagged `dbhealth:bloat:orders`. Fix (owner-approval-only, `20260704120000_orders_autovacuum_scale_factor.sql` + `scripts/apply-orders-autovacuum-migration.ts` — full write-up in [[../recipes/db-vacuum-tune-orders]]):
+
+  - `autovacuum_vacuum_scale_factor = 0.05` (fire at 5% dead, not 20%)
+  - `autovacuum_analyze_scale_factor = 0.02` (refresh stats at 2% churn)
+  - `autovacuum_vacuum_threshold = 1000` (floor)
+
+**No data is deleted** by the fix — `VACUUM` reclaims dead-tuple space + refreshes planner stats; live rows are untouched.
+
 ## Gotchas
 
 - There is no `name` column — use `order_number` (e.g. `"SC129467"`).
