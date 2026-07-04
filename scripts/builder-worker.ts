@@ -9711,34 +9711,82 @@ async function runSpecReviewJob(job: Job) {
     }
   }
 
+  // agent-mandate-hardening-spec-review Phase 1 — bake the accumulated coaching into the run-job. Pre-
+  // resolve every goal in the workspace so Vale can validate any `Parent: [[../goals/{slug}]]` or
+  // `[[../goals/{slug}#M{n}-…]]` wikilink against the DB row directly. The rejection pattern the coaching
+  // caught: Vale kept flagging `Parent: [[../goals/{slug}]]` specs on the grounds that
+  // docs/brain/goals/{slug}.md is absent — but that path was PURGED in spec-pm-markdown-purge and the DB
+  // is authoritative. Handing Vale the resolved goal + milestones inline lets her check against the truth
+  // instead of a stale filesystem heuristic.
+  const goalIndex: { slug: string; milestones: { id: string; title: string }[] }[] = await (async () => {
+    try {
+      const { listGoals } = await import("../src/lib/goals-table");
+      const goals = await listGoals(job.workspace_id);
+      return goals.map((g) => ({
+        slug: g.slug,
+        milestones: (g.milestones ?? []).map((m) => ({ id: m.id, title: m.title })),
+      }));
+    } catch (e) {
+      console.warn(`${tag} could not pre-resolve goals index: ${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
+  })();
+  const goalIndexBlock = goalIndex.length
+    ? [
+        `GOAL-PARENT LOOKUP — RESOLVED FROM public.goals + public.goal_milestones (the DB is authoritative;`,
+        `docs/brain/goals/*.md was DELETED in spec-pm-markdown-purge — do NOT reject a Parent goal wikilink`,
+        `on the grounds that its markdown file is missing). When a spec's Parent line names a goal, validate`,
+        `it against this DB-resolved index (goal slug → milestones):`,
+        ...goalIndex.map(
+          (g) =>
+            `  • ${g.slug}${
+              g.milestones.length
+                ? ` — milestones: ${g.milestones.map((m) => `#${m.id.slice(0, 8)}=${m.title}`).join("; ")}`
+                : ` — no milestones`
+            }`,
+        ),
+        `If the Parent wikilink names a goal slug that IS in this index, the goal parent RESOLVES — do not`,
+        `emit needs_fix on missing-goal-file grounds. If the Parent names ONLY the goal (no milestone) AND`,
+        `the goal has ≥1 milestone in the index above, that IS a defect (specs must anchor to a specific`,
+        `milestone, not the general goal). If the goal slug is NOT in this index, then the parent goal`,
+        `genuinely does not exist and needs_fix is correct.`,
+      ].join("\n")
+    : `GOAL-PARENT LOOKUP — the goals index is empty for this workspace (no goals authored yet), so any Parent that claims a [[../goals/{slug}]] wikilink is unresolved and IS a defect.`;
+
   try {
     const prompt = [
       `You are Vale, the box's Spec-Review agent — the meticulous reviewer who guards the build pipeline. Use the spec-review skill (cwd is the repo root). You are on Max (no ANTHROPIC_API_KEY, web search on), read-only against the repo + DB. The WORKER (deterministic Node) is the only component that mutates state — you investigate and emit verdicts.`,
       ``,
-      `Phase 3 (governance — CEO design, refined by vale-reasons-the-disposition): you check QUALITY (pass/needs_fix) AND — on a PASS — ALSO recommend a reasoned planned/deferred disposition. Ada (the Platform/DevOps Director) still DISPOSES: she applies your recommendation through her existing asymmetric routing (same → autonomous, DOWNGRADE → autonomous + notify with YOUR reason, UPGRADE → CEO-gated Approval Request carrying YOUR reason). You PROPOSE; the director + the CEO gate still hold. A passing spec stays in_review for Ada's sweep; a malformed spec stays in_review with the diagnosis recorded and NO disposition (an ill-formed spec is not dispositionable yet).`,
+      `Phase 3 rubric — QUALITY ONLY: you emit exactly one verdict per spec (pass | needs_fix). Ada owns the planned/deferred call — do NOT emit disposition / disposition_reason. AGENT_RUBRICS["spec-review"] is explicit: "Phase 3: QUALITY only — pass/needs_fix; planned/deferred is Ada's call, not Vale's." An emitted disposition is a lane violation and the grader penalises it. (This supersedes the earlier vale-reasons-the-disposition delegation — repeated coaching stuck.)`,
       ``,
       `🗃️ DB-DRIVEN SPECS — specs now live in public.specs + public.spec_phases, NOT in docs/brain/specs/*.md (those files were DELETED in the db-driven-specs purge — do NOT try to read them, they don't exist). The worker has MATERIALIZED each in_review spec's DB row to a temp file under .box/. Read THAT file, never docs/brain/specs/….`,
       ``,
-      `THE QUEUE — ${reviewable.length} spec(s) parked in_review awaiting your review. Read the materialized DB row at each path:`,
-      reviewable.map((s) => `  • .box/spec-${s}.md`).join("\n"),
+      `THE QUEUE — ${reviewable.length} spec(s) parked in_review awaiting your review. Read the materialized DB row at each path (the slug BEFORE .md IS the slug you MUST emit — copy it VERBATIM into decisions[].slug; do not re-derive the slug from the H1 title, the summary, or intuition. Any decision whose slug doesn't match a queued path is silently dropped by the worker):`,
+      reviewable.map((s) => `  • .box/spec-${s}.md   (slug: ${s})`).join("\n"),
+      ``,
+      goalIndexBlock,
       ``,
       `For EACH spec, read its .box/spec-{slug}.md (the materialized DB row) + check it against this CHECKLIST (adapted to the DB row — the materialized file has NO status markers; status is a DB column, so don't check the H1 for emojis):`,
-      `  • Exactly one well-formed phase sequence — the phases are spec_phases rows rendered as "## Phase N — …" headings; no duplicate / mangled / out-of-order phase numbers (a "P1/P2/P1/P2" shape is a defect). A one-shot spec with no "## Phase" heading is fine (the whole thing ships in one PR).`,
-      `  • A real **Owner:** [[../functions/{slug}]] line (the DRI) — the wikilink must resolve to a real docs/brain/functions/ doc.`,
-      `  • A real **Parent:** line (a function mandate — a ### under that function's ## Mandates — or a goal milestone in docs/brain/goals/) — no orphan specs.`,
-      `  • A **Blocked-by:** [[…]] line IFF the spec actually has prerequisites (the body names them). Absence is fine when there are none; only a defect when prerequisites are named in the body but missing from the header.`,
-      `  • A DB-companion plan if the spec adds a customer-referenced table (the CLAUDE.md hard rule — a Sonnet data tool must be wired in sonnet-orchestrator-v2.ts). Flag a customer_id table introduced with no such plan.`,
-      `  • A Verification block per phase — each phase in the materialized file should carry its "### Verification" section (spec_phases.verification) so the spec-test agent can grade it later. A phase with no verification is a defect; a one-shot spec needs at least one Verification block.`,
+      `  1. PHASES — exactly one well-formed phase sequence. Phases render as "## Phase N — …" (one per spec_phases row); no duplicate / mangled / out-of-order phase numbers (a "P1/P2/P1/P2" shape is a defect). A one-shot spec with no "## Phase" heading is fine.`,
+      `  2. OWNER — a real **Owner:** [[../functions/{slug}]] line whose wikilink resolves to docs/brain/functions/{slug}.md.`,
+      `  3. PARENT — a real **Parent:** line pointing at either a function mandate (a ### under that function's ## Mandates) OR a goal milestone. For a goal parent, USE THE DB-RESOLVED INDEX ABOVE — never reject on "docs/brain/goals/{slug}.md is missing" (that path is purged). A Parent that names only the goal when the DB shows the goal has milestones IS a defect (should anchor to a milestone).`,
+      `  4. BLOCKED-BY — a **Blocked-by:** [[…]] line IFF the spec actually depends on prerequisites (the body names them). Absence is fine when there are none; only a defect when prerequisites are named in the body but missing from the header.`,
+      `  5. DB-COMPANION — flag a customer-referenced table (customer_id column) introduced with no plan for a Sonnet data tool in sonnet-orchestrator-v2.ts (CLAUDE.md hard rule).`,
+      `  6. VERIFICATION — each phase carries its "### Verification" section (spec_phases.verification) so Vera can grade later. A phase with no Verification is a defect; a one-shot spec needs at least one Verification block.`,
+      ``,
+      `EVIDENCE CONTRACT — every verdict's reason field MUST enumerate the six checks by number with the actual RESULT you observed. This is the coaching that stuck: bare "passes" / "looks good" caps you at grade 6 because the grader cannot distinguish a genuine walk from a rubber-stamp. Sample reason:`,
+      `  "spec {slug-verbatim}: (1) phases 1-3 contiguous each with ### Verification; (2) Owner [[../functions/growth]] resolves; (3) Parent [[../goals/acquisition-research-engine#M4-…]] resolves via DB index (M4-… in the goal); (4) no prerequisites named in body → no Blocked-by required; (5) no customer_id table; (6) all phases carry Verification — no defects, verdict pass, stayed in Phase 3 quality lane (no disposition emitted)."`,
+      `Even on a pass, name what you checked; on needs_fix quote the exact offending field or section from the markdown (e.g. "duplicate '## Phase 1' heading at :34 and :52", 'no "**Owner:**" line', '**Parent:** [[../goals/x]] names only the goal but DB shows milestones M1/M2/M3').`,
       ``,
       `Then route each spec with ONE quality verdict:`,
-      `  • pass — the CHECKLIST passes. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane. ALSO emit disposition + disposition_reason (vale-reasons-the-disposition Phase 1): choose planned when the spec is small / unblocks other flagged work / fixes a live outage / carries a hot dependency signal in the body; choose deferred when scope is large or fuzzy, a stated prerequisite is unshipped, or the body explicitly parks itself. When you cannot tell, match the author's intent (a same disposition flips silently). Be concrete in disposition_reason (a named dependency, a goal member, a scope note — not vibes). Ada then applies your recommendation: same → autonomous, DOWNGRADE → autonomous + CEO notify, UPGRADE → CEO Approval Request. Your reason is what the CEO sees on DOWNGRADE/UPGRADE.`,
-      `  • needs_fix — the CHECKLIST FAILS (mangled phases / missing Owner / missing Parent / no Verification / missing Blocked-by when prerequisites exist / customer-referenced table with no Sonnet data tool). The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Be SPECIFIC in defects — name the missing field / the mangled phase numbers. DO NOT emit disposition on needs_fix.`,
+      `  • pass — CHECKLIST clears. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane. Emit reason (per the EVIDENCE CONTRACT above). defects: []. Do NOT emit disposition / disposition_reason — that is Ada's call, and the worker will not process it under this rubric.`,
+      `  • needs_fix — one or more CHECKLIST items fail. The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Emit reason (per the EVIDENCE CONTRACT above) + defects[] listing the specific failures — name the missing field, the mangled phase numbers, the offending section. Never emit disposition.`,
       ``,
       `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating script. Your final message is ONE JSON object, no prose before/after (if fenced, the JSON is the last thing in the message):`,
-      `  {"status":"completed","decisions":[{"slug":"…","verdict":"pass","reason":"…","defects":[],"disposition":"planned|deferred","disposition_reason":"…"},{"slug":"…","verdict":"needs_fix","reason":"…","defects":["…"]}]}`,
+      `  {"status":"completed","decisions":[{"slug":"<verbatim-from-.box-path>","verdict":"pass","reason":"<evidence-contract sentence>","defects":[]},{"slug":"<verbatim-from-.box-path>","verdict":"needs_fix","reason":"<evidence-contract sentence>","defects":["<specific failure>"]}]}`,
       `  {"status":"error","error":"<why you cannot proceed>"}`,
       ``,
-      `Every slug in the queue MUST appear in decisions[]. needs_fix.defects MUST list the specific checklist failures (no defects → not a needs_fix). On pass, disposition (if set) MUST be "planned" or "deferred" and MUST be paired with disposition_reason; the worker IGNORES disposition on a needs_fix.`,
+      `Every slug in the queue MUST appear once in decisions[] with its slug copied verbatim from the .box/spec-{slug}.md path above (never abbreviated, never re-derived from the H1 or the summary). verdict MUST be spelled literally "pass" or "needs_fix". needs_fix.defects MUST list the specific checklist failures (no defects → the worker treats it as pass). Do NOT emit disposition or disposition_reason on any verdict under this rubric — planned/deferred is Ada's.`,
     ].join("\n");
 
     const { session, resultText, isError, raw, usage, model, configDir: reviewDir } = await runBoxLane(
