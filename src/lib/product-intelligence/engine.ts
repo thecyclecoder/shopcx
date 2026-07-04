@@ -29,21 +29,34 @@ export async function callSonnet(
 ): Promise<{ text: string; raw: unknown } | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: SONNET,
-      max_tokens: maxTokens,
-      temperature,
-      system,
-      messages: [{ role: "user", content: user }],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: SONNET,
+        max_tokens: maxTokens,
+        temperature,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+      // Bound the call well below the /api/inngest 800s Lambda cap so a stalled
+      // Sonnet completion aborts as a normal fetch error (Inngest retries it)
+      // instead of being reaped by Vercel as a Lambda timeout.
+      signal: AbortSignal.timeout(600_000),
+    });
+  } catch (err) {
+    const name = (err as { name?: string } | null)?.name;
+    if (name === "AbortError" || name === "TimeoutError") {
+      throw new Error("Anthropic call timed out after 600s");
+    }
+    throw err;
+  }
   if (!res.ok) {
     throw new Error(`Anthropic error: ${res.status} ${await res.text().catch(() => "")}`);
   }
