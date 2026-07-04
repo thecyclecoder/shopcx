@@ -1,0 +1,1 @@
+- **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
