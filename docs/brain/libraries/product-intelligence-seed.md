@@ -23,7 +23,7 @@ Max + web search.)
 
 | Export | Notes |
 |---|---|
-| `callSonnet(system, user, maxTokens, temp)` | Anthropic Messages API (`process.env.ANTHROPIC_API_KEY`, model [[../libraries/ai-models\|SONNET]]). Used ONLY by the Inngest Engine — never the box |
+| `callSonnet(system, user, maxTokens, temp)` | Anthropic Messages API (`process.env.ANTHROPIC_API_KEY`, model [[../libraries/ai-models\|SONNET]]). Used ONLY by the Inngest Engine — never the box. Fetch is bounded by `AbortSignal.timeout(600_000)` (below the `/api/inngest` 800s Lambda cap) — an `AbortError` / `TimeoutError` is translated to a thrown `"Anthropic call timed out after 600s"` so the enclosing Inngest `step.run` sees a normal retryable failure instead of Vercel reaping the whole Lambda (Control Tower signature `vercel:bb28f61b887be822`). |
 | `extractJson<T>(text)` | tolerant JSON extraction (fences / substring salvage) |
 | `researchOneIngredient(admin, {…})` · `researchIngredientsCore(admin, {…})` | per-ingredient research → `product_ingredient_research`, fault-isolated |
 | `fetchReviewsForAnalysis` · `analyzeReviewChunk` · `reduceReviewAnalysis` · `persistReviewAnalysis` · `analyzeReviewsCore` | 4–5★, featured-weighted, 100-review map-reduce → `product_review_analysis` |

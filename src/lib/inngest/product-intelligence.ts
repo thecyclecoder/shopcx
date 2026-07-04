@@ -302,21 +302,33 @@ Return JSON array:
 
 If no relevant studies exist for any ingredient, return an empty array []. Be honest — don't stretch.`;
 
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: SONNET,
-          max_tokens: 4096,
-          temperature: 0,
-          system: "You are a nutritional science researcher. Return strict JSON only — no prose, no markdown fences.",
-          messages: [{ role: "user", content: prompt }],
-        }),
-      });
+      let res: Response;
+      try {
+        res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: SONNET,
+            max_tokens: 4096,
+            temperature: 0,
+            system: "You are a nutritional science researcher. Return strict JSON only — no prose, no markdown fences.",
+            messages: [{ role: "user", content: prompt }],
+          }),
+          // Bound below the /api/inngest 800s Lambda cap so a stalled Sonnet call
+          // aborts as a retryable fetch error instead of being reaped by Vercel.
+          signal: AbortSignal.timeout(600_000),
+        });
+      } catch (err) {
+        const name = (err as { name?: string } | null)?.name;
+        if (name === "AbortError" || name === "TimeoutError") {
+          throw new Error("Anthropic call timed out after 600s");
+        }
+        throw err;
+      }
 
       if (!res.ok) return [];
       const data = await res.json();
