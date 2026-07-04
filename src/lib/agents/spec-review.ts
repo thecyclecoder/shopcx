@@ -7,12 +7,13 @@
  *
  *   - `pass`       — the spec is well-formed (CHECKLIST clears). Sets `flags.vale_pass=true` on the card;
  *                    the spec stays in `in_review` to enter Ada's **director-disposition lane** (Phase 3).
- *                    **vale-reasons-the-disposition Phase 1** — a pass MAY also carry a reasoned
- *                    planned/deferred recommendation (Vale hydrated once for quality + emitted the
- *                    disposition at ~zero extra cost); when present it lands on
- *                    `specs.vale_disposition` + `vale_disposition_reason` and Ada's Phase-2 sweep
- *                    consumes it (retiring the trust-the-author stub). Absent on a legacy pass — the
- *                    sweep falls back to `intended_status`.
+ *                    **agent-mandate-hardening-spec-review Phase 1** — the Phase-3 rubric limits Vale
+ *                    to QUALITY ONLY (`AGENT_RUBRICS["spec-review"]` is explicit); the run-job prompt +
+ *                    the skill no longer ask for a `disposition` recommendation and repeated coaching
+ *                    to leave planned/deferred to Ada is baked in. The applier still ACCEPTS the
+ *                    optional `disposition` / `disposition_reason` fields for legacy / non-Phase-3
+ *                    callers (they land on `specs.vale_disposition` + `vale_disposition_reason`), but
+ *                    the box worker never emits them — Ada's sweep falls back to `intended_status`.
  *   - `needs_fix`  — the spec is malformed. The defects surface as a `director_activity` row so the CEO
  *                    sees the diagnosis; the spec stays in `in_review` until the corrections land.
  *

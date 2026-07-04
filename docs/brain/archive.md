@@ -12,7 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
+- **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]

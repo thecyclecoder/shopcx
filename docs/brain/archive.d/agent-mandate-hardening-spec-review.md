@@ -1,0 +1,1 @@
+- **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
