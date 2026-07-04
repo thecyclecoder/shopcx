@@ -32,6 +32,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Product-intelligence Sonnet fetches: 600s AbortSignal timeout prevents 800s Lambda kills** · verified 2026-07-04 · → [[inngest/product-intelligence]]
 - **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
 - **Research → Teardowns list + a Showcase "View HTML" teardown page** · verified 2026-07-04 · → [[../lifecycles/showcase]]
+- **Reva as a box session — review the commits before rolling back** · verified 2026-07-04 · → [[../libraries/deploy-guardian]] · [[../tables/deploy_watches]] · [[../tables/agent_jobs]] · [[../inngest/deploy-guardian-cron]]
 - **Segment-coverage assertion: grace the fresh-cohort check while the daily fanout is still running** · verified 2026-07-04 · → [[libraries/control-tower]]
 - **Add partial btree on tickets(workspace_id, escalated_at DESC) WHERE escalated_at IS NOT NULL to unblock /api/escalated** · verified 2026-07-04 · → [[../lifecycles/ticket-lifecycle]]
 - **Queue + drain Twilio SMS status/inbound callbacks (webhook fast-ack, bounded batched drain)** · verified 2026-07-04 · → [[../inngest/sms-callback-drain]]
