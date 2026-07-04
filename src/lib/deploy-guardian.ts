@@ -221,7 +221,14 @@ async function gh(
   return { ok: res.ok, status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
 }
 
-export type DeployVerdict = "healthy" | "regressed" | "unsure";
+/**
+ * The `deploy_watches.verdict` values. `healthy | regressed | unsure` are the findings-derived
+ * verdicts `verdictFor` returns; `in_review` is a NEW lifecycle state stamped by the cron on a
+ * non-healthy verdict when it enqueues a Reva deploy-review box-session job (reva-box-session-causal-
+ * rollback Phase 1) — the box session decides revert|keep|escalate and Phase 3's applyBoxDeployReview
+ * stamps the final verdict (healthy on keep, regressed on revert, unsure on escalate).
+ */
+export type DeployVerdict = "healthy" | "regressed" | "unsure" | "in_review";
 
 export interface DeployWatch {
   id: string;
@@ -450,12 +457,16 @@ export async function gatherDeployFindings(admin: Admin, watch: DeployWatch): Pr
   return { newErrorSignatures, newRedLoops, excludedRedLoops, redLoopCount, controlTowerOk };
 }
 
+/** The findings-derived subset of `DeployVerdict` — the three values `verdictFor` can return. */
+export type FindingsVerdict = "healthy" | "regressed" | "unsure";
+
 /**
  * The verdict rule. `regressed` = a clear deploy-correlated spike (a new red loop, OR a clear new-error
  * spike). `healthy` = nothing new attributable to the deploy. `unsure` = some new signal that doesn't
- * clearly clear the spike bar (escalate, never auto-act — Phase 2 owns escalation).
+ * clearly clear the spike bar. `verdictFor` NEVER returns `in_review` — that's a lifecycle state the
+ * cron stamps when it enqueues a Reva box-session review job (reva-box-session-causal-rollback Phase 1).
  */
-export function verdictFor(f: DeployWatchFindings): DeployVerdict {
+export function verdictFor(f: DeployWatchFindings): FindingsVerdict {
   if (f.newRedLoops.length > 0) return "regressed"; // a monitored loop flipped red after the deploy
   const sigs = f.newErrorSignatures;
   if (sigs.length === 0) return "healthy"; // no new deploy-correlated error, no new red loop
@@ -675,8 +686,20 @@ function describeRegression(f: DeployWatchFindings): string {
 }
 
 /**
- * Evaluate ONE watch: gather findings → verdict → CLAIM the row (atomic, idempotent) → ACT (Phase 2).
- * Only the evaluator that wins the `pending → verdict` claim acts, so a concurrent re-run never double-reverts.
+ * Evaluate ONE watch: gather findings → verdict → CLAIM the row (atomic, idempotent) → ACT.
+ *
+ * reva-box-session-causal-rollback Phase 1 — the cron STOPS DECIDING. The healthy path is unchanged
+ * (verdictFor cheaply proves 'nothing new' → stamp healthy + record activity). On a NON-healthy
+ * findings verdict, the cron enqueues a `kind='deploy-review'` agent_jobs row (Reva's Max session
+ * reads the diff + judges per-signal causal plausibility) and stamps the watch `verdict='in_review'`
+ * instead of reverting/escalating directly. The pending-window read filters `verdict='pending'`, so
+ * an `in_review` watch is naturally excluded from re-evaluation — a re-tick cannot double-enqueue.
+ *
+ * Preserved: the ATOMIC-goal escalate branch (a whole-goal deploy always escalates instead of routing
+ * a per-signal review); the LOOP-GUARD pre-check (a slug that already hit `DEPLOY_GUARDIAN_LOOP_GUARD_MAX`
+ * prior auto-rollbacks escalates and does NOT enqueue — a rollback-then-reland loop is a deeper issue).
+ * Only the evaluator that wins the `pending → verdict` claim acts, so a concurrent re-run never
+ * double-enqueues (the same idempotency spine that guarded the revert).
  */
 export async function evaluateDeployWatch(admin: Admin, watch: DeployWatch): Promise<DeployVerdict> {
   const findings = await gatherDeployFindings(admin, watch);
@@ -690,62 +713,65 @@ export async function evaluateDeployWatch(admin: Admin, watch: DeployWatch): Pro
     controlTowerOk: findings.controlTowerOk,
   };
 
-  // CLAIM the watch: stamp the verdict where it's still `pending`, returning the row. If we don't get it
-  // back, a concurrent evaluator already stamped + acted — do nothing (the idempotency spine for the revert).
-  const { data: claimed } = await admin
-    .from("deploy_watches")
-    .update({ verdict, evaluated_at: new Date().toISOString(), findings: findingsJson })
-    .eq("id", watch.id)
-    .eq("verdict", "pending")
-    .select("id");
-  if (!claimed || claimed.length === 0) {
-    console.log(`[deploy-guardian] ${watch.branch} → ${verdict} (already claimed by a concurrent tick — no action)`);
-    return verdict;
-  }
-
+  // ── HEALTHY: unchanged fast path (nothing new attributable → stamp + activity, no session). ───
   if (verdict === "healthy") {
+    const { data: healthyClaimed } = await admin
+      .from("deploy_watches")
+      .update({ verdict: "healthy", evaluated_at: new Date().toISOString(), findings: findingsJson })
+      .eq("id", watch.id)
+      .eq("verdict", "pending")
+      .select("id");
+    if (!healthyClaimed || healthyClaimed.length === 0) {
+      console.log(`[deploy-guardian] ${watch.branch} → healthy (already claimed by a concurrent tick — no action)`);
+      return "healthy";
+    }
     await recordDirectorActivity(admin, {
       workspaceId: watch.workspace_id,
       directorFunction: GUARDIAN_FUNCTION,
       actionKind: "deploy_healthy",
       specSlug: watch.slug,
       reason: `Deploy of ${watch.slug} (${watch.branch}) clean over the ${Math.round(CANARY_WINDOW_MS / 60000)}m canary window — no new deploy-correlated error or red loop.`,
-      metadata: deployActivityMeta(watch, verdict, findings),
+      metadata: deployActivityMeta(watch, "healthy", findings),
     });
     console.log(`[deploy-guardian] ${watch.branch} → healthy`);
-    return verdict;
+    return "healthy";
   }
 
-  if (verdict === "unsure") {
-    // Ambiguous — escalate, never auto-act (the conservative leash). Record the verdict surface too.
-    const diagnosis = `Deploy of "${watch.slug}" (${watch.branch}) shows an AMBIGUOUS post-deploy signal (${findings.newErrorSignatures.length} new low-count error signature(s)) that doesn't clearly clear the regression bar. Reva won't auto-revert on an unsure signal — please eyeball it: ${describeRegression(findings)}.`;
-    await safeEscalate(admin, watch, { title: `Ambiguous post-deploy signal: ${watch.slug}`, diagnosis, dedupeKey: `deploy-unsure:${watch.id}`, escalationKind: "deploy_unsure" });
-    await recordDirectorActivity(admin, {
-      workspaceId: watch.workspace_id,
-      directorFunction: GUARDIAN_FUNCTION,
-      actionKind: "deploy_unsure",
-      specSlug: watch.slug,
-      reason: diagnosis,
-      metadata: deployActivityMeta(watch, verdict, findings),
-    });
-    console.log(`[deploy-guardian] ${watch.branch} → unsure (escalated, no revert)`);
-    return verdict;
-  }
-
-  // verdict === "regressed":
-  // spec-goal-branch-pm-flow M5 — an ATOMIC goal→main watch NEVER auto-reverts. The deploy carries a whole
-  // goal's many specs in one merge, and the regression bar (verdictFor) is tuned for tiny per-phase diffs, so
-  // a single tripped threshold would roll back many specs' tested work. Escalate to the CEO with the diagnosis
-  // + the regression detail and let a human decide the rollback (revert the goal merge, hotfix-forward, or
-  // accept). The per-spec path keeps auto-revert (cheap + safe for a small diff).
+  // ── ATOMIC non-healthy: preserved escalate path (never route a whole-goal deploy through a per-
+  //    signal causal review — reverting a goal-sized deploy is far costlier than a per-phase revert). ──
   if (watch.is_atomic) {
+    const { data: atomicClaimed } = await admin
+      .from("deploy_watches")
+      .update({ verdict, evaluated_at: new Date().toISOString(), findings: findingsJson })
+      .eq("id", watch.id)
+      .eq("verdict", "pending")
+      .select("id");
+    if (!atomicClaimed || atomicClaimed.length === 0) {
+      console.log(`[deploy-guardian] ${watch.branch} → ${verdict} (atomic; already claimed by a concurrent tick — no action)`);
+      return verdict;
+    }
+    if (verdict === "unsure") {
+      const diagnosis = `Deploy of "${watch.slug}" (${watch.branch}) shows an AMBIGUOUS post-deploy signal (${findings.newErrorSignatures.length} new low-count error signature(s)) that doesn't clearly clear the regression bar. Reva won't auto-revert on an unsure signal — please eyeball it: ${describeRegression(findings)}.`;
+      await safeEscalate(admin, watch, { title: `Ambiguous post-deploy signal: ${watch.slug}`, diagnosis, dedupeKey: `deploy-unsure:${watch.id}`, escalationKind: "deploy_unsure" });
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_unsure",
+        specSlug: watch.slug,
+        reason: diagnosis,
+        metadata: deployActivityMeta(watch, "unsure", findings, { atomic: true }),
+      });
+      console.log(`[deploy-guardian] ${watch.branch} → unsure (atomic; escalated, no revert)`);
+      return "unsure";
+    }
+    // atomic regressed
     const diagnosis = `ATOMIC goal promotion "${watch.slug}" (${watch.branch}) shows a post-deploy REGRESSION over the ${Math.round(CANARY_WINDOW_MS / 60000)}m canary window: ${describeRegression(findings)}. This deploy landed a whole goal (many specs) on main in one merge — Reva will NOT auto-revert a goal-sized deploy (the regression bar is tuned for small per-phase diffs; reverting the whole goal would discard many specs' tested work). Please decide: revert the goal merge, hotfix-forward, or accept.`;
     await safeEscalate(admin, watch, {
       title: `Regression on atomic goal promotion: ${watch.slug} — manual rollback decision needed`,
       diagnosis,
       dedupeKey: `deploy-atomic-regressed:${watch.id}`,
       escalationKind: "deploy_atomic_regressed",
-      metadata: deployActivityMeta(watch, verdict, findings, { atomic: true }),
+      metadata: deployActivityMeta(watch, "regressed", findings, { atomic: true }),
     });
     await recordDirectorActivity(admin, {
       workspaceId: watch.workspace_id,
@@ -753,14 +779,112 @@ export async function evaluateDeployWatch(admin: Admin, watch: DeployWatch): Pro
       actionKind: "deploy_atomic_regressed",
       specSlug: watch.slug,
       reason: diagnosis,
-      metadata: deployActivityMeta(watch, verdict, findings, { atomic: true }),
+      metadata: deployActivityMeta(watch, "regressed", findings, { atomic: true }),
     });
     console.log(`[deploy-guardian] ${watch.branch} → ATOMIC regressed (escalated, NO auto-revert of a whole goal)`);
-    return verdict;
+    return "regressed";
   }
-  // Per-spec path → Phase 2: restore known-good + escalate.
-  await actOnRegression(admin, watch, findings, findingsJson);
-  return verdict;
+
+  // ── LOOP-GUARD pre-check (per-spec, non-atomic): a slug that already hit MAX prior auto-rollbacks
+  //    is stuck in a rollback-then-reland loop — a deeper issue, not a per-signal review candidate.
+  //    Stamp `regressed` + escalate + halt, DON'T spawn a Reva session (spec verification bullet). ──
+  const priorRollbacks = await priorRollbacksForSlug(admin, watch.workspace_id, watch.slug);
+  if (priorRollbacks >= DEPLOY_GUARDIAN_LOOP_GUARD_MAX) {
+    const { data: guardedClaim } = await admin
+      .from("deploy_watches")
+      .update({ verdict: "regressed", evaluated_at: new Date().toISOString(), findings: findingsJson })
+      .eq("id", watch.id)
+      .eq("verdict", "pending")
+      .select("id");
+    if (!guardedClaim || guardedClaim.length === 0) {
+      console.log(`[deploy-guardian] ${watch.branch} → loop-guard (already claimed by a concurrent tick — no action)`);
+      return "regressed";
+    }
+    const what = describeRegression(findings);
+    const diagnosis = `Deploy of "${watch.slug}" (${watch.branch}) regressed AGAIN after ${priorRollbacks} prior auto-rollback(s) — the rollback-then-reland cycle is looping (a deeper issue, not a flaky deploy). I've STOPPED auto-reverting this slug; it needs a human to fix the root cause or pause its auto-merge. Latest regression: ${what}.`;
+    await safeEscalate(admin, watch, { title: `Deploy loop: ${watch.slug} keeps regressing — auto-rollback halted`, diagnosis, dedupeKey: `deploy-loopguard:${watch.id}`, escalationKind: "deploy_loop_guard", metadata: { prior_rollbacks: priorRollbacks } });
+    await notifyOpsAlert(watch.workspace_id, {
+      title: `Deploy loop-guard tripped: ${watch.slug} regressed ${priorRollbacks + 1}×`,
+      severity: "critical",
+      lines: [`Stopped auto-reverting "${watch.slug}" after ${priorRollbacks} rollback(s) — the fix keeps re-breaking on reland. A human needs to fix the root cause or pause its auto-merge.`, what],
+    });
+    await recordDirectorActivity(admin, {
+      workspaceId: watch.workspace_id,
+      directorFunction: GUARDIAN_FUNCTION,
+      actionKind: "deploy_regressed",
+      specSlug: watch.slug,
+      reason: diagnosis,
+      metadata: deployActivityMeta(watch, "regressed", findings, { loop_guard: true, prior_rollbacks: priorRollbacks }),
+    });
+    await recordRollbackOutcome(admin, watch, findingsJson, { status: "loop_guard", prior_rollbacks: priorRollbacks });
+    console.log(`[deploy-guardian] ${watch.branch} → regressed but LOOP-GUARDED (${priorRollbacks} prior rollbacks) — escalated, no revert, no session enqueue`);
+    return "regressed";
+  }
+
+  // ── Non-healthy per-spec, no loop-guard: CLAIM (pending → in_review) + enqueue Reva box session.
+  //    The atomic claim is the enqueue idempotency spine — only the tick that wins routes a session. ──
+  const { data: reviewClaim } = await admin
+    .from("deploy_watches")
+    .update({ verdict: "in_review", evaluated_at: new Date().toISOString(), findings: findingsJson })
+    .eq("id", watch.id)
+    .eq("verdict", "pending")
+    .select("id");
+  if (!reviewClaim || reviewClaim.length === 0) {
+    console.log(`[deploy-guardian] ${watch.branch} → in_review (already claimed by a concurrent tick — no action)`);
+    return "in_review";
+  }
+  await enqueueDeployReviewJob(admin, watch, verdict, findings);
+  console.log(`[deploy-guardian] ${watch.branch} → in_review (Reva review job enqueued; findings verdict=${verdict})`);
+  return "in_review";
+}
+
+/**
+ * Enqueue exactly one `kind='deploy-review'` agent_jobs row for a watch that just claimed
+ * `verdict='in_review'`. Idempotency is upstream: only the cron tick that wins the atomic
+ * `pending → in_review` update reaches this helper, so a re-tick cannot double-enqueue. `spec_slug` =
+ * the watch slug (mirrors the build-job shape); `spec_branch` = the merged claude/* branch;
+ * `instructions` = the JSON brief the Phase-2 Reva session loads (watch id + merge_sha + candidate
+ * signals + the findings-derived starting verdict). Best-effort — a throw here is logged but doesn't
+ * unstamp the watch (Phase 4's fail-safe backstops a stuck in_review row via the box worker).
+ */
+async function enqueueDeployReviewJob(
+  admin: Admin,
+  watch: DeployWatch,
+  findingsVerdict: FindingsVerdict,
+  findings: DeployWatchFindings,
+): Promise<void> {
+  try {
+    const instructions = {
+      watch_id: watch.id,
+      slug: watch.slug,
+      branch: watch.branch,
+      merge_sha: watch.merge_sha,
+      pr_number: watch.pr_number,
+      deployed_at: watch.deployed_at,
+      window_ends_at: watch.window_ends_at,
+      is_atomic: !!watch.is_atomic,
+      findings_verdict: findingsVerdict,
+      new_error_signatures: findings.newErrorSignatures,
+      new_red_loops: findings.newRedLoops,
+      excluded_red_loops: findings.excludedRedLoops,
+      red_loop_count: findings.redLoopCount,
+      control_tower_ok: findings.controlTowerOk,
+    };
+    const { error } = await admin.from("agent_jobs").insert({
+      workspace_id: watch.workspace_id,
+      spec_slug: watch.slug,
+      spec_branch: watch.branch,
+      pr_number: watch.pr_number ?? null,
+      kind: "deploy-review",
+      status: "queued",
+      instructions: JSON.stringify(instructions),
+    });
+    if (error) {
+      console.warn(`[deploy-guardian] enqueueDeployReviewJob failed for ${watch.slug} (${watch.branch}):`, error.message);
+    }
+  } catch (e) {
+    console.warn("[deploy-guardian] enqueueDeployReviewJob threw:", e instanceof Error ? e.message : e);
+  }
 }
 
 /** Shared director_activity metadata for a deploy verdict row. */
