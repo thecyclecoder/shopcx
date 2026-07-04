@@ -148,6 +148,16 @@ const { data } = await admin.from("customers")
 // See [[../README]] linkedIds() — always expand the group before scoping queries.
 ```
 
+## Autovacuum tuning
+
+Per-table `reloptions` are tightened on `public.customers` — the cluster default `autovacuum_vacuum_scale_factor = 0.20` is too loose for the retention-score / ltv_cents / subscription_status / marketing_status / last_order_at churn on this table (rewrites on every order + every lifecycle transition, on ~620k rows), so the DB Health Agent's [[../libraries/db-health|bloat pass]] flagged `dbhealth:bloat:customers`. Fix (owner-approval-only, `20260819120000_customers_autovacuum_scale_factor.sql` + `scripts/apply-customers-autovacuum-migration.ts` — full write-up in [[../recipes/db-vacuum-tune-customers]]):
+
+  - `autovacuum_vacuum_scale_factor = 0.05` (fire at 5% dead, not 20%)
+  - `autovacuum_analyze_scale_factor = 0.02` (refresh stats at 2% churn)
+  - `autovacuum_vacuum_threshold = 1000` (floor)
+
+**No data is deleted** by the fix — `VACUUM` reclaims dead-tuple space + refreshes planner stats; live rows are untouched.
+
 ## Gotchas
 
 - `email_marketing_status` / `sms_marketing_status`: `"subscribed"`, `"unsubscribed"`, `"not_subscribed"`, or `null`. Lowercase.
