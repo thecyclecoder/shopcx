@@ -15,7 +15,7 @@ Phase 1 of [[../specs/creative-finder-video]] — the heavier follow-on to the s
 ## Cost / safety
 
 - **Cost-bounded.** Only `video_pending` rows are picked, then flipped to `analyzed`/`failed` → no re-download / re-transcribe / re-vision. Per-ad spend is `console.log`ged (`bytes / durationSec / frames / transcriptChars / whisperCents`) and summed into `VideoProcessResult`.
-- **Transcription is best-effort** — gated on `hasOpenAiKey()` + `WHISPER_MAX_BYTES` (25 MB). A silent / oversized / failing clip still vision-analyzes on the frames alone.
+- **Transcription is best-effort** — gated on `hasOpenAiKey()` + `WHISPER_MAX_BYTES` (25 MB). A silent / oversized / failing clip still vision-analyzes on the frames alone. The Whisper catch branch logs at `console.warn` (not `error`) so the Vercel log drain's `isError()` filter doesn't mint a Control Tower error_events row for a graceful degradation.
 - **Structure, not creative** — same invariant as statics: we keep the skeleton + the AdLibrary link, never a lifted asset.
 
 ## Gotchas
