@@ -456,6 +456,61 @@ export function isTransientSupabaseLogNoise(
   return false;
 }
 
+/**
+ * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
+ * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
+ * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
+ *
+ * When Supabase's Cloudflare edge can't complete an SSL handshake with the origin for a
+ * brief window, its response body is Cloudflare's HTML `525: SSL handshake failed` error
+ * page — not JSON. App-layer callers that best-effort-log the response body then emit that
+ * full HTML blob as an `rpcErr.message` (the shortlink route's click-logging RPC — a
+ * `console.error("[shortlink] counter increment failed:", rpcErr.message)` at
+ * `src/app/api/sl/[slug]/route.ts:144`), which the Vercel log drain surfaces as an ERR
+ * `/api/sl/[slug]` entry. The redirect flow itself is healthy (the catch is designed to
+ * swallow this so the customer's redirect still ships), so minting a fresh OPEN paged
+ * incident on a self-healed upstream blip churns Platform owners on a healthy loop
+ * (Control Tower `vercel:be569a72ccfdbf14`).
+ *
+ * `true` ONLY when BOTH markers unique to this shape are present:
+ *   1. a Cloudflare error-page fingerprint — the `no-js` + `oldie` <html> preamble, OR
+ *      the `cf-error-details` class Cloudflare renders on its 5xx error pages,
+ *   2. `supabase.co` (the host that owns the Cloudflare-fronted edge) AND a 5xx
+ *      SSL/certificate marker — `525: SSL handshake failed`, `SSL handshake failed`,
+ *      or `526: Invalid SSL certificate`.
+ *
+ * Wired in `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which
+ * auto-resolves a first sighting (recorded for visibility, NOT paged, no repair fan-out)
+ * and escalates to a real open+page ONLY if the SAME signature recurs within
+ * `TRANSIENT_RECUR_WINDOW_MS` — so a one-off edge blip is dropped while a chronic
+ * upstream outage (would recur every beat) still surfaces.
+ *
+ * KEPT (not transient): a Cloudflare 525 page for a different host (unrelated upstream),
+ * a real Supabase JSON error that happens to carry the words "SSL handshake" (no
+ * Cloudflare fingerprint), and empty/nullish input.
+ */
+export function isTransientSupabaseEdgeHandshakeError(message: string | null | undefined): boolean {
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  // Marker 1: a Cloudflare error-page fingerprint. The classic Cloudflare 5xx template
+  // opens with a `<html class="no-js ie6 oldie">`-style preamble; newer pages embed a
+  // `cf-error-details` block instead. Either is enough to identify the origin.
+  const cloudflareFingerprint =
+    (lower.includes("no-js") && lower.includes("oldie") && lower.includes("<title>")) ||
+    lower.includes("cf-error-details");
+  if (!cloudflareFingerprint) return false;
+  // Marker 2: supabase.co is the host that owns the edge, AND the page names a 5xx
+  // SSL/certificate failure. Both required so we don't swallow a Cloudflare 525 for a
+  // different host (unrelated upstream outage).
+  if (!lower.includes("supabase.co")) return false;
+  return (
+    lower.includes("525: ssl handshake failed") ||
+    lower.includes("ssl handshake failed") ||
+    lower.includes("526: invalid ssl certificate")
+  );
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */

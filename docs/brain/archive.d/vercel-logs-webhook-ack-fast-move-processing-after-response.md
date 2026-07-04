@@ -1,0 +1,1 @@
+- **Vercel log-drain webhook: ACK 200 immediately, move recordError fan-out into after()** · verified 2026-07-04 · → [[../integrations/vercel-log-drain]]
