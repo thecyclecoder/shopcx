@@ -400,3 +400,112 @@ export async function isSessionArmed(admin: Admin, sessionId: string): Promise<b
   if (data.absolute_expires_at && new Date(data.absolute_expires_at) < new Date()) return false;
   return true;
 }
+
+// ── Phase 3 cockpit-facing helpers ────────────────────────────────────────
+
+/** The disposition a cockpit token resolves to — the /god/[token] route branches on this. */
+export type TokenResolution =
+  | { kind: "ok"; session: GodModeSessionRow }
+  | { kind: "not_found" }
+  | { kind: "expired" }
+  | { kind: "disarmed" };
+
+/**
+ * Resolve a cockpit token to an armed, non-expired session (or a typed rejection).
+ * The `/god/[token]` page + `/api/god/[token]/*` routes ALL go through this — a
+ * single chokepoint decides not-found vs expired vs disarmed, so every route
+ * returns the same shape (404 / 410) for the same reason.
+ *
+ *   • unknown token or wrong-length → not_found
+ *   • row exists but status !== 'armed' → disarmed
+ *   • row is armed but past token_expires_at OR absolute_expires_at → expired
+ *   • otherwise → ok
+ */
+export async function resolveCockpitToken(admin: Admin, token: string): Promise<TokenResolution> {
+  const session = await getSessionByToken(admin, token);
+  if (!session) return { kind: "not_found" };
+  if (session.status !== "armed") return { kind: "disarmed" };
+  const now = new Date();
+  if (session.absolute_expires_at && new Date(session.absolute_expires_at) < now) return { kind: "expired" };
+  if (session.token_expires_at && new Date(session.token_expires_at) < now) return { kind: "expired" };
+  return { kind: "ok", session };
+}
+
+/** List approvals for a session, most-recent first. Pending float to the top in the UI, but that's a render decision. */
+export async function listApprovalsForSession(
+  admin: Admin,
+  sessionId: string,
+  limit = 50,
+): Promise<GodModeApprovalRow[]> {
+  const { data } = await admin
+    .from("god_mode_approvals")
+    .select("*")
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return (data as GodModeApprovalRow[] | null) ?? [];
+}
+
+/**
+ * Read one approval row scoped to a session — the Phase-3 approve route uses
+ * this to enforce the tamper-guard: a token can only act on its OWN session's
+ * approvals, never another workspace's. Returns null on mismatch (same shape
+ * as "row not found" so the caller can't distinguish).
+ */
+export async function getApprovalForSession(
+  admin: Admin,
+  args: { approvalId: string; sessionId: string },
+): Promise<GodModeApprovalRow | null> {
+  const { data } = await admin
+    .from("god_mode_approvals")
+    .select("*")
+    .eq("id", args.approvalId)
+    .eq("session_id", args.sessionId)
+    .maybeSingle();
+  return (data as GodModeApprovalRow | null) ?? null;
+}
+
+/** Load the workspace's god_mode_pin_hash. Used by the destructive-approval PIN gate. */
+export async function loadPinHash(admin: Admin, workspaceId: string): Promise<string | null> {
+  const { data } = await admin
+    .from("workspaces")
+    .select("god_mode_pin_hash")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  return (data?.god_mode_pin_hash as string | null) ?? null;
+}
+
+/**
+ * Enqueue one god-mode turn job. The /api/god/[token]/message route calls
+ * this after appending the user turn to the transcript. The box worker's
+ * concurrency-1 god-mode lane claims it and runs runGodModeJob.
+ *
+ * `mode:'kill'` is enqueued separately by the disarm surface (not from here).
+ */
+export async function enqueueGodModeTurn(
+  admin: Admin,
+  args: { workspaceId: string; sessionId: string; userMessage: string; createdBy?: string | null },
+): Promise<{ jobId: string | null }> {
+  const instructions = JSON.stringify({
+    session_id: args.sessionId,
+    mode: "turn",
+    user_message: args.userMessage,
+  });
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: args.workspaceId,
+      kind: "god-mode",
+      // spec_slug carries the session id so the box view lane-detail can show
+      // WHICH god-mode session this row runs. Same convention as dev-ask's
+      // per-thread rows.
+      spec_slug: args.sessionId,
+      status: "queued",
+      instructions,
+      created_by: args.createdBy ?? null,
+    })
+    .select("id")
+    .single();
+  if (error || !data) return { jobId: null };
+  return { jobId: data.id as string };
+}

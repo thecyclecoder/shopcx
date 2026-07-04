@@ -26,7 +26,12 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 | `decideApproval(admin, { approvalId, decision, questionText? })` | Terminal-flip one approval to `approved` / `denied` / `asked`. Idempotent (no-op if already terminal). `ask` requires `questionText`. |
 | `hasInFlight(admin, sessionId)` | Phase-5 reaper check — does the session hold any `pending` approval? A `true` blocks the idle-disarm. |
 | `isSessionArmed(admin, sessionId)` | Belt-and-suspenders check the gate uses to bail fast if the founder disarmed while a tool call was mid-flight. |
-| `GodModeMessage` / `GodModeStatus` / `GodModeSessionRow` / `GodModeApprovalRow` / `GodModeApprovalRisk` / `GodModeApprovalStatus` | Types. |
+| `resolveCockpitToken(admin, token)` | Phase-3 chokepoint: resolve a `/god/[token]` slug to `{ kind: 'ok' \| 'not_found' \| 'disarmed' \| 'expired', session? }`. Every Phase-3 route calls this so 404 (unknown/disarmed) vs 410 (expired) is decided in one place. |
+| `listApprovalsForSession(admin, sessionId, limit=50)` | Cockpit-render read — approvals for the session, most-recent first. |
+| `getApprovalForSession(admin, { approvalId, sessionId })` | Tamper-guarded read: only returns the row if it belongs to THIS session. `null` otherwise — same shape as row-not-found so callers can't distinguish. |
+| `loadPinHash(admin, workspaceId)` | Read `workspaces.god_mode_pin_hash`. Used by the Phase-3 approve route for the destructive-approval PIN check. |
+| `enqueueGodModeTurn(admin, { workspaceId, sessionId, userMessage, createdBy? })` | Insert a `kind='god-mode'` `mode:'turn'` `agent_jobs` row. Called by `POST /api/god/[token]/message` and by the Phase-4 dashboard tab. |
+| `TokenResolution` / `GodModeMessage` / `GodModeStatus` / `GodModeSessionRow` / `GodModeApprovalRow` / `GodModeApprovalRisk` / `GodModeApprovalStatus` | Types. |
 
 ## Callers
 
@@ -35,7 +40,10 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 - `scripts/_set-god-mode-pin.ts` — disposable, env-fed. Calls `hashPin` to store ONLY the hash.
 - `scripts/builder-worker.ts` `runGodModeJob` — turn runner. Calls `disarmSession` (kill mode), `appendMessage`, `setBoxSession`, `bumpActivity`.
 - `scripts/god-mode-permission-gate.ts` — the box-side PreToolUse hook. Calls `isSessionArmed`, `openApproval`, `getApproval` in a poll loop.
-- Phase 3+ cockpit routes (`/api/god/[token]/*`) — will call `getSessionByToken` + `decideApproval` + `bumpActivity`.
+- `GET /api/god/[token]` — calls `resolveCockpitToken`, `listApprovalsForSession`, `bumpActivity`.
+- `POST /api/god/[token]/message` — calls `resolveCockpitToken`, `appendMessage`, `enqueueGodModeTurn`, `bumpActivity`.
+- `POST /api/god/[token]/approve` — calls `resolveCockpitToken`, `getApprovalForSession`, `loadPinHash` + `verifyPin` (destructive), `decideApproval`, `bumpActivity`.
+- Phase 4 dashboard tab — will call the same routes without the token (server-side resolves the workspace's active session).
 
 ## RLS + safety
 

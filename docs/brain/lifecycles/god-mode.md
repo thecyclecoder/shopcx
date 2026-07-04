@@ -123,9 +123,38 @@ The currently running `claude -p` session (if any) sees the session flip next ti
 
 The Phase-5 reaper only expires a session when `now() > token_expires_at` AND `hasInFlight(sessionId) === false`. A pending approval row holds the door open indefinitely, and `bumpActivity` on every turn stream keeps `token_expires_at` sliding forward.
 
-## Phase 3+ — deliberately out of scope for this PR
+## Phase 3 — the SMS cockpit at `/god/[token]`
 
-Phase 3 (cockpit token page + Chat + Approvals tabs), Phase 4 (in-app tab), Phase 5 (SMS + reaper) all build on the Phase-2 lane + gate. See the individual phases in [[../specs/god-mode]]. The tables + SDK + arm/disarm + box lane + gate here are wired to make ALL of them land cleanly.
+The founder taps the cockpit URL from the (Phase-5) SMS or from the (Phase-4) in-app tab. The page (`src/app/god/[token]/page.tsx`, `"use client"`) resolves the token against `god_mode_sessions` and renders two tabs — Chat + Approvals — off a 2.5s poll of `GET /api/god/[token]`.
+
+Route wrap: `src/app/god/layout.tsx` wraps `{children}` in `<Suspense fallback={null}>` — required by `cacheComponents: true` because the client page reads `useParams()`.
+
+### Routes
+
+All three routes are **service-role only** (`createAdminClient()`) and **token-authed** (no cookie, no user — the 48-hex slug IS the auth, same convention as `/api/journey/[token]`). Every route goes through `resolveCockpitToken(admin, token)` so `not_found` / `disarmed` (→ 404) vs `expired` (→ 410) is decided in one chokepoint.
+
+- `GET /api/god/[token]` → `{ status, messages, approvals, token_expires_at, absolute_expires_at }`. Bumps `token_expires_at` (sliding) + `last_activity_at` (Phase-5 in-flight signal) BEFORE reading approvals so a reaper doesn't race an open cockpit into expiry. Never exposes `workspace_id`, `created_by`, `box_session_id`, or the token itself in the response body.
+- `POST /api/god/[token]/message` — body `{ message }`. Appends the founder turn to the transcript, then `enqueueGodModeTurn` inserts a `kind='god-mode'` `mode:'turn'` `agent_jobs` row. The box lane claims + runs `runGodModeJob`. Renews TTL + bumps activity.
+- `POST /api/god/[token]/approve` — body `{ approvalId, decision:'approve'|'deny'|'ask', question?, pin? }`. Tamper-guard: the approval MUST belong to the token's session (via `getApprovalForSession`) — else 404 (never 403, to avoid confirming the id exists elsewhere). Idempotent (a call on an already-terminal row returns the row unchanged). On `approve` of `risk='destructive'`: loads `workspaces.god_mode_pin_hash`, refuses if unset (401 `pin_not_set`), refuses on constant-time `verifyPin` mismatch (401 `pin_incorrect` — never reveals validity beyond allow/deny). On `ask`: requires a non-empty `question` — 400 otherwise. Renews TTL + bumps activity on every call.
+
+### Cockpit tab UI
+
+- **Chat tab** — renders `god_mode_sessions.messages`. `[Founder]` bubbles indigo, `[You]` (assistant) neutral, `[System]` muted. Composer supports ⌘/Ctrl+Enter to send. Auto-scrolls to bottom on new messages. 2.5s poll updates the transcript live (no realtime channel — a poll is enough at this cadence and dodges the cross-Suspense channel setup).
+- **Approvals tab** — pending float to the top, history below (most-recent first). Each card shows `tool_name`, `preview`, risk badge (`safe|write|destructive`), status badge (`pending|approved|denied|asked`). Pending rows expose three actions:
+  - **Approve** — for `risk='destructive'` a PIN input appears above; Approve is disabled until it's non-empty. The client sends `pin` alongside; the route verifies against the stored hash.
+  - **Deny** — one click.
+  - **Ask** — surfaces a textarea; the founder types a question and the row flips to `status='asked'` + `question_text` is saved. The box gate returns deny-with-the-question so the box reads it in-transcript and can respond, then re-request approval as a new row.
+  - On `pin_incorrect` / `pin_not_set` / `question_required` the client renders the error inline (no toast).
+- **Disarm button** in the header — hits `POST /api/god-mode/disarm` with `{ cockpit_token }` (Phase-1 kill switch: flips status to `disarmed` + nulls the token).
+
+### Not implemented in Phase 3 (deliberately)
+
+- No realtime Supabase channel — a 2.5s poll is enough at this cadence and dodges the cross-Suspense channel setup. Phase 5's SMS handles cold-visit alerts.
+- No file uploads, no rich text — the cockpit is a lifeline console, not a full IDE.
+
+## Phase 4+ — deliberately out of scope for this PR
+
+Phase 4 (in-app dashboard tab) reuses THIS page's routes but resolves the workspace's active session server-side (no token). Phase 5 (SMS + reaper) delivers the cockpit URL and enforces the sliding + absolute TTLs the routes already bump. See [[../specs/god-mode]].
 
 ## Sunset
 
@@ -135,6 +164,6 @@ Retire the whole feature (drop the two tables + the workspaces column + delete `
 
 - Phase 1 (session model + arm/disarm + PIN): ✅ shipped.
 - Phase 2 (full-power box lane + live permission gate): ✅ shipped.
-- Phase 3 (SMS cockpit — token page with Chat + Approvals tabs): ⏳ planned.
+- Phase 3 (SMS cockpit — token page with Chat + Approvals tabs): ✅ shipped.
 - Phase 4 (in-app dashboard God Mode tab): ⏳ planned.
 - Phase 5 (SMS delivery + lifecycle reaper): ⏳ planned.
