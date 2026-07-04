@@ -24,6 +24,21 @@ function jsonErr(body: Record<string, unknown>, status = 400)
 function clampInt(n: unknown, fallback: number) : number
 ```
 
+### `portalFetch` — function
+
+```ts
+async function portalFetch(url: string, init?: RequestInit, timeoutMs = 20_000) : Promise<Response>
+```
+
+`fetch()` with a bounded per-request deadline (`AbortSignal.timeout`). Every
+portal-side outbound fetch (Appstle, Shopify GraphQL, Braintree, Avalara) must
+go through this — a bare `fetch()` can hold a Lambda open for the full 300s
+Vercel ceiling if the upstream stalls, and the customer sees a hung portal.
+Timeouts normalize to a stable `Error('upstream_timeout')` so the existing
+`handleAppstleError` / `jsonErr` paths surface a clean 502-class response.
+Paired with `export const maxDuration = 30` on `src/app/api/portal/route.ts`
+as a defense-in-depth ceiling.
+
 ### `shortId` — function
 
 ```ts
@@ -86,7 +101,7 @@ function handleAppstleError(e: unknown, context?: { route?: string; payload?: un
 
 ## Gotchas
 
-_None documented._
+- **Never call bare `fetch()` from `src/lib/portal/handlers/*`** — always route through `portalFetch`. A stalled Appstle / Shopify GraphQL / Braintree / Avalara upstream can otherwise hold a `/api/portal` Lambda for the full 300s Vercel ceiling (originating signature `vercel:db57eb2d13e0a610`).
 
 ---
 
