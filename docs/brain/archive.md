@@ -20,6 +20,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Content upload → product intelligence → lander build handoff** · verified 2026-07-04 · → [[../lifecycles/lander-from-teardown]]
 - **Drop the unused index klaviyo_profile_events_profile_metric_dt** · verified 2026-07-04 · → [[tables/profile_events]]
 - **Reduce call volume / cache the hot query on query -7726440967385220442** · verified 2026-07-04 · → [[../dashboard/home]]
+- **Sidebar polling: reduce high-call-volume by removing pathname from fetchCounts effect deps (query 2430642232831032083)** · verified 2026-07-04 · → [[../libraries/db-health]]
 - **Vacuum / autovacuum-tune customers (bloat)** · verified 2026-07-04 · → [[recipes/db-vacuum-tune-customers]]
 - **Vacuum / autovacuum-tune orders (bloat)** · verified 2026-07-04 · → [[recipes/db-vacuum-tune-orders]]
 - **Drop bare 'network error' TypeError from client feed (5th browser network-abort variant)** · verified 2026-07-04 · → [[libraries/control-tower]]
