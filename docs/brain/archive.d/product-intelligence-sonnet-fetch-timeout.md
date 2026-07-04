@@ -1,0 +1,1 @@
+- **Product-intelligence Sonnet fetches: 600s AbortSignal timeout prevents 800s Lambda kills** · verified 2026-07-04 · → [[inngest/product-intelligence]]
