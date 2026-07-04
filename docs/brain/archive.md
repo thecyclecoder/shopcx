@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
+- **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
 - **Guard /api/portal against 300s upstream hangs (Appstle/Shopify fetch timeout)** · verified 2026-07-04 · → [[libraries/portal__helpers]]
