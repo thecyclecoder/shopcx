@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Harden the Bo agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[../recipes/build-box-setup#bo-agents-durable-mandate]]
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Carrie — DR content session (copy + AI imagery + real-asset gap flags)** · verified 2026-07-04 · → [[../functions/growth]]
+- **Cleo blueprint sweep — real category→product matching + dedup by funnel type** · verified 2026-07-04 · → [[../libraries/storefront-optimizer-agent]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
 - **Content upload → product intelligence → lander build handoff** · verified 2026-07-04 · → [[../lifecycles/lander-from-teardown]]
 - **Drop the unused index klaviyo_profile_events_profile_metric_dt** · verified 2026-07-04 · → [[tables/profile_events]]
