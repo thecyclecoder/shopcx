@@ -1,0 +1,1 @@
+- **Drop the unused index klaviyo_profile_events_profile_metric_dt** · verified 2026-07-04 · → [[tables/profile_events]]
