@@ -220,6 +220,16 @@ test("isTransientSupabaseLogNoise scopes GoTrue browser-abort noise as transient
     isTransientSupabaseLogNoise("auth", { severity: "error", message: "context deadline exceeded" }),
     true,
   );
+  // The Go net-layer variant when the request context dies mid-dial — same class,
+  // different phrase (error-feed-supabase-logs-transient-auth-dial-canceled).
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", {
+      severity: "error",
+      message:
+        "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: operation was canceled)",
+    }),
+    true,
+  );
 });
 
 test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate limit) — pages", () => {

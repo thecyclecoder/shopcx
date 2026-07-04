@@ -441,9 +441,20 @@ export function isTransientSupabaseLogNoise(
     // same way the postgres branch scopes `canceling statement due to` / `statement
     // timeout`. Anything else on auth (invalid JWT, rate limit, signature mismatch) still
     // pages on first sighting.
+    //
+    // The same browser-abort also surfaces as Go's `net.OpError` phrasing when the request
+    // context dies MID-DIAL against the GoTrue → Postgres socket: `failed to connect to
+    // host=... : dial error (dial tcp [::1]:5432: operation was canceled)`. Same class,
+    // different phrase — allowlist `operation was canceled` and the general `dial ...
+    // canceled` shape too.
     const msg = String(ctx.message ?? "").toLowerCase();
     if (!msg.trim()) return false;
-    return msg.includes("context canceled") || msg.includes("context deadline exceeded");
+    return (
+      msg.includes("context canceled") ||
+      msg.includes("context deadline exceeded") ||
+      msg.includes("operation was canceled") ||
+      /\bdial\b[^\n]*\bcanceled\b/.test(msg)
+    );
   }
   return false;
 }
