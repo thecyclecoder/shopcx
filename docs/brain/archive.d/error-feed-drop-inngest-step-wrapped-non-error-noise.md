@@ -1,0 +1,1 @@
+- **Error feed: drop the Inngest step wrapped-non-Error log from the Vercel feed** · verified 2026-07-04 · → [[integrations/vercel-log-drain]]

@@ -176,6 +176,57 @@ export function isBareInngestStepErrorMiddlewareLog(
 }
 
 /**
+ * Inngest step-wrapped non-Error log noise — the stack-form sibling to
+ * `isBareInngestStepErrorMiddlewareLog`, factored here so the vercel-logs route can reuse
+ * it ([[../specs/error-feed-drop-inngest-step-wrapped-non-error-noise]]).
+ *
+ * When an Inngest step handler throws a non-Error value (e.g. `throw {foo: 'bar'}` or any
+ * plain object), the Inngest SDK's `buildStepErrorOp` wraps it as
+ * `new Error(String(error))` — and `String({…})` is the literal `[object Object]`. Pino's
+ * `LoggerMiddleware.onStepError` logs the wrapped Error; Vercel's log drain surfaces the
+ * wrapped Error's STACK, which has zero application frames because the wrapping happened
+ * inside the SDK (only compiled Inngest chunk frames like `M.buildStepErrorOp` /
+ * `M.tryExecuteStep` / `steps-found` / `M._start`). The result is a brand-new signature
+ * `vercel:d48a64ae867f66dd` titled `ERR /api/inngest: Error: [object Object]` that opened
+ * a fresh incident and paged Platform owners on a step whose true terminal failure — if
+ * it ever exhausts retries — is already captured on `source='inngest'` by
+ * [[../inngest/inngest-failure-capture]] with the real function id + error class. So the
+ * Vercel log is duplicate noise on a healthy self-healing loop.
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path === '/api/inngest'` (the Inngest webhook route),
+ *   2. the trimmed message begins with `Error: [object Object]`,
+ *   3. the stack contains a `buildStepErrorOp` frame (the SDK's wrapping site), AND
+ *   4. NO `at …` frame names a file under `src/` or `app/` (i.e. the entire stack is
+ *      inside Inngest SDK chunks with zero application frames — a real application throw
+ *      that happens to carry the same literal string ships a stack with a frame in our
+ *      code and stays captured).
+ *
+ * The existing `isBareInngestStepErrorMiddlewareLog` only catches the literal Pino label
+ * `"Inngest step error"`; this stack-form variant surfaces as the wrapped Error message
+ * with SDK-only frames, which that filter doesn't match.
+ */
+export function isInngestStepWrappedNonErrorLog(
+  message: string,
+  path: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("Error: [object Object]")) return false;
+  if (!text.includes("buildStepErrorOp")) return false;
+  // Every `at …` frame must be inside the compiled Inngest SDK chunk — zero frames in
+  // our code (`src/` or `app/`). A real application throw carrying the same literal
+  // message ships a stack with a frame in our code and stays captured.
+  const atFrames = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^at\s/i.test(l));
+  if (atFrames.length === 0) return false;
+  return !atFrames.some((l) => l.includes("src/") || l.includes("app/"));
+}
+
+/**
  * Inngest TRANSPORT-layer failure noise — the inngest companion to `isBareLifecycle` /
  * `isAbortedStreamNoise`, factored here so the capture path can reuse it
  * ([[../specs/error-feed-drop-inngest-transport-http-unreachable]]).
