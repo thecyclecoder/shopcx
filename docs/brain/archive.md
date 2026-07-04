@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
+- **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
 - **Guard crisis_pause action-executor handler against a missing contract_id** · verified 2026-07-03 · → [[../libraries/action-executor]]
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
