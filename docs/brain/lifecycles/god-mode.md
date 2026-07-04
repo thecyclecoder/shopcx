@@ -152,9 +152,30 @@ All three routes are **service-role only** (`createAdminClient()`) and **token-a
 - No realtime Supabase channel — a 2.5s poll is enough at this cadence and dodges the cross-Suspense channel setup. Phase 5's SMS handles cold-visit alerts.
 - No file uploads, no rich text — the cockpit is a lifeline console, not a full IDE.
 
-## Phase 4+ — deliberately out of scope for this PR
+## Phase 4 — in-app dashboard God Mode tab (desk mirror)
 
-Phase 4 (in-app dashboard tab) reuses THIS page's routes but resolves the workspace's active session server-side (no token). Phase 5 (SMS + reaper) delivers the cockpit URL and enforces the sliding + absolute TTLs the routes already bump. See [[../specs/god-mode]].
+The founder isn't always on their phone — Phase 4 mirrors the [[#phase-3--the-sms-cockpit-at-godtoken]] cockpit into the desktop dashboard so an incident can be worked from the desk. Tab lives inside the Developer Message Center at `/dashboard/developer/messages` — see [[../dashboard/developer__messages]].
+
+- **Component** — `src/app/dashboard/developer/messages/GodModeTab.tsx`. Reuses the Phase-3 Chat + Approvals UX (transcript render, pending-first approvals, Approve/Deny/Ask + PIN input for `risk='destructive'`) but hits owner-gated `/api/god-mode/*` routes instead of the cockpit's token-authed routes.
+- **Parent wiring** — `src/app/dashboard/developer/messages/MessageCenterChat.tsx` gained a `Tab = 'chat' | 'god'` union + `useState`; the tab bar renders between the header at `:214` and the body at `:216`. The God Mode tab **button** is gated on `isOwner` (workspace.role === 'owner') — non-owners never see it.
+- **Controls** — the tab exposes an **Arm god mode** button when nothing is armed (hits `POST /api/god-mode/arm` and reloads the payload) and a **Disarm / kill** button in the session header when armed (hits `POST /api/god-mode/disarm` — the same Phase-1 kill switch).
+
+### Routes (all owner-gated, service-role, workspace-scoped)
+
+Every route calls the SAME `requireOwner()` helper as `/api/developer/messages` — never trust the client. The tab hides the button for non-owners, but the server never assumes the client honored that. Under the covers each route resolves the workspace's active session via `getActiveSession(admin, workspaceId)` — the `cockpit_token` never enters the response (that token stays reserved for the SMS-linked `/god/[token]` cockpit).
+
+- `GET /api/god-mode/session` → `{ armed: false }` OR `{ armed: true, session, messages, approvals }` with the SAME `messages/approvals` public shape as `GET /api/god/[token]`. Bumps sliding TTL + `last_activity_at` on every read.
+- `POST /api/god-mode/message` — body `{ message }`. Appends the founder turn + enqueues a `kind='god-mode'` `mode:'turn'` `agent_jobs` row via `enqueueGodModeTurn`. Bumps TTL. 404 when nothing is armed.
+- `POST /api/god-mode/approve` — body `{ approvalId, decision, question?, pin? }`. Tamper-guarded via `getApprovalForSession` against the workspace's ACTIVE session (an approvalId from another workspace → 404, never 403). Destructive approve verifies PIN through constant-time `verifyPin`. Idempotent on already-terminal rows.
+- `POST /api/god-mode/arm` + `POST /api/god-mode/disarm` — pre-existing Phase-1 routes; the tab is a caller.
+
+### Why the tab (vs just deep-linking the SMS cockpit)
+
+The SMS cockpit was designed for the middle of the night; the desk tab is for daytime work. Same routes underneath (parallel implementation, not a duplicated one) so a fix that lands on one lands on the other with only a `getActiveSession` vs `resolveCockpitToken` swap.
+
+## Phase 5+ — deliberately out of scope for this PR
+
+Phase 5 (SMS + reaper) delivers the cockpit URL and enforces the sliding + absolute TTLs the routes already bump. See [[../specs/god-mode]].
 
 ## Sunset
 
@@ -165,5 +186,5 @@ Retire the whole feature (drop the two tables + the workspaces column + delete `
 - Phase 1 (session model + arm/disarm + PIN): ✅ shipped.
 - Phase 2 (full-power box lane + live permission gate): ✅ shipped.
 - Phase 3 (SMS cockpit — token page with Chat + Approvals tabs): ✅ shipped.
-- Phase 4 (in-app dashboard God Mode tab): ⏳ planned.
+- Phase 4 (in-app dashboard God Mode tab): ✅ shipped.
 - Phase 5 (SMS delivery + lifecycle reaper): ⏳ planned.

@@ -2,6 +2,11 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
+import GodModeTab from "./GodModeTab";
+
+// Owner-only tabs — the message-center default 'chat' is the founder's read-only console;
+// 'god' is the Phase-4 elevated god-mode mirror (docs/brain/specs/god-mode.md).
+type Tab = "chat" | "god";
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Action = {
@@ -44,6 +49,7 @@ export default function MessageCenterChat() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [recent, setRecent] = useState<Thread[]>([]);
   const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("chat");
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -213,6 +219,35 @@ export default function MessageCenterChat() {
         </button>
       </div>
 
+      {/* Phase-4 god-mode tab: shown ONLY to the workspace owner. The parent gate here
+          is UX-level; the /api/god-mode/* endpoints RE-gate via requireOwner server-side. */}
+      {isOwner && (
+        <div className="mb-3 border-b border-zinc-200 dark:border-zinc-800">
+          <nav className="-mb-px flex gap-6">
+            {[
+              { k: "chat", label: "Chat" },
+              { k: "god", label: "God Mode" },
+            ].map((t) => (
+              <button
+                key={t.k}
+                onClick={() => setTab(t.k as Tab)}
+                className={`border-b-2 pb-2 text-xs font-medium ${
+                  tab === t.k
+                    ? "border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400"
+                    : "border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
+
+      {isOwner && tab === "god" ? (
+        <GodModeTab />
+      ) : (
+      <>
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto rounded-lg border border-zinc-100 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         {messages.length === 0 && (
           <div className="space-y-3">
@@ -326,6 +361,8 @@ export default function MessageCenterChat() {
           </button>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }
