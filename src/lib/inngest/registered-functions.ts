@@ -95,6 +95,7 @@ import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inng
 import { textCampaignScheduled, textCampaignSendTick } from "@/lib/inngest/marketing-text";
 import { smsCallbackDrain, smsInboundDrain, receivedSmsRollupCron } from "@/lib/inngest/sms-callback-drain";
 import { refreshCustomerSegmentsCron, refreshWorkspaceSegments } from "@/lib/inngest/refresh-customer-segments";
+import { smsMarketingCron, smsMarketingSchedule } from "@/lib/inngest/sms-marketing";
 import { smsWavePromote } from "@/lib/inngest/sms-wave-promote";
 import { marketingCouponAutoDisable } from "@/lib/inngest/marketing-coupon-cron";
 import { abandonedCartReminder } from "@/lib/inngest/abandoned-cart";
@@ -243,6 +244,8 @@ export const registeredInngestFunctions = [
   receivedSmsRollupCron,
   smsWavePromote,
   refreshCustomerSegmentsCron,
+  smsMarketingCron,
+  smsMarketingSchedule,
   refreshWorkspaceSegments,
   marketingCouponAutoDisable,
   abandonedCartReminder,

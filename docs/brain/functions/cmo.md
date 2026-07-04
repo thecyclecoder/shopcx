@@ -22,10 +22,18 @@ Always-on organic posts/reels/stories to FB + IG for engagement, sourced from ex
 - **Metric:** posting cadence kept full, organic reach/engagement.
 - **Specs:** [[../specs/automated-social-scheduler]] ✅
 
+### SMS marketing agent (Margo)
+Autonomous owned-channel SMS promos — the CMO-side mirror of Growth's storefront optimizer. **Margo** (worker persona under Iris) runs a cadence engine ([[../inngest/sms-marketing]]) that, on a valid send window, picks a sale theme (VIP / Weekend), tailors the per-segment copy from the DB-driven [[../tables/sms_campaign_templates]] library, and schedules 1-2 promotional sends/week over the [[marketing-text]] pipeline — all within a bounded proxy.
+- **Objective (Iris owns it):** owned-channel SMS revenue. **Bounded proxy (Margo optimizes it):** attributed **revenue-per-send** ([[../sms-segment-performance]]) within the policy's weekly cap + segment scope + send windows.
+- **The leash — [[../tables/sms_marketing_policy]]:** `active` on-switch (default false), `weekly_send_cap`, `send_windows` (Sun AM · Mon AM · Tue PM · Thu AM · Sat AM), `segment_scope` (never `cold`), `theme_config` (per-theme Shopify code + collection). Authored/activated via [[../libraries/sms-marketing-policy-authoring]]. Two-switch dormancy like the optimizer: this policy's `active` **and** `function_autonomy('cmo')`.
+- **Rails (escalate, never execute):** a stale segment book (<80% refreshed) or a theme with no coupon configured → Margo **blocks + records a `director_activity` line for Iris** instead of texting. Reversible within cap+scope (a scheduled send can be paused/cancelled before delivery).
+- **KPI + grading:** [[../tables/sms_campaign_grades]] — revenue-per-send, `hypothesis_quality` scored apart from `result_quality`.
+- **Status:** ⏳ **built + DORMANT** (`active=false`, placeholder theme codes). Set real Shopify codes + flip `active=true` (+ `function_autonomy('cmo')` live) to go live. Grader sweep = follow-up. Avatar photo = follow-up (mascot fallback for now).
+
 ## Owned / contributed goals
 
 - Contributes to [[../goals/ceo-mode]] — the CMO director seat.
 
 ## Status
 
-Charter doc. Owns the blog + social content engines.
+Charter doc. Owns the blog + social content engines + the SMS marketing agent (Margo, dormant).
