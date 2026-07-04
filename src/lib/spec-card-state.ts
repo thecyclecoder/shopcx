@@ -633,6 +633,37 @@ export async function markSpecCardValePassed(
 }
 
 /**
+ * vale-instant-per-spec-review — Vale's quality verdict (needs_fix leg): stamp the DURABLE
+ * "reviewed → malformed" marker so the spec LEAVES Vale's queue until it's re-authored. Sets
+ * `flags.vale_pass=false` (mirrors to `specs.vale_pass=false`), reusing the existing tri-state:
+ *
+ *   • `null`  — never verdicted → IN Vale's queue (`selectUnreviewedInReviewSpecs` picks it up).
+ *   • `false` — reviewed, needs_fix → OUT of the queue (no re-review until the spec is re-authored).
+ *   • `true`  — passed → OUT of the queue, parked for Ada's disposition lane.
+ *
+ * `markSpecCardBackToReview` NULLs `vale_pass` on every re-author / send-back, so a corrected spec
+ * re-enters the queue naturally (the same content-change signal that already re-admits a passed spec).
+ * WITHOUT this, a `needs_fix` spec kept `vale_pass=null` and stayed in the pool — tolerable under the
+ * old 15-min batch cron, but the instant-per-spec poll (~30s) would re-review it every cycle, a Max-
+ * session firehose on one malformed spec. Ada's disposition lane already treats `false` like `null`
+ * (`spec-dispose.ts`: `if (!r.vale_pass) continue`), so a needs_fix spec is correctly NOT disposed.
+ * Does NOT flip status — the spec stays `in_review` (the build hard-stop holds).
+ */
+export async function markSpecCardValeNeedsFix(
+  workspaceId: string,
+  slug: string,
+  audit: { actor: string; reason?: string },
+): Promise<void> {
+  await upsertCardState(workspaceId, slug, { flags: { vale_pass: false } }, [
+    {
+      field: "status",
+      actor: audit.actor,
+      reason: audit.reason ?? "vale: needs_fix (malformed — re-review on re-author)",
+    },
+  ]);
+}
+
+/**
  * spec-review-agent Phase 3 — Ada's disposition: flip a Vale-passed `in_review` spec to its final
  * column (`planned` or `deferred`) and CONSUME the disposition flags (clear `intended_status`,
  * `vale_pass`, `ada_disposition` so the same lane can't re-touch it). Records who/what on the audit

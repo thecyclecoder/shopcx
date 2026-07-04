@@ -1,5 +1,7 @@
 # inngest/spec-review-on-mutate
 
+> **vale-instant-per-spec-review (2026-07-04):** this reactive event is now a **bonus trigger**, not the workhorse. The box **can't reliably send** it (no `INNGEST_EVENT_KEY`; the send is fire-and-forget `.catch(() => {})`), so specs authored on the box silently never fired it. The primary path is now the box's own ~30s reconcile poll (`runSpecReviewEnqueueReaper`). This event still helps for mutations that DO originate where Inngest is configured (the Vercel app). Enqueue is per-spec; see [[../libraries/agents-spec-review]].
+
 The **reactive trigger** for the box-hosted **spec-review agent** ([[../specs/spec-review-agent]]) — Vale looks at a newly-authored or re-opened `in_review` spec within seconds instead of waiting up to 15 minutes for the [[spec-review-cron]] tick.
 
 [[../specs/vale-reactive-spec-review]] Phase 2. Fire-and-forget `spec-review/spec-mutated` events land here from the two mutation chokepoints that create or re-open an `in_review` spec:
@@ -20,11 +22,11 @@ Same relationship as [[spec-test-on-ship]] + [[spec-test-cron]]: the reactive ev
 
 ## What it does
 
-Calls the SAME gated helper the 15-min cron uses — `enqueueSpecReviewIfDue(workspace_id)` from [[../libraries/agents-spec-review]]. That helper reads `public.specs` for `status='in_review'` AND `deferred=false` AND `vale_pass !== true` (the "unreviewed" pool). Three outcomes:
+Calls the SAME gated helper the cron + box poll use — `enqueueSpecReviewIfDue(workspace_id)` from [[../libraries/agents-spec-review]]. That helper reads `public.specs` for `status='in_review'` AND `deferred=false` AND `vale_pass IS NULL` (the "unreviewed" pool) and inserts one job **per** such spec that lacks a live job of its own. Outcomes:
 
-- **enqueued** — a `kind='spec-review'` `agent_jobs` row was inserted; the box's spec-review lane (`runSpecReviewJob`) picks it up within seconds.
-- **no-unreviewed-specs / no-in-review-specs** — the current content already carries `vale_pass=true` (parked for Ada's disposition lane, not Vale's queue) OR the pool is empty. NO Max session spins up — the free SDK check inside the helper is the whole point of the gate.
-- **in-flight** — a `spec-review` job is already queued/running for this workspace; the racing enqueue no-ops (the one-in-flight guard makes this idempotent against a cron tick fired at the same time).
+- **enqueued** — one `kind='spec-review'` `agent_jobs` row per unreviewed spec was inserted (`enqueuedCount`); the box's spec-review lane (`runSpecReviewJob`) picks them up within seconds (two in parallel).
+- **no-unreviewed-specs / no-in-review-specs** — every in_review spec is already verdicted (pass or needs_fix) OR the pool is empty. NO Max session spins up — the free SDK check inside the helper is the whole point of the gate.
+- **all-in-flight / batch-in-flight** — every unreviewed spec already has its own live per-spec job, or a legacy sentinel sweep covers the pool; the racing enqueue no-ops (per-slug dedup makes this idempotent against the box poll / cron firing at the same time).
 
 ## Downstream events sent
 
@@ -32,12 +34,12 @@ _None._ The box polls [[../tables/agent_jobs]] and claims the row.
 
 ## Tables written
 
-- [[../tables/agent_jobs]] (inserts the `spec-review` job when the free SDK check finds real work)
+- [[../tables/agent_jobs]] (inserts one `spec-review` job per unreviewed spec when the free SDK check finds real work)
 
 ## Tables read (not written)
 
-- [[../tables/agent_jobs]] (in-flight dedupe)
-- [[../tables/specs]] (the unreviewed in_review pool)
+- [[../tables/agent_jobs]] (per-slug in-flight dedupe)
+- [[../tables/specs]] (the unreviewed in_review pool — `vale_pass IS NULL`)
 
 ## Contrast with `spec-review-cron`
 

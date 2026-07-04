@@ -115,10 +115,14 @@ const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
 // `claude -p` pass walks every in_review spec and emits one QUALITY verdict per spec (pass/needs_fix);
 // the planned/deferred call belongs to Ada (Phase 3 — director-disposition lane).
 // Read-only against repo/DB. Minutes, like the other supervisory passes (repair/regression/spec-test).
-// Concurrency-1 own lane (one box, one sweep per cron tick — same shape as triage-escalations).
+// vale-instant-per-spec-review — bumped 1 → 2: spec-review jobs are now PER-SPEC (one job per in_review
+// spec, scoped to its own slug), so a couple of distinct specs review in PARALLEL when the hopper fills
+// (5-6 specs authored over a few minutes) instead of draining one-at-a-time. Held at 2 (not higher) so
+// short read-only review sessions never starve the build lane on the shared Max pool. Per-slug dedup in
+// enqueueSpecReviewIfDue guarantees two sessions never examine the SAME spec.
 // Claude-down-gated like the other read-only Max agents (repair/regression/security-review) — when
-// Claude is down the cron's queued spec-review jobs park `blocked_on_dependency` + drain on recovery.
-const MAX_SPEC_REVIEW = 1;
+// Claude is down the queued spec-review jobs park `blocked_on_dependency` + drain on recovery.
+const MAX_SPEC_REVIEW = 2;
 const SPEC_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Migration-fix jobs (migration-fix-agent) run in their OWN concurrency-1 lane: a top-level Max
 // `claude -p` (migration-fix skill) that DIAGNOSES a failed migration_audits row read-only and PROPOSES
@@ -381,6 +385,18 @@ let goalEscortSweepInFlight = false;
 const FOLD_QUEUE_REAPER_INTERVAL_MS = 2 * 60 * 1000; // ~2 min — quick to un-strand a stuck fold queue.
 let lastFoldQueueReaper = 0; // 0 ⇒ run on first poll so a queue stranded by the prior instance drains right away.
 let foldQueueReaperInFlight = false;
+
+// vale-instant-per-spec-review — the box SELF-ENQUEUES Vale reviews by RECONCILING the specs table every
+// ~30s, rather than waiting on the Inngest `spec-review/spec-mutated` event (which the box cannot reliably
+// send — it has no INNGEST_EVENT_KEY, and the send is fire-and-forget `.catch(() => {})`, so a box-authored
+// spec — submit-spec on a terminal, spec-chat finalize, etc. — silently never fired the reactive enqueue and
+// waited up to 15 min for the Vercel cron). This poll finds every in_review spec lacking a current Vale
+// verdict and inserts ONE per-spec job each (deduped per (workspace, slug) in enqueueSpecReviewIfDue). ~30s
+// so review is near-instant; 0 ⇒ run on the first poll so specs authored while the box was down enqueue on
+// boot. Throttled + in-flight-guarded like the fold reaper; best-effort, never breaks the loop.
+const SPEC_REVIEW_ENQUEUE_INTERVAL_MS = 30 * 1000;
+let lastSpecReviewEnqueue = 0;
+let specReviewEnqueueInFlight = false;
 
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
@@ -4268,14 +4284,14 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // the review actually RUNS. Best-effort; both helpers are idempotent.
     const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs } = await import("../src/lib/agents/spec-review");
     const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
-    // vale-reactive-spec-review Phase 1 — the selector now returns only in_review specs that LACK a current
-    // Vale review (vale_pass !== true), so the backstop skips workspaces whose in_review pool is fully
-    // Vale-passed (parked for Ada, not Vale). The disposition sweep below still runs regardless.
+    // vale-reactive-spec-review Phase 1 / vale-instant-per-spec-review — the selector returns only in_review
+    // specs that LACK a current Vale verdict (vale_pass IS NULL), so the backstop skips workspaces whose
+    // in_review pool is fully verdicted (passed → parked for Ada, or needs_fix). Disposition sweep runs regardless.
     const inReview = await selectUnreviewedInReviewSpecs(db, job.workspace_id);
     if (inReview.length) {
       const enq = await enqueueSpecReviewIfDue(job.workspace_id);
-      if (enq.enqueued) notes.push(`spec-review backstop → enqueued Vale over ${enq.pending} in_review spec(s)`);
-      else if (enq.reason === "in-flight") notes.push(`spec-review backstop → Vale already in flight (${enq.pending} in_review)`);
+      if (enq.enqueued) notes.push(`spec-review backstop → enqueued ${enq.enqueuedCount} per-spec Vale job(s) (${enq.pending} unreviewed in_review)`);
+      else if (enq.reason === "all-in-flight" || enq.reason === "batch-in-flight") notes.push(`spec-review backstop → Vale already in flight (${enq.pending} in_review)`);
     }
     // Always run the disposition sweep — it self-selects only Vale-passed, un-disposed candidates, so it's a
     // no-op when there's nothing to advance and recovers a spec whose inline dispose tail never ran.
@@ -7624,6 +7640,25 @@ async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise
 // claimed is orphaned and must be released back to 'pending'.
 const ACTIVE_FOLD_JOB_STATUSES = ["queued", "queued_resume", "claimed", "building"] as const;
 
+// vale-instant-per-spec-review — the box's ~30s self-enqueue for Vale. Reconciles the specs table (finds
+// every in_review spec lacking a current Vale verdict) and inserts one PER-SPEC spec-review job each, deduped
+// per (workspace, slug) inside enqueueSpecReviewIfDue. This is the primary enqueue path (the Inngest event
+// the box can't reliably send is now just a bonus); distinct specs review in parallel (MAX_SPEC_REVIEW > 1),
+// the same spec never gets two sessions. Fire-and-forget, best-effort — never breaks the poll loop.
+async function runSpecReviewEnqueueReaper(): Promise<void> {
+  try {
+    const workspaceId = await resolveOwnerWorkspaceId();
+    if (!workspaceId) return;
+    const { enqueueSpecReviewIfDue } = await import("../src/lib/agents/spec-review");
+    const r = await enqueueSpecReviewIfDue(workspaceId);
+    if (r.enqueuedCount > 0) {
+      console.log(`[spec-review-reaper] enqueued ${r.enqueuedCount} per-spec Vale job(s) (${r.pending} unreviewed in_review)`);
+    }
+  } catch (e) {
+    console.warn("[spec-review-reaper] best-effort sweep failed:", e instanceof Error ? e.message : e);
+  }
+}
+
 async function runFoldQueueReaperJob(): Promise<void> {
   try {
     // Workspaces with any non-terminal fold queue work (pending OR folding). One sweep per workspace.
@@ -9665,7 +9700,15 @@ async function runSpecReviewJob(job: Job) {
   // vale-reactive-spec-review Phase 1 — the selector returns only in_review specs LACKING a current Vale
   // review, so Vale never re-reviews content she already cleared. A re-author / send-back NULLs vale_pass
   // via markSpecCardBackToReview, re-admitting the spec.
-  const pending = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
+  //
+  // vale-instant-per-spec-review — a PER-SPEC job (spec_slug = a real slug) reviews ONLY its own slug; a
+  // legacy sentinel ('spec-review-sweep') or a slug-less job sweeps the whole pool (back-compat). Scoping
+  // is what lets two concurrent per-spec jobs (MAX_SPEC_REVIEW > 1) run without each re-sweeping the entire
+  // queue. If this job's slug already left the pool by run time (passed/deferred/sent-back), `pending` is
+  // empty → the no-op branch below completes it benignly.
+  const isSentinel = !job.spec_slug || job.spec_slug === "spec-review-sweep";
+  const pool = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
+  const pending = isSentinel ? pool : pool.filter((s) => s === job.spec_slug);
   if (!pending.length) {
     // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
     // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
@@ -9813,9 +9856,13 @@ async function runSpecReviewJob(job: Job) {
       // agent was handed nothing to decide), there is nothing to review — complete as a benign no-op instead
       // of parking a needs_attention job that Ada would then re-escalate forever on every standing pass. Only
       // a parse failure over a STILL-POPULATED queue parks (a real malformed-output failure on real input).
-      const stillInReview = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
+      // vale-instant-per-spec-review — scope the drain-check to THIS job's slug for a per-spec job (a
+      // slug-less/sentinel job re-checks the whole pool). A per-spec job whose slug already got verdicted
+      // (or shipped/deferred/sent-back) since it was enqueued has nothing to decide → benign no-op.
+      const stillPool = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
+      const stillInReview = isSentinel ? stillPool : stillPool.filter((s) => s === job.spec_slug);
       if (!stillInReview.length) {
-        const tail = `spec-review no-op — in_review pool drained to 0 by run time (no parseable decisions over empty input; not parking)`;
+        const tail = `spec-review no-op — nothing left to review by run time (no parseable decisions over empty input; not parking)`;
         await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
         console.log(`${tag} ${tail}`);
         return;
@@ -18828,6 +18875,14 @@ async function main() {
         lastFoldQueueReaper = Date.now();
         foldQueueReaperInFlight = true;
         void runFoldQueueReaperJob().finally(() => { foldQueueReaperInFlight = false; });
+      }
+      // vale-instant-per-spec-review — ~30s self-enqueue: reconcile the specs table → one per-spec Vale job
+      // per unreviewed in_review spec. The primary enqueue path (the box can't reliably send the Inngest
+      // event). In-flight-guarded + throttled; fire-and-forget, never blocks the loop.
+      if (!specReviewEnqueueInFlight && Date.now() - lastSpecReviewEnqueue > SPEC_REVIEW_ENQUEUE_INTERVAL_MS) {
+        lastSpecReviewEnqueue = Date.now();
+        specReviewEnqueueInFlight = true;
+        void runSpecReviewEnqueueReaper().finally(() => { specReviewEnqueueInFlight = false; });
       }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
