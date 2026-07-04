@@ -1,6 +1,6 @@
-# `src/lib/lander-blueprints.ts` — Cleo's teardown → build-new blueprint SDK
+# `src/lib/lander-blueprints.ts` — Cleo's blueprint + Carrie's DR-content-store SDK
 
-The chokepoint for [[../tables/lander_blueprints]]: the ONLY file allowed to write the table. Owns `validateSkeleton`, the build-lifecycle status vocabulary, and the read helpers Carrie / the owner panel consume. Phase 1 of [[../specs/cleo-lander-blueprint]] (parent: [[../goals/acquisition-research-engine]]).
+The chokepoint for [[../tables/lander_blueprints]] AND for Carrie's DR-content store: the ONLY file allowed to write [[../tables/lander_blueprints]], [[../tables/lander_content_gaps]], or the DR columns on [[../tables/product_media]] (`category` / `source` / `caption`). Owns `validateSkeleton`, the build-lifecycle status vocabulary, the categorized `product_media` reader/writer, and the [[../tables/lander_content_gaps]] create/list/resolve helpers. Phase 1 of [[../specs/cleo-lander-blueprint]] + Phase 1 of [[../specs/carrie-dr-content]] (parent: [[../goals/acquisition-research-engine]]).
 
 **North-star (supervisable autonomy):** Cleo (Max's leash) deterministically PROPOSES a blueprint off a worthy [[../tables/research_urls]] teardown when the gap is a whole missing funnel TYPE (Phase 2 — the modify-vs-build-new session); Carrie (dr-content) fills content within the same leash; Ada/Platform's build submission is the human-touch handoff. This file NEVER acts — it's the write chokepoint the agents call through.
 
@@ -15,6 +15,13 @@ The chokepoint for [[../tables/lander_blueprints]]: the ONLY file allowed to wri
 | `setBlueprintContent(workspaceId, id, content)` | Carrie's copy write — per-block `role` + `copy` (+ optional `assets`). Keeps `skeleton` untouched (that's structure); `content` is the copy layer. Rejects an empty `content.blocks` or a block missing `role` / `copy`. |
 | `validateSkeleton(skeleton)` | Exported so one-off scripts / tests can assert a skeleton before storing it. Throws on failure; returns void on pass. |
 | `LanderBlueprint` / `LanderBlueprintStatus` / `LanderBlueprintSkeleton` / `LanderBlueprintBlock` / `LanderBlueprintContent` / `LanderBlueprintContentBlock` / `LanderBlueprintFilter` / `CreateBlueprintInput` | Types. |
+| `writeCategorizedProductMedia(input)` | Persist a Carrie DR asset (a Nano-Banana-Pro generation or a founder upload) to [[../tables/product_media]] with `category` + `source` + `caption`. UPSERTS on `(workspace_id, product_id, slot, display_order)` so re-running the same slot rewrites the row (mirrors [[product-intelligence]] `seed-tools.saveMedia`). Validates `category` / `source` against the CHECK vocabularies. |
+| `listCategorizedProductMedia(workspaceId, productId, filter?)` | Carrie's "do we already have an X for this product?" probe. Filter by `category` \| `source`. Returns only the DR-relevant subset of columns (no responsive-variant bloat). |
+| `openContentGap(input)` | Carrie opens one row per real-evidence asset she can't ethically generate (before/after, UGC selfie, testimonial photo, press logo). Description written for the FOUNDER — plain language, no jargon. Routed to Max via [[approval-inbox]] (`ownerFunctionForKind('dr-content')='growth'`). |
+| `listContentGaps(workspaceId, filter?)` | Filter by `blueprint_id` \| `status` \| `asset_role`. Drives Carrie's status-transition probe (open-gaps → `awaiting_upload`, zero → `content_complete`) and Max's inbox lane. |
+| `resolveContentGap(workspaceId, gapId, resolvedMediaId)` | Founder / operator marks the gap resolved after supplying the real-evidence [[../tables/product_media]] row. Idempotent — resolving again re-points `resolved_media_id`. |
+| `REAL_EVIDENCE_CATEGORIES` | `readonly ["before_after", "ugc", "testimonial_photo", "press_logo"]` — the never-fake-a-customer-result set. |
+| `ProductMediaCategory` / `ProductMediaSource` / `ProductMediaCategorizedRow` / `WriteCategorizedMediaInput` / `LanderContentGap` / `LanderContentGapAssetRole` / `LanderContentGapStatus` / `OpenContentGapInput` / `ListContentGapsFilter` | Types. |
 
 ## `LanderBlueprintSkeleton` shape
 
@@ -63,7 +70,8 @@ Matches the CHECK constraint on `public.lander_blueprints.status`:
 
 ## Gotchas
 
-- **Chokepoint discipline.** All writes go through this file via `createAdminClient()`. A raw `.from('lander_blueprints').insert|update|upsert` anywhere else skips `validateSkeleton` + the status-vocabulary check. Mirrors the pattern used by [[research-urls]] / [[specs-table]] / goals-table.
+- **Chokepoint discipline.** All writes to [[../tables/lander_blueprints]] + [[../tables/lander_content_gaps]] + the DR columns on [[../tables/product_media]] (`category` / `source` / `caption`) go through this file via `createAdminClient()`. A raw `.from(...).insert|update|upsert` anywhere else skips `validateSkeleton` + the status-vocabulary check + the never-fake-a-customer-result discipline. Mirrors the pattern used by [[research-urls]] / [[specs-table]] / goals-table.
+- **Real-evidence categories are the never-fake line.** `REAL_EVIDENCE_CATEGORIES` (`before_after`, `ugc`, `testimonial_photo`, `press_logo`) must NEVER be written via `writeCategorizedProductMedia` with `source: 'generated'`. Not enforced by a DB CHECK — it's caller discipline in Carrie's [[builder-worker]] `runDrContentJob` (never routing a generated asset to a real-evidence category). If you're tempted to bypass this, that's a spec-violation.
 - **`skeleton` ≠ `content`.** `skeleton` is STRUCTURE (blocks + levers); `content` is COPY. `createBlueprint` + `setBlueprintContent` write DIFFERENT columns for a reason — never conflate.
 - **`funnel_type` is free-text.** The vocabulary is Rhea's `TeardownRecipe.funnel_type` — extending it is a spec change over there, not a validation here.
 - **`created_by` is free-text.** Mirrors [[research-urls]] `classified_by` — `'cleo'` for the deterministic session, operator email for a manual override.
@@ -71,9 +79,9 @@ Matches the CHECK constraint on `public.lander_blueprints.status`:
 ## Callers
 
 - **[[builder-worker]] (Phase 2 — Cleo's modify-vs-build-new session)** — reads [[research-urls]] `listNewTeardowns`, diffs against our funnel + Cleo's [[../tables/storefront_experiments]], and calls `createBlueprint` on a whole-missing-funnel-type gap. Then deterministically enqueues a `dr-content` [[../tables/agent_jobs]] job carrying the blueprint id and calls [[research-urls]] `markTeardownReviewed`.
-- **Carrie (`dr-content`)** — reads `getBlueprint` for the skeleton, produces per-block copy, writes via `setBlueprintContent`, then advances `setBlueprintStatus` to `content_complete` (or `awaiting_upload` while she waits on assets).
+- **Carrie (`dr-content`)** — reads `getBlueprint` for the skeleton + `listCategorizedProductMedia` for the existing DR asset store; per generatable slot calls `writeCategorizedProductMedia` after a [[gemini]] `generateNanoBananaProCombine` returns; per real-evidence slot with no existing row calls `openContentGap`. When copy is done she calls `setBlueprintContent`, then advances `setBlueprintStatus` to `content_complete` (zero open gaps) or `awaiting_upload` (any open gap) — the transition is driven by `listContentGaps(workspaceId, { blueprint_id, status: 'open' })`.
 - **Owner-facing blueprints panel (Phase 3 UI)** — `listBlueprints` for the queue view, `getBlueprint` for the detail.
 
 ## Related
 
-[[../specs/cleo-lander-blueprint]] · [[../specs/rhea-teardown-recipe]] · [[../tables/lander_blueprints]] · [[../tables/research_urls]] · [[../tables/products]] · [[../tables/agent_jobs]] · [[../functions/growth]] · [[../functions/platform]] · [[research-urls]] · [[../goals/acquisition-research-engine]]
+[[../specs/cleo-lander-blueprint]] · [[../specs/carrie-dr-content]] · [[../specs/rhea-teardown-recipe]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../tables/research_urls]] · [[../tables/products]] · [[../tables/agent_jobs]] · [[../functions/growth]] · [[../functions/platform]] · [[research-urls]] · [[approval-inbox]] · [[gemini]] · [[../goals/acquisition-research-engine]]

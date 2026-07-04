@@ -47,6 +47,9 @@ Per-product media (images, videos) with dimensions and roles (hero, gallery, bef
 | `avif_1500_storage_path` | `text` | ✓ |  |
 | `webp_1500_storage_path` | `text` | ✓ |  |
 | `display_order` | `int4` | — | default: `0` · gallery order within a slot. The hero gallery shares `slot="hero"` across rows: `0` = bag hero, higher orders = lifestyle / Nano-Banana static-ad slides. Storage path gets a `_{order}` suffix when > 0 so multiple images coexist under one slot |
+| `category` | `text` | ✓ | Persuasive job of the asset — Carrie's DR read key ("do we already have an X for this product?"). CHECK ∈ `before_after` \| `ugc` \| `testimonial_photo` \| `press_logo` \| `lifestyle` \| `hero` \| `ingredient` \| `mechanism` \| `other`. Populated for Carrie's DR-content pass; historic rows leave it NULL. |
+| `source` | `text` | ✓ | Where the asset came from. CHECK ∈ `uploaded` \| `generated` \| `scout` \| `shopify`. Populated for Carrie's DR-content pass; historic rows leave it NULL. |
+| `caption` | `text` | ✓ | DR-shaped caption (Carrie's voice), distinct from `alt_text` (SEO-shaped for the storefront). |
 
 ## Foreign keys
 
@@ -76,9 +79,19 @@ const { count } = await admin.from("product_media")
   .gte("created_at", since);
 ```
 
+## Categorized DR store (Phase 1 of [[../specs/carrie-dr-content]])
+
+Carrie's `dr-content` box lane treats `product_media` as permanent, categorized product intelligence — keyed by `product_id` + `category`. That's the whole point of the `category` / `source` / `caption` columns: her decision "generate this or open a gap?" turns on "do we already have a `category='before_after'` row for this product?" (yes → reuse; no + real-evidence → open a [[lander_content_gaps]] row; no + generatable → Nano Banana Pro → row with `source='generated'`).
+
+**Real-evidence categories** (`before_after`, `ugc`, `testimonial_photo`, `press_logo`) are the never-fake-a-customer-result line — Carrie NEVER writes a row here with `source='generated'` for these. Real-evidence + no existing row → open a [[lander_content_gaps]] row for the founder to supply.
+
+**Chokepoint:** the DR write path goes through [[../libraries/lander-blueprints]] `writeCategorizedProductMedia` — no raw `.from('product_media').insert|upsert` with `category` / `source` / `caption` outside the SDK. (Legacy write sites — [[../libraries/product-intelligence]] `seed-tools.saveMedia`, [[../libraries/product-intelligence]] `engine`, etc — write the non-DR columns unchanged.)
+
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **`category` and `source` are NULL on historic rows.** Rows written before Phase 1 of [[../specs/carrie-dr-content]] never carried the columns — Carrie's read-by-category ignores those (they're pre-DR content).
+- **`category='before_after' | 'ugc' | 'testimonial_photo' | 'press_logo'` must have `source ≠ 'generated'`.** Not enforced by a CHECK constraint yet — it's the SDK discipline in [[../libraries/lander-blueprints]] `writeCategorizedProductMedia` (never called with a real-evidence category from a generation step). Fabricated customer results are the harm; the discipline is upstream.
+- **`caption` ≠ `alt_text`.** `alt_text` is SEO/accessibility; `caption` is the DR caption Carrie writes for the founder to review.
 
 ---
 
