@@ -27,6 +27,7 @@ import {
   isBareLifecycle,
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
+  isTransientSupabaseEdgeHandshakeError,
 } from "@/lib/control-tower/error-feed";
 
 
@@ -143,14 +144,18 @@ export async function POST(request: Request) {
     // Inngest STEP-RETRY noise (a `step.run` throwing to trigger its own retry — attempt
     // N/M with N<M; the function body never finally-failed) OR a Shopify webhook HMAC-
     // failure log on /api/webhooks/shopify(-returns) (a one-off probe with an invalid
-    // signature — Shopify's own wiring check, a scanner, a stale-secret retry): classify
-    // it `transient` so recordError auto-resolves a first sighting (no page) and only
-    // escalates to a real open+page on recurrence within the window — one-off blips are
-    // dropped while a function that throws on every retry / a chronic signing bug still
+    // signature — Shopify's own wiring check, a scanner, a stale-secret retry) OR a
+    // Supabase Cloudflare-edge SSL-handshake HTML blob leaked into an app-layer
+    // `console.error` (the shortlink route's best-effort click-logging RPC — the redirect
+    // itself already ships fine): classify it `transient` so recordError auto-resolves a
+    // first sighting (no page) and only escalates to a real open+page on recurrence
+    // within the window — one-off blips are dropped while a function that throws on every
+    // retry / a chronic signing bug / a chronic upstream Supabase edge outage still
     // surfaces.
     const transient =
       isTransientInngestStepRetryThrow(g.path, g.message) ||
-      isTransientShopifyWebhookHmacFailure(g.path, g.message);
+      isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
+      isTransientSupabaseEdgeHandshakeError(g.message);
     await recordError({
       source: "vercel",
       // Group on path + status + normalized message (stable bits, not requestId/deploymentId).

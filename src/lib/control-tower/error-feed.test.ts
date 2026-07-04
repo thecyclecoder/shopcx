@@ -19,6 +19,7 @@ import {
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
   isTransientShopifyWebhookHmacFailure,
+  isTransientSupabaseEdgeHandshakeError,
   isTransientSupabaseLogNoise,
 } from "./error-feed";
 
@@ -433,4 +434,87 @@ test("isTransientClientNetworkAbort returns false on empty / nullish message", (
   assert.equal(isTransientClientNetworkAbort(undefined, undefined), false);
   assert.equal(isTransientClientNetworkAbort("", ""), false);
   assert.equal(isTransientClientNetworkAbort("   ", null), false);
+});
+
+// ── isTransientSupabaseEdgeHandshakeError (error-feed-drop-supabase-edge-ssl-handshake-noise) ──
+// When Supabase's Cloudflare edge briefly can't complete SSL handshake with the origin,
+// its response body is Cloudflare's HTML `525: SSL handshake failed` page — not JSON. The
+// shortlink route's best-effort click-logging RPC receives that HTML body as
+// rpcErr.message and console.error's it (src/app/api/sl/[slug]/route.ts:144), which the
+// Vercel log drain surfaces as an ERR /api/sl/[slug] entry. The redirect itself is
+// healthy; classifying it transient auto-resolves a first sighting (recorded, not paged)
+// while the recur window still surfaces a chronic upstream outage. The false positive
+// that opened Control Tower `vercel:be569a72ccfdbf14`.
+
+// Regression fixture: the leaked vercel:be569a72ccfdbf14 blob — the classic Cloudflare
+// 525 error page (no-js + oldie preamble + <title> + cf-error-details) naming supabase.co.
+const CF_525_SUPABASE_BLOB = `<!DOCTYPE html>
+<html lang="en-US" class="no-js ie6 oldie">
+<head>
+<title>vqfxwvxsrezoivwmyhux.supabase.co | 525: SSL handshake failed</title>
+</head>
+<body>
+<div class="cf-error-details cf-error-525">
+<h1>Error 525</h1>
+<h2>SSL handshake failed</h2>
+</div>
+</body>
+</html>`;
+
+test("isTransientSupabaseEdgeHandshakeError matches the vercel:be569a72ccfdbf14 leaked 525 blob", () => {
+  assert.equal(isTransientSupabaseEdgeHandshakeError(CF_525_SUPABASE_BLOB), true);
+});
+
+test("isTransientSupabaseEdgeHandshakeError matches the sibling 526 (Invalid SSL certificate) shape", () => {
+  const blob = `<!DOCTYPE html>
+<html lang="en-US" class="no-js ie6 oldie">
+<head><title>foo.supabase.co | 526: Invalid SSL certificate</title></head>
+<body><div class="cf-error-details">Error 526</div></body>
+</html>`;
+  assert.equal(isTransientSupabaseEdgeHandshakeError(blob), true);
+});
+
+test("isTransientSupabaseEdgeHandshakeError matches when only cf-error-details is present (newer Cloudflare template)", () => {
+  const blob = `<html><body>
+<div class="cf-error-details cf-error-525">
+<span>bar.supabase.co</span>
+<h2>SSL handshake failed</h2>
+</div>
+</body></html>`;
+  assert.equal(isTransientSupabaseEdgeHandshakeError(blob), true);
+});
+
+test("isTransientSupabaseEdgeHandshakeError KEEPS a Cloudflare 525 page for a different host (unrelated upstream)", () => {
+  const blob = `<!DOCTYPE html>
+<html lang="en-US" class="no-js ie6 oldie">
+<head><title>api.acme.com | 525: SSL handshake failed</title></head>
+<body><div class="cf-error-details">Error 525</div></body>
+</html>`;
+  assert.equal(isTransientSupabaseEdgeHandshakeError(blob), false);
+});
+
+test("isTransientSupabaseEdgeHandshakeError KEEPS a real Supabase JSON error carrying the words 'SSL handshake'", () => {
+  // A genuine Supabase JSON error (no Cloudflare HTML preamble, no cf-error-details) that
+  // happens to mention SSL handshake in the message — a real bug, still paged.
+  const json = `{"code":"PGRST301","message":"SSL handshake failed with upstream from supabase.co client","hint":null}`;
+  assert.equal(isTransientSupabaseEdgeHandshakeError(json), false);
+});
+
+test("isTransientSupabaseEdgeHandshakeError KEEPS a Cloudflare page without the SSL 5xx marker", () => {
+  // Cloudflare 502/503/522 pages for supabase.co are a different failure mode — no SSL
+  // handshake marker, so this classifier ignores them (they may or may not be transient
+  // via other classifiers; this one only claims the SSL-handshake noise class).
+  const blob = `<!DOCTYPE html>
+<html lang="en-US" class="no-js ie6 oldie">
+<head><title>foo.supabase.co | 522: Connection timed out</title></head>
+<body><div class="cf-error-details">Error 522</div></body>
+</html>`;
+  assert.equal(isTransientSupabaseEdgeHandshakeError(blob), false);
+});
+
+test("isTransientSupabaseEdgeHandshakeError returns false on empty / nullish input", () => {
+  assert.equal(isTransientSupabaseEdgeHandshakeError(null), false);
+  assert.equal(isTransientSupabaseEdgeHandshakeError(undefined), false);
+  assert.equal(isTransientSupabaseEdgeHandshakeError(""), false);
+  assert.equal(isTransientSupabaseEdgeHandshakeError("   "), false);
 });
