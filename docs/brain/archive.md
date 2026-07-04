@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Harden the Bo agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[../recipes/build-box-setup#bo-agents-durable-mandate]]
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Carrie — DR content session (copy + AI imagery + real-asset gap flags)** · verified 2026-07-04 · → [[../functions/growth]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
