@@ -69,8 +69,8 @@ The write path (`setTeardown` in [[../libraries/research-urls]]) runs `validateT
 
 ## Read by
 
-[[../libraries/research-urls]] (`listResearchUrls` — Rhea capture+classify loop + owner-facing Growth queue · `listNewTeardowns` — Cleo's Phase-3 discovery reader, the input trigger the slice-4 gap-analysis loop will consume · `getResearchUrl` + `listResearchShotChapters` + `signResearchShot` — the [[../dashboard/research__landers]] owner surface).
+[[../libraries/research-urls]] (`listResearchUrls` — Rhea capture+classify loop + owner-facing Growth queue · `listNewTeardowns` — Cleo's Phase-3 discovery reader, the input trigger the slice-4 gap-analysis loop will consume · `getResearchUrl` + `listResearchShotChapters` + `signResearchShot` — the [[../dashboard/research__landers]] owner surface · `listResearchUrls({ has_teardown: true })` + `getResearchUrlById` — the [[../dashboard/research__teardowns]] curated gallery + its Showcase HTML board).
 
 ## Related
 
-[[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[../libraries/landing-page-scout]] · [[../functions/growth]] · [[../dashboard/research__landers]] (owner viewer)
+[[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../goals/acquisition-research-engine]] · [[creative_skeletons]] · [[../inngest/creative-finder]] · [[../inngest/acquisition-research-cadence]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[../libraries/landing-page-scout]] · [[../functions/growth]] · [[../dashboard/research__landers]] (owner viewer) · [[../dashboard/research__teardowns]] (curated gallery + Showcase HTML board)
