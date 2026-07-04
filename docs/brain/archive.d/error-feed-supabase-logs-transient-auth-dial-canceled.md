@@ -1,0 +1,1 @@
+- **Scope GoTrue `operation was canceled` dial noise as transient in the Supabase log poller** · verified 2026-07-04 · → [[../libraries/control-tower]]
