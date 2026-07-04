@@ -50,6 +50,18 @@ The Growth-owned lane that classifies unreviewed [[../tables/research_urls]] row
 - **Skill** — `.claude/skills/research/SKILL.md` (Rhea's persona + output contract + the erthlabs 8-reasons worked teardown example).
 - **Write chokepoint** — every `research_urls` mutation flows through [[research-urls]]. The worker never touches the table directly (CI grep enforces).
 
+## The `storefront-optimizer` lane's Cleo blueprint preamble ([[../specs/cleo-lander-blueprint]] Phase 2)
+
+Every `runStorefrontOptimizerJob` invocation runs a **workspace-scoped preamble** before the per-surface diagnose/propose work: [[cleo-blueprint]] `runCleoBlueprintSweep(workspaceId, {createdBy})`. The preamble reads [[research-urls]] `listNewTeardowns` and per row decides **modify-vs-build-new** via [[cleo-blueprint]] `decideBlueprintForTeardown`:
+
+- **Chain:** [[../tables/research_urls]] (teardown recipe) → **[[../tables/lander_blueprints|blueprint]]** → Carrie's `dr-content` job (fills `content`) → Ada build (`build_submitted`).
+- **Blueprint path** (whole missing funnel type): [[lander-blueprints]] `createBlueprint` with the teardown's `transferable_pattern` adapted into `skeleton` + a rationale, then enqueue a deduped `dr-content` [[../tables/agent_jobs]] row (spec_slug = blueprint id, kind = `dr-content`) + [[research-urls]] `markTeardownReviewed`.
+- **Bandit path** (single reversible lever — we already have a matching-funnel-type lander): NO blueprint. Cleo's existing storefront-optimizer campaign path handles it unchanged; the sweep just marks the teardown reviewed.
+- **North-star + idempotence:** deterministic + within Max's leash; every row surfaces its rationale. The `dr-content` dedup gate + `growth_reviewed_at` watermark hold under retries.
+- **Non-fatal:** try/caught — a preamble failure never poisons the per-surface optimizer work.
+
+The `dr-content` kind is registered in `Job.kind`; the deterministic worker will add a `runDrContentJob` runner in the Carrie build (Phase 3+ of a follow-up spec).
+
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[acquisition-gap-grader]] · [[../operational-rules]]
+[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
