@@ -1,0 +1,1 @@
+- **Research → Teardowns list + a Showcase "View HTML" teardown page** · verified 2026-07-04 · → [[../lifecycles/showcase]]
