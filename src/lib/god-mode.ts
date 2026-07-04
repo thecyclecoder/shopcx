@@ -1,0 +1,217 @@
+/**
+ * god-mode — Phase 1 SDK + PIN hashing for the founder god-mode cockpit.
+ *
+ * See [[../../docs/brain/specs/god-mode]] + [[../../docs/brain/lifecycles/god-mode]].
+ *
+ * This module is the WRITE CHOKEPOINT for the two god-mode tables — nothing
+ * else should hit them raw (same discipline as specs-table / goals-table /
+ * lander-blueprints). Callers (arm/disarm routes, the box gate, the cockpit
+ * approve route) pass typed arguments; this file synthesizes the row shape.
+ *
+ * PIN storage: the founder PIN is stored ONLY as a one-way scrypt hash on
+ * workspaces.god_mode_pin_hash. Plaintext never enters this file — hashPin()
+ * takes the PIN, salts it, and returns the "scrypt:v1:<salt>:<hash>" string
+ * that lands in the column; verifyPin() takes the same string + a candidate
+ * PIN and does a constant-time compare. The plaintext PIN is set OUT-OF-BAND
+ * via scripts/_set-god-mode-pin.ts (never in source, never in a migration).
+ */
+import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+// ── PIN hashing ────────────────────────────────────────────────────────────
+//
+// scrypt is deliberately expensive so a leaked hash isn't brute-forceable
+// against a 4-6 digit PIN in seconds. N=2^15 is the standard "interactive
+// login" cost — a few hundred ms per verify on the box, negligible under the
+// once-per-destructive-approval call rate.
+const SCRYPT_N = 1 << 15;
+const SCRYPT_r = 8;
+const SCRYPT_p = 1;
+const SCRYPT_KEYLEN = 32;
+const HASH_VERSION = "v1";
+
+/** Hash a PIN for storage on workspaces.god_mode_pin_hash. Format: `scrypt:v1:<saltHex>:<hashHex>`. */
+export function hashPin(pin: string): string {
+  const salt = randomBytes(16);
+  const derived = scryptSync(pin, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_r, p: SCRYPT_p });
+  return `scrypt:${HASH_VERSION}:${salt.toString("hex")}:${derived.toString("hex")}`;
+}
+
+/** Constant-time verify a candidate PIN against a stored `scrypt:v1:<salt>:<hash>` string. */
+export function verifyPin(candidate: string, stored: string | null | undefined): boolean {
+  if (!stored) return false;
+  const parts = stored.split(":");
+  if (parts.length !== 4 || parts[0] !== "scrypt" || parts[1] !== HASH_VERSION) return false;
+  const salt = Buffer.from(parts[2], "hex");
+  const expected = Buffer.from(parts[3], "hex");
+  if (salt.length !== 16 || expected.length !== SCRYPT_KEYLEN) return false;
+  let derived: Buffer;
+  try {
+    derived = scryptSync(candidate, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_r, p: SCRYPT_p });
+  } catch {
+    return false;
+  }
+  return timingSafeEqual(derived, expected);
+}
+
+// ── Session model ─────────────────────────────────────────────────────────
+
+/** 48-char hex cockpit token (24 random bytes). Same size as journey_sessions.token. */
+export function newCockpitToken(): string {
+  return randomBytes(24).toString("hex");
+}
+
+/** Sliding-TTL bump — every GET/message/approve/turn extends the token this long. */
+export const SLIDING_TTL_MS = 20 * 60 * 1000;
+/** Hard ceiling — arm() + 12h. Never bumped; the reaper force-disarms past this. */
+export const ABSOLUTE_TTL_MS = 12 * 60 * 60 * 1000;
+
+export type GodModeMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+  ts: string;
+};
+
+export type GodModeStatus = "armed" | "disarmed" | "expired";
+
+export type GodModeSessionRow = {
+  id: string;
+  workspace_id: string;
+  created_by: string;
+  status: GodModeStatus;
+  cockpit_token: string | null;
+  token_expires_at: string | null;
+  absolute_expires_at: string | null;
+  box_session_id: string | null;
+  box_session_config_dir: string | null;
+  messages: GodModeMessage[];
+  last_activity_at: string;
+  armed_at: string;
+  disarmed_at: string | null;
+  created_at: string;
+};
+
+type Admin = SupabaseClient;
+
+/**
+ * Arm a session for a workspace. Idempotent w.r.t. the "one active session per
+ * workspace" invariant: if an armed session already exists, its cockpit_token
+ * is REFRESHED (new 48-hex slug) and the sliding + absolute TTLs are reset.
+ * Returns the row (post-write).
+ */
+export async function armSession(
+  admin: Admin,
+  args: { workspaceId: string; createdBy: string },
+): Promise<GodModeSessionRow> {
+  const now = new Date();
+  const token = newCockpitToken();
+  const tokenExpiresAt = new Date(now.getTime() + SLIDING_TTL_MS).toISOString();
+  const absoluteExpiresAt = new Date(now.getTime() + ABSOLUTE_TTL_MS).toISOString();
+
+  const { data: existing } = await admin
+    .from("god_mode_sessions")
+    .select("*")
+    .eq("workspace_id", args.workspaceId)
+    .eq("status", "armed")
+    .maybeSingle();
+
+  if (existing) {
+    const { data: updated, error } = await admin
+      .from("god_mode_sessions")
+      .update({
+        cockpit_token: token,
+        token_expires_at: tokenExpiresAt,
+        absolute_expires_at: absoluteExpiresAt,
+        last_activity_at: now.toISOString(),
+        armed_at: now.toISOString(),
+      })
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error || !updated) throw new Error(`arm(refresh) failed: ${error?.message ?? "no row"}`);
+    return updated as GodModeSessionRow;
+  }
+
+  const { data: inserted, error } = await admin
+    .from("god_mode_sessions")
+    .insert({
+      workspace_id: args.workspaceId,
+      created_by: args.createdBy,
+      status: "armed",
+      cockpit_token: token,
+      token_expires_at: tokenExpiresAt,
+      absolute_expires_at: absoluteExpiresAt,
+      last_activity_at: now.toISOString(),
+      armed_at: now.toISOString(),
+    })
+    .select("*")
+    .single();
+  if (error || !inserted) throw new Error(`arm(insert) failed: ${error?.message ?? "no row"}`);
+  return inserted as GodModeSessionRow;
+}
+
+/**
+ * Disarm the workspace's active session (or a specific session by id). Nulls
+ * the cockpit token, flips status to 'disarmed', stamps disarmed_at. Idempotent
+ * — a session already disarmed/expired returns unchanged.
+ */
+export async function disarmSession(
+  admin: Admin,
+  args: { workspaceId?: string; sessionId?: string },
+): Promise<GodModeSessionRow | null> {
+  if (!args.workspaceId && !args.sessionId) throw new Error("workspaceId or sessionId required");
+
+  const query = admin
+    .from("god_mode_sessions")
+    .select("*")
+    .eq("status", "armed")
+    .limit(1);
+  if (args.sessionId) query.eq("id", args.sessionId);
+  else if (args.workspaceId) query.eq("workspace_id", args.workspaceId);
+
+  const { data } = await query.maybeSingle();
+  if (!data) return null;
+
+  const now = new Date().toISOString();
+  const { data: updated, error } = await admin
+    .from("god_mode_sessions")
+    .update({
+      status: "disarmed",
+      cockpit_token: null,
+      disarmed_at: now,
+      last_activity_at: now,
+    })
+    .eq("id", data.id)
+    .select("*")
+    .single();
+  if (error || !updated) throw new Error(`disarm failed: ${error?.message ?? "no row"}`);
+  return updated as GodModeSessionRow;
+}
+
+/** Load the active (armed) session for a workspace, or null. */
+export async function getActiveSession(admin: Admin, workspaceId: string): Promise<GodModeSessionRow | null> {
+  const { data } = await admin
+    .from("god_mode_sessions")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "armed")
+    .maybeSingle();
+  return (data as GodModeSessionRow | null) ?? null;
+}
+
+/** Load a session by cockpit token (the /god/[token] path). Returns null on unknown token. */
+export async function getSessionByToken(admin: Admin, token: string): Promise<GodModeSessionRow | null> {
+  if (!token || token.length !== 48) return null;
+  const { data } = await admin
+    .from("god_mode_sessions")
+    .select("*")
+    .eq("cockpit_token", token)
+    .maybeSingle();
+  return (data as GodModeSessionRow | null) ?? null;
+}
+
+/** Compose the /god/{token} URL from NEXT_PUBLIC_SITE_URL (mirrors journey-delivery). */
+export function cockpitUrl(token: string): string {
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
+  return `${siteUrl}/god/${token}`;
+}
