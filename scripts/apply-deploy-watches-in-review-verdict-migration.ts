@@ -18,29 +18,19 @@ async function main() {
       await c.query(readFileSync(resolve(__dirname, "../supabase/migrations", file), "utf8"));
       console.log(`✓ applied ${file}`);
     }
+    // Read the CHECK constraint's current expression via pg_get_constraintdef (the modern replacement
+    // for the pg_catalog.pg_constraint.consrc column removed in PostgreSQL 12) and assert it accepts
+    // `in_review`. information_schema.check_constraints would also work, but pg_get_constraintdef is
+    // the canonical read + returns the fully-parenthesized expression Postgres actually enforces.
     const { rows } = await c.query(
-      "select consrc from pg_catalog.pg_constraint where conname='deploy_watches_verdict_check'",
+      `select pg_get_constraintdef(oid) as def
+         from pg_catalog.pg_constraint
+        where conname = 'deploy_watches_verdict_check'`,
     );
-    console.log(`✓ deploy_watches_verdict_check present: ${rows.length === 1}`);
-    // Round-trip: an insert-then-rollback of a row carrying verdict='in_review' proves the new
-    // CHECK accepts it (a transaction is rolled back so we don't leave a test row behind).
-    await c.query("begin");
-    try {
-      // Sanity-only: pick any workspace, prove verdict='in_review' isn't rejected.
-      const ws = await c.query("select id from public.workspaces limit 1");
-      if (ws.rows.length) {
-        await c.query(
-          `insert into public.deploy_watches (workspace_id, slug, branch, deployed_at, window_ends_at, verdict)
-             values ($1, 'in-review-verdict-probe', 'claude/probe', now(), now(), 'in_review')`,
-          [ws.rows[0].id],
-        );
-        console.log("✓ verdict='in_review' accepted by the CHECK constraint");
-      } else {
-        console.log("· no workspaces present — skipped the CHECK round-trip");
-      }
-    } finally {
-      await c.query("rollback");
-    }
+    const def = rows.length ? String(rows[0].def) : null;
+    if (!def) throw new Error("deploy_watches_verdict_check not found — the ALTER TABLE did not land");
+    if (!/in_review/.test(def)) throw new Error(`deploy_watches_verdict_check does not accept 'in_review': ${def}`);
+    console.log(`✓ deploy_watches_verdict_check accepts 'in_review': ${def}`);
   } finally {
     await c.end();
   }
