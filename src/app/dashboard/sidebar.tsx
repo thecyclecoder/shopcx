@@ -142,6 +142,10 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/marketing/text", label: "Text", icon: ICONS.marketing },
       { href: "/dashboard/marketing/ads", label: "Ads", icon: ICONS.marketing },
       { href: "/dashboard/marketing/landers", label: "Landers", icon: ICONS.marketing },
+      // Founder-facing upload surface (content-upload-and-lander-build Phase 1). Sits under
+      // Landers in the Marketing area so pending real-evidence uploads are one click away; the
+      // badge shows total open lander_content_gaps on awaiting_upload blueprints.
+      { href: "/dashboard/marketing/landers/content", label: "Lander uploads", icon: ICONS.marketing, ownerOnly: true },
       { href: "/dashboard/marketing/acquisition", label: "Acquisition", icon: ICONS.marketing, ownerOnly: true },
       { href: "/dashboard/marketing/social", label: "Social", icon: ICONS.marketing },
       { href: "#", label: "Email", icon: ICONS.marketing, comingSoon: true },
@@ -213,6 +217,7 @@ export default function Sidebar({
   const [regressionCount, setRegressionCount] = useState(0); // shipped specs failing their own spec-test (owner)
   const [approvalsCount, setApprovalsCount] = useState(0); // approvals escalated to the CEO (Henry)
   const [securityCount, setSecurityCount] = useState(0); // surfaced security findings (Vault, owner)
+  const [landerUploadCount, setLanderUploadCount] = useState(0); // open lander_content_gaps on awaiting_upload blueprints (owner)
 
   // Close sidebar on route change (mobile), auto-expand tickets when on tickets page
   useEffect(() => {
@@ -307,6 +312,11 @@ export default function Sidebar({
         fetch(`/api/developer/security-tests?count=1`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.surfacedCount != null) setSecurityCount(d.surfacedCount); })
+          .catch(() => {});
+        // Lander uploads: open lander_content_gaps on awaiting_upload blueprints (owner surface).
+        fetch(`/api/marketing/landers/blueprints?workspaceId=${workspace.id}&count=1`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.pending_uploads != null) setLanderUploadCount(d.pending_uploads); })
           .catch(() => {});
       }
     };
@@ -608,6 +618,12 @@ export default function Sidebar({
                           {item.href === "/dashboard/developer/security-tests" && securityCount > 0 && (
                             <span className="rounded-full bg-rose-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
                               {securityCount > 99 ? "99+" : securityCount}
+                            </span>
+                          )}
+                          {/* Lander uploads: amber "needs you" — a Cleo blueprint is waiting on real-evidence assets. */}
+                          {item.href === "/dashboard/marketing/landers/content" && landerUploadCount > 0 && (
+                            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                              {landerUploadCount > 99 ? "99+" : landerUploadCount}
                             </span>
                           )}
                         </Link>
