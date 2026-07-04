@@ -26,6 +26,22 @@ _None._
 - [[../tables/meta_ad_accounts]]
 - [[../tables/meta_connections]]
 
+## Amazon error handling
+
+The Amazon leg wraps the whole SP-API report lifecycle (request → poll → download
+→ process) in a try/catch. The log level is split so the Control Tower error
+feed only escalates real problems:
+
+- Caught message contains any of `InternalFailure`, `ServiceUnavailable`,
+  `RequestThrottled`, `InternalError`, `TooManyRequests` (case-insensitive), or
+  a `Report request failed: ... 5xx` / `Report download failed: 5xx` bare-status
+  substring → `console.warn` + `{ amazon: 'transient' }`. Documented AWS
+  retry-later codes; the next 5-min cron tick self-heals. Repair signature
+  `vercel:de424cf8b0121136`.
+- Everything else (auth revoked, disabled connection, permission errors,
+  unexpected 4xx, code defects) → `console.error` + `{ amazon: 'error' }`,
+  which Vercel routes into the error feed for Control Tower to escalate.
+
 ## Per-account Meta error handling
 
 The Meta loop wraps each account in a try/catch and continues to the next

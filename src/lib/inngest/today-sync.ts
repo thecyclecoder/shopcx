@@ -52,6 +52,22 @@ export const todaySyncCron = inngest.createFunction(
 
         return { amazon: "synced", orders: result.orderCount };
       } catch (err) {
+        // SP-API transient upstream blips — Amazon's own documented retry-later
+        // codes surfaced inside the `Report request failed: {...}` JSON payload
+        // (or a bare 5xx from the document download). The 5-min cron cadence
+        // self-heals these on the next run, so log at warn and don't escalate
+        // to the Control Tower error feed. Real failures (auth revoked,
+        // connection disabled, permissions) still hit console.error and
+        // surface. Mirrors the Meta-side classifier below.
+        const msg = err instanceof Error ? err.message : String(err);
+        const isTransient =
+          /InternalFailure|ServiceUnavailable|RequestThrottled|InternalError|TooManyRequests/i.test(msg) ||
+          /Report request failed:.*\b5\d\d\b/.test(msg) ||
+          /Report download failed: 5\d\d/.test(msg);
+        if (isTransient) {
+          console.warn("[Today Sync] Amazon transient:", err);
+          return { amazon: "transient" };
+        }
         console.error("[Today Sync] Amazon error:", err);
         return { amazon: "error" };
       }
