@@ -58,9 +58,24 @@ _None._
 
 ## Tuning notes
 
-**Drain-rate dial:** `concurrency.limit` in the function config. Ceiling = `concurrency × batchEvents.maxSize` callbacks in flight regardless of webhook enqueue rate. Today: `8 × 100 = 800` in flight max.
+**Drain-rate dial (concurrency).** `concurrency.limit` in the `smsCallbackDrain` config at `src/lib/inngest/sms-callback-drain.ts:99` — single-line change. Ceiling = `concurrency × batchEvents.maxSize` callbacks in flight regardless of webhook enqueue rate. Today: `8 × 100 = 800` in flight max. Bump when Postgres headroom is available (watch `pg_stat_activity` for idle-in-transaction); cut on evidence of DB pressure (Supabase 521 gateway errors, statement timeouts). Same location holds the `sms-inbound-drain` limit (`4`) and `received-sms-rollup-cron` limit (`1`).
 
-**Latency dial:** `batchEvents.timeout` (5s). Shorter timeout = faster individual runs at the cost of smaller batches; longer timeout = better bulk efficiency at the cost of tail latency.
+**Batch-size dial.** `batchEvents.maxSize` at the same line — larger batches = fewer round-trips per callback but bigger UPDATE row sets. 100 is the sweet spot at 800 in-flight ceiling; going above ~500 starts to fight the pooler statement timeout on the bulk UPDATE step.
+
+**Latency dial.** `batchEvents.timeout` (5s). Shorter timeout = faster individual runs at the cost of smaller batches; longer timeout = better bulk efficiency at the cost of tail latency.
+
+## Phase 5 backpressure proof — burst-load harness
+
+`scripts/_burst-load-drain-harness.ts` synthesizes 20k `sms/status-callback.received` events against a seed workspace + campaign, includes a duplicate segment (~10%) and an out-of-order segment (~5%, `delivered` before `sent`), and polls `sms_campaign_recipients` for convergence. Deterministic MessageSids per `--seed`, so a second run against the same seed lands the same sids and hits the idempotency path (bulk UPDATE returns the same row set; stage-rank guards keep state stable). Underscore-prefix throwaway per [[../recipes/script-conventions]].
+
+Run:
+
+```
+npx tsx scripts/_burst-load-drain-harness.ts \
+  --workspace <uuid> --campaign <uuid> --seed twilio-drain-harness-v1
+```
+
+**Status:** ⏳ harness on branch; owner runs against a staging workspace/campaign to record the peak-concurrency screenshot from the Inngest dashboard (the sampler here can't reach Inngest Cloud's run catalog — dashboard is authoritative). Expected result: peak concurrent runs ≤ 8, zero Postgres 521/timeout events, re-run leaves row counts unchanged.
 
 ## Related
 
