@@ -106,8 +106,12 @@ export interface SpecCard {
   shippedPr?: number | null;
   /** spec-review-agent Phase 4 — the In Review lane surface signals (read straight off public.specs):
    *
-   *   - `valePass` true  → Vale's CHECKLIST cleared; the card is waiting on Ada's disposition lane.
-   *   - `valePass` false → Vale hasn't passed it yet (a fresh send-back, or a never-reviewed spec).
+   *   - `valePass` undefined → NEVER reviewed (fresh authoring / a send-back that NULLed the flag). "pending".
+   *   - `valePass` true      → Vale's CHECKLIST cleared; the card is waiting on Ada's disposition lane.
+   *   - `valePass` false     → Vale reviewed it and flagged **needs_fix** — the spec is MALFORMED and the build
+   *     pipeline is hard-stopped behind it (vale-instant-per-spec-review). The board must render this distinctly
+   *     from "pending" — before, `false` was collapsed to undefined here and a failed review looked unreviewed.
+   *     `needsFixReason` / `needsFixDefects` carry Vale's latest diagnosis (overlaid from `director_activity`).
    *   - `adaDisposition='pending_upgrade'` → Ada parked an UPGRADE; a CEO Planned/Deferred call is queued.
    *   - `intendedStatus` is the AUTHOR'S suggested destination — surfaced inline as "↳ planned" / "↳ deferred"
    *     so the CEO can see what was proposed alongside the agent state.
@@ -115,6 +119,12 @@ export interface SpecCard {
    * All optional — older rows / non-in_review cards carry undefined. Consumed by the In Review column on the
    * roadmap board (`InReviewLane`) and by Vale's role page; not used for status routing. */
   valePass?: boolean;
+  /** vale-instant-per-spec-review — Vale's latest needs_fix diagnosis, overlaid from the most recent
+   *  `director_activity` `spec_review_needs_fix` row (only populated when `valePass === false`). `needsFixReason`
+   *  is her one-sentence evidence-contract verdict (shown as the chip tooltip); `needsFixDefects` is the
+   *  specific checklist failures. Undefined on any non-failed card. */
+  needsFixReason?: string;
+  needsFixDefects?: string[];
   /** build-gate-durable-review-signal — the DURABLE "this spec passed Vale review" signal, read straight
    *  off `specs.vale_review_passed_at` (non-null → true). UNLIKE `valePass` (the transient flag Ada's
    *  disposition consumes), this survives the spec leaving in_review — so the claim-time build gate can
@@ -581,10 +591,11 @@ function dbRowToSpecCard(row: SpecRow): SpecCard {
     // semantics consumers rely on (`card.autoBuild !== false`) keep working.
     autoBuild: row.auto_build ? true : undefined,
     repairSignature: !!row.repair_signature,
-    // spec-review-agent Phase 4 — In Review lane state. Surfaced only when set (a never-touched row leaves
-    // them undefined so consumers can branch on presence). Boolean→true|undefined keeps the SpecCard shape
-    // tri-state-friendly the way autoBuild already does.
-    valePass: row.vale_pass === true ? true : undefined,
+    // spec-review-agent Phase 4 / vale-instant-per-spec-review — In Review lane state, the FULL tri-state:
+    // null → undefined (never reviewed), true → passed, FALSE → needs_fix (kept, not collapsed). The old
+    // `=== true ? true : undefined` mapping threw `false` away, so a failed review rendered identically to an
+    // un-reviewed spec on the board — the bug this fixes. Consumers branch on `=== false` for the needs_fix chip.
+    valePass: row.vale_pass == null ? undefined : row.vale_pass,
     // build-gate-durable-review-signal — durable pass signal (survives Ada consuming vale_pass). The gate
     // reads THIS, not valePass. Non-null timestamp → passed review.
     valeReviewPassed: row.vale_review_passed_at ? true : undefined,
@@ -637,6 +648,22 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
   } catch {
     /* best-effort overlay — the DB row is authoritative for everything else. */
   }
+  // vale-instant-per-spec-review — overlay Vale's needs_fix diagnosis onto the cards she FAILED
+  // (valePass === false). One batched read of the latest `spec_review_needs_fix` director_activity row per
+  // failed slug, so the board can render WHY a review failed (the chip tooltip), not just THAT it failed.
+  // Best-effort: a read error leaves the cards showing the plain "needs fix" chip with no reason.
+  try {
+    const failed = cards.filter((c) => c.valePass === false).map((c) => c.slug);
+    if (failed.length) {
+      const reasons = await readNeedsFixReasons(workspaceId, failed);
+      for (let i = 0; i < cards.length; i++) {
+        const nf = reasons.get(cards[i].slug);
+        if (nf) cards[i] = { ...cards[i], needsFixReason: nf.reason, needsFixDefects: nf.defects };
+      }
+    }
+  } catch {
+    /* best-effort — the needs_fix chip still renders without the reason. */
+  }
   // preview-test-promote-pipeline M3 — apply the in_testing derivation. Pure batched read of the same
   // signals the fold gate uses (getLatestSpecTestRuns + getSecurityStateBySlug) plus the per-build preview
   // signal. The board and the fold gate read the same sources, so they can never disagree. Best-effort: a
@@ -656,6 +683,36 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
     /* best-effort — base rollup stands when the signal readers fail. */
   }
   return cards.sort((a, b) => SPEC_RANK[a.status] - SPEC_RANK[b.status] || a.title.localeCompare(b.title));
+}
+
+/**
+ * vale-instant-per-spec-review — the latest `spec_review_needs_fix` diagnosis per failed slug. One batched
+ * `director_activity` read (newest-first), keeping the FIRST row seen per slug (its most recent verdict).
+ * Returns a map keyed by slug; absent = no recorded diagnosis (the chip renders without a reason). Read-only,
+ * best-effort — the caller swallows any error.
+ */
+async function readNeedsFixReasons(
+  workspaceId: string,
+  slugs: string[],
+): Promise<Map<string, { reason: string; defects: string[] }>> {
+  const out = new Map<string, { reason: string; defects: string[] }>();
+  if (!slugs.length) return out;
+  const { createAdminClient } = await import("@/lib/supabase/admin");
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("director_activity")
+    .select("spec_slug, reason, metadata, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("action_kind", "spec_review_needs_fix")
+    .in("spec_slug", slugs)
+    .order("created_at", { ascending: false });
+  for (const row of (data ?? []) as { spec_slug: string; reason: string | null; metadata: unknown }[]) {
+    if (out.has(row.spec_slug)) continue; // newest-first → first seen is the latest verdict
+    const defectsRaw = (row.metadata as { defects?: unknown } | null)?.defects;
+    const defects = Array.isArray(defectsRaw) ? defectsRaw.map((d) => String(d)) : [];
+    out.set(row.spec_slug, { reason: (row.reason ?? "").trim(), defects });
+  }
+  return out;
 }
 
 /**
