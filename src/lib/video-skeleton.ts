@@ -139,7 +139,7 @@ export async function deconstructVideo(
       durationSec = t.duration || 0;
       whisperCents = whisperCostCents(durationSec);
     } catch (err) {
-      console.error("[creative-finder-video] transcription failed:", err);
+      console.warn("[creative-finder-video] transcription failed:", err);
     }
   }
 
