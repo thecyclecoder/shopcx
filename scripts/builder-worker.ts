@@ -153,6 +153,17 @@ const DEPLOY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // build-sized ceiling so a heavy join + a few read probes never get cut short.
 const MAX_DEV_ASK = 1;
 const DEV_ASK_TIMEOUT_MS = 20 * 60 * 1000;
+// God-mode turns (docs/brain/specs/god-mode.md Phase 2) run in their OWN concurrency-1 interactive
+// lane: a resumable Max `claude -p` session under a HARD per-tool permission gate (no
+// --dangerously-skip-permissions — the box gate at scripts/god-mode-permission-gate.ts adjudicates
+// EVERY non-safe-read tool call by inserting a god_mode_approvals row and polling it). Serialized
+// per box — one active god-mode session per box, matching the "one active god-mode session per
+// workspace" invariant enforced by the partial UNIQUE index on god_mode_sessions. Build-sized
+// timeout: an incident-remediation turn can be long (the founder may sleep on an approval — the
+// stream stays open, the gate keeps polling). The whole feature is a deliberate sunset stopgap;
+// see docs/brain/lifecycles/god-mode.md § sunset.
+const MAX_GOD_MODE = 1;
+const GOD_MODE_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_DIRECTOR_COACH = 1; // CEO↔Director coaching chat (worker-grading P7) — concurrency-1 interactive lane.
 // PR-resolve jobs (dirty-pr-resolver-agent) run in their OWN concurrency-1 lane: event-fired by the
 // GitHub webhook the moment a push to main dirties an open claude/* build PR. A top-level `claude -p`
@@ -354,6 +365,13 @@ const DB_HEALTH_SLOWQ_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const DB_HEALTH_SIZE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 const DB_HEALTH_INSTANCE_INTERVAL_MS = 15 * 60 * 1000; // ~15 min — active-incident cadence (db-health-instance-saturation-detector P1)
 let lastDbHealthSlowQ = 0; // 0 ⇒ run on first poll so there's a beat right away.
+// God-mode reaper (docs/brain/specs/god-mode.md Phase 5): idle-expire armed
+// sessions past token_expires_at with NO in-flight signal (no pending approval,
+// no queued/building god-mode job); force-disarm past absolute_expires_at
+// regardless of activity. Runs every ~60s off the poll loop; best-effort.
+let lastGodModeReap = 0;
+let godModeReapInFlight = false;
+const GOD_MODE_REAP_INTERVAL_MS = 60 * 1000;
 let lastDbHealthSize = 0;
 let lastDbHealthInstance = 0;
 let dbHealthSlowQInFlight = false;
@@ -492,7 +510,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1731,9 +1749,25 @@ interface RunBoxSessionOpts {
   configDir?: string;
   jobId?: string | null;
   kind?: string;
-  sandbox?: "build" | "max";
+  // "build" — strip SECRET_RE. "max" — keep the env, drop ANTHROPIC_API_KEY.
+  // "godmode" — deliberately-prod-write lane (Phase 2 of docs/brain/specs/god-mode.md).
+  //   Env-wise: identical to "max" (keeps prod-write creds like SUPABASE_SERVICE_ROLE_KEY /
+  //   SUPABASE_DB_URL / GITHUB_TOKEN that `build` strips via SECRET_RE). Distinct branch as
+  //   an EXPLICIT INTENT MARKER — grep-able, and Phase-3 review can enforce that ONLY
+  //   god-mode routes through it. The trust boundary is NOT the env stripping (there is
+  //   none vs max), it's the hard per-tool permission gate below (see `permissionGate`).
+  sandbox?: "build" | "max" | "godmode";
   timeout: number;
   idleTimeout?: number;
+  // God-mode Phase 2: wire a PreToolUse hook via inline --settings JSON and DO NOT pass
+  // --dangerously-skip-permissions. Every non-safe-read tool call routes through the gate
+  // (scripts/god-mode-permission-gate.ts) which inserts a god_mode_approvals row and polls
+  // until the founder decides. The gate reads GOD_MODE_SESSION_ID from env — the runner
+  // sets it via extraEnv.
+  permissionGate?: { hookCommand: string };
+  // Extra env vars merged into the spawned env (after the sandbox branch). The godmode
+  // lane uses this to pass GOD_MODE_SESSION_ID down to the PreToolUse hook.
+  extraEnv?: Record<string, string>;
 }
 
 interface RunResult {
@@ -1836,17 +1870,27 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   //   "max"  — keep the env, drop ONLY ANTHROPIC_API_KEY so all LLM is Max-billed. Used by every
   //     non-build runner (director / improve / triage / etc — they need read-only DB/crypto creds).
   const env: NodeJS.ProcessEnv = {};
-  if ((opts.sandbox ?? "max") === "build") {
+  const sb = opts.sandbox ?? "max";
+  if (sb === "build") {
     for (const [k, v] of Object.entries(process.env)) {
       if (k === "ANTHROPIC_API_KEY") continue;
       if (/^NEXT_PUBLIC_/.test(k)) { env[k] = v; continue; }
       if (SECRET_RE.test(k)) continue;
       env[k] = v;
     }
+  } else if (sb === "godmode") {
+    // God-mode: DELIBERATELY prod-write. Forwards SUPABASE_SERVICE_ROLE_KEY / SUPABASE_DB_URL /
+    // GITHUB_TOKEN / deploy creds — the same creds `build` strips via SECRET_RE. Drops
+    // ANTHROPIC_API_KEY so all inference is Max-billed. The trust boundary is the hard
+    // per-tool permission gate below (opts.permissionGate), not env stripping. See
+    // docs/brain/lifecycles/god-mode.md § permission gate.
+    Object.assign(env, process.env);
+    delete env.ANTHROPIC_API_KEY;
   } else {
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
   }
+  if (opts.extraEnv) Object.assign(env, opts.extraEnv);
   // Multi-account: point the `claude` CLI at the chosen account's isolated credentials/config dir. An
   // ALIAS can't reach a spawned process (no shell), so the worker must set CLAUDE_CONFIG_DIR in the env
   // object itself. Unset → the CLI's default (~/.claude = pool[0]) — back-compat for callers not yet
@@ -1863,7 +1907,24 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // boxes (0 checklist events). Up-front + mandatory, the agent states its plan as tasks and the
   // card mirrors it live.
   const augmentedPrompt = `${BOX_SESSION_CHECKLIST_INSTRUCTION}\n\n${prompt}`;
-  const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
+  // God-mode Phase 2: replace --dangerously-skip-permissions with an inline --settings JSON
+  // wiring a PreToolUse hook to the box gate. Every non-safe-read tool call routes through
+  // scripts/god-mode-permission-gate.ts (which reads GOD_MODE_SESSION_ID from env — set
+  // via opts.extraEnv above — and adjudicates against god_mode_approvals). The hook script
+  // returns { hookSpecificOutput: { permissionDecision: "allow"|"deny", ... } } to the CLI.
+  const permissionArgs: string[] = opts.permissionGate
+    ? [
+        "--settings",
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [
+              { matcher: ".*", hooks: [{ type: "command", command: opts.permissionGate.hookCommand }] },
+            ],
+          },
+        }),
+      ]
+    : ["--dangerously-skip-permissions"];
+  const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, ...permissionArgs, "--output-format", "stream-json", "--verbose"];
   const writer = opts.jobId ? makeChecklistWriter(opts.jobId) : null;
   // Heartbeat (stale-session-reaper): bump last_heartbeat_at on each stream line so the in-loop reaper
   // can tell a LIVE-but-long session from a DEAD one. Keyed on jobId only (independent of the checklist),
@@ -10822,6 +10883,204 @@ async function runDeveloperMessageJob(job: Job) {
   }
 }
 
+// ── God-mode (docs/brain/specs/god-mode.md Phase 2) ─────────────────────────
+// A kind='god-mode' job is ONE TURN of the founder's ELEVATED bridge to the box for incident
+// remediation. Unlike dev-ask (READ-ONLY analyst) this lane runs a resumable `claude -p` on Max
+// with PROD-WRITE creds and NO --dangerously-skip-permissions — every non-safe-read tool call
+// routes through the box gate at scripts/god-mode-permission-gate.ts which inserts a
+// god_mode_approvals row and blocks (poll) until the founder decides.
+//
+// Two modes on `job.instructions`:
+//   { session_id, mode: "turn", user_message }  — one conversational turn
+//   { session_id, mode: "kill" }                — tear down: disarm the session
+//
+// Stable per-session worktree at builds/god-mode-<session_id> so `claude --resume` finds the
+// prior transcript (same discipline as runSpecChatJob / runDeveloperMessageJob's per-thread
+// worktree). The god_mode_sessions row's box_session_id + box_session_config_dir carry the
+// Claude session id + config dir so subsequent turns resume on the SAME Max account.
+async function runGodModeClaude(
+  prompt: string,
+  sessionId: string | null,
+  cwd: string,
+  configDir: string | undefined,
+  jobId: string,
+  godModeSessionId: string,
+) {
+  return runBoxSession(prompt, sessionId, cwd, {
+    configDir,
+    jobId,
+    kind: "god-mode",
+    sandbox: "godmode",
+    timeout: GOD_MODE_TIMEOUT_MS,
+    // Wire the PreToolUse hook to the box gate. The gate reads GOD_MODE_SESSION_ID
+    // from env (extraEnv below) to know which session's approval queue to write.
+    permissionGate: {
+      hookCommand: `npx tsx ${join(REPO_DIR, "scripts", "god-mode-permission-gate.ts")}`,
+    },
+    extraEnv: { GOD_MODE_SESSION_ID: godModeSessionId },
+  });
+}
+
+function godModeFraming(): string {
+  return [
+    `You are the founder's ELEVATED god-mode session inside the ShopCX box. You have full repo access, prod-write DB creds, and every deploy credential the box has — this is NOT the read-only dev-ask console.`,
+    `EVERY non-safe-read tool call is INTERCEPTED by a hard permission gate that pauses on an approval card in the founder's cockpit. Safe reads (Read/Grep/Glob/WebSearch + a small allowlist of read-only Bash prefixes) auto-allow. Everything else — Write/Edit, arbitrary Bash, deploys, git push, migration applies — will BLOCK your tool call until the founder Approves or Denies (or Asks — in which case respond in-transcript to their question, then re-attempt).`,
+    `House rules: read docs/brain/ before grepping src/ (start at docs/brain/README.md). Diagnose read-only FIRST; propose the smallest change; ASK before big or destructive moves. Never assume approval — the gate is real. On DENY, stop and reply in-transcript.`,
+    `You are here to REMEDIATE an incident, not build a feature. Prefer a script over an edit; prefer a single-row surgical write over a broad UPDATE; prefer proposing a spec over a raw code change when the fix is durable.`,
+    ``,
+    `Final message = ONLY one JSON object, nothing else:`,
+    `{"status":"replied","reply":"<your plain-text answer to the founder — what you did, what you found, what you propose next>"}`,
+  ].join("\n");
+}
+
+function renderGodModeTranscript(messages: { role: string; content: string }[]): string {
+  return messages
+    .map((m) => `${m.role === "user" ? "[Founder]" : m.role === "system" ? "[System]" : "[You]"}: ${m.content}`)
+    .join("\n\n");
+}
+
+async function runGodModeJob(job: Job) {
+  const tag = `[god-mode:${job.id.slice(0, 8)}]`;
+  const { getSessionByToken: _unused, ...godMode } = await import("../src/lib/god-mode");
+  void _unused;
+
+  let params: { session_id?: string; mode?: string; user_message?: string } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — fail */
+  }
+  const mode = (params.mode as "turn" | "kill") || "turn";
+  const sessionId = params.session_id;
+  if (!sessionId) {
+    await update(job.id, { status: "failed", error: "god-mode job missing session_id" });
+    return;
+  }
+
+  const admin = db;
+
+  // ── mode: "kill" — tear down the session ────────────────────────────────
+  if (mode === "kill") {
+    try {
+      await godMode.disarmSession(admin, { sessionId });
+      await update(job.id, { status: "completed", log_tail: `god-mode session ${sessionId.slice(0, 8)} disarmed via kill` });
+      console.log(`${tag} killed session ${sessionId.slice(0, 8)}`);
+    } catch (e) {
+      await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+      console.error(`${tag} kill failed:`, e instanceof Error ? e.message : e);
+    }
+    return;
+  }
+
+  // ── mode: "turn" — one conversational turn under the permission gate ────
+  const { data: sessionRow } = await admin
+    .from("god_mode_sessions")
+    .select("*")
+    .eq("id", sessionId)
+    .maybeSingle();
+  if (!sessionRow) {
+    await update(job.id, { status: "failed", error: `god-mode session ${sessionId} not found` });
+    return;
+  }
+  if (sessionRow.status !== "armed") {
+    await update(job.id, { status: "failed", error: `god-mode session is ${sessionRow.status}, not armed — refusing turn` });
+    console.warn(`${tag} refusing turn — session status is ${sessionRow.status}`);
+    return;
+  }
+  const priorBoxSession = (sessionRow.box_session_id as string | null) ?? null;
+  const priorConfigDir = (sessionRow.box_session_config_dir as string | null) ?? undefined;
+  const isResume = !!priorBoxSession;
+
+  // Stable per-session worktree: `claude --resume` resolves against the cwd's project store,
+  // so the SAME session must always run in the SAME path. Key on the god-mode session id.
+  const key = sessionId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const wt = join(BUILDS_DIR, `god-mode-${key}`);
+  sh("git", ["fetch", "origin", "main"]);
+  sh("git", ["worktree", "remove", "--force", wt]);
+  const branch = `claude/god-mode-${key}`;
+  const add = sh("git", ["worktree", "add", "-B", branch, wt, "origin/main"]);
+  if (add.code !== 0) {
+    await update(job.id, { status: "failed", error: `worktree add failed: ${add.err.slice(0, 200)}` });
+    return;
+  }
+  sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+  try {
+    const messages = Array.isArray(sessionRow.messages)
+      ? (sessionRow.messages as { role: string; content: string; ts: string }[])
+      : [];
+
+    // Append the user turn before invoking the model — the cockpit tab reads this
+    // to render the transcript live even before the reply lands.
+    if (params.user_message && params.user_message.trim()) {
+      await godMode.appendMessage(admin, sessionId, {
+        role: "user",
+        content: params.user_message.trim(),
+        ts: new Date().toISOString(),
+      });
+      messages.push({ role: "user", content: params.user_message.trim(), ts: new Date().toISOString() });
+    }
+
+    const latestUser = [...messages].reverse().find((m) => m.role === "user")?.content || "";
+    const turnPrompt = isResume
+      ? latestUser
+      : [godModeFraming(), ``, `Conversation so far:`, renderGodModeTranscript(messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+
+    // Multi-account: RESUME pins to the prior config dir; a FRESH turn round-robins across
+    // healthy accounts (same discipline as every other resumable Max lane).
+    const { result: coachRun, configDir: usedConfigDir, allCapped } = await withAccountFailover(
+      { sessionId: priorBoxSession, configDir: priorConfigDir },
+      async (cfg, sid) => {
+        return runGodModeClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id, sessionId);
+      },
+    );
+    if (allCapped || !coachRun) {
+      await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — god-mode turn parked" });
+      console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
+      return;
+    }
+    const { session: newBoxSession, resultText, isError, raw, usage, model } = coachRun;
+    await meterAgentJob(job, usedConfigDir ?? undefined, usage, model);
+
+    // Capture the new box session id + config dir for the next --resume.
+    if (newBoxSession || usedConfigDir) {
+      await godMode.setBoxSession(admin, sessionId, {
+        boxSessionId: newBoxSession ?? priorBoxSession,
+        boxSessionConfigDir: usedConfigDir ?? priorConfigDir ?? null,
+      });
+    }
+
+    const parsed = parseStatus(resultText) as Record<string, unknown> | null;
+    const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
+    const logTail = raw.slice(-2000);
+
+    if (!reply) {
+      const fallback = isError ? "god-mode turn errored" : "god-mode turn returned no reply";
+      // Still append a system note so the cockpit shows something happened.
+      await godMode.appendMessage(admin, sessionId, {
+        role: "system",
+        content: fallback,
+        ts: new Date().toISOString(),
+      });
+      await update(job.id, { status: "failed", error: fallback, log_tail: logTail });
+      return;
+    }
+
+    await godMode.appendMessage(admin, sessionId, {
+      role: "assistant",
+      content: reply,
+      ts: new Date().toISOString(),
+    });
+    await godMode.bumpActivity(admin, sessionId);
+    await update(job.id, { status: "completed", log_tail: logTail });
+    console.log(`${tag} ✓ turn done — reply appended (${reply.length} chars)`);
+  } finally {
+    // Leave the worktree in place — the SAME path is what `claude --resume` needs on the
+    // next turn. We rebuild it fresh at the top of each turn (fetch + worktree remove +
+    // worktree add), so a stale checkout can't drift between turns.
+  }
+}
+
 // ── CEO↔Director coaching chat (worker-grading-and-director-management Phase 7) ──────────────
 // A kind='director-coach' job is ONE turn of the CEO↔Director coaching thread. The box runs a resumable
 // `claude -p` on Max AS the Platform/DevOps Director (Ada): read-only over the brain + her leash + the
@@ -17435,6 +17694,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
+  if (job.kind === "god-mode") return runGodModeJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
   if (job.kind === "repair") return runRepairJob(job);
@@ -18529,6 +18789,7 @@ async function main() {
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
+  const countGodMode = () => [...active.values()].filter((v) => v.kind === "god-mode").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
   const countRepair = () => [...active.values()].filter((v) => v.kind === "repair").length;
@@ -18552,7 +18813,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -18659,6 +18920,28 @@ async function main() {
           console.error("[reaper] stale-session sweep failed (continuing):", e instanceof Error ? e.message : e);
         } finally {
           reapSweepInFlight = false;
+        }
+      }
+
+      // God-mode reaper (docs/brain/specs/god-mode.md Phase 5): force-disarm any god_mode_sessions row
+      // past absolute_expires_at (arm+12h), and idle-expire any row past token_expires_at when NO in-
+      // flight signal exists (no pending approval AND no queued/building god-mode agent_jobs row).
+      // Sends a session-done SMS on expiry (best-effort inside the reaper). Throttled ~1min; best-effort,
+      // never breaks the poll loop. Sliding TTL bumps come from the Phase-3/4 GET/message/approve routes
+      // + the runGodModeJob turn — active use keeps a session alive without the reaper's involvement.
+      if (!godModeReapInFlight && Date.now() - lastGodModeReap > GOD_MODE_REAP_INTERVAL_MS) {
+        lastGodModeReap = Date.now();
+        godModeReapInFlight = true;
+        try {
+          const { reapGodModeSessions } = await import("../src/lib/god-mode");
+          const r = await reapGodModeSessions(db);
+          if (r.forceDisarmed || r.idleExpired) {
+            console.log(`[god-mode reaper] force=${r.forceDisarmed} idle=${r.idleExpired}`);
+          }
+        } catch (e) {
+          console.error("[god-mode reaper] sweep failed (continuing):", e instanceof Error ? e.message : e);
+        } finally {
+          godModeReapInFlight = false;
         }
       }
 
@@ -18783,6 +19066,17 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed dev-ask ${job.id.slice(0, 8)} → ${countDevAsk() + 1}/${MAX_DEV_ASK} dev-ask lane`);
+        launch(job);
+      }
+      // Fill the god-mode lane (docs/brain/specs/god-mode.md Phase 2): the founder's ELEVATED
+      // bridge to the box — a resumable Max `claude -p` turn under a HARD per-tool permission
+      // gate (no --dangerously-skip-permissions). Concurrency-1 interactive; every non-safe
+      // tool call inserts a god_mode_approvals row and blocks. `mode:'kill'` tears down.
+      while (countGodMode() < MAX_GOD_MODE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["god-mode"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed god-mode ${job.id.slice(0, 8)} → ${countGodMode() + 1}/${MAX_GOD_MODE} god-mode lane`);
         launch(job);
       }
       // Fill the director-coach lane (worker-grading P7): CEO↔Director coaching chat turns, concurrency-1.
