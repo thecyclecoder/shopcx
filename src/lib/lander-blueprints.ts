@@ -262,3 +262,311 @@ export async function setBlueprintContent(
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setBlueprintContent: ${error.message}`);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Carrie's DR content STORE — Phase 1 of carrie-dr-content.md
+//
+// Two SDK surfaces piggyback on this file because they're the same idea:
+//
+//   • `product_media` categorized reader/writer — a DR asset is permanent,
+//     categorized product intelligence keyed by product_id + category.
+//   • `lander_content_gaps` create/list/resolve — one row per real-evidence
+//     asset Carrie can't ethically generate, routed to Max for upload.
+//
+// Chokepoint discipline: no raw
+// `.from('product_media' | 'lander_content_gaps').insert|update|upsert` for
+// these DR paths outside this file (createAdminClient() is only reached here).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Persuasive job of a `product_media` asset. Matches the CHECK constraint on
+ * `product_media.category` and is what Carrie reads by ("do we already have a
+ * lifestyle shot for this product?").
+ *
+ *   before_after     — a real transformation story (NEVER generated)
+ *   ugc              — a real customer selfie (NEVER generated)
+ *   testimonial_photo— a real customer's photo (NEVER generated)
+ *   press_logo       — press / certification logo (NEVER generated)
+ *   lifestyle        — illustrative lifestyle shot (generatable)
+ *   hero             — product hero (generatable)
+ *   ingredient       — ingredient close-up (generatable)
+ *   mechanism        — mechanism-of-action diagram (generatable)
+ *   other            — escape hatch
+ */
+export type ProductMediaCategory =
+  | "before_after"
+  | "ugc"
+  | "testimonial_photo"
+  | "press_logo"
+  | "lifestyle"
+  | "hero"
+  | "ingredient"
+  | "mechanism"
+  | "other";
+
+/** How a `product_media` row was sourced. Matches the CHECK on `product_media.source`. */
+export type ProductMediaSource = "uploaded" | "generated" | "scout" | "shopify";
+
+/**
+ * Slots Carrie MUST NEVER fabricate — the never-fake-a-customer-result line.
+ * These are the only `asset_role` values allowed on a `lander_content_gaps`
+ * row (plus `other` as an escape hatch); they route to Max for real-world
+ * supply.
+ */
+export const REAL_EVIDENCE_CATEGORIES = [
+  "before_after",
+  "ugc",
+  "testimonial_photo",
+  "press_logo",
+] as const satisfies readonly ProductMediaCategory[];
+
+const PRODUCT_MEDIA_CATEGORIES: readonly ProductMediaCategory[] = [
+  "before_after",
+  "ugc",
+  "testimonial_photo",
+  "press_logo",
+  "lifestyle",
+  "hero",
+  "ingredient",
+  "mechanism",
+  "other",
+];
+
+const PRODUCT_MEDIA_SOURCES: readonly ProductMediaSource[] = [
+  "uploaded",
+  "generated",
+  "scout",
+  "shopify",
+];
+
+/**
+ * The subset of `product_media` columns Carrie's DR read path cares about.
+ * The full row has 40+ responsive-variant columns; loading them all bloats the
+ * "do we already have an X for this product?" probe with no upside.
+ */
+export interface ProductMediaCategorizedRow {
+  id: string;
+  workspace_id: string;
+  product_id: string;
+  slot: string;
+  url: string | null;
+  storage_path: string | null;
+  category: ProductMediaCategory | null;
+  source: ProductMediaSource | null;
+  caption: string | null;
+  alt_text: string | null;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WriteCategorizedMediaInput {
+  workspace_id: string;
+  product_id: string;
+  slot: string;
+  url: string;
+  storage_path?: string | null;
+  category: ProductMediaCategory;
+  source: ProductMediaSource;
+  caption?: string | null;
+  alt_text?: string | null;
+  width?: number | null;
+  height?: number | null;
+  mime_type?: string | null;
+  display_order?: number;
+}
+
+/**
+ * Persist a categorized `product_media` row — the Carrie write path. Used by
+ * her dr-content session when Nano Banana Pro returns an approved asset (or
+ * when the founder resolves a gap by uploading a real-evidence asset).
+ *
+ * Uses `upsert` on `(workspace_id, product_id, slot, display_order)` to match
+ * the existing gallery unique constraint, so re-running the same slot rewrites
+ * the row (mirrors `seed-tools.saveMedia`).
+ */
+export async function writeCategorizedProductMedia(
+  input: WriteCategorizedMediaInput,
+): Promise<ProductMediaCategorizedRow> {
+  if (!PRODUCT_MEDIA_CATEGORIES.includes(input.category)) {
+    throw new Error(`writeCategorizedProductMedia: unknown category '${input.category}'`);
+  }
+  if (!PRODUCT_MEDIA_SOURCES.includes(input.source)) {
+    throw new Error(`writeCategorizedProductMedia: unknown source '${input.source}'`);
+  }
+  if (!input.url) {
+    throw new Error("writeCategorizedProductMedia: url is required");
+  }
+  const admin = createAdminClient();
+  const row = {
+    workspace_id: input.workspace_id,
+    product_id: input.product_id,
+    slot: input.slot,
+    display_order: input.display_order ?? 0,
+    url: input.url,
+    storage_path: input.storage_path ?? null,
+    category: input.category,
+    source: input.source,
+    caption: input.caption ?? null,
+    alt_text: input.alt_text ?? "",
+    width: input.width ?? null,
+    height: input.height ?? null,
+    mime_type: input.mime_type ?? null,
+    uploaded_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  const { data, error } = await admin
+    .from("product_media")
+    .upsert(row, { onConflict: "workspace_id,product_id,slot,display_order" })
+    .select(
+      "id, workspace_id, product_id, slot, url, storage_path, category, source, caption, alt_text, display_order, created_at, updated_at",
+    )
+    .single();
+  if (error) throw new Error(`writeCategorizedProductMedia: ${error.message}`);
+  return data as ProductMediaCategorizedRow;
+}
+
+/**
+ * Read categorized `product_media` for a product — Carrie's "do we already
+ * have an X for this product?" probe. Filter by `category` to answer a single
+ * slot's question; omit to load every categorized asset for a decision pass.
+ */
+export async function listCategorizedProductMedia(
+  workspaceId: string,
+  productId: string,
+  filter: { category?: ProductMediaCategory; source?: ProductMediaSource } = {},
+): Promise<ProductMediaCategorizedRow[]> {
+  const admin = createAdminClient();
+  let q = admin
+    .from("product_media")
+    .select(
+      "id, workspace_id, product_id, slot, url, storage_path, category, source, caption, alt_text, display_order, created_at, updated_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId);
+  if (filter.category) q = q.eq("category", filter.category);
+  if (filter.source) q = q.eq("source", filter.source);
+  q = q.order("created_at", { ascending: false });
+  const { data, error } = await q;
+  if (error) throw new Error(`listCategorizedProductMedia: ${error.message}`);
+  return (data || []) as ProductMediaCategorizedRow[];
+}
+
+/**
+ * Asset role for a `lander_content_gaps` row — must be a category Carrie
+ * would NEVER ethically generate (plus `other` as an escape hatch). Matches
+ * the CHECK constraint on `lander_content_gaps.asset_role`.
+ */
+export type LanderContentGapAssetRole =
+  | "before_after"
+  | "ugc"
+  | "testimonial_photo"
+  | "press_logo"
+  | "other";
+
+export type LanderContentGapStatus = "open" | "resolved";
+
+export interface LanderContentGap {
+  id: string;
+  workspace_id: string;
+  blueprint_id: string;
+  asset_role: LanderContentGapAssetRole;
+  block_ref: string;
+  description: string;
+  status: LanderContentGapStatus;
+  resolved_media_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OpenContentGapInput {
+  workspace_id: string;
+  blueprint_id: string;
+  asset_role: LanderContentGapAssetRole;
+  /** Which skeleton block on the blueprint needs this asset (matches `skeleton.blocks[].role`). */
+  block_ref: string;
+  /** Plain-language description written for the FOUNDER — no jargon, no lever names. */
+  description: string;
+}
+
+const GAP_ASSET_ROLES: readonly LanderContentGapAssetRole[] = [
+  "before_after",
+  "ugc",
+  "testimonial_photo",
+  "press_logo",
+  "other",
+];
+
+/**
+ * Carrie opens a gap — one row per real-evidence asset she can't ethically
+ * generate. The row is workspace-scoped and blueprint-scoped; on resolve it
+ * points at the resolved `product_media` row.
+ */
+export async function openContentGap(input: OpenContentGapInput): Promise<LanderContentGap> {
+  if (!GAP_ASSET_ROLES.includes(input.asset_role)) {
+    throw new Error(`openContentGap: unknown asset_role '${input.asset_role}'`);
+  }
+  if (!input.block_ref) throw new Error("openContentGap: block_ref is required");
+  if (!input.description) throw new Error("openContentGap: description is required");
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("lander_content_gaps")
+    .insert({
+      workspace_id: input.workspace_id,
+      blueprint_id: input.blueprint_id,
+      asset_role: input.asset_role,
+      block_ref: input.block_ref,
+      description: input.description,
+    })
+    .select("*")
+    .single();
+  if (error) throw new Error(`openContentGap: ${error.message}`);
+  return data as LanderContentGap;
+}
+
+export interface ListContentGapsFilter {
+  blueprint_id?: string;
+  status?: LanderContentGapStatus;
+  asset_role?: LanderContentGapAssetRole;
+  limit?: number;
+}
+
+/**
+ * List a workspace's content gaps — Carrie reads by `blueprint_id` +
+ * `status='open'` to decide the blueprint status transition; Max's inbox
+ * reads by workspace + `status='open'`.
+ */
+export async function listContentGaps(
+  workspaceId: string,
+  filter: ListContentGapsFilter = {},
+): Promise<LanderContentGap[]> {
+  const admin = createAdminClient();
+  let q = admin.from("lander_content_gaps").select("*").eq("workspace_id", workspaceId);
+  if (filter.blueprint_id) q = q.eq("blueprint_id", filter.blueprint_id);
+  if (filter.status) q = q.eq("status", filter.status);
+  if (filter.asset_role) q = q.eq("asset_role", filter.asset_role);
+  q = q.order("created_at", { ascending: false }).limit(filter.limit ?? 200);
+  const { data, error } = await q;
+  if (error) throw new Error(`listContentGaps: ${error.message}`);
+  return (data || []) as LanderContentGap[];
+}
+
+/**
+ * Founder / operator resolves a gap after supplying the real-evidence asset.
+ * `resolvedMediaId` must be an existing `product_media` row (the just-uploaded
+ * DR asset). Idempotent — resolving an already-resolved gap re-points it.
+ */
+export async function resolveContentGap(
+  workspaceId: string,
+  gapId: string,
+  resolvedMediaId: string,
+): Promise<void> {
+  if (!resolvedMediaId) throw new Error("resolveContentGap: resolvedMediaId is required");
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("lander_content_gaps")
+    .update({ status: "resolved", resolved_media_id: resolvedMediaId })
+    .eq("id", gapId)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`resolveContentGap: ${error.message}`);
+}

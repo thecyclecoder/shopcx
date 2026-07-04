@@ -28,6 +28,7 @@ CI static check `scripts/_check-worker-lanes.ts` enforces that every kind in the
 | `campaign-grade` | [[../functions/growth]] | [[storefront-campaign-grader]] |
 | `gap-grade` | [[../functions/growth]] | [[acquisition-gap-grader]] |
 | `research` | [[../functions/growth]] | Rhea's URL sensor — see below |
+| `dr-content` | [[../functions/growth]] | Carrie's DR-content lane — see below |
 | `security-review` | [[../functions/platform]] | [[security-agent]] |
 | `ticket-improve` | (CS) | [[ticket-improve-chats]] |
 | `triage-escalations` | (CS) | [[../lifecycles/agent-todo-system]] |
@@ -60,8 +61,29 @@ Every `runStorefrontOptimizerJob` invocation runs a **workspace-scoped preamble*
 - **North-star + idempotence:** deterministic + within Max's leash; every row surfaces its rationale. The `dr-content` dedup gate + `growth_reviewed_at` watermark hold under retries.
 - **Non-fatal:** try/caught — a preamble failure never poisons the per-surface optimizer work.
 
-The `dr-content` kind is registered in `Job.kind`; the deterministic worker will add a `runDrContentJob` runner in the Carrie build (Phase 3+ of a follow-up spec).
+The `dr-content` kind is registered in `Job.kind` and served by `runDrContentJob` — see below.
+
+## The `dr-content` lane (Carrie's DR-content fill, [[../specs/carrie-dr-content]] Phase 2)
+
+The Growth-owned lane that fills a queued [[../tables/lander_blueprints]] row's `content` bucket — DR copy per skeleton block + a per-image-slot verdict per asset slot (generate → Nano Banana Pro compose + a categorized [[../tables/product_media]] row · flag_gap → a [[../tables/lander_content_gaps]] row for Max). Enforces the never-fake-a-customer-result rail: a real-evidence category (`before_after` / `ugc` / `testimonial_photo` / `press_logo`) is HARD-refused for `generate` in the worker and routed to a gap instead — defense-in-depth even if Carrie's session hallucinates a verdict.
+
+- **Enqueue** — [[cleo-blueprint]] `enqueueDrContentJob` (called by `runCleoBlueprintSweep` — [[../specs/cleo-lander-blueprint]] Phase 2). One `kind='dr-content'` row per newly-landed blueprint, blueprint id in `spec_slug` (dedup-gated on any in-flight `dr-content` job for the same blueprint).
+- **Cap** — `MAX_DR_CONTENT=1` concurrency lane, `DR_CONTENT_TIMEOUT_MS=30 min`. Env-tunable (`AGENT_TODO_MAX_DR_CONTENT`).
+- **`runDrContentJob(job)`** (the runner, in `scripts/builder-worker.ts`):
+  1. Load the blueprint via [[lander-blueprints]] `getBlueprint` (workspace-scoped). Fail if missing; idempotent no-op if the blueprint is already past `content_in_progress` / `awaiting_upload` (never clobber a submitted build).
+  2. Load the product's intelligence bundle read-only: `products` (title / target_customer / certifications), `product_ingredients` (with dosages), `product_benefit_selections` (lead + supporting benefits with `customer_phrases`), `product_review_analysis` (phrases the customer used), and the existing categorized [[../tables/product_media]] via [[lander-blueprints]] `listCategorizedProductMedia`.
+  3. Pick a **hero reference** (the product's `slot='hero'` image, or a `category='hero'` DR row) — Nano Banana Pro composes from it. No hero → the worker degrades to opening an `other` gap for every generatable slot on the block (a founder resolving with a hero unlocks the next Carrie pass).
+  4. Hand the compact bundle to a Max session running the `dr-content` skill. Carrie returns per-block copy + per-image-slot verdicts (JSON).
+  5. Parse Carrie's JSON via `extractJson`. Zip her `blocks[]` against the skeleton by role (skeleton is source of truth — a block whose role isn't in the skeleton is DROPPED). Per image slot:
+     - **Real-evidence** (`before_after` / `ugc` / `testimonial_photo` / `press_logo`) — always route to a gap. Reuse existing [[../tables/product_media]] of that category if present (no gap); else [[lander-blueprints]] `openContentGap` (`asset_role`, `block_ref`, plain-language `description`). A `generate` verdict on this category is HARD-refused + logged.
+     - **Generatable** (`hero` / `ingredient` / `mechanism` / `lifestyle`) with `generate` — call [[gemini]] `generateNanoBananaProCombine` (identity-locked to the product hero), upload to the `product-media` Storage bucket (`product_id/dr-content/<slug>.<ext>`), and write via [[lander-blueprints]] `writeCategorizedProductMedia` (source='generated', category=`<slot>`, tied to the product). A missing hero degrades to opening an `other` gap.
+     - **Fallback** `flag_gap` — open an `other` gap (never-fake extends: the worker never generates an ambiguous asset).
+  6. Write the content bucket via [[lander-blueprints]] `setBlueprintContent` (per-block copy + generated media refs + optional CTA).
+  7. Advance status via [[lander-blueprints]] `setBlueprintStatus`: zero open gaps → `content_complete`; else `awaiting_upload`. Driven by `listContentGaps(workspaceId, { blueprint_id, status: 'open' })`.
+- **Skill** — `.claude/skills/dr-content/SKILL.md` (Carrie's persona + real-vs-AI discipline + output contract).
+- **Write chokepoint** — every [[../tables/lander_blueprints]] / [[../tables/lander_content_gaps]] mutation + every DR column on [[../tables/product_media]] (`category` / `source` / `caption`) flows through [[lander-blueprints]]. The worker never touches those tables directly.
+- **Approval routing** — a [[../tables/lander_content_gaps]] row is surfaced to Max via [[approval-inbox]] (`ownerFunctionForKind('dr-content') = 'growth'` — Control Tower registry entry `agent:dr-content`).
 
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
+[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
