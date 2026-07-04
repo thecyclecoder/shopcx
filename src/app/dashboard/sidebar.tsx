@@ -311,12 +311,16 @@ export default function Sidebar({
       }
     };
     fetchCounts();
-    // Poll every 30s (not 10s): this effect fires ~11 authenticated API requests per
-    // tick, each making several PostgREST round-trips that re-run the per-request RLS
-    // set_config statement (pg_stat_statements -7821780334453251234: 38,888,209 calls,
-    // 0ms mean). The sidebar is always-mounted for every user on every dashboard page,
-    // so it dominates that call volume; badge counts tolerate 30s staleness fine.
-    const interval = setInterval(fetchCounts, 30000);
+    // Poll every 60s: this effect fires ~13 authenticated API requests per tick
+    // (up to ~5 more for owner/admin), each making several PostgREST round-trips
+    // that re-run the per-request RLS set_config statement — the dominant
+    // high_call_volume family. Prior widen 10s→30s addressed queryid
+    // -7821780334453251234; the DB Health Agent flagged a follow-on
+    // high_call_volume offender (dbhealth:slowq:-7726440967385220442), so widen
+    // once more. The sidebar is always-mounted for every user on every dashboard
+    // page and dominates authenticated round-trips; badge counts tolerate 60s
+    // staleness fine (the ticket views + NotificationBell already poll at 60s+).
+    const interval = setInterval(fetchCounts, 60000);
     return () => clearInterval(interval);
   }, [workspace.id, pathname]);
 
