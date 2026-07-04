@@ -25,6 +25,7 @@ import {
   isAbortedStreamNoise,
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isInngestStepWrappedNonErrorLog,
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHtmlBody,
@@ -93,6 +94,12 @@ function isError(log: VercelLog): boolean {
   // inngest/function.failed; the bare label is duplicate noise on a healthy retry loop.
   const path = log.path ?? log.proxy?.path ?? null;
   if (isBareInngestStepErrorMiddlewareLog(message, path)) return false;
+  // Drop the stack-form sibling: a step handler that throws a non-Error (e.g. a plain
+  // object) surfaces as `Error: [object Object]` with an SDK-only stack (all frames
+  // inside the compiled Inngest chunk — no `src/`/`app/` frame). Terminal failures are
+  // already captured on source='inngest' via inngest/function.failed with the real
+  // function id + error class, so the Vercel-side variant is duplicate noise.
+  if (isInngestStepWrappedNonErrorLog(message, path)) return false;
   return true;
 }
 

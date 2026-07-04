@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isInngestStepWrappedNonErrorLog,
   isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
@@ -582,4 +583,68 @@ test("isTransientSupabaseEdgeHtmlBody returns false on empty / nullish input", (
   assert.equal(isTransientSupabaseEdgeHtmlBody(undefined), false);
   assert.equal(isTransientSupabaseEdgeHtmlBody(""), false);
   assert.equal(isTransientSupabaseEdgeHtmlBody("   "), false);
+});
+
+// ── isInngestStepWrappedNonErrorLog (error-feed-drop-inngest-step-wrapped-non-error-noise) ──
+// A step handler throwing a non-Error (e.g. `throw {foo: 'bar'}`) makes Inngest's
+// `buildStepErrorOp` wrap it as `new Error(String(error))` — literally `Error: [object Object]`
+// — and Pino's LoggerMiddleware.onStepError logs the wrapped Error. Vercel's drain surfaces the
+// wrapped Error's STACK, which has zero application frames because the wrapping happened inside
+// the SDK (only compiled Inngest chunk frames like `M.buildStepErrorOp` / `M.tryExecuteStep` /
+// `steps-found` / `M._start`). Terminal failures are already captured on source='inngest' by
+// inngest-failure-capture.ts, so the vercel-side variant is duplicate noise — the false positive
+// that opened Control Tower `vercel:d48a64ae867f66dd`.
+
+// Regression fixture: the wrapped non-Error message + SDK-only stack shape Vercel surfaces.
+const STEP_WRAPPED_NON_ERROR_BLOB = `Error: [object Object]
+    at M.buildStepErrorOp (/var/task/.next/server/chunks/inngest-abc.js:12:34)
+    at M.tryExecuteStep (/var/task/.next/server/chunks/inngest-abc.js:56:78)
+    at steps-found (/var/task/.next/server/chunks/inngest-abc.js:90:12)
+    at M._start (/var/task/.next/server/chunks/inngest-abc.js:100:5)`;
+
+test("isInngestStepWrappedNonErrorLog drops the vercel:d48a64ae867f66dd wrapped non-Error blob on /api/inngest", () => {
+  assert.equal(isInngestStepWrappedNonErrorLog(STEP_WRAPPED_NON_ERROR_BLOB, "/api/inngest"), true);
+});
+
+test("isInngestStepWrappedNonErrorLog KEEPS the same blob on a different path", () => {
+  assert.equal(isInngestStepWrappedNonErrorLog(STEP_WRAPPED_NON_ERROR_BLOB, "/api/other"), false);
+  assert.equal(isInngestStepWrappedNonErrorLog(STEP_WRAPPED_NON_ERROR_BLOB, null), false);
+  assert.equal(isInngestStepWrappedNonErrorLog(STEP_WRAPPED_NON_ERROR_BLOB, undefined), false);
+});
+
+test("isInngestStepWrappedNonErrorLog KEEPS the same message with a frame in our code (real app throw)", () => {
+  // A real application throw carrying the same literal string ships a stack with a frame
+  // in `src/`/`app/` — that's an application bug we want captured + paged, not swallowed.
+  const withSrcFrame = `Error: [object Object]
+    at handler (/var/task/.next/server/src/lib/inngest/publish.js:42:15)
+    at M.buildStepErrorOp (/var/task/.next/server/chunks/inngest-abc.js:12:34)
+    at M.tryExecuteStep (/var/task/.next/server/chunks/inngest-abc.js:56:78)`;
+  assert.equal(isInngestStepWrappedNonErrorLog(withSrcFrame, "/api/inngest"), false);
+  const withAppFrame = `Error: [object Object]
+    at handler (/var/task/.next/server/app/api/inngest/route.js:1:1)
+    at M.buildStepErrorOp (/var/task/.next/server/chunks/inngest-abc.js:12:34)`;
+  assert.equal(isInngestStepWrappedNonErrorLog(withAppFrame, "/api/inngest"), false);
+});
+
+test("isInngestStepWrappedNonErrorLog KEEPS a real body / real stack (not the wrapped non-Error shape)", () => {
+  // Real message, real stack — actionable, kept.
+  const realErr = `TypeError: Cannot read properties of undefined (reading 'id')
+    at handler (/var/task/.next/server/src/lib/inngest/publish.js:42:15)
+    at M.tryExecuteStep (/var/task/.next/server/chunks/inngest-abc.js:56:78)`;
+  assert.equal(isInngestStepWrappedNonErrorLog(realErr, "/api/inngest"), false);
+  // The wrapped-non-Error prefix but WITHOUT a buildStepErrorOp frame — not this class.
+  const noWrapFrame = `Error: [object Object]
+    at somewhereElse (/var/task/.next/server/chunks/other.js:1:1)`;
+  assert.equal(isInngestStepWrappedNonErrorLog(noWrapFrame, "/api/inngest"), false);
+  // The buildStepErrorOp frame but a DIFFERENT message (not the wrapped-object literal).
+  const wrongPrefix = `Error: Task timed out after 10s
+    at M.buildStepErrorOp (/var/task/.next/server/chunks/inngest-abc.js:12:34)`;
+  assert.equal(isInngestStepWrappedNonErrorLog(wrongPrefix, "/api/inngest"), false);
+});
+
+test("isInngestStepWrappedNonErrorLog returns false on empty / nullish message", () => {
+  assert.equal(isInngestStepWrappedNonErrorLog("", "/api/inngest"), false);
+  assert.equal(isInngestStepWrappedNonErrorLog("   ", "/api/inngest"), false);
+  // No `at …` frame at all — not a stack; not this class.
+  assert.equal(isInngestStepWrappedNonErrorLog("Error: [object Object]", "/api/inngest"), false);
 });
