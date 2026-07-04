@@ -1,0 +1,1 @@
+- **Cleo blueprint sweep — real category→product matching + dedup by funnel type** · verified 2026-07-04 · → [[../libraries/storefront-optimizer-agent]]

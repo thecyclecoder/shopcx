@@ -201,6 +201,32 @@ export async function getBlueprint(workspaceId: string, id: string): Promise<Lan
   return (data as LanderBlueprint | null) ?? null;
 }
 
+/**
+ * Dedup reader for Cleo's blueprint sweep — has this workspace already got a lander_blueprints
+ * row for the same `(product_id, funnel_type)` pair, in ANY status? A `true` here means the
+ * sweep must SKIP creating a duplicate: two advertorial teardowns landing on the same product
+ * should produce ONE blueprint, not two. Called from `runCleoBlueprintSweep` per candidate
+ * blueprint (alongside a per-sweep Set for within-sweep dedup). See
+ * `docs/brain/specs/cleo-blueprint-product-matching.md` Phase 1.
+ */
+export async function hasBlueprintForProductType(
+  workspaceId: string,
+  productId: string,
+  funnelType: string,
+): Promise<boolean> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("lander_blueprints")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .eq("funnel_type", funnelType)
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`hasBlueprintForProductType: ${error.message}`);
+  return !!data;
+}
+
 /** List a workspace's blueprints, optionally filtered by product / source teardown / status. */
 export async function listBlueprints(
   workspaceId: string,
