@@ -15,9 +15,11 @@ Two functions, fan-out architecture (the cron only dispatches; the per-workspace
 
 ### `refresh-workspace-segments`
 - **Trigger:** event `segments/refresh-workspace` · **Retries:** 2 · **Concurrency:** `[{ limit: 4 }]`
-- Keyset-paginates the workspace's SMS-subscribed customers and processes each `STEP_BATCH` (2000) page inside its own `step.run` (`page-N`). Inngest runs each step as a separate short HTTP invocation (completed steps replay from memo, so the cursor loop resumes exactly where it left off) — **so no single invocation can hit the Vercel maxDuration ceiling**, regardless of subscriber count.
+- Keyset-paginates the workspace's SMS-subscribed customers and processes each `STEP_BATCH` (1000) page inside its own `step.run` (`page-N`). Inngest runs each step as a separate short HTTP invocation (completed steps replay from memo, so the cursor loop resumes exactly where it left off) — **so no single invocation can hit the Vercel maxDuration ceiling**, regardless of subscriber count.
 
 > **Why fan-out (2026-06-14):** the prior single-invocation design processed all ~138K subscribers in one run, timed out at ~71K, and restarted from the lowest id each day — so the back half of the book never refreshed (stuck ~29 days stale, which is how the 2026-05-31 SUMMERFIT send went out on a 2026-05-16 snapshot). Splitting into per-workspace runs + step-per-page removes the timeout entirely. Manual escape hatch `scripts/refresh-customer-segments.ts` (no serverless limit) is unchanged.
+
+> **PostgREST 1000-row cap — page-size invariant (2026-07-04 fix):** the Supabase/PostgREST server silently truncates `.select().limit(N)` to `max-rows = 1000` — a `.limit(2000)` returns at most 1000. `processBatch` (the per-page fetch) infers "done" from `batch.length < limit`, so any `STEP_BATCH > 1000` returns a 1000-row page that reads as short → cursor nulls → the loop breaks after **one page** and the back half of the book stays stale. The 2026-07 whole-book-coverage regression was exactly this: only ~1000 of ~138K subscribers refreshed per cron. **Invariant:** `STEP_BATCH` MUST be ≤ 1000 (currently 1000 = exact match; a full page then equals `limit` and the cursor advances; the natural terminator is `if (!idRows?.length)` on the next fetch). Mirrored in `scripts/refresh-customer-segments.ts`. If the max-rows cap is ever raised at the PostgREST layer, this invariant relaxes correspondingly.
 
 ## Segments produced
 

@@ -39,10 +39,16 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
-// Customers per keyset page = one step.run = one HTTP invocation. Tuned so a
-// single page (≈90 chunked sub-queries) finishes well under maxDuration; ~70
-// steps cover a 138K-subscriber workspace.
-const STEP_BATCH = 2000;
+// Customers per keyset page = one step.run = one HTTP invocation. MUST be ≤
+// the PostgREST/Supabase server-side `max-rows` cap (1000 by default) — a
+// `.limit(N)` above the cap is silently truncated to the cap, and processBatch
+// decides "done" from `batch.length < limit` (line ~198). If STEP_BATCH is
+// above 1000 the first full page returns 1000, batch.length < limit → cursor
+// nulls → the loop breaks after ONE page and the back half of the book never
+// refreshes (the 2026-07 whole-book-coverage bug: 1000/138K subscribers stayed
+// stale). Mirrored in scripts/refresh-customer-segments.ts. ~138 pages cover
+// 138K subscribers, each still well under maxDuration.
+const STEP_BATCH = 1000;
 const ENGAGEMENT_BATCH = 100;
 const UPDATE_BATCH = 200;
 // Backstop against an unbounded cursor loop (STEP_BATCH * this = ceiling).

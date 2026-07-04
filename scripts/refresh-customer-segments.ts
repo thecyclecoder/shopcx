@@ -133,6 +133,9 @@ async function main() {
   console.log(`Loading customers (scope: ${ALL ? "all" : "SMS-subscribed"})...`);
   const customers: CustomerRow[] = [];
   let lastId: string | null = null;
+  // Page size = 1000 = PostgREST server-side max-rows cap. A `.limit(N)` above
+  // the cap is silently truncated, and a short page reads as "done" — see
+  // src/lib/inngest/refresh-customer-segments.ts STEP_BATCH mirror.
   while (true) {
     let q = sb
       .from("customers")
