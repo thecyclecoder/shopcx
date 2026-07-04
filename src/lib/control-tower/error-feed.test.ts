@@ -20,7 +20,6 @@ import {
   isTransientInngestTransportError,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseLogNoise,
-  isTransientUndiciHeadersTimeout,
 } from "./error-feed";
 
 // Regression fixture: the leaked vercel:ebdf493a37c60c34 blob — a bare Lambda lifecycle
@@ -434,66 +433,4 @@ test("isTransientClientNetworkAbort returns false on empty / nullish message", (
   assert.equal(isTransientClientNetworkAbort(undefined, undefined), false);
   assert.equal(isTransientClientNetworkAbort("", ""), false);
   assert.equal(isTransientClientNetworkAbort("   ", null), false);
-});
-
-// ── isTransientUndiciHeadersTimeout (error-feed-drop-undici-headers-timeout-noise) ──
-// Node's undici HTTP client emits `TypeError: fetch failed` with cause
-// `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` when an outbound request our server
-// made started fine but the upstream never returned response headers before the network
-// timeout tripped — a momentary upstream stall the next batch self-heals. Classifying it
-// transient auto-resolves a first sighting (recorded, not paged); a chronic upstream
-// outage would recur within the window and still surface. The false positive that opened
-// Control Tower `vercel:1f9767027e5314fc`.
-
-test("isTransientUndiciHeadersTimeout matches the vercel:1f9767027e5314fc HeadersTimeoutError blob", () => {
-  const blob = `TypeError: fetch failed
-    at node:internal/deps/undici/undici:12345:11
-    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
-  [cause]: HeadersTimeoutError: Headers Timeout Error
-      at Timeout.onParserTimeout [as callback] (node:internal/deps/undici/undici:9999:1)
-      code: 'UND_ERR_HEADERS_TIMEOUT'`;
-  assert.equal(isTransientUndiciHeadersTimeout(blob), true);
-});
-
-test("isTransientUndiciHeadersTimeout matches when either cause marker is present", () => {
-  assert.equal(
-    isTransientUndiciHeadersTimeout("TypeError: fetch failed — [cause]: HeadersTimeoutError"),
-    true,
-  );
-  assert.equal(
-    isTransientUndiciHeadersTimeout("TypeError: fetch failed — code: 'UND_ERR_HEADERS_TIMEOUT'"),
-    true,
-  );
-});
-
-test("isTransientUndiciHeadersTimeout KEEPS an unrelated fetch-failed message (different cause)", () => {
-  // A real code-level TypeError with a different cause is an application bug, not undici
-  // outbound-fetch noise — stay captured / paged on first sighting.
-  assert.equal(
-    isTransientUndiciHeadersTimeout("TypeError: fetch failed — [cause]: ENOTFOUND example.com"),
-    false,
-  );
-  assert.equal(
-    isTransientUndiciHeadersTimeout("TypeError: fetch failed — [cause]: certificate has expired"),
-    false,
-  );
-  assert.equal(isTransientUndiciHeadersTimeout("TypeError: fetch failed"), false);
-});
-
-test("isTransientUndiciHeadersTimeout KEEPS the cause marker WITHOUT the fetch-failed prefix", () => {
-  // A HeadersTimeoutError surfacing outside the undici-fetch path (e.g. a raw HTTP client
-  // that reuses the same code) is not the well-known outbound-fetch class this classifier
-  // scopes — REQUIRE both markers.
-  assert.equal(
-    isTransientUndiciHeadersTimeout("HeadersTimeoutError: Headers Timeout Error"),
-    false,
-  );
-  assert.equal(isTransientUndiciHeadersTimeout("code: 'UND_ERR_HEADERS_TIMEOUT'"), false);
-});
-
-test("isTransientUndiciHeadersTimeout returns false on empty / nullish input", () => {
-  assert.equal(isTransientUndiciHeadersTimeout(null), false);
-  assert.equal(isTransientUndiciHeadersTimeout(undefined), false);
-  assert.equal(isTransientUndiciHeadersTimeout(""), false);
-  assert.equal(isTransientUndiciHeadersTimeout("   "), false);
 });

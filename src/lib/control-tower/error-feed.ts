@@ -335,40 +335,6 @@ export function isTransientClientNetworkAbort(
 }
 
 /**
- * Undici outbound-fetch headers-timeout noise — the outbound-fetch companion to
- * `isTransientInngestTransportError` (Inngest transport reset) and
- * `isTransientSupabaseLogNoise` (Supabase edge 5xx / statement timeout), factored here so
- * the vercel-logs route can reuse it
- * ([[../specs/error-feed-drop-undici-headers-timeout-noise]]).
- *
- * Node's undici HTTP client emits `TypeError: fetch failed` with cause
- * `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` when an outbound request our server
- * made started fine but the upstream never returned response headers before the
- * network-level timeout tripped — a momentary upstream network stall. Nothing in our code
- * is broken; the very next drain batch to the same endpoint self-heals. Minting a fresh
- * OPEN paged incident + repair fan-out for a single such log churns Platform owners on a
- * healthy loop that already recovered (Control Tower `vercel:1f9767027e5314fc`).
- *
- * `true` ONLY when the message carries BOTH the `TypeError: fetch failed` marker AND a
- * `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` cause substring — the exact and only
- * shape undici emits for this class. A `fetch failed` message from any other cause (DNS
- * failure, TLS error, our own code throwing a same-worded TypeError) carries a different
- * cause and stays captured / paged on first sighting.
- *
- * Wired in `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which
- * auto-resolves a first sighting (recorded for visibility, NOT paged, no repair fan-out)
- * and escalates to a real open+page ONLY if the SAME signature recurs within
- * `TRANSIENT_RECUR_WINDOW_MS` — so a one-off blip is dropped while a chronic upstream
- * outage (would recur every drain batch) still surfaces.
- */
-export function isTransientUndiciHeadersTimeout(message: string | null | undefined): boolean {
-  const text = (message ?? "").trim();
-  if (!text) return false;
-  if (!text.includes("TypeError: fetch failed")) return false;
-  return text.includes("HeadersTimeoutError") || text.includes("UND_ERR_HEADERS_TIMEOUT");
-}
-
-/**
  * Transient Supabase-logs noise — the supabase-logs companion to `isBareLifecycle` /
  * `isTransientInngestTransportError`, factored here so the poller can reuse it
  * ([[../specs/error-feed-supabase-logs-transient-5xx-scoping]]).
