@@ -17,6 +17,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Reduce call volume / cache the hot query on query -7726440967385220442** · verified 2026-07-04 · → [[../dashboard/home]]
 - **Error feed: drop the Inngest step wrapped-non-Error log from the Vercel feed** · verified 2026-07-04 · → [[integrations/vercel-log-drain]]
 - **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
+- **error-feed-drop-supabase-edge-ssl-handshake-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
 - **Add expression index for find_customers_by_phone last-10 comparison to unblock the Twilio marketing-sms webhook** · verified 2026-07-04 · → [[../tables/customers]]
