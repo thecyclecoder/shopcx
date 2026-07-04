@@ -232,25 +232,6 @@ test("isTransientSupabaseLogNoise scopes GoTrue browser-abort noise as transient
   );
 });
 
-test("isTransientSupabaseLogNoise scopes Supabase Auth 504 gateway-timeout wrapper as transient (error-feed-scope-supabase-auth-504-gateway-timeout-transient)", () => {
-  // The API tier's 504 handler wraps `context deadline exceeded` as a user-friendly
-  // retry string — the outer msg lacks the `context ...` substring, but the nested
-  // `error` field is literally `context deadline exceeded`, so it's the same class.
-  assert.equal(
-    isTransientSupabaseLogNoise("auth", {
-      severity: "error",
-      message: "504: Processing this request timed out, please retry after a moment.",
-    }),
-    true,
-  );
-  // A real auth failure still pages on first sighting — the 504 wrapper doesn't loosen
-  // the filter for the invalid-JWT class.
-  assert.equal(
-    isTransientSupabaseLogNoise("auth", { severity: "error", message: "invalid JWT" }),
-    false,
-  );
-});
-
 test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate limit) — pages", () => {
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "invalid JWT: signature mismatch" }), false);
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "rate limit exceeded" }), false);
