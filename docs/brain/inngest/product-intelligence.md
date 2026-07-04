@@ -30,6 +30,7 @@ The four Sonnet workers that drive the Product Intelligence Engine pipeline. End
 - **Trigger:** event `intelligence/research-benefit-gap`
 - **Retries:** 2
 - **Concurrency:** `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]`
+- **Anthropic fetch bound at 600s** via `AbortSignal.timeout(600_000)` — the direct `fetch('https://api.anthropic.com/v1/messages', …)` (same pattern as `callSonnet` in [[../libraries/product-intelligence-seed|engine.ts]]) throws `"Anthropic call timed out after 600s"` on abort, so the step retries under Inngest's `retries: 2` instead of the whole Lambda being reaped by Vercel at 800s (Control Tower signature `vercel:bb28f61b887be822`).
 
 
 ## Downstream events sent
