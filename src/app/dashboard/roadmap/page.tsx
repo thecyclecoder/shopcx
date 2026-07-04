@@ -81,10 +81,21 @@ function InReviewLane({ spec }: { spec: SpecCard }) {
     label = `⬆ Ada → CEO upgrade${intent}`;
     title = "Ada wants to UPGRADE a deferred suggestion to planned — awaiting CEO Planned/Deferred call.";
     chip = "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
-  } else if (spec.valePass) {
+  } else if (spec.valePass === true) {
     label = `🔍✓ Vale passed · ⏳ Ada disposing${intent}`;
     title = "Vale cleared the CHECKLIST; Ada's disposition lane will pick it up next.";
     chip = "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300";
+  } else if (spec.valePass === false) {
+    // vale-instant-per-spec-review — Vale reviewed it and flagged needs_fix. Distinct from "pending" so a
+    // failed review no longer looks unreviewed. The tooltip carries her latest diagnosis (+ defect count).
+    const nDefects = spec.needsFixDefects?.length ?? 0;
+    label = `🔍✗ Vale: needs fix${nDefects ? ` · ${nDefects} defect${nDefects === 1 ? "" : "s"}` : ""}${intent}`;
+    title = spec.needsFixReason
+      ? `Vale flagged this spec needs_fix — fix and re-send for re-review.\n\n${spec.needsFixReason}${
+          spec.needsFixDefects?.length ? `\n\nDefects:\n• ${spec.needsFixDefects.join("\n• ")}` : ""
+        }`
+      : "Vale's CHECKLIST verdict is needs_fix — the spec is malformed and the build pipeline is hard-stopped behind it. Fix and re-send for re-review.";
+    chip = "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300";
   } else {
     label = `🔍 Vale: pending review${intent}`;
     title = "Awaiting Vale's CHECKLIST quality pass — the build pipeline refuses this spec until it clears.";
