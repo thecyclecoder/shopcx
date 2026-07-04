@@ -114,6 +114,7 @@ import { adToolFunctions } from "@/lib/inngest/ad-tool";
 import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { triageEscalationsCron } from "@/lib/inngest/triage-escalations";
 import { specTestCron } from "@/lib/inngest/spec-test-cron";
+import { blueprintBuildSubmitCron } from "@/lib/inngest/blueprint-build-submit-cron";
 import { specReviewCron } from "@/lib/inngest/spec-review-cron";
 import { specReviewOnMutate } from "@/lib/inngest/spec-review-on-mutate";
 import { portalActionHealer } from "@/lib/inngest/portal-action-healer";
@@ -259,6 +260,7 @@ export const registeredInngestFunctions = [
   agentTodoExecute,
   triageEscalationsCron,
   specTestCron,
+  blueprintBuildSubmitCron,
   specReviewCron,
   specReviewOnMutate,
   portalActionHealer,

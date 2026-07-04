@@ -148,9 +148,24 @@ export async function POST(
     status: "open",
   });
   let blueprintComplete = false;
+  let buildSpecSlug: string | null = null;
+  let handoffOutcome: string | null = null;
   if (remainingOpen.length === 0) {
     await setBlueprintStatus(workspaceId, gap.blueprint_id, "content_complete");
     blueprintComplete = true;
+    // Phase 2 handoff — deterministic verify + author lander BUILD spec via the author-spec
+    // chokepoint (or revert to awaiting_upload with re-opened gaps if the bucket is incomplete).
+    // Best-effort: a handoff hiccup must never leave the founder with an un-acknowledged upload —
+    // the scheduled sweep picks up any `content_complete` row we missed.
+    try {
+      const { verifyAndSubmitBlueprint } = await import("@/lib/blueprint-build-submit");
+      const outcome = await verifyAndSubmitBlueprint(workspaceId, gap.blueprint_id);
+      handoffOutcome = outcome.status;
+      if (outcome.status === "submitted") buildSpecSlug = outcome.build_spec_slug ?? null;
+    } catch (e) {
+      handoffOutcome = "error";
+      console.warn(`[gaps/upload] verifyAndSubmitBlueprint failed for blueprint ${gap.blueprint_id}:`, e instanceof Error ? e.message : e);
+    }
   }
 
   return NextResponse.json({
@@ -163,5 +178,7 @@ export async function POST(
     },
     gap: { id: gap.id, status: "resolved", resolved_media_id: media.id },
     blueprint_complete: blueprintComplete,
+    build_spec_slug: buildSpecSlug,
+    handoff_outcome: handoffOutcome,
   });
 }

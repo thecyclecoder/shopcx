@@ -94,6 +94,13 @@ export interface LanderBlueprint {
   status: LanderBlueprintStatus;
   rationale: string | null;
   content: LanderBlueprintContent | null;
+  /**
+   * The slug of the lander BUILD spec Cleo authored via [[author-spec]] `authorSpecRowStructured`
+   * when the blueprint's bucket was verified whole (content-upload-and-lander-build.md Phase 2).
+   * Set exactly once when the row flips from `content_complete` → `build_submitted`; null before.
+   * Free-text — spec slugs are kebab-case strings, no FK to `public.specs` (spec may be renamed).
+   */
+  build_spec_slug: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -231,6 +238,34 @@ export async function setBlueprintStatus(
     .eq("id", id)
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setBlueprintStatus: ${error.message}`);
+}
+
+/**
+ * Cleo's build-submission stamp — records the slug of the lander BUILD spec that was
+ * authored off this blueprint AND flips the row's status to `build_submitted` atomically
+ * (one UPDATE, one round-trip). Called exactly once per blueprint from the Phase 2
+ * verify+handoff (content-upload-and-lander-build) after `authorSpecRowStructured` lands.
+ *
+ * Idempotent under the SDK's callers: the caller (`blueprint-build-submit`) gates on the
+ * blueprint's current status = `content_complete`, so a repeat verify+handoff sweep against
+ * an already-submitted blueprint is a no-op at the caller (it never reaches this SDK).
+ * The DB CHECK on `status` is the belt-and-suspenders — `'build_submitted'` is on the list.
+ */
+export async function setBlueprintBuildSubmission(
+  workspaceId: string,
+  id: string,
+  buildSpecSlug: string,
+): Promise<void> {
+  if (!buildSpecSlug) {
+    throw new Error("setBlueprintBuildSubmission: buildSpecSlug is required");
+  }
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("lander_blueprints")
+    .update({ status: "build_submitted", build_spec_slug: buildSpecSlug })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`setBlueprintBuildSubmission: ${error.message}`);
 }
 
 /**
