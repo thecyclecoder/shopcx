@@ -160,13 +160,6 @@ export const smsCallbackDrain = inngest.createFunction(
     const matchedRecipientSids = new Set<string>();
     // Campaigns whose counters need recount after this batch.
     const touchedCampaigns = new Set<string>();
-    // Delivered recipients that still need a "Received SMS" profile
-    // event (only campaign recipients — leads don't have customer_id).
-    const deliveredProfileRows: Array<{
-      workspace_id: string;
-      customer_id: string;
-      campaign_id: string;
-    }> = [];
 
     // ── Bulk: sent transition ─────────────────────────────────────────
     // Stage-rank guard: only advance rows still in-flight or already
@@ -222,13 +215,6 @@ export const smsCallbackDrain = inngest.createFunction(
         }>) {
           matchedRecipientSids.add(r.message_sid);
           touchedCampaigns.add(r.campaign_id);
-          if (r.customer_id) {
-            deliveredProfileRows.push({
-              workspace_id: r.workspace_id,
-              customer_id: r.customer_id,
-              campaign_id: r.campaign_id,
-            });
-          }
         }
         // Same leftover pass as sent — sids whose row is past the
         // guarded prev-state (rare) are still not leads.
@@ -294,24 +280,13 @@ export const smsCallbackDrain = inngest.createFunction(
       });
     }
 
-    // ── Bulk: profile_events "Received SMS" on delivered ─────────────
-    // Preserves the pre-fast-ack inline behavior. Phase 4 hoists this
-    // to a watermarked rollup for true idempotency.
-    if (deliveredProfileRows.length > 0) {
-      await step.run("delivered-profile-events", async () => {
-        const admin = createAdminClient();
-        const now = new Date().toISOString();
-        await admin.from("profile_events").insert(
-          deliveredProfileRows.map((r) => ({
-            workspace_id: r.workspace_id,
-            customer_id: r.customer_id,
-            metric_name: "Received SMS",
-            datetime: now,
-            attributed_campaign_id: r.campaign_id,
-          })),
-        );
-      });
-    }
+    // ── profile_events "Received SMS" ─────────────────────────────────
+    // No longer inserted here — Phase 4 moved it to a watermarked
+    // rollup cron (`received-sms-rollup-cron`) that reads
+    // `sms_campaign_recipients` with `delivered_at IS NOT NULL AND
+    // received_sms_logged_at IS NULL`, inserts profile_events with
+    // `datetime = delivered_at`, then marks the flag — exactly one
+    // event per delivered recipient, idempotent by construction.
 
     // ── storefront_leads fallback ────────────────────────────────────
     // Popup-coupon SMS sends direct from the short code with this
@@ -345,6 +320,10 @@ export const smsCallbackDrain = inngest.createFunction(
     // ── Recount touched campaign counters ─────────────────────────────
     // Recount (not increment) — matches `marketing-text.ts` send-tick.
     // Idempotent: re-draining the same batch produces the same counts.
+    // `recipients_delivered` (Phase 4 counter) tracks the terminal
+    // delivered state distinctly from `recipients_sent` (which counts
+    // sent+scheduled+delivered per the pre-existing convention in
+    // marketing-text.ts).
     if (touchedCampaigns.size > 0) {
       await step.run("recount-campaigns", async () => {
         const admin = createAdminClient();
@@ -355,6 +334,11 @@ export const smsCallbackDrain = inngest.createFunction(
             .select("id", { count: "exact", head: true })
             .eq("campaign_id", cid)
             .in("status", ["sent", "scheduled", "delivered"]);
+          const { count: delivered } = await admin
+            .from("sms_campaign_recipients")
+            .select("id", { count: "exact", head: true })
+            .eq("campaign_id", cid)
+            .eq("status", "delivered");
           const { count: failed } = await admin
             .from("sms_campaign_recipients")
             .select("id", { count: "exact", head: true })
@@ -364,6 +348,7 @@ export const smsCallbackDrain = inngest.createFunction(
             .from("sms_campaigns")
             .update({
               recipients_sent: sent || 0,
+              recipients_delivered: delivered || 0,
               recipients_failed: failed || 0,
               updated_at: now,
             })
@@ -587,5 +572,91 @@ export const smsInboundDrain = inngest.createFunction(
     }
 
     return { drained: 1, type: "generic", autoresponded: decision.shouldAutoRespond };
+  },
+);
+
+// ═════════════════════════════════════════════════════════════════════
+// Phase 4 — Received-SMS rollup cron.
+//
+// Emits one `profile_events` row per delivered SMS recipient, driven by
+// `sms_campaign_recipients.received_sms_logged_at`. Runs on a short
+// interval (every 5 min) so segmentation (which reads profile_events)
+// sees delivered engagements with only a small lag.
+//
+// The drain (Phase 2) NO LONGER inserts profile_events on the hot path
+// (removed above). Moving the insert here means:
+//   1. Webhook path is DB-write-free (Phase 1 mandate).
+//   2. `datetime = delivered_at`, not the drain's `now()` — matches
+//      when the recipient actually got the message, so time-windowed
+//      segments read correctly.
+//   3. Exactly-once via the `received_sms_logged_at` flag: candidates
+//      are `delivered_at IS NOT NULL AND received_sms_logged_at IS NULL`
+//      (backed by `idx_sms_campaign_recipients_rollup_pending`); after
+//      insert we stamp the flag. A second cron pass picks zero rows.
+//
+// Concurrency 1 to keep the flag flip deterministic (no two runs
+// racing for the same candidate).
+// ═════════════════════════════════════════════════════════════════════
+
+/** Cap per run — keeps a single tick fast even if a big blast just landed. */
+const ROLLUP_BATCH_LIMIT = 2000;
+
+export const receivedSmsRollupCron = inngest.createFunction(
+  {
+    id: "received-sms-rollup-cron",
+    name: "Twilio — Received-SMS profile-event rollup",
+    concurrency: [{ limit: 1 }],
+    triggers: [{ cron: "*/5 * * * *" }],
+  },
+  async ({ step }) => {
+    return await step.run("rollup", async () => {
+      const admin = createAdminClient();
+      // Candidate set: delivered but not-yet-rolled-up. Ordered by
+      // delivered_at so a partial batch still advances time monotonically
+      // and the partial index (delivered_at) stays useful for the LIMIT.
+      const { data: candidates } = await admin
+        .from("sms_campaign_recipients")
+        .select("id, workspace_id, customer_id, campaign_id, delivered_at")
+        .not("delivered_at", "is", null)
+        .is("received_sms_logged_at", null)
+        .order("delivered_at", { ascending: true })
+        .limit(ROLLUP_BATCH_LIMIT);
+
+      const rows = (candidates || []) as Array<{
+        id: string;
+        workspace_id: string;
+        customer_id: string | null;
+        campaign_id: string;
+        delivered_at: string;
+      }>;
+      if (rows.length === 0) return { emitted: 0, flagged: 0 };
+
+      // Only recipients with a customer_id emit a profile event (no
+      // customer → no engagement lineage). Recipients WITHOUT a
+      // customer still get their flag flipped so we don't scan them
+      // again forever.
+      const withCustomer = rows.filter((r) => r.customer_id);
+      if (withCustomer.length > 0) {
+        await admin.from("profile_events").insert(
+          withCustomer.map((r) => ({
+            workspace_id: r.workspace_id,
+            customer_id: r.customer_id,
+            metric_name: "Received SMS",
+            datetime: r.delivered_at,
+            attributed_campaign_id: r.campaign_id,
+          })),
+        );
+      }
+
+      // Mark ALL candidates (with or without customer) as rolled up.
+      // received_sms_logged_at is the idempotency flag — after this
+      // update they exit the candidate set forever.
+      await admin
+        .from("sms_campaign_recipients")
+        .update({ received_sms_logged_at: new Date().toISOString() })
+        .in("id", rows.map((r) => r.id));
+
+      return { emitted: withCustomer.length, flagged: rows.length };
+    });
   },
 );
