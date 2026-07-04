@@ -39,10 +39,16 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
-// Customers per keyset page = one step.run = one HTTP invocation. Tuned so a
-// single page (≈90 chunked sub-queries) finishes well under maxDuration; ~70
-// steps cover a 138K-subscriber workspace.
-const STEP_BATCH = 2000;
+// Customers per keyset page = one step.run = one HTTP invocation. MUST be ≤
+// the PostgREST/Supabase server-side `max-rows` cap (1000 by default) — a
+// `.limit(N)` above the cap is silently truncated to the cap, and processBatch
+// decides "done" from `batch.length < limit` (line ~198). If STEP_BATCH is
+// above 1000 the first full page returns 1000, batch.length < limit → cursor
+// nulls → the loop breaks after ONE page and the back half of the book never
+// refreshes (the 2026-07 whole-book-coverage bug: 1000/138K subscribers stayed
+// stale). Mirrored in scripts/refresh-customer-segments.ts. ~138 pages cover
+// 138K subscribers, each still well under maxDuration.
+const STEP_BATCH = 1000;
 const ENGAGEMENT_BATCH = 100;
 const UPDATE_BATCH = 200;
 // Backstop against an unbounded cursor loop (STEP_BATCH * this = ceiling).
@@ -252,7 +258,39 @@ export const refreshCustomerSegmentsCron = inngest.createFunction(
       data: { workspace_id: w.id as string },
     }));
     if (events.length) await step.sendEvent("fan-out-workspaces", events);
-    const result = { fanned_out: events.length };
+
+    // Coverage probe (fix-segment-refresh-coverage Phase 2): count SMS-subscribed
+    // customers vs the count refreshed within 26h + oldest refresh across the
+    // subscribed set. Rides `produced` so the Control Tower tile surfaces the
+    // number, and the `segment-coverage` output assertion (registry) reads the
+    // LIVE customers table each tick to red on <95% coverage or a >48h tail —
+    // the alarm that would have caught the 1000/138K state.
+    //
+    // Fanout is async: the per-workspace runs kicked off above haven't executed
+    // yet, so the reported numbers reflect the state BEFORE today's refresh.
+    // That's still exactly what we want for a staleness alarm — a red tile at
+    // 11:00 UTC means yesterday's book stayed stale, and the assertion polls
+    // the same signal every ~15 min so the tile clears once the fanout lands.
+    const coverage = await step.run("probe-coverage", async () => {
+      const cutoff26h = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+      const [totalRes, freshRes] = await Promise.all([
+        sb.from("customers").select("id", { count: "exact", head: true }).eq("sms_marketing_status", "subscribed"),
+        sb
+          .from("customers")
+          .select("id", { count: "exact", head: true })
+          .eq("sms_marketing_status", "subscribed")
+          .gte("segments_refreshed_at", cutoff26h),
+      ]);
+      const total = totalRes.count ?? 0;
+      const fresh = freshRes.count ?? 0;
+      return {
+        sms_subscribed_total: total,
+        sms_subscribed_fresh_26h: fresh,
+        coverage_ratio: total > 0 ? Math.round((fresh / total) * 10_000) / 10_000 : null,
+      };
+    });
+
+    const result = { fanned_out: events.length, ...coverage };
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
     await step.run("emit-heartbeat", async () => {

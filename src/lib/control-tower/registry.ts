@@ -96,6 +96,15 @@ export const OWNER_FUNCTIONS: { id: OwnerFunction; label: string; healthLabel: s
  *                          the assertion reads that list and flips the tile red. On the
  *                          box-emitted migration-drift-check loop.
  *                          (control-tower-migration-drift-check P1.)
+ *   - segment-coverage   — the refresh-customer-segments cron RAN (fresh beat, green on P1) but
+ *                          didn't actually refresh the whole book: <95% of SMS-subscribed rows have
+ *                          segments_refreshed_at within 26h, OR any subscribed row's
+ *                          segments_refreshed_at is older than 48h / null. Catches the exact
+ *                          2026-07 whole-book-coverage regression where the PostgREST 1000-row cap
+ *                          + a `.limit(2000)` truncated the cursor loop to page 1 (1000/138K
+ *                          refreshed per cron, back half stayed 29d stale). Reads the LIVE
+ *                          customers table each monitor tick; sample-guarded so an empty workspace
+ *                          can't false-fire. (fix-segment-refresh-coverage P2.)
  */
 export type OutputAssertionId =
   | "escalation-idle"
@@ -103,7 +112,8 @@ export type OutputAssertionId =
   | "renewal-integrity"
   | "renewal-outcome-distribution"
   | "stuck-dunning"
-  | "migration-drift";
+  | "migration-drift"
+  | "segment-coverage";
 
 /**
  * Per-sub renewal outcome taxonomy (control-tower-renewal-integrity-assertions, Phase 1). Every
@@ -629,7 +639,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // control_tower_loop_beats RPC stays fast. registeredAt claims the registered_not_firing grace
   // (a newly-added daily cron hasn't had its first tick yet — see control-tower-registered-not-firing-new-cron-grace).
   { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
-  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR, outputAssertion: "segment-coverage" },
   { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
