@@ -9,17 +9,17 @@ Recomputes `customers.segments` array for archetype-driven SMS targeting. See PE
 Two functions, fan-out architecture (the cron only dispatches; the per-workspace function does the work):
 
 ### `refresh-customer-segments-cron`
-- **Trigger:** cron `0 11 * * *` (11:00 UTC = 6 AM Central, before the marketing-text send-tick resolves the day's audiences)
+- **Trigger:** cron `0 11 * * *` (11:00 UTC = 6 AM Central, before the marketing-text send-tick + the sms-marketing agent resolve the day's audiences)
 - **Retries:** 2 · **Concurrency:** `[{ limit: 1 }]`
-- Sends one `segments/refresh-workspace` event per workspace. That's all — trivial + fast.
+- Sends one `segments/refresh-workspace` event per workspace, then probes coverage + heartbeats. That's all — trivial + fast.
 
 ### `refresh-workspace-segments`
 - **Trigger:** event `segments/refresh-workspace` · **Retries:** 2 · **Concurrency:** `[{ limit: 4 }]`
-- Keyset-paginates the workspace's SMS-subscribed customers and processes each `STEP_BATCH` (1000) page inside its own `step.run` (`page-N`). Inngest runs each step as a separate short HTTP invocation (completed steps replay from memo, so the cursor loop resumes exactly where it left off) — **so no single invocation can hit the Vercel maxDuration ceiling**, regardless of subscriber count.
+- **One `.rpc()` call** to the set-based `public.refresh_customer_segments(workspace_id, all)` SQL function (migration `20260704160000`). The whole workspace recomputes inside Postgres in a single short invocation — no pagination, no per-row writes, no timeout risk.
 
-> **Why fan-out (2026-06-14):** the prior single-invocation design processed all ~138K subscribers in one run, timed out at ~71K, and restarted from the lowest id each day — so the back half of the book never refreshed (stuck ~29 days stale, which is how the 2026-05-31 SUMMERFIT send went out on a 2026-05-16 snapshot). Splitting into per-workspace runs + step-per-page removes the timeout entirely. Manual escape hatch `scripts/refresh-customer-segments.ts` (no serverless limit) is unchanged.
+> **Set-based rewrite (2026-07-04) — the ~3-hours-→-~1-minute fix.** The refresh used to be a per-customer read/compute/write loop: for each ~500-customer batch it chunk-read orders/subs/leads/events, computed segments in JS, then issued **one `UPDATE … WHERE id=$1` per customer** — ~138K individual PostgREST round-trips, ~3 HOURS wall-clock, far too slow to run daily. Worse, the chunked `.in(100 ids)` reads hit the same **PostgREST 1000-row cap** and could silently truncate a heavy customer's orders/events → wrong segments. Both are gone: `refresh_customer_segments()` computes every segment via aggregate CTEs (order count/first/last → reorder ratio where `meanGap=(last−first)/(n−1)` telescopes to a pure aggregate; engagement via `count(*) filter (…)`; active-sub/lead existence joins) in ONE `UPDATE … FROM (…)`. **138K customers in ~1 min (0.3s compute + the row writes), exact, validated byte-identical to the old `computeSegments()` on a 400-customer sample.** This also retires the earlier keyset-pagination whole-book-coverage bug (the 2026-07 1000/138K stale-book regression) — there is no pagination left to get wrong.
 
-> **PostgREST 1000-row cap — page-size invariant (2026-07-04 fix):** the Supabase/PostgREST server silently truncates `.select().limit(N)` to `max-rows = 1000` — a `.limit(2000)` returns at most 1000. `processBatch` (the per-page fetch) infers "done" from `batch.length < limit`, so any `STEP_BATCH > 1000` returns a 1000-row page that reads as short → cursor nulls → the loop breaks after **one page** and the back half of the book stays stale. The 2026-07 whole-book-coverage regression was exactly this: only ~1000 of ~138K subscribers refreshed per cron. **Invariant:** `STEP_BATCH` MUST be ≤ 1000 (currently 1000 = exact match; a full page then equals `limit` and the cursor advances; the natural terminator is `if (!idRows?.length)` on the next fetch). Mirrored in `scripts/refresh-customer-segments.ts`. If the max-rows cap is ever raised at the PostgREST layer, this invariant relaxes correspondingly.
+> **The SQL function `public.refresh_customer_segments(p_workspace_id uuid, p_all boolean)`** is the single source of the segment logic; both the cron and the manual escape hatch call it. `p_all=false` = SMS-subscribed scope (campaign targeting); `p_all=true` = everyone in the workspace. Returns the updated row count.
 
 ## Coverage heartbeat + `segment-coverage` output assertion (Phase 2)
 
