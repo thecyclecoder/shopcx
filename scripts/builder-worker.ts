@@ -10433,16 +10433,21 @@ async function runDeployReviewJob(job: Job) {
     const verdict = normalizeDeployReviewVerdict(parsed);
     console.log(`${tag} claude finished — decision: ${verdict?.decision ?? "(none)"} · isError=${isError}`);
 
+    // Import Phase-3 mutator + Phase-4 fail-safe once for every branch below.
+    const { applyBoxDeployReview, failsafeStampWatchUnsure } = await import("../src/lib/deploy-guardian");
+    const failsafeArgs = { jobId: job.id, watchId: watchId ?? null, workspaceId: job.workspace_id, slug: inst.slug ?? job.spec_slug };
+
     if (!verdict) {
-      // No parseable verdict → surface for a human rather than acting. Phase 4's fail-safe (in the
-      // worker: keep the watch in in_review + escalate) is the ultimate backstop, but at this stage
-      // we mark the job needs_attention so the lane frees and the outcome is visible.
+      // Phase 4 fail-safe (never revert without a judgment): stamp the watch 'unsure' + escalate. The
+      // atomic pending-guard makes this idempotent — a concurrent apply/failsafe/redriven-job no-ops.
+      // Then the job parks needs_attention so the lane frees and a human sees the error.
+      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session" });
       await update(job.id, {
         status: "needs_attention",
         error: "deploy-review returned no parseable verdict",
-        log_tail: raw.slice(-2000),
+        log_tail: `${fs.stamped ? "fail-safe: watch stamped 'unsure' + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`}\n\n${raw}`.slice(-2000),
       });
-      console.warn(`${tag} unparseable verdict — needs_attention (Phase 4 fail-safe applies on the watch)`);
+      console.warn(`${tag} unparseable verdict — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
       return;
     }
 
@@ -10454,8 +10459,21 @@ async function runDeployReviewJob(job: Job) {
     // — Reva's typed verdict landed cleanly; the session's non-zero stream flag can be a spurious
     // stderr blip, and skipping the mutation on it would leave the watch stuck in in_review for
     // Phase 4's fail-safe. The applyBoxDeployReview result carries what actually happened.
-    const { applyBoxDeployReview } = await import("../src/lib/deploy-guardian");
     const applied = await applyBoxDeployReview(db, job.id, verdict);
+
+    // Phase 4 fail-safe backstop: applyBoxDeployReview returned {ok:false} WITHOUT resolving the watch
+    // past `in_review` — a genuine race where every claim attempt lost, or a resolvable-but-unresolved
+    // no-op (watch_not_found / claim_lost / etc.). Stamp 'unsure' + escalate so the watch never stays
+    // stuck at `in_review` (which would be invisible to the cron's pending-window read + never re-open).
+    // Skipped when the mutator resolved the watch to a terminal verdict already (finalVerdict set).
+    if (!applied.ok && !applied.finalVerdict) {
+      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: `apply no-op: ${applied.reason ?? "unknown"}` });
+      const fsLine = fs.stamped ? "fail-safe: watch stamped 'unsure' + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`;
+      await update(job.id, { status: "completed", error: `deploy-review apply no-op: ${applied.reason ?? "unknown"}`, log_tail: `${fsLine}\ndecision=${verdict.decision}\n${verdict.reasoning ?? ""}`.slice(-2000) });
+      console.warn(`${tag} apply no-op (${applied.reason ?? "unknown"}) — ${fsLine}`);
+      return;
+    }
+
     const signalsLine = verdict.signals.length
       ? `signals(${verdict.signals.length}): ${verdict.signals.map((s) => `${s.caused ? "✅" : "❌"}${s.key}`).join(" ")}`
       : "";
@@ -10479,6 +10497,15 @@ async function runDeployReviewJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision} → ${appliedLine}`);
   } catch (e) {
+    // Phase 4 fail-safe on the runner catch-path: a throw here means the session crashed / the
+    // pipeline threw before applyBoxDeployReview could fire. Fire the fail-safe to guarantee the
+    // watch doesn't stay stuck at `in_review` (which would evade the cron's re-evaluation).
+    try {
+      const { failsafeStampWatchUnsure } = await import("../src/lib/deploy-guardian");
+      await failsafeStampWatchUnsure(db, { jobId: job.id, watchId: inst.watch_id ?? null, workspaceId: job.workspace_id, slug: inst.slug ?? job.spec_slug, reason: `runner threw: ${e instanceof Error ? e.message : String(e)}` });
+    } catch (fsErr) {
+      console.error(`${tag} fail-safe on runner catch threw:`, fsErr instanceof Error ? fsErr.message : fsErr);
+    }
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }

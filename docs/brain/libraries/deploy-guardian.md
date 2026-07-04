@@ -94,6 +94,14 @@ The pure verdict rule:
 - `DEPLOY_GUARDIAN_LOOP_GUARD_MAX` — `DEPLOY_GUARDIAN_LOOP_GUARD_MAX`, default `2` (mirrors `PLATFORM_DIRECTOR_LOOP_GUARD_MAX`).
 - `MAIN_BRANCH` — `AGENT_TODO_MAIN_BRANCH`, default `main` (the branch the revert advances).
 - GitHub access: `GITHUB_TOKEN` / `AGENT_TODO_GITHUB_TOKEN` + `AGENT_TODO_REPO` (default `thecyclecoder/shopcx`) — the same token the auto-merge gate uses.
+- **`DEPLOY_GUARDIAN_AUTOREVERT_MODE`** ([[../specs/reva-box-session-causal-rollback]] Phase 4) — the **kill-switch**. `'box'` (default) → full box-session path (enqueue review → apply typed verdict → revert on 'revert'). `'off'` → **surface-only**: the cron still enqueues Reva, `applyBoxDeployReview` still stamps + writes activity + preserves `findings.reva_review`, BUT a `decision='revert'` is DEGRADED to the escalate path (never calls `revertDeployMerge`). Flip to `'off'` when Reva is producing false positives or during a controlled experiment — "eyes open, hands tied."
+- **`DEPLOY_GUARDIAN_SAME_SURFACE_FASTPATH`** ([[../specs/reva-box-session-causal-rollback]] Phase 4) — the **optional fast-path**. `'1'` → a deterministic same-surface high-count match (a new error whose `sample.path` matches a changed file's route AND `count ≥ DEPLOY_REGRESSION_MIN_COUNT`) may revert immediately, skipping Reva's session. **OFF by default** until validated against the 2026-07-04 fixtures — a false fast-path revert is exactly what the whole causal-review effort exists to prevent.
+
+## Fail-safe (Phase 4) — never revert without a judgment
+
+Reva's box session can die: an idle-kill, a session hardcap, a stream that never emits parseable JSON, a runner throw before `applyBoxDeployReview` fires. The fail-safe (`failsafeStampWatchUnsure` in [[deploy-guardian]]) guarantees the watch never sits stuck at `verdict='in_review'` (which would evade the cron's pending-window read + leave it silently invisible). The default is **keep + escalate, NOT revert**: an unsure stamp + a CEO escalation, because absence-of-judgment means absence-of-evidence — the conservative move is to surface, not roll back.
+
+Called by `runDeployReviewJob` (scripts/builder-worker.ts) on: (a) no parseable verdict from the session, (b) an exception in the runner's try/catch, (c) `applyBoxDeployReview` returned `{ok:false}` without resolving the watch past `in_review`. Idempotent + concurrency-safe via the same `update … where verdict='in_review' returning id` atomic pending-guard the mutator uses — a fail-safe call after a normal apply is a no-op, and a concurrent fail-safe/redriven-job call from a re-run no-ops on the second caller. Writes `findings.reva_review = { decision:'escalate', signals:[], reasoning:<why the fail-safe fired>, reviewed_by:'box-session-failsafe' }` so the audit trail names the failsafe as the author. **Best-effort + never throws.**
 
 ## North star
 

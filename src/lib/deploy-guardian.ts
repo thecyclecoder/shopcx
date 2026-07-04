@@ -193,6 +193,37 @@ export const DEPLOY_GUARDIAN_LOOP_GUARD_MAX = Number(process.env.DEPLOY_GUARDIAN
 /** The window the loop-guard counts prior auto-rollbacks of the same slug over (mirrors the regression agent). */
 const RELAND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+/**
+ * The autorevert **kill-switch** ([[../specs/reva-box-session-causal-rollback]] Phase 4). Two values:
+ *  - `'box'` (default) — the full box-session path: the cron enqueues a Reva review job on a non-healthy
+ *    verdict; `applyBoxDeployReview` applies Reva's typed verdict, `revertDeployMerge` on 'revert'.
+ *  - `'off'` — SURFACE-ONLY. The cron still enqueues the review + Reva still runs (so the audit surface
+ *    on `deploy_watches.findings.reva_review` is preserved); `applyBoxDeployReview` still stamps + writes
+ *    activity — but a decision='revert' is DEGRADED to 'escalate' (never calls `revertDeployMerge`). This
+ *    is the "emergency stop" the founder can flip when Reva is producing false positives or during a
+ *    controlled experiment: the guardian keeps its eyes open but its hands tied.
+ * Read by `applyBoxDeployReview` (the mutator) — not by the cron enqueue path, so surface state stays
+ * populated regardless of the mode.
+ */
+export type DeployGuardianAutorevertMode = "box" | "off";
+export const DEPLOY_GUARDIAN_AUTOREVERT_MODE: DeployGuardianAutorevertMode =
+  process.env.DEPLOY_GUARDIAN_AUTOREVERT_MODE === "off" ? "off" : "box";
+/** Is autorevert currently enabled? Convenience for the mutator's decision-branch gate. */
+export function isAutoRevertEnabled(): boolean {
+  return DEPLOY_GUARDIAN_AUTOREVERT_MODE === "box";
+}
+
+/**
+ * Optional narrow fast-path ([[../specs/reva-box-session-causal-rollback]] Phase 4) — a deterministic
+ * SAME-SURFACE HIGH-COUNT match (a new error whose `sample.path` matches a changed file's route AND
+ * `count ≥ DEPLOY_REGRESSION_MIN_COUNT`) may revert immediately, skipping Reva's session. Kept **OFF
+ * by default** behind this env until we validate the false-positive rate against the 2026-07-04
+ * fixtures — a false fast-path revert is exactly what the whole causal-review effort exists to prevent.
+ * When `off`, the fast-path never fires; the enqueue path is unchanged.
+ */
+export const DEPLOY_GUARDIAN_SAME_SURFACE_FASTPATH: boolean =
+  process.env.DEPLOY_GUARDIAN_SAME_SURFACE_FASTPATH === "1";
+
 // ── GitHub git-data API (the rollback hand) ──────────────────────────────────
 // Reva restores known-good via the SAME GitHub REST token/repo the auto-merge gate ([[github-pr-resolve]])
 // already uses — no new credential, no box round-trip (the cron runs in the Vercel/Inngest runtime).
@@ -1310,7 +1341,39 @@ export async function applyBoxDeployReview(admin: Admin, jobId: string, verdict:
       return { ok: true, finalVerdict: "unsure" };
     }
 
-    // ── decision === 'revert' — Reva cited a causal path in the diff. Loop-guard first, then revert. ──
+    // ── decision === 'revert' — Reva cited a causal path in the diff. Kill-switch first, then loop-guard.
+    // Phase-4 kill-switch (`DEPLOY_GUARDIAN_AUTOREVERT_MODE='off'`) → SURFACE-ONLY: never call
+    // `revertDeployMerge`. Degrade to the escalate path (still stamps findings.reva_review + writes a
+    // `deploy_unsure` activity + escalates), so Reva's verdict is preserved on the audit surface but
+    // no code moves. Same shape as the escalate branch above, with a note the mode disabled the revert.
+    if (!isAutoRevertEnabled()) {
+      const { data: claimed } = await admin
+        .from("deploy_watches")
+        .update({ verdict: "unsure", evaluated_at: new Date().toISOString() })
+        .eq("id", watch.id)
+        .eq("verdict", "in_review")
+        .select("id");
+      if (!claimed || claimed.length === 0) return { ok: false, reason: "claim_lost", finalVerdict: "unsure" };
+      await stampFindingsWithReview(admin, watch.id, currentFindings, verdict, { status: "autorevert_off", mode: DEPLOY_GUARDIAN_AUTOREVERT_MODE });
+      const diagnosis = `Reva cited a causal path in the deploy of "${watch.slug}" (${watch.branch}, merge ${(watch.merge_sha || "").slice(0, 7)}) — ${describeRevaSignals(verdict)} — BUT the autorevert kill-switch is ON (DEPLOY_GUARDIAN_AUTOREVERT_MODE='off'). The guardian is in SURFACE-ONLY mode; no auto-revert will fire. Please revert manually if the causal path is real. Reasoning: ${verdict.reasoning || "(no reasoning)"}.`;
+      await safeEscalate(admin, watch, {
+        title: `Deploy revert requested by Reva but SUPPRESSED by kill-switch: ${watch.slug}`,
+        diagnosis,
+        dedupeKey: `deploy-autorevert-off:${watch.id}`,
+        escalationKind: "deploy_autorevert_off",
+        metadata: { autorevert_mode: DEPLOY_GUARDIAN_AUTOREVERT_MODE },
+      });
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_unsure",
+        specSlug: watch.slug,
+        reason: diagnosis,
+        metadata: revaActivityMeta(watch, "unsure", verdict, { autorevert_mode: DEPLOY_GUARDIAN_AUTOREVERT_MODE }),
+      });
+      console.log(`[deploy-guardian] ${watch.branch} → revert SUPPRESSED (DEPLOY_GUARDIAN_AUTOREVERT_MODE=off) → verdict='unsure', escalated`);
+      return { ok: true, finalVerdict: "unsure" };
+    }
     const priorRollbacks = await priorRollbacksForSlug(admin, watch.workspace_id, watch.slug);
     if (priorRollbacks >= DEPLOY_GUARDIAN_LOOP_GUARD_MAX) {
       const { data: claimed } = await admin
@@ -1396,5 +1459,123 @@ export async function applyBoxDeployReview(admin: Admin, jobId: string, verdict:
   } catch (e) {
     console.error("[deploy-guardian] applyBoxDeployReview threw:", e instanceof Error ? e.message : e);
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * FAIL-SAFE ([[../specs/reva-box-session-causal-rollback]] Phase 4): stamp a watch stuck at
+ * `verdict='in_review'` to `'unsure'` + escalate, when the Reva box session couldn't return a
+ * parseable verdict (session died / idle-killed / hardcap / stream error with no JSON / an
+ * exception in the runner). "Never revert without a judgment" — the fail-safe is
+ * **keep+escalate, NOT revert**: an unsure stamp is the conservative default because the box
+ * session couldn't produce evidence either way.
+ *
+ * Idempotent + concurrency-safe via the same atomic pending-guard as the mutator
+ * (`update … where verdict='in_review' returning id`) — a fail-safe call after a normal
+ * `applyBoxDeployReview` no-ops (the watch is already past `in_review`), and a concurrent
+ * fail-safe call from a redriven job no-ops on the second caller. Best-effort + **never throws**.
+ * Called by `runDeployReviewJob` (scripts/builder-worker.ts) on: (a) unparseable verdict, (b) a
+ * thrown catch-block, (c) `applyBoxDeployReview` returned `{ok:false}` with the watch still stuck.
+ * Callers pass a `jobId` (for the escalation dedupe key) + a plain-text `reason` — the escalation
+ * carries both so the CEO inbox sees why the fail-safe fired.
+ */
+export async function failsafeStampWatchUnsure(
+  admin: Admin,
+  args: { jobId: string; reason: string; watchId?: string | null; workspaceId?: string | null; slug?: string | null },
+): Promise<{ stamped: boolean; reason?: string; escalated?: boolean }> {
+  try {
+    // Resolve the watch: prefer the passed watchId (from the enqueue instructions), else look up the
+    // latest `in_review` row for (workspaceId, slug) — the runner has all three from the job/instructions.
+    let watchId: string | null = args.watchId ?? null;
+    if (!watchId && args.workspaceId && args.slug) {
+      const { data: latest } = await admin
+        .from("deploy_watches")
+        .select("id")
+        .eq("workspace_id", args.workspaceId)
+        .eq("slug", args.slug)
+        .eq("verdict", "in_review")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      watchId = (latest as { id: string } | null)?.id ?? null;
+    }
+    if (!watchId) return { stamped: false, reason: "watch_not_found" };
+
+    const { data: watchRow } = await admin.from("deploy_watches").select("*").eq("id", watchId).maybeSingle();
+    if (!watchRow) return { stamped: false, reason: "watch_row_gone" };
+    const watch = watchRow as DeployWatch;
+    if (watch.verdict !== "in_review") {
+      // Already past in_review (a normal apply landed, or another fail-safe won) — no-op.
+      return { stamped: false, reason: `not_in_review:${watch.verdict}` };
+    }
+
+    // Atomic claim: only the caller that wins the in_review → unsure transition escalates.
+    const { data: claimed } = await admin
+      .from("deploy_watches")
+      .update({ verdict: "unsure", evaluated_at: new Date().toISOString() })
+      .eq("id", watch.id)
+      .eq("verdict", "in_review")
+      .select("id");
+    if (!claimed || claimed.length === 0) return { stamped: false, reason: "claim_lost" };
+
+    // Merge a `reva_review` failsafe marker onto findings so the audit trail shows why we didn't apply
+    // a typed verdict (the ordinary applyBoxDeployReview never ran to write it).
+    try {
+      const base = (watch.findings ?? {}) as Record<string, unknown>;
+      const patch: Record<string, unknown> = {
+        ...base,
+        reva_review: {
+          decision: "escalate",
+          signals: [],
+          reasoning: args.reason,
+          reviewed_by: "box-session-failsafe",
+        },
+      };
+      await admin.from("deploy_watches").update({ findings: patch }).eq("id", watch.id);
+    } catch (e) {
+      console.warn(`[deploy-guardian] failsafe findings write failed for ${watch.id}:`, e instanceof Error ? e.message : e);
+    }
+
+    const diagnosis = `Reva review job ${args.jobId.slice(0, 8)} did not return a parseable verdict for the deploy of "${watch.slug}" (${watch.branch}, merge ${(watch.merge_sha || "").slice(0, 7)}). Fail-safe applied — the watch is stamped 'unsure' and NOT reverted (never revert without a judgment). Reason: ${args.reason}. Please eyeball the deploy manually.`;
+    let escalated = false;
+    try {
+      await safeEscalate(admin, watch, {
+        title: `Reva review failed on ${watch.slug} — fail-safe applied (no revert)`,
+        diagnosis,
+        dedupeKey: `deploy-failsafe:${watch.id}`,
+        escalationKind: "deploy_review_failsafe",
+        metadata: { job_id: args.jobId, failsafe_reason: args.reason },
+      });
+      escalated = true;
+    } catch (e) {
+      console.warn(`[deploy-guardian] failsafe escalation threw for ${watch.id}:`, e instanceof Error ? e.message : e);
+    }
+    try {
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_unsure",
+        specSlug: watch.slug,
+        reason: diagnosis,
+        metadata: {
+          actor: GUARDIAN_ACTOR,
+          deploy_watch_id: watch.id,
+          branch: watch.branch,
+          pr_number: watch.pr_number,
+          merge_sha: watch.merge_sha,
+          verdict: "unsure",
+          reviewed_by: "box-session-failsafe",
+          failsafe_reason: args.reason,
+          job_id: args.jobId,
+        },
+      });
+    } catch (e) {
+      console.warn(`[deploy-guardian] failsafe activity write failed for ${watch.id}:`, e instanceof Error ? e.message : e);
+    }
+    console.log(`[deploy-guardian] ${watch.branch} → FAIL-SAFE: verdict='unsure', escalated (job ${args.jobId.slice(0, 8)} — ${args.reason})`);
+    return { stamped: true, escalated };
+  } catch (e) {
+    console.error("[deploy-guardian] failsafeStampWatchUnsure threw:", e instanceof Error ? e.message : e);
+    return { stamped: false, reason: e instanceof Error ? e.message : String(e) };
   }
 }
