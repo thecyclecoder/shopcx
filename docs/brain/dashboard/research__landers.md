@@ -3,7 +3,7 @@
 The owner-facing window onto **Rhea**'s URL sensor output — the landers she found + the teardowns she wrote. Reads [[../tables/research_urls]] (list + each row's structured `teardown` recipe + `capture_ref` → the chaptered mobile shots in the private `research-shots` bucket) and renders them as a real teardown board so Growth can operate against Rhea's output without leaving the app. Growth operates; Ada / Platform builds — sibling of [[research__competitors]] under the owner-gated Research section in [[../../src/app/dashboard/sidebar]].
 
 **Route:** `/dashboard/research/landers` (client, owner-only) · detail at `/dashboard/research/landers/[id]`
-**Sidebar:** **Research** section (owner-only) → **Landers**, placed directly below [[research__competitors|Competitors]] and above the legacy [[research__teardowns|Lander Teardowns]] item.
+**Sidebar:** **Research** section (owner-only) → **Landers**, placed directly below [[research__competitors|Competitors]] and above [[research__teardowns|Teardowns]] (the sibling curated gallery — renamed from the legacy 'Lander Teardowns').
 
 ## Surfaces
 
@@ -47,10 +47,10 @@ This surface is **read-only** — every WRITE to [[../tables/research_urls]] goe
 
 Both routes 403 for a non-owner (`role !== 'owner'` → `Forbidden`), mirroring the sibling `/api/ads/lander-teardowns` gate.
 
-## Relationship to the legacy `/dashboard/research/teardowns`
+## Relationship to `/dashboard/research/teardowns`
 
-This new **Landers** surface is Rhea's pipeline output — [[../tables/research_urls]] + `research-shots` bucket + the structured `TeardownRecipe`. The legacy sibling **[[research__teardowns|Lander Teardowns]]** (`/dashboard/research/teardowns`) reads the OLDER `lander_snapshots` / funnel-teardown-scout system that predates Rhea. The two temporarily coexist under the Research section; **Landers supersedes Teardowns for competitor lander teardowns** going forward — the legacy item can be retired once Growth has finished migrating off it.
+**Landers** is the broad list — every classified URL Rhea has seen, filterable by classification + verdict. The sibling **[[research__teardowns|Teardowns]]** surface is the curated subset — only the rows carrying a structured `TeardownRecipe` — paired with the founder-approved Showcase HTML board (`/showcase/tools/teardowns/examples/[id]`) for each. Both read the SAME [[../tables/research_urls]] via the [[../libraries/research-urls]] chokepoint. Together they replace the OLDER `lander_snapshots` / funnel-teardown-scout system that predated Rhea — the legacy `/api/ads/lander-teardowns` funnel-filmstrip page is superseded.
 
 ## Related
 
-[[../tables/research_urls]] · [[../libraries/research-urls]] (`signResearchShot`, `listResearchShotChapters`, `getResearchUrl`, `RESEARCH_SHOTS_BUCKET`) · [[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../specs/rhea-research-automation]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[../functions/growth]] · [[../functions/platform]] · [[../goals/acquisition-research-engine]] · [[research__competitors]] · [[research__teardowns]] (legacy)
+[[../tables/research_urls]] · [[../libraries/research-urls]] (`signResearchShot`, `listResearchShotChapters`, `getResearchUrl`, `RESEARCH_SHOTS_BUCKET`) · [[../specs/rhea-url-sensor]] · [[../specs/rhea-teardown-recipe]] · [[../specs/rhea-research-automation]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[../functions/growth]] · [[../functions/platform]] · [[../goals/acquisition-research-engine]] · [[research__competitors]] · [[research__teardowns]] (curated gallery + Showcase board)
