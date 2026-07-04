@@ -70,7 +70,14 @@ async function resolveShortlinkWorkspaceByDomain(
       `${supabaseUrl}/rest/v1/workspaces?shortlink_domain=eq.${encodeURIComponent(
         hostname,
       )}&select=id&limit=1`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+      {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+        // Bound the upstream — a hanging Supabase REST call must not lock the
+        // middleware invocation until Vercel's 300s ceiling. On timeout the
+        // AbortError falls through to the null return below (cached-negative
+        // via shortlinkCache).
+        signal: AbortSignal.timeout(2_000),
+      },
     );
     const data = (await res.json()) as Array<{ id?: string }>;
     const workspaceId = data?.[0]?.id || null;
@@ -109,11 +116,17 @@ async function loadExperimentManifest(origin: string): Promise<ExperimentManifes
       // query). Activates automatically once the owner provisions Edge Config.
       const u = new URL(edgeConfig);
       u.pathname = `${u.pathname.replace(/\/$/, "")}/item/${EXPERIMENT_MANIFEST_EDGE_KEY}`;
-      const res = await fetch(u.toString());
+      // Bound the upstream (Edge Config item endpoint) — a hang here would
+      // lock every PDP click; on timeout we fall through to the empty-manifest
+      // cache below (no assignment, real cached PDP served).
+      const res = await fetch(u.toString(), { signal: AbortSignal.timeout(2_000) });
       if (res.ok) data = ((await res.json()) as ExperimentManifest) ?? {};
     } else {
       // Fallback: the cached JSON blob the middleware fetches same-origin.
-      const res = await fetch(`${origin}${EXPERIMENT_MANIFEST_PATH}`);
+      // Same bound — a stalled same-origin fetch also degrades to empty manifest.
+      const res = await fetch(`${origin}${EXPERIMENT_MANIFEST_PATH}`, {
+        signal: AbortSignal.timeout(2_000),
+      });
       if (res.ok) data = ((await res.json()) as ExperimentManifest) ?? {};
     }
   } catch {
@@ -202,7 +215,14 @@ async function resolveStorefrontSlugByDomain(
       `${supabaseUrl}/rest/v1/workspaces?storefront_domain=eq.${encodeURIComponent(
         hostname,
       )}&select=storefront_slug&limit=1`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+      {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+        // Bound the upstream — a hanging Supabase REST call must not lock the
+        // middleware invocation until Vercel's 300s ceiling. On timeout the
+        // AbortError falls through to the null return below (cached-negative
+        // via storefrontCache).
+        signal: AbortSignal.timeout(2_000),
+      },
     );
     const data = (await res.json()) as Array<{ storefront_slug?: string }>;
     const slug = data?.[0]?.storefront_slug || null;
@@ -396,7 +416,14 @@ export async function updateSession(
             const orFilter = `or=(help_custom_domain.eq.${encodeURIComponent(hostname)},portal_config->minisite->>custom_domain.eq.${encodeURIComponent(hostname)})`;
             const res = await fetch(
               `${supabaseUrl}/rest/v1/workspaces?${orFilter}&select=help_slug,help_custom_domain,portal_config&limit=1`,
-              { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
+              {
+                headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+                // Bound the upstream — a hanging Supabase REST call must not
+                // lock the middleware invocation until Vercel's 300s ceiling.
+                // On timeout the AbortError falls through to the outer try/catch
+                // and slug stays null (no help/portal rewrite for this request).
+                signal: AbortSignal.timeout(2_000),
+              }
             );
             const data = await res.json();
             const ws = data?.[0];

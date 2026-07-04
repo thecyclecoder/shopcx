@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isInternalSubscription } from "@/lib/internal-subscription";
@@ -103,7 +103,7 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-      const res = await portalFetch(
+      const res = await fetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${contractId}`,
         {
           method: "PUT",
