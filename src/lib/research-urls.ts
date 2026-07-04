@@ -180,6 +180,8 @@ export interface ResearchUrlFilter {
   classification?: ResearchUrlClassification;
   teardown_verdict?: ResearchUrlVerdict;
   competitor_id?: string;
+  /** When true, restrict to rows carrying a structured TeardownRecipe (`teardown IS NOT NULL`). */
+  has_teardown?: boolean;
   limit?: number;
 }
 
@@ -577,6 +579,7 @@ export async function listResearchUrls(
   if (filter.classification) q = q.eq("classification", filter.classification);
   if (filter.teardown_verdict) q = q.eq("teardown_verdict", filter.teardown_verdict);
   if (filter.competitor_id) q = q.eq("competitor_id", filter.competitor_id);
+  if (filter.has_teardown) q = q.not("teardown", "is", null);
   q = q.order("ad_count", { ascending: false }).limit(filter.limit ?? 500);
   const { data, error } = await q;
   if (error) throw new Error(`listResearchUrls: ${error.message}`);
