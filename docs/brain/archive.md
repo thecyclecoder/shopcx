@@ -14,6 +14,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
+- **Reduce call volume / cache the hot query on query -7726440967385220442** · verified 2026-07-04 · → [[../dashboard/home]]
 - **Error feed: drop the Inngest step wrapped-non-Error log from the Vercel feed** · verified 2026-07-04 · → [[integrations/vercel-log-drain]]
 - **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
@@ -25,6 +26,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
 - **Research → Teardowns list + a Showcase "View HTML" teardown page** · verified 2026-07-04 · → [[../lifecycles/showcase]]
 - **Add partial btree on tickets(workspace_id, escalated_at DESC) WHERE escalated_at IS NOT NULL to unblock /api/escalated** · verified 2026-07-04 · → [[../lifecycles/ticket-lifecycle]]
+- **Vercel log-drain webhook: ACK 200 immediately, move recordError fan-out into after()** · verified 2026-07-04 · → [[../integrations/vercel-log-drain]]
 - **Guard crisis_pause action-executor handler against a missing contract_id** · verified 2026-07-03 · → [[../libraries/action-executor]]
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
 - **Investigate statement_timeout pressure on the instance** · verified 2026-07-03 · → [[../libraries/db-health]]
