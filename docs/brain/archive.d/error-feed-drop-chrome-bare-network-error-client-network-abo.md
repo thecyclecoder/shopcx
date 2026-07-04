@@ -1,0 +1,1 @@
+- **Drop bare 'network error' TypeError from client feed (5th browser network-abort variant)** · verified 2026-07-04 · → [[libraries/control-tower]]

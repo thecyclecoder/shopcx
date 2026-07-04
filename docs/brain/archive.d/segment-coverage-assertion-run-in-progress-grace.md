@@ -1,0 +1,1 @@
+- **Segment-coverage assertion: grace the fresh-cohort check while the daily fanout is still running** · verified 2026-07-04 · → [[libraries/control-tower]]
