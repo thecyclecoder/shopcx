@@ -14,6 +14,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Cleo — teardown → lander blueprint (the modify-vs-build-new decision)** · verified 2026-07-04 · → [[tables/lander_blueprints]]
+- **Error feed: drop the Inngest step wrapped-non-Error log from the Vercel feed** · verified 2026-07-04 · → [[integrations/vercel-log-drain]]
 - **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
