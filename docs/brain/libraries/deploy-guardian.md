@@ -56,7 +56,17 @@ Open a watch over a just-merged deploy. **Per-spec path** (default): a `claude/<
 The cron driver: find every `pending` watch past its `window_ends_at` (bounded to 25/tick) and evaluate each. Never throws.
 
 ### `evaluateDeployWatch(admin, watch): Promise<DeployVerdict>`
-Evaluate ONE watch: gather findings → `verdictFor` → **CLAIM** the row (`update … where verdict='pending' returning id`; only the winner acts — the idempotency spine for the revert) → ACT on the verdict (Phase 2 `actOnRegression` on `regressed`; escalate on `unsure`; log on `healthy`) → write a `deploy_healthy`/`deploy_rolled_back`/`deploy_regressed`/`deploy_unsure` [[../tables/director_activity]] row.
+Evaluate ONE watch: gather findings → `verdictFor` → **CLAIM** the row (`update … where verdict='pending' returning id`; only the winner acts — the idempotency spine) → route on shape. Under [[../specs/reva-box-session-causal-rollback]] Phase 1 the cron **stops deciding** on non-healthy verdicts: `healthy` still stamps + records `deploy_healthy` (unchanged fast path); atomic (`is_atomic=true`) non-healthy escalates directly (never routed through per-signal review — reverting a whole tested goal is far costlier than a per-phase revert); per-spec non-healthy under the loop-guard **stamps `verdict='in_review'` + enqueues one `kind='deploy-review'` [[../tables/agent_jobs]] row** (Reva reads the merge_sha's real diff on Max via `runDeployReviewJob` — Phase 2 — and returns a typed verdict the worker applies via `applyBoxDeployReview` — Phase 3, the mutator); per-spec non-healthy with the loop-guard TRIPPED escalates + halts without enqueueing. Each acted watch still writes a matching [[../tables/director_activity]] row.
+
+### `applyBoxDeployReview(admin, jobId, verdict): Promise<ApplyBoxDeployReviewResult>` — [[../specs/reva-box-session-causal-rollback]] Phase 3
+
+The **only mutator** on the box-session path — the deterministic writer that applies Reva's typed causal-review verdict (`{ decision: 'revert'|'keep'|'escalate', signals: [{ key, surface, caused, evidence }], reasoning }`) returned by the Phase-2 box session (`runDeployReviewJob`, `scripts/builder-worker.ts`) to the watch behind ONE `kind='deploy-review'` [[../tables/agent_jobs]] row. Mirrors [[agent-grader]] `applyBoxGrade` in shape: the box session diagnoses read-only + emits a typed verdict, and this function claims + applies it. **Concurrency-safe + idempotent:** the atomic pending-guard is `update deploy_watches set … where verdict='in_review' returning id` — only the caller that wins the claim acts, so a re-apply / a concurrent tick / a redriven job never double-reverts. Every decision writes `findings.reva_review = { decision, signals, reasoning, reviewed_by:'box-session' }` (no new column — per the [[../tables/deploy_watches]] findings pattern), preserving all prior findings keys.
+
+- `decision='revert'` — check the **loop-guard** first (`priorRollbacksForSlug` ≥ `DEPLOY_GUARDIAN_LOOP_GUARD_MAX`). Tripped ⇒ escalate + stamp `verdict='regressed'` + `findings.rollback={status:'loop_guard', prior_rollbacks}` + `deploy_regressed` [[../tables/director_activity]] row + a critical [[../integrations/slack]] ops alert — **no revert** (same conservative move `actOnRegression` made; a rollback-then-reland loop is a deeper issue). Untripped ⇒ CLAIM (`in_review → regressed`) + call `revertDeployMerge` (the standalone hand at line 584); a clean revert stamps `findings.rollback={status:'reverted', revert_sha, prior_rollbacks}` + escalates + writes `deploy_rolled_back`; a conflict/failed revert stamps `findings.rollback={status:'revert_failed'|'conflict', reason}` + critical ops alert + `deploy_regressed` (prod still on the regressed build — manual revert needed).
+- `decision='keep'` — CLAIM (`in_review → healthy`) + `deploy_kept` activity. No revert, no escalation — Reva affirmed no causal path; the reasoning goes on the activity row.
+- `decision='escalate'` — CLAIM (`in_review → unsure`) + `escalateDiagnosisToCeo` (dedupe `deploy-reva-escalate:{watch.id}`) + `deploy_unsure` activity. A plausible but unconfirmable causal path escalates for a human; never revert on doubt.
+
+Returns `{ ok, reason?, finalVerdict?, revertSha?, loopGuarded? }` — surfaced back to the Phase-2 runner for `agent_jobs.log_tail`. **Never throws** — caught errors return `{ ok:false, reason }`.
 
 ### `revertDeployMerge({ mergeSha, slug, prNumber? }): Promise<RevertResult>` — Phase 2
 Restore known-good by reverting the offending squash-merge **via the GitHub git-data API** (no local git — the cron runs in the Vercel/Inngest runtime, reusing [[github-pr-resolve]]'s `GITHUB_TOKEN`/`AGENT_TODO_REPO`). A squash merge is single-parent, so: if nothing landed since (`HEAD === mergeSha`, the common case under the serialized auto-merge gate) it restores the **parent tree verbatim** (the prior good build, byte-for-byte); else it does a **true single-commit revert** of only this deploy's files (`buildRevertTree` — restore each to the parent version, **bail to a conflict** if a later commit touched it or the tree is truncated). Creates the revert commit on top of HEAD + fast-forwards `main`. **Never throws** — returns `{ reverted, revertSha?, reason?, conflict? }`; the caller escalates on `!reverted`.
@@ -84,17 +94,45 @@ The pure verdict rule:
 - `DEPLOY_GUARDIAN_LOOP_GUARD_MAX` — `DEPLOY_GUARDIAN_LOOP_GUARD_MAX`, default `2` (mirrors `PLATFORM_DIRECTOR_LOOP_GUARD_MAX`).
 - `MAIN_BRANCH` — `AGENT_TODO_MAIN_BRANCH`, default `main` (the branch the revert advances).
 - GitHub access: `GITHUB_TOKEN` / `AGENT_TODO_GITHUB_TOKEN` + `AGENT_TODO_REPO` (default `thecyclecoder/shopcx`) — the same token the auto-merge gate uses.
+- **`DEPLOY_GUARDIAN_AUTOREVERT_MODE`** ([[../specs/reva-box-session-causal-rollback]] Phase 4) — the **kill-switch**. `'box'` (default) → full box-session path (enqueue review → apply typed verdict → revert on 'revert'). `'off'` → **surface-only**: the cron still enqueues Reva, `applyBoxDeployReview` still stamps + writes activity + preserves `findings.reva_review`, BUT a `decision='revert'` is DEGRADED to the escalate path (never calls `revertDeployMerge`). Flip to `'off'` when Reva is producing false positives or during a controlled experiment — "eyes open, hands tied."
+- **`DEPLOY_GUARDIAN_SAME_SURFACE_FASTPATH`** ([[../specs/reva-box-session-causal-rollback]] Phase 4) — the **optional fast-path**. `'1'` → a deterministic same-surface high-count match (a new error whose `sample.path` matches a changed file's route AND `count ≥ DEPLOY_REGRESSION_MIN_COUNT`) may revert immediately, skipping Reva's session. **OFF by default** until validated against the 2026-07-04 fixtures — a false fast-path revert is exactly what the whole causal-review effort exists to prevent.
+
+## Fail-safe (Phase 4) — never revert without a judgment
+
+Reva's box session can die: an idle-kill, a session hardcap, a stream that never emits parseable JSON, a runner throw before `applyBoxDeployReview` fires. The fail-safe (`failsafeStampWatchUnsure` in [[deploy-guardian]]) guarantees the watch never sits stuck at `verdict='in_review'` (which would evade the cron's pending-window read + leave it silently invisible). The default is **keep + escalate, NOT revert**: an unsure stamp + a CEO escalation, because absence-of-judgment means absence-of-evidence — the conservative move is to surface, not roll back.
+
+Called by `runDeployReviewJob` (scripts/builder-worker.ts) on: (a) no parseable verdict from the session, (b) an exception in the runner's try/catch, (c) `applyBoxDeployReview` returned `{ok:false}` without resolving the watch past `in_review`. Idempotent + concurrency-safe via the same `update … where verdict='in_review' returning id` atomic pending-guard the mutator uses — a fail-safe call after a normal apply is a no-op, and a concurrent fail-safe/redriven-job call from a re-run no-ops on the second caller. Writes `findings.reva_review = { decision:'escalate', signals:[], reasoning:<why the fail-safe fired>, reviewed_by:'box-session-failsafe' }` so the audit trail names the failsafe as the author. **Best-effort + never throws.**
 
 ## North star
 
 Reva is the **supervisor** on the auto-merge proxy: it surfaces a verdict (and in Phase 2 takes the conservative, reversible action — restore known-good — on a clear regression, escalating anything ambiguous). It does not replace the deploy/error/loop signals; it supervises them. See [[../operational-rules#north-star]].
 
+## The Reva box session (reva-box-session-causal-rollback Phase 2)
+
+A `kind='deploy-review'` [[../tables/agent_jobs]] row (enqueued by `evaluateDeployWatch` on a per-spec non-healthy watch under the loop-guard) is claimed on its own **concurrency-1 lane** (`MAX_DEPLOY_REVIEW=1`) by the box worker's `runDeployReviewJob` (`scripts/builder-worker.ts`). It launches a top-level `claude -p` on Max (no `ANTHROPIC_API_KEY`, keeps read-only DB + full repo access) running the `deploy-review` skill (Reva's persona; `GUARDIAN_ACTOR='deploy-guardian'`). The session `git show`s the `merge_sha` + `git diff`s `origin/main~1..<merge_sha>` to enumerate the deploy's real changed files; for each candidate signal (from the enqueue payload — `new_error_signatures` + `new_red_loops`) it maps the source surface (route / cron / lib) and Reads it, then decides per-signal whether the diff has a **causal path** to the surface. It returns ONE JSON object:
+
+```
+{ "decision": "revert"|"keep"|"escalate", "signals": [{ "key", "surface", "caused", "evidence" }], "reasoning" }
+```
+
+Read-only against everything (no repo writes, no DB writes, no PR). The worker (`runDeployReviewJob`) logs the verdict on `agent_jobs.log_tail` for audit and completes the job; Phase 3's `applyBoxDeployReview` (the only mutator) applies the typed verdict: `revert` → `revertDeployMerge` + `escalateDiagnosisToCeo` + `deploy_rolled_back` activity; `keep` → stamp `verdict='healthy'` + `deploy_kept` activity; `escalate` → `escalateDiagnosisToCeo` (no revert). Absence of a parseable verdict → the job parks `needs_attention` (Phase 4's fail-safe backstops the watch).
+
 ## Callers
 
 - [[github-pr-resolve]] `autoMergeReadyPrs` → `openDeployWatch` (the open path).
-- [[../inngest/deploy-guardian-cron]] → `evaluateDueDeployWatches` (the eval + act path).
-- [[platform-director]] `escalateDiagnosisToCeo` ← the Phase-2 escalation plumbing (CEO inbox).
+- [[../inngest/deploy-guardian-cron]] → `evaluateDueDeployWatches` (the eval + enqueue path).
+- [[platform-director]] `escalateDiagnosisToCeo` ← the escalation plumbing (CEO inbox).
+- `scripts/builder-worker.ts` `runDeployReviewJob` — the Phase-2 box session that runs the causal review.
+
+## Status / open work
+
+- [[../specs/reva-box-session-causal-rollback]] Phase 5 — the backtest harness `scripts/_backtest-reva-box.ts` LANDS the go-live gate for flipping `DEPLOY_GUARDIAN_AUTOREVERT_MODE` from `'off'` to `'box'`. Curated fixture set:
+  - **2026-07-04 false-revert set** (all must return `keep`): portal-external-fetch-timeout-guard (merge `3886045`), error-feed-drop-undici-headers-timeout-noise (`f3240b8`), error-feed-drop-supabase-edge-html-body-noise (`5686a78`), error-feed-scope-supabase-auth-504-gateway-timeout-transient (`708dd73`).
+  - **Historical false-revert classes** (all must return `keep`): build-card-lifecycle-timeline (fold-gate diff mis-attributed to a `supabase-logs` burst + Appstle `UserGeneratedError`), blog-pixel-tracking (mis-attributed to `kpi_drift:*:monthly`), noop-pipeline-test-6 (mis-attributed to weekly-aggregate `kpi_drift`).
+  - **Synthetic positive** (must return `revert`): a same-surface high-count error whose sample.path is a portal handler the diff literally touched.
+- **Dry-run** (`npx tsx scripts/_backtest-reva-box.ts`) is CI-safe — prints each fixture's brief for the operator to eyeball. **Live** (`--run`) spawns `claude -p` per fixture on Max, parses the returned JSON verdict, and exits non-zero on any mismatch. Wall-clock ≈ 15 min for the full set.
+- **Go-live gate:** every fixture must PASS with `--run` before the operator flips `DEPLOY_GUARDIAN_AUTOREVERT_MODE=box` in the box's systemd EnvironmentFile + restarts the worker. Until then the guardian is in surface-only mode (see [[#Constants]] the kill-switch env) — Reva still runs, records `findings.reva_review`, and writes activity, but never calls `revertDeployMerge`.
 
 ## Related
 
-[[../specs/deploy-health-rollback-guardian]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]] · [[../lifecycles/spec-goal-branch-pm-flow]]
+[[../specs/deploy-health-rollback-guardian]] · [[../specs/reva-box-session-causal-rollback]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]] · [[../lifecycles/spec-goal-branch-pm-flow]]
