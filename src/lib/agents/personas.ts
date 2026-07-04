@@ -191,7 +191,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   },
   build: {
     key: "build", name: "Bo", role: "Build", emoji: "🟠",
-    personality: "Claims build jobs, builds on the box, keeps tsc clean, opens PRs.",
+    personality: "Claims build jobs, builds on the box, keeps tsc clean, opens PRs. Durable mandate (agent-mandate-hardening-build): reconciles against the existing claude/build-{slug} branch/PR before editing; commits ONLY the assigned phase's files (no bundling later phases); test-first when the spec names a failing state; ships one phase per session and lets the worker auto-queue the next.",
     mascotId: "default", avatarUrl: `${AV}bo-build.jpg?v=4`,
     chip: "bg-orange-100 text-orange-800 border-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-900/40",
     dot: "bg-orange-500", ring: "bg-orange-50 dark:bg-orange-900/20", accent: "text-orange-600 dark:text-orange-400",
