@@ -269,6 +269,14 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
     dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
   },
+  "dr-content": {
+    key: "dr-content", name: "Carrie", role: "DR Content", emoji: "✍️",
+    personality: "Direct-response copywriter — turns a lander blueprint + our product intelligence into intense, emotional, urgency-driven conversion copy (never brand fluff — she sells). Generates the AI-appropriate imagery on Nano Banana Pro herself, and is razor-sharp on when a slot needs a REAL customer asset (before/after, UGC, press logos) — those she flags to Max as content gaps. Fills the content bucket to 100% before a build is specced.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}carrie-dr-content.jpg?v=1`,
+    chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
+    dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
+  },
 };
 
 /**
@@ -364,6 +372,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Deconstruct what's working — creative skeletons, offers, lander teardowns — and surface the gaps worth chasing",
     "Reason about which competitors / URLs / angles deserve Growth's attention, not just dump everything found",
     "Feed the confirmed opportunities to Cleo's tests + Max's approval queue; escalate what she can't call",
+  ],
+  "dr-content": [
+    "Read a lander blueprint + Amazing Coffee's product intelligence and write intense, emotional, urgency-driven DR copy for every block",
+    "Classify each image slot by its persuasive job — generate the product/ingredient/mechanism shots on Nano Banana Pro herself",
+    "Flag REAL-asset gaps to Max — before/after transformations, UGC, testimonial photos, press logos — never fabricate a customer result",
+    "Fill the content bucket to 100% (copy + imagery) so Cleo can spec the build; DR conversion voice, not brand copy",
   ],
   "storefront-optimizer": [
     "Read the funnel + lever-importance map and form one atomic, grounded hypothesis per campaign",

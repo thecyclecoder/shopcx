@@ -91,6 +91,9 @@ const KIND_TO_FUNCTION: Record<string, string> = (() => {
   // `research` (Rhea) is a Growth worker — any research agent_jobs she raises route UP from Growth
   // (Max auto-approves within his leash, else the CEO fail-safe), same as Cleo's grade lanes.
   if (!m["research"]) m["research"] = "growth";
+  // `dr-content` (Carrie) is a Growth worker — her content-gap flags + build handoffs route UP from
+  // Growth (Max), same leash. She reports to Max and escalates real-asset gaps to him.
+  if (!m["dr-content"]) m["dr-content"] = "growth";
   // `proposed-goal` (director-proposed-goals) is deliberately ABSENT — a goal NEVER routes to a director for
   // greenlight, even a live+autonomous one (a director may propose its own goal but never greenlight any).
   // Unmapped ⇒ ownerFunctionForKind returns null ⇒ resolveApprover falls through to the CEO. Do not add it.
