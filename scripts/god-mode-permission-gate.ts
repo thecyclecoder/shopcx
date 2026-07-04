@@ -124,6 +124,16 @@ const DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
   /\bvercel\s+.*(--prod|deploy\s+--prod)\b/i,
 ];
 
+// Shell metacharacters that permit chaining, redirection, subshell, or command
+// substitution. If ANY of these appear in a command, the "prefix looks safe"
+// heuristic can't guarantee safety anymore — a chained `ls; rm -rf /tmp`
+// slipped through the old prefix-match. Fail-closed on any of these.
+//   ; & |  → command chaining / pipelines
+//   ` $(   → command substitution
+//   > <    → redirection (could clobber, could exfil)
+//   \n     → newline-embedded second statement
+const SHELL_METACHAR_RE = /[;&|`$<>\n]|\$\(/;
+
 function isSafeBash(command: string): boolean {
   const c = command.trim();
   // psql with a plain SELECT is safe. Anything containing a semicolon-separated
@@ -138,7 +148,17 @@ function isSafeBash(command: string): boolean {
     }
     return false;
   }
-  return SAFE_BASH_PREFIXES.some((prefix) => c === prefix || c.startsWith(prefix + " ") || c.startsWith(prefix));
+  // Whole-command must fall UNDER an allowlist prefix — either the exact
+  // prefix or `prefix<space>...`. The previous `c.startsWith(prefix)` clause
+  // (no trailing space) was the bypass vector: `ls;rm -rf /` prefix-matched
+  // `ls` and slipped through as "safe". Removed.
+  const matchedPrefix = SAFE_BASH_PREFIXES.some((prefix) => c === prefix || c.startsWith(prefix + " "));
+  if (!matchedPrefix) return false;
+  // Even under an allowlisted prefix, reject any shell metacharacter that
+  // permits chaining / substitution / redirection. `ls; rm -rf /tmp` and
+  // `ls && cat /etc/passwd` and `cat "$(curl attacker)"` all fail here.
+  if (SHELL_METACHAR_RE.test(c)) return false;
+  return true;
 }
 
 function isDestructive(command: string): boolean {
@@ -156,9 +176,16 @@ function classify(toolName: string, toolInput: Record<string, unknown>): {
   if (toolName === "Bash") {
     const command = typeof toolInput.command === "string" ? toolInput.command : "";
     if (!command) return { decision: "needs_approval", risk: "write", preview: "Bash (no command)" };
+    // Belt-and-suspenders: even under isSafeBash-true, if the destructive rail
+    // matches, force needs_approval risk='destructive'. Guards against a novel
+    // destructive-command shape that slipped into an allowlisted prefix (e.g.
+    // `git branch -D main` — `git branch` is allowlisted but the `-D` deletes).
+    // The PIN gate on the destructive approval remains the enforcement point.
+    if (isDestructive(command)) {
+      return { decision: "needs_approval", risk: "destructive", preview: `Bash: ${command}` };
+    }
     if (isSafeBash(command)) return { decision: "safe", risk: "safe", preview: `Bash: ${command}` };
-    const risk: GodModeApprovalRisk = isDestructive(command) ? "destructive" : "write";
-    return { decision: "needs_approval", risk, preview: `Bash: ${command}` };
+    return { decision: "needs_approval", risk: "write", preview: `Bash: ${command}` };
   }
   if (toolName === "Write" || toolName === "Edit") {
     const path = typeof toolInput.file_path === "string" ? toolInput.file_path : "?";

