@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
@@ -285,7 +285,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
-      const res = await fetch(`https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3`, {
+      const res = await portalFetch(`https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3`, {
         method: "POST",
         headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
         body: JSON.stringify(body),

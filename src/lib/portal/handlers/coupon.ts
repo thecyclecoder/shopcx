@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isInternalSubscription } from "@/lib/internal-subscription";
@@ -48,7 +48,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
     const { data: ws2 } = await adminDb.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
     if (ws2?.appstle_api_key_encrypted) {
       const ak = decrypt(ws2.appstle_api_key_encrypted);
-      const contractRes = await fetch(
+      const contractRes = await portalFetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${ak}`,
       );
       if (contractRes.ok) {
@@ -127,7 +127,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
           if (wsSettings?.shopify_access_token_encrypted && wsSettings?.shopify_myshopify_domain) {
             const shopToken = decrypt(wsSettings.shopify_access_token_encrypted);
             const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
-            const gqlRes = await fetch(
+            const gqlRes = await portalFetch(
               `https://${wsSettings.shopify_myshopify_domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
               {
                 method: "POST",
@@ -189,7 +189,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
         else return jsonOk({ ok: false, route, contractId, mode, error: "discount_not_found" });
       }
 
-      const res = await fetch(
+      const res = await portalFetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(resolvedDiscountId)}`,
         { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" },
       );

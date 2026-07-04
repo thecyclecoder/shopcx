@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, checkPortalBan, portalFetch } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
 // decrypt removed — discounts now read from local DB, not Appstle API
@@ -296,7 +296,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
           .eq("id", auth.workspaceId).single();
         if (wsCreds?.shopify_access_token_encrypted) {
           const shopToken = decrypt(wsCreds.shopify_access_token_encrypted);
-          const gqlRes = await fetch(`https://${ws.shopify_myshopify_domain}/admin/api/2024-10/graphql.json`, {
+          const gqlRes = await portalFetch(`https://${ws.shopify_myshopify_domain}/admin/api/2024-10/graphql.json`, {
             method: "POST",
             headers: { "X-Shopify-Access-Token": shopToken, "Content-Type": "application/json" },
             body: JSON.stringify({
