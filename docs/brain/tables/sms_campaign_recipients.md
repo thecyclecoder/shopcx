@@ -26,7 +26,7 @@ Per-recipient SMS send row — local-time-resolved `send_time`, status, message_
 | `updated_at` | `timestamptz` | — | default: `now()` |
 | `scheduled_at_twilio` | `timestamptz` | ✓ |  |
 | `preferred_hour_used` | `int2` | ✓ |  |
-| `received_sms_logged_at` | `timestamptz` | ✓ | Set once the recipient's terminal-delivered state has been rolled up into `profile_events` (`metric_name='Received SMS'`). Idempotency flag for the [[../inngest/sms-callback-drain]] `received-sms-rollup-cron` (Phase 4 of [[../specs/twilio-callback-queue-drain]]). Candidate set = `delivered_at IS NOT NULL AND received_sms_logged_at IS NULL`, backed by partial index `idx_sms_campaign_recipients_rollup_pending`. |
+| `received_sms_logged_at` | `timestamptz` | ✓ | Set once the recipient's terminal-delivered state has been rolled up into `profile_events` (`metric_name='Received SMS'`). Idempotency flag for the [[../inngest/sms-callback-drain]] `received-sms-rollup-cron`. Candidate set = `delivered_at IS NOT NULL AND received_sms_logged_at IS NULL`, backed by partial index `idx_sms_campaign_recipients_rollup_pending`. |
 
 ## Foreign keys
 

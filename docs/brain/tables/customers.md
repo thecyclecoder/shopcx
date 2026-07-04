@@ -46,9 +46,9 @@ Synced from Shopify. Email, retention_score, subscription_status, LTV, marketing
 | `chargeback_notice_sent_at` | `timestamptz` | ✓ |  |
 | `segments` | `text[]` | — | default: `ARRAY[]` |
 | `segments_refreshed_at` | `timestamptz` | ✓ |  |
-| `phone_status` | `text` | ✓ |  |
-| `phone_status_code` | `int4` | ✓ |  |
-| `phone_status_at` | `timestamptz` | ✓ |  |
+| `phone_status` | `text` | ✓ | Set by [[../inngest/sms-callback-drain]] on fatal Twilio carrier codes (21211/21217/21407/21421/21610/21612/21614/21660/30003-30008). Indicates the phone number is invalid, blocked, or otherwise not reachable (e.g., `'invalid'`, `'failed'`). |
+| `phone_status_code` | `int4` | ✓ | The Twilio error code that triggered the phone_status update (e.g., `21612` = unsubscribed number, `30003` = carrier restrictions). |
+| `phone_status_at` | `timestamptz` | ✓ | Timestamp when the phone status was last updated (from the failed SMS callback). |
 | `preferred_sms_send_hour` | `int2` | ✓ |  |
 | `preferred_sms_send_hour_clicks` | `int2` | ✓ |  |
 | `preferred_sms_send_hour_at` | `timestamptz` | ✓ |  |
