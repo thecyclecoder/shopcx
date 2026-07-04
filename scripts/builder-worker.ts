@@ -459,7 +459,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -16155,6 +16155,31 @@ async function runStorefrontOptimizerJob(job: Job) {
   if (!surface.product_id || !surface.lander_type) {
     await update(job.id, { status: "failed", error: "storefront-optimizer job missing product_id/lander_type" });
     return;
+  }
+
+  // ── Cleo's blueprint sweep (docs/brain/specs/cleo-lander-blueprint.md Phase 2). Runs at
+  //    the top of every optimizer job invocation as a workspace-scoped preamble: reads new
+  //    teardowns from research_urls.listNewTeardowns, decides modify-vs-build-new per row,
+  //    creates a lander_blueprints entity + enqueues Carrie's dr-content job for the
+  //    whole-missing-funnel-type case (bandit for single-lever gaps — unchanged), and
+  //    stamps the teardown reviewed so it drops out of the discovery reader. Idempotent
+  //    (the dedup gate on the dr-content enqueue + the growth_reviewed_at watermark hold);
+  //    a failure here NEVER poisons the per-surface optimizer work — swallowed + logged. ──
+  try {
+    const { runCleoBlueprintSweep } = await import("../src/lib/cleo-blueprint");
+    const sweep = await runCleoBlueprintSweep(surface.workspace_id, { createdBy: job.created_by });
+    if (sweep.scanned > 0) {
+      console.log(
+        `${tag} blueprint-sweep: scanned=${sweep.scanned} blueprints_created=${sweep.blueprints_created} bandit_routed=${sweep.bandit_routed} skipped=${sweep.skipped}`,
+      );
+      for (const e of sweep.entries) {
+        console.log(
+          `${tag}   ${e.decision}: research_url=${e.research_url_id}${e.blueprint_id ? ` blueprint=${e.blueprint_id}` : ""}${e.dr_content_job_id ? ` dr_content_job=${e.dr_content_job_id}` : ""} — ${e.rationale}`,
+        );
+      }
+    }
+  } catch (e) {
+    console.warn(`${tag} blueprint-sweep failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
   }
 
   const opt = await import("../src/lib/storefront/optimizer-agent");
