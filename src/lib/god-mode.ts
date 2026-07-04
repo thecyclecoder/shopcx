@@ -17,6 +17,7 @@
  */
 import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { sendSMS } from "@/lib/twilio";
 
 // ── PIN hashing ────────────────────────────────────────────────────────────
 //
@@ -146,6 +147,8 @@ export async function armSession(
       .select("*")
       .single();
     if (error || !updated) throw new Error(`arm(refresh) failed: ${error?.message ?? "no row"}`);
+    // Phase-5 SMS: re-arm sends a fresh notification with the (refreshed) token.
+    void sendGodModeSMS(admin, { workspaceId: args.workspaceId, kind: "arm", cockpitToken: token });
     return updated as GodModeSessionRow;
   }
 
@@ -164,6 +167,8 @@ export async function armSession(
     .select("*")
     .single();
   if (error || !inserted) throw new Error(`arm(insert) failed: ${error?.message ?? "no row"}`);
+  // Phase-5 SMS: on arm, deliver the cockpit URL to the founder's mobile.
+  void sendGodModeSMS(admin, { workspaceId: args.workspaceId, kind: "arm", cockpitToken: token });
   return inserted as GodModeSessionRow;
 }
 
@@ -190,6 +195,17 @@ export async function disarmSession(
   if (!data) return null;
 
   const now = new Date().toISOString();
+  // Phase-5 SMS: session-done push BEFORE nulling the cockpit_token so the URL
+  // remains meaningful in the message body ("session ended" — nothing to open).
+  // The reason "disarmed" distinguishes it from the reaper's idle/ceiling
+  // messages.
+  const sessionRow = data as GodModeSessionRow;
+  void sendGodModeSMS(admin, {
+    workspaceId: sessionRow.workspace_id,
+    kind: "done",
+    cockpitToken: sessionRow.cockpit_token,
+    context: { reason: "disarmed" },
+  });
   const { data: updated, error } = await admin
     .from("god_mode_sessions")
     .update({
@@ -321,6 +337,24 @@ export async function openApproval(
     .select("*")
     .single();
   if (error || !data) throw new Error(`openApproval failed: ${error?.message ?? "no row"}`);
+
+  // Phase-5 SMS: every new pending approval pushes ONE SMS with the same
+  // persistent cockpit URL (deep-links to the Approvals tab). Fire-and-
+  // forget — a failed SMS never blocks the gate. Look up the session's
+  // cockpit_token here since the caller (the box gate) only has the
+  // session id.
+  const { data: session } = await admin
+    .from("god_mode_sessions")
+    .select("cockpit_token")
+    .eq("id", args.sessionId)
+    .maybeSingle();
+  void sendGodModeSMS(admin, {
+    workspaceId: args.workspaceId,
+    kind: "approval",
+    cockpitToken: (session as { cockpit_token: string | null } | null)?.cockpit_token ?? null,
+    context: { toolName: args.toolName, risk: args.risk },
+  });
+
   return data as GodModeApprovalRow;
 }
 
@@ -473,6 +507,163 @@ export async function loadPinHash(admin: Admin, workspaceId: string): Promise<st
     .eq("id", workspaceId)
     .maybeSingle();
   return (data?.god_mode_pin_hash as string | null) ?? null;
+}
+
+// ── Phase 5 — SMS delivery + reaper ───────────────────────────────────────
+
+/** Read the founder's mobile: workspace column FIRST, then env, else null. */
+export async function resolveFounderPhone(admin: Admin, workspaceId: string): Promise<string | null> {
+  const { data } = await admin
+    .from("workspaces")
+    .select("god_mode_sms_number")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  const wsNum = typeof data?.god_mode_sms_number === "string" ? data.god_mode_sms_number.trim() : "";
+  if (wsNum) return wsNum;
+  const envNum = (process.env.GOD_MODE_FOUNDER_PHONE || "").trim();
+  return envNum || null;
+}
+
+/**
+ * The three god-mode SMS events. Distinct kinds keep the text deterministic +
+ * make an integration test straightforward.
+ *
+ *   • arm      — "God mode armed on {ws}. Cockpit: {url}"
+ *   • approval — "God mode: {tool} needs your approval ({risk}). Cockpit: {url}"
+ *   • done     — "God mode session ended ({reason}). Re-arm in the app if needed."
+ *
+ * "reply" is intentionally absent — the spec says plain box replies send NONE
+ * (the Chat tab handles live watching). Only approvals + session-done push.
+ */
+export type GodModeSmsKind = "arm" | "approval" | "done";
+
+/**
+ * Best-effort SMS emit. Never throws; returns { sent } for the caller's log.
+ * Silent no-op when no founder phone is resolvable OR the workspace has no
+ * twilio_phone_number (sendSMS returns success:false with a reason).
+ */
+export async function sendGodModeSMS(
+  admin: Admin,
+  args: {
+    workspaceId: string;
+    kind: GodModeSmsKind;
+    cockpitToken?: string | null;
+    context?: { toolName?: string; risk?: GodModeApprovalRisk; reason?: string };
+  },
+): Promise<{ sent: boolean; reason?: string }> {
+  try {
+    const to = await resolveFounderPhone(admin, args.workspaceId);
+    if (!to) return { sent: false, reason: "no founder phone configured" };
+
+    const url = args.cockpitToken ? cockpitUrl(args.cockpitToken) : "";
+    let text = "";
+    if (args.kind === "arm") {
+      text = `God mode armed. Cockpit:`;
+    } else if (args.kind === "approval") {
+      const tool = args.context?.toolName ?? "Tool";
+      const risk = args.context?.risk ?? "write";
+      text = `God mode: ${tool} needs your approval (${risk}). Approvals tab:`;
+    } else {
+      const reason = args.context?.reason ?? "ended";
+      text = `God mode session ${reason}. Re-arm in the app if needed.`;
+    }
+    const body = url ? `${text}\n\n${url}` : text;
+
+    const r = await sendSMS(args.workspaceId, to, body);
+    return { sent: r.success, reason: r.error };
+  } catch (e) {
+    return { sent: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Phase-5 reaper — one pass. Called from a beat in the box-worker poll loop.
+ *
+ *   1) Any session past `absolute_expires_at` → force-disarm (status='expired',
+ *      cockpit_token=NULL, disarmed_at=now). ALWAYS, regardless of activity.
+ *   2) Any session past `token_expires_at` with NO in-flight signal — no
+ *      pending approval AND no building god-mode turn — → idle-expire.
+ *      In-flight (pending approval OR building turn) holds the door open
+ *      indefinitely so the founder can respond whenever he sees the SMS.
+ *
+ * On expiry: send one "session done" SMS (best-effort), then flip the row.
+ * Returns counts for the box's log.
+ */
+export async function reapGodModeSessions(admin: Admin): Promise<{
+  forceDisarmed: number;
+  idleExpired: number;
+}> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  let forceDisarmed = 0;
+  let idleExpired = 0;
+
+  const { data: armed } = await admin
+    .from("god_mode_sessions")
+    .select("id, workspace_id, cockpit_token, token_expires_at, absolute_expires_at")
+    .eq("status", "armed");
+  const rows = (armed as {
+    id: string;
+    workspace_id: string;
+    cockpit_token: string | null;
+    token_expires_at: string | null;
+    absolute_expires_at: string | null;
+  }[] | null) ?? [];
+
+  for (const s of rows) {
+    // (1) Absolute ceiling — kill regardless of activity.
+    if (s.absolute_expires_at && new Date(s.absolute_expires_at) < now) {
+      await sendGodModeSMS(admin, {
+        workspaceId: s.workspace_id,
+        kind: "done",
+        cockpitToken: s.cockpit_token,
+        context: { reason: "hit its 12h ceiling" },
+      });
+      await admin
+        .from("god_mode_sessions")
+        .update({
+          status: "expired",
+          cockpit_token: null,
+          disarmed_at: nowIso,
+          last_activity_at: nowIso,
+        })
+        .eq("id", s.id);
+      forceDisarmed++;
+      continue;
+    }
+
+    // (2) Idle ceiling — only when there's no in-flight signal.
+    if (s.token_expires_at && new Date(s.token_expires_at) < now) {
+      const pending = await hasInFlight(admin, s.id);
+      if (pending) continue; // pending approval holds the door open
+      const { count } = await admin
+        .from("agent_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("kind", "god-mode")
+        .eq("spec_slug", s.id)
+        .in("status", ["queued", "building", "queued_resume"]);
+      if ((count ?? 0) > 0) continue; // building/queued turn holds the door open
+
+      await sendGodModeSMS(admin, {
+        workspaceId: s.workspace_id,
+        kind: "done",
+        cockpitToken: s.cockpit_token,
+        context: { reason: "idled out" },
+      });
+      await admin
+        .from("god_mode_sessions")
+        .update({
+          status: "expired",
+          cockpit_token: null,
+          disarmed_at: nowIso,
+          last_activity_at: nowIso,
+        })
+        .eq("id", s.id);
+      idleExpired++;
+    }
+  }
+
+  return { forceDisarmed, idleExpired };
 }
 
 /**

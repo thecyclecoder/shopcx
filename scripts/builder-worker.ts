@@ -365,6 +365,13 @@ const DB_HEALTH_SLOWQ_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const DB_HEALTH_SIZE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 const DB_HEALTH_INSTANCE_INTERVAL_MS = 15 * 60 * 1000; // ~15 min — active-incident cadence (db-health-instance-saturation-detector P1)
 let lastDbHealthSlowQ = 0; // 0 ⇒ run on first poll so there's a beat right away.
+// God-mode reaper (docs/brain/specs/god-mode.md Phase 5): idle-expire armed
+// sessions past token_expires_at with NO in-flight signal (no pending approval,
+// no queued/building god-mode job); force-disarm past absolute_expires_at
+// regardless of activity. Runs every ~60s off the poll loop; best-effort.
+let lastGodModeReap = 0;
+let godModeReapInFlight = false;
+const GOD_MODE_REAP_INTERVAL_MS = 60 * 1000;
 let lastDbHealthSize = 0;
 let lastDbHealthInstance = 0;
 let dbHealthSlowQInFlight = false;
@@ -18913,6 +18920,28 @@ async function main() {
           console.error("[reaper] stale-session sweep failed (continuing):", e instanceof Error ? e.message : e);
         } finally {
           reapSweepInFlight = false;
+        }
+      }
+
+      // God-mode reaper (docs/brain/specs/god-mode.md Phase 5): force-disarm any god_mode_sessions row
+      // past absolute_expires_at (arm+12h), and idle-expire any row past token_expires_at when NO in-
+      // flight signal exists (no pending approval AND no queued/building god-mode agent_jobs row).
+      // Sends a session-done SMS on expiry (best-effort inside the reaper). Throttled ~1min; best-effort,
+      // never breaks the poll loop. Sliding TTL bumps come from the Phase-3/4 GET/message/approve routes
+      // + the runGodModeJob turn — active use keeps a session alive without the reaper's involvement.
+      if (!godModeReapInFlight && Date.now() - lastGodModeReap > GOD_MODE_REAP_INTERVAL_MS) {
+        lastGodModeReap = Date.now();
+        godModeReapInFlight = true;
+        try {
+          const { reapGodModeSessions } = await import("../src/lib/god-mode");
+          const r = await reapGodModeSessions(db);
+          if (r.forceDisarmed || r.idleExpired) {
+            console.log(`[god-mode reaper] force=${r.forceDisarmed} idle=${r.idleExpired}`);
+          }
+        } catch (e) {
+          console.error("[god-mode reaper] sweep failed (continuing):", e instanceof Error ? e.message : e);
+        } finally {
+          godModeReapInFlight = false;
         }
       }
 

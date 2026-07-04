@@ -31,7 +31,10 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 | `getApprovalForSession(admin, { approvalId, sessionId })` | Tamper-guarded read: only returns the row if it belongs to THIS session. `null` otherwise — same shape as row-not-found so callers can't distinguish. |
 | `loadPinHash(admin, workspaceId)` | Read `workspaces.god_mode_pin_hash`. Used by the Phase-3 approve route for the destructive-approval PIN check. |
 | `enqueueGodModeTurn(admin, { workspaceId, sessionId, userMessage, createdBy? })` | Insert a `kind='god-mode'` `mode:'turn'` `agent_jobs` row. Called by `POST /api/god/[token]/message` and by the Phase-4 dashboard tab. |
-| `TokenResolution` / `GodModeMessage` / `GodModeStatus` / `GodModeSessionRow` / `GodModeApprovalRow` / `GodModeApprovalRisk` / `GodModeApprovalStatus` | Types. |
+| `resolveFounderPhone(admin, workspaceId)` | Phase-5 config resolver: `workspaces.god_mode_sms_number` first, then `process.env.GOD_MODE_FOUNDER_PHONE`. `null` means silent no-op (god mode still works, just no push). |
+| `sendGodModeSMS(admin, { workspaceId, kind, cockpitToken?, context? })` | Phase-5 emit — best-effort, never throws. `kind: 'arm' \| 'approval' \| 'done'`. Called from `armSession` (arm), `openApproval` (approval), `disarmSession` + `reapGodModeSessions` (done). Sends the persistent cockpit URL in arm + approval; done omits URL. Silent no-op when no founder phone or no workspace `twilio_phone_number`. |
+| `reapGodModeSessions(admin)` | Phase-5 reaper — one pass over `armed` rows. Force-disarms past `absolute_expires_at` (regardless of activity). Idle-expires past `token_expires_at` only when `hasInFlight===false` AND no queued/building `kind='god-mode'` `agent_jobs` row for the session. Emits a done SMS on expiry. Called from a ~60s beat in `scripts/builder-worker.ts` next to the stale-session reaper. |
+| `GodModeSmsKind` / `TokenResolution` / `GodModeMessage` / `GodModeStatus` / `GodModeSessionRow` / `GodModeApprovalRow` / `GodModeApprovalRisk` / `GodModeApprovalStatus` | Types. |
 
 ## Callers
 
@@ -43,7 +46,8 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 - `GET /api/god/[token]` — calls `resolveCockpitToken`, `listApprovalsForSession`, `bumpActivity`.
 - `POST /api/god/[token]/message` — calls `resolveCockpitToken`, `appendMessage`, `enqueueGodModeTurn`, `bumpActivity`.
 - `POST /api/god/[token]/approve` — calls `resolveCockpitToken`, `getApprovalForSession`, `loadPinHash` + `verifyPin` (destructive), `decideApproval`, `bumpActivity`.
-- Phase 4 dashboard tab — will call the same routes without the token (server-side resolves the workspace's active session).
+- Phase 4 dashboard tab — calls the owner-gated `/api/god-mode/*` routes; each route resolves the workspace's active session server-side.
+- `scripts/builder-worker.ts` reaper beat — calls `reapGodModeSessions(db)` every ~60s.
 
 ## RLS + safety
 

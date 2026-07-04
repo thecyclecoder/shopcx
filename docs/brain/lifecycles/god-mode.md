@@ -173,13 +173,48 @@ Every route calls the SAME `requireOwner()` helper as `/api/developer/messages` 
 
 The SMS cockpit was designed for the middle of the night; the desk tab is for daytime work. Same routes underneath (parallel implementation, not a duplicated one) so a fix that lands on one lands on the other with only a `getActiveSession` vs `resolveCockpitToken` swap.
 
-## Phase 5+ — deliberately out of scope for this PR
+## Phase 5 — SMS delivery + lifecycle reaper
 
-Phase 5 (SMS + reaper) delivers the cockpit URL and enforces the sliding + absolute TTLs the routes already bump. See [[../specs/god-mode]].
+The final piece: **push notification** so the founder learns about an incident even when the app is closed, and a **reaper** so a forgotten armed session doesn't stay hot forever.
 
-## Sunset
+### Founder mobile config
 
-Retire the whole feature (drop the two tables + the workspaces column + delete `src/lib/god-mode.ts` + delete the routes) once the CEO exec layer covers the incident remediation surface. Self-contained by construction (no shared tables, no shared columns beyond one workspaces column) — removal is a one-migration + one-PR cleanup.
+The founder mobile number is a **SECURE CONFIG** value, never hardcoded in source:
+
+1. **Workspace column** — `workspaces.god_mode_sms_number` (plain text — a phone number isn't a cryptographic secret; same convention as `twilio_phone_number`). Added by `supabase/migrations/20260909120000_god_mode_sms_number.sql` (idempotent `ADD COLUMN IF NOT EXISTS`).
+2. **Env fallback** — `process.env.GOD_MODE_FOUNDER_PHONE` if the workspace column is unset.
+
+Resolution: workspace column FIRST, then env. Both unset → SMS is a silent no-op (god mode still works via the dashboard tab and the cockpit; the founder just doesn't get pushed).
+
+Resolved by `resolveFounderPhone(admin, workspaceId)` in [[../libraries/god-mode]].
+
+### SMS delivery — three events, one persistent cockpit URL
+
+Send is best-effort — every emit site fires-and-forgets so a Twilio outage never blocks a mutation. Delivery goes through `sendSMS()` in [[../libraries/twilio]] (the workspace's `twilio_phone_number` is the From; body ends with the cockpit URL where relevant).
+
+- **arm** — `armSession()` fires ONE SMS with the cockpit URL. `"God mode armed. Cockpit:\n\n<url>"`. A re-arm on an already-armed workspace refreshes the token AND resends the SMS with the refreshed URL.
+- **approval** — `openApproval()` fires ONE SMS whenever a new `god_mode_approvals` row lands (called by the [[god-mode-permission-gate]] on every non-safe tool call). `"God mode: <tool> needs your approval (<risk>). Approvals tab:\n\n<url>"`. **Same cockpit URL every time** — one persistent cockpit per session, deep-linking to the Approvals tab.
+- **done** — `disarmSession()` on the founder's explicit disarm, AND the reaper on idle/ceiling expiry. `"God mode session <reason>. Re-arm in the app if needed."` No URL — the cockpit is dead.
+
+**Not on plain replies.** A mid-turn assistant reply pushes NO SMS — the Chat tab handles live watching. The spec's rule: approvals + done ONLY.
+
+### Reaper — the poll-loop beat
+
+`reapGodModeSessions(admin)` in [[../libraries/god-mode]]. Invoked from a `scripts/builder-worker.ts` beat every ~60s (throttled + in-flight-guarded, same shape as the stale-session-reaper next to it). One pass over all `armed` rows:
+
+1. **Absolute ceiling first** — `now() > absolute_expires_at` (arm + 12h). Force-disarm regardless of activity. `status='expired'`, `cockpit_token=NULL`, `disarmed_at=now`. One session-done SMS with reason `"hit its 12h ceiling"`. The founder re-arms with one tap in the app.
+2. **Idle ceiling** — `now() > token_expires_at`. But ONLY if there's NO in-flight signal:
+   - `hasInFlight(sessionId)` — any `god_mode_approvals` row with `status='pending'`? A pending approval holds the door open indefinitely (the founder may sleep on the SMS).
+   - A `queued`/`building`/`queued_resume` `agent_jobs` row with `kind='god-mode'` and `spec_slug=<session_id>`? A live turn holds the door open too.
+   - Neither → idle-expire. Same terminal state as force-disarm, reason `"idled out"`.
+
+Sliding-TTL renewal is orthogonal: every Phase-3 GET/message/approve + every Phase-4 GET/message/approve + every runGodModeJob turn calls `bumpActivity` (extends `token_expires_at` by `SLIDING_TTL_MS`). An actively-used session stays hot; the reaper only touches truly-idle ones.
+
+**Why a poll beat, not an Inngest fn:** the box already has a 1-minute poll cadence for other reapers (the stale-session one); adding this beat is a 20-line diff. No new deploy target, no Inngest fn/dashboard page, no cross-boundary auth.
+
+## Retirement (sunset)
+
+Retire the whole feature (drop the two tables + the workspaces columns + delete `src/lib/god-mode.ts` + delete the routes + delete the box-worker lane + drop the reaper beat) once the CEO exec layer covers the incident remediation surface. Self-contained by construction — removal is a one-migration + one-PR cleanup.
 
 ## Status / open work
 
@@ -187,4 +222,4 @@ Retire the whole feature (drop the two tables + the workspaces column + delete `
 - Phase 2 (full-power box lane + live permission gate): ✅ shipped.
 - Phase 3 (SMS cockpit — token page with Chat + Approvals tabs): ✅ shipped.
 - Phase 4 (in-app dashboard God Mode tab): ✅ shipped.
-- Phase 5 (SMS delivery + lifecycle reaper): ⏳ planned.
+- Phase 5 (SMS delivery + lifecycle reaper): ✅ shipped.
