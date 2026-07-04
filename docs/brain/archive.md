@@ -17,6 +17,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
 - **Guard /api/portal against 300s upstream hangs (Appstle/Shopify fetch timeout)** · verified 2026-07-04 · → [[libraries/portal__helpers]]
+- **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
 - **Research → Teardowns list + a Showcase "View HTML" teardown page** · verified 2026-07-04 · → [[../lifecycles/showcase]]
 - **Guard crisis_pause action-executor handler against a missing contract_id** · verified 2026-07-03 · → [[../libraries/action-executor]]
 - **Owner-only: exclude a CSAT from the stats** · verified 2026-07-03 · → [[lifecycles/csat]]
