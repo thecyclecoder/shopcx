@@ -44,13 +44,28 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
       // today are eligible.
       const endOfToday = new Date();
       endOfToday.setUTCHours(23, 59, 59, 999);
-      const { data } = await admin
-        .from("subscriptions")
-        .select("id, workspace_id, shopify_contract_id")
-        .eq("is_internal", true)
-        .eq("status", "active")
-        .lte("next_billing_date", endOfToday.toISOString());
-      return data || [];
+      // Keyset-paginate — a bare select is capped at the PostgREST max-rows (1000).
+      // Internal subs (~28K on a ~30-day cadence) run ~900/day, right at the cap; without
+      // pagination the overflow is silently skipped (a missed renewal = lost revenue).
+      const all: { id: string; workspace_id: string; shopify_contract_id: string | null }[] = [];
+      let afterId: string | null = null;
+      while (true) {
+        let q = admin
+          .from("subscriptions")
+          .select("id, workspace_id, shopify_contract_id")
+          .eq("is_internal", true)
+          .eq("status", "active")
+          .lte("next_billing_date", endOfToday.toISOString())
+          .order("id", { ascending: true })
+          .limit(1000);
+        if (afterId) q = q.gt("id", afterId);
+        const { data } = await q;
+        if (!data?.length) break;
+        all.push(...data);
+        if (data.length < 1000) break;
+        afterId = data[data.length - 1].id;
+      }
+      return all;
     });
 
     // Fan out one event per sub. Inngest's concurrency control on the

@@ -398,21 +398,30 @@ export const enrichBatch = inngest.createFunction(
             .limit(MAX_PER_RUN);
 
           if (!eventData.force_all) {
-            // Only pick customers with no demographics row OR outdated version.
-            // Supabase JS can't do a LEFT JOIN in one query, so we'll over-
-            // fetch and filter client-side by checking existing rows.
-            // This is fine at MAX_PER_RUN scale.
-            const { data: existing } = await admin
-              .from("customer_demographics")
-              .select("customer_id, enrichment_version")
-              .eq("workspace_id", workspaceId);
-            const skipIds = new Set(
-              (existing || [])
-                .filter(
-                  (e) => (e.enrichment_version || 0) >= ENRICHMENT_VERSION,
-                )
-                .map((e) => e.customer_id),
-            );
+            // Skip customers already enriched at the current version. Keyset-paginate:
+            // a bare select is capped at PostgREST max-rows (1000), so at >1000 enriched
+            // customers the skip set was truncated → already-enriched customers weren't
+            // skipped → nightly RE-enrichment (paid Versium/Haiku/Census calls) + coverage
+            // stalling on the same first candidates. Filter version server-side + page fully.
+            const skipIds = new Set<string>();
+            {
+              let afterCid: string | null = null;
+              while (true) {
+                let q = admin
+                  .from("customer_demographics")
+                  .select("customer_id")
+                  .eq("workspace_id", workspaceId)
+                  .gte("enrichment_version", ENRICHMENT_VERSION)
+                  .order("customer_id", { ascending: true })
+                  .limit(1000);
+                if (afterCid) q = q.gt("customer_id", afterCid);
+                const { data: existing } = await q;
+                if (!existing?.length) break;
+                for (const e of existing) skipIds.add(e.customer_id as string);
+                if (existing.length < 1000) break;
+                afterCid = existing[existing.length - 1].customer_id as string;
+              }
+            }
             const { data: all } = await query;
             return (all || []).filter((c) => !skipIds.has(c.id)).slice(0, MAX_PER_RUN);
           }
@@ -687,33 +696,53 @@ export const demographicsSnapshotBuilder = inngest.createFunction(
           .eq("workspace_id", ws.id)
           .eq("status", "active");
 
+        // ONE pass over orders → reverse index (variant_id/sku → Set<customer_id>). The old
+        // code re-scanned the ENTIRE orders table (~133K rows) once PER product in JS —
+        // N_products × ~134 page reads every run. Build the index once, then each product is a
+        // map lookup. Keyset by id (the old offset-range had no ORDER BY → unstable paging).
+        const variantToCusts = new Map<string, Set<string>>();
+        const skuToCusts = new Map<string, Set<string>>();
+        {
+          let afterId: string | null = null;
+          while (true) {
+            let q = admin.from("orders")
+              .select("id, customer_id, line_items")
+              .eq("workspace_id", ws.id)
+              .order("id", { ascending: true })
+              .limit(1000);
+            if (afterId) q = q.gt("id", afterId);
+            const { data: orders } = await q;
+            if (!orders?.length) break;
+            for (const o of orders) {
+              if (!o.customer_id) continue;
+              const items = (o.line_items || []) as { variant_id?: string; sku?: string }[];
+              for (const it of items) {
+                if (it.variant_id) {
+                  const k = String(it.variant_id);
+                  let s = variantToCusts.get(k); if (!s) { s = new Set(); variantToCusts.set(k, s); }
+                  s.add(o.customer_id as string);
+                }
+                if (it.sku) {
+                  let s = skuToCusts.get(it.sku); if (!s) { s = new Set(); skuToCusts.set(it.sku, s); }
+                  s.add(o.customer_id as string);
+                }
+              }
+            }
+            if (orders.length < 1000) break;
+            afterId = orders[orders.length - 1].id as string;
+          }
+        }
+
         for (const product of products || []) {
           const variants = (product.variants || []) as { id?: string; sku?: string }[];
           const variantIds = new Set(variants.map(v => String(v.id)).filter(Boolean));
           const skus = new Set(variants.map(v => v.sku).filter(Boolean) as string[]);
           if (variantIds.size === 0 && skus.size === 0) continue;
 
-          // Find customer IDs who ordered this product
+          // Customer IDs who ordered this product — union the pre-built reverse index.
           const custIds = new Set<string>();
-          let offset = 0;
-          while (true) {
-            const { data: orders } = await admin.from("orders")
-              .select("customer_id, line_items")
-              .eq("workspace_id", ws.id)
-              .range(offset, offset + 999);
-            if (!orders?.length) break;
-            for (const o of orders) {
-              const items = (o.line_items || []) as { variant_id?: string; sku?: string }[];
-              if (items.some(i =>
-                (i.variant_id && variantIds.has(String(i.variant_id))) ||
-                (i.sku && skus.has(i.sku))
-              )) {
-                custIds.add(o.customer_id);
-              }
-            }
-            if (orders.length < 1000) break;
-            offset += 1000;
-          }
+          for (const vid of variantIds) { const s = variantToCusts.get(vid); if (s) for (const c of s) custIds.add(c); }
+          for (const sku of skus) { const s = skuToCusts.get(sku); if (s) for (const c of s) custIds.add(c); }
 
           if (custIds.size === 0) {
             await admin.from("demographics_snapshots").upsert({

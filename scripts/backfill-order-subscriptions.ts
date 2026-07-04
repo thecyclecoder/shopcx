@@ -12,6 +12,7 @@
  */
 
 import { createClient } from "@supabase/supabase-js";
+import { pgClient } from "./_bootstrap";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -73,6 +74,9 @@ async function main() {
   let hasMore = true;
   let batchNum = 0;
 
+  const pg = pgClient();
+  await pg.connect();
+  try {
   while (hasMore) {
     batchNum++;
     const { data: orders, error } = await supabase
@@ -87,6 +91,11 @@ async function main() {
     if (!orders?.length) { hasMore = false; break; }
 
     console.log(`Batch ${batchNum}: ${orders.length} orders to process...`);
+
+    // Match in JS, collect (orderId → subId), then flush the whole batch as
+    // ONE set-based UPDATE ... FROM (VALUES ...) instead of a round-trip per
+    // matched order.
+    const matches: Array<{ orderId: string; subId: string }> = [];
 
     for (const order of orders) {
       if (!order.shopify_customer_id) {
@@ -139,17 +148,32 @@ async function main() {
       }
 
       if (matchedSubId) {
-        const { error: updateErr } = await supabase
-          .from("orders")
-          .update({ subscription_id: matchedSubId })
-          .eq("id", order.id);
-        if (updateErr) {
-          console.error(`  Update error for order ${order.id}:`, updateErr.message);
-        } else {
-          totalLinked++;
-        }
+        matches.push({ orderId: order.id, subId: matchedSubId });
       } else {
         totalNoMatch++;
+      }
+    }
+
+    // Flush this batch's matches in one statement.
+    if (matches.length > 0) {
+      const params: unknown[] = [];
+      const tuples: string[] = [];
+      let p = 1;
+      for (const m of matches) {
+        tuples.push(`($${p++}::uuid, $${p++}::uuid)`);
+        params.push(m.orderId, m.subId);
+      }
+      try {
+        const res = await pg.query(
+          `UPDATE orders AS o
+              SET subscription_id = v.sid
+             FROM (VALUES ${tuples.join(", ")}) AS v(oid, sid)
+            WHERE o.id = v.oid`,
+          params,
+        );
+        totalLinked += res.rowCount ?? 0;
+      } catch (updateErr) {
+        console.error(`  Batch ${batchNum} update error:`, updateErr instanceof Error ? updateErr.message : updateErr);
       }
     }
 
@@ -157,6 +181,9 @@ async function main() {
 
     // If we got fewer than BATCH_SIZE, we're done
     if (orders.length < BATCH_SIZE) hasMore = false;
+  }
+  } finally {
+    await pg.end();
   }
 
   console.log("\n=== Backfill Summary ===");
