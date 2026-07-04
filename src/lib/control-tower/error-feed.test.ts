@@ -22,6 +22,7 @@ import {
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
   isTransientSupabaseLogNoise,
+  isTransientUndiciHeadersTimeout,
 } from "./error-feed";
 
 // Regression fixture: the leaked vercel:ebdf493a37c60c34 blob — a bare Lambda lifecycle
@@ -228,6 +229,30 @@ test("isTransientSupabaseLogNoise scopes GoTrue browser-abort noise as transient
       message:
         "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: operation was canceled)",
     }),
+    true,
+  );
+});
+
+test("isTransientUndiciHeadersTimeout — only 'fetch failed' + HeadersTimeout cause is transient (restored undici spec)", () => {
+  assert.equal(
+    isTransientUndiciHeadersTimeout("TypeError: fetch failed\n  [cause]: HeadersTimeoutError: Headers Timeout Error"),
+    true,
+  );
+  assert.equal(isTransientUndiciHeadersTimeout("TypeError: fetch failed [cause]: UND_ERR_HEADERS_TIMEOUT"), true);
+  // 'fetch failed' from a DIFFERENT cause (DNS/TLS/our own throw) is NOT this class — pages.
+  assert.equal(isTransientUndiciHeadersTimeout("TypeError: fetch failed\n  [cause]: getaddrinfo ENOTFOUND api.example.com"), false);
+  // The cause without the fetch-failed marker (some unrelated log) is not it either.
+  assert.equal(isTransientUndiciHeadersTimeout("HeadersTimeoutError somewhere"), false);
+  assert.equal(isTransientUndiciHeadersTimeout(""), false);
+  assert.equal(isTransientUndiciHeadersTimeout(null), false);
+});
+
+test("isTransientSupabaseLogNoise scopes GoTrue 504 gateway-timeout as transient (restored auth-504 spec)", () => {
+  // The 2026-07-04 incident shape: `504: Processing this request timed out, please retry
+  // after a moment.` A gateway timeout under load, same self-healing class as the
+  // context-deadline shape — a one-off pages nobody; a chronic 504 spike recurs + surfaces.
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "504: Processing this request timed out, please retry after a moment." }),
     true,
   );
 });

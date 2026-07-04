@@ -29,6 +29,7 @@ import {
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
+  isTransientUndiciHeadersTimeout,
 } from "@/lib/control-tower/error-feed";
 
 
@@ -171,7 +172,8 @@ export async function POST(request: Request) {
       const transient =
         isTransientInngestStepRetryThrow(g.path, g.message) ||
         isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
-        isTransientSupabaseEdgeHandshakeError(g.message);
+        isTransientSupabaseEdgeHandshakeError(g.message) ||
+        isTransientUndiciHeadersTimeout(g.message);
       await recordError({
         source: "vercel",
         // Group on path + status + normalized message (stable bits, not requestId/deploymentId).

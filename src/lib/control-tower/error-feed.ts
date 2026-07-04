@@ -455,7 +455,14 @@ export function isTransientSupabaseLogNoise(
       msg.includes("context canceled") ||
       msg.includes("context deadline exceeded") ||
       msg.includes("operation was canceled") ||
-      /\bdial\b[^\n]*\bcanceled\b/.test(msg)
+      /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
+      // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
+      // load: `504: Processing this request timed out, please retry after a moment.` Same
+      // transient class as the context-deadline shape above (restore of the reverted
+      // error-feed-scope-supabase-auth-504-gateway-timeout-transient — falsely rolled back
+      // 2026-07-04). A one-off pages nobody; a chronic 504 spike (a real outage) recurs and
+      // still surfaces. Invalid JWT / rate-limit / signature mismatch remain first-sight pages.
+      msg.includes("processing this request timed out")
     );
   }
   return false;
@@ -514,6 +521,35 @@ export function isTransientSupabaseEdgeHandshakeError(message: string | null | u
     lower.includes("ssl handshake failed") ||
     lower.includes("526: invalid ssl certificate")
   );
+}
+
+/**
+ * Undici outbound-fetch headers-timeout noise — the outbound-fetch companion to
+ * `isTransientInngestTransportError` (Inngest transport reset) and
+ * `isTransientSupabaseLogNoise` (Supabase edge 5xx / statement timeout), factored here so
+ * the vercel-logs route can reuse it
+ * ([[../specs/error-feed-drop-undici-headers-timeout-noise]] — falsely rolled back 2026-07-04,
+ * restored here; NOT a mechanical revert since error-feed.ts moved on).
+ *
+ * Node's undici HTTP client emits `TypeError: fetch failed` with cause
+ * `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` when an outbound request our server made
+ * started fine but the upstream never returned response headers before the network-level
+ * timeout tripped — a momentary upstream network stall. Nothing in our code is broken; the
+ * next batch to the same endpoint self-heals. Minting a fresh OPEN paged incident + repair
+ * fan-out for a single such log churns Platform owners on a healthy loop that already
+ * recovered.
+ *
+ * `true` ONLY when the message carries BOTH the `TypeError: fetch failed` marker AND a
+ * `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` cause substring — the exact and only
+ * shape undici emits for this class. A `fetch failed` from any other cause (DNS, TLS, our own
+ * code throwing a same-worded TypeError) carries a different cause and stays paged on first
+ * sighting. Recurrence-gated like its siblings: a chronic upstream outage still surfaces.
+ */
+export function isTransientUndiciHeadersTimeout(message: string | null | undefined): boolean {
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.includes("TypeError: fetch failed")) return false;
+  return text.includes("HeadersTimeoutError") || text.includes("UND_ERR_HEADERS_TIMEOUT");
 }
 
 export interface RecordErrorInput {
