@@ -20,6 +20,7 @@ SMS campaign — message body, MMS image, send_date, target_local_hour, audience
 | `audience_filter` | `jsonb` | — | default: `'{}'` |
 | `recipients_total` | `int4` | — | default: `0` |
 | `recipients_sent` | `int4` | — | default: `0` |
+| `recipients_delivered` | `int4` | — | default: `0` — running count of terminal-delivered recipients. Recounted by [[../inngest/sms-callback-drain]] every drain batch (not increment — idempotent across re-delivered callbacks). Added in [[../specs/twilio-callback-queue-drain]] Phase 4. |
 | `recipients_failed` | `int4` | — | default: `0` |
 | `recipients_skipped` | `int4` | — | default: `0` |
 | `scheduled_at` | `timestamptz` | ✓ |  |

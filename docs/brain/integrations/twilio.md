@@ -41,6 +41,19 @@ Inbound SMS flows into [[../tables/sms_marketing_inbound]] (STOP / HELP / replie
 
 **Status callback → `storefront_leads` sync.** `POST /api/webhooks/twilio/marketing-status` handles delivery callbacks for *both* campaign sends and the popup-coupon SMS. Marketing sends match [[../tables/sms_campaign_recipients]] by `message_sid`; if no recipient matches, the no-recipient branch matches [[../tables/storefront_leads]] by `sms_message_sid` and syncs `sms_status` + `sms_status_at`. The popup-coupon send (`src/app/api/popup/claim/route.ts`) sends **direct from the short code** (no Messaging Service) so it must pass this route as an explicit per-message `StatusCallback` (`sendSMS(..., { statusCallback })`) — otherwise Twilio fires no delivery callback and `sms_status` freezes at the `queued` written on send even after delivery (ticket 8e9e325e). Reconcile rows sent before that fix with `scripts/backfill-popup-sms-status.ts` (polls the Twilio Messages API for stuck `queued` leads).
 
+### Fast-ack + drain (Phase 1 shipped)
+
+Both Twilio webhooks (`marketing-status` + `marketing-sms`) do **zero Postgres work on the request path**. They verify the signature, parse the URL-encoded body, and enqueue a single Inngest event; a bounded/batched drain consumer processes the event off the request path. Callback storms (~100k+ callbacks after a ~50k-recipient blast) no longer touch the DB from the webhook Lambda.
+
+| Route | Fast-ack event | Payload | Producer |
+|---|---|---|---|
+| `POST /api/webhooks/twilio/marketing-status` | `sms/status-callback.received` | `{ params: Record<string,string>, url: string }` — parsed Twilio form body + request URL. `params.MessageSid` is the consumer's idempotency key. | `src/app/api/webhooks/twilio/marketing-status/route.ts` |
+| `POST /api/webhooks/twilio/marketing-sms` | `sms/inbound.received` | `{ params: Record<string,string>, url: string }` — same shape. `params.MessageSid` is the consumer's idempotency key; `params.From` / `params.To` / `params.Body` drive STOP/START + inbound-log. | `src/app/api/webhooks/twilio/marketing-sms/route.ts` |
+
+Signature-check behavior is preserved: bad signature → 200 empty body, no event enqueued (silent drop, so Twilio doesn't retry). The `marketing-sms` autoresponder (previously TwiML in the response body) now sends out-of-band via the Twilio API from the drain consumer — STOP/START confirmations remain Twilio's Advanced Opt-Out at the carrier edge.
+
+Consumers register in [[../inngest/sms-callback-drain]] (Phase 2+).
+
 ## Verify v2 (customer phone OTP)
 
 Used for storefront passwordless auth + portal verification. `src/lib/twilio-verify.ts`. Don't pass arbitrary phone numbers — Twilio Verify rate-limits per-phone aggressively, and abuse drives up cost.

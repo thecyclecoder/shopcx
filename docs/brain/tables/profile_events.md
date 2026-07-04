@@ -57,7 +57,7 @@ const { count } = await admin.from("profile_events")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **`Received SMS`** is produced by [[../inngest/sms-callback-drain]] `received-sms-rollup-cron` (every 5 min) — NOT by the Twilio status-callback webhook path (moved off the hot path in [[../specs/twilio-callback-queue-drain]] Phase 4). `datetime` is the recipient's `delivered_at` (when Twilio actually delivered), not the rollup's `now()`. Exactly one row per delivered recipient — the cron marks `sms_campaign_recipients.received_sms_logged_at` after emitting, so a second pass picks zero candidates.
 
 ---
 
