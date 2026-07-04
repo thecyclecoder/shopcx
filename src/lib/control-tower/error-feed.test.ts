@@ -21,6 +21,7 @@ import {
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHtmlBody,
   isTransientSupabaseLogNoise,
+  isTransientUndiciHeadersTimeout,
 } from "./error-feed";
 
 // Regression fixture: the leaked vercel:ebdf493a37c60c34 blob — a bare Lambda lifecycle
