@@ -25,6 +25,8 @@ import {
   EmptyPhaseBodyError,
   MissingVerificationError,
   MissingIntentError,
+  assertValidParent,
+  InvalidParentError,
 } from "./author-spec";
 import { parseVerificationBlobToChecks } from "./spec-phase-checks-table";
 import { parseBrainRefsLineToSlugs } from "./spec-brain-refs-table";
@@ -59,6 +61,49 @@ test("empty-body phase fails loud with slug + position", () => {
     assert.match((e as Error).message, /empty body/);
     return true;
   });
+});
+
+// one-off-spec-parent — assertValidParent (bare-goal parent guard)
+test("bare-goal parent (no milestone, no milestoneId) throws InvalidParentError", () => {
+  assert.throws(
+    () => assertValidParent("[[../goals/acquisition-research-engine]] — correctness fix.", {}),
+    (e: unknown) => {
+      assert.ok(e instanceof InvalidParentError, `expected InvalidParentError, got ${e}`);
+      assert.match((e as Error).message, /acquisition-research-engine/);
+      assert.match((e as Error).message, /mandate/);
+      return true;
+    },
+  );
+});
+
+test("bare-goal parent is ALLOWED when a milestoneId is bound (goal-bound spec)", () => {
+  assert.doesNotThrow(() =>
+    assertValidParent("[[../goals/acquisition-research-engine]] — under M4.", { milestoneId: "abc-123" }),
+  );
+});
+
+test("bare-goal parent is ALLOWED when the caller declares a typed mandate/milestone parent", () => {
+  assert.doesNotThrow(() =>
+    assertValidParent("[[../goals/acquisition-research-engine]]", { parentKind: "milestone" }),
+  );
+  assert.doesNotThrow(() =>
+    assertValidParent("[[../goals/acquisition-research-engine]]", { parentKind: "mandate" }),
+  );
+});
+
+test("milestone-anchored goal parent passes (names a specific milestone)", () => {
+  assert.doesNotThrow(() =>
+    assertValidParent("[[../goals/acquisition-research-engine#m4-hub]] — the hub milestone.", {}),
+  );
+  assert.doesNotThrow(() =>
+    assertValidParent("[[../goals/acquisition-research-engine]] (M4) — the hub milestone.", {}),
+  );
+});
+
+test("function-mandate parent passes (the one-off case)", () => {
+  assert.doesNotThrow(() =>
+    assertValidParent('[[../functions/platform]] — "Infra & DevOps / reliability" mandate: x.', {}),
+  );
 });
 
 test("all-non-empty phases pass the body gate", () => {

@@ -993,6 +993,41 @@ export async function setSpecBlockers(
 }
 
 /**
+ * Re-parent a spec — set the free-text `parent` prose + the typed `parent_kind`/`parent_ref` pair (and the
+ * `milestone_id` FK) in ONE slug-resolved UPDATE, without round-tripping the whole body through `upsertSpec`
+ * (which replaces phases). The narrow SDK writer for the parent columns — sibling to `setSpecBlockers` /
+ * `setSpecStatus` (no raw PM SQL outside the SDK; `_check-pm-sdk-compliance` enforces it).
+ *
+ * one-off-spec-parent: a one-off spec's home is a function MANDATE (`kind:"mandate"`,
+ * `ref:"{owner}#{mandate-slug}"`, `milestoneId:null`); a goal-bound spec's is a MILESTONE
+ * (`kind:"milestone"`, `milestoneId:"<goal_milestones.id>"`). Pass the `parent` prose so it names the same
+ * mandate/milestone the typed pair points at (Vale reads the prose). Undefined fields are left untouched.
+ */
+export async function setSpecParent(
+  workspaceId: string,
+  slug: string,
+  patch: {
+    parent?: string;
+    parentKind?: "function" | "mandate" | "milestone" | null;
+    parentRef?: string | null;
+    milestoneId?: string | null;
+  },
+): Promise<void> {
+  const fields: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (patch.parent !== undefined) fields.parent = patch.parent;
+  if (patch.parentKind !== undefined) fields.parent_kind = patch.parentKind;
+  if (patch.parentRef !== undefined) fields.parent_ref = patch.parentRef;
+  if (patch.milestoneId !== undefined) fields.milestone_id = patch.milestoneId;
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update(fields)
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+}
+
+/**
  * Set the spec's `auto_build` flag — the owner's "auto-build is on/off for this spec" toggle (the init/groom
  * lanes skip a spec with `auto_build=false`; the CEO commissioning a build flips it on). The only narrow SDK
  * writer for this column outside a full `upsertSpec` re-author, so a one-off (the CEO re-opening a stuck
