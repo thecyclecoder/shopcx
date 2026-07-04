@@ -4,12 +4,6 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-
-// Defense-in-depth cap: never let a portal request hold a Lambda past 30s,
-// even if a per-fetch portalFetch deadline is missed. See
-// [[docs/brain/libraries/portal__helpers]] § portalFetch.
-export const maxDuration = 30;
-
 import { requireAppProxy, type PortalAuthResult } from "@/lib/portal/auth";
 import { routeMap } from "@/lib/portal/handlers";
 import { decrypt } from "@/lib/crypto";

@@ -15,30 +15,6 @@ export function clampInt(n: unknown, fallback: number): number {
   return Number.isFinite(x) ? Math.trunc(x) : fallback;
 }
 
-/**
- * fetch() with a bounded per-request deadline. A stalled upstream (Appstle,
- * Shopify GraphQL, Braintree, Avalara) can otherwise hold a portal Lambda open
- * for the full 300s Vercel ceiling — the customer sees a hung request and the
- * platform emits a runtime timeout. Wrap every portal-side outbound fetch with
- * this so we surface a clean upstream_timeout error the existing
- * handleAppstleError / jsonErr paths convert into a 502-class response.
- */
-export async function portalFetch(
-  url: string,
-  init?: RequestInit,
-  timeoutMs = 20_000,
-): Promise<Response> {
-  try {
-    return await fetch(url, { ...(init || {}), signal: AbortSignal.timeout(timeoutMs) });
-  } catch (e) {
-    const err = e as { name?: string };
-    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
-      throw new Error("upstream_timeout");
-    }
-    throw e;
-  }
-}
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** All customer UUIDs in the caller's link group (incl. self). Linking is display-only. */

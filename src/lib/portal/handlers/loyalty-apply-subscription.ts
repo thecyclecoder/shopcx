@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { isInternalSubscription } from "@/lib/internal-subscription";
@@ -93,7 +93,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
 
     try {
       const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
-      const res = await portalFetch(
+      const res = await fetch(
         `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
         {
           method: "POST",
@@ -199,7 +199,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
         const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
 
         // Check if unused
-        const checkRes = await portalFetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+        const checkRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
           method: "POST", headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
           body: JSON.stringify({ query: `{ codeDiscountNodeByCode(code: "${code}") { id codeDiscount { ... on DiscountCodeBasic { asyncUsageCount } } } }` }),
         });
@@ -209,7 +209,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
 
         if (usage === 0 && oldNodeId) {
           // Delete old coupon
-          await portalFetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+          await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
             method: "POST", headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
             body: JSON.stringify({ query: `mutation { discountCodeDelete(id: "${oldNodeId}") { deletedCodeDiscountId userErrors { field message } } }` }),
           });
@@ -236,7 +236,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
             .eq("id", customer2?.id || "")
             .single();
 
-          const createRes = await portalFetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+          const createRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
             method: "POST", headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
             body: JSON.stringify({
               query: DISCOUNT_CREATE_MUTATION,
