@@ -40,6 +40,8 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { sendSMS } from "@/lib/twilio";
+import { unsubscribeFromSmsMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
 
 /** Lifecycle-stage rank — higher wins when dedup'ing multiple callbacks per MessageSid. */
 const STAGE_RANK: Record<string, number> = {
@@ -378,5 +380,212 @@ export const smsCallbackDrain = inngest.createFunction(
       leads: unmatched.length,
       campaigns_recounted: touchedCampaigns.size,
     };
+  },
+);
+
+// ═════════════════════════════════════════════════════════════════════
+// Phase 3 — Bounded inbound (STOP / HELP / reply) drain.
+//
+// Consumes `sms/inbound.received` events that the fast-ack webhook
+// (`src/app/api/webhooks/twilio/marketing-sms/route.ts`) enqueues for
+// every inbound message to our marketing shortcode. All matching /
+// consent / logging work that used to run on the webhook request path
+// (workspace lookup → find_customers_by_phone RPC → per-customer
+// Shopify consent mutation → customers UPDATE → sms_marketing_inbound
+// INSERT → dedupe-gated TwiML autoresponse) happens here, bounded so a
+// STOP-storm after a big send can't DDoS Postgres via the webhook path.
+//
+// STOP / HELP / START confirmation replies are still handled by
+// Twilio's Advanced Opt-Out at the carrier edge (per docs/brain/
+// integrations/twilio.md); we log the inbound + mirror consent to
+// Shopify so audience builds line up with Twilio's block list.
+// ═════════════════════════════════════════════════════════════════════
+
+const AUTORESPONSE_TEXT =
+  "This number isn't monitored. For help, please visit https://help.superfoodscompany.com — our team responds within a few hours.";
+
+const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// Case-insensitive, whole-message-or-first-word match — mirrors the
+// pre-fast-ack inline logic. Substring matching would unsubscribe a
+// customer who types "thanks!" (contains "ks"); we don't do that.
+const STOP_KEYWORDS = new Set([
+  "STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "REVOKE",
+  "OPTOUT", "OPT-OUT", "OPT OUT", "REMOVE",
+]);
+const START_KEYWORDS = new Set([
+  "START", "UNSTOP", "YES", "SUBSCRIBE", "OPTIN", "OPT-IN", "OPT IN",
+]);
+
+function isStopMessage(body: string): boolean {
+  const trimmed = body.trim().toUpperCase();
+  if (STOP_KEYWORDS.has(trimmed)) return true;
+  return /^(PLEASE\s+STOP|REMOVE\s+ME|STOP\s+MESSAGES|STOP\s+TEXTS|STOP\s+ALL)\b/i.test(body.trim());
+}
+
+function isStartMessage(body: string): boolean {
+  const trimmed = body.trim().toUpperCase();
+  if (START_KEYWORDS.has(trimmed)) return true;
+  return /^(RESUBSCRIBE|RE-?SUBSCRIBE\s+ME|RESUME)\b/i.test(body.trim());
+}
+
+export const smsInboundDrain = inngest.createFunction(
+  {
+    id: "sms-inbound-drain",
+    name: "Twilio — SMS inbound drain (STOP/HELP/reply)",
+    // Same drain-rate DIAL pattern as the status-callback drain. Inbound
+    // volume is a fraction of status-callback volume (STOP-storms after
+    // a big blast are the main scenario), so a lower ceiling is fine.
+    concurrency: [{ limit: 4 }],
+    triggers: [{ event: "sms/inbound.received" }],
+  },
+  async ({ event, step }) => {
+    const data = event.data as { params?: Record<string, string> } | undefined;
+    const params = data?.params;
+    if (!params) return { drained: 0, reason: "missing-params" };
+
+    const from = params.From || "";
+    const to = params.To || "";
+    const messageBody = params.Body || "";
+    const messageSid = params.MessageSid || "";
+    if (!from || !to) return { drained: 0, reason: "missing-from-or-to" };
+
+    // ── STOP / START classification (Twilio OptOutType first, then keyword) ──
+    const optOutType = (params.OptOutType || "").toUpperCase();
+    const isOptOut = optOutType === "STOP" || isStopMessage(messageBody);
+    const isOptIn = optOutType === "START" || isStartMessage(messageBody);
+
+    if (isOptOut || isOptIn) {
+      const outcome = await step.run("consent-flip", async () => {
+        const admin = createAdminClient();
+        // Resolve workspace by the shortcode the inbound came TO. The
+        // `twilio_phone_number` column stores the bare shortcode digits
+        // (e.g. "85041") for marketing.
+        const { data: ws } = await admin
+          .from("workspaces")
+          .select("id")
+          .eq("twilio_phone_number", to.replace(/^\+/, ""))
+          .maybeSingle();
+
+        let matched = 0;
+        let flipped = 0;
+        if (ws?.id) {
+          // find_customers_by_phone strips non-digits on both sides so
+          // +18583349198 / (858) 334-9198 / 858-334-9198 all match.
+          // Returns rows regardless of current sms_marketing_status so
+          // START can flip 'unsubscribed' rows back. Uses the expression
+          // index on last-10-digits (verified via EXPLAIN in the spec).
+          const { data: matches, error: rpcErr } = await admin.rpc(
+            "find_customers_by_phone",
+            { p_workspace_id: ws.id, p_phone: from },
+          );
+          if (rpcErr) {
+            console.error("[sms-inbound-drain] phone lookup RPC failed:", rpcErr.message);
+          }
+
+          const newStatus = isOptOut ? "unsubscribed" : "subscribed";
+          for (const cust of (matches || []) as Array<{
+            id: string;
+            workspace_id: string;
+            shopify_customer_id: string | null;
+            sms_marketing_status: string | null;
+          }>) {
+            matched++;
+            // Idempotency: skip rows already in the target state — same
+            // guard the pre-fast-ack inline code used.
+            if (cust.sms_marketing_status === newStatus) continue;
+            if (cust.shopify_customer_id) {
+              try {
+                if (isOptOut) {
+                  await unsubscribeFromSmsMarketing(cust.workspace_id, cust.shopify_customer_id);
+                } else {
+                  await subscribeToSmsMarketing(cust.workspace_id, cust.shopify_customer_id);
+                }
+              } catch (err) {
+                console.error(
+                  `[sms-inbound-drain] Shopify SMS ${isOptOut ? "unsubscribe" : "subscribe"} failed:`,
+                  cust.id,
+                  err,
+                );
+              }
+            }
+            await admin
+              .from("customers")
+              .update({
+                sms_marketing_status: newStatus,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", cust.id);
+            flipped++;
+          }
+        }
+        return { workspace_id: ws?.id || null, matched, flipped };
+      });
+
+      // Log the inbound. Autoresponder skipped — Twilio's Advanced
+      // Opt-Out replies with the carrier-mandated STOP/START
+      // confirmation from its edge, so a second reply would look
+      // broken (matches pre-fast-ack behavior).
+      await step.run("log-inbound-optout", async () => {
+        const admin = createAdminClient();
+        await admin.from("sms_marketing_inbound").insert({
+          shortcode: to,
+          from_phone: from,
+          body: messageBody,
+          message_sid: messageSid,
+          autoresponded: false,
+        });
+      });
+
+      return { drained: 1, type: isOptOut ? "opt_out" : "opt_in", ...outcome };
+    }
+
+    // ── Generic inbound — dedupe-gated autoresponder ─────────────────
+    // The pre-fast-ack path returned TwiML that Twilio auto-replied
+    // from the shortcode. Fast-ack drops the TwiML response body, so
+    // the drain sends the same message out-of-band via the Twilio API.
+    const decision = await step.run("log-inbound-generic", async () => {
+      const admin = createAdminClient();
+      const since = new Date(Date.now() - DEDUPE_WINDOW_MS).toISOString();
+      const { data: recent } = await admin
+        .from("sms_marketing_inbound")
+        .select("id")
+        .eq("shortcode", to)
+        .eq("from_phone", from)
+        .gte("created_at", since)
+        .eq("autoresponded", true)
+        .limit(1)
+        .maybeSingle();
+
+      const shouldAutoRespond = !recent;
+
+      await admin.from("sms_marketing_inbound").insert({
+        shortcode: to,
+        from_phone: from,
+        body: messageBody,
+        message_sid: messageSid,
+        autoresponded: shouldAutoRespond,
+      });
+
+      // Need workspace_id to send the reply from the correct shortcode.
+      const { data: ws } = await admin
+        .from("workspaces")
+        .select("id")
+        .eq("twilio_phone_number", to.replace(/^\+/, ""))
+        .maybeSingle();
+
+      return { shouldAutoRespond, workspace_id: ws?.id || null };
+    });
+
+    if (decision.shouldAutoRespond && decision.workspace_id) {
+      await step.run("send-autoresponder", async () => {
+        const res = await sendSMS(decision.workspace_id as string, from, AUTORESPONSE_TEXT);
+        if (!res.success) {
+          console.error("[sms-inbound-drain] autoresponse send failed:", res.error);
+        }
+      });
+    }
+
+    return { drained: 1, type: "generic", autoresponded: decision.shouldAutoRespond };
   },
 );
