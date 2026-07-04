@@ -1,0 +1,1 @@
+- **Add expression index for find_customers_by_phone last-10 comparison to unblock the Twilio marketing-sms webhook** · verified 2026-07-04 · → [[../tables/customers]]
