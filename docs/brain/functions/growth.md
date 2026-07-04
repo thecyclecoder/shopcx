@@ -34,7 +34,7 @@ Every ad has a scent-matched lander (advertorial / before-after) so paid traffic
 
 - **Metric:** worthy-lander hit-rate (share of captured URLs Rhea marked `worthy`); unviewable rate (bot-block coverage).
 - **Loop:** ad scout captures a destination → sync upserts a `research_urls` row `unreviewed` → cadence enqueues Rhea's `research` box job → she classifies → the resulting worthy landers feed **Cleo's modify-vs-build-new decision** ([[../libraries/cleo-blueprint]] `runCleoBlueprintSweep` — [[../specs/cleo-lander-blueprint]] Phase 2) → **whole-missing-funnel-type gaps** land as [[../tables/lander_blueprints]] rows + queue **Carrie** (`dr-content`) to fill copy per block → the finished blueprint is submitted to **Ada's build queue**. **Single-lever gaps** stay in Cleo's existing storefront-optimizer bandit path (unchanged).
-- **Specs:** [[../specs/rhea-url-sensor]] ⏳ (M1 — slice 1 SENSOR only) · [[../specs/rhea-teardown-recipe]] ⏳ (M2 — Rhea's structured teardown recipe) · [[../specs/cleo-lander-blueprint]] ⏳ (the teardown → build-new bridge — Cleo's judgment step).
+- **Specs:** [[../specs/rhea-url-sensor]] ⏳ (M1 — slice 1 SENSOR only) · [[../specs/rhea-teardown-recipe]] ⏳ (M2 — Rhea's structured teardown recipe) · [[../specs/cleo-lander-blueprint]] ✅ (the teardown → build-new bridge — Cleo's judgment step).
 
 ### Storefront CRO
 The storefront is **the** conversion surface — continuously lift predicted-LTV-per-visitor across the whole Amazing Coffee funnel, from first paint to renewal. Run by the **Storefront Optimizer**, this director's *graded employee* (the objective-owner in the CEO→role-agent→tool chain, [[../goals/ceo-mode]]). Never "done"; measured by a metric trend, not % complete.
