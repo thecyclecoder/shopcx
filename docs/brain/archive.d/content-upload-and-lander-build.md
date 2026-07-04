@@ -1,0 +1,1 @@
+- **Content upload → product intelligence → lander build handoff** · verified 2026-07-04 · → [[../lifecycles/lander-from-teardown]]
