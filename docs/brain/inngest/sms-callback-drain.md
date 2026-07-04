@@ -1,6 +1,6 @@
 # inngest/sms-callback-drain
 
-Bounded, batched drain for Twilio SMS callbacks. Consumes fast-ack events from the two webhook routes and lands the DB writes off the request path — the Postgres self-DDoS blocker that motivated [[../specs/twilio-callback-queue-drain]].
+Bounded, batched drain for Twilio SMS callbacks. Consumes fast-ack events from the two webhook routes and lands the DB writes off the request path — the Postgres self-DDoS blocker (spec [[../archive.d/twilio-callback-queue-drain]], archived 2026-07-04).
 
 **File:** `src/lib/inngest/sms-callback-drain.ts`
 
@@ -79,4 +79,4 @@ npx tsx scripts/_burst-load-drain-harness.ts \
 
 ## Related
 
-[[../integrations/twilio]] · [[../specs/twilio-callback-queue-drain]] · [[marketing-text]] · [[abandoned-cart]]
+[[../integrations/twilio]] · [[marketing-text]] · [[abandoned-cart]]
