@@ -1,0 +1,1 @@
+- **God Mode — full-power box cockpit for the founder** · verified 2026-07-04 · → [[../lifecycles/god-mode]]
