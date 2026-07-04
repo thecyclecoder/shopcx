@@ -56,7 +56,7 @@ Open a watch over a just-merged deploy. **Per-spec path** (default): a `claude/<
 The cron driver: find every `pending` watch past its `window_ends_at` (bounded to 25/tick) and evaluate each. Never throws.
 
 ### `evaluateDeployWatch(admin, watch): Promise<DeployVerdict>`
-Evaluate ONE watch: gather findings → `verdictFor` → **CLAIM** the row (`update … where verdict='pending' returning id`; only the winner acts — the idempotency spine for the revert) → ACT on the verdict (Phase 2 `actOnRegression` on `regressed`; escalate on `unsure`; log on `healthy`) → write a `deploy_healthy`/`deploy_rolled_back`/`deploy_regressed`/`deploy_unsure` [[../tables/director_activity]] row.
+Evaluate ONE watch: gather findings → `verdictFor` → **CLAIM** the row (`update … where verdict='pending' returning id`; only the winner acts — the idempotency spine) → route on shape. Under [[../specs/reva-box-session-causal-rollback]] Phase 1 the cron **stops deciding** on non-healthy verdicts: `healthy` still stamps + records `deploy_healthy` (unchanged fast path); atomic (`is_atomic=true`) non-healthy escalates directly (never routed through per-signal review — reverting a whole tested goal is far costlier than a per-phase revert); per-spec non-healthy under the loop-guard **stamps `verdict='in_review'` + enqueues one `kind='deploy-review'` [[../tables/agent_jobs]] row** (Reva reads the merge_sha's real diff on Max via `runDeployReviewJob` — Phase 2 — and returns a typed verdict the worker applies via `applyBoxDeployReview` — Phase 3, the mutator); per-spec non-healthy with the loop-guard TRIPPED escalates + halts without enqueueing. Each acted watch still writes a matching [[../tables/director_activity]] row.
 
 ### `revertDeployMerge({ mergeSha, slug, prNumber? }): Promise<RevertResult>` — Phase 2
 Restore known-good by reverting the offending squash-merge **via the GitHub git-data API** (no local git — the cron runs in the Vercel/Inngest runtime, reusing [[github-pr-resolve]]'s `GITHUB_TOKEN`/`AGENT_TODO_REPO`). A squash merge is single-parent, so: if nothing landed since (`HEAD === mergeSha`, the common case under the serialized auto-merge gate) it restores the **parent tree verbatim** (the prior good build, byte-for-byte); else it does a **true single-commit revert** of only this deploy's files (`buildRevertTree` — restore each to the parent version, **bail to a conflict** if a later commit touched it or the tree is truncated). Creates the revert commit on top of HEAD + fast-forwards `main`. **Never throws** — returns `{ reverted, revertSha?, reason?, conflict? }`; the caller escalates on `!reverted`.
@@ -89,11 +89,22 @@ The pure verdict rule:
 
 Reva is the **supervisor** on the auto-merge proxy: it surfaces a verdict (and in Phase 2 takes the conservative, reversible action — restore known-good — on a clear regression, escalating anything ambiguous). It does not replace the deploy/error/loop signals; it supervises them. See [[../operational-rules#north-star]].
 
+## The Reva box session (reva-box-session-causal-rollback Phase 2)
+
+A `kind='deploy-review'` [[../tables/agent_jobs]] row (enqueued by `evaluateDeployWatch` on a per-spec non-healthy watch under the loop-guard) is claimed on its own **concurrency-1 lane** (`MAX_DEPLOY_REVIEW=1`) by the box worker's `runDeployReviewJob` (`scripts/builder-worker.ts`). It launches a top-level `claude -p` on Max (no `ANTHROPIC_API_KEY`, keeps read-only DB + full repo access) running the `deploy-review` skill (Reva's persona; `GUARDIAN_ACTOR='deploy-guardian'`). The session `git show`s the `merge_sha` + `git diff`s `origin/main~1..<merge_sha>` to enumerate the deploy's real changed files; for each candidate signal (from the enqueue payload — `new_error_signatures` + `new_red_loops`) it maps the source surface (route / cron / lib) and Reads it, then decides per-signal whether the diff has a **causal path** to the surface. It returns ONE JSON object:
+
+```
+{ "decision": "revert"|"keep"|"escalate", "signals": [{ "key", "surface", "caused", "evidence" }], "reasoning" }
+```
+
+Read-only against everything (no repo writes, no DB writes, no PR). The worker (`runDeployReviewJob`) logs the verdict on `agent_jobs.log_tail` for audit and completes the job; Phase 3's `applyBoxDeployReview` (the only mutator) applies the typed verdict: `revert` → `revertDeployMerge` + `escalateDiagnosisToCeo` + `deploy_rolled_back` activity; `keep` → stamp `verdict='healthy'` + `deploy_kept` activity; `escalate` → `escalateDiagnosisToCeo` (no revert). Absence of a parseable verdict → the job parks `needs_attention` (Phase 4's fail-safe backstops the watch).
+
 ## Callers
 
 - [[github-pr-resolve]] `autoMergeReadyPrs` → `openDeployWatch` (the open path).
-- [[../inngest/deploy-guardian-cron]] → `evaluateDueDeployWatches` (the eval + act path).
-- [[platform-director]] `escalateDiagnosisToCeo` ← the Phase-2 escalation plumbing (CEO inbox).
+- [[../inngest/deploy-guardian-cron]] → `evaluateDueDeployWatches` (the eval + enqueue path).
+- [[platform-director]] `escalateDiagnosisToCeo` ← the escalation plumbing (CEO inbox).
+- `scripts/builder-worker.ts` `runDeployReviewJob` — the Phase-2 box session that runs the causal review.
 
 ## Related
 

@@ -129,6 +129,18 @@ const MAX_MIGRATION_FIX = 1;
 // One migration-fix pass: diagnose the failing checks read-only (re-fetch live Appstle, the sub, the
 // catalog) + propose a typed fix. Minutes — same ballpark as a ticket-improve turn, not the seed ceiling.
 const MIGRATION_FIX_TIMEOUT_MS = 15 * 60 * 1000;
+// Deploy-review jobs (reva-box-session-causal-rollback Phase 2) run in their OWN concurrency-1 lane:
+// event-fired by the deploy-guardian cron the moment a canary window closes on a non-healthy findings
+// verdict. A top-level `claude -p` on Max (deploy-review skill, no ANTHROPIC_API_KEY, keeps read-only
+// DB + repo access) reads the merge_sha's REAL diff, maps each candidate signal to its owning source
+// surface, and returns ONE JSON object { decision: 'revert'|'keep'|'escalate', signals, reasoning }.
+// The WORKER (deterministic Node — Phase 3's applyBoxDeployReview) is the only mutator. Serialized so
+// two reviews never race on the same shared `main` (a `git show` on a moving HEAD is fine, but only
+// one revert can safely land at a time).
+const MAX_DEPLOY_REVIEW = 1;
+// One deploy-review pass: read-only diff walk + a few code Reads for each candidate signal (typically
+// 1-3). Minutes — same ballpark as a migration-fix / repair turn.
+const DEPLOY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
 // lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
 // (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
@@ -464,7 +476,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -2242,7 +2254,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -10269,6 +10281,193 @@ async function runMigrationFixJob(job: Job) {
   }
 }
 
+// ── Box-hosted deploy-review agent (reva-box-session-causal-rollback Phase 2) ────
+// A kind='deploy-review' job is fired by the deploy-guardian cron the moment a deploy_watches canary
+// window closes on a NON-HEALTHY findings verdict (Phase 1). This retires the deterministic auto-revert
+// path (revertDeployMerge fired on a single new red loop) that racked up four false reverts on
+// 2026-07-04 by treating a canary-window overlap as causation. Reva now READS the merge_sha's real
+// diff on Max (deploy-review skill), maps each candidate error signature / red loop to its OWNING
+// source surface (route / cron / lib), decides per-signal whether the merged code has a CAUSAL PATH to
+// it, and returns ONE JSON object { decision: 'revert'|'keep'|'escalate', signals, reasoning }.
+//
+// The box is READ-ONLY: no repo writes, no PR, no DB writes. Phase 3's applyBoxDeployReview (deterministic
+// Node in src/lib/deploy-guardian.ts — the only mutator) applies the typed verdict: `revert` →
+// revertDeployMerge + escalate; `keep` → stamp verdict='healthy'; `escalate` → escalate (no revert).
+// spec_slug = the watch slug; instructions = JSON {watch_id, merge_sha, deployed_at, window_ends_at,
+// findings_verdict, new_error_signatures, new_red_loops, ...}. See docs/brain/specs/reva-box-session-causal-rollback.md.
+async function runDeployReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "deploy-review", sandbox: "max", timeout: DEPLOY_REVIEW_TIMEOUT_MS });
+}
+
+// The read-only brief baked into Reva's prompt: the deploy identity (slug/branch/merge_sha) + the
+// canary window bounds + the findings-derived starting verdict + every candidate signal the cron
+// classified as attributable (pre-gate excluded infra/user-state + monthly kpi_drift already). Reva
+// runs `git show <merge_sha>` / `git diff origin/main~1..<merge_sha>` on top of this to enumerate the
+// changed files; the brief lists the candidates she must judge and the deploy identity that anchors them.
+function deployReviewBrief(inst: DeployReviewInstructions): string {
+  const sigs = Array.isArray(inst.new_error_signatures) ? inst.new_error_signatures : [];
+  const loops = Array.isArray(inst.new_red_loops) ? inst.new_red_loops : [];
+  const excluded = Array.isArray(inst.excluded_red_loops) ? inst.excluded_red_loops : [];
+  return [
+    `DEPLOY WATCH ${inst.watch_id} — slug ${inst.slug} · branch ${inst.branch}`,
+    `  merge_sha: ${inst.merge_sha ?? "(unknown)"}${inst.pr_number ? ` · PR #${inst.pr_number}` : ""}`,
+    `  deployed_at: ${inst.deployed_at} · window_ends_at: ${inst.window_ends_at}`,
+    `  is_atomic: ${!!inst.is_atomic} · findings_verdict: ${inst.findings_verdict}`,
+    ``,
+    `NEW ERROR SIGNATURES (${sigs.length}) — first-seen INSIDE the canary window, NOT outage-correlated, NOT excluded pre-gate:`,
+    ...sigs.map((s) => `  • [${s.source}] "${s.title ?? ""}" — signature ${s.signature} · count ${s.count}`),
+    ``,
+    `NEW RED LOOPS (${loops.length}) — opened INSIDE the canary window, causally attributable-eligible:`,
+    ...loops.map((l) => `  • ${l.loop_id} — ${l.reason}${l.detail ? ` · ${l.detail}` : ""}`),
+    ``,
+    `EXCLUDED RED LOOPS (${excluded.length}) — opened in the window but dropped as not deploy-scoped (already filtered; here for auditability):`,
+    ...excluded.map((e) => `  • ${e.loop_id} — ${e.excluded_reason}`),
+    ``,
+    `LIVE red_loop_count on Control Tower: ${inst.red_loop_count ?? "(unavailable)"} · control_tower_ok: ${inst.control_tower_ok !== false}`,
+  ].join("\n");
+}
+
+function deployReviewPrompt(brief: string): string {
+  return [
+    `Use the deploy-review skill (cwd is the repo root). You are Reva, the box's Deploy Guardian, on Max — web search on, no API key. You have full brain / \`src/\` / git powers and READ-ONLY prod DB. You NEVER mutate: you investigate, decide, and emit ONE JSON object. The worker (deterministic Node in src/lib/deploy-guardian.ts — applyBoxDeployReview) executes your typed verdict on your response — never re-run the cron, never call revertDeployMerge yourself, never touch deploy_watches.`,
+    `A deploy_watches canary window just closed with a NON-HEALTHY findings verdict. The old cron reverted deterministically on this signal and racked up four back-to-back false reverts on 2026-07-04 by mistaking a canary-window overlap for causation. Your job: read the deploy's REAL diff and decide per-signal whether the merged code has a causal path to it.`,
+    ``,
+    brief,
+    ``,
+    `Steps:`,
+    `  1. Run \`git show <merge_sha>\` and/or \`git diff origin/main~1..<merge_sha>\` to enumerate the deploy's changed files.`,
+    `  2. For EACH candidate signal above, identify the source surface it OWNS (a route file, a src/lib/inngest/*.ts cron, a src/lib/* library) and Read it. Decide: does the diff's code path plausibly REACH that surface?`,
+    `  3. Cite a real file:line — either the causal path IN the diff (caused=true) or the specific reason the diff has no path to the surface (caused=false).`,
+    ``,
+    `Verdict rule:`,
+    `  • 'revert' — at least one signal has caused=true with a cited causal path in the diff.`,
+    `  • 'keep' — every candidate signal is caused=false with a clear no-causal-path reason (the 2026-07-04 fixture class).`,
+    `  • 'escalate' — plausible but unconfirmable causal path, OR the diff is too large / opaque to review reliably. A human decides — never guess revert.`,
+    ``,
+    `Final message = ONLY one JSON object matching this exact shape:`,
+    `  {"decision":"revert"|"keep"|"escalate","signals":[{"key":"<signature or loop_id>","surface":"<owning route/cron/lib>","caused":true|false,"evidence":"<cited file:line — the causal path or its absence>"}],"reasoning":"<2-4 sentences citing at least one real file:line>"}`,
+  ].join("\n");
+}
+
+interface DeployReviewInstructions {
+  watch_id?: string;
+  slug?: string;
+  branch?: string;
+  merge_sha?: string | null;
+  pr_number?: number | null;
+  deployed_at?: string;
+  window_ends_at?: string;
+  is_atomic?: boolean;
+  findings_verdict?: string;
+  new_error_signatures?: Array<{ signature: string; source: string; title: string | null; count: number }>;
+  new_red_loops?: Array<{ loop_id: string; reason: string; detail: string }>;
+  excluded_red_loops?: Array<{ loop_id: string; excluded_reason: string }>;
+  red_loop_count?: number | null;
+  control_tower_ok?: boolean;
+}
+
+interface DeployReviewSignal {
+  key: string;
+  surface: string;
+  caused: boolean;
+  evidence: string;
+}
+
+interface DeployReviewVerdict {
+  decision: "revert" | "keep" | "escalate";
+  signals: DeployReviewSignal[];
+  reasoning: string;
+}
+
+// Normalize the box's JSON verdict → DeployReviewVerdict, dropping malformed entries. Never throws.
+// Any missing/invalid field falls back to a safe default: an unknown decision becomes 'escalate' (the
+// only shape-safe conservative move — never silently upgrade an unparseable verdict to revert/keep).
+function normalizeDeployReviewVerdict(raw: unknown): DeployReviewVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const decisionRaw = String(r.decision || "").toLowerCase();
+  const decision: DeployReviewVerdict["decision"] =
+    decisionRaw === "revert" || decisionRaw === "keep" || decisionRaw === "escalate" ? decisionRaw : "escalate";
+  const rawSignals = Array.isArray(r.signals) ? r.signals : [];
+  const signals: DeployReviewSignal[] = [];
+  for (const s of rawSignals) {
+    const o = (s || {}) as Record<string, unknown>;
+    const key = typeof o.key === "string" ? o.key : "";
+    if (!key) continue;
+    signals.push({
+      key,
+      surface: typeof o.surface === "string" ? o.surface : "",
+      caused: o.caused === true,
+      evidence: typeof o.evidence === "string" ? o.evidence : "",
+    });
+  }
+  const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
+  return { decision, signals, reasoning };
+}
+
+async function runDeployReviewJob(job: Job) {
+  const tag = `[deploy-review:${job.id.slice(0, 8)}]`;
+  let inst: DeployReviewInstructions = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as DeployReviewInstructions) : {};
+  } catch {
+    /* leave inst empty — the guard below will fail-safe */
+  }
+  const watchId = inst.watch_id;
+  if (!watchId) {
+    await update(job.id, { status: "failed", error: "deploy-review job missing watch_id in instructions" });
+    return;
+  }
+  console.log(`${tag} reviewing watch ${watchId.slice(0, 8)} · slug=${inst.slug} · merge=${(inst.merge_sha || "").slice(0, 7)} · findings=${inst.findings_verdict}`);
+
+  try {
+    const brief = deployReviewBrief(inst);
+    const prompt = deployReviewPrompt(brief);
+    const { session, resultText, isError, raw, usage, model, configDir: drDir } = await runBoxLane(
+      (cfg, sid) => runDeployReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, drDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: drDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizeDeployReviewVerdict(parsed);
+    console.log(`${tag} claude finished — decision: ${verdict?.decision ?? "(none)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // No parseable verdict → surface for a human rather than acting. Phase 4's fail-safe (in the
+      // worker: keep the watch in in_review + escalate) is the ultimate backstop, but at this stage
+      // we mark the job needs_attention so the lane frees and the outcome is visible.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "deploy-review returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention (Phase 4 fail-safe applies on the watch)`);
+      return;
+    }
+
+    // Persist the parsed verdict on log_tail (auditability) — Phase 3's applyBoxDeployReview is the
+    // mutator and stamps deploy_watches.findings.reva_review. This runner is READ-ONLY on the DB.
+    const summary = [
+      `decision=${verdict.decision}`,
+      verdict.signals.length ? `signals(${verdict.signals.length}): ${verdict.signals.map((s) => `${s.caused ? "✅" : "❌"}${s.key}`).join(" ")}` : "",
+      verdict.reasoning ? verdict.reasoning : "",
+    ].filter(Boolean).join("\n");
+    if (isError) {
+      // The session errored out but a verdict landed — still surface it, but flag the error so a
+      // human can eyeball. Phase 3 hasn't landed yet, so we complete the job without acting.
+      await update(job.id, { status: "completed", error: "deploy-review session errored (verdict logged)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} verdict=${verdict.decision} (session errored — logged, no mutation)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} verdict=${verdict.decision} — logged (Phase 3's applyBoxDeployReview will apply it)`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Developer Message Center (developer-message-center) ──────────────────────
 // A kind='dev-ask' job is ONE turn of a founder-facing, read-only "ask the box anything" thread. Like
 // ticket-improve it runs a TOP-LEVEL `claude -p` on Max (ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
@@ -17144,6 +17343,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "spec-review") return runSpecReviewJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
+  if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
   if (job.kind === "pr-resolve") return runPrResolveJob(job);
@@ -18186,7 +18386,7 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
     `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
@@ -18237,6 +18437,7 @@ async function main() {
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countSpecReview = () => [...active.values()].filter((v) => v.kind === "spec-review").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
+  const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
   const countPrResolve = () => [...active.values()].filter((v) => v.kind === "pr-resolve").length;
@@ -18261,7 +18462,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "dev-ask" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -18471,6 +18672,19 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed migration-fix ${job.id.slice(0, 8)} → ${countMigrationFix() + 1}/${MAX_MIGRATION_FIX} migration-fix lane`);
+        launch(job);
+      }
+      // Fill the deploy-review lane (reva-box-session-causal-rollback Phase 2): event-fired the
+      // moment the deploy-guardian cron closes a canary window on a non-healthy findings verdict.
+      // A top-level Max `claude -p` (deploy-review skill) reads the merge_sha's real diff read-only
+      // and emits ONE JSON verdict; Phase 3's applyBoxDeployReview applies it. Concurrency-1 so two
+      // reviews never race on the same shared main. Gated on the Claude-down breaker (Reva can't
+      // judge causal plausibility if Claude is down — jobs park blocked_on_dependency + drain).
+      while (!claudeDown && countDeployReview() < MAX_DEPLOY_REVIEW) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["deploy-review"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed deploy-review ${job.id.slice(0, 8)} → ${countDeployReview() + 1}/${MAX_DEPLOY_REVIEW} deploy-review lane`);
         launch(job);
       }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
