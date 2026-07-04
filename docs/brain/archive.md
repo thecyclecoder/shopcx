@@ -17,6 +17,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Drop 'Supabase Cloudflare 5xx HTML body' console.error text as transient in the Vercel drain** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **error-feed-drop-undici-headers-timeout-noise** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Demote best-effort Whisper transcription failure log** · verified 2026-07-04 · → [[../libraries/video-skeleton]]
+- **Add expression index for find_customers_by_phone last-10 comparison to unblock the Twilio marketing-sms webhook** · verified 2026-07-04 · → [[../tables/customers]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
 - **Guard /api/portal against 300s upstream hangs (Appstle/Shopify fetch timeout)** · verified 2026-07-04 · → [[libraries/portal__helpers]]
 - **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
