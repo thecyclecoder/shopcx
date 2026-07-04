@@ -28,7 +28,7 @@
  * enqueue helper the cron uses. The agent is read-only; only this writer mutates state.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { markSpecCardValePassed } from "@/lib/spec-card-state";
+import { markSpecCardValePassed, markSpecCardValeNeedsFix } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { listSpecs } from "@/lib/specs-table";
 
@@ -69,13 +69,19 @@ export interface SpecReviewDecision {
  * `specs.deferred=true` wins over status (mirrors the readers' projection), so a deferred spec doesn't slip
  * into the pool by accident.
  *
- * vale-reactive-spec-review Phase 1: additionally filters `vale_pass !== true`. The durable review signal
- * keys to spec CONTENT: `markSpecCardBackToReview` NULLs `vale_pass` on every re-open / re-author, and a
- * fresh authoring leaves it null (`upsertSpec` DB default). So `vale_pass === true` reliably means "Vale
- * already reviewed the CURRENT content" — those specs sit in `in_review` parked for Ada's disposition lane,
- * not Vale's queue. Filtering them out here gates BOTH the 15-min cron backstop and the reactive
- * `spec-review/spec-mutated` event through the same free predicate — an expensive box `claude -p` only spins
- * up when there is real, unreviewed work.
+ * vale-reactive-spec-review Phase 1: additionally filters on `vale_pass`. The durable review signal keys to
+ * spec CONTENT: `markSpecCardBackToReview` NULLs `vale_pass` on every re-open / re-author, and a fresh
+ * authoring leaves it null (`upsertSpec` DB default).
+ *
+ * vale-instant-per-spec-review: the predicate is now `vale_pass IS NULL` (was `!== true`). The tri-state
+ * carries BOTH review outcomes so a verdicted spec — pass OR needs_fix — leaves the queue:
+ *   • `null`  = never verdicted → Vale's queue.
+ *   • `true`  = passed → parked for Ada's disposition lane (not Vale's queue).
+ *   • `false` = needs_fix (`markSpecCardValeNeedsFix`) → OUT until re-authored (NULLs it back to null).
+ * Under the old `!== true` predicate a `needs_fix` spec (vale_pass=null) stayed in the pool and got
+ * re-reviewed every cadence — harmless at the 15-min batch cron, a Max-session firehose at the ~30s
+ * instant-per-spec poll. This gates the poll, the cron backstop, and the reactive event through one free
+ * predicate — an expensive box `claude -p` only spins up on real, unreviewed work.
  */
 export async function selectUnreviewedInReviewSpecs(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -86,61 +92,80 @@ export async function selectUnreviewedInReviewSpecs(
   const rows = await listSpecs(workspaceId, { status: "in_review" });
   return rows
     .filter((r) => !r.deferred) // a deferred spec is out of the in_review pool even if status still reads it
-    .filter((r) => r.vale_pass !== true) // and a Vale-passed spec is out of Vale's queue (parked for Ada)
+    .filter((r) => r.vale_pass == null) // only NEVER-verdicted specs; pass (true) + needs_fix (false) are out
     .map((r) => r.slug);
 }
 
 /**
- * Dedupe-aware enqueue: insert ONE `spec-review` job per workspace per cadence — only when ≥1 in_review spec
- * LACKS a current Vale review AND no in-flight `spec-review` job is already running. The Inngest cron + the
- * reactive `spec-review/spec-mutated` event both flow through here, so a cron tick that races an event no-ops
- * the duplicate, and a mutation on a spec whose current content already passed Vale no-ops for free (never
- * spinning up a Max session).
+ * vale-instant-per-spec-review — PER-SPEC enqueue: insert ONE `spec-review` job for EACH in_review spec that
+ * lacks a current Vale verdict AND has no in-flight `spec-review` job of its own. This replaced the single
+ * batch-sentinel job (`spec-review-sweep`, one Vale session sweeping the whole pool with global concurrency
+ * 1). Per-spec jobs let distinct specs review IN PARALLEL (the box runs `MAX_SPEC_REVIEW` > 1) while the
+ * per-slug dedup guarantees two sessions never examine the SAME spec — the "one-in-flight PER SPEC, not per
+ * workspace" rule. Every enqueuer flows through here (the ~30s box poll, the Inngest 15-min cron backstop,
+ * the reactive `spec-review/spec-mutated` event, the standing-pass + build claim-gate), so the per-slug
+ * dedup makes them all idempotent against each other — a spec whose current content already passed Vale
+ * no-ops for free (the free `listSpecs` predicate; never spins up a Max session).
  *
- * `reason` disambiguates the empty-pool cases so the cron heartbeat + build claim-gate can log them apart:
+ * A legacy `spec-review-sweep` sentinel job still in flight (queued by the pre-hotfix code before deploy)
+ * covers the whole pool, so we yield to it (`batch-in-flight`) to avoid double-reviewing during the window.
+ *
+ * `reason` disambiguates the no-enqueue cases so the callers can log them apart:
  *   • `no-in-review-specs`  — no non-deferred in_review specs exist at all.
- *   • `no-unreviewed-specs` — in_review pool is non-empty but every spec already carries `vale_pass=true`
- *                             (they are parked for Ada's disposition lane, not Vale's queue).
- *   • `in-flight`           — a spec-review job is already queued/running for this workspace.
+ *   • `no-unreviewed-specs` — in_review pool is non-empty but every spec is already verdicted (pass/needs_fix).
+ *   • `batch-in-flight`     — a legacy sentinel sweep is running; it covers the pool, so we hold.
+ *   • `all-in-flight`       — every unreviewed spec already has its own live per-spec job.
  */
 export async function enqueueSpecReviewIfDue(
   workspaceId: string,
-): Promise<{ enqueued: boolean; reason?: string; pending?: number }> {
+): Promise<{ enqueued: boolean; enqueuedCount: number; pending: number; reason?: string }> {
   const admin = createAdminClient();
 
   // vale-reactive-spec-review Phase 1 — read the in_review pool ONCE so we can distinguish "nothing to
-  // review, nothing in_review at all" from "nothing to review, every in_review spec already passed Vale".
+  // review, nothing in_review at all" from "nothing to review, every in_review spec already verdicted".
   const rows = await listSpecs(workspaceId, { status: "in_review" });
   const nonDeferred = rows.filter((r) => !r.deferred);
-  const pending = nonDeferred.filter((r) => r.vale_pass !== true).map((r) => r.slug);
+  const pending = nonDeferred.filter((r) => r.vale_pass == null).map((r) => r.slug);
   if (!pending.length) {
     return {
       enqueued: false,
-      reason: nonDeferred.length ? "no-unreviewed-specs" : "no-in-review-specs",
+      enqueuedCount: 0,
       pending: 0,
+      reason: nonDeferred.length ? "no-unreviewed-specs" : "no-in-review-specs",
     };
   }
 
-  // One-in-flight guard: don't pile up Vale passes.
-  const { data: inflight } = await admin
+  // Per-spec in-flight guard: pull every live spec-review job's slug so we skip any spec that already has
+  // one — and yield entirely to a legacy batch sentinel (it reviews the whole pool).
+  const { data: inflightRows } = await admin
     .from("agent_jobs")
-    .select("id")
+    .select("spec_slug")
     .eq("workspace_id", workspaceId)
     .eq("kind", "spec-review")
-    .in("status", ["queued", "queued_resume", "building", "claimed"])
-    .limit(1);
-  if (inflight && inflight.length) return { enqueued: false, reason: "in-flight", pending: pending.length };
+    .in("status", ["queued", "queued_resume", "building", "claimed"]);
+  const inflight = new Set((inflightRows ?? []).map((r) => r.spec_slug as string));
+  if (inflight.has("spec-review-sweep")) {
+    return { enqueued: false, enqueuedCount: 0, pending: pending.length, reason: "batch-in-flight" };
+  }
+  const toEnqueue = pending.filter((slug) => !inflight.has(slug));
+  if (!toEnqueue.length) {
+    return { enqueued: false, enqueuedCount: 0, pending: pending.length, reason: "all-in-flight" };
+  }
 
-  const { error } = await admin.from("agent_jobs").insert({
-    workspace_id: workspaceId,
-    spec_slug: "spec-review-sweep", // sentinel — Vale sweeps the queue, not one spec
-    kind: "spec-review",
-    status: "queued",
-    created_by: null,
-    instructions: JSON.stringify({ pending_count: pending.length }),
-  });
-  if (error) return { enqueued: false, reason: `insert-failed: ${error.message}`, pending: pending.length };
-  return { enqueued: true, pending: pending.length };
+  const { error } = await admin.from("agent_jobs").insert(
+    toEnqueue.map((slug) => ({
+      workspace_id: workspaceId,
+      spec_slug: slug, // one job PER spec — Vale reviews just this slug (not a pool sweep)
+      kind: "spec-review",
+      status: "queued",
+      created_by: null,
+      instructions: JSON.stringify({ single_spec: true }),
+    })),
+  );
+  if (error) {
+    return { enqueued: false, enqueuedCount: 0, pending: pending.length, reason: `insert-failed: ${error.message}` };
+  }
+  return { enqueued: true, enqueuedCount: toEnqueue.length, pending: pending.length };
 }
 
 /**
@@ -204,6 +229,12 @@ export async function applySpecReviewDecision(
           ? { disposition, disposition_reason: dispositionReason }
           : undefined,
       );
+    } else {
+      // vale-instant-per-spec-review — stamp the durable needs_fix marker (`vale_pass=false`) so the spec
+      // LEAVES Vale's queue until it's re-authored. Without this, the ~30s instant-per-spec poll would
+      // re-review the same malformed spec every cycle. The spec STAYS in_review (build hard-stop holds);
+      // markSpecCardBackToReview NULLs the flag on re-author to re-admit it. See markSpecCardValeNeedsFix.
+      await markSpecCardValeNeedsFix(workspaceId, decision.slug, { actor, reason });
     }
     // needs_fix leaves the spec in_review (the build hard-stop holds). The defect surfaces via the
     // director_activity row so the CEO sees what Vale flagged. On a pass, the disposition is recorded
