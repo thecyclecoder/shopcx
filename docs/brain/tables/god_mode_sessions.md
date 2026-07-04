@@ -26,6 +26,7 @@ The founder's ELEVATED bridge to the box. One row per god-mode session (armed, d
 | `armed_at` | `timestamptz` | — | default `now()`. When arm() minted the current token — reset on re-arm. |
 | `disarmed_at` | `timestamptz` | ✓ | Stamped when status flips to `disarmed` or `expired`. |
 | `created_at` | `timestamptz` | — | default `now()`. First-arm timestamp — never reset. |
+| `active_plan_id` | `uuid` | ✓ | → [[god_mode_approvals]].id · ON DELETE SET NULL. **Plan-scoped approvals** (hotfix): the currently-open, founder-approved plan. While non-NULL AND that approval row is `status='approved'` + `risk='plan'`, the box gate AUTO-ALLOWS non-destructive tool calls (the founder approved the DECISION once, not each keystroke). Set by `scripts/god-mode-plan.ts open` on approval; nulled by `close` AND at the start of every turn (a plan authorizes work only within the turn it was approved in). Destructive calls NEVER batch under a plan — they still PIN-gate individually. |
 
 **Indexes:**
 - `god_mode_sessions_cockpit_token_key` — UNIQUE partial `(cockpit_token) where cockpit_token is not null`. Hot path for every `/api/god/[token]` request. Many NULLs are OK (disarmed sessions null the token).
@@ -42,7 +43,7 @@ Only `armed` is queryable via the cockpit; `disarmed`/`expired` return `404`/`41
 
 ## Chokepoint
 
-All WRITES go through [[../libraries/god-mode]] (`armSession` / `disarmSession` / `getActiveSession` / `getSessionByToken`) via `createAdminClient()`. No raw `.from('god_mode_sessions').insert|update|delete` outside the SDK — same discipline as [[../libraries/specs-table]] / [[../libraries/goals-table]] / [[../libraries/lander-blueprints]].
+All WRITES go through [[../libraries/god-mode]] (`armSession` / `disarmSession` / `getActiveSession` / `getSessionByToken` / `setActivePlan` / `getActivePlan`) via `createAdminClient()`. No raw `.from('god_mode_sessions').insert|update|delete` outside the SDK — same discipline as [[../libraries/specs-table]] / [[../libraries/goals-table]] / [[../libraries/lander-blueprints]].
 
 ## RLS
 

@@ -91,7 +91,12 @@ export type GodModeMessage = {
 
 export type GodModeStatus = "armed" | "disarmed" | "expired";
 
-export type GodModeApprovalRisk = "safe" | "write" | "destructive";
+// 'plan' is a plain-language, founder-approved UNIT OF WORK (not a single tool
+// call). While a session's active_plan_id points at an approved plan row, the box
+// gate auto-allows the non-destructive mechanical calls that implement it — the
+// founder approves the DECISION once instead of every keystroke. 'plan' never
+// triggers the destructive PIN gate (only 'destructive' does).
+export type GodModeApprovalRisk = "safe" | "write" | "destructive" | "plan";
 export type GodModeApprovalStatus = "pending" | "approved" | "denied" | "asked";
 
 export type GodModeApprovalRow = {
@@ -123,6 +128,11 @@ export type GodModeSessionRow = {
   armed_at: string;
   disarmed_at: string | null;
   created_at: string;
+  // Plan-scoped approvals (hotfix): the currently-open, founder-approved plan
+  // row id, or null. While non-null AND that row is status='approved', the box
+  // gate auto-allows non-destructive calls. Cleared at the start of every turn
+  // and by `god-mode-plan.ts close`.
+  active_plan_id: string | null;
 };
 
 type Admin = SupabaseClient;
@@ -419,6 +429,71 @@ export async function decideApproval(
     .single();
   if (error || !data) throw new Error(`decideApproval failed: ${error?.message ?? "no row"}`);
   return data as GodModeApprovalRow;
+}
+
+// ── Plan-scoped approvals (hotfix) ─────────────────────────────────────────
+//
+// A "plan" is a plain-language unit of work the founder approves ONCE; while it
+// is open the box gate auto-allows the non-destructive mechanical calls that
+// implement it. These three helpers are the read/write chokepoint for the
+// session's active_plan_id pointer. `scripts/god-mode-plan.ts` drives them.
+
+/** Set (or clear, with null) the session's open-plan pointer. */
+export async function setActivePlan(
+  admin: Admin,
+  sessionId: string,
+  planId: string | null,
+): Promise<void> {
+  await admin
+    .from("god_mode_sessions")
+    .update({ active_plan_id: planId, last_activity_at: new Date().toISOString() })
+    .eq("id", sessionId);
+}
+
+/**
+ * The session's currently-open, APPROVED plan row — or null. Returns null unless
+ * active_plan_id is set AND that approval row is still status='approved' (a
+ * pending/denied/asked pointer is treated as no open plan, so the gate keeps
+ * per-call gating until the founder actually approves the plan). The gate calls
+ * this on every non-destructive tool call to decide auto-allow.
+ */
+export async function getActivePlan(admin: Admin, sessionId: string): Promise<GodModeApprovalRow | null> {
+  const { data: session } = await admin
+    .from("god_mode_sessions")
+    .select("active_plan_id")
+    .eq("id", sessionId)
+    .maybeSingle();
+  const planId = (session as { active_plan_id: string | null } | null)?.active_plan_id ?? null;
+  if (!planId) return null;
+  const plan = await getApproval(admin, planId);
+  if (!plan || plan.status !== "approved" || plan.risk !== "plan") return null;
+  return plan;
+}
+
+/**
+ * Open a plan approval row (risk='plan'). tool_name is a stable marker so the
+ * cockpit renders it as a Plan card, and tool_input carries the intended steps
+ * for the audit trail. The founder approves this ONE row; the caller
+ * (`god-mode-plan.ts`) then polls it and, on approval, points the session's
+ * active_plan_id at it. Reuses openApproval so the same SMS + cockpit surface
+ * fires.
+ */
+export async function openPlan(
+  admin: Admin,
+  args: { sessionId: string; workspaceId: string; title: string; steps?: string[] },
+): Promise<GodModeApprovalRow> {
+  const steps = (args.steps ?? []).filter((s) => s.trim().length > 0);
+  const preview = steps.length
+    ? `${args.title}\n\nSteps:\n${steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}`
+    : args.title;
+  return openApproval(admin, {
+    sessionId: args.sessionId,
+    workspaceId: args.workspaceId,
+    toolName: "Plan",
+    toolInput: { title: args.title, steps },
+    preview,
+    risk: "plan",
+  });
 }
 
 /**

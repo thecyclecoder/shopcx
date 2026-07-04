@@ -24,6 +24,9 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 | `openApproval(admin, args)` | Insert one `god_mode_approvals` row (`status='pending'`, `risk`). Called by the Phase-2 permission gate for every non-safe tool call. Returns the row. |
 | `getApproval(admin, id)` | Poll a single approval row (~2s cadence in the gate). |
 | `decideApproval(admin, { approvalId, decision, questionText? })` | Terminal-flip one approval to `approved` / `denied` / `asked`. Idempotent (no-op if already terminal). `ask` requires `questionText`. |
+| `openPlan(admin, { sessionId, workspaceId, title, steps? })` | **Plan-scoped approvals**: insert one `risk='plan'` row (`tool_name='Plan'`, `preview`=title+numbered steps) via `openApproval`. The founder approves this ONE card to authorize a whole unit of work. Driven by `scripts/god-mode-plan.ts open`. |
+| `setActivePlan(admin, sessionId, planId \| null)` | Point [[../tables/god_mode_sessions]].`active_plan_id` at an approved plan (or clear it). Set on plan approval; cleared by `god-mode-plan.ts close` + at each turn start. |
+| `getActivePlan(admin, sessionId)` | The session's currently-open plan row, or null — returns non-null ONLY if `active_plan_id` is set AND that row is `status='approved'` + `risk='plan'`. The [[god-mode-permission-gate]] calls it on every non-destructive call to decide auto-allow. |
 | `hasInFlight(admin, sessionId)` | Phase-5 reaper check — does the session hold any `pending` approval? A `true` blocks the idle-disarm. |
 | `isSessionArmed(admin, sessionId)` | Belt-and-suspenders check the gate uses to bail fast if the founder disarmed while a tool call was mid-flight. |
 | `resolveCockpitToken(admin, token)` | Phase-3 chokepoint: resolve a `/god/[token]` slug to `{ kind: 'ok' \| 'not_found' \| 'disarmed' \| 'expired', session? }`. Every Phase-3 route calls this so 404 (unknown/disarmed) vs 410 (expired) is decided in one place. |

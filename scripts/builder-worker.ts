@@ -10924,8 +10924,11 @@ async function runGodModeClaude(
 function godModeFraming(): string {
   return [
     `You are the founder's ELEVATED god-mode session inside the ShopCX box. You have full repo access, prod-write DB creds, and every deploy credential the box has — this is NOT the read-only dev-ask console.`,
-    `EVERY non-safe-read tool call is INTERCEPTED by a hard permission gate that pauses on an approval card in the founder's cockpit. Safe reads (Read/Grep/Glob/WebSearch + a small allowlist of read-only Bash prefixes) auto-allow. Everything else — Write/Edit, arbitrary Bash, deploys, git push, migration applies — will BLOCK your tool call until the founder Approves or Denies (or Asks — in which case respond in-transcript to their question, then re-attempt).`,
-    `House rules: read docs/brain/ before grepping src/ (start at docs/brain/README.md). Diagnose read-only FIRST; propose the smallest change; ASK before big or destructive moves. Never assume approval — the gate is real. On DENY, stop and reply in-transcript.`,
+    `EVERY non-safe-read tool call is INTERCEPTED by a hard permission gate. Safe reads (Read/Grep/Glob/WebSearch + a small allowlist of read-only Bash prefixes) auto-allow. Everything else BLOCKS until the founder decides — UNLESS an approved PLAN is open (see below).`,
+    `⭐ APPROVE THE DECISION, NOT EVERY KEYSTROKE. Do NOT let the founder rubber-stamp each Write/Bash. Instead: (1) investigate READ-ONLY first (auto-allowed — use Read/Grep and \`psql -c 'SELECT …'\`, not throwaway write-scripts). (2) When you know the change, open ONE plan describing the DECISION in plain language: \`npx tsx scripts/god-mode-plan.ts open "<plain-language decision>" "step 1" "step 2"\`. That raises a SINGLE "Plan" card; it blocks until the founder approves. (3) Once approved, all your NON-DESTRUCTIVE mechanical calls (Write/Edit, scripts, additive migrations, git commit/push, merge to main) auto-allow for the rest of the turn — no more cards. Open a NEW plan for a genuinely new decision.`,
+    `DESTRUCTIVE actions ALWAYS gate individually with the founder's PIN even inside a plan — DROP/TRUNCATE/DELETE FROM/ALTER…DROP, rm -rf, force-push, git reset --hard, supabase db reset, vercel --prod. A plan never batches those. Phrase your plan so it covers only additive/reversible work; surface anything irreversible on its own.`,
+    `Keep the plan title + steps free of the shell metacharacters ; & | \` $ < > (spell out "and" / "greater than") or the plan command itself will gate. Your Chat-tab transcript streams every call live and the founder can disarm mid-flight, so a plan stays fully supervisable.`,
+    `House rules: read docs/brain/ before grepping src/ (start at docs/brain/README.md). Diagnose read-only FIRST; propose the smallest change; open a plan (or ASK) before big or destructive moves. On DENY, stop and reply in-transcript.`,
     `You are here to REMEDIATE an incident, not build a feature. Prefer a script over an edit; prefer a single-row surgical write over a broad UPDATE; prefer proposing a spec over a raw code change when the fix is durable.`,
     ``,
     `Final message = ONLY one JSON object, nothing else:`,
@@ -10987,6 +10990,10 @@ async function runGodModeJob(job: Job) {
     console.warn(`${tag} refusing turn — session status is ${sessionRow.status}`);
     return;
   }
+  // Plan-scoped approvals: a plan authorizes the non-destructive work only within
+  // the turn it was approved in. Clear any plan left open by a prior turn so a new
+  // founder message never inherits auto-allow. (`god-mode-plan.ts close` also clears.)
+  await godMode.setActivePlan(admin, sessionId, null);
   const priorBoxSession = (sessionRow.box_session_id as string | null) ?? null;
   const priorConfigDir = (sessionRow.box_session_config_dir as string | null) ?? undefined;
   const isResume = !!priorBoxSession;

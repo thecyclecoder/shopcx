@@ -44,6 +44,7 @@ import {
   openApproval,
   getApproval,
   isSessionArmed,
+  getActivePlan,
   type GodModeApprovalRisk,
 } from "../src/lib/god-mode";
 
@@ -134,8 +135,18 @@ const DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
 //   \n     → newline-embedded second statement
 const SHELL_METACHAR_RE = /[;&|`$<>\n]|\$\(/;
 
+// The god-mode plan primitive (scripts/god-mode-plan.ts open|close|status) is
+// allowlisted: invoking it must NOT itself land a card, because its whole job is
+// to raise the ONE plan card and poll it internally. Anchored at the start (an
+// optional path prefix before scripts/) + a known subcommand; the shell-
+// metachar guard below still rejects any `$`/`;`/backtick in the title/steps.
+const PLAN_CMD_RE = /^npx\s+tsx\s+(\S*\/)?scripts\/god-mode-plan\.ts\s+(open|close|status)\b/;
+
 function isSafeBash(command: string): boolean {
   const c = command.trim();
+  // The plan primitive — allow it (but still reject shell metacharacters so a
+  // title carrying `$(…)` can't smuggle a subshell past the allowlist).
+  if (PLAN_CMD_RE.test(c)) return !SHELL_METACHAR_RE.test(c);
   // psql with a plain SELECT is safe. Anything containing a semicolon-separated
   // second statement or SQL keywords other than SELECT is not.
   if (/^psql\b/i.test(c)) {
@@ -252,6 +263,20 @@ async function main() {
   const cls = classify(toolName, toolInput);
   if (cls.decision === "safe") {
     emit("allow", `god-mode gate: auto-allowed (${cls.preview})`);
+  }
+
+  // Plan-scoped auto-allow (hotfix): while the founder has an APPROVED plan open
+  // for this session, the non-destructive mechanical calls that implement it flow
+  // without a fresh card — the founder approved the DECISION once. Destructive
+  // calls NEVER batch under a plan; they fall through to the PIN gate below. The
+  // plan's own open/close/status invocation is already safe above, so it never
+  // reaches here. The Chat tab still streams every call live, and disarm kills
+  // the session mid-flight — so the batch stays supervisable.
+  if (cls.risk !== "destructive") {
+    const plan = await getActivePlan(admin, sessionId!);
+    if (plan) {
+      emit("allow", `god-mode gate: auto-allowed under approved plan ${plan.id.slice(0, 8)} — ${cls.preview}`);
+    }
   }
 
   // Land the approval row and poll until the founder decides.

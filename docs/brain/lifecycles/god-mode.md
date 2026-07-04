@@ -80,7 +80,7 @@ For every tool call the box tries, the CLI pipes the PreToolUse event (`{ tool_n
 
 1. **Bails fast** if the session isn't `armed` anymore (the founder disarmed while the box was mid-call) — returns `deny`.
 2. **Classifies** the call:
-   - **safe** — `Read`/`Grep`/`Glob`/`WebSearch`/`WebFetch`, task-tracking tools, and Bash matching a **read-only allowlist** (`git status/diff/log/show/branch/ls-files/rev-parse/config --get`, `ls`, `cat`, `pwd`, `wc`, `head`, `tail`, `find`, `which`, `printf`, `node -v`, `npm -v`, `npx tsc --noEmit`, `grep`, `rg`, `gh pr list/view`, `gh issue list/view`, `gh run list/view`, and `psql -c 'SELECT …'` without a second statement). Auto-allow — no `god_mode_approvals` row.
+   - **safe** — `Read`/`Grep`/`Glob`/`WebSearch`/`WebFetch`, task-tracking tools, and Bash matching a **read-only allowlist** (`git status/diff/log/show/branch/ls-files/rev-parse/config --get`, `ls`, `cat`, `pwd`, `wc`, `head`, `tail`, `find`, `which`, `printf`, `node -v`, `npm -v`, `npx tsc --noEmit`, `grep`, `rg`, `gh pr list/view`, `gh issue list/view`, `gh run list/view`, `psql -c 'SELECT …'` without a second statement, and the plan primitive `npx tsx …scripts/god-mode-plan.ts open|close|status …`). Auto-allow — no `god_mode_approvals` row.
    - **destructive** — deterministic rail over the command text: `rm -rf`, `rmdir`, `git push --force`, `git reset --hard`, `git clean -f`, `git branch -D`, `DROP TABLE/DATABASE/…`, `TRUNCATE`, `DELETE FROM`, `ALTER TABLE … DROP`, `supabase db reset|push`, `vercel … --prod`. Land a row with `risk='destructive'`.
    - **write** — everything else non-safe. Land a row with `risk='write'`.
 3. **Polls** the approval row every 2s until it leaves `pending`:
@@ -89,6 +89,10 @@ For every tool call the box tries, the CLI pipes the PreToolUse event (`{ tool_n
    - `asked` → return `deny` with the founder's `question_text` in `permissionDecisionReason` so the box reads it in the tool's reject-reason and can respond in-transcript, then re-request approval on the next tool call. **A live back-and-forth, not a dead end.**
 
 For `risk='destructive'` cards, Phase 3's `/api/god/[token]/approve` route additionally verifies the founder PIN against `workspaces.god_mode_pin_hash` (via `verifyPin` — constant-time) BEFORE flipping the row to `approved`. The gate itself just waits — it never sees the PIN.
+
+### Plan-scoped approvals (hotfix) — approve the DECISION, not every keystroke
+
+Per-call gating meant one logical decision fanned out into many cards (a "dismiss 4 stale approvals" incident = ~9 rubber-stamps: write-probe → run → write-probe → run → write-fix → run → verify). The fix: a **plan** — a plain-language unit of work the founder approves ONCE. The box investigates read-only (auto-allowed), then runs `npx tsx scripts/god-mode-plan.ts open "<decision>" "step" …` (allowlisted); that raises ONE `risk='plan'` card ([[../libraries/god-mode]] `openPlan`) and polls it. On approval the script points `god_mode_sessions.active_plan_id` at the plan, and the gate then AUTO-ALLOWS the non-destructive mechanical calls that implement it (`getActivePlan` returns the approved open plan → allow, no new card). **Destructive calls still gate individually with the PIN even under a plan** (`cls.risk !== 'destructive'` guard); the Chat tab streams every auto-allowed call and disarm kills mid-flight, so it stays supervisable. A plan is scoped to its turn — `runGodModeJob` clears `active_plan_id` at turn start and `god-mode-plan.ts close` clears it explicitly; no open plan ⇒ pre-hotfix per-call behavior. Mechanism detail: [[../libraries/god-mode-permission-gate]] § Plan-scoped approvals.
 
 ### Turn flow
 

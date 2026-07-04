@@ -27,7 +27,7 @@ interface GodApproval {
   id: string;
   tool_name: string;
   preview: string;
-  risk: "safe" | "write" | "destructive";
+  risk: "safe" | "write" | "destructive" | "plan";
   status: "pending" | "approved" | "denied" | "asked";
   question_text: string | null;
   created_at: string;
@@ -51,6 +51,9 @@ const RISK_BADGE: Record<GodApproval["risk"], string> = {
   safe: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
   write: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
   destructive: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
+  // A "plan" card = one plain-language unit of work; approving it auto-allows the
+  // non-destructive calls that implement it (no PIN — only destructive needs one).
+  plan: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300",
 };
 
 const STATUS_BADGE: Record<GodApproval["status"], string> = {
