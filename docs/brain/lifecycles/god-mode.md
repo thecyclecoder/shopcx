@@ -216,6 +216,28 @@ Sliding-TTL renewal is orthogonal: every Phase-3 GET/message/approve + every Pha
 
 Retire the whole feature (drop the two tables + the workspaces columns + delete `src/lib/god-mode.ts` + delete the routes + delete the box-worker lane + drop the reaper beat) once the CEO exec layer covers the incident remediation surface. Self-contained by construction — removal is a one-migration + one-PR cleanup.
 
+## Phase 6 — Fix 1 — security regressions (injection + authz)
+
+The pre-merge spec-test found two high-risk security findings in the Phase-2 permission gate:
+
+1. **Command injection vulnerability** (`scripts/god-mode-permission-gate.ts:52-63` `isSafeBash()`): The allowlist check was loose — a command like `ls; rm -rf /tmp` would pass because the allowlist prefix `ls` appeared at the head. Fixed by: (1) tightening the prefix check to require exact match or match+space, (2) adding a shell-metacharacter rejection (`/[;&|`$<>\n]|\$\(/)`) after allowlist match, (3) belt-and-suspenders: force even allowlisted-prefix commands through the destructive rail if they match destructive patterns.
+
+2. **Authorization bypass** (same location): The gate's loose prefix matching bypassed the founder-approval requirement that's the entire app-layer authorization for prod mutations under god-mode. Fixed by the same tightened checks above.
+
+Both findings are now closed.
+
+## Phase 7 — Fix 2 — scrypt memory limit regressions
+
+The pre-merge spec-test found three failures in PIN handling (both setter + verifier):
+
+1. **Phase 1 PIN setter crash** (`_set-god-mode-pin.ts`): `hashPin()` uses `scrypt(N=2^15, r=8, p=1)` which requires 128×(N+2)×r = 33.5 MB, exceeding Node's default maxmem (32 MB) by 2 KB. The setter crashed before writing any hash.
+
+2. **Phase 3 PIN verify failure**: `verifyPin()` caught the same scrypt RangeError and returned `false`, blocking ALL destructive approvals regardless of the entered PIN (fail-closed, so safety intact — but unusable).
+
+3. **Phase 4 PIN verify failure**: Same issue on the dashboard tab's destructive approve route.
+
+Fixed by raising scrypt maxmem from 32 MB to 64 MB (or lowering SCRYPT_N; the fix chose maxmem to preserve security parameters). All three PIN paths now work.
+
 ## Status / open work
 
 - Phase 1 (session model + arm/disarm + PIN): ✅ shipped.
@@ -223,3 +245,5 @@ Retire the whole feature (drop the two tables + the workspaces columns + delete 
 - Phase 3 (SMS cockpit — token page with Chat + Approvals tabs): ✅ shipped.
 - Phase 4 (in-app dashboard God Mode tab): ✅ shipped.
 - Phase 5 (SMS delivery + lifecycle reaper): ✅ shipped.
+- Phase 6 (Fix 1 — command injection + authz): ✅ shipped.
+- Phase 7 (Fix 2 — scrypt memory limit): ✅ shipped.

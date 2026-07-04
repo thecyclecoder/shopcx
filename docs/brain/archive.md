@@ -30,6 +30,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Scope GoTrue `operation was canceled` dial noise as transient in the Supabase log poller** · verified 2026-07-04 · → [[../libraries/control-tower]]
 - **Add expression index for find_customers_by_phone last-10 comparison to unblock the Twilio marketing-sms webhook** · verified 2026-07-04 · → [[../tables/customers]]
 - **Fix daily segment refresh — whole-book coverage + staleness alarm** · verified 2026-07-04 · → [[../inngest/refresh-customer-segments]]
+- **God Mode — full-power box cockpit for the founder** · verified 2026-07-04 · → [[../lifecycles/god-mode]]
 - **Guard /api/portal against 300s upstream hangs (Appstle/Shopify fetch timeout)** · verified 2026-07-04 · → [[libraries/portal__helpers]]
 - **Product-intelligence Sonnet fetches: 600s AbortSignal timeout prevents 800s Lambda kills** · verified 2026-07-04 · → [[inngest/product-intelligence]]
 - **Bound every upstream fetch in the Next 16 middleware so a stalled upstream can't hit the 300s Vercel timeout** · verified 2026-07-04 · → [[libraries/supabase__middleware]]
