@@ -554,6 +554,24 @@ export async function listResearchShotChapters(
   return out;
 }
 
+/**
+ * Fetch ONE research_urls row by id — no workspace scope. Read-only surfaces that don't
+ * carry a workspace context (e.g. the Showcase teardown board at
+ * /showcase/tools/teardowns/examples/[id]) use this to look up a row by uuid alone. The
+ * caller enforces access (Showcase is password-gated; a UUID is not enumerable). Returns
+ * null when the row doesn't exist.
+ */
+export async function getResearchUrlById(id: string): Promise<ResearchUrl | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("research_urls")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getResearchUrlById: ${error.message}`);
+  return (data as ResearchUrl | null) ?? null;
+}
+
 /** Fetch ONE research_urls row (workspace-scoped). Returns null when it doesn't exist. */
 export async function getResearchUrl(workspaceId: string, id: string): Promise<ResearchUrl | null> {
   const admin = createAdminClient();
