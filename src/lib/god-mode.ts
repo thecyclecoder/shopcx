@@ -111,6 +111,10 @@ export type GodModeApprovalRow = {
   question_text: string | null;
   decided_at: string | null;
   created_at: string;
+  // When the 5-min "still waiting" nudge SMS fired for this pending row (null =
+  // not yet nudged). See `nudgeStalePendingApprovals`. We deliberately do NOT
+  // text on insert anymore — only if it sits unanswered 5+ min.
+  sms_notified_at: string | null;
 };
 
 export type GodModeSessionRow = {
@@ -364,23 +368,9 @@ export async function openApproval(
     .single();
   if (error || !data) throw new Error(`openApproval failed: ${error?.message ?? "no row"}`);
 
-  // Phase-5 SMS: every new pending approval pushes ONE SMS with the same
-  // persistent cockpit URL (deep-links to the Approvals tab). Fire-and-
-  // forget — a failed SMS never blocks the gate. Look up the session's
-  // cockpit_token here since the caller (the box gate) only has the
-  // session id.
-  const { data: session } = await admin
-    .from("god_mode_sessions")
-    .select("cockpit_token")
-    .eq("id", args.sessionId)
-    .maybeSingle();
-  void sendGodModeSMS(admin, {
-    workspaceId: args.workspaceId,
-    kind: "approval",
-    cockpitToken: (session as { cockpit_token: string | null } | null)?.cockpit_token ?? null,
-    context: { toolName: args.toolName, risk: args.risk },
-  });
-
+  // NO immediate SMS. The founder gets texted only if this row is STILL pending
+  // 5+ min later — the `nudgeStalePendingApprovals` sweep (box-worker 60s beat)
+  // owns that. Texting on every insert was the noise this replaced.
   return data as GodModeApprovalRow;
 }
 
@@ -620,11 +610,14 @@ export async function resolveFounderPhone(admin: Admin, workspaceId: string): Pr
  * make an integration test straightforward.
  *
  *   • arm      — "God mode armed on {ws}. Cockpit: {url}"
- *   • approval — "God mode: {tool} needs your approval ({risk}). Cockpit: {url}"
+ *   • approval — the 5-min REMINDER: "…has been waiting 5+ min for your approval"
+ *                (single) or "{n} approvals have been waiting 5+ min" (batch).
+ *                NOT sent on insert — only by `nudgeStalePendingApprovals` once a
+ *                card sits unanswered past the threshold.
  *   • done     — "God mode session ended ({reason}). Re-arm in the app if needed."
  *
  * "reply" is intentionally absent — the spec says plain box replies send NONE
- * (the Chat tab handles live watching). Only approvals + session-done push.
+ * (the Chat tab handles live watching). Only the approval nudge + session-done push.
  */
 export type GodModeSmsKind = "arm" | "approval" | "done";
 
@@ -639,7 +632,7 @@ export async function sendGodModeSMS(
     workspaceId: string;
     kind: GodModeSmsKind;
     cockpitToken?: string | null;
-    context?: { toolName?: string; risk?: GodModeApprovalRisk; reason?: string };
+    context?: { toolName?: string; risk?: GodModeApprovalRisk; reason?: string; count?: number };
   },
 ): Promise<{ sent: boolean; reason?: string }> {
   try {
@@ -651,9 +644,15 @@ export async function sendGodModeSMS(
     if (args.kind === "arm") {
       text = `God mode armed. Cockpit:`;
     } else if (args.kind === "approval") {
-      const tool = args.context?.toolName ?? "Tool";
-      const risk = args.context?.risk ?? "write";
-      text = `God mode: ${tool} needs your approval (${risk}). Approvals tab:`;
+      // The 5-min reminder (never sent on insert — see nudgeStalePendingApprovals).
+      const count = args.context?.count ?? 1;
+      if (count > 1) {
+        text = `God mode: ${count} approvals have been waiting 5+ min for your reply. Approvals tab:`;
+      } else {
+        const tool = args.context?.toolName ?? "An approval";
+        const risk = args.context?.risk ?? "write";
+        text = `God mode: ${tool} (${risk}) has been waiting 5+ min for your approval. Approvals tab:`;
+      }
     } else {
       const reason = args.context?.reason ?? "ended";
       text = `God mode session ${reason}. Re-arm in the app if needed.`;
@@ -665,6 +664,82 @@ export async function sendGodModeSMS(
   } catch (e) {
     return { sent: false, reason: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Text the founder only if an approval has sat unanswered this long. */
+export const APPROVAL_NUDGE_AFTER_MS = 5 * 60 * 1000;
+
+/**
+ * The 5-minute approval NUDGE sweep — one pass, run on the box-worker's 60s
+ * god-mode beat (next to `reapGodModeSessions`).
+ *
+ * The founder no longer gets a text on every approval (`openApproval` sends
+ * nothing). Instead: for each ARMED session holding a `pending` approval that has
+ * been un-answered for ≥ `APPROVAL_NUDGE_AFTER_MS` AND not yet nudged
+ * (`sms_notified_at IS NULL`), send ONE reminder SMS (batched — "N approvals
+ * waiting" when several piled up) and stamp `sms_notified_at` so it never
+ * re-texts the same rows. A brand-new card that later crosses 5 min re-nudges.
+ *
+ *   • Only ARMED sessions with a live cockpit_token nudge. A disarmed/expired
+ *     session's leftover pendings are dead — we stamp them notified (no SMS) so
+ *     the sweep stops scanning them.
+ *   • We stamp on SUCCESSFUL send only; a transient Twilio failure leaves the row
+ *     un-stamped so the next beat retries (no message was delivered → no spam).
+ *
+ * Best-effort + bounded; never throws into the poll loop. Returns { nudged }.
+ */
+export async function nudgeStalePendingApprovals(admin: Admin): Promise<{ nudged: number }> {
+  const cutoff = new Date(Date.now() - APPROVAL_NUDGE_AFTER_MS).toISOString();
+  const { data: stale } = await admin
+    .from("god_mode_approvals")
+    .select("id, session_id, workspace_id, tool_name, risk, created_at")
+    .eq("status", "pending")
+    .is("sms_notified_at", null)
+    .lt("created_at", cutoff)
+    .order("created_at", { ascending: true })
+    .limit(200);
+  const rows = (stale as { id: string; session_id: string; workspace_id: string; tool_name: string; risk: GodModeApprovalRisk }[] | null) ?? [];
+  if (!rows.length) return { nudged: 0 };
+
+  // One SMS per session (batch if several piled up).
+  const bySession = new Map<string, typeof rows>();
+  for (const r of rows) {
+    const arr = bySession.get(r.session_id) ?? [];
+    arr.push(r);
+    bySession.set(r.session_id, arr);
+  }
+
+  let nudged = 0;
+  const stampNow = () => new Date().toISOString();
+  for (const [sessionId, group] of bySession) {
+    const ids = group.map((g) => g.id);
+    const { data: session } = await admin
+      .from("god_mode_sessions")
+      .select("status, cockpit_token, workspace_id")
+      .eq("id", sessionId)
+      .maybeSingle();
+    const s = session as { status: string; cockpit_token: string | null; workspace_id: string } | null;
+
+    // Dead session's leftover pendings — suppress forever (no SMS).
+    if (!s || s.status !== "armed" || !s.cockpit_token) {
+      await admin.from("god_mode_approvals").update({ sms_notified_at: stampNow() }).in("id", ids);
+      continue;
+    }
+
+    const first = group[0];
+    const res = await sendGodModeSMS(admin, {
+      workspaceId: s.workspace_id,
+      kind: "approval",
+      cockpitToken: s.cockpit_token,
+      context: { toolName: first.tool_name, risk: first.risk, count: group.length },
+    });
+    // Stamp only on a delivered SMS — a transient failure retries next beat.
+    if (res.sent) {
+      await admin.from("god_mode_approvals").update({ sms_notified_at: stampNow() }).in("id", ids);
+      nudged++;
+    }
+  }
+  return { nudged };
 }
 
 /**

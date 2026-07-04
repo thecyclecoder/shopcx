@@ -23,6 +23,7 @@ The approvals queue+history for a [[god_mode_sessions]] session. One row per BLO
 | `question_text` | `text` | ✓ | Populated only on `status='asked'` — the founder's question back to the box. |
 | `decided_at` | `timestamptz` | ✓ | Stamped when status leaves `pending`. |
 | `created_at` | `timestamptz` | — | default `now()` |
+| `sms_notified_at` | `timestamptz` | ✓ | When the **5-min nudge SMS** fired for this row (NULL = not yet nudged). The founder is NOT texted on insert anymore — only if a card sits `pending` unanswered for `APPROVAL_NUDGE_AFTER_MS` (5 min). The 60s `nudgeStalePendingApprovals` sweep ([[../libraries/god-mode]]) stamps this so it never re-texts the same rows. See [[../lifecycles/god-mode]] § Phase 5. |
 
 **Indexes:**
 - `god_mode_approvals_gate_poll_idx` — `(id, status)`. Hot path — the Phase-2 gate's poll loop.

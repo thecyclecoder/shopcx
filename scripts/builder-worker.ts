@@ -18950,11 +18950,15 @@ async function main() {
         lastGodModeReap = Date.now();
         godModeReapInFlight = true;
         try {
-          const { reapGodModeSessions } = await import("../src/lib/god-mode");
+          const { reapGodModeSessions, nudgeStalePendingApprovals } = await import("../src/lib/god-mode");
           const r = await reapGodModeSessions(db);
           if (r.forceDisarmed || r.idleExpired) {
             console.log(`[god-mode reaper] force=${r.forceDisarmed} idle=${r.idleExpired}`);
           }
+          // Same 60s beat: text the founder only about approvals left unanswered
+          // 5+ min (no more per-approval spam — see nudgeStalePendingApprovals).
+          const n = await nudgeStalePendingApprovals(db);
+          if (n.nudged) console.log(`[god-mode nudge] texted ${n.nudged} stale approval(s)`);
         } catch (e) {
           console.error("[god-mode reaper] sweep failed (continuing):", e instanceof Error ? e.message : e);
         } finally {

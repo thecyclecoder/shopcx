@@ -197,10 +197,10 @@ Resolved by `resolveFounderPhone(admin, workspaceId)` in [[../libraries/god-mode
 Send is best-effort — every emit site fires-and-forgets so a Twilio outage never blocks a mutation. Delivery goes through `sendSMS()` in [[../libraries/twilio]] (the workspace's `twilio_phone_number` is the From; body ends with the cockpit URL where relevant).
 
 - **arm** — `armSession()` fires ONE SMS with the cockpit URL. `"God mode armed. Cockpit:\n\n<url>"`. A re-arm on an already-armed workspace refreshes the token AND resends the SMS with the refreshed URL.
-- **approval** — `openApproval()` fires ONE SMS whenever a new `god_mode_approvals` row lands (called by the [[god-mode-permission-gate]] on every non-safe tool call). `"God mode: <tool> needs your approval (<risk>). Approvals tab:\n\n<url>"`. **Same cockpit URL every time** — one persistent cockpit per session, deep-linking to the Approvals tab.
+- **approval (5-min nudge, NOT per-approval)** — `openApproval()` sends NOTHING on insert. Instead the 60s `nudgeStalePendingApprovals` sweep texts ONCE only if an approval has sat `pending` and un-answered for `APPROVAL_NUDGE_AFTER_MS` (5 min): `"God mode: <tool> (<risk>) has been waiting 5+ min for your approval. Approvals tab:\n\n<url>"`, or batched `"God mode: <n> approvals have been waiting 5+ min…"` when several piled up. `god_mode_approvals.sms_notified_at` is stamped on send so the same rows never re-text (a new card that later crosses 5 min re-nudges). **Same cockpit URL every time** — deep-links to the Approvals tab. This replaced the old fire-on-every-insert behavior (too noisy — every gated call pinged the founder). With plan-scoped approvals most calls auto-allow and never create a card at all, so in practice the only thing that can nudge is a plan card, a destructive card, or an un-planned write the founder left sitting.
 - **done** — `disarmSession()` on the founder's explicit disarm, AND the reaper on idle/ceiling expiry. `"God mode session <reason>. Re-arm in the app if needed."` No URL — the cockpit is dead.
 
-**Not on plain replies.** A mid-turn assistant reply pushes NO SMS — the Chat tab handles live watching. The spec's rule: approvals + done ONLY.
+**Not on plain replies.** A mid-turn assistant reply pushes NO SMS — the Chat tab handles live watching. The rule now: the 5-min approval nudge + done ONLY.
 
 ### Reaper — the poll-loop beat
 
@@ -213,6 +213,8 @@ Send is best-effort — every emit site fires-and-forgets so a Twilio outage nev
    - Neither → idle-expire. Same terminal state as force-disarm, reason `"idled out"`.
 
 Sliding-TTL renewal is orthogonal: every Phase-3 GET/message/approve + every Phase-4 GET/message/approve + every runGodModeJob turn calls `bumpActivity` (extends `token_expires_at` by `SLIDING_TTL_MS`). An actively-used session stays hot; the reaper only touches truly-idle ones.
+
+**The same 60s beat also runs `nudgeStalePendingApprovals(admin)`** — the 5-min approval nudge (§ SMS above). It's a sibling of the reaper on the identical throttle/in-flight-guarded beat, so idle-expiry and the "you left an approval waiting" reminder share one loop.
 
 **Why a poll beat, not an Inngest fn:** the box already has a 1-minute poll cadence for other reapers (the stale-session one); adding this beat is a 20-line diff. No new deploy target, no Inngest fn/dashboard page, no cross-boundary auth.
 
