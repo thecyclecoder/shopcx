@@ -19,7 +19,9 @@ import {
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
   isTransientShopifyWebhookHmacFailure,
+  isTransientSupabaseEdgeHtmlBody,
   isTransientSupabaseLogNoise,
+  isTransientUndiciHeadersTimeout,
 } from "./error-feed";
 
 // Regression fixture: the leaked vercel:ebdf493a37c60c34 blob — a bare Lambda lifecycle
@@ -433,4 +435,151 @@ test("isTransientClientNetworkAbort returns false on empty / nullish message", (
   assert.equal(isTransientClientNetworkAbort(undefined, undefined), false);
   assert.equal(isTransientClientNetworkAbort("", ""), false);
   assert.equal(isTransientClientNetworkAbort("   ", null), false);
+});
+
+// ── isTransientUndiciHeadersTimeout (error-feed-drop-undici-headers-timeout-noise) ──
+// Node's undici HTTP client emits `TypeError: fetch failed` with cause
+// `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` when an outbound request our server
+// made started fine but the upstream never returned response headers before the network
+// timeout tripped — a momentary upstream stall the next batch self-heals. Classifying it
+// transient auto-resolves a first sighting (recorded, not paged); a chronic upstream
+// outage would recur within the window and still surface. The false positive that opened
+// Control Tower `vercel:1f9767027e5314fc`.
+
+test("isTransientUndiciHeadersTimeout matches the vercel:1f9767027e5314fc HeadersTimeoutError blob", () => {
+  const blob = `TypeError: fetch failed
+    at node:internal/deps/undici/undici:12345:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+  [cause]: HeadersTimeoutError: Headers Timeout Error
+      at Timeout.onParserTimeout [as callback] (node:internal/deps/undici/undici:9999:1)
+      code: 'UND_ERR_HEADERS_TIMEOUT'`;
+  assert.equal(isTransientUndiciHeadersTimeout(blob), true);
+});
+
+test("isTransientUndiciHeadersTimeout matches when either cause marker is present", () => {
+  assert.equal(
+    isTransientUndiciHeadersTimeout("TypeError: fetch failed — [cause]: HeadersTimeoutError"),
+    true,
+  );
+  assert.equal(
+    isTransientUndiciHeadersTimeout("TypeError: fetch failed — code: 'UND_ERR_HEADERS_TIMEOUT'"),
+    true,
+  );
+});
+
+test("isTransientUndiciHeadersTimeout KEEPS an unrelated fetch-failed message (different cause)", () => {
+  // A real code-level TypeError with a different cause is an application bug, not undici
+  // outbound-fetch noise — stay captured / paged on first sighting.
+  assert.equal(
+    isTransientUndiciHeadersTimeout("TypeError: fetch failed — [cause]: ENOTFOUND example.com"),
+    false,
+  );
+  assert.equal(
+    isTransientUndiciHeadersTimeout("TypeError: fetch failed — [cause]: certificate has expired"),
+    false,
+  );
+  assert.equal(isTransientUndiciHeadersTimeout("TypeError: fetch failed"), false);
+});
+
+test("isTransientUndiciHeadersTimeout KEEPS the cause marker WITHOUT the fetch-failed prefix", () => {
+  // A HeadersTimeoutError surfacing outside the undici-fetch path (e.g. a raw HTTP client
+  // that reuses the same code) is not the well-known outbound-fetch class this classifier
+  // scopes — REQUIRE both markers.
+  assert.equal(
+    isTransientUndiciHeadersTimeout("HeadersTimeoutError: Headers Timeout Error"),
+    false,
+  );
+  assert.equal(isTransientUndiciHeadersTimeout("code: 'UND_ERR_HEADERS_TIMEOUT'"), false);
+});
+
+test("isTransientUndiciHeadersTimeout returns false on empty / nullish input", () => {
+  assert.equal(isTransientUndiciHeadersTimeout(null), false);
+  assert.equal(isTransientUndiciHeadersTimeout(undefined), false);
+  assert.equal(isTransientUndiciHeadersTimeout(""), false);
+  assert.equal(isTransientUndiciHeadersTimeout("   "), false);
+});
+
+// ── isTransientSupabaseEdgeHtmlBody (error-feed-drop-supabase-edge-html-body-noise) ──
+// Supabase's edge momentarily unreachable → Cloudflare returns a `521 Web server is down`
+// HTML error page instead of JSON. supabase-js surfaces that raw HTML as an error message,
+// and callers like `computePlatformScorecard` throw with a message like
+// `... upsert failed: ? <!DOCTYPE html>...supabase.co | 521: Web server is`. The next daily
+// beat idempotently heals via the done-guard + snapshot upsert. Classifying it transient
+// auto-resolves a first sighting (recorded, not paged); a chronic edge outage would recur
+// within the window and still surface. The false positive that opened Control Tower
+// `vercel:a0844c1b5be72bb7`.
+
+test("isTransientSupabaseEdgeHtmlBody matches the vercel:a0844c1b5be72bb7 521 HTML body blob", () => {
+  const blob = `platform_scorecard_snapshots upsert failed: ? <!DOCTYPE html>
+<html lang="en-US">
+<head><title>supabase.co | 521: Web server is down</title></head>
+<body>...supabase.co | 521: Web server is down...</body>
+</html>`;
+  assert.equal(isTransientSupabaseEdgeHtmlBody(blob), true);
+});
+
+test("isTransientSupabaseEdgeHtmlBody matches each Cloudflare 5xx status word (521-524 / 'Web server')", () => {
+  for (const marker of ["Web server", "521", "522", "523", "524"]) {
+    assert.equal(
+      isTransientSupabaseEdgeHtmlBody(
+        `caller failed: <!DOCTYPE html> ... project.supabase.co ... ${marker} ...`,
+      ),
+      true,
+      `marker=${marker}`,
+    );
+  }
+});
+
+test("isTransientSupabaseEdgeHtmlBody KEEPS a real supabase-js JSON error (PostgrestError shape)", () => {
+  // A structured supabase-js error is a real bug (constraint, RLS, bad payload) — stay
+  // captured / paged on first sighting. No `<!DOCTYPE html>` in these shapes.
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `{ code: '23505', message: 'duplicate key value violates unique constraint', details: null, hint: null }`,
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `PostgrestError: JWT expired (code=PGRST301) — supabase.co /rest/v1/customers`,
+    ),
+    false,
+  );
+});
+
+test("isTransientSupabaseEdgeHtmlBody KEEPS a bare <!DOCTYPE html> with no supabase.co marker", () => {
+  // An HTML-parse failure from an UNRELATED upstream (Shopify page, Meta login wall, our
+  // own 500 page) also carries `<!DOCTYPE html>`. Without the `supabase.co` marker it's not
+  // the supabase-edge class — stay captured / paged so a genuinely unrelated HTML-body bug
+  // still surfaces.
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `<!DOCTYPE html><html><head><title>521: Web server is down</title></head></html>`,
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `Unexpected HTML from shopify.com/admin: <!DOCTYPE html> ... 502 Bad Gateway ...`,
+    ),
+    false,
+  );
+});
+
+test("isTransientSupabaseEdgeHtmlBody KEEPS a supabase.co HTML body WITHOUT a Cloudflare 5xx marker", () => {
+  // A 4xx / auth-wall HTML body from the supabase edge (e.g. 403 / rate limit page) is a
+  // real classify-and-look failure, not the transient CF 5xx class.
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `<!DOCTYPE html> ... project.supabase.co ... 403 Forbidden ...`,
+    ),
+    false,
+  );
+});
+
+test("isTransientSupabaseEdgeHtmlBody returns false on empty / nullish input", () => {
+  assert.equal(isTransientSupabaseEdgeHtmlBody(null), false);
+  assert.equal(isTransientSupabaseEdgeHtmlBody(undefined), false);
+  assert.equal(isTransientSupabaseEdgeHtmlBody(""), false);
+  assert.equal(isTransientSupabaseEdgeHtmlBody("   "), false);
 });
