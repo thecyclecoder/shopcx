@@ -239,7 +239,11 @@ export default function Sidebar({
     }
   }, [pathname]);
 
-  // Load ticket views + counts — refetch on navigation + poll every 30s
+  // Load ticket views + counts — poll every 60s.
+  // NOTE: intentionally NOT depending on `pathname` — see the poll comment at the
+  // end of this effect. Route changes must not tear down the interval and re-fire
+  // the whole fan-out (that was the dominant multiplier on the RLS `set_config`
+  // hot query — the failure mode this session addresses).
   useEffect(() => {
     const fetchCounts = () => {
       fetch(`/api/workspaces/${workspace.id}/ticket-views`)
@@ -324,15 +328,22 @@ export default function Sidebar({
     // Poll every 60s: this effect fires ~13 authenticated API requests per tick
     // (up to ~5 more for owner/admin), each making several PostgREST round-trips
     // that re-run the per-request RLS set_config statement — the dominant
-    // high_call_volume family. Prior widen 10s→30s addressed queryid
-    // -7821780334453251234; the DB Health Agent flagged a follow-on
-    // high_call_volume offender (dbhealth:slowq:-7726440967385220442), so widen
-    // once more. The sidebar is always-mounted for every user on every dashboard
-    // page and dominates authenticated round-trips; badge counts tolerate 60s
-    // staleness fine (the ticket views + NotificationBell already poll at 60s+).
+    // high_call_volume family. Prior widens 10s→30s (queryid -7821780334453251234)
+    // and 30s→60s (queryid -7726440967385220442) each addressed a follow-on offender;
+    // the DB Health Agent then flagged queryid 2430642232831032083 (same
+    // set_config-class high_call_volume pattern, signature dbhealth:slowq:2430642232831032083).
+    // Widening further past 60s hurts badge freshness; the remaining lever at
+    // this level is to stop RE-FIRING the fan-out on every navigation. The prior
+    // dep list `[workspace.id, pathname]` tore this interval down on each route
+    // change and immediately re-issued all 13-17 requests — a large multiplier
+    // on top of the 60s cadence for any user who clicks between dashboard pages.
+    // Dropping `pathname` from the deps keeps the interval alive across
+    // navigations while the 60s poll still covers freshness. Counts change on
+    // events, not routes, so nothing that reads them needed the route-driven
+    // refresh.
     const interval = setInterval(fetchCounts, 60000);
     return () => clearInterval(interval);
-  }, [workspace.id, pathname]);
+  }, [workspace.id]);
 
   // Prevent body scroll when sidebar is open on mobile
   useEffect(() => {
