@@ -124,6 +124,15 @@ Read-only against everything (no repo writes, no DB writes, no PR). The worker (
 - [[platform-director]] `escalateDiagnosisToCeo` ← the escalation plumbing (CEO inbox).
 - `scripts/builder-worker.ts` `runDeployReviewJob` — the Phase-2 box session that runs the causal review.
 
+## Status / open work
+
+- [[../specs/reva-box-session-causal-rollback]] Phase 5 — the backtest harness `scripts/_backtest-reva-box.ts` LANDS the go-live gate for flipping `DEPLOY_GUARDIAN_AUTOREVERT_MODE` from `'off'` to `'box'`. Curated fixture set:
+  - **2026-07-04 false-revert set** (all must return `keep`): portal-external-fetch-timeout-guard (merge `3886045`), error-feed-drop-undici-headers-timeout-noise (`f3240b8`), error-feed-drop-supabase-edge-html-body-noise (`5686a78`), error-feed-scope-supabase-auth-504-gateway-timeout-transient (`708dd73`).
+  - **Historical false-revert classes** (all must return `keep`): build-card-lifecycle-timeline (fold-gate diff mis-attributed to a `supabase-logs` burst + Appstle `UserGeneratedError`), blog-pixel-tracking (mis-attributed to `kpi_drift:*:monthly`), noop-pipeline-test-6 (mis-attributed to weekly-aggregate `kpi_drift`).
+  - **Synthetic positive** (must return `revert`): a same-surface high-count error whose sample.path is a portal handler the diff literally touched.
+- **Dry-run** (`npx tsx scripts/_backtest-reva-box.ts`) is CI-safe — prints each fixture's brief for the operator to eyeball. **Live** (`--run`) spawns `claude -p` per fixture on Max, parses the returned JSON verdict, and exits non-zero on any mismatch. Wall-clock ≈ 15 min for the full set.
+- **Go-live gate:** every fixture must PASS with `--run` before the operator flips `DEPLOY_GUARDIAN_AUTOREVERT_MODE=box` in the box's systemd EnvironmentFile + restarts the worker. Until then the guardian is in surface-only mode (see [[#Constants]] the kill-switch env) — Reva still runs, records `findings.reva_review`, and writes activity, but never calls `revertDeployMerge`.
+
 ## Related
 
-[[../specs/deploy-health-rollback-guardian]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]] · [[../lifecycles/spec-goal-branch-pm-flow]]
+[[../specs/deploy-health-rollback-guardian]] · [[../specs/reva-box-session-causal-rollback]] · [[../tables/deploy_watches]] · [[../inngest/deploy-guardian-cron]] · [[github-pr-resolve]] · [[control-tower]] · [[director-activity]] · [[../tables/error_events]] · [[../tables/loop_alerts]] · [[../goals/devops-director]] · [[../specs/agent-outage-resilience]] · [[../specs/regression-agent]] · [[../lifecycles/spec-goal-branch-pm-flow]]
