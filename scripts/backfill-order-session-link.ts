@@ -24,12 +24,14 @@
  *   npx tsx scripts/backfill-order-session-link.ts --apply          # recent, write
  *   npx tsx scripts/backfill-order-session-link.ts --all-time --apply  # all-time, write
  */
-import { createAdminClient } from "./_bootstrap";
+import { createAdminClient, pgClient } from "./_bootstrap";
 
 const APPLY = process.argv.includes("--apply");
 const ALL_TIME = process.argv.includes("--all-time");
 const RECENT_DAYS = 30;
 const PAGE = 1000;
+// Order rows written per set-based UPDATE ... FROM (VALUES ...) statement.
+const WRITE_BATCH = 1000;
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -38,7 +40,9 @@ async function fetchOrderPlacedLinks(
   sinceIso: string | null,
 ): Promise<Map<string, { session_id: string; anonymous_id: string | null }>> {
   const byOrder = new Map<string, { session_id: string; anonymous_id: string | null }>();
-  for (let page = 0; page < 200; page++) {
+  // No hard page cap — the short-page break terminates naturally, and a giant
+  // catalogue (--all-time) must not be silently truncated at 200K events.
+  for (let page = 0; ; page++) {
     let q = admin
       .from("storefront_events")
       .select("session_id, anonymous_id, meta, created_at, id")
@@ -72,39 +76,71 @@ async function main() {
   const links = await fetchOrderPlacedLinks(admin, sinceIso);
   console.log(`Found ${links.size} order_placed events with a session link.`);
 
+  const orderIds = [...links.keys()];
+  const pg = pgClient();
+  await pg.connect();
   let updated = 0;
-  let missing = 0;
-  const samples: string[] = [];
-  for (const [orderId, link] of links) {
-    // Only orders missing the link (set-when-null).
-    const { data: order } = await admin
-      .from("orders")
-      .select("id, order_number, session_id")
-      .eq("id", orderId)
-      .maybeSingle();
-    if (!order) {
-      missing += 1;
-      continue;
-    }
-    if (order.session_id) continue; // already linked
-    if (samples.length < 10) samples.push(`${order.order_number} → session ${link.session_id}`);
-    if (APPLY) {
-      await admin
-        .from("orders")
-        .update({ session_id: link.session_id, anonymous_id: link.anonymous_id })
-        .eq("id", orderId)
-        .is("session_id", null);
-    }
-    updated += 1;
-  }
+  try {
+    // How many of those order_ids still exist (missing = links − existing).
+    const { rows: existRows } = await pg.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM orders WHERE id = ANY($1::uuid[])`,
+      [orderIds],
+    );
+    const existing = Number(existRows[0]?.n ?? 0);
+    const missing = links.size - existing;
 
-  console.log(`\nOrders ${APPLY ? "updated" : "to update"}: ${updated}`);
-  if (missing) console.log(`order_placed events whose order_id no longer exists: ${missing}`);
-  if (samples.length) {
-    console.log("Samples:");
-    for (const s of samples) console.log(`  ${s}`);
+    // How many still need the link (set-when-null) — the true to-update count,
+    // computed set-based instead of a per-order existence SELECT.
+    const { rows: pendRows } = await pg.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM orders WHERE id = ANY($1::uuid[]) AND session_id IS NULL`,
+      [orderIds],
+    );
+    const toUpdate = Number(pendRows[0]?.n ?? 0);
+
+    // Samples (order_number → session), no per-row existence probe.
+    const { rows: sampleRows } = await pg.query<{ id: string; order_number: string | null }>(
+      `SELECT id, order_number FROM orders WHERE id = ANY($1::uuid[]) AND session_id IS NULL LIMIT 10`,
+      [orderIds],
+    );
+    const samples = sampleRows.map((r) => `${r.order_number} → session ${links.get(r.id)?.session_id}`);
+
+    if (APPLY) {
+      // Collapse writes to one UPDATE ... FROM (VALUES ...) per batch. The
+      // `session_id IS NULL` guard makes it a no-op on already-linked rows
+      // (idempotent) — no need for the old existence SELECT.
+      for (let i = 0; i < orderIds.length; i += WRITE_BATCH) {
+        const chunk = orderIds.slice(i, i + WRITE_BATCH);
+        const params: unknown[] = [];
+        const tuples: string[] = [];
+        let p = 1;
+        for (const oid of chunk) {
+          const link = links.get(oid)!;
+          tuples.push(`($${p++}::uuid, $${p++}::uuid, $${p++}::text)`);
+          params.push(oid, link.session_id, link.anonymous_id);
+        }
+        const res = await pg.query(
+          `UPDATE orders AS o
+              SET session_id = v.sid, anonymous_id = v.aid
+             FROM (VALUES ${tuples.join(", ")}) AS v(oid, sid, aid)
+            WHERE o.id = v.oid AND o.session_id IS NULL`,
+          params,
+        );
+        updated += res.rowCount ?? 0;
+      }
+    } else {
+      updated = toUpdate;
+    }
+
+    console.log(`\nOrders ${APPLY ? "updated" : "to update"}: ${updated}`);
+    if (missing) console.log(`order_placed events whose order_id no longer exists: ${missing}`);
+    if (samples.length) {
+      console.log("Samples:");
+      for (const s of samples) console.log(`  ${s}`);
+    }
+    if (!APPLY) console.log("\nDry-run only. Re-run with --apply to write.");
+  } finally {
+    await pg.end();
   }
-  if (!APPLY) console.log("\nDry-run only. Re-run with --apply to write.");
 }
 
 main().catch((e) => {

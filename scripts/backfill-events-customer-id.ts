@@ -25,107 +25,72 @@ for (const line of readFileSync(envPath, "utf8").split("\n")) {
   if (!process.env[k]) process.env[k] = t.slice(eq + 1);
 }
 
-import { createClient } from "@supabase/supabase-js";
+import { pgClient } from "./_bootstrap";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
-const PROFILE_BATCH = 1000;
+// klaviyo_profile_ids per set-based UPDATE. Chunking the join keeps each
+// statement's lock footprint on the 3.2M-row profile_events table bounded
+// (instead of one giant table-wide UPDATE), while still doing the
+// profile→customer mapping as a single SQL join per statement — not one
+// UPDATE per (customer, 1000-profile) task as the old loop did.
+const PROFILE_BATCH = 2000;
 
 async function main() {
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } },
-  );
-
-  // Build the list of (profile_id, customer_id) pairs from staging — paginated
-  console.log("Loading resolved profile→customer mappings from staging...");
-  const pairs: Array<{ profile_id: string; customer_id: string }> = [];
-  let lastId: string | null = null;
-  while (true) {
-    let q = supabase.from("klaviyo_profile_staging")
-      .select("klaviyo_profile_id, customer_id")
-      .eq("workspace_id", WS)
-      .not("customer_id", "is", null)
-      .order("klaviyo_profile_id", { ascending: true })
-      .limit(1000);
-    if (lastId) q = q.gt("klaviyo_profile_id", lastId);
-    const { data, error } = await q;
-    if (error) throw new Error(`staging fetch: ${error.message}`);
-    if (!data || data.length === 0) break;
-    for (const r of data) {
-      if (r.customer_id) pairs.push({ profile_id: r.klaviyo_profile_id, customer_id: r.customer_id });
-    }
-    lastId = data[data.length - 1].klaviyo_profile_id;
-    if (data.length < 1000) break;
-  }
-  console.log(`Resolved pairs to apply: ${pairs.length}`);
-
-  // Update events in batches — group by customer_id so we can do
-  // bulk UPDATE ... WHERE klaviyo_profile_id IN (...) for each customer
-  // separately. (A single CASE statement across thousands of customers
-  // would be slower than per-customer batched updates.)
-  const byCustomer = new Map<string, string[]>();
-  for (const p of pairs) {
-    if (!byCustomer.has(p.customer_id)) byCustomer.set(p.customer_id, []);
-    byCustomer.get(p.customer_id)!.push(p.profile_id);
-  }
-  console.log(`Distinct customer_ids: ${byCustomer.size}`);
-
-  // Build flat list of (customer_id, profile_id_chunk) tasks
-  const tasks: Array<{ customerId: string; chunk: string[] }> = [];
-  for (const [customerId, profileIds] of byCustomer.entries()) {
-    for (let j = 0; j < profileIds.length; j += PROFILE_BATCH) {
-      tasks.push({ customerId, chunk: profileIds.slice(j, j + PROFILE_BATCH) });
-    }
-  }
-  console.log(`Total update tasks: ${tasks.length}`);
-
-  // Run with concurrency to amortize roundtrip latency. 15 instead of
-  // 30 — the original run crashed after 18 min on a transient fetch
-  // error; lower concurrency reduces the rate of those.
-  const CONCURRENCY = 15;
-  const RETRIES = 3;
-  let totalUpdated = 0;
-  let completed = 0;
-  let totalErrors = 0;
+  const pg = pgClient();
+  await pg.connect();
   const t0 = Date.now();
+  try {
+    // Distinct resolved profile_ids from staging — the set-based join maps
+    // each to its customer_id in SQL; we only pull the ids here to chunk the
+    // UPDATE and keep locks sane.
+    console.log("Loading resolved profile ids from staging...");
+    const idsRes = await pg.query<{ klaviyo_profile_id: string }>(
+      `SELECT DISTINCT klaviyo_profile_id
+         FROM klaviyo_profile_staging
+        WHERE workspace_id = $1 AND customer_id IS NOT NULL
+        ORDER BY klaviyo_profile_id`,
+      [WS],
+    );
+    const profileIds = idsRes.rows.map((r) => r.klaviyo_profile_id);
+    const totalBatches = Math.ceil(profileIds.length / PROFILE_BATCH);
+    console.log(`Resolved profile ids: ${profileIds.length} → ${totalBatches} batch(es) of ${PROFILE_BATCH}`);
 
-  async function runOne(t: { customerId: string; chunk: string[] }) {
-    for (let attempt = 1; attempt <= RETRIES; attempt++) {
-      try {
-        const { error, count } = await supabase
-          .from("profile_events")
-          .update({ customer_id: t.customerId }, { count: "exact" })
-          .eq("workspace_id", WS)
-          .is("customer_id", null)
-          .in("klaviyo_profile_id", t.chunk);
-        if (error) throw new Error(`supabase: ${error.message}`);
-        totalUpdated += count || 0;
-        completed++;
-        if (completed % 1000 === 0) {
-          const elapsedMin = ((Date.now() - t0) / 60_000).toFixed(1);
-          console.log(`  ${completed}/${tasks.length} tasks | events updated: ${totalUpdated} | errors: ${totalErrors} | ${elapsedMin}min`);
-        }
-        return;
-      } catch (err) {
-        totalErrors++;
-        if (attempt >= RETRIES) {
-          console.error(`  ✗ ${t.customerId} failed after ${RETRIES} attempts:`, err instanceof Error ? err.message : err);
-          completed++;
-          return;
-        }
-        await new Promise(res => setTimeout(res, 1000 * attempt));  // exponential-ish
+    let totalUpdated = 0;
+    let completed = 0;
+
+    // One set-based join-update per profile-id batch:
+    //   UPDATE profile_events pe SET customer_id = s.customer_id
+    //   FROM klaviyo_profile_staging s
+    //   WHERE pe.klaviyo_profile_id = s.klaviyo_profile_id
+    //     AND pe.workspace_id = s.workspace_id
+    //     AND pe.customer_id IS NULL          -- idempotent, set-when-null
+    //     AND pe.klaviyo_profile_id = ANY($2) -- lock-bounding chunk
+    for (let i = 0; i < profileIds.length; i += PROFILE_BATCH) {
+      const chunk = profileIds.slice(i, i + PROFILE_BATCH);
+      const res = await pg.query(
+        `UPDATE profile_events pe
+            SET customer_id = s.customer_id
+           FROM klaviyo_profile_staging s
+          WHERE pe.klaviyo_profile_id = s.klaviyo_profile_id
+            AND pe.workspace_id = s.workspace_id
+            AND s.workspace_id = $1
+            AND s.customer_id IS NOT NULL
+            AND pe.customer_id IS NULL
+            AND pe.klaviyo_profile_id = ANY($2::text[])`,
+        [WS, chunk],
+      );
+      totalUpdated += res.rowCount ?? 0;
+      completed++;
+      if (completed % 50 === 0 || completed === totalBatches) {
+        const elapsedMin = ((Date.now() - t0) / 60_000).toFixed(1);
+        console.log(`  ${completed}/${totalBatches} batches | events updated: ${totalUpdated} | ${elapsedMin}min`);
       }
     }
-  }
 
-  // Process in waves of CONCURRENCY
-  for (let i = 0; i < tasks.length; i += CONCURRENCY) {
-    const wave = tasks.slice(i, i + CONCURRENCY);
-    await Promise.all(wave.map(runOne));
+    console.log(`\n✓ DONE — batches=${totalBatches} events_updated=${totalUpdated} time=${((Date.now() - t0) / 60_000).toFixed(1)}min`);
+  } finally {
+    await pg.end();
   }
-
-  console.log(`\n✓ DONE — tasks=${tasks.length} events_updated=${totalUpdated} time=${((Date.now() - t0) / 60_000).toFixed(1)}min`);
 }
 
 main().catch(err => { console.error("FATAL:", err); process.exit(1); });

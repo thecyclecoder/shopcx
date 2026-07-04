@@ -29,8 +29,8 @@ for (const line of readFileSync(envPath, "utf8").split("\n")) {
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { decrypt } from "../src/lib/crypto";
 import { fetchZipDemographics, timezoneFromState } from "../src/lib/census";
-import {
 import { HAIKU_MODEL } from "../src/lib/ai-models";
+import {
   analyzeOrderHistory, lifeStageFromAgeRange,
   type AgeRange, type OrderInput, type SubscriptionInput,
 } from "../src/lib/customer-demographics";
@@ -170,22 +170,48 @@ function extractState(c: Customer): string | null {
   return typeof s === "string" && s.trim() ? s.trim() : null;
 }
 
-async function loadOrdersAndSubs(customerId: string): Promise<{ orders: OrderInput[]; subscriptions: SubscriptionInput[] }> {
+/**
+ * Bulk-load orders + subscriptions for a whole chunk of customers in TWO reads
+ * (one `.in("customer_id", …)` each) instead of the old per-customer N+1
+ * (2 reads × ~200K customers). Grouped in JS into per-customer maps.
+ */
+async function loadOrdersAndSubsForChunk(
+  customerIds: string[],
+): Promise<{ ordersBy: Map<string, OrderInput[]>; subsBy: Map<string, SubscriptionInput[]> }> {
+  const ordersBy = new Map<string, OrderInput[]>();
+  const subsBy = new Map<string, SubscriptionInput[]>();
+  if (customerIds.length === 0) return { ordersBy, subsBy };
+
   const [ordersRes, subsRes] = await Promise.all([
-    admin.from("orders").select("total_cents, created_at, line_items").eq("workspace_id", workspaceId).eq("customer_id", customerId),
-    admin.from("subscriptions").select("status, created_at, items").eq("workspace_id", workspaceId).eq("customer_id", customerId),
+    admin.from("orders").select("customer_id, total_cents, created_at, line_items").eq("workspace_id", workspaceId).in("customer_id", customerIds),
+    admin.from("subscriptions").select("customer_id, status, created_at, items").eq("workspace_id", workspaceId).in("customer_id", customerIds),
   ]);
-  return {
-    orders: (ordersRes.data || []).map(o => ({
+  for (const o of ordersRes.data || []) {
+    if (!o.customer_id) continue;
+    const arr = ordersBy.get(o.customer_id) || [];
+    arr.push({
       total_cents: typeof o.total_cents === "number" ? o.total_cents : Number(o.total_cents) || 0,
       created_at: o.created_at,
       line_items: Array.isArray(o.line_items) ? o.line_items : [],
-    })),
-    subscriptions: (subsRes.data || []).map(s => ({ status: s.status, created_at: s.created_at, items: s.items })),
-  };
+    });
+    ordersBy.set(o.customer_id, arr);
+  }
+  for (const s of subsRes.data || []) {
+    if (!s.customer_id) continue;
+    const arr = subsBy.get(s.customer_id) || [];
+    arr.push({ status: s.status, created_at: s.created_at, items: s.items });
+    subsBy.set(s.customer_id, arr);
+  }
+  return { ordersBy, subsBy };
 }
 
-async function enrichOne(c: Customer, nameMap: Map<string, NameInference>, censusKey: string | undefined): Promise<void> {
+async function enrichOne(
+  c: Customer,
+  nameMap: Map<string, NameInference>,
+  censusKey: string | undefined,
+  orders: OrderInput[],
+  subscriptions: SubscriptionInput[],
+): Promise<void> {
   const nameKey = (c.first_name || "").toLowerCase().trim();
   const nameResult = nameKey ? nameMap.get(nameKey) : undefined;
 
@@ -198,7 +224,6 @@ async function enrichOne(c: Customer, nameMap: Map<string, NameInference>, censu
     await admin.from("customers").update({ timezone }).eq("id", c.id);
   }
 
-  const { orders, subscriptions } = await loadOrdersAndSubs(c.id);
   const orderAnalysis = analyzeOrderHistory(orders, subscriptions);
 
   const ageRange = nameResult?.age_range ?? null;
@@ -308,8 +333,11 @@ async function main() {
     const firstNames = todo.map(c => c.first_name).filter((n): n is string => typeof n === "string" && n.trim().length > 0);
     const nameMap = await inferNamesBatch(firstNames);
 
+    // Bulk-load orders + subs for the whole chunk (2 reads), not per-customer.
+    const { ordersBy, subsBy } = await loadOrdersAndSubsForChunk(todo.map(c => c.id));
+
     // Enrich each (parallel within chunk for throughput)
-    await Promise.all(todo.map(c => enrichOne(c, nameMap, censusKey).catch(e => {
+    await Promise.all(todo.map(c => enrichOne(c, nameMap, censusKey, ordersBy.get(c.id) || [], subsBy.get(c.id) || []).catch(e => {
       console.warn(`\n  failed ${c.id}: ${e instanceof Error ? e.message : e}`);
     })));
 

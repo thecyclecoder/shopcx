@@ -121,14 +121,30 @@ export const metaCapiDispatchCron = inngest.createFunction(
           return rows.filter((r) => !(r.event_type === "order_placed" && renewalIds.has(orderId(r)))).map((r) => r.id);
         };
 
-        const { data: recentEvents } = await admin
-          .from("storefront_events")
-          .select("id, event_type, meta")
-          .eq("workspace_id", sinkRow.workspace_id)
-          .in("event_type", mappedTypes)
-          .gte("created_at", sinceIso)
-          .limit(1000);
-        await seedMissing(await dropRenewalPurchases(recentEvents || []));
+        // Keyset-paginate — a bare/.limit(1000) select is capped at PostgREST max-rows (1000).
+        // A busy window can exceed 1000 events; the unordered overflow would never be seeded,
+        // so those Purchases never reach Meta CAPI (lost conversions). seedMissing() is idempotent.
+        const recentEvents: Array<{ id: string; event_type: string; meta: Record<string, unknown> | null }> = [];
+        {
+          let afterId: string | null = null;
+          while (true) {
+            let q = admin
+              .from("storefront_events")
+              .select("id, event_type, meta")
+              .eq("workspace_id", sinkRow.workspace_id)
+              .in("event_type", mappedTypes)
+              .gte("created_at", sinceIso)
+              .order("id", { ascending: true })
+              .limit(1000);
+            if (afterId) q = q.gt("id", afterId);
+            const { data } = await q;
+            if (!data?.length) break;
+            recentEvents.push(...(data as Array<{ id: string; event_type: string; meta: Record<string, unknown> | null }>));
+            if (data.length < 1000) break;
+            afterId = data[data.length - 1].id as string;
+          }
+        }
+        await seedMissing(await dropRenewalPurchases(recentEvents));
 
         // ── 1b. Safety net for order_placed (the money event) ────────
         // The 20-minute lookback above permanently skips any order_placed
@@ -139,14 +155,27 @@ export const metaCapiDispatchCron = inngest.createFunction(
         // Volume is ~one row per order, and seedMissing() keeps it idempotent.
         if (mappedTypes.includes("order_placed")) {
           const capiWindowIso = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
-          const { data: purchases } = await admin
-            .from("storefront_events")
-            .select("id, meta")
-            .eq("workspace_id", sinkRow.workspace_id)
-            .eq("event_type", "order_placed")
-            .gte("created_at", capiWindowIso)
-            .limit(1000);
-          await seedMissing(await dropRenewalPurchases((purchases || []).map((p) => ({ ...p, event_type: "order_placed" }))));
+          // Keyset-paginate the full 7-day window — >1000 Purchases/week is common and the
+          // unordered tail past 1000 would otherwise never be seeded (permanently lost to CAPI).
+          const purchases: Array<{ id: string; meta: Record<string, unknown> | null }> = [];
+          let afterId: string | null = null;
+          while (true) {
+            let q = admin
+              .from("storefront_events")
+              .select("id, meta")
+              .eq("workspace_id", sinkRow.workspace_id)
+              .eq("event_type", "order_placed")
+              .gte("created_at", capiWindowIso)
+              .order("id", { ascending: true })
+              .limit(1000);
+            if (afterId) q = q.gt("id", afterId);
+            const { data } = await q;
+            if (!data?.length) break;
+            purchases.push(...(data as Array<{ id: string; meta: Record<string, unknown> | null }>));
+            if (data.length < 1000) break;
+            afterId = data[data.length - 1].id as string;
+          }
+          await seedMissing(await dropRenewalPurchases(purchases.map((p) => ({ ...p, event_type: "order_placed" }))));
         }
 
         // ── 2. Pull pending + retryable-failed dispatches ────────────

@@ -37,63 +37,21 @@ export const klaviyoAttributionCompute = inngest.createFunction(
   async ({ event, step }) => {
     const { workspace_id } = event.data as { workspace_id: string };
 
-    const campaigns = await step.run("load-campaigns", async () => {
+    // Set-based recompute — ONE aggregate UPDATE across all campaigns via the
+    // recompute_klaviyo_attribution() SQL function (migration 20260704180000). Replaces the
+    // old per-campaign loop whose per-campaign klaviyo_events select was UNBOUNDED → silently
+    // capped at PostgREST max-rows (1000) → any campaign with >1000 attributed orders
+    // undercounted revenue. The function excludes subscription_contract renewals + null values
+    // (identical to the old JS), and writes every campaign (LEFT JOIN → 0/0/null when no events).
+    const computed = await step.run("recompute-attribution", async () => {
       const admin = createAdminClient();
-      const { data } = await admin
-        .from("klaviyo_sms_campaign_history")
-        .select("id, klaviyo_campaign_id")
-        .eq("workspace_id", workspace_id);
-      return (data || []) as Array<{ id: string; klaviyo_campaign_id: string }>;
-    });
-
-    if (campaigns.length === 0) return { computed: 0 };
-
-    let computed = 0;
-    for (const c of campaigns) {
-      await step.run(`compute-${c.id}`, async () => {
-        const admin = createAdminClient();
-        // Pull every Placed Order event attributed via UTMs to this
-        // campaign id. Defensive subscription filter: in practice
-        // Klaviyo UTMs land on the storefront checkout, not the
-        // subscription auto-renewal path, so this filter rarely
-        // excludes anything — but we keep it so a manually-tagged
-        // renewal can't sneak in.
-        const { data: events } = await admin
-          .from("klaviyo_events")
-          .select("value, source_name, klaviyo_profile_id")
-          .eq("workspace_id", workspace_id)
-          .eq("klaviyo_metric_id", PLACED_ORDER_METRIC)
-          .eq("attributed_klaviyo_campaign_id", c.klaviyo_campaign_id);
-
-        let initialConversions = 0;
-        let totalRevenue = 0;
-        for (const e of events || []) {
-          const src = (e.source_name as string | null) || "";
-          if (src.startsWith("subscription_contract")) continue;
-          const v = typeof e.value === "number" ? e.value : Number(e.value);
-          if (!Number.isFinite(v)) continue;
-          initialConversions++;
-          totalRevenue += v;
-        }
-
-        const initialRevenueCents = Math.round(totalRevenue * 100);
-        const initialAovCents = initialConversions > 0
-          ? Math.round(initialRevenueCents / initialConversions)
-          : null;
-
-        await admin
-          .from("klaviyo_sms_campaign_history")
-          .update({
-            initial_conversions: initialConversions,
-            initial_conversion_value_cents: initialRevenueCents,
-            initial_average_order_value_cents: initialAovCents,
-            initial_revenue_computed_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", c.id);
+      const { data, error } = await admin.rpc("recompute_klaviyo_attribution", {
+        p_workspace_id: workspace_id,
+        p_metric_id: PLACED_ORDER_METRIC,
       });
-      computed++;
-    }
+      if (error) throw new Error(`recompute_klaviyo_attribution(${workspace_id}) failed: ${error.message}`);
+      return (data as number) ?? 0;
+    });
     return { computed };
   },
 );

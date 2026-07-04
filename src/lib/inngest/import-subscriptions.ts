@@ -338,6 +338,10 @@ export const importChunkProcess = inngest.createFunction(
 
         // Match order names to orders and set subscription_id
         const orderNames = [...new Set(orderSubLinks.map(l => l.order_name))];
+        // Precompute order_name → link ONCE (first match wins, mirroring the old .find). The
+        // per-order Array.find was O(orders × links) — quadratic on a subscription-heavy import.
+        const linkByOrderName = new Map<string, typeof orderSubLinks[number]>();
+        for (const l of orderSubLinks) if (!linkByOrderName.has(l.order_name)) linkByOrderName.set(l.order_name, l);
         for (let n = 0; n < orderNames.length; n += 100) {
           const batch = orderNames.slice(n, n + 100);
           const { data: orders } = await admin.from("orders")
@@ -347,7 +351,7 @@ export const importChunkProcess = inngest.createFunction(
 
           if (orders) {
             for (const order of orders) {
-              const link = orderSubLinks.find(l => l.order_name === order.order_number);
+              const link = linkByOrderName.get(order.order_number);
               if (link) {
                 const subId = subMap.get(link.contract_id);
                 if (subId) {
@@ -405,14 +409,28 @@ export const importChunksComplete = inngest.createFunction(
     const batchInfo = await step.run("prepare-finalize", async () => {
       await updateJob(admin, job_id, { status: "finalizing" });
 
-      // Get distinct customer IDs that have subscriptions in this workspace
-      const { data: customers } = await admin
-        .from("subscriptions")
-        .select("customer_id")
-        .eq("workspace_id", workspace_id)
-        .not("customer_id", "is", null);
-
-      const uniqueIds = [...new Set((customers || []).map(c => c.customer_id).filter(Boolean))] as string[];
+      // Get distinct customer IDs that have subscriptions in this workspace. Keyset-paginate —
+      // a bare select is capped at PostgREST max-rows (1000); without this, a workspace with
+      // >1000 subscription rows only finalized the first 1000, so most customers' subscription_status
+      // was never set (silent wrong data). ~28K subs → ~28 pages.
+      const seen = new Set<string>();
+      let afterId: string | null = null;
+      while (true) {
+        let q = admin
+          .from("subscriptions")
+          .select("id, customer_id")
+          .eq("workspace_id", workspace_id)
+          .not("customer_id", "is", null)
+          .order("id", { ascending: true })
+          .limit(1000);
+        if (afterId) q = q.gt("id", afterId);
+        const { data } = await q;
+        if (!data?.length) break;
+        for (const c of data) if (c.customer_id) seen.add(c.customer_id as string);
+        if (data.length < 1000) break;
+        afterId = data[data.length - 1].id as string;
+      }
+      const uniqueIds = [...seen];
       const batchCount = Math.max(1, Math.ceil(uniqueIds.length / 1000));
 
       await updateJob(admin, job_id, { finalize_total: batchCount });
