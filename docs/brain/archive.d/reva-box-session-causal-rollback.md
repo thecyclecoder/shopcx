@@ -1,0 +1,1 @@
+- **Reva as a box session — review the commits before rolling back** · verified 2026-07-04 · → [[../libraries/deploy-guardian]] · [[../tables/deploy_watches]] · [[../tables/agent_jobs]] · [[../inngest/deploy-guardian-cron]]
