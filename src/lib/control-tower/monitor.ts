@@ -855,6 +855,8 @@ const SEGMENT_COVERAGE_MIN_RATIO = 0.95;
 const SEGMENT_COVERAGE_MAX_AGE_MS = 48 * 60 * 60_000;
 /** Below this book size don't judge — a workspace with 0-99 subscribers can noise-fire. */
 const SEGMENT_COVERAGE_MIN_SAMPLE = 100;
+/** Run-in-progress grace: skip the fresh-cohort ratio check while the daily refresh-customer-segments cron is still fanning out (comfortably longer than the observed worst-case fanout). The stale48h check stays active. */
+const SEGMENT_COVERAGE_RUN_GRACE_MS = 6 * 60 * 60_000;
 
 /** Sum the anomalous ("bad") outcomes in a renewal breakdown. */
 function badOutcomeCount(c: RenewalOutcomeCounts): number {
@@ -1022,7 +1024,15 @@ function evalOutputAssertion(
       const ratio = fresh / total;
       const minPct = Math.round(SEGMENT_COVERAGE_MIN_RATIO * 100);
       const maxAgeH = Math.round(SEGMENT_COVERAGE_MAX_AGE_MS / 3_600_000);
-      if (ratio < SEGMENT_COVERAGE_MIN_RATIO) {
+      // Run-in-progress grace: the fresh-cohort ratio only signals 'yesterday's cron didn't cover the book'
+      // AFTER today's cron has had a chance to finish. While the daily refresh-customer-segments fanout is
+      // still walking the book (~4-5h across 138K rows), a below-floor ratio is the expected shape of an
+      // in-progress walk, not a break. If the loop's most recent beat is within the grace window, skip the
+      // ratio check. The stale48h check below stays active — a subscriber older than 48h is a genuine break
+      // even mid-run — and once the grace elapses the 95% floor re-engages.
+      const withinRunGrace =
+        latest?.ran_at != null && ageMs(latest.ran_at) <= SEGMENT_COVERAGE_RUN_GRACE_MS;
+      if (!withinRunGrace && ratio < SEGMENT_COVERAGE_MIN_RATIO) {
         const pct = Math.round(ratio * 100);
         return {
           statusText: `only ${pct}% of subscribers fresh (${fresh}/${total}, need ${minPct}%)`,
