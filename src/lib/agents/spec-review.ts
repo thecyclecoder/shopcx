@@ -88,11 +88,19 @@ export async function selectUnreviewedInReviewSpecs(
   _admin: Admin,
   workspaceId: string,
 ): Promise<string[]> {
-  // Read the in_review pool through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit).
-  const rows = await listSpecs(workspaceId, { status: "in_review" });
+  // specs-status-overrides-only: `status='in_review'` is no longer STORED (in_review is DERIVED). Vale's
+  // pool is now keyed off the durable review signal: a spec needs review iff Vale has NOT durably passed the
+  // current content (`vale_review_passed_at == null` — NULLed on every re-open/re-author by
+  // markSpecCardBackToReview). That also excludes a DISPOSED spec whose transient `vale_pass` Ada consumed —
+  // the durable stamp survives, keeping it out of Vale's queue. folded/deferred are out; `vale_pass == null`
+  // keeps only NEVER-verdicted specs (pass=true parks for Ada, needs_fix=false is out until re-authored —
+  // vale-instant-per-spec-review). SDK read (pm-db-agent-toolkit).
+  const rows = await listSpecs(workspaceId);
   return rows
-    .filter((r) => !r.deferred) // a deferred spec is out of the in_review pool even if status still reads it
-    .filter((r) => r.vale_pass == null) // only NEVER-verdicted specs; pass (true) + needs_fix (false) are out
+    .filter((r) => r.status !== "folded")
+    .filter((r) => !r.deferred)
+    .filter((r) => r.vale_review_passed_at == null)
+    .filter((r) => r.vale_pass == null)
     .map((r) => r.slug);
 }
 
@@ -121,17 +129,20 @@ export async function enqueueSpecReviewIfDue(
 ): Promise<{ enqueued: boolean; enqueuedCount: number; pending: number; reason?: string }> {
   const admin = createAdminClient();
 
-  // vale-reactive-spec-review Phase 1 — read the in_review pool ONCE so we can distinguish "nothing to
-  // review, nothing in_review at all" from "nothing to review, every in_review spec already verdicted".
-  const rows = await listSpecs(workspaceId, { status: "in_review" });
-  const nonDeferred = rows.filter((r) => !r.deferred);
-  const pending = nonDeferred.filter((r) => r.vale_pass == null).map((r) => r.slug);
+  // specs-status-overrides-only: the in_review pool is DERIVED (no stored `status='in_review'`). Read it via
+  // the durable review signal — not-folded, not-deferred, never durably Vale-passed (`vale_review_passed_at
+  // == null`, which excludes disposed specs whose transient `vale_pass` was consumed). `vale_pass == null`
+  // then keeps only never-verdicted specs. Read ONCE so we can distinguish "nothing in the pool at all" from
+  // "pool non-empty but every spec already verdicted".
+  const rows = await listSpecs(workspaceId);
+  const pool = rows.filter((r) => r.status !== "folded" && !r.deferred && r.vale_review_passed_at == null);
+  const pending = pool.filter((r) => r.vale_pass == null).map((r) => r.slug);
   if (!pending.length) {
     return {
       enqueued: false,
       enqueuedCount: 0,
       pending: 0,
-      reason: nonDeferred.length ? "no-unreviewed-specs" : "no-in-review-specs",
+      reason: pool.length ? "no-unreviewed-specs" : "no-in-review-specs",
     };
   }
 

@@ -441,9 +441,17 @@ function isBoardableStatus(status: SpecRow["status"]): boolean {
  * Terminal / override statuses are NOT rollups and still win where they apply (they live on the row, not
  * the phases):
  *   - `deferred`   — the CEO parked the spec (specs.deferred flag); wins over phase progress.
- *   - `in_review`  — a newly-authored / sent-back spec awaiting Vale + Ada disposition; the build pipeline
- *                    refuses it, so it must read in_review regardless of any phase the body declares.
  *   - `folded`     — archived; callers filter it before this runs (isBoardableStatus), but preserved here.
+ *
+ * `in_review` is DERIVED, NEVER stored (specs-status-overrides-only migration
+ * 20260907130000_specs_status_overrides_only_derive_in_review): a spec reads `in_review` iff NO build has
+ * started (the phase rollup is still `planned`) AND Vale has not durably passed it
+ * (`vale_review_passed_at IS NULL` — the SAME signal the claim-time build gate reads, so the board and the
+ * gate can never disagree). Because it can only appear while the rollup is `planned`, a built spec can
+ * NEVER read `in_review` — this kills the old drift bug where a stored `in_review` that was never cleared
+ * pinned an all-phases-shipped spec in the In Review column. A send-back ("re-review this") is expressed by
+ * NULLing `vale_review_passed_at` (`markSpecCardBackToReview`), so it flows through the same derivation.
+ *
  * A spec with ZERO phases (a one-shot spec) has nothing to roll up — derive from MERGE PROVENANCE, not the
  * stored `specs.status` column. The one-shot merge hook (`stampSpecMergeProvenance`) writes `specs.merged_pr`
  * / `specs.last_merge_sha` but NEVER advances `specs.status`, so reading the stored column would leak a stale
@@ -451,12 +459,19 @@ function isBoardableStatus(status: SpecRow["status"]): boolean {
  */
 function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
   if (row.deferred) return "deferred";
-  if (row.status === "in_review") return "in_review";
   if (row.status === "folded") return "shipped"; // boardable callers filter folded; preserved for safety
-  // one-shot spec (no phases to roll up): derive from merge provenance, never the stored status column — the
-  // merge hook stamps merged_pr/last_merge_sha but not specs.status, so the stored value is a stale leak.
-  if (!phases.length) return row.merged_pr !== null || row.last_merge_sha !== null ? "shipped" : "planned";
-  return rollupPhaseStatus(phases.map((p, i) => ({ index: i, title: p.title, status: p.status })));
+  // Roll the phases up FIRST — phases are ground truth. A one-shot spec (no phases) derives from merge
+  // provenance (merged_pr/last_merge_sha), never the stored status column (a stale leak — the merge hook
+  // never advances specs.status).
+  const rollup: SpecStatus = phases.length
+    ? rollupPhaseStatus(phases.map((p, i) => ({ index: i, title: p.title, status: p.status })))
+    : row.merged_pr !== null || row.last_merge_sha !== null
+      ? "shipped"
+      : "planned";
+  // in_review is derived: only while nothing has been built (rollup still `planned`) AND Vale hasn't
+  // durably passed the current content. Once any phase ships the rollup wins outright.
+  if (rollup === "planned" && row.vale_review_passed_at == null) return "in_review";
+  return rollup;
 }
 
 /**

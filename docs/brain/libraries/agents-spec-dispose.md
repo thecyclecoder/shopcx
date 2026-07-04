@@ -21,13 +21,13 @@ The asymmetry: spending more than the author proposed (UPGRADE) confirms with th
 
 ### `selectDispositionCandidates(admin, workspaceId): Promise<DispositionCandidate[]>`
 
-Every Vale-passed `in_review` spec the lane hasn't touched. Reads `spec_card_state` directly:
-- `status='in_review'`
-- `flags.vale_pass=true`
-- `flags.ada_disposition` NOT set (idempotent re-fire — a card already disposed or parked is skipped)
-- `flags.deferred` NOT set (out-of-band defer wins; the lane stays out of it)
+Every Vale-passed spec awaiting disposition the lane hasn't touched. Reads `public.specs` via [[specs-table]] `listSpecs` (pm-db-agent-toolkit — no raw PM SQL). Since `specs-status-overrides-only` (migration `20260907130000`) `in_review` is no longer a STORED status, so the cohort is selected by the disposition signals directly (status-independent — `vale_pass=true` can only be set while the spec was in review and is CONSUMED once disposed, so it precisely identifies the pending cohort):
+- `status !== 'folded'` (archived — never Ada's turn)
+- `vale_pass=true` (Vale passed, awaiting disposition — null/false is not Ada's turn)
+- `ada_disposition` NOT set (idempotent re-fire — a spec already disposed or parked is skipped)
+- `deferred` NOT set (out-of-band defer wins; the lane stays out of it)
 
-`intended_status` defaults to `planned` when missing (every in_review row is a NEW spec; the author's bias is to build).
+`intended_status` defaults to `planned` when missing (a freshly-authored spec's author bias is to build).
 
 ### `adaDispositionFor(candidate): AdaDecision`
 
