@@ -1,0 +1,1 @@
+- **Carrie — DR content session (copy + AI imagery + real-asset gap flags)** · verified 2026-07-04 · → [[../functions/growth]]
