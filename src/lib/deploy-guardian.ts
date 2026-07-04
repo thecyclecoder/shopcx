@@ -1107,3 +1107,294 @@ export async function evaluateDueDeployWatches(admin: Admin): Promise<EvaluateDu
   }
   return out;
 }
+
+// ── Phase 3 — the worker applies Reva's typed verdict (the only mutator) ─────────
+
+/** One per-signal verdict returned by Reva's box session (deploy-review skill). */
+export interface RevaSignalVerdict {
+  key: string;
+  surface: string;
+  caused: boolean;
+  evidence: string;
+}
+
+/** The typed verdict Reva's box session (`kind='deploy-review'`) returns for one watch. */
+export interface RevaReviewVerdict {
+  decision: "revert" | "keep" | "escalate";
+  signals: RevaSignalVerdict[];
+  reasoning: string;
+}
+
+/** The outcome of applying a `RevaReviewVerdict` to a watch (surfaced back to the runner for its log_tail). */
+export interface ApplyBoxDeployReviewResult {
+  ok: boolean;
+  /** why the apply no-op'd (already claimed, no watch, no in_review row, etc.) — set when `!ok`. */
+  reason?: string;
+  /** the resulting `deploy_watches.verdict` stamp — 'healthy'/'regressed'/'unsure' (never re-writes 'in_review'). */
+  finalVerdict?: DeployVerdict;
+  /** on decision='revert' + a clean revert, the revert commit SHA. */
+  revertSha?: string | null;
+  /** the loop-guard trip surface: a decision='revert' by a slug that already hit MAX prior auto-rollbacks
+   *  degrades to escalate (never revert) — the same conservative move Phase 2's actOnRegression made. */
+  loopGuarded?: boolean;
+}
+
+/** Format Reva's signals for the escalation diagnosis + activity reason (compact, human-legible). */
+function describeRevaSignals(v: RevaReviewVerdict): string {
+  const caused = v.signals.filter((s) => s.caused);
+  const notCaused = v.signals.filter((s) => !s.caused);
+  const bits: string[] = [];
+  if (caused.length) bits.push(`${caused.length} caused signal(s): ${caused.slice(0, 3).map((s) => `${s.key} → ${s.surface}${s.evidence ? ` (${s.evidence})` : ""}`).join("; ")}`);
+  if (notCaused.length) bits.push(`${notCaused.length} not-caused: ${notCaused.slice(0, 3).map((s) => s.key).join(", ")}`);
+  return bits.join(" · ") || "no per-signal detail";
+}
+
+/** Common activity-metadata slice for a Reva verdict (mirrors deployActivityMeta's shape, minus DeployWatchFindings). */
+function revaActivityMeta(watch: DeployWatch, verdict: DeployVerdict, v: RevaReviewVerdict, extra?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    actor: GUARDIAN_ACTOR, // Reva.
+    deploy_watch_id: watch.id,
+    branch: watch.branch,
+    pr_number: watch.pr_number,
+    merge_sha: watch.merge_sha,
+    verdict,
+    reviewed_by: "box-session",
+    reva_decision: v.decision,
+    reva_signals: v.signals,
+    ...(extra ?? {}),
+  };
+}
+
+/** Write findings.reva_review + (on revert) findings.rollback, preserving all other findings keys. */
+async function stampFindingsWithReview(
+  admin: Admin,
+  watchId: string,
+  currentFindings: Record<string, unknown> | null,
+  v: RevaReviewVerdict,
+  rollback?: Record<string, unknown>,
+): Promise<void> {
+  try {
+    const base = currentFindings ?? {};
+    const patch: Record<string, unknown> = {
+      ...base,
+      reva_review: { decision: v.decision, signals: v.signals, reasoning: v.reasoning, reviewed_by: "box-session" },
+    };
+    if (rollback) patch.rollback = rollback;
+    await admin.from("deploy_watches").update({ findings: patch }).eq("id", watchId);
+  } catch (e) {
+    console.warn(`[deploy-guardian] stampFindingsWithReview failed for ${watchId}:`, e instanceof Error ? e.message : e);
+  }
+}
+
+/**
+ * Apply Reva's typed causal-review verdict to the watch behind ONE `kind='deploy-review'` agent_jobs
+ * row (reva-box-session-causal-rollback Phase 3 — the **only mutator** on the box-session path).
+ * Mirrors `applyBoxGrade` in shape: the box session diagnoses read-only + returns a typed verdict; this
+ * deterministic writer claims the row atomically and applies it. **Idempotent + concurrency-safe:**
+ * the atomic pending-guard is `update deploy_watches set … where verdict='in_review' returning id`
+ * — only the caller that wins the claim acts, so a re-apply / a concurrent tick / a redriven job never
+ * double-reverts.
+ *
+ * Decisions:
+ * - `revert` — check the LOOP-GUARD first (`priorRollbacksForSlug` ≥ `DEPLOY_GUARDIAN_LOOP_GUARD_MAX`).
+ *   If tripped: escalate + stamp `verdict='regressed'` + `findings.rollback={status:'loop_guard'…}` +
+ *   `deploy_regressed` activity (same conservative move actOnRegression made — a rollback-then-reland
+ *   loop is a deeper issue, not a per-signal review candidate). Else: call `revertDeployMerge` (:584);
+ *   on a clean revert stamp `verdict='regressed'` + `findings.rollback={status:'reverted', revert_sha,
+ *   prior_rollbacks}` + escalate + `deploy_rolled_back` activity. A conflict/failed revert stamps
+ *   `verdict='regressed'` + `findings.rollback={status:'revert_failed'|'conflict', reason}` + a critical
+ *   ops alert + `deploy_regressed` activity (prod still on the regressed build — manual revert needed).
+ * - `keep` — stamp `verdict='healthy'` + `deploy_kept` activity (no revert, no escalation — Reva
+ *   affirmed no causal path). Reasoning goes on the activity row.
+ * - `escalate` — stamp `verdict='unsure'` + escalate the plausible-but-unconfirmable case + `deploy_unsure`
+ *   activity (never revert on doubt).
+ *
+ * Every path writes `findings.reva_review = { decision, signals, reasoning, reviewed_by:'box-session' }`
+ * — the audit surface for the reasoning that drove the mutation. **Never throws** — returns a structured
+ * result so the caller can log it on the agent_jobs row (the runner is Phase 2's `runDeployReviewJob`).
+ */
+export async function applyBoxDeployReview(admin: Admin, jobId: string, verdict: RevaReviewVerdict): Promise<ApplyBoxDeployReviewResult> {
+  try {
+    // Resolve the watch id: prefer instructions.watch_id (the enqueue payload), fall back to spec_slug
+    // (which is the watch's slug, not id) via a latest-in_review lookup. The enqueue path always writes
+    // a JSON `instructions` string with `watch_id`, so the fallback is defensive against a stripped row.
+    const { data: jobRow } = await admin
+      .from("agent_jobs")
+      .select("id, workspace_id, kind, spec_slug, instructions, status")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (!jobRow) return { ok: false, reason: "job_not_found" };
+    const job = jobRow as { id: string; workspace_id: string; kind: string; spec_slug: string; instructions: string | null; status: string };
+    if (job.kind !== "deploy-review") return { ok: false, reason: `wrong_kind:${job.kind}` };
+
+    let watchId: string | null = null;
+    try {
+      const parsed = job.instructions ? (JSON.parse(job.instructions) as { watch_id?: string }) : null;
+      if (parsed?.watch_id) watchId = String(parsed.watch_id);
+    } catch { /* fall through to the fallback below */ }
+    if (!watchId) {
+      const { data: latest } = await admin
+        .from("deploy_watches")
+        .select("id")
+        .eq("workspace_id", job.workspace_id)
+        .eq("slug", job.spec_slug)
+        .eq("verdict", "in_review")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const row = latest as { id: string } | null;
+      if (row?.id) watchId = row.id;
+    }
+    if (!watchId) return { ok: false, reason: "watch_not_found" };
+
+    // Read the watch to work off (findings + slug/merge_sha for the mutator hands).
+    const { data: watchRow } = await admin.from("deploy_watches").select("*").eq("id", watchId).maybeSingle();
+    if (!watchRow) return { ok: false, reason: "watch_row_gone" };
+    const watch = watchRow as DeployWatch;
+    if (watch.verdict !== "in_review") {
+      // The watch is already past `in_review` — a re-apply (retry / concurrent tick) that lost the
+      // claim. No-op idempotently instead of stamping a stale verdict on top of a later one.
+      return { ok: false, reason: `watch_not_in_review:${watch.verdict}`, finalVerdict: watch.verdict as DeployVerdict };
+    }
+    const currentFindings = watch.findings ?? {};
+
+    // ── decision === 'keep' — Reva affirmed no causal path; stamp healthy, no revert, no escalation.
+    if (verdict.decision === "keep") {
+      const { data: claimed } = await admin
+        .from("deploy_watches")
+        .update({ verdict: "healthy", evaluated_at: new Date().toISOString() })
+        .eq("id", watch.id)
+        .eq("verdict", "in_review")
+        .select("id");
+      if (!claimed || claimed.length === 0) return { ok: false, reason: "claim_lost", finalVerdict: "healthy" };
+      await stampFindingsWithReview(admin, watch.id, currentFindings, verdict);
+      const reason = `Reva reviewed the deploy of "${watch.slug}" (${watch.branch}, merge ${(watch.merge_sha || "").slice(0, 7)}) and kept it — every candidate signal has no causal path to the diff. ${describeRevaSignals(verdict)}. Reasoning: ${verdict.reasoning || "(no reasoning)"}.`;
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_kept",
+        specSlug: watch.slug,
+        reason,
+        metadata: revaActivityMeta(watch, "healthy", verdict),
+      });
+      console.log(`[deploy-guardian] ${watch.branch} → keep (Reva confirmed no causal path — verdict='healthy')`);
+      return { ok: true, finalVerdict: "healthy" };
+    }
+
+    // ── decision === 'escalate' — plausible but unconfirmed causal path; escalate + verdict='unsure'.
+    if (verdict.decision === "escalate") {
+      const { data: claimed } = await admin
+        .from("deploy_watches")
+        .update({ verdict: "unsure", evaluated_at: new Date().toISOString() })
+        .eq("id", watch.id)
+        .eq("verdict", "in_review")
+        .select("id");
+      if (!claimed || claimed.length === 0) return { ok: false, reason: "claim_lost", finalVerdict: "unsure" };
+      await stampFindingsWithReview(admin, watch.id, currentFindings, verdict);
+      const diagnosis = `Reva reviewed the deploy of "${watch.slug}" (${watch.branch}, merge ${(watch.merge_sha || "").slice(0, 7)}) and could construct a plausible causal path for at least one candidate signal but couldn't confirm it — escalating instead of guessing a revert. ${describeRevaSignals(verdict)}. Reasoning: ${verdict.reasoning || "(no reasoning)"}.`;
+      await safeEscalate(admin, watch, {
+        title: `Deploy review escalated by Reva: ${watch.slug}`,
+        diagnosis,
+        dedupeKey: `deploy-reva-escalate:${watch.id}`,
+        escalationKind: "deploy_reva_escalate",
+      });
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_unsure",
+        specSlug: watch.slug,
+        reason: diagnosis,
+        metadata: revaActivityMeta(watch, "unsure", verdict),
+      });
+      console.log(`[deploy-guardian] ${watch.branch} → escalate (Reva unconfirmed — verdict='unsure', no revert)`);
+      return { ok: true, finalVerdict: "unsure" };
+    }
+
+    // ── decision === 'revert' — Reva cited a causal path in the diff. Loop-guard first, then revert. ──
+    const priorRollbacks = await priorRollbacksForSlug(admin, watch.workspace_id, watch.slug);
+    if (priorRollbacks >= DEPLOY_GUARDIAN_LOOP_GUARD_MAX) {
+      const { data: claimed } = await admin
+        .from("deploy_watches")
+        .update({ verdict: "regressed", evaluated_at: new Date().toISOString() })
+        .eq("id", watch.id)
+        .eq("verdict", "in_review")
+        .select("id");
+      if (!claimed || claimed.length === 0) return { ok: false, reason: "claim_lost", finalVerdict: "regressed" };
+      const rollback = { status: "loop_guard", prior_rollbacks: priorRollbacks };
+      await stampFindingsWithReview(admin, watch.id, currentFindings, verdict, rollback);
+      const diagnosis = `Reva cited a causal path in the deploy of "${watch.slug}" (${watch.branch}) — ${describeRevaSignals(verdict)} — BUT the slug already auto-rolled-back ${priorRollbacks} time(s) in the last 7 days. The rollback-then-reland cycle is looping (a deeper issue, not a flaky deploy). I've STOPPED auto-reverting this slug; it needs a human to fix the root cause or pause its auto-merge. Reasoning: ${verdict.reasoning || "(no reasoning)"}.`;
+      await safeEscalate(admin, watch, { title: `Deploy loop: ${watch.slug} keeps regressing — auto-rollback halted`, diagnosis, dedupeKey: `deploy-loopguard:${watch.id}`, escalationKind: "deploy_loop_guard", metadata: { prior_rollbacks: priorRollbacks } });
+      await notifyOpsAlert(watch.workspace_id, {
+        title: `Deploy loop-guard tripped: ${watch.slug} regressed ${priorRollbacks + 1}× (Reva review)`,
+        severity: "critical",
+        lines: [`Stopped auto-reverting "${watch.slug}" after ${priorRollbacks} rollback(s) — the fix keeps re-breaking on reland. A human needs to fix the root cause or pause its auto-merge.`, describeRevaSignals(verdict)],
+      });
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_regressed",
+        specSlug: watch.slug,
+        reason: diagnosis,
+        metadata: revaActivityMeta(watch, "regressed", verdict, { loop_guard: true, prior_rollbacks: priorRollbacks }),
+      });
+      console.log(`[deploy-guardian] ${watch.branch} → revert but LOOP-GUARDED (${priorRollbacks} prior rollbacks) — escalated, no revert`);
+      return { ok: true, finalVerdict: "regressed", loopGuarded: true };
+    }
+
+    // CLAIM the watch → verdict='regressed' (the revert-eligible stamp). Do this BEFORE calling the
+    // revert hand so a re-apply/concurrent tick can't double-revert (the atomic in_review→regressed
+    // transition is the idempotency spine — same shape actOnRegression relied on).
+    const { data: revertClaim } = await admin
+      .from("deploy_watches")
+      .update({ verdict: "regressed", evaluated_at: new Date().toISOString() })
+      .eq("id", watch.id)
+      .eq("verdict", "in_review")
+      .select("id");
+    if (!revertClaim || revertClaim.length === 0) return { ok: false, reason: "claim_lost", finalVerdict: "regressed" };
+
+    const result = await revertDeployMerge({ mergeSha: watch.merge_sha, slug: watch.slug, prNumber: watch.pr_number });
+
+    if (result.reverted) {
+      const rollback = { status: "reverted", revert_sha: result.revertSha, prior_rollbacks: priorRollbacks };
+      await stampFindingsWithReview(admin, watch.id, currentFindings, verdict, rollback);
+      const diagnosis = `Reva reviewed the deploy of "${watch.slug}" (${watch.branch}) and rolled it back — ${describeRevaSignals(verdict)}. Restored the prior good build (revert ${String(result.revertSha).slice(0, 7)} on ${MAIN_BRANCH}); a revert is itself reversible, so re-land the fix once the root cause is understood. Reasoning: ${verdict.reasoning || "(no reasoning)"}. Please confirm prod recovered.`;
+      await safeEscalate(admin, watch, { title: `Auto-rolled back by Reva: ${watch.slug} regressed → restored prior build`, diagnosis, dedupeKey: `deploy-rollback:${watch.id}`, escalationKind: "deploy_rollback", metadata: { revert_sha: result.revertSha } });
+      await recordDirectorActivity(admin, {
+        workspaceId: watch.workspace_id,
+        directorFunction: GUARDIAN_FUNCTION,
+        actionKind: "deploy_rolled_back",
+        specSlug: watch.slug,
+        reason: diagnosis,
+        metadata: revaActivityMeta(watch, "regressed", verdict, { revert_sha: result.revertSha, prior_rollbacks: priorRollbacks }),
+      });
+      console.log(`[deploy-guardian] ${watch.branch} → revert → ROLLED BACK (revert ${String(result.revertSha).slice(0, 7)}) via Reva review`);
+      return { ok: true, finalVerdict: "regressed", revertSha: result.revertSha ?? null };
+    }
+
+    // Revert couldn't run cleanly (conflict, missing SHA, GitHub error) — prod is STILL on the regressed
+    // build. Don't guess/clobber; escalate critically for a manual revert (same shape as actOnRegression).
+    const reason = result.reason || "unknown";
+    const rollback = { status: result.conflict ? "conflict" : "revert_failed", reason };
+    await stampFindingsWithReview(admin, watch.id, currentFindings, verdict, rollback);
+    const diagnosis = `Reva cited a causal path in the deploy of "${watch.slug}" (${watch.branch}) — ${describeRevaSignals(verdict)} — but the auto-revert could NOT be applied (${result.conflict ? "a later commit touched the same files (a revert conflict)" : "the revert couldn't be applied"}: ${reason}). Prod is STILL on the regressed build — please revert it manually. Reasoning: ${verdict.reasoning || "(no reasoning)"}.`;
+    await safeEscalate(admin, watch, { title: `Regression on ${watch.slug} — AUTO-ROLLBACK FAILED, manual revert needed`, diagnosis, dedupeKey: `deploy-revertfail:${watch.id}`, escalationKind: result.conflict ? "deploy_revert_conflict" : "deploy_revert_failed", metadata: { revert_reason: reason } });
+    await notifyOpsAlert(watch.workspace_id, {
+      title: `Auto-rollback FAILED: ${watch.slug} regressed and is still live`,
+      severity: "critical",
+      lines: [`Reva confirmed a regression on "${watch.slug}" (${watch.branch}) but couldn't auto-revert (${reason}). Prod is still on the regressed build — revert it manually.`, describeRevaSignals(verdict)],
+    });
+    await recordDirectorActivity(admin, {
+      workspaceId: watch.workspace_id,
+      directorFunction: GUARDIAN_FUNCTION,
+      actionKind: "deploy_regressed",
+      specSlug: watch.slug,
+      reason: diagnosis,
+      metadata: revaActivityMeta(watch, "regressed", verdict, { revert_failed: true, conflict: !!result.conflict, revert_reason: reason }),
+    });
+    console.log(`[deploy-guardian] ${watch.branch} → revert but REVERT FAILED (${reason}) — escalated for manual rollback`);
+    return { ok: true, finalVerdict: "regressed", revertSha: null };
+  } catch (e) {
+    console.error("[deploy-guardian] applyBoxDeployReview threw:", e instanceof Error ? e.message : e);
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}

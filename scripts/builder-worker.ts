@@ -10446,22 +10446,38 @@ async function runDeployReviewJob(job: Job) {
       return;
     }
 
-    // Persist the parsed verdict on log_tail (auditability) — Phase 3's applyBoxDeployReview is the
-    // mutator and stamps deploy_watches.findings.reva_review. This runner is READ-ONLY on the DB.
+    // Phase 3 — hand the typed verdict to the mutator. applyBoxDeployReview is the ONLY component
+    // that touches deploy_watches (atomic pending-guard on verdict='in_review' → the idempotency
+    // spine; a re-apply / a concurrent tick / a redriven job never double-reverts). This runner
+    // stays read-only on deploy_watches; the mutator writes the stamp + findings.reva_review + the
+    // director_activity row + (on 'revert') calls revertDeployMerge. On session error we STILL apply
+    // — Reva's typed verdict landed cleanly; the session's non-zero stream flag can be a spurious
+    // stderr blip, and skipping the mutation on it would leave the watch stuck in in_review for
+    // Phase 4's fail-safe. The applyBoxDeployReview result carries what actually happened.
+    const { applyBoxDeployReview } = await import("../src/lib/deploy-guardian");
+    const applied = await applyBoxDeployReview(db, job.id, verdict);
+    const signalsLine = verdict.signals.length
+      ? `signals(${verdict.signals.length}): ${verdict.signals.map((s) => `${s.caused ? "✅" : "❌"}${s.key}`).join(" ")}`
+      : "";
+    const appliedLine = applied.ok
+      ? `applied → verdict=${applied.finalVerdict}${applied.revertSha ? ` · revert_sha=${String(applied.revertSha).slice(0, 7)}` : ""}${applied.loopGuarded ? " · LOOP_GUARDED (no revert)" : ""}`
+      : `apply no-op → ${applied.reason}${applied.finalVerdict ? ` (watch verdict=${applied.finalVerdict})` : ""}`;
     const summary = [
       `decision=${verdict.decision}`,
-      verdict.signals.length ? `signals(${verdict.signals.length}): ${verdict.signals.map((s) => `${s.caused ? "✅" : "❌"}${s.key}`).join(" ")}` : "",
+      signalsLine,
+      appliedLine,
       verdict.reasoning ? verdict.reasoning : "",
     ].filter(Boolean).join("\n");
+
     if (isError) {
-      // The session errored out but a verdict landed — still surface it, but flag the error so a
-      // human can eyeball. Phase 3 hasn't landed yet, so we complete the job without acting.
-      await update(job.id, { status: "completed", error: "deploy-review session errored (verdict logged)", log_tail: summary.slice(-2000) });
-      console.log(`${tag} verdict=${verdict.decision} (session errored — logged, no mutation)`);
+      // The session errored (stream isError) but a verdict landed AND was applied. Complete with the
+      // error surfaced so a human can eyeball — the mutation isn't silently rolled back.
+      await update(job.id, { status: "completed", error: "deploy-review session errored (verdict applied)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} verdict=${verdict.decision} → ${appliedLine} (session errored — applied + logged)`);
       return;
     }
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
-    console.log(`${tag} verdict=${verdict.decision} — logged (Phase 3's applyBoxDeployReview will apply it)`);
+    console.log(`${tag} verdict=${verdict.decision} → ${appliedLine}`);
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
