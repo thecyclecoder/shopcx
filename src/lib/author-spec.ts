@@ -267,19 +267,39 @@ export function assertValidParent(
   // parentKind:'milestone').
   if (opts.milestoneId) return;
   if (opts.parentKind === "mandate" || opts.parentKind === "milestone") return;
-  const m = (parent || "").trim().match(GOAL_PARENT_RE);
-  if (!m) return; // a mandate / function / prose parent — Vale is the backstop for the fuzzier shapes.
-  const anchor = m[2] || "";
-  // "names a milestone" = a wikilink `#anchor`, a "(M4)" tag, or an explicit "milestone" / bare "M<n>" token.
-  const namesMilestone = anchor.includes("#") || /\(\s*M\s*\d|milestone|\bM\d+\b/i.test(parent);
-  if (namesMilestone) return;
-  throw new InvalidParentError(
-    parent,
-    `Parent names goal "${m[1]}" with no specific milestone. A one-off spec should parent to a function ` +
-      `mandate (parentKind:"mandate", parentRef:"${"{owner}"}#{mandate-slug}"), NOT a goal; a goal-bound spec ` +
-      `must anchor to a milestone (pass milestoneId, or [[../goals/${m[1]}#{milestone}]]). ` +
-      `Don't force a one-off spec onto a bare goal.`,
-  );
+  const p = (parent || "").trim();
+  // POSITIVE definition (the same rule Vale enforces): a parent is valid iff it resolves to a function
+  // MANDATE or a goal MILESTONE. Everything else — a bare goal, a bare function, a sibling-`../specs/`
+  // parent, or free-text provenance — is a defect that Vale would bounce every pass. We enforce it at the
+  // write chokepoint so a bad parent fails FAST here instead of looping forever in review.
+  const hasFunctionMandate =
+    /\[\[[^\]]*functions\/[a-z0-9-]+[^\]]*\]\]/i.test(p) && (p.includes("#") || /mandate/i.test(p));
+  const goalM = p.match(GOAL_PARENT_RE);
+  const hasGoalMilestone =
+    !!goalM && ((goalM[2] || "").includes("#") || /\(\s*M\s*\d|milestone|\bM\d+\b/i.test(p));
+  if (hasFunctionMandate || hasGoalMilestone) return;
+
+  // Build a message tuned to what's actually wrong.
+  let why: string;
+  if (p.includes("../specs/")) {
+    why =
+      `Parent points at a sibling spec (\`../specs/…\`). A spec is NEVER the parent of another spec — a fix ` +
+      `that relates to an origin spec sets \`relatedSpec\`/\`related_spec\` (a link), and parents to a ` +
+      `function mandate.`;
+  } else if (goalM) {
+    why =
+      `Parent names goal "${goalM[1]}" with no specific milestone. A one-off spec parents to a function ` +
+      `mandate; a goal-bound spec must anchor to a milestone (pass milestoneId, or [[../goals/${goalM[1]}#{milestone}]]).`;
+  } else if (/\[\[[^\]]*functions\//i.test(p)) {
+    why =
+      `Parent names a function but not a specific mandate. Anchor it to a \`###\` under that function's ` +
+      `\`## Mandates\` (e.g. [[../functions/platform#infra-devops-reliability]], or name the mandate in the prose).`;
+  } else {
+    why =
+      `Parent is not a resolvable mandate or milestone (it reads as free text). Set it to a function mandate ` +
+      `(parentKind:"mandate", parentRef:"{owner}#{mandate-slug}") or a goal milestone.`;
+  }
+  throw new InvalidParentError(parent, `${why} — CLAUDE.md: parent = a function mandate OR a goal milestone, never a spec.`);
 }
 
 /**
@@ -505,6 +525,20 @@ export function extractIntentHeaders(raw: string): { why: string | null; what: s
   return { why: collect("Why"), what: collect("What") };
 }
 
+/** no-spec-parent — `**Related-spec:** <slug>` (or `[[<slug>]]`) line: the origin-spec LINK a fix-spec
+ *  points at (persists to `specs.related_spec`), so a self-healing agent references the fixed spec WITHOUT
+ *  putting it in the parent. Returns the slug (wikilink brackets/`../specs/` stripped), or null. */
+export function extractRelatedSpecHeader(raw: string): string | null {
+  for (const l of raw.split("\n")) {
+    const m = l.match(/\*\*Related-spec:\*\*\s*(.+?)\s*$/i);
+    if (m) {
+      const v = cleanInline(m[1]).replace(/^\[\[|\]\]$/g, "").replace(/^\.\.\/specs\//, "").trim();
+      return v || null;
+    }
+  }
+  return null;
+}
+
 /** `**Repair-signature:** `…`` line (box Repair-Agent specs). Returns the SIGNATURE TEXT, not just presence. */
 export function extractRepairSignature(raw: string): string | null {
   for (const l of raw.split("\n")) {
@@ -559,6 +593,10 @@ export interface AuthorSpecOpts {
   regressionSignature?: string | null;
   /** Optional: pre-typed repair signature. Falls back to parsing the markdown headers. */
   repairSignature?: string | null;
+  /** no-spec-parent — origin-spec slug this fix-spec RELATES to (persists to `specs.related_spec`). A
+   *  self-healing agent (repair / db-health / security / regression / coverage) sets this INSTEAD of an
+   *  `extends [[../specs/…]]` parent; the parent stays a function mandate. Omit / null for a normal spec. */
+  relatedSpec?: string | null;
   /** Optional: who set the intended_status (the author surface — `planner`, `director-coach`, etc.). */
   intendedStatusSetBy?: string | null;
   /** Optional: bind the authored spec to a goal milestone (`goal_milestones.id`). The goal planner passes
@@ -911,6 +949,8 @@ export async function authorSpecRowStructured(
         repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : null,
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : null,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : null,
+        // no-spec-parent — the origin-spec LINK (never a parent). Preserved when omitted.
+        related_spec: opts.relatedSpec,
         // pm-structured-intent-and-refs Phase 1 — persist the spec-level intent columns.
         why: spec.why.trim(),
         what: spec.what.trim(),
@@ -1095,6 +1135,9 @@ export async function authorSpecRowFromMarkdown(
         repair_signature: opts.repairSignature !== undefined ? opts.repairSignature : extractRepairSignature(markdown),
         regression_of_slug: opts.regressionOfSlug !== undefined ? opts.regressionOfSlug : regressionHeaders.ofSlug,
         regression_signature: opts.regressionSignature !== undefined ? opts.regressionSignature : regressionHeaders.signature,
+        // no-spec-parent — the origin-spec LINK (never a parent): opts win, else parse a `**Related-spec:**`
+        // header from the markdown (how the repair agent emits it). `undefined` → PRESERVE on re-author.
+        related_spec: opts.relatedSpec !== undefined ? opts.relatedSpec : (extractRelatedSpecHeader(markdown) ?? undefined),
         // pm-structured-intent-and-refs Phase 1 — persist the extracted intent (null when the markdown
         // surface hasn't been migrated yet; the structured chokepoint is HARD-gated).
         why: intent.why,

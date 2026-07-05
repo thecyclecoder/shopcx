@@ -1136,9 +1136,12 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
   return [
     `# ${finding.specTitle} ⏳`,
     ``,
-    `**Owner:** [[../functions/platform]] · **Parent:** a fix proposed by the [[../libraries/db-health|DB Health Agent]] ([[db-health-agent]]) — surface-don't-apply. · **Diagnosed cause:** \`${finding.cause}\` (${finding.category} pass).`,
+    // no-spec-parent: parent is the platform reliability MANDATE (a DB-health fix targets infra, not a spec).
+    // The provenance ("proposed by the DB Health Agent, surface-don't-apply") moves onto its own line below.
+    `**Owner:** [[../functions/platform]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (owner-approval-only; the DB Health Agent surfaces reliability fixes, never auto-applies).`,
     `**DBHealth-signature:** \`${finding.signature}\``,
     `**DBHealth-fix:** \`${finding.fixKind}\``,
+    `**Diagnosed cause:** \`${finding.cause}\` (${finding.category} pass) — a fix proposed by the [[../libraries/db-health|DB Health Agent]] ([[db-health-agent]]), surface-don't-apply.`,
     ``,
     `The DB Health Agent flagged this read-only and proposes the fix below. It applied **zero** DDL/deletes — the owner approves the build. Impact: ${finding.impact}.`,
     ``,

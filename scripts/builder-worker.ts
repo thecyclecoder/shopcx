@@ -9461,7 +9461,7 @@ async function runSpecTestJob(job: Job) {
             `  • "false-positive" — what looked risky is a safe/established pattern (or already mitigated). No spec, no action.`,
             `  • "real-vuln" — the diff introduced ≥1 genuine vulnerability. Author a single-phase, ~30-min-scoped fix spec that closes it (the finding(s), the fix, and verification). Reference secrets by location only.`,
             `  • "needs-human" — you CANNOT confidently classify (ambiguous, needs context only a human has). No spec, no guess — surface a plain one-line note.`,
-            `For "real-vuln", default owner "[[../functions/platform]]" and parent "extends [[../specs/security-dependency-agent]]" unless a more specific function clearly owns the affected system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build.`,
+            `For "real-vuln", default owner "[[../functions/platform]]" and parent "[[../functions/platform]] — Infra & DevOps / reliability mandate" (a fix-spec parent is a function MANDATE, NEVER a spec) and set "related_spec":"security-dependency-agent" (the origin link, not the parent). Use a more specific function+mandate only if one clearly owns the affected system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build.`,
           ]
         : []),
       `⭐ MANDATE — IF A MACHINE CAN TEST IT, THE MACHINE DOES IT. Maximize machine coverage; \`needs_human\` is the LAST resort, not the default. You have THREE non-destructive execution modes — reach for them in order before deferring: (1) read-only probes (repo/DB/HTTP/migration-present), (2) OUTCOME PROBE, (3) NON-DESTRUCTIVE LOCAL HARNESS.`,
@@ -9476,7 +9476,7 @@ async function runSpecTestJob(job: Job) {
       `TIE-BREAKER (replaces "when in doubt → needs_human"): when in doubt, attempt a read-only outcome probe first, then a non-destructive local harness, then (rendered-UI) a browser check, then (internal-only behavioral) a sandbox check; defer to \`needs_human\` ONLY if ALL are impossible OR the flow crosses the external firewall.`,
       `You have the box's QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, GET/read-only endpoint hits, a non-destructive local harness (\`_\`-prefixed scratch \`npx tsx\` script importing pure code from src/), the headless-browser check \`npx tsx scripts/spec-test-browser-check.ts\` (owner-authed, READ-ONLY render assertions + screenshot), and the behavioral sandbox \`npx tsx scripts/spec-test-sandbox.ts\` (drives INTERNAL-ONLY flows on is_test fixtures, asserts, proves isolation — bounded by the external firewall). NEVER mutate REAL prod data, NEVER mark the spec verified/archived, NEVER run a check that hits a real customer/dollar/external API (those are needs_human), NEVER submit a mutating form in the browser, NEVER point the sandbox at a non-is_test workspace.`,
       isPreMerge
-        ? `Final message = ONLY one JSON object combining BOTH verdicts (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>"]}}} — the security.checks array is REQUIRED (ALL 5 required checks) and each \`clean\` entry MUST carry evidence; the "spec" field is REQUIRED for security.status="real-vuln" and OMITTED otherwise. If you cannot proceed at all, return ONLY {"status":"error","error":"<why>"}.`
+        ? `Final message = ONLY one JSON object combining BOTH verdicts (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>"]}}} — the security.checks array is REQUIRED (ALL 5 required checks) and each \`clean\` entry MUST carry evidence; the "spec" field is REQUIRED for security.status="real-vuln" and OMITTED otherwise. If you cannot proceed at all, return ONLY {"status":"error","error":"<why>"}.`
         : `Final message = ONLY one JSON object (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"} — or {"status":"error","error":"<why>"} if you cannot proceed.`,
     ].join("\n");
 
@@ -9512,7 +9512,7 @@ async function runSpecTestJob(job: Job) {
       const repair = [
         `Your previous message could not be parsed as JSON. Return ONLY one valid JSON object matching this schema — no prose, no commentary, no markdown around it, and if fenced it must be the last thing in the message:`,
         isPreMerge
-          ? `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<inspection cite OR finding OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"...","fix":"...","verification":["..."]}}}`
+          ? `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<inspection cite OR finding OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"...","fix":"...","verification":["..."]}}}`
           : `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"}`,
         isPreMerge
           ? `Reuse the checks + security findings you already determined; do not re-run anything. The "security" object is REQUIRED (this is a fused pre-merge session — both verdicts must ship together). security.checks MUST be present and cover all 5 required keys with per-check evidence — a bare status flag is REJECTED downstream (Phase 1). The security.spec field is required only when security.status="real-vuln". If you genuinely could not proceed at all, return ONLY {"status":"error","error":"<why>"}.`
@@ -9542,7 +9542,7 @@ async function runSpecTestJob(job: Job) {
       const envelopeRepair = [
         `Your previous JSON parsed but did NOT include the required "security" field. This is a FUSED pre-merge session — both the spec-test verdict AND the security envelope MUST ship together, or the pre-merge gate has to hold the branch for a human.`,
         `Return ONLY one valid JSON object with the SAME schema as before (reuse your prior checks + report verbatim; do not re-run the spec-test) — add the "security" envelope now:`,
-        `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"...","fix":"...","verification":["..."]}}}`,
+        `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"...","fix":"...","verification":["..."]}}}`,
         `security.checks MUST cover ALL 5 required keys (injection, secret_leak, authz_rls, unsafe_admin_client, crypto_encrypted) with per-check evidence — a bare status flag is REJECTED by the fused-envelope validator (fused-premerge-security-authoritative-drop-standalone Phase 1). The security.spec field is required only when security.status="real-vuln".`,
         `Review the branch diff you already have in context (\`git diff origin/main...origin/${branch}\`) — do NOT re-fetch. If you genuinely cannot classify a check, use verdict="needs_human" with an "evidence" note explaining why. If you genuinely could not proceed at all, return ONLY {"status":"error","error":"<why>"}.`,
       ].join("\n");
@@ -13213,7 +13213,7 @@ function repairPrompt(brief: string): string {
     `  • "transient" — a genuine wait / one-off blip with no code fix (a deploy-boundary race, a momentary upstream timeout that already recovered). NO spec — resolve the error and log why.`,
     `  • "needs-human" — you CANNOT confidently diagnose it (ambiguous, needs context only a human has). NO spec, no guess, no loop — surface it for a human with a plain one-line note.`,
     ``,
-    `For any spec verdict, propose owner + parent (no orphan specs). Default owner "[[../functions/platform]]" and parent "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]" unless a more specific function clearly owns the implicated system. The spec must be a SINGLE phase scoped to a ~30-min build.`,
+    `For any spec verdict, propose owner + parent (no orphan specs). A fix-spec parent is a function MANDATE, NEVER a spec: default owner "[[../functions/platform]]" and parent "[[../functions/platform]] — Infra & DevOps / reliability mandate"; if the fix relates to an origin spec, set "related_spec":"<that-spec-slug>" (a link, not the parent). Use a more specific function+mandate only if one clearly owns the implicated system. The spec must be a SINGLE phase scoped to a ~30-min build.`,
     ``,
     `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if an EXISTING spec you'd extend (a parent, a Blocked-by: link, a sibling root-cause spec you'd group onto) is malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; should be flipped back to in_review via markSpecCardBackToReview before this fix can hang off it"). Never silently patch a malformed spec inline; the in_review flip is what gets it back into Vale's queue.`,
     ``,
@@ -13260,7 +13260,7 @@ function stripPhasePrefix(name: string): string {
 //      meta no longer gets swallowed into the summary — and thus no longer DUPLICATED against the header
 //      the serializer regenerates from the Owner/Parent columns.
 function repairSpecMarkdown(
-  spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; proposedChange?: string; why?: string; phase?: string; target?: string },
+  spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; proposedChange?: string; why?: string; phase?: string; target?: string; relatedSpec?: string },
   signature: string,
   verdict: string,
   rootCause: string,
@@ -13304,7 +13304,11 @@ function repairSpecMarkdown(
     // end-of-line, so an appended `· **Verdict:**` corrupted the stored `parent` column (it became
     // "extends … · Verdict: real-bug"). The verdict is carried losslessly in the footer's `(verdict: …)`
     // instead (a standalone `**Verdict:**` line here isn't column-backed and would vanish on the round-trip).
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"}`,
+    // no-spec-parent: parent is a function MANDATE (a repair fix targets infra/reliability, not a spec).
+    // If the fix relates to a specific origin spec, that pointer lives on `**Related-spec:**` (→ specs.related_spec),
+    // NEVER the parent — author-spec's assertValidParent rejects an `extends [[../specs/…]]` parent outright.
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || '[[../functions/platform]] — "Infra & DevOps / reliability" mandate'}`,
+    ...(spec.relatedSpec ? [`**Related-spec:** ${spec.relatedSpec}`] : []),
     ``,
     `## Phase 1 — ${phaseName}`,
     ``,
@@ -13468,7 +13472,10 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
         slug,
         title,
         owner: String(s.owner || "[[../functions/platform]]"),
-        parent: String(s.parent || "extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]"),
+        // no-spec-parent: default to the platform reliability MANDATE, never an `extends [[../specs/…]]` parent.
+        parent: String(s.parent || '[[../functions/platform]] — "Infra & DevOps / reliability" mandate'),
+        // The origin-spec pointer (if any) rides on `related_spec`, never the parent.
+        relatedSpec: typeof s.relatedSpec === "string" ? s.relatedSpec : (typeof s.related_spec === "string" ? s.related_spec : undefined),
         intent: String(s.intent || "Close the issue behind this Control Tower signature."),
         problem: String(s.problem || "(see the repair diagnosis above)"),
         proposedChange: typeof s.proposedChange === "string" ? s.proposedChange : undefined,
@@ -13811,12 +13818,12 @@ function regressionPrompt(brief: string): string {
     `NEGATIVE GUARD — only a regression of PRIOR-WORKING behaviour belongs to you. A brand-new feature error (never worked) is the repair agent's, not yours — if that's what this is, return "false-positive" with that reason (it'll be left to the repair agent).`,
     ``,
     `⭐ BUILD-WIDE SWEEP — when the regression is a BUILD-TIME / CONFIG break (a compile-time failure: an incompatible route-segment config, a renamed/removed framework API, a bad import, a lint/type gate), the deploy fails FAST on the FIRST offending file — but identical offenders elsewhere SURVIVE and become the next deploy break. So before authoring the fix, GREP THE WHOLE REPO for EVERY occurrence of the offending construct, not just the file named in the error, and scope the spec to fix ALL of them in one pass (list each path in the spec). Example that bit us: \`export const runtime\` lives in \`route.ts\` AND \`page.tsx\`/\`layout.tsx\`/\`opengraph-image.tsx\` — fixing only the named route.ts left opengraph-image.tsx breaking the very next build. A one-file patch that just moves the break to the next file is NOT a real fix.`,
-    `For "real-regression", default owner "[[../functions/platform]]" and parent "extends [[../specs/regression-agent]]" unless a more specific function clearly owns the regressed system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build (a repo-wide sweep of one mechanical pattern still counts as one phase). Provide the verification bullets that must hold again (reuse the regressed spec's failing checks), and for a build-time break add a bullet that the FULL build/compile passes (no remaining occurrences).`,
+    `For "real-regression", default owner "[[../functions/platform]]" and parent "[[../functions/platform]] — Infra & DevOps / reliability mandate" (a fix-spec parent is a function MANDATE, NEVER a spec; the regressed origin spec is linked via the Regression-of header, not the parent). Use a more specific function+mandate only if one clearly owns the regressed system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build (a repo-wide sweep of one mechanical pattern still counts as one phase). Provide the verification bullets that must hold again (reuse the regressed spec's failing checks), and for a build-time break add a bullet that the FULL build/compile passes (no remaining occurrences).`,
     ``,
     `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if the spec you're reviewing the regression of (or any spec you'd extend a Blocked-by: line from) is itself malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; the worker should send it back to in_review via markSpecCardBackToReview before the regression chain can extend it"). Never patch a malformed spec inline while authoring a fix.`,
     ``,
     `Final message = ONLY one JSON object:`,
-    `  {"status":"real-regression","review":"<plain text: what regressed + the offending change + the fix>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/regression-agent]]","intent":"<one paragraph>","what_regressed":"<the ✅ behaviour that broke>","offending_change":"<the change/merge that broke it>","fix":"<what to change to restore it>","verification":["<bullet that must hold again>","..."]}}`,
+    `  {"status":"real-regression","review":"<plain text: what regressed + the offending change + the fix>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","intent":"<one paragraph>","what_regressed":"<the ✅ behaviour that broke>","offending_change":"<the change/merge that broke it>","fix":"<what to change to restore it>","verification":["<bullet that must hold again>","..."]}}`,
     `  {"status":"transient"|"foreign"|"false-positive"|"already-fixed","reason":"<why this is not a real regression to fix>"}`,
     `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
   ].join("\n");
@@ -13842,7 +13849,7 @@ function regressionFixSpecMarkdown(spec: RegressionFixProposal, regressedSlug: s
   return [
     `# ${spec.title}`,
     ``,
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/regression-agent]]"} · **Regression-of:** [[${regressedSlug}]]`,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "[[../functions/platform]] — Infra & DevOps / reliability mandate"} · **Regression-of:** [[${regressedSlug}]]`,
     `**Regression-signature:** \`${signature}\``,
     ``,
     (spec.intent || "Restore the prior-working behaviour that regressed.").trim(),
@@ -16221,10 +16228,10 @@ function securityReviewChecksAndVerdictBlock(): string[] {
     `  • "real-vuln" — the diff introduced ≥1 genuine vulnerability. Author a single-phase, ~30-min-scoped fix spec that closes it (the finding(s), the fix, and verification). Reference secrets by location only.`,
     `  • "needs-human" — you CANNOT confidently classify (ambiguous, needs context only a human has). No spec, no guess — surface a plain one-line note.`,
     ``,
-    `For "real-vuln", default owner "[[../functions/platform]]" and parent "extends [[../specs/security-dependency-agent]]" unless a more specific function clearly owns the affected system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build.`,
+    `For "real-vuln", default owner "[[../functions/platform]]" and parent "[[../functions/platform]] — Infra & DevOps / reliability mandate" (a fix-spec parent is a function MANDATE, NEVER a spec) and set "related_spec":"security-dependency-agent" (the origin link, not the parent). Use a more specific function+mandate only if one clearly owns the affected system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build.`,
     ``,
     `Final message = ONLY one JSON object:`,
-    `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet that must hold>","..."]}}`,
+    `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet that must hold>","..."]}}`,
     `  {"status":"clean"|"false-positive","review":"<what you checked + why it's safe>"}`,
     `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
   ];
@@ -16244,7 +16251,7 @@ function securityReviewRepairPrompt(): string {
     `  {"status":"clean","review":"<what you checked + why it's safe>"}`,
     `  {"status":"false-positive","review":"<what looked risky + why it isn't>"}`,
     `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
-    `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"extends [[../specs/security-dependency-agent]]","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>","..."]}}`,
+    `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>","..."]}}`,
     ``,
     `If you genuinely could not complete the review (timed out, blocked, etc.), return ONLY {"status":"needs-human","review":"<one line on why you couldn't complete the review>"}.`,
   ].join("\n");
@@ -16282,7 +16289,7 @@ function securityFixSpecMarkdown(spec: SecurityFixProposal, parentSlug: string, 
   return [
     `# ${spec.title}`,
     ``,
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "extends [[../specs/security-dependency-agent]]"} · **Fixes:** [[${parentSlug}]]`,
+    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || "[[../functions/platform]] — Infra & DevOps / reliability mandate"} · **Fixes:** [[${parentSlug}]]`,
     sourceHeaderLine,
     ``,
     (spec.intent || intentDefault).trim(),
@@ -16440,7 +16447,7 @@ function depUpgradeSpecMarkdown(findings: DepFinding[], signature: string): stri
   return [
     `# Security dependency upgrades`,
     ``,
-    `**Owner:** [[../functions/platform]] · **Parent:** extends [[../specs/security-dependency-agent]] · auto-authored by [[../libraries/security-agent]].`,
+    `**Owner:** [[../functions/platform]] · **Parent:** [[../functions/platform]] — Infra & DevOps / reliability mandate · **Fixes:** [[security-dependency-agent]] · auto-authored by [[../libraries/security-agent]].`,
     `**Dep-advisory-signature:** \`${signature}\``,
     ``,
     `The daily \`npm audit\` dep-watch found ${findings.length} actionable advisory(ies) (≥ moderate). Bump the affected dependencies to their fixed versions. NEVER auto-bumped — this owner-gated build does the bump + the \`tsc\` gate.`,
@@ -17095,7 +17102,7 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite, 
   const md = [
     `# ${title}`,
     ``,
-    `**Owner:** ${String(s.owner || "[[../functions/growth]]")} · **Parent:** ${String(s.parent || "extends [[../specs/storefront-optimizer-agent]]")} · **Optimizer-surface:** \`${surface.product_id}:${surface.lander_type}:${surface.audience}\``,
+    `**Owner:** ${String(s.owner || "[[../functions/growth]]")} · **Parent:** ${String(s.parent || "[[../functions/growth]] — Storefront CRO mandate")} · **Optimizer-surface:** \`${surface.product_id}:${surface.lander_type}:${surface.audience}\``,
     ``,
     String(s.intent || "Add the storefront capability the optimizer needs to test this lever.").trim(),
     ``,

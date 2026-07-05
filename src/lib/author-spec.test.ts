@@ -104,6 +104,42 @@ test("function-mandate parent passes (the one-off case)", () => {
   assert.doesNotThrow(() =>
     assertValidParent('[[../functions/platform]] — "Infra & DevOps / reliability" mandate: x.', {}),
   );
+  // anchored form also passes
+  assert.doesNotThrow(() => assertValidParent("[[../functions/platform#infra-devops-reliability]] — x.", {}));
+});
+
+// no-spec-parent — the strengthened guard catches every non-mandate/milestone shape
+test("sibling-spec (../specs/) parent throws — a spec is never a parent", () => {
+  assert.throws(
+    () => assertValidParent("extends [[../specs/control-tower]] + [[../specs/error-feed-monitoring]]", {}),
+    (e: unknown) => {
+      assert.ok(e instanceof InvalidParentError);
+      assert.match((e as Error).message, /sibling spec|never the parent|relatedSpec/i);
+      return true;
+    },
+  );
+});
+
+test("free-text provenance parent throws (no wikilink)", () => {
+  assert.throws(
+    () => assertValidParent("a fix proposed by the DB Health Agent — surface-don't-apply.", {}),
+    (e: unknown) => {
+      assert.ok(e instanceof InvalidParentError);
+      assert.match((e as Error).message, /free text|mandate or milestone|never a spec/i);
+      return true;
+    },
+  );
+});
+
+test("bare-function parent (no mandate named) throws", () => {
+  assert.throws(
+    () => assertValidParent("[[../functions/platform]] — the platform-director graduates a fix.", {}),
+    (e: unknown) => {
+      assert.ok(e instanceof InvalidParentError);
+      assert.match((e as Error).message, /not a specific mandate|## Mandates/i);
+      return true;
+    },
+  );
 });
 
 test("all-non-empty phases pass the body gate", () => {
