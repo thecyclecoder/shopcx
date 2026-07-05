@@ -1,496 +1,470 @@
-<title>Commerce SDK — Contract Inventory</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Commerce SDK inventory — surface map, ops, view shapes, rename map, defects, plan</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   :root {
-    --bg: #fbfbfd;
-    --panel: #ffffff;
-    --panel-2: #f4f4f8;
-    --ink: #191b22;
-    --ink-2: #4a4d5a;
-    --ink-3: #767a8a;
-    --line: #e5e6ee;
-    --line-2: #d3d5e0;
-    --accent: #5b5bd6;
-    --accent-soft: #ecebfb;
-    --good: #0f9d6e;
-    --good-soft: #e2f5ee;
-    --warn: #c07406;
-    --warn-soft: #fbefdd;
-    --crit: #d1345b;
-    --crit-soft: #fbe4ea;
-    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --radius: 10px;
-    --maxw: 1120px;
+    --fg: #1a1a1a;
+    --muted: #555;
+    --bg: #fdfdfc;
+    --panel: #f4f2ee;
+    --border: #d9d5cc;
+    --accent: #b4531f;
+    --code-bg: #f8f7f4;
+    --link: #205780;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1116;
-      --panel: #171922;
-      --panel-2: #1e2029;
-      --ink: #e9eaf2;
-      --ink-2: #b0b3c2;
-      --ink-3: #7f8396;
-      --line: #262935;
-      --line-2: #333747;
-      --accent: #9b9bf0;
-      --accent-soft: #23233a;
-      --good: #45c496;
-      --good-soft: #16281f;
-      --warn: #e3a44e;
-      --warn-soft: #2b2013;
-      --crit: #f2789a;
-      --crit-soft: #2c1620;
-    }
-  }
-  :root[data-theme="light"] {
-    --bg: #fbfbfd; --panel: #ffffff; --panel-2: #f4f4f8; --ink: #191b22; --ink-2: #4a4d5a;
-    --ink-3: #767a8a; --line: #e5e6ee; --line-2: #d3d5e0; --accent: #5b5bd6; --accent-soft: #ecebfb;
-    --good: #0f9d6e; --good-soft: #e2f5ee; --warn: #c07406; --warn-soft: #fbefdd; --crit: #d1345b; --crit-soft: #fbe4ea;
-  }
-  :root[data-theme="dark"] {
-    --bg: #0f1116; --panel: #171922; --panel-2: #1e2029; --ink: #e9eaf2; --ink-2: #b0b3c2;
-    --ink-3: #7f8396; --line: #262935; --line-2: #333747; --accent: #9b9bf0; --accent-soft: #23233a;
-    --good: #45c496; --good-soft: #16281f; --warn: #e3a44e; --warn-soft: #2b2013; --crit: #f2789a; --crit-soft: #2c1620;
-  }
-
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font-family: var(--sans); line-height: 1.55;
-    font-size: 15px; -webkit-font-smoothing: antialiased;
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  code { background: var(--code-bg); border: 1px solid var(--border); padding: 0 4px; border-radius: 3px; font-size: 0.9em; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); padding: 12px 14px; border-radius: 4px; overflow-x: auto; font-size: 0.88em; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 15px; margin: 20px 0 8px; color: var(--accent); }
+  h4 { font-size: 14px; margin: 14px 0 6px; }
+  p { margin: 0 0 12px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  li { margin-bottom: 4px; }
+  .layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
+  nav.side {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 20px 16px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 14px;
   }
-  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
-  .layout { display: grid; grid-template-columns: 1fr; gap: 0; }
-  @media (min-width: 1080px) {
-    .layout { grid-template-columns: 210px minmax(0,1fr); gap: 40px; align-items: start; max-width: 1300px; margin: 0 auto; padding: 0 24px; }
-  }
-
-  /* ---- header ---- */
-  header.hero { border-bottom: 1px solid var(--line); background:
-      radial-gradient(120% 140% at 88% -10%, var(--accent-soft) 0%, transparent 46%); }
-  .eyebrow { font-size: 11.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--accent); font-weight: 650; }
-  h1 { font-size: clamp(28px, 4.4vw, 42px); line-height: 1.05; letter-spacing: -.02em; margin: 14px 0 12px; text-wrap: balance; font-weight: 720; }
-  .lede { font-size: 17px; color: var(--ink-2); max-width: 64ch; margin: 0; }
-  .hero-inner { padding: 46px 0 40px; }
-  .meta-row { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 22px; font-size: 12.5px; color: var(--ink-3); }
-  .meta-row b { color: var(--ink-2); font-weight: 600; }
-
-  /* ---- nav rail ---- */
-  nav.toc { position: sticky; top: 0; padding: 40px 0; font-size: 13px; display: none; }
-  @media (min-width: 1080px) { nav.toc { display: block; } }
-  nav.toc a { display: block; color: var(--ink-3); text-decoration: none; padding: 5px 0 5px 12px; border-left: 2px solid var(--line); transition: color .15s, border-color .15s; }
-  nav.toc a:hover { color: var(--ink); border-color: var(--accent); }
-  nav.toc .toc-head { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); font-weight: 650; padding-bottom: 8px; }
-
-  main { padding: 40px 0 100px; min-width: 0; }
-  section { margin-bottom: 54px; scroll-margin-top: 24px; }
-  h2 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 650; margin: 0 0 6px; }
-  .sec-title { font-size: 24px; letter-spacing: -.015em; font-weight: 680; margin: 0 0 18px; text-wrap: balance; }
-  h3 { font-size: 16px; font-weight: 640; margin: 26px 0 10px; letter-spacing: -.01em; }
-  p { color: var(--ink-2); margin: 0 0 14px; }
-  p.tight { max-width: 68ch; }
-  code, .mono { font-family: var(--mono); font-size: .88em; }
-  main code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; color: var(--ink); border: 1px solid var(--line); }
-
-  /* ---- pills ---- */
-  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; letter-spacing: .02em; white-space: nowrap; line-height: 1.5; }
-  .pill.good { background: var(--good-soft); color: var(--good); }
-  .pill.warn { background: var(--warn-soft); color: var(--warn); }
-  .pill.crit { background: var(--crit-soft); color: var(--crit); }
-  .pill.neutral { background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--line); }
-  .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
-  .dot.good { background: var(--good); } .dot.warn { background: var(--warn); } .dot.crit { background: var(--crit); }
-
-  /* ---- stat strip ---- */
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 12px; margin: 4px 0 8px; }
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
-  .stat .n { font-size: 26px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-  .stat .l { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
-
-  /* ---- stack diagram ---- */
-  .stacks { display: grid; grid-template-columns: 1fr; gap: 14px; margin: 18px 0; }
-  @media (min-width: 720px) { .stacks { grid-template-columns: repeat(3,1fr); } }
-  .stack { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 16px; }
-  .stack h4 { margin: 0 0 4px; font-size: 14.5px; font-weight: 640; }
-  .stack .path { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); line-height: 1.7; word-break: break-word; }
-  .converge { text-align: center; color: var(--ink-3); font-size: 13px; margin: 6px 0 0; }
-  .converge b { color: var(--accent); }
-
-  /* ---- defect cards ---- */
-  .defects { display: flex; flex-direction: column; gap: 12px; }
-  .defect { display: grid; grid-template-columns: auto 1fr; gap: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
-  .defect .stripe { width: 5px; }
-  .defect.crit .stripe { background: var(--crit); }
-  .defect.high .stripe { background: var(--warn); }
-  .defect.med .stripe { background: var(--accent); }
-  .defect .body { padding: 14px 16px; min-width: 0; }
-  .defect .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
-  .defect .top .name { font-weight: 640; font-size: 15px; }
-  .defect .desc { color: var(--ink-2); font-size: 14px; margin: 0; }
-  .defect .where { margin-top: 7px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
-
-  /* ---- tables ---- */
-  .tbl-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
-  th, td { text-align: left; padding: 9px 13px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); font-weight: 620; background: var(--panel-2); position: sticky; top: 0; }
-  tr:last-child td { border-bottom: none; }
-  td.mono, th.mono { font-family: var(--mono); font-size: 12px; }
-  tbody tr:hover { background: var(--panel-2); }
-  .num { font-variant-numeric: tabular-nums; }
-
-  /* rename table two-col */
-  .rename td:first-child { color: var(--crit); text-decoration: line-through; text-decoration-color: var(--line-2); }
-  .rename td:nth-child(2) { color: var(--good); }
-  .arrow { color: var(--ink-3); }
-
-  /* ---- surface cards ---- */
-  .surf-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-  @media (min-width: 700px) { .surf-grid { grid-template-columns: 1fr 1fr; } }
-  .surf { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 14px 15px; }
-  .surf .sh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 3px; }
-  .surf .sh .nm { font-weight: 630; font-size: 14.5px; }
-  .surf .rt { font-family: var(--mono); font-size: 11px; color: var(--ink-3); word-break: break-all; }
-  .surf ul { margin: 8px 0 0; padding-left: 16px; color: var(--ink-2); font-size: 13px; }
-  .surf ul li { margin: 2px 0; }
-  .grp-label { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 640; margin: 22px 0 10px; display: flex; align-items: center; gap: 10px; }
-  .grp-label::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-
-  /* ---- milestone rail ---- */
-  .miles { display: flex; flex-direction: column; gap: 0; }
-  .mile { display: grid; grid-template-columns: 34px 1fr; gap: 14px; padding-bottom: 20px; position: relative; }
-  .mile:not(:last-child)::before { content: ""; position: absolute; left: 16px; top: 30px; bottom: -2px; width: 2px; background: var(--line); }
-  .mile .badge { width: 34px; height: 34px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; z-index: 1; border: 1px solid var(--line); }
-  .mile .mc h4 { margin: 6px 0 4px; font-size: 15.5px; font-weight: 640; }
-  .mile .mc p { font-size: 13.5px; margin: 0; }
-  .mile.last .badge { background: var(--crit-soft); color: var(--crit); }
-
-  .callout { border: 1px solid var(--line-2); border-left: 3px solid var(--accent); background: var(--panel); border-radius: 8px; padding: 13px 16px; margin: 16px 0; font-size: 14px; color: var(--ink-2); }
-  .callout b { color: var(--ink); }
-  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--ink-3); margin: 10px 0 0; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  footer { border-top: 1px solid var(--line); color: var(--ink-3); font-size: 12.5px; padding: 22px 0 44px; }
-  a.inline { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--line-2); }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  nav.side .brand { font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 12px; }
+  nav.side ol { list-style: none; padding: 0; margin: 0; }
+  nav.side ol li { margin: 6px 0; }
+  nav.side a { display: block; padding: 4px 6px; border-radius: 3px; color: var(--fg); }
+  nav.side a:hover { background: #eae5db; text-decoration: none; }
+  nav.side .sub { padding-left: 12px; font-size: 13px; color: var(--muted); }
+  main { padding: 28px 40px 80px; max-width: 960px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 16px; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); font-weight: 600; }
+  td.mono, th.mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--panel); border: 1px solid var(--border); color: var(--muted); }
+  .pill.warn { background: #f5e5c8; border-color: #d9b56b; color: #6a4a10; }
+  .pill.ok { background: #d8ecd1; border-color: #78b26a; color: #2a5921; }
+  .note { border-left: 3px solid var(--accent); padding: 8px 12px; background: #faf3ee; margin: 12px 0; font-size: 14px; }
+  .surface { display: grid; grid-template-columns: 220px 1fr; gap: 8px 16px; align-items: baseline; margin: 6px 0; font-size: 14px; }
+  .surface .name { font-weight: 600; }
+  .surface .path { color: var(--muted); font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  .caret { color: var(--muted); }
+  footer { margin: 60px 0 0; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
 </style>
-
-<header class="hero">
-  <div class="wrap hero-inner">
-    <div class="eyebrow">ShopCX · Refactor Foundation</div>
-    <h1>Centralized Commerce SDK — Contract Inventory</h1>
-    <p class="lede">One internal-aware SDK for every customer-facing read and write. This is the surface map, the Display + Mutation operation set, and the defect register that motivates it — the doc the goal is built from.</p>
-    <div class="meta-row">
-      <span><b>Scope:</b> everything customer-touching</span>
-      <span><b>Surfaces:</b> 3 dashboard stacks · portal ×2 · AI ×3</span>
-      <span><b>Method:</b> driven from <code style="font-family:var(--mono)">sidebar.tsx</code> nav</span>
-      <span><b>Status:</b> research complete · pre-build</span>
-    </div>
-  </div>
-</header>
-
-<div class="wrap">
+</head>
+<body>
 <div class="layout">
-  <nav class="toc" aria-label="Section index">
-    <div class="toc-head">Contents</div>
-    <a href="#why">Why now</a>
-    <a href="#stacks">Three stacks</a>
-    <a href="#defects">Defect register</a>
-    <a href="#display">Display operations</a>
-    <a href="#mutation">Mutation operations</a>
-    <a href="#naming">Naming map</a>
-    <a href="#perf">Performance tenets</a>
-    <a href="#surfaces">Surface inventory</a>
-    <a href="#plan">Build plan</a>
+  <nav class="side" aria-label="Sections">
+    <div class="brand">Commerce SDK inventory</div>
+    <ol>
+      <li><a href="#surface-map">1. Surface map</a></li>
+      <li><a href="#display-ops">2. Display operation set</a></li>
+      <li><a href="#mutation-ops">3. Mutation operation set</a></li>
+      <li><a href="#operation-contract">4. Operation contract</a></li>
+      <li><a href="#view-shapes">5. Canonical view shapes</a></li>
+      <li><a href="#rename-map">6. appstleX → subscriptionX rename map</a></li>
+      <li><a href="#defect-register">7. Defect register (9)</a></li>
+      <li><a href="#build-plan">8. Build plan</a></li>
+    </ol>
+    <div class="sub" style="margin-top:24px">
+      <p><strong>Spec:</strong><br>commerce-sdk-scaffold-money-resolver</p>
+      <p><strong>Parent:</strong><br>M2 — SDK core: Display + Mutation, zero consumers</p>
+      <p><strong>Owner:</strong><br>Platform</p>
+    </div>
   </nav>
 
   <main>
-    <!-- WHY -->
-    <section id="why">
-      <h2>Origin</h2>
-      <div class="sec-title">Two one-off bugs turned out to be one systemic gap</div>
-      <p class="tight">A ticket action set a customer's next order via a raw Shopify GraphQL mutation instead of the internal-aware dispatcher; a dashboard rendered a correct date a day early. Both are instances of the same structural problem: <b>customer data is read and written through three independent stacks that share almost nothing on the read side, and each re-implements — or skips — the internal-vs-Appstle branch.</b> Internal subscriptions (billed by our own engine) and Appstle subscriptions carry different price and identity shapes; every surface that forgets the difference produces a wrong number or a dead action.</p>
-      <div class="stats">
-        <div class="stat"><div class="n">15+</div><div class="l">customer-facing surfaces</div></div>
-        <div class="stat"><div class="n">9</div><div class="l">defect classes found</div></div>
-        <div class="stat"><div class="n">2</div><div class="l">critical (money/mis-fire)</div></div>
-        <div class="stat"><div class="n">0</div><div class="l">SQL RPCs in analytics</div></div>
-      </div>
-    </section>
+    <h1>Commerce SDK inventory</h1>
+    <p>The single source-of-truth reference for <code>src/lib/commerce</code>: which surfaces consume it, the Display + Mutation ops, the canonical view shapes, the appstleX → subscriptionX rename map, the defect register the SDK exists to close, and the build plan across M2b/M2c.</p>
+    <p><strong>Open locally.</strong> This page is a self-contained HTML file — no external CSS/JS. Open it directly in a browser (<code>open docs/brain/reference/commerce-sdk-inventory.html</code>).</p>
 
-    <!-- STACKS -->
-    <section id="stacks">
-      <h2>Structural finding</h2>
-      <div class="sec-title">Three parallel data stacks, unified only halfway</div>
-      <p class="tight">Mutations are ~70% converged — the AI, Improve, and Triage paths all bottom out on the same <code>directActionHandlers</code>, and portal + AI both dispatch through the <code>appstle.ts</code> / <code>subscription-items.ts</code> wrappers. <b>Reads are not unified at all</b>, and the pricing-enrichment that prevents <code>$NaN</code> is applied inconsistently across the three. That inconsistency is the bug class.</p>
-      <div class="stacks">
-        <div class="stack">
-          <h4>Dashboard</h4>
-          <div class="path">pages → /api/workspaces/[id]/… REST routes → Supabase</div>
-        </div>
-        <div class="stack">
-          <h4>Customer Portal</h4>
-          <div class="path">2 render surfaces → /api/portal → src/lib/portal/handlers/* (DB-first)</div>
-        </div>
-        <div class="stack">
-          <h4>AI / Automation</h4>
-          <div class="path">orchestrator read-tools + action-executor directActionHandlers</div>
-        </div>
-      </div>
-      <p class="converge">Target ⟶ all three become thin consumers of <b>one <code style="font-family:var(--mono)">src/lib/commerce/</code> SDK</b></p>
-    </section>
+    <!-- 1. SURFACE MAP -->
+    <h2 id="surface-map">1. Surface map</h2>
+    <p>Every surface that reads or mutates a commerce entity today. All must migrate to <code>@/lib/commerce</code>; the goal is a per-column build plan (see §7) that lands one surface at a time.</p>
 
-    <!-- DEFECTS -->
-    <section id="defects">
-      <h2>The case for the work</h2>
-      <div class="sec-title">Defect register — what the SDK eliminates</div>
-      <div class="legend">
-        <span><i class="dot crit"></i> Critical — money or silent mis-fire</span>
-        <span><i class="dot warn"></i> High — visible wrong data / fragile compound write</span>
-        <span><i class="dot" style="background:var(--accent)"></i> Medium — gap or maintenance risk</span>
-      </div>
-      <div class="defects" style="margin-top:16px">
-        <div class="defect crit"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Refund gateway-blindness</span><span class="pill crit">critical</span></div>
-          <p class="desc">The only live refund button (Returns → “Issue Refund”) fires Shopify <code>returnProcess</code> with no gateway check. For internal / Braintree-paid orders this records a Shopify refund while no money moves — a phantom refund. The gateway-aware routers (<code>partialRefundByAmount</code>, <code>refundOrderViaBraintree</code>) exist but are wired to no UI.</p>
-          <div class="where">returns/[id]/page.tsx:325 → processReturn (shopify-returns.ts:431)</div>
-        </div></div>
-        <div class="defect crit"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Coupon route not internal-aware</span><span class="pill crit">critical</span></div>
-          <p class="desc">The subscription coupon route (POST apply + DELETE remove) skips <code>isInternalSubscription</code> and hits Appstle inline. It is the <b>only</b> subscription-mutation surface that never branches. Ticket “Apply Coupon”, sub-detail “Remove discount”, and the AI <code>apply_coupon</code>/<code>remove_coupon</code> handlers all mis-fire against internal contracts.</p>
-          <div class="where">subscriptions/[subId]/coupon/route.ts · action-executor.ts:597,618</div>
-        </div></div>
-        <div class="defect high"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Internal-sub price blanking</span><span class="pill warn">high</span></div>
-          <p class="desc">Internal subs carry no baked <code>items[].price_cents</code> (engine-derived), and the dashboard routes never call the live pricing engine. Result: subscriptions list shows <code>$0/mo</code>, sub-detail shows <code>“--”</code> per line, ticket cards render <code>$NaN</code>. The single money resolver (<code>priceSubscription</code>) exists; the surfaces bypass it.</p>
-          <div class="where">subscriptions/route.ts:145 · SubscriptionsList.tsx:154 · enrich-pricing.ts:126</div>
-        </div></div>
-        <div class="defect high"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Fraud confirm-fraud is a compound, non-transactional write</span><span class="pill warn">high</span></div>
-          <p class="desc">The 5-step wizard cancels subscriptions (Appstle), cancels + refunds + restocks orders (Shopify), and bans the customer — as independent POSTs with no transaction. Partial failure leaves mixed state. Its detail view also has unguarded <code>formatCents</code> over <code>evidence</code> JSONB → real <code>$NaN</code>.</p>
-          <div class="where">fraud-cases/[caseId]/confirm-fraud · fraud/[id]/page.tsx:77</div>
-        </div></div>
-        <div class="defect med"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Detail pages missing actions</span><span class="pill neutral">medium</span></div>
-          <p class="desc">Sub-detail exposes coupon <i>remove</i> but not <i>apply</i>, and payment-update email only inside an active dunning block. The ticket page omits <code>change_frequency</code>, line-item edits, and payment-method changes though its route accepts them. Manual customer fixes are harder than they should be.</p>
-          <div class="where">subscriptions/[id]/page.tsx · tickets/[id]/page.tsx</div>
-        </div></div>
-        <div class="defect med"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Crisis “Resolve” stub</span><span class="pill neutral">medium</span></div>
-          <p class="desc">The confirm dialog promises to auto-resume paused subs and re-add removed items; the handler only flips <code>status='resolved'</code>. Copy over-promises a subscription side effect it never performs.</p>
-          <div class="where">crisis/[id]/route.ts:239 (“mass actions later”)</div>
-        </div></div>
-        <div class="defect med"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Loyalty aggregate + guard gaps</span><span class="pill neutral">medium</span></div>
-          <p class="desc">List stats (“Points Outstanding / Total Earned / Avg”) are summed over a 250-row sample but labeled program-wide — wrong past 250 members. Manual point adjustment writes raw, bypassing <code>deductPoints</code> with no negative-balance guard.</p>
-          <div class="where">loyalty/page.tsx:62 · loyalty/members/[memberId]/route.ts:42</div>
-        </div></div>
-        <div class="defect med"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">Unguarded money formatters</span><span class="pill neutral">medium</span></div>
-          <p class="desc"><code>formatCents(cents/100)</code> with no null guard on customers list/detail (<code>ltv_cents</code>), fraud detail (evidence), orders (<code>total_cents</code>), returns (three fields), ticket page. Any missing field renders <code>$NaN</code>. One SDK money resolver + formatter closes all of these.</p>
-          <div class="where">components/shared/format-utils.ts + per-page redefinitions</div>
-        </div></div>
-        <div class="defect med"><div class="stripe"></div><div class="body">
-          <div class="top"><span class="name">JS-side aggregation, zero RPCs</span><span class="pill neutral">perf</span></div>
-          <p class="desc">All seven analytics readers aggregate in JS over raw rows; none use a SQL RPC. Ranked conversion candidates: <b>Funnel ≫ MRR &gt; Portal-analytics &gt; Dunning</b>. (Revenue / Profit / ROAS already sit on pre-aggregated snapshot tables.) Matches the prior 3h→8s SQL win.</p>
-          <div class="where">storefront/funnel-tree.ts · analytics/mrr/route.ts · portal-analytics/route.ts</div>
-        </div></div>
-      </div>
-    </section>
+    <h3>Dashboard commerce pages</h3>
+    <div class="surface"><span class="name">Subscriptions list</span><span class="path">src/app/dashboard/subscriptions/</span></div>
+    <div class="surface"><span class="name">Subscription detail</span><span class="path">src/app/dashboard/subscriptions/[id]/</span></div>
+    <div class="surface"><span class="name">Orders list</span><span class="path">src/app/dashboard/orders/</span></div>
+    <div class="surface"><span class="name">Order detail</span><span class="path">src/app/dashboard/orders/[orderNumber]/</span></div>
+    <div class="surface"><span class="name">Returns list</span><span class="path">src/app/dashboard/returns/</span></div>
+    <div class="surface"><span class="name">Chargebacks dashboard</span><span class="path">src/app/dashboard/chargebacks/</span></div>
+    <div class="surface"><span class="name">Fraud cases</span><span class="path">src/app/dashboard/fraud/</span></div>
+    <div class="surface"><span class="name">Loyalty members</span><span class="path">src/app/dashboard/loyalty/</span></div>
+    <div class="surface"><span class="name">Crisis events</span><span class="path">src/app/dashboard/crisis/</span></div>
+    <div class="surface"><span class="name">Customer detail</span><span class="path">src/app/dashboard/customers/[id]/</span></div>
 
-    <!-- DISPLAY -->
-    <section id="display">
-      <h2>Read side</h2>
-      <div class="sec-title">Display operation set</div>
-      <p class="tight">Every surface consumes the same <code>listX</code> / <code>detailX</code> functions returning <b>fully enriched, pricing-resolved, internal-vs-Appstle-normalized</b> view shapes. The invariant: <b>no surface ever touches raw <code>items[].price_cents</code></b> — pricing always flows through <code>priceSubscription</code>. This single rule retires the whole NaN / $0 / “--” family.</p>
-      <div class="tbl-scroll">
-        <table>
-          <thead><tr><th>Entity</th><th>List</th><th>Detail</th><th>Canonical view shape</th><th>Consumers</th></tr></thead>
-          <tbody>
-            <tr><td>Subscription</td><td class="mono"><a href="../libraries/commerce__subscription.md">listSubscriptions</a></td><td class="mono"><a href="../libraries/commerce__subscription.md">getSubscription</a></td><td>SubscriptionView — priced lines, MSRP/discount/tax, coupon, payment, dunning</td><td>dashboard, portal ×2, ticket, AI</td></tr>
-            <tr><td>Order</td><td class="mono"><a href="../libraries/commerce__order.md">listOrders</a></td><td class="mono"><a href="../libraries/commerce__order.md">getOrder</a></td><td>OrderView — lines, totals, fulfillment, gateway, attribution</td><td>dashboard, portal, ticket, AI</td></tr>
-            <tr><td>Return</td><td class="mono"><a href="../libraries/commerce__return.md">listReturns</a></td><td class="mono"><a href="../libraries/commerce__return.md">getReturn</a></td><td>ReturnView — items, order/label/net refund, resolution</td><td>dashboard, ticket, customer-360</td></tr>
-            <tr><td>Replacement</td><td class="mono"><a href="../libraries/commerce__replacement.md">listReplacements</a></td><td class="mono"><a href="../libraries/commerce__replacement.md">getReplacement</a></td><td>ReplacementView — items, reason, sub-adjustment</td><td>dashboard, ticket, customer-360</td></tr>
-            <tr><td>Customer</td><td class="mono"><a href="../libraries/commerce__customer.md">getCustomer</a></td><td class="mono"><a href="../libraries/commerce__customer.md">getCustomer</a></td><td>CustomerView (360) — batched: subs, orders, returns, chargebacks, fraud, loyalty, payment, credit</td><td>dashboard, ticket</td></tr>
-            <tr><td>Loyalty member</td><td class="mono"><a href="../libraries/commerce__loyalty.md">listLoyaltyLedger</a></td><td class="mono"><a href="../libraries/commerce__loyalty.md">getLoyaltyBalance</a></td><td>LoyaltyView — balance, tiers, redemptions, dollar value</td><td>dashboard, portal, ticket, customer-360</td></tr>
-            <tr><td>Chargeback</td><td class="mono"><a href="../libraries/commerce__chargeback.md">listChargebacks</a></td><td class="mono"><a href="../libraries/commerce__chargeback.md">listChargebacks</a></td><td>ChargebackView — dispute, linked subs, suggestions</td><td>dashboard, ticket, customer-360</td></tr>
-            <tr><td>Fraud case</td><td class="mono"><a href="../libraries/commerce__fraud.md">getFraudPosture</a></td><td class="mono"><a href="../libraries/commerce__fraud.md">getFraudPosture</a></td><td>FraudView — evidence, linked accounts/orders/subs</td><td>dashboard, ticket, customer-360</td></tr>
-            <tr><td>Reseller</td><td class="mono">listResellers</td><td>—</td><td>ResellerView — status, ASINs, discovery runs</td><td>dashboard (Risk)</td></tr>
-            <tr><td>Crisis</td><td class="mono"><a href="../libraries/commerce__crisis.md">getCrisisContext</a></td><td class="mono"><a href="../libraries/commerce__crisis.md">getCrisisContext</a></td><td>CrisisView — segments, outcomes, financial impact</td><td>dashboard</td></tr>
-            <tr><td>Comp subscription</td><td class="mono">listCompSubscriptions</td><td>(shared)</td><td>subset of SubscriptionView ($0 roster)</td><td>dashboard</td></tr>
-            <tr><td>Review</td><td class="mono">listReviews</td><td>(inline)</td><td>ReviewView — status, rating, product, AI excerpt</td><td>dashboard, ticket, customer-360</td></tr>
-            <tr><td>Analytics</td><td colspan="2" class="mono">readRevenue · readMRR · readROAS · readProfit · readDunning · readFunnel · readPortal</td><td>read-only aggregates — SQL-RPC backed (see perf)</td><td>dashboard</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <h3>Ticket detail (Support)</h3>
+    <div class="surface"><span class="name">Ticket view</span><span class="path">src/app/dashboard/tickets/[id]/</span></div>
+    <div class="surface"><span class="name">Ticket API</span><span class="path">src/app/api/tickets/[id]/route.ts</span></div>
+    <p>Currently reads subscriptions via the deprecated <code>priceSubItemsForDisplay</code> shim (see §5 &amp; §6).</p>
 
-    <!-- MUTATION -->
-    <section id="mutation">
-      <h2>Write side</h2>
-      <div class="sec-title">Mutation operation set + dispatch status</div>
-      <p class="tight">Entity-named, each internally branching internal-vs-Appstle (and, for money, gateway-aware). Most already dispatch correctly through the wrappers; the table flags the ones that bypass and become the SDK's first fixes.</p>
-      <div class="tbl-scroll">
-        <table>
-          <thead><tr><th>Entity</th><th>Operations</th><th style="width:130px">Dispatch today</th></tr></thead>
-          <tbody>
-            <tr>
-              <td>Subscription</td>
-              <td>pause · resume · cancel(journey) · skip · changeNextOrderDate · changeFrequency · addItem · removeItem · swapVariant · changeQuantity · updateLinePrice · billNow · switchPaymentMethod · sendPaymentUpdateEmail · addFreeProduct · swapProduct</td>
-              <td><span class="pill good">internal-aware</span></td>
-            </tr>
-            <tr>
-              <td>Subscription — coupon</td>
-              <td>applyCoupon · removeCoupon</td>
-              <td><span class="pill crit">bypasses</span></td>
-            </tr>
-            <tr>
-              <td>Order</td>
-              <td>refund(full/partial) · cancel(refund/restock) · updateShippingAddress · resolveSync</td>
-              <td><span class="pill warn">refund not gateway-aware in UI</span></td>
-            </tr>
-            <tr>
-              <td>Return</td>
-              <td>approve · decline · addTracking · dispose · issueRefund · issueStoreCredit · close · cancel</td>
-              <td><span class="pill crit">refund Shopify-only</span></td>
-            </tr>
-            <tr>
-              <td>Replacement</td>
-              <td>createReplacementOrder · adjustSubscription · markShipped · deny</td>
-              <td><span class="pill good">ok</span></td>
-            </tr>
-            <tr>
-              <td>Loyalty</td>
-              <td>redeem · adjust · redeemAsRefund</td>
-              <td><span class="pill warn">adjust unguarded</span></td>
-            </tr>
-            <tr>
-              <td>Customer</td>
-              <td>linkAccounts · unlink · ban/unban · enrich · updateInfo · issueStoreCredit · debitStoreCredit</td>
-              <td><span class="pill good">ok</span></td>
-            </tr>
-            <tr>
-              <td>Fraud</td>
-              <td>confirmFraud(compound) · cancelSubscription · markReseller · dismiss</td>
-              <td><span class="pill warn">non-transactional</span></td>
-            </tr>
-            <tr>
-              <td>Chargeback</td>
-              <td>cancelSubscription · reinstate</td>
-              <td><span class="pill good">internal-aware</span></td>
-            </tr>
-            <tr>
-              <td>Reseller</td>
-              <td>setStatus · runDiscovery</td>
-              <td><span class="pill neutral">single-entity</span></td>
-            </tr>
-            <tr>
-              <td>Crisis</td>
-              <td>autoSwap · resolve</td>
-              <td><span class="pill warn">resolve is a stub</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <h3>Agent Improve tab</h3>
+    <div class="surface"><span class="name">Agent-improve UI</span><span class="path">src/app/dashboard/tickets/[id]/Improve/</span></div>
+    <div class="surface"><span class="name">Ticket-improve worker (box)</span><span class="path">src/lib/inngest/ticket-improve.ts</span></div>
+    <p>Agent-authored remedies must resolve money through the SDK Mutation ops, never directly against Braintree/Shopify/Appstle.</p>
 
-    <!-- NAMING -->
-    <section id="naming">
-      <h2>Vendor sunset</h2>
-      <div class="sec-title">Naming map — <code>appstleX → subscriptionX</code></div>
-      <p class="tight">The correct pattern already exists as the <code>sub*</code> family in <code>subscription-items.ts</code>. These renames make the whole surface entity-named so Appstle can be removed without touching call sites. Appstle-only primitives (no internal path) stay named until the vendor is gone, and are flagged.</p>
-      <div class="tbl-scroll">
-        <table class="rename">
-          <thead><tr><th>Current (Appstle-named)</th><th>Rename to</th><th>Note</th></tr></thead>
-          <tbody>
-            <tr><td class="mono">appstleSubscriptionAction</td><td class="mono">subscriptionSetState</td><td class="arrow">pause/resume/cancel</td></tr>
-            <tr><td class="mono">appstleSkipNextOrder</td><td class="mono">subscriptionSkipNextOrder</td><td></td></tr>
-            <tr><td class="mono">appstleUpdateBillingInterval</td><td class="mono">subscriptionChangeFrequency</td><td></td></tr>
-            <tr><td class="mono">appstleUpdateNextBillingDate</td><td class="mono">subscriptionChangeNextOrderDate</td><td></td></tr>
-            <tr><td class="mono">appstleGetUpcomingOrders</td><td class="mono">subscriptionUpcomingOrders</td><td></td></tr>
-            <tr><td class="mono">appstleSkipUpcomingOrder</td><td class="mono">subscriptionSkipUpcomingOrder</td><td></td></tr>
-            <tr><td class="mono">appstleSwitchPaymentMethod</td><td class="mono">subscriptionSwitchPaymentMethod</td><td></td></tr>
-            <tr><td class="mono">appstleSendPaymentUpdateEmail</td><td class="mono">subscriptionSendPaymentUpdateEmail</td><td></td></tr>
-            <tr><td class="mono">appstleAddFreeProduct</td><td class="mono">subscriptionAddFreeProduct</td><td></td></tr>
-            <tr><td class="mono">appstleSwapProduct</td><td class="mono">subscriptionSwapProduct</td><td></td></tr>
-            <tr><td class="mono">appstleRemoveLineItem</td><td class="mono">subscriptionRemoveLineItem</td><td></td></tr>
-            <tr><td class="mono">changeNextBillingDate</td><td class="mono">(delete)</td><td class="arrow">raw Shopify — deprecation target</td></tr>
-            <tr><td class="mono">appstleAttemptBilling</td><td class="mono">(keep, flag)</td><td class="arrow">Appstle-only, no internal path</td></tr>
-            <tr><td class="mono">appstleUnskipOrder</td><td class="mono">(keep, flag)</td><td class="arrow">Appstle-only, no internal path</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <h3>AI stack (orchestrator + data tools)</h3>
+    <div class="surface"><span class="name">Sonnet orchestrator</span><span class="path">src/lib/sonnet-orchestrator-v2.ts</span></div>
+    <div class="surface"><span class="name">Direct action handlers</span><span class="path">src/lib/direct-action-handlers.ts</span></div>
+    <div class="surface"><span class="name">Runtime executor bridge</span><span class="path">scripts/apply-coupon-via-executor.ts</span></div>
 
-    <!-- PERF -->
-    <section id="perf">
-      <h2>Battle-testing</h2>
-      <div class="sec-title">Performance tenets — baked in, not bolted on</div>
-      <div class="surf-grid" style="grid-template-columns:1fr">
-        <div class="callout"><b>SQL / RPC for anything list-or-aggregate.</b> The 3h→8s precedent is the rule: list and rollup operations are set-based Postgres functions, not JS loops over paginated fetches. First conversions: <b>Funnel</b> (raw event/session tables) ≫ <b>MRR</b> (nested day-bucketing) &gt; <b>Portal-analytics</b> (unbounded on “all time”) &gt; <b>Dunning</b>.</div>
-        <div class="callout"><b>Never silently truncate.</b> Every <code>listX</code> paginates past Supabase's 1000-row cap via range or RPC. (Live example this pass: loyalty stats summed a 250-row sample and labeled it program-wide.)</div>
-        <div class="callout"><b>Column-selective + batched enrichment.</b> The customer-360 fans out to ~13 parallel fetches today; <code>detailCustomer</code> collapses that into one batched call to cut egress.</div>
-        <div class="callout"><b>One money resolver.</b> <code>priceSubscription</code> is the only path to a line/total price; internal subs can never emit <code>undefined</code> cents, so no surface can render <code>$NaN</code>.</div>
-      </div>
-    </section>
+    <h3>Mini-site portal (customer-facing)</h3>
+    <div class="surface"><span class="name">Mini-site page render</span><span class="path">src/app/portal/[slug]/page.tsx</span></div>
+    <div class="surface"><span class="name">Portal handlers (list + detail)</span><span class="path">src/lib/portal/handlers/</span></div>
+    <div class="surface"><span class="name">Legacy pricing shim (deprecated)</span><span class="path">src/lib/portal/helpers/enrich-pricing.ts</span></div>
 
-    <!-- SURFACES -->
-    <section id="surfaces">
-      <h2>Coverage check</h2>
-      <div class="sec-title">Surface inventory — driven from the nav</div>
-      <p class="tight">Every entity below traces to a real sidebar item, its list/detail pages, and the display + mutation elements they carry. This is the completeness guarantee: the SDK must serve all of them.</p>
+    <h3>Shopify-extension portal (embedded)</h3>
+    <div class="surface"><span class="name">Portal source (React)</span><span class="path">shopify-extension/portal-src/</span></div>
+    <div class="surface"><span class="name">Built bundle (rebuild after edit)</span><span class="path">scripts/build-all-portals.js</span></div>
 
-      <div class="grp-label">Dashboard · Customers</div>
-      <div class="surf-grid">
-        <div class="surf"><div class="sh"><span class="nm">Subscriptions</span><span class="pill warn">$0/mo bug</span></div><div class="rt">/dashboard/subscriptions · [id]</div><ul><li>List: status/recovery/payment/MRR</li><li>Detail: all sub mutations — but no <i>apply</i> coupon</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Orders</span><span class="pill neutral">read</span></div><div class="rt">/dashboard/orders · [id]</div><ul><li>List: status/tracking/total</li><li>Detail: resolve-sync fulfill · no refund button</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Returns</span><span class="pill crit">phantom refund</span></div><div class="rt">/dashboard/returns · [id]</div><ul><li>approve/decline/dispose</li><li>issueRefund (Shopify-only) · store-credit</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Replacements</span><span class="pill good">ok</span></div><div class="rt">/dashboard/replacements · [id]</div><ul><li>create $0 draft · adjust sub · ship/deny</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Customers (360)</span><span class="pill warn">NaN LTV</span></div><div class="rt">/dashboard/customers · [id]</div><ul><li>~13 side-panel fetches</li><li>link/ban/enrich · store-credit</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Loyalty</span><span class="pill warn">sample stats</span></div><div class="rt">/dashboard/loyalty · [memberId]</div><ul><li>redeem · manual adjust (unguarded)</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Crisis</span><span class="pill warn">resolve stub</span></div><div class="rt">/dashboard/crisis · [id]</div><ul><li>auto-swap (grandfathered) · per-customer flags</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Comp Subs</span><span class="pill neutral">read</span></div><div class="rt">/dashboard/comp-subscriptions</div><ul><li>$0 roster by role · shared detail</li></ul></div>
-      </div>
+    <!-- 2. DISPLAY OPS -->
+    <h2 id="display-ops">2. Display operation set</h2>
+    <p>A Display op takes a <code>(workspace, input)</code> and returns a canonical view (§4). Read-only — no side effects, no money moves.</p>
+    <table>
+      <thead><tr><th>Op</th><th class="mono">Signature</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr><td>getSubscription</td><td class="mono">(workspaceId, subscriptionId) → SubscriptionView</td><td>Full sub with priced lines + pricing summary</td></tr>
+        <tr><td>listSubscriptions</td><td class="mono">(workspaceId, filter) → SubscriptionView[]</td><td>Filtered list; internal + Appstle merged</td></tr>
+        <tr><td>getOrder</td><td class="mono">(workspaceId, orderId | orderNumber) → OrderView</td><td>One order with priced line items</td></tr>
+        <tr><td>listOrders</td><td class="mono">(workspaceId, customerId, opts) → OrderView[]</td><td>Order history (expands linked accounts)</td></tr>
+        <tr><td>getReturn</td><td class="mono">(workspaceId, returnId) → ReturnView</td><td>One return with delivery/refund state</td></tr>
+        <tr><td>listReturns</td><td class="mono">(workspaceId, customerId) → ReturnView[]</td><td>Customer's returns (open + closed)</td></tr>
+        <tr><td>getReplacement</td><td class="mono">(workspaceId, replacementId) → ReplacementView</td><td>Replacement + source order link</td></tr>
+        <tr><td>getCustomer</td><td class="mono">(workspaceId, customerId) → CustomerView</td><td>Customer identity + LTV rollup</td></tr>
+        <tr><td>getLoyalty</td><td class="mono">(workspaceId, customerId) → LoyaltyView</td><td>Points balance + redemption tiers</td></tr>
+        <tr><td>getChargeback</td><td class="mono">(workspaceId, disputeId) → ChargebackView</td><td>Dispute + subs cancelled by auto-action</td></tr>
+        <tr><td>getFraudCase</td><td class="mono">(workspaceId, caseId) → FraudView</td><td>Rule match + evidence for the orchestrator gate</td></tr>
+        <tr><td>getCrisis</td><td class="mono">(workspaceId, crisisId) → CrisisView</td><td>Event + per-customer tier state</td></tr>
+        <tr><td>priceSubscription</td><td class="mono">(workspaceId, sub) → { priced, pricing }</td><td>THE money resolver — see §6 defect #5</td></tr>
+      </tbody>
+    </table>
+    <p><span class="pill ok">Shipped</span> <code>priceSubscription</code> lives at <code>src/lib/commerce/price.ts</code> (moved in Phase 2). Others land in M2b.</p>
 
-      <div class="grp-label">Dashboard · Risk</div>
-      <div class="surf-grid">
-        <div class="surf"><div class="sh"><span class="nm">Chargebacks</span><span class="pill good">internal-aware</span></div><div class="rt">/dashboard/chargebacks</div><ul><li>cancel/reinstate linked subs · link accounts</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Fraud</span><span class="pill crit">compound write</span></div><div class="rt">/dashboard/fraud · [id]</div><ul><li>confirm-fraud: cancel subs+orders+ban</li><li>mark reseller · dismiss (Amplifier)</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Resellers</span><span class="pill neutral">single-entity</span></div><div class="rt">/dashboard/resellers</div><ul><li>set status (gates future orders) · discovery</li></ul></div>
-      </div>
+    <!-- 3. MUTATION OPS -->
+    <h2 id="mutation-ops">3. Mutation operation set</h2>
+    <p>A Mutation op takes a <code>(workspace, input)</code>, moves the appropriate boundary (Braintree / Shopify / Appstle / internal DB), and returns <code>{ success, ...result }</code>. Money-moving ops declare their <code>Gateway</code> (see Phase 4 §<em>Operation contract</em>).</p>
+    <table>
+      <thead><tr><th>Op</th><th class="mono">Signature</th><th>Gateway</th></tr></thead>
+      <tbody>
+        <tr><td>subscriptionAction</td><td class="mono">(ws, id, action: "pause"|"cancel"|"resume", reason?, by?) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionSkipNext</td><td class="mono">(ws, id) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionUpdateBillingInterval</td><td class="mono">(ws, id, interval, count) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionUpdateNextBillingDate</td><td class="mono">(ws, id, nextBillingDate) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionSwitchPaymentMethod</td><td class="mono">(ws, id, paymentMethodId) → { success }</td><td>braintree</td></tr>
+        <tr><td>subscriptionSendPaymentUpdateEmail</td><td class="mono">(ws, id) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionAddItem</td><td class="mono">(ws, id, variantId, qty=1) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionRemoveItem</td><td class="mono">(ws, id, variantOrLine) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionChangeQuantity</td><td class="mono">(ws, id, variantId, qty) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionSwapVariant</td><td class="mono">(ws, id, oldVariantId, newVariantId, qty=1) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionAddFreeProduct</td><td class="mono">(ws, id, variantId, qty=1) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>subscriptionAttemptBilling</td><td class="mono">(ws, billingAttemptId) → { success }</td><td>braintree ∪ shopify</td></tr>
+        <tr><td>subscriptionOrderNow</td><td class="mono">(ws, id) → { success, internal? }</td><td>braintree ∪ shopify</td></tr>
+        <tr><td>createReturn</td><td class="mono">(ws, orderId, lines, resolution) → { success, returnId }</td><td>internal (label = easypost)</td></tr>
+        <tr><td>issueRefund</td><td class="mono">(ws, orderId, cents, gateway) → { success, refundId }</td><td>braintree ∪ shopify</td></tr>
+        <tr><td>createReplacement</td><td class="mono">(ws, orderId, items, adjustSub?) → { success, replacementId }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>applyCoupon</td><td class="mono">(ws, subscriptionId, code) → { success }</td><td>internal (Appstle: readonly)</td></tr>
+        <tr><td>removeCoupon</td><td class="mono">(ws, subscriptionId, discountId?, code?) → { success }</td><td>internal ∪ appstle</td></tr>
+        <tr><td>loyaltyEarnPoints</td><td class="mono">(ws, memberId, points, orderId, description) → { success }</td><td>internal</td></tr>
+        <tr><td>loyaltySpendPoints</td><td class="mono">(ws, memberId, points, description, shopifyDiscountId?) → { success }</td><td>internal ∪ shopify</td></tr>
+        <tr><td>loyaltyDeductPoints</td><td class="mono">(ws, memberId, points, orderId, type, description) → { success }</td><td>internal</td></tr>
+      </tbody>
+    </table>
+    <div class="note"><strong>Invariant:</strong> Every money-moving Mutation op resolves cents through <code>priceSubscription</code> or the pricing engine — never a caller-supplied number. This closes defect #1 (§7) at the type level.</div>
 
-      <div class="grp-label">Dashboard · Analytics + others</div>
-      <div class="surf-grid">
-        <div class="surf"><div class="sh"><span class="nm">Analytics ×7</span><span class="pill neutral">read · JS agg</span></div><div class="rt">revenue·mrr·roas·profit·dunning·funnel·portal</div><ul><li>no RPCs; Funnel/MRR/Portal/Dunning → SQL</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Reviews</span><span class="pill good">authoritative</span></div><div class="rt">/dashboard/reviews</div><ul><li>approve/reject/feature · Klaviyo-synced</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Demographics</span><span class="pill neutral">read</span></div><div class="rt">/dashboard/demographics</div><ul><li>shares of <i>enriched</i> customers</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Migration</span><span class="pill neutral">monitor</span></div><div class="rt">/dashboard/migrations</div><ul><li>Appstle→internal audit · box-agent fix inbox</li></ul></div>
-      </div>
+    <!-- 4. OPERATION CONTRACT -->
+    <h2 id="operation-contract">4. Operation contract</h2>
+    <p>The two op shapes every entry in §2 and §3 satisfies, plus the <code>Gateway</code> discriminator money-moving ops carry and the <code>InternalOrAppstle&lt;T&gt;</code> helper that binds each op to declaring both branches at the type level. Declared in <code>src/lib/commerce/types.ts</code>; zero implementations ship in this phase — Display impls arrive in M2b, Mutation impls in M2c.</p>
 
-      <div class="grp-label">Ticket · Portal · AI</div>
-      <div class="surf-grid">
-        <div class="surf"><div class="sh"><span class="nm">Ticket detail (customer-360)</span><span class="pill crit">highest value</span></div><div class="rt">/dashboard/tickets/[id] · 3,834 lines</div><ul><li>union of every read + mutation, all raw <code>fetch()</code>, none internal-aware</li><li>direct Supabase = auth identity only</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Customer Portal ×2</span><span class="pill neutral">migrate last</span></div><div class="rt">app/portal/[slug] · shopify-extension</div><ul><li>2 render surfaces, 1 backend (~40 handlers)</li><li>reads DB-first; mutations via wrappers</li></ul></div>
-        <div class="surf"><div class="sh"><span class="nm">Orchestrator / Improve / Triage</span><span class="pill good">shared executor</span></div><div class="rt">sonnet-orchestrator-v2 · action-executor</div><ul><li>all three share <code>directActionHandlers</code></li></ul></div>
-      </div>
-    </section>
+    <h3>DisplayOp&lt;TInput, TView&gt;</h3>
+    <p>A read-only op: workspace + typed input → one canonical view (see §5).</p>
+<pre><code>type DisplayOp&lt;TInput, TView&gt; = (
+  workspaceId: string,
+  input: TInput,
+) =&gt; Promise&lt;TView&gt;;</code></pre>
+    <p>Example: <code>const getSubscription: DisplayOp&lt;string, SubscriptionView&gt;</code> — subscription id in, priced <code>SubscriptionView</code> out.</p>
 
-    <!-- PLAN -->
-    <section id="plan">
-      <h2>Sequencing</h2>
-      <div class="sec-title">Build plan — customer surfaces migrate last</div>
-      <p class="tight">The SDK is built and proven in isolation before a single customer-facing line changes. Each surface migrates behind an unchanged UI, verified by diffing new-SDK output against current output.</p>
-      <div class="miles">
-        <div class="mile"><div class="badge">0</div><div class="mc"><h4>Contract lock</h4><p>This document — the operation set, view shapes, defect register, and naming map become the SDK's acceptance spec.</p></div></div>
-        <div class="mile"><div class="badge">1</div><div class="mc"><h4>SDK core — <code>src/lib/commerce/</code>, zero consumers</h4><p>Display (<code>listX</code>/<code>detailX</code> + view shapes + <code>priceSubscription</code> everywhere) and Mutation (entity-named, internal-aware, gateway-aware refund). Nothing imports it yet → production unchanged.</p></div></div>
-        <div class="mile"><div class="badge">2</div><div class="mc"><h4>Battle-test in isolation</h4><p>Differential harness diffs SDK output vs current portal + dashboard output across internal / Appstle / grandfathered samples; NaN assertions; egress + latency + row-count benchmarks; SQL RPCs for the four aggregation candidates.</p></div></div>
-        <div class="mile"><div class="badge">3</div><div class="mc"><h4>Migrate — dashboard lists → detail + ticket → AI</h4><p>Lowest blast-radius first. Agent-facing surfaces (you see them before any customer). Fix the missing-action gaps here.</p></div></div>
-        <div class="mile last"><div class="badge">4</div><div class="mc"><h4>Customer portal — last</h4><p>Migrates only after the SDK has run in production on every internal surface and is diff-verified against the portal's own current output.</p></div></div>
-      </div>
-    </section>
+    <h3>MutationOp&lt;TInput, TResult&gt;</h3>
+    <p>A write op: workspace + typed input → <code>{ success, …result }</code>. The callable signature is a function; the <code>gateway</code> metadata field is a property set on the same value when (and only when) money moves.</p>
+<pre><code>type MutationResult&lt;TResult&gt; = { success: boolean } &amp; TResult;
+
+interface MutationOp&lt;TInput, TResult&gt; {
+  (workspaceId: string, input: TInput): Promise&lt;MutationResult&lt;TResult&gt;&gt;;
+  /** Payment boundary. Undefined iff the op does not move money. */
+  readonly gateway?: Gateway;
+}</code></pre>
+    <p>Example: <code>const issueRefund: MutationOp&lt;{ orderId: string; cents: number }, { refundId: string }&gt;</code>, with <code>issueRefund.gateway = "braintree"</code> for internal orders.</p>
+
+    <h3>Gateway</h3>
+    <p>The payment boundary a money-moving Mutation op routes through. Non-money mutations (a pause, a resume, a title enrichment) omit it.</p>
+<pre><code>type Gateway = "braintree" | "shopify";</code></pre>
+    <p>Braintree owns internal-sub charges + refunds; Shopify owns Appstle-baked charges + refunds — the same routing the current renewal + refund paths use, now declared once at the type level so a caller cannot pick the wrong boundary.</p>
+
+    <h3>InternalOrAppstle&lt;T&gt;</h3>
+    <p>Every commerce op has TWO implementations — internal (engine + Braintree) and Appstle-baked (Appstle + Shopify). The SDK dispatcher takes an <code>InternalOrAppstle&lt;Op&gt;</code> and picks the branch at call time from <code>sub.is_internal</code>. Declaring only one branch is a type error — that is the point.</p>
+<pre><code>interface InternalOrAppstle&lt;T&gt; {
+  internal: T;
+  appstle:  T;
+}</code></pre>
+    <p>Example M2b/M2c wiring:</p>
+<pre><code>const getSubscriptionImpls: InternalOrAppstle&lt;DisplayOp&lt;string, SubscriptionView&gt;&gt; = {
+  internal: async (ws, id) =&gt; { /* engine-priced */ },
+  appstle:  async (ws, id) =&gt; { /* baked-priced  */ },
+};</code></pre>
+    <div class="note"><strong>Why this shape.</strong> A caller who imports <code>@/lib/commerce/subscription#getSubscription</code> gets a <code>DisplayOp&lt;string, SubscriptionView&gt;</code> — one contract, both branches guaranteed to exist. The dispatcher (M2b) sits between the import and the two <code>InternalOrAppstle</code> branches, so the two-branch discipline is compiled in, not remembered.</div>
+
+    <!-- 5. VIEW SHAPES -->
+    <h2 id="view-shapes">5. Canonical view shapes</h2>
+    <p>Declared in <code>src/lib/commerce/types.ts</code> (Phase 1). Every Display op returns one of these; every Mutation op takes / returns the same shapes so display and mutation share one contract.</p>
+
+    <h3>Money primitives</h3>
+<pre><code>type Cents = number;                       // integer, always defined
+interface PricedLine { base_cents: Cents; unit_cents: Cents; }
+interface DiscountPill { kind: "sns" | "break" | "free_shipping" | "coupon" | "renewal_offer"; label: string; }</code></pre>
+
+    <h3>SubscriptionView (grounded in <a href="../tables/subscriptions.md">tables/subscriptions</a>)</h3>
+<pre><code>interface SubscriptionView {
+  id, workspace_id, customer_id;
+  shopify_contract_id: string | null;          // boundary only
+  status: "active" | "paused" | "cancelled";
+  is_internal: boolean; comp: boolean;
+  billing_interval, billing_interval_count, next_billing_date;
+  last_payment_status: "succeeded" | "failed" | "skipped" | null;
+  items: SubscriptionLineView[];               // priced by ./price.ts
+  pricing: SubscriptionPricingView;            // msrp/subtotal/discount/shipping/protection/tax/total + pills
+  shipping_address, shipping_protection_added, shipping_protection_amount_cents;
+  applied_discounts, pricing_offer_id, payment_method_id;
+  created_at, updated_at;
+}</code></pre>
+
+    <h3>OrderView (grounded in <a href="../tables/orders.md">tables/orders</a>)</h3>
+<pre><code>interface OrderView {
+  id, workspace_id, customer_id, subscription_id;
+  order_number, email, currency;
+  financial_status, fulfillment_status, delivery_status;
+  total_cents, tax_cents, shipping_cents;
+  shipping_protection_added, shipping_protection_amount_cents;
+  line_items: OrderLineView[];                 // snapshotted at renewal
+  fulfillments, tracking_number, carrier;
+  shipping_address, billing_address;
+  created_at, delivered_at;
+}</code></pre>
+
+    <h3>ReturnView (grounded in <a href="../tables/returns.md">tables/returns</a>)</h3>
+<pre><code>interface ReturnView {
+  id, workspace_id, order_id, order_number, customer_id;
+  status: "open" | "label_created" | "in_transit" | "delivered" | "refunded" | "cancelled" | "closed";
+  resolution_type: "refund_return" | "store_credit_return" | "refund_no_return" | "store_credit_no_return";
+  order_total_cents, label_cost_cents, net_refund_cents;  // net_refund_cents is the contract
+  tracking_number, carrier, label_url;
+  return_line_items: ReturnLineView[];
+  shipped_at, delivered_at, refunded_at, created_at;
+}</code></pre>
+
+    <h3>ReplacementView (grounded in <a href="../tables/replacements.md">tables/replacements</a>)</h3>
+<pre><code>interface ReplacementView {
+  id, workspace_id, customer_id;
+  original_order_id, original_order_number, replacement_order_id, subscription_id;
+  reason, reason_detail;
+  status: "pending" | "shipped" | "delivered" | "cancelled";
+  customer_error, items, address_validated;
+  subscription_adjusted, new_next_billing_date, created_at;
+}</code></pre>
+
+    <h3>CustomerView (grounded in <a href="../tables/customers.md">tables/customers</a>)</h3>
+<pre><code>interface CustomerView {
+  id, workspace_id, email, first_name, last_name, phone;
+  subscription_status, subscription_tenure_days, total_orders, ltv_cents;
+  first_order_at, last_order_at, tags, addresses, default_address;
+  email_marketing_status, sms_marketing_status, portal_banned, is_internal, created_at;
+}</code></pre>
+
+    <h3>LoyaltyView (grounded in <a href="../libraries/loyalty.md">libraries/loyalty</a>)</h3>
+<pre><code>interface LoyaltyView {
+  member_id, workspace_id, customer_id;
+  points_balance, points_earned, points_spent, dollar_value_cents;
+  redemption_tiers: LoyaltyRedemptionTierView[];
+  needs_points_backfill, source;
+}</code></pre>
+
+    <h3>ChargebackView (grounded in <a href="../tables/chargeback_events.md">tables/chargeback_events</a>)</h3>
+<pre><code>interface ChargebackView {
+  id, workspace_id, shopify_dispute_id, shopify_order_id, customer_id;
+  dispute_type, reason, network_reason_code, amount_cents, currency;
+  status: "under_review" | "won" | "lost";
+  auto_action_taken: "subscriptions_cancelled" | "flagged_for_review" | "none" | null;
+  auto_action_at, evidence_due_by, evidence_sent_on, finalized_on;
+  fraud_case_id, ticket_id, initiated_at, created_at;
+}</code></pre>
+
+    <h3>FraudView (grounded in <a href="../tables/fraud_cases.md">tables/fraud_cases</a>)</h3>
+<pre><code>interface FraudView {
+  id, workspace_id, rule_id, rule_type;
+  status: "open" | "reviewing" | "confirmed_fraud" | "dismissed";
+  severity, title, summary, evidence;
+  customer_ids, order_ids, orders_held;
+  resolution, first_detected_at, last_seen_at, reviewed_at, created_at;
+}</code></pre>
+
+    <h3>CrisisView (grounded in <a href="../tables/crisis_events.md">tables/crisis_events</a> + <a href="../tables/crisis_customer_actions.md">crisis_customer_actions</a>)</h3>
+<pre><code>interface CrisisView {
+  id, workspace_id, name, status;
+  affected_variant_id, affected_sku, affected_product_title;
+  default_swap_variant_id, tier2_coupon_code, tier2_coupon_percent;
+  expected_restock_date, lead_time_days, tier_wait_days;
+  actions: CrisisCustomerActionView[]; created_at;
+}</code></pre>
+
+    <!-- 6. RENAME MAP -->
+    <h2 id="rename-map">6. appstleX → subscriptionX rename map</h2>
+    <p>Every export in <a href="../libraries/appstle.md">libraries/appstle</a> and <a href="../libraries/subscription-items.md">libraries/subscription-items</a> paired to its new SDK name. New names are boundary-agnostic (no <code>appstle</code> prefix) — the SDK dispatches internal vs Appstle at the implementation layer, not the caller layer. Callers switch to <code>@/lib/commerce</code> once M2b lands.</p>
+
+    <h3>From <code>src/lib/appstle.ts</code> (13 exports)</h3>
+    <table>
+      <thead><tr><th class="mono">Old (appstle)</th><th class="mono">New (commerce)</th><th>Module</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">appstleSubscriptionAction</td><td class="mono">subscriptionAction</td><td>subscription</td><td>pause / cancel / resume dispatch</td></tr>
+        <tr><td class="mono">appstleSkipNextOrder</td><td class="mono">subscriptionSkipNextOrder</td><td>subscription</td><td>skip the very next scheduled order</td></tr>
+        <tr><td class="mono">appstleUpdateBillingInterval</td><td class="mono">subscriptionUpdateBillingInterval</td><td>subscription</td><td>DAY | WEEK | MONTH | YEAR</td></tr>
+        <tr><td class="mono">appstleUpdateNextBillingDate</td><td class="mono">subscriptionUpdateNextBillingDate</td><td>subscription</td><td>YYYY-MM-DD or ISO datetime</td></tr>
+        <tr><td class="mono">appstleGetUpcomingOrders</td><td class="mono">subscriptionListUpcomingOrders</td><td>subscription</td><td>upcoming billing attempts</td></tr>
+        <tr><td class="mono">appstleAttemptBilling</td><td class="mono">subscriptionAttemptBilling</td><td>subscription</td><td>immediate billing retry</td></tr>
+        <tr><td class="mono">orderNowByContract</td><td class="mono">subscriptionOrderNow</td><td>subscription</td><td>internal-aware; already boundary-agnostic</td></tr>
+        <tr><td class="mono">appstleSkipUpcomingOrder</td><td class="mono">subscriptionSkipUpcomingOrder</td><td>subscription</td><td>skip by billingAttemptId</td></tr>
+        <tr><td class="mono">appstleUnskipOrder</td><td class="mono">subscriptionUnskipOrder</td><td>subscription</td><td>reinstate a skipped attempt</td></tr>
+        <tr><td class="mono">appstleSwitchPaymentMethod</td><td class="mono">subscriptionSwitchPaymentMethod</td><td>subscription</td><td>Braintree gateway; pinned card</td></tr>
+        <tr><td class="mono">appstleSendPaymentUpdateEmail</td><td class="mono">subscriptionSendPaymentUpdateEmail</td><td>subscription</td><td>customer-facing update-card email</td></tr>
+        <tr><td class="mono">appstleAddFreeProduct</td><td class="mono">subscriptionAddFreeProduct</td><td>subscription</td><td>$0 line (gift or promo)</td></tr>
+        <tr><td class="mono">appstleSwapProduct</td><td class="mono">subscriptionSwapProduct</td><td>subscription</td><td>replace a line's variant in place</td></tr>
+      </tbody>
+    </table>
+
+    <h3>From <code>src/lib/subscription-items.ts</code> (12 exports)</h3>
+    <table>
+      <thead><tr><th class="mono">Old (sub / mixed)</th><th class="mono">New (commerce)</th><th>Module</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">resolveVariantTitles</td><td class="mono">subscriptionResolveVariantTitles</td><td>subscription</td><td>variantId[] → title map</td></tr>
+        <tr><td class="mono">enrichItemTitles</td><td class="mono">subscriptionEnrichItemTitles</td><td>subscription</td><td>fill missing titles from catalog</td></tr>
+        <tr><td class="mono">getAppstleConfig</td><td class="mono">— (internal only)</td><td>subscription</td><td>boundary detail; not a public op</td></tr>
+        <tr><td class="mono">resolveContractVariantId</td><td class="mono">subscriptionResolveVariantId</td><td>subscription</td><td>id-or-title → variantId</td></tr>
+        <tr><td class="mono">appstleRemoveLineItem</td><td class="mono">subscriptionRemoveLine</td><td>subscription</td><td>low-level remove (variant xor lineGid)</td></tr>
+        <tr><td class="mono">subAddItem</td><td class="mono">subscriptionAddItem</td><td>subscription</td><td>add a variant (defaults qty 1)</td></tr>
+        <tr><td class="mono">subRemoveItem</td><td class="mono">subscriptionRemoveItem</td><td>subscription</td><td>public remove; supports variant or line</td></tr>
+        <tr><td class="mono">subChangeQuantity</td><td class="mono">subscriptionChangeQuantity</td><td>subscription</td><td>change qty for a variant</td></tr>
+        <tr><td class="mono">subUpdateLineItemPrice</td><td class="mono">subscriptionUpdateLineItemPrice</td><td>subscription</td><td>grandfathered price update</td></tr>
+        <tr><td class="mono">getLastOrderPrice</td><td class="mono">subscriptionGetLastPricePaid</td><td>subscription</td><td>customer's last-paid price by variant</td></tr>
+        <tr><td class="mono">calcBasePrice</td><td class="mono">priceCalcBase</td><td>price</td><td>target × discount → base (pure)</td></tr>
+        <tr><td class="mono">subSwapVariant</td><td class="mono">subscriptionSwapVariant</td><td>subscription</td><td>swap on line (qty defaults 1)</td></tr>
+      </tbody>
+    </table>
+    <p class="pill warn">Rename discipline</p> One PR per surface migration: swap the import + the call sites in one commit; the deprecated shim at <code>src/lib/portal/helpers/enrich-pricing.ts</code> models the transition (compile-clean, zero call-site edits required to keep the surface live).</p>
+
+    <!-- 7. DEFECT REGISTER -->
+    <h2 id="defect-register">7. Defect register (9)</h2>
+    <p>The defects the SDK exists to close. #1 and #2 link to their M1 specs (defect-elimination milestone). #3–#9 are grounded in current codebase evidence — where fixed, links point at the merged fix; where open, at the code the Mutation op must guard.</p>
+
+    <table>
+      <thead><tr><th style="width:34px">#</th><th>Defect</th><th>Where</th><th>Status</th><th>How the SDK closes it</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><strong>Phantom refund</strong> — Braintree gateway reported a refund success before the settlement actually moved. 4 phantom "refunds" on SC128233; customer never paid back.</td>
+          <td class="mono">src/lib/shopify-order-actions.ts (SC128233)</td>
+          <td><span class="pill">M1</span></td>
+          <td>Mutation op <code>issueRefund</code> gates the write on settlement confirmation before writing note+tag; a caller cannot silently claim success. <a href="/dashboard/roadmap/m1-phantom-refund-braintree-settlement-gate">M1 spec: phantom-refund-braintree-settlement-gate</a></td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><strong>Coupon mis-fire</strong> — the wrong coupon (or a coupon at all) was applied to a sub because the mapping was hardcoded or the wrong shape was accepted.</td>
+          <td class="mono">src/lib/coupons.ts + orchestrator apply</td>
+          <td><span class="pill">M1</span></td>
+          <td>Mutation op <code>applyCoupon</code> gates on the DB-driven coupon-mapping table, normalizes both shapes, and rejects unknown codes. <a href="/dashboard/roadmap/m1-coupon-misfire-mapping-guard">M1 spec: coupon-misfire-mapping-guard</a></td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><strong>Double-discount trap</strong> — when a variant wasn't in the catalog, <code>base</code> fell back to the item's already-post-discount baked price, then S&amp;S applied again → double-discounted.</td>
+          <td class="mono">src/lib/pricing.ts (fixed 2026-06)</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td>Dual-shape variant resolver (UUID + shopify_variant_id) in pricing.ts; SDK Mutation ops write UUID-only. See <a href="../libraries/pricing.md">libraries/pricing § Gotchas</a>.</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td><strong>Stale last_payment_status locks portal</strong> — a leaked <code>last_payment_status='failed'</code> on an internal sub permanently locks the customer out of every self-serve mutation (ticket <code>efe0d2ad</code>).</td>
+          <td class="mono">portal handlers gate on last_payment_status</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td>Internal renewal + <code>closeInternalDunningOnSuccess</code> defence-in-depth writers; backfill at <code>scripts/backfill-internal-sub-last-payment-status.ts</code>. SDK Display op refuses to return the stale value once fixed. See <a href="../tables/subscriptions.md">tables/subscriptions § Gotchas</a>.</td>
+        </tr>
+        <tr>
+          <td>5</td>
+          <td><strong>Missing catalog line silently prices to $0</strong> — Appstle-baked path used <code>Number(price_cents || 0)</code>; an undefined price silently baked $0 into every display surface.</td>
+          <td class="mono">src/lib/commerce/price.ts (fixed 2026-07, Phase 2)</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td><code>PriceInvariantError</code> throws with sub id + line id when a non-gift, non-protection line yields undefined/NaN cents. Repro: <code>npx tsx scripts/_probe-price-invariant.ts</code>.</td>
+        </tr>
+        <tr>
+          <td>6</td>
+          <td><strong>Tax quote staleness under dynamic pricing</strong> — cached Avalara quote used <code>updated_at</code> as freshness key; a catalog price / rule edit re-prices without touching the row, so <code>updated_at</code> didn't move and a stale quote leaked.</td>
+          <td class="mono">ensureFreshSubscriptionTaxQuote (fixed 2026-06)</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td><code>avalara_quote_hash</code> over engine-priced inputs (hashTaxInputs); SDK Display op reads via the freshness gate. Billing does its own commit=true call, so display staleness cannot mischarge. See <a href="../libraries/pricing.md">libraries/pricing § Display layer</a>.</td>
+        </tr>
+        <tr>
+          <td>7</td>
+          <td><strong>NULL storefront attribution UTMs</strong> — native storefront orders (source_name=storefront) had NULL <code>attributed_utm_*</code>, so a Meta sale showed <code>(direct)</code>.</td>
+          <td class="mono">/api/checkout § 10b (fixed 2026-06-14)</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td>First-touch backfill from earliest <code>storefront_sessions</code> with a UTM; also stamps <code>session_id</code>, <code>anonymous_id</code>, <code>advertorial_page_id</code>, <code>ad_campaign_id</code>. SDK <code>getOrder</code> surfaces the resolved attribution directly. See <a href="../tables/orders.md">tables/orders § Gotchas</a>.</td>
+        </tr>
+        <tr>
+          <td>8</td>
+          <td><strong>Comp sub renewal without allowlist</strong> — a comp sub whose customer lacked a valid <code>comp_role</code> would ship free if the renewal branch didn't gate first (would be free-inventory leak).</td>
+          <td class="mono">internal-subscription-renewals (comp branch)</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td>Gate first — invalid <code>comp_role</code> → fail-closed with <code>type='comp'</code> failed transaction + <code>subscription.comp_renewal_failed</code> event, no shipment, no advance. SDK Mutation op preserves the gate. See <a href="../tables/subscriptions.md">tables/subscriptions § Gotchas</a>.</td>
+        </tr>
+        <tr>
+          <td>9</td>
+          <td><strong>Return refund on carrier first-scan</strong> — returns refunded when a carrier first scanned the package, not when EasyPost marked it <code>delivered</code>. Prone to lost-in-transit refund-then-nothing-arrives loss.</td>
+          <td class="mono">returns pipeline (EasyPost webhook)</td>
+          <td><span class="pill ok">Fixed</span></td>
+          <td>Refund fires on EasyPost <code>delivered</code>. <code>net_refund_cents</code> is the contract, set at return creation — SDK <code>issueRefund</code> reads it, never re-derives. See <a href="../tables/returns.md">tables/returns § Gotchas</a>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- 8. BUILD PLAN -->
+    <h2 id="build-plan">8. Build plan</h2>
+    <ol>
+      <li><strong>M2 — SDK core</strong> (this spec, <code>commerce-sdk-scaffold-money-resolver</code>)
+        <ul>
+          <li>Phase 1 — Scaffold <code>src/lib/commerce</code> + declare view shapes <span class="pill ok">Shipped</span></li>
+          <li>Phase 2 — Relocate <code>priceSubscription</code> + lock money invariants <span class="pill ok">Shipped</span></li>
+          <li>Phase 3 — Author this inventory HTML <span class="pill ok">Shipped</span></li>
+          <li>Phase 4 — Publish the operation contract (<code>DisplayOp</code> / <code>MutationOp</code> / <code>Gateway</code> / <code>InternalOrAppstle</code>) <span class="pill ok">Shipped</span></li>
+        </ul>
+      </li>
+      <li><strong>M2b — Display implementations</strong> — implement <code>getSubscription</code>, <code>listSubscriptions</code>, <code>getOrder</code>, <code>listOrders</code>, <code>getReturn</code>, <code>listReturns</code>, <code>getReplacement</code>, <code>getCustomer</code>, <code>getLoyalty</code>, <code>getChargeback</code>, <code>getFraudCase</code>, <code>getCrisis</code>. Each op internal + Appstle branch behind one signature.</li>
+      <li><strong>M2c — Mutation implementations</strong> — implement every op in §3, wired to the correct gateway; every money move flows through <code>priceSubscription</code>.</li>
+      <li><strong>M2d — Surface migration</strong> — one PR per surface (§1), swap the import from <code>@/lib/portal/helpers/enrich-pricing</code> or <code>@/lib/appstle</code> / <code>@/lib/subscription-items</code> to <code>@/lib/commerce</code>. Deprecated shims stay until every surface is off them.</li>
+      <li><strong>M2e — Delete shims</strong> — remove the deprecated re-exports; delete the standalone <code>appstle.ts</code> / <code>subscription-items.ts</code>; regenerate brain library pages.</li>
+      <li><strong>Post-M2</strong> — fold this HTML page into the relevant lifecycle pages ([[../lifecycles/customer-portal]], [[../lifecycles/subscription-billing]]); the inventory then survives as historical reference in the brain archive.</li>
+    </ol>
 
     <footer>
-      Research complete · 6 nav-driven catalog passes + 4 stack-mapping passes · grounded in <code>src/app/dashboard/sidebar.tsx</code>. Next step: lock this contract, then open the goal with these milestones. Findings are labeled from code inspection; runtime scale figures are not asserted here.
+      <p>Owner: Platform · Parent: M2 — SDK core: Display + Mutation, zero consumers · Spec: <code>commerce-sdk-scaffold-money-resolver</code></p>
+      <p>Open locally: <code>open docs/brain/reference/commerce-sdk-inventory.html</code></p>
     </footer>
   </main>
 </div>
-</div>
+</body>
+</html>

@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { appstleSubscriptionAction } from "@/lib/appstle";
 import { cancelOrder } from "@/lib/shopify-order-actions";
+import { refundOrder } from "@/lib/refund";
 
 /**
  * Confirmed Fraud — multi-step action series.
@@ -124,50 +125,71 @@ export async function POST(
     const results: { order_id: string; order_number: string; success: boolean; error?: string }[] = [];
 
     for (const oid of orderIds) {
-      // order_ids may contain Shopify order IDs (rule-based) or internal UUIDs (AI-detected)
-      // Resolve to shopify_order_id in either case
-      let shopifyOrderId = oid;
-      let orderNumber = oid;
+      // order_ids may contain Shopify order IDs (rule-based) or internal UUIDs (AI-detected).
+      // Resolve to the internal orders row either way — refundOrder + cancelOrder both need it.
+      let dbOrder: { id: string; order_number: string | null; shopify_order_id: string | null; total_cents: number | null } | null = null;
 
-      // Try as shopify_order_id first
       const { data: orderByShopify } = await admin.from("orders")
-        .select("id, order_number, shopify_order_id")
+        .select("id, order_number, shopify_order_id, total_cents")
         .eq("workspace_id", workspaceId)
         .eq("shopify_order_id", oid)
         .maybeSingle();
 
       if (orderByShopify) {
-        shopifyOrderId = orderByShopify.shopify_order_id;
-        orderNumber = orderByShopify.order_number || oid;
+        dbOrder = orderByShopify;
       } else {
-        // Try as internal UUID
         const { data: orderByUuid } = await admin.from("orders")
-          .select("id, order_number, shopify_order_id")
+          .select("id, order_number, shopify_order_id, total_cents")
           .eq("workspace_id", workspaceId)
           .eq("id", oid)
           .maybeSingle();
+        if (orderByUuid) dbOrder = orderByUuid;
+      }
 
-        if (orderByUuid?.shopify_order_id) {
-          shopifyOrderId = orderByUuid.shopify_order_id;
-          orderNumber = orderByUuid.order_number || oid;
-        } else {
-          results.push({ order_id: oid, order_number: oid, success: false, error: "Order not found" });
+      if (!dbOrder) {
+        results.push({ order_id: oid, order_number: oid, success: false, error: "Order not found" });
+        continue;
+      }
+
+      const orderNumber = dbOrder.order_number || oid;
+      const totalCents = dbOrder.total_cents || 0;
+
+      // Phase-3 dispatcher migration — refund via the gateway-aware
+      // wrapper (Braintree for internal orders, Shopify for Shopify
+      // orders). Then cancel the Shopify order WITHOUT `refund: true`
+      // so Shopify doesn't try (and phantom-succeed on Braintree)
+      // a second refund. Order matters: refund the money first; if the
+      // refund fails, don't leave a canceled but unrefunded order.
+      let success = false;
+      let error: string | undefined;
+
+      if (totalCents > 0) {
+        const refund = await refundOrder(workspaceId, dbOrder.id, totalCents, "Fraud offset — order refund", {
+          source: "fraud",
+          eventProperties: { fraud_case_id: caseId, reason: "confirmed_fraud" },
+        });
+        if (!refund.success) {
+          results.push({ order_id: oid, order_number: orderNumber, success: false, error: `Refund failed: ${refund.error}` });
           continue;
         }
       }
 
-      const result = await cancelOrder(workspaceId, shopifyOrderId, {
-        reason: "FRAUD",
-        refund: true,
-        restock: true,
-        notify: false,
-      });
-      results.push({
-        order_id: oid,
-        order_number: orderNumber,
-        success: result.success,
-        error: result.error,
-      });
+      if (dbOrder.shopify_order_id) {
+        const cancelResult = await cancelOrder(workspaceId, dbOrder.shopify_order_id, {
+          reason: "FRAUD",
+          refund: false,
+          restock: true,
+          notify: false,
+        });
+        success = cancelResult.success;
+        error = cancelResult.error;
+      } else {
+        // Internal (SHOPCX*) order — no Shopify order to cancel; the
+        // refund above is the whole action.
+        success = true;
+      }
+
+      results.push({ order_id: oid, order_number: orderNumber, success, error });
     }
 
     return NextResponse.json({ ok: true, step: "cancel_refund_orders", results });
