@@ -2296,8 +2296,11 @@ export default function TicketDetailPage() {
                               ?.filter(i => i.title && !i.title.toLowerCase().includes("shipping protection"))
                               .map(i => formatItemName(i))
                               .join(", ") || "Subscription";
+                            // next_billing_date is a UTC-midnight calendar date — pin UTC so it
+                            // reads as the intended day (matches the portal + billing cron). Without
+                            // this, 2026-07-29T00:00:00Z rendered "Jul 28" for a Central viewer.
                             const nextDate = sub.next_billing_date
-                              ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                              ? new Date(sub.next_billing_date).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
                               : "—";
                             return (
                               <option key={sub.id} value={sub.id}>

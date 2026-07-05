@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
-import { formatItemName } from "@/components/shared/format-utils";
+import { formatItemName, formatOrderDate } from "@/components/shared/format-utils";
 
 interface Product {
   id: string;
@@ -276,7 +276,7 @@ export default function SubscriptionsPage() {
                         </span>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-2.5 text-zinc-500">{formatDate(sub.next_billing_date)}</td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-zinc-500">{formatOrderDate(sub.next_billing_date)}</td>
                     <td className="px-4 py-2.5">
                       {sub.last_payment_status && (
                         <span className={`text-xs font-medium ${PAYMENT_BADGE[sub.last_payment_status] || "text-zinc-400"}`}>
