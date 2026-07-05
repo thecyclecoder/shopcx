@@ -85,11 +85,29 @@ function calcBasePrice(targetPriceCents: number, discountPercent: number) : numb
 async function subSwapVariant(workspaceId: string, contractId: string, oldVariantId: string, newVariantId: string, quantity: number = 1,) : Promise<
 ```
 
+### `subscriptionApplyCoupon` — function
+
+```ts
+async function subscriptionApplyCoupon(workspaceId: string, contractId: string, code: string,) : Promise<{ success: boolean; error?: string }>
+```
+
+Internal-aware coupon apply. Internal subs: `resolveCoupon` (internal wins → Shopify fallback) → `internalSubApplyDiscount` writes `subscriptions.applied_discounts`. Appstle subs: `healOnTouch` → `applyDiscountWithReplace`.
+
+### `subscriptionRemoveCoupon` — function
+
+```ts
+async function subscriptionRemoveCoupon(workspaceId: string, contractId: string, discountIdOrCode: string,) : Promise<{ success: boolean; error?: string }>
+```
+
+Internal-aware coupon remove. Internal subs: `internalSubRemoveDiscount`. Appstle subs: `healOnTouch` → `removeExistingDiscounts` (1-coupon-per-sub, so `discountIdOrCode` is only consulted for the internal filter).
+
 ## Callers
 
 - `src/app/api/webhooks/appstle/[workspaceId]/route.ts`
 - `src/app/api/workspaces/[id]/crisis/[crisisId]/auto-swap/route.ts`
+- `src/app/api/workspaces/[id]/subscriptions/[subId]/coupon/route.ts` — `subscriptionApplyCoupon` (POST) / `subscriptionRemoveCoupon` (DELETE)
 - `src/app/api/workspaces/[id]/subscriptions/[subId]/items/route.ts`
+- `src/lib/action-executor.ts` — `subscriptionApplyCoupon` (apply_coupon + apply_loyalty_coupon) / `subscriptionRemoveCoupon` (remove_coupon)
 - `src/lib/portal/handlers/remove-line-item.ts`
 - `src/lib/portal/handlers/replace-variants.ts`
 
