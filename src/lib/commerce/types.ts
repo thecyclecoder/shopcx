@@ -33,7 +33,7 @@ export interface PricedLine {
 
 /** A discount pill rendered next to the total (Subscribe & Save, Buy 2, Coupon, …). */
 export interface DiscountPill {
-  kind: "sns" | "break" | "free_shipping" | "coupon" | "renewal_offer";
+  kind: "sns" | "quantity_break" | "free_shipping" | "coupon" | "renewal_offer";
   label: string;
 }
 
@@ -54,6 +54,32 @@ export interface SubscriptionLineView {
   /** Money resolved by ./price.ts — never undefined. */
   base_cents: Cents;
   unit_cents: Cents;
+}
+
+/**
+ * The most recent renewal order for the subscription — compact projection joined
+ * by the list RPC so a caller can render "last shipped on …" without a second
+ * round-trip. Full OrderView arrives in Phase 2 (commerce/order.ts).
+ */
+export interface SubscriptionLatestOrderView {
+  id: string;
+  order_number: string;
+  financial_status: string | null;
+  delivery_status: string | null;
+  total_cents: Cents;
+  created_at: string;
+  delivered_at: string | null;
+}
+
+/**
+ * The next scheduled renewal — the projection the RPC computes so a caller can
+ * render "next ships on …, projected total …" without a second round-trip.
+ * `projected_total_cents` is the priced total from `./price.ts.priceSubscription`;
+ * `next_billing_date` mirrors the column on the sub.
+ */
+export interface SubscriptionUpcomingOrderView {
+  next_billing_date: string | null;
+  projected_total_cents: Cents;
 }
 
 /** The one shape every subscription surface (portal, dashboard, AI) hydrates. */
@@ -79,8 +105,30 @@ export interface SubscriptionView {
   applied_discounts: Array<Record<string, unknown>>;
   pricing_offer_id: string | null;
   payment_method_id: string | null;
+  /** Most recent renewal order (compact); null when the sub has never billed. */
+  latest_order: SubscriptionLatestOrderView | null;
+  /** Next scheduled renewal (compact); null when cancelled or with no next date. */
+  upcoming_order: SubscriptionUpcomingOrderView | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Filters accepted by `listSubscriptions`. Any subset is optional. */
+export interface SubscriptionListFilters {
+  /** Match a single lifecycle state — lowercase per [[../../docs/brain/tables/subscriptions]] § Gotchas. */
+  status?: "active" | "paused" | "cancelled";
+  /** Match one `last_payment_status`; combine with `status` for e.g. active-and-failing. */
+  last_payment_status?: "succeeded" | "failed" | "skipped";
+  /** Only internal (engine-priced) subs; unset returns both branches. */
+  is_internal?: boolean;
+  /** Only comp (free-ship) subs. */
+  comp?: boolean;
+  /** Restrict to a single customer — for the customer-scoped list op. */
+  customer_id?: string;
+  /** Per-page ceiling on the RPC's returned rows. Defaults to 500. */
+  page_size?: number;
+  /** Hard cap on the total rows walked before the SDK stops. Defaults to Infinity. */
+  max_rows?: number;
 }
 
 export interface SubscriptionPricingView {
