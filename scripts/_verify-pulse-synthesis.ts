@@ -74,6 +74,10 @@ async function main() {
       decisions: [],
       threads: [{ title: "founder-pulse-recap", status: "open", cite: "we shipped this" }],
       refs: [],
+      // Pre-Phase-1 shape: Haiku-ingest digest, no session-authored authority. Threading digest_model
+      // here (added by pulse-session-authored-recaps Phase 3) keeps the runtime fixture aligned with
+      // the DigestInput interface — same shape the buildPulse SELECT now returns.
+      digest_model: "claude-haiku-4-5-20251001",
     },
     {
       id: "d-2",
@@ -84,6 +88,7 @@ async function main() {
       decisions: [],
       threads: [{ title: openSlug, status: "open", cite: "no spec yet" }],
       refs: [],
+      digest_model: "heuristic",
     },
   ];
 

@@ -19,11 +19,26 @@ The digest table is the evidence layer; this module is the reasoning layer. Ever
 
 Rendered in this order on `/dashboard/developer/pulse`:
 
-- **whats_working** — threads that match a spec in a settled or in-flight state (`folded ｜ shipped ｜ in_progress`, or any phase with `build_sha`/`merge_sha`/`pr` set).
-- **where_you_left_off** — genuinely open threads (no matching spec, or the matching spec is still `planned`/`in_review`). Falls back to the most-recent digest's `resume_point` when nothing else surfaces.
-- **rabbit_holes** — threads the founder marked `status='noise'` in the digest.
-- **next_moves** — planned/in_review specs, prioritized by whether an open thread already references them.
+- **whats_working** — threads resolved by ANY of: (a) session-authored `status='resolved'` (authoritative — the assistant witnessed the resolution in-session); (b) an exact-matched spec in a settled/in-flight state (`folded ｜ shipped ｜ in_progress`, or any phase with `build_sha`/`merge_sha`/`pr` set); (c) an exact `kind='pr'` ref whose PR is merged in the workspace ledger (`specs.merged_pr` + `last_merge_sha`, OR any `phases.pr` with `merge_sha`); (d) an exact `kind='commit'` ref — a commit sha is a work-landed signal even without a spec anchor. See "Exact-ref-first reconciliation" below.
+- **where_you_left_off** — genuinely open threads (no matching spec / matching spec still `planned`/`in_review`, and no merged-PR/commit ref, and not session-authored `resolved`). Falls back to the most-recent digest's `resume_point` when nothing else surfaces. A session-authored `open` thread surfaces with its original title; a Haiku-ingest match keeps the "no matching spec yet" suffix so the caller can see the classifier ran on a guess.
+- **rabbit_holes** — threads the founder marked `status='noise'` in the digest (session-authored takes this as authoritative; Haiku-ingest is still respected).
+- **next_moves** — planned/in_review specs, prioritized by whether an OPEN thread already references them (author-resolved and PR-merged and commit-anchored threads don't count as open — same Phase-3 resolution rules as the main fan-out).
 - **threads_in_flight** — the open-thread set + any `in_progress`/`in_review` spec + any non-terminal `agent_jobs` row.
+
+## Exact-ref-first reconciliation ([[../specs/pulse-session-authored-recaps]] Phase 3)
+
+The pre-Phase-3 join used a lossy slug-substring guess against the thread title / cite / digest refs — good enough for Haiku's paraphrased digests but wrong when the assistant already knows the exact spec slug, PR number, and commit sha. The session-authored writer emits those as first-class `refs[]` entries; the join now consults them BEFORE the substring fallback:
+
+1. **Exact refs first.** `matchThreadsToSpecs` iterates `digest.refs[]` for each thread:
+   - `kind='spec'` → exact slug match against the workspace `listSpecs` result. Ledger-scoped — a slug that isn't in the workspace doesn't resolve.
+   - `kind='pr'` → number match against `specs.merged_pr` OR any `spec.phases[].pr` (the ledger-scoped confirming predicate — a bare PR number never claims a spec that isn't the workspace's). Also cross-references the OPEN `agent_jobs` set so an in-flight PR still carries a job cite.
+   - `kind='commit'` → recorded as `matchedCommit` (a sha means work landed — see the resolution rules above).
+   - `kind='migration' | 'brain' | 'file' | 'url'` → not used for status resolution; still contribute to the substring haystack as a soft signal.
+2. **Slug-substring fallback.** Runs only when no exact ref matched anything — preserves the pre-Phase-3 behavior for Haiku-ingest digests and for session-authored digests that forgot to include exact refs. Longest slug wins (same rule as before).
+
+**Session-authored authority.** When `digest_model === 'session-authored'` ([[pulse-digest]] `SESSION_AUTHORED_MODEL`), the thread's explicit `status` is carried as `authorStatus` on the `ThreadMatch` and treated as authoritative — `resolved` bypasses the ledger re-derive, `noise` sends the thread straight to `rabbit_holes`. The assistant SAW the outcome; the pulse join respects that.
+
+**Post-session shipping.** A thread with an exact spec/PR ref that has NOT shipped yet renders as open on the ingest run; when the spec later ships (a phase merges) or the PR later merges, the NEXT `buildPulse` re-derives the status and flips the thread to `whats_working` WITHOUT re-ingesting the digest. That's the "done reads as done" property — the digest is a stable record of what the founder saw; the ledger is what's actually true right now. The join reconciles them at read time.
 
 ## Exports
 
@@ -42,8 +57,11 @@ Whether a thread title / ref value looks like a disposable one-off script (`scri
 ### `deriveSpecStatus(spec): SpecStatus | 'in_progress' | 'shipped' | 'planned'`
 Rolls up the spec's phases the way [[brain-roadmap]] does at read time. Explicit lifecycle overrides (`in_review`/`deferred`/`folded`) win; otherwise phases roll up.
 
-### `matchThreadsToSpecs(digests, specs): ThreadMatch[]`
-For every thread across every digest, find the spec whose slug appears in the thread's title / cite / the digest's refs. Longest slug wins so `founder-pulse-v2` beats `founder-pulse`.
+### `matchThreadsToSpecs(digests, specs, jobs?): ThreadMatch[]`
+For every thread across every digest, resolve it to a ledger anchor via exact refs first (`kind='spec'` → workspace slug; `kind='pr'` → `specs.merged_pr` / `phases.pr` + open agent_jobs; `kind='commit'` → recorded sha), then fall back to slug-substring matching (longest slug wins). Returns `ThreadMatch { thread, digest, matchedSpec, matchedJob, matchedCommit, matchedPr, matchedVia, authorStatus }`. `authorStatus` is set only for `digest_model === 'session-authored'` digests — the assistant's ground-truth call on that thread. See "Exact-ref-first reconciliation" above.
+
+### `DigestInput` — interface
+Adds `digest_model: string | null` (Phase 3) so the join can tell a session-authored digest from a Haiku ingest and apply the authority rule accordingly.
 
 ### `synthesizeDeterministic(fixtures, opts?): PulseSnapshot`
 The pure-code entry point. Feeds `{ digests, specs, jobs }` to the join and returns a snapshot with every claim already cite-anchored. **This is what the Phase-2 verification harness imports.** Zero-cite claims are filtered out before return — no free-floating assertions escape.
@@ -67,6 +85,7 @@ Wraps [[ai-usage]] `logAiUsage` with `purpose='pulse_narrative'` so cost trackin
 
 - `src/app/api/developer/pulse/route.ts` — the owner-gated GET (default: read cache; `?refresh=1` recompute + upsert)
 - `scripts/_verify-pulse-synthesis.ts` — the Phase-2 pure-code verification harness (no LLM call)
+- `scripts/_verify-pulse-session-authored.ts` — the [[../specs/pulse-session-authored-recaps]] Phase-3 pure-code verification harness (no LLM call) — asserts session-authored + merged-PR ref renders as done, no-spec + commit-sha ref renders as done, post-session shipping flips a same-digest render to done, and the slug-substring fallback still resolves un-ref'd threads.
 - `src/app/dashboard/developer/pulse/page.tsx` — Phase 3 (upcoming)
 
 ## Gotchas
