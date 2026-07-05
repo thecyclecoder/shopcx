@@ -27,6 +27,8 @@ import {
   type SlowQueryRow,
 } from "./db-health";
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { parseAuthoredSpecMarkdown } from "@/lib/brain-roadmap";
+import { extractPhaseBodies } from "@/lib/author-spec";
 
 const GB = 1024 * 1024 * 1024;
 
@@ -220,6 +222,39 @@ test("buildFixSpecMarkdown on an instance finding is non-empty, has ≥1 `## Pha
   assert.match(body, /no auto-apply/i);
   // The evidence numbers are quoted verbatim.
   assert.match(body, /883 GB/);
+});
+
+test("dbhealth-spec-evidence-survives-parse: the generated markdown parses cleanly — summary is the INTENT (not the metadata blob), Phase 1 is extracted, and the EXPLAIN evidence lands in the phase body (the db-index-q needs_input stall)", () => {
+  // A slow-query finding with a real EXPLAIN evidence block — the shape Bo needs to author a safe index.
+  const finding: DbHealthFinding = {
+    signature: "dbhealth:slowq:-123:orders",
+    category: "slow_query", cause: "no_index_match", fixKind: "add_index",
+    table: "orders", title: "Slow query on orders", impact: "1200ms mean × 5000 calls = 6000s total",
+    score: 6000,
+    evidence: [
+      "Query (pg_stat_statements -123):", "```sql", "SELECT * FROM orders WHERE customer_id = $1 AND status = $2", "```",
+      "Stats: calls=5000, mean=1200ms, total=6000000ms, stddev=200ms, rows=12", "",
+      "EXPLAIN:", "```", "Seq Scan on orders  Filter: (customer_id = $1 AND status = $2)", "```",
+    ].join("\n"),
+    specSlug: "db-index-orders", specTitle: "Slow query -123 on orders — no index match",
+  };
+  const md = buildFixSpecMarkdown(finding);
+  const card = parseAuthoredSpecMarkdown("db-index-orders", md);
+  const bodies = extractPhaseBodies(md);
+
+  // Summary is the intent paragraph, NOT the swallowed metadata headers (the mangle).
+  assert.ok(!(card.summary ?? "").includes("Owner:"), "summary must not swallow the **Owner:** meta line");
+  assert.ok(!(card.summary ?? "").includes("DBHealth-signature"), "summary must not swallow the DBHealth headers");
+  assert.match(card.summary ?? "", /DB Health Agent flagged this/);
+  // Exactly one phase, extracted (not 0 — the db-index-q / db-reduce-calls bug stored 0 phases).
+  assert.equal(card.phases.length, 1, `expected 1 phase; got ${card.phases.length}`);
+  assert.equal(bodies.length, 1);
+  // The REAL evidence (query text + EXPLAIN plan) survives INTO the phase body — the whole point.
+  assert.ok(bodies[0].body.includes("pg_stat_statements"), "evidence query header must be in the phase body");
+  assert.ok(bodies[0].body.includes("Seq Scan on orders"), "the EXPLAIN plan must be in the phase body");
+  assert.ok(bodies[0].body.includes("SELECT * FROM orders"), "the query text must be in the phase body");
+  // Verification column is populated (### Verification split out of the phase body).
+  assert.ok((bodies[0].verification ?? "").length > 0, "phase verification must be populated");
 });
 
 test("buildFixSpecMarkdown resolves cause-specific guidance for statement_timeout_pressure (not the generic investigate_timeouts fallback)", () => {
