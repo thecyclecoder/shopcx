@@ -70,10 +70,11 @@
       <li><a href="#surface-map">1. Surface map</a></li>
       <li><a href="#display-ops">2. Display operation set</a></li>
       <li><a href="#mutation-ops">3. Mutation operation set</a></li>
-      <li><a href="#view-shapes">4. Canonical view shapes</a></li>
-      <li><a href="#rename-map">5. appstleX → subscriptionX rename map</a></li>
-      <li><a href="#defect-register">6. Defect register (9)</a></li>
-      <li><a href="#build-plan">7. Build plan</a></li>
+      <li><a href="#operation-contract">4. Operation contract</a></li>
+      <li><a href="#view-shapes">5. Canonical view shapes</a></li>
+      <li><a href="#rename-map">6. appstleX → subscriptionX rename map</a></li>
+      <li><a href="#defect-register">7. Defect register (9)</a></li>
+      <li><a href="#build-plan">8. Build plan</a></li>
     </ol>
     <div class="sub" style="margin-top:24px">
       <p><strong>Spec:</strong><br>commerce-sdk-scaffold-money-resolver</p>
@@ -179,10 +180,51 @@
         <tr><td>loyaltyDeductPoints</td><td class="mono">(ws, memberId, points, orderId, type, description) → { success }</td><td>internal</td></tr>
       </tbody>
     </table>
-    <div class="note"><strong>Invariant:</strong> Every money-moving Mutation op resolves cents through <code>priceSubscription</code> or the pricing engine — never a caller-supplied number. This closes defect #1 (§6) at the type level.</div>
+    <div class="note"><strong>Invariant:</strong> Every money-moving Mutation op resolves cents through <code>priceSubscription</code> or the pricing engine — never a caller-supplied number. This closes defect #1 (§7) at the type level.</div>
 
-    <!-- 4. VIEW SHAPES -->
-    <h2 id="view-shapes">4. Canonical view shapes</h2>
+    <!-- 4. OPERATION CONTRACT -->
+    <h2 id="operation-contract">4. Operation contract</h2>
+    <p>The two op shapes every entry in §2 and §3 satisfies, plus the <code>Gateway</code> discriminator money-moving ops carry and the <code>InternalOrAppstle&lt;T&gt;</code> helper that binds each op to declaring both branches at the type level. Declared in <code>src/lib/commerce/types.ts</code>; zero implementations ship in this phase — Display impls arrive in M2b, Mutation impls in M2c.</p>
+
+    <h3>DisplayOp&lt;TInput, TView&gt;</h3>
+    <p>A read-only op: workspace + typed input → one canonical view (see §5).</p>
+<pre><code>type DisplayOp&lt;TInput, TView&gt; = (
+  workspaceId: string,
+  input: TInput,
+) =&gt; Promise&lt;TView&gt;;</code></pre>
+    <p>Example: <code>const getSubscription: DisplayOp&lt;string, SubscriptionView&gt;</code> — subscription id in, priced <code>SubscriptionView</code> out.</p>
+
+    <h3>MutationOp&lt;TInput, TResult&gt;</h3>
+    <p>A write op: workspace + typed input → <code>{ success, …result }</code>. The callable signature is a function; the <code>gateway</code> metadata field is a property set on the same value when (and only when) money moves.</p>
+<pre><code>type MutationResult&lt;TResult&gt; = { success: boolean } &amp; TResult;
+
+interface MutationOp&lt;TInput, TResult&gt; {
+  (workspaceId: string, input: TInput): Promise&lt;MutationResult&lt;TResult&gt;&gt;;
+  /** Payment boundary. Undefined iff the op does not move money. */
+  readonly gateway?: Gateway;
+}</code></pre>
+    <p>Example: <code>const issueRefund: MutationOp&lt;{ orderId: string; cents: number }, { refundId: string }&gt;</code>, with <code>issueRefund.gateway = "braintree"</code> for internal orders.</p>
+
+    <h3>Gateway</h3>
+    <p>The payment boundary a money-moving Mutation op routes through. Non-money mutations (a pause, a resume, a title enrichment) omit it.</p>
+<pre><code>type Gateway = "braintree" | "shopify";</code></pre>
+    <p>Braintree owns internal-sub charges + refunds; Shopify owns Appstle-baked charges + refunds — the same routing the current renewal + refund paths use, now declared once at the type level so a caller cannot pick the wrong boundary.</p>
+
+    <h3>InternalOrAppstle&lt;T&gt;</h3>
+    <p>Every commerce op has TWO implementations — internal (engine + Braintree) and Appstle-baked (Appstle + Shopify). The SDK dispatcher takes an <code>InternalOrAppstle&lt;Op&gt;</code> and picks the branch at call time from <code>sub.is_internal</code>. Declaring only one branch is a type error — that is the point.</p>
+<pre><code>interface InternalOrAppstle&lt;T&gt; {
+  internal: T;
+  appstle:  T;
+}</code></pre>
+    <p>Example M2b/M2c wiring:</p>
+<pre><code>const getSubscriptionImpls: InternalOrAppstle&lt;DisplayOp&lt;string, SubscriptionView&gt;&gt; = {
+  internal: async (ws, id) =&gt; { /* engine-priced */ },
+  appstle:  async (ws, id) =&gt; { /* baked-priced  */ },
+};</code></pre>
+    <div class="note"><strong>Why this shape.</strong> A caller who imports <code>@/lib/commerce/subscription#getSubscription</code> gets a <code>DisplayOp&lt;string, SubscriptionView&gt;</code> — one contract, both branches guaranteed to exist. The dispatcher (M2b) sits between the import and the two <code>InternalOrAppstle</code> branches, so the two-branch discipline is compiled in, not remembered.</div>
+
+    <!-- 5. VIEW SHAPES -->
+    <h2 id="view-shapes">5. Canonical view shapes</h2>
     <p>Declared in <code>src/lib/commerce/types.ts</code> (Phase 1). Every Display op returns one of these; every Mutation op takes / returns the same shapes so display and mutation share one contract.</p>
 
     <h3>Money primitives</h3>
@@ -283,8 +325,8 @@ interface DiscountPill { kind: "sns" | "break" | "free_shipping" | "coupon" | "r
   actions: CrisisCustomerActionView[]; created_at;
 }</code></pre>
 
-    <!-- 5. RENAME MAP -->
-    <h2 id="rename-map">5. appstleX → subscriptionX rename map</h2>
+    <!-- 6. RENAME MAP -->
+    <h2 id="rename-map">6. appstleX → subscriptionX rename map</h2>
     <p>Every export in <a href="../libraries/appstle.md">libraries/appstle</a> and <a href="../libraries/subscription-items.md">libraries/subscription-items</a> paired to its new SDK name. New names are boundary-agnostic (no <code>appstle</code> prefix) — the SDK dispatches internal vs Appstle at the implementation layer, not the caller layer. Callers switch to <code>@/lib/commerce</code> once M2b lands.</p>
 
     <h3>From <code>src/lib/appstle.ts</code> (13 exports)</h3>
@@ -327,8 +369,8 @@ interface DiscountPill { kind: "sns" | "break" | "free_shipping" | "coupon" | "r
     </table>
     <p class="pill warn">Rename discipline</p> One PR per surface migration: swap the import + the call sites in one commit; the deprecated shim at <code>src/lib/portal/helpers/enrich-pricing.ts</code> models the transition (compile-clean, zero call-site edits required to keep the surface live).</p>
 
-    <!-- 6. DEFECT REGISTER -->
-    <h2 id="defect-register">6. Defect register (9)</h2>
+    <!-- 7. DEFECT REGISTER -->
+    <h2 id="defect-register">7. Defect register (9)</h2>
     <p>The defects the SDK exists to close. #1 and #2 link to their M1 specs (defect-elimination milestone). #3–#9 are grounded in current codebase evidence — where fixed, links point at the merged fix; where open, at the code the Mutation op must guard.</p>
 
     <table>
@@ -400,15 +442,15 @@ interface DiscountPill { kind: "sns" | "break" | "free_shipping" | "coupon" | "r
       </tbody>
     </table>
 
-    <!-- 7. BUILD PLAN -->
-    <h2 id="build-plan">7. Build plan</h2>
+    <!-- 8. BUILD PLAN -->
+    <h2 id="build-plan">8. Build plan</h2>
     <ol>
       <li><strong>M2 — SDK core</strong> (this spec, <code>commerce-sdk-scaffold-money-resolver</code>)
         <ul>
           <li>Phase 1 — Scaffold <code>src/lib/commerce</code> + declare view shapes <span class="pill ok">Shipped</span></li>
           <li>Phase 2 — Relocate <code>priceSubscription</code> + lock money invariants <span class="pill ok">Shipped</span></li>
-          <li>Phase 3 — Author this inventory HTML <span class="pill warn">In progress</span></li>
-          <li>Phase 4 — Publish the operation contract (<code>DisplayOp</code> / <code>MutationOp</code> / <code>Gateway</code>) <span class="pill">Planned</span></li>
+          <li>Phase 3 — Author this inventory HTML <span class="pill ok">Shipped</span></li>
+          <li>Phase 4 — Publish the operation contract (<code>DisplayOp</code> / <code>MutationOp</code> / <code>Gateway</code> / <code>InternalOrAppstle</code>) <span class="pill ok">Shipped</span></li>
         </ul>
       </li>
       <li><strong>M2b — Display implementations</strong> — implement <code>getSubscription</code>, <code>listSubscriptions</code>, <code>getOrder</code>, <code>listOrders</code>, <code>getReturn</code>, <code>listReturns</code>, <code>getReplacement</code>, <code>getCustomer</code>, <code>getLoyalty</code>, <code>getChargeback</code>, <code>getFraudCase</code>, <code>getCrisis</code>. Each op internal + Appstle branch behind one signature.</li>

@@ -312,6 +312,77 @@ export interface CrisisView {
   created_at: string;
 }
 
-// ── Operation contract (declared in Phase 4) ────────────────────────
-// DisplayOp / MutationOp / Gateway / InternalOrAppstle live here, added by
-// Phase 4 of this spec — not this phase. Keep this file focused on view shapes.
+// ── Operation contract ──────────────────────────────────────────────
+//
+// Every operation in the commerce SDK satisfies one of two shapes:
+//
+//   - `DisplayOp<TInput, TView>` — read-only; `(workspaceId, input) → view`.
+//   - `MutationOp<TInput, TResult>` — writes; `(workspaceId, input) → { success, …result }`.
+//
+// When a Mutation op moves money, it declares its `Gateway` — the boundary
+// (`braintree` | `shopify`) the SDK must route through.
+//
+// `InternalOrAppstle<T>` is the branching contract: every op has two
+// implementations, and the SDK's dispatcher must supply BOTH. Declaring only
+// one branch fails at the type level — the commerce SDK does not let a
+// half-migrated op slip out (this is what "zero consumers" until Phase 1's
+// scaffold has both branches wired up means for M2b / M2c).
+//
+// These are pure contract declarations. Implementations arrive in M2b (Display)
+// and M2c (Mutation).
+
+/**
+ * A read-only op: takes a workspace + typed input and resolves to a canonical
+ * view. Views come from this file — one of `SubscriptionView`, `OrderView`,
+ * `ReturnView`, `ReplacementView`, `CustomerView`, `LoyaltyView`,
+ * `ChargebackView`, `FraudView`, `CrisisView`.
+ */
+export type DisplayOp<TInput, TView> = (
+  workspaceId: string,
+  input: TInput,
+) => Promise<TView>;
+
+/**
+ * The payload shape every `MutationOp` returns: a boolean `success` plus the
+ * op-specific result fields. `TResult` is the extension shape (e.g.
+ * `{ returnId: string }`), NOT the whole return type — the SDK guarantees
+ * `success` is always present, so ops can only add fields.
+ */
+export type MutationResult<TResult> = { success: boolean } & TResult;
+
+/**
+ * A mutation op: takes a workspace + typed input and resolves to
+ * `{ success, …TResult }`. Money-moving ops attach a `gateway` metadata field
+ * (see `Gateway`) so the dispatcher can route to Braintree or Shopify without
+ * inspecting the input. Non-money mutations omit `gateway`.
+ */
+export interface MutationOp<TInput, TResult> {
+  (workspaceId: string, input: TInput): Promise<MutationResult<TResult>>;
+  /**
+   * The payment boundary this op moves money through. `undefined` iff the op
+   * does not move money (a pause, a resume, a title enrichment).
+   */
+  readonly gateway?: Gateway;
+}
+
+/**
+ * The payment boundary a money-moving `MutationOp` routes through. Braintree
+ * owns internal-sub charges + refunds; Shopify owns Appstle-baked charges +
+ * refunds. Any op that moves money declares one of these on its `.gateway`;
+ * any op that does not moves NO money and MUST NOT declare a gateway.
+ */
+export type Gateway = "braintree" | "shopify";
+
+/**
+ * Every commerce op has TWO implementations — one for internal subs (engine +
+ * Braintree) and one for Appstle-baked subs (Appstle + Shopify). The SDK's
+ * dispatcher takes an `InternalOrAppstle<Op>` and picks the branch at call
+ * time based on `sub.is_internal`. Declaring only one branch is a type error —
+ * that is the whole point of this helper: it makes the "silently drop the
+ * Appstle path" and "silently drop the internal path" bugs impossible at the
+ * type level. Implementations wire this up in M2b / M2c.
+ */
+export interface InternalOrAppstle<T> {
+  internal: T;
+  appstle: T;
+}
