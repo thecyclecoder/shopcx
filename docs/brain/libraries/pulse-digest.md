@@ -84,7 +84,7 @@ Renders a UTC ISO in America/Puerto_Rico (AST, UTC-4, **no DST**). The single-so
 ## Callers
 
 - `scripts/pulse-digest.ts` — the SessionEnd Haiku ingest (the forget-fallback)
-- `scripts/pulse-recap.ts` — the [[../.claude/skills/recap|/recap]] skill's runnable (session-authored writer). Calls `upsertDigestRow` with `digest_model='session-authored'` and delegates ref-kind normalization to `normalizeDigest`. Owns its own **deterministic session resolver** (`resolveCurrentSession` — `--session-id` flag → `CLAUDE_CODE_SESSION_ID` env → refuse-on-ambiguity mtime) plus `MTIME_LIVE_WINDOW_MS`, `HARNESS_SESSION_ENV`, and `SessionAmbiguityError`. See [[../specs/recap-session-id-resolution]] for the incident and rationale.
+- `scripts/pulse-recap.ts` — the [[../.claude/skills/recap|/recap]] skill's runnable (session-authored writer). Calls `upsertDigestRow` with `digest_model='session-authored'` and delegates ref-kind normalization to `normalizeDigest`. Owns its own **deterministic session resolver** (`resolveCurrentSession` — `--session-id` flag → `CLAUDE_CODE_SESSION_ID` env → refuse-on-ambiguity mtime) plus `MTIME_LIVE_WINDOW_MS`, `HARNESS_SESSION_ENV`, and `SessionAmbiguityError`. See [[../archive.d/recap-session-id-resolution]] for the incident and rationale.
 - `src/lib/pulse.ts` (Phase 2, upcoming — the synthesizer reads the digests both writers produce)
 
 ## Gotchas
