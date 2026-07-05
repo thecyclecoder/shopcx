@@ -18,7 +18,8 @@ The approvals queue+history for a [[god_mode_sessions]] session. One row per BLO
 | `tool_name` | `text` | — | The blocked tool — `Bash`, `Edit`, `Write`, `ApplyMigration`, etc. Free-text; vocabulary is the Claude Code PreToolUse contract (Phase 2). |
 | `tool_input` | `jsonb` | — | The raw tool input the gate saw (command string, edit patch, migration SQL). Shape varies per `tool_name`. |
 | `preview` | `text` | — | Human-readable single-string preview the cockpit renders on the approval card. The gate synthesizes this from `tool_input` (the command line, the diff summary, the migration filename). Never null — the founder needs SOMETHING to decide on. |
-| `risk` | `text` | — | default `'write'` · CHECK ∈ `safe` \| `write` \| `destructive` \| `plan`. Deterministic classification of the blocked call (see below); `plan` is the plain-language batch-approval card (see below). |
+| `risk` | `text` | — | default `'write'` · CHECK ∈ `safe` \| `write` \| `destructive` \| `plan` \| `decision`. CEO-grade model ([[../lifecycles/god-mode]]): `decision` = a box-raised plain-language CEO call (standing-grantable); `destructive` = the deterministic catastrophic floor (always PIN, never grantable); `safe`/`write`/`plan` are legacy tiers (the gate no longer raises them — it allows all non-catastrophic work). |
+| `category` | `text` | ✓ | The plain-language category a `risk='decision'` card belongs to (e.g. `dismiss-stale-approvals`, `ship-hotfix`). Keyed on by [[god_mode_standing_grants]] — "don't ask again" grants this category so future decisions in it auto-approve. NULL for non-decision rows. |
 | `status` | `text` | — | default `'pending'` · CHECK ∈ `pending` \| `approved` \| `denied` \| `asked`. Decision lifecycle (see below). |
 | `question_text` | `text` | ✓ | Populated only on `status='asked'` — the founder's question back to the box. |
 | `decided_at` | `timestamptz` | ✓ | Stamped when status leaves `pending`. |

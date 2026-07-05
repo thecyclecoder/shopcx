@@ -23,6 +23,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getActiveSession,
   listApprovalsForSession,
+  listStandingGrants,
   bumpActivity,
   type GodModeApprovalRow,
   type GodModeMessage,
@@ -51,6 +52,7 @@ function publicApproval(a: GodModeApprovalRow) {
     preview: a.preview,
     risk: a.risk,
     status: a.status,
+    category: a.category,
     question_text: a.question_text,
     created_at: a.created_at,
     decided_at: a.decided_at,
@@ -67,6 +69,7 @@ export async function GET() {
 
   await bumpActivity(admin, session.id);
   const approvals = await listApprovalsForSession(admin, session.id);
+  const standingGrants = await listStandingGrants(admin, workspaceId);
   const messages: GodModeMessage[] = Array.isArray(session.messages) ? session.messages : [];
 
   return NextResponse.json({
@@ -80,5 +83,6 @@ export async function GET() {
     },
     messages,
     approvals: approvals.map(publicApproval),
+    standingGrants: standingGrants.map((g) => ({ category: g.category, created_at: g.created_at })),
   });
 }

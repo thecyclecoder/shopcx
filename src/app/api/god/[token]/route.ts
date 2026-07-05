@@ -20,6 +20,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   resolveCockpitToken,
   listApprovalsForSession,
+  listStandingGrants,
   bumpActivity,
   type GodModeApprovalRow,
   type GodModeMessage,
@@ -32,6 +33,7 @@ function publicApproval(a: GodModeApprovalRow) {
     preview: a.preview,
     risk: a.risk,
     status: a.status,
+    category: a.category,
     question_text: a.question_text,
     created_at: a.created_at,
     decided_at: a.decided_at,
@@ -59,12 +61,14 @@ export async function GET(
   await bumpActivity(admin, res.session.id);
 
   const approvals = await listApprovalsForSession(admin, res.session.id);
+  const standingGrants = await listStandingGrants(admin, res.session.workspace_id);
   const messages: GodModeMessage[] = Array.isArray(res.session.messages) ? res.session.messages : [];
 
   return NextResponse.json({
     status: res.session.status,
     messages,
     approvals: approvals.map(publicApproval),
+    standingGrants: standingGrants.map((g) => ({ category: g.category, created_at: g.created_at })),
     // Sliding + absolute — the cockpit renders a "session ends at" hint so the
     // founder knows when to re-arm.
     token_expires_at: res.session.token_expires_at,

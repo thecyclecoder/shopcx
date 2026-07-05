@@ -15,43 +15,33 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE } from "@/components/god-mode-shared";
 
 type Tab = "chat" | "approvals";
 
-interface GodMessage { role: "user" | "assistant" | "system"; content: string; ts: string }
+interface GodMessage { role: "user" | "assistant" | "system" | "checklist"; content: string; ts: string }
 interface GodApproval {
   id: string;
   tool_name: string;
   preview: string;
-  risk: "safe" | "write" | "destructive" | "plan";
+  risk: "safe" | "write" | "destructive" | "plan" | "decision";
   status: "pending" | "approved" | "denied" | "asked";
+  category: string | null;
   question_text: string | null;
   created_at: string;
   decided_at: string | null;
 }
+interface GodStandingGrant { category: string; created_at: string }
 interface GodPayload {
   status: "armed" | "disarmed" | "expired";
   messages: GodMessage[];
   approvals: GodApproval[];
+  standingGrants?: GodStandingGrant[];
   token_expires_at: string | null;
   absolute_expires_at: string | null;
 }
 
-const RISK_BADGE: Record<GodApproval["risk"], string> = {
-  safe: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
-  write: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
-  destructive: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
-  // A "plan" card = one plain-language unit of work; approving it auto-allows the
-  // non-destructive calls that implement it (no PIN — only destructive needs one).
-  plan: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300",
-};
-
-const STATUS_BADGE: Record<GodApproval["status"], string> = {
-  pending: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
-  approved: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
-  denied: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  asked: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
-};
+const STATUS_BADGE = DEC_STATUS_BADGE;
 
 export default function GodModeCockpit() {
   const { token } = useParams<{ token: string }>();
@@ -63,7 +53,9 @@ export default function GodModeCockpit() {
   const [busyApprovalId, setBusyApprovalId] = useState<string | null>(null);
   const [askDraft, setAskDraft] = useState<Record<string, string>>({});
   const [pinDraft, setPinDraft] = useState<Record<string, string>>({});
+  const [dontAskDraft, setDontAskDraft] = useState<Record<string, boolean>>({});
   const [approvalError, setApprovalError] = useState<Record<string, string>>({});
+  const [revoking, setRevoking] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
@@ -133,7 +125,7 @@ export default function GodModeCockpit() {
     setBusyApprovalId(id);
     setApprovalError((s) => ({ ...s, [id]: "" }));
     try {
-      const body: { approvalId: string; decision: string; question?: string; pin?: string } = {
+      const body: { approvalId: string; decision: string; question?: string; pin?: string; dontAskAgain?: boolean } = {
         approvalId: id,
         decision,
       };
@@ -144,8 +136,11 @@ export default function GodModeCockpit() {
       }
       if (decision === "approve" && approval.risk === "destructive") {
         const pin = (pinDraft[id] || "").trim();
-        if (!pin) { setApprovalError((s) => ({ ...s, [id]: "PIN required for destructive." })); return; }
+        if (!pin) { setApprovalError((s) => ({ ...s, [id]: "PIN required to confirm." })); return; }
         body.pin = pin;
+      }
+      if (decision === "approve" && approval.risk === "decision" && dontAskDraft[id]) {
+        body.dontAskAgain = true;
       }
       const r = await fetch(`/api/god/${token}/approve`, {
         method: "POST",
@@ -155,6 +150,7 @@ export default function GodModeCockpit() {
       if (r.ok) {
         setAskDraft((s) => ({ ...s, [id]: "" }));
         setPinDraft((s) => ({ ...s, [id]: "" }));
+        setDontAskDraft((s) => ({ ...s, [id]: false }));
         load();
       } else {
         const j = (await r.json().catch(() => ({}))) as { error?: string };
@@ -166,6 +162,21 @@ export default function GodModeCockpit() {
       }
     } finally {
       setBusyApprovalId(null);
+    }
+  }
+
+  async function revokeStanding(category: string) {
+    if (revoking) return;
+    setRevoking(category);
+    try {
+      await fetch(`/api/god/${token}/standing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "revoke", category }),
+      });
+      await load();
+    } finally {
+      setRevoking(null);
     }
   }
 
@@ -244,21 +255,27 @@ export default function GodModeCockpit() {
                   No messages yet. Type below to start the session.
                 </div>
               )}
-              {payload.messages.map((m, i) => (
-                <div
-                  key={i}
-                  className={`whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm ${
-                    m.role === "user"
-                      ? "border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-100"
-                      : m.role === "system"
-                        ? "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
-                        : "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
-                  }`}
-                >
-                  <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-400">{m.role}</div>
-                  {m.content}
-                </div>
-              ))}
+              {payload.messages.map((m, i) =>
+                m.role === "checklist" ? (
+                  <GodModeChecklist key={i} content={m.content} />
+                ) : (
+                  <div
+                    key={i}
+                    className={`whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm ${
+                      m.role === "user"
+                        ? "border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-100"
+                        : m.role === "system"
+                          ? "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
+                          : "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+                    }`}
+                  >
+                    <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-400">
+                      {m.role === "user" ? "You" : m.role === "system" ? "Update" : "Chief of staff"}
+                    </div>
+                    {m.content}
+                  </div>
+                ),
+              )}
             </div>
             <div className="border-t border-zinc-200 py-3 dark:border-zinc-800">
               <div className="flex gap-2">
@@ -287,42 +304,68 @@ export default function GodModeCockpit() {
 
         {tab === "approvals" && (
           <div className="flex-1 space-y-3 overflow-y-auto py-4">
+            {(payload.standingGrants ?? []).length > 0 && (
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3 dark:border-zinc-800 dark:bg-zinc-900/40">
+                <div className="mb-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                  Standing approvals — god mode won&apos;t ask about these
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(payload.standingGrants ?? []).map((g) => (
+                    <span
+                      key={g.category}
+                      className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300"
+                    >
+                      {g.category}
+                      <button
+                        onClick={() => revokeStanding(g.category)}
+                        disabled={revoking === g.category}
+                        title="Ask me again about this"
+                        className="ml-0.5 text-indigo-400 hover:text-indigo-700 disabled:opacity-50 dark:hover:text-indigo-200"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             {sortedApprovals.length === 0 && (
               <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
-                No tool calls yet. The box will land approval cards here.
+                Nothing needs you right now. God mode is working — it&apos;ll ask here only when it needs a real decision.
               </div>
             )}
             {sortedApprovals.map((a) => {
               const isPending = a.status === "pending";
               const isDestructive = a.risk === "destructive";
+              const isDecision = a.risk === "decision";
               const err = approvalError[a.id];
               return (
                 <div
                   key={a.id}
-                  className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
+                  className={`rounded-lg border p-4 ${isDestructive ? "border-red-200 bg-red-50/40 dark:border-red-900/40 dark:bg-red-950/20" : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                        {a.tool_name}
+                        {godCardTitle(a.risk)}
                       </div>
                       <div className="mt-0.5 text-[11px] text-zinc-400">
                         {new Date(a.created_at).toLocaleTimeString()}
                         {a.decided_at ? ` · decided ${new Date(a.decided_at).toLocaleTimeString()}` : ""}
+                        {a.category ? ` · ${a.category}` : ""}
                       </div>
                     </div>
-                    <div className="flex flex-shrink-0 items-center gap-1.5">
-                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${RISK_BADGE[a.risk]}`}>
-                        {a.risk}
-                      </span>
-                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_BADGE[a.status]}`}>
-                        {a.status}
-                      </span>
-                    </div>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_BADGE[a.status]}`}>
+                      {a.status}
+                    </span>
                   </div>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-zinc-50 p-2 text-xs text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
-                    {a.preview}
-                  </pre>
+                  {isDecision ? (
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-snug text-zinc-800 dark:text-zinc-200">{a.preview}</p>
+                  ) : (
+                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-zinc-50 p-2 text-xs text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
+                      {a.preview}
+                    </pre>
+                  )}
                   {a.status === "asked" && a.question_text && (
                     <div className="mt-2 rounded border border-purple-200 bg-purple-50 p-2 text-xs text-purple-900 dark:border-purple-900 dark:bg-purple-950/40 dark:text-purple-200">
                       <span className="font-medium">You asked: </span>{a.question_text}
@@ -338,16 +381,28 @@ export default function GodModeCockpit() {
                           autoComplete="off"
                           value={pinDraft[a.id] ?? ""}
                           onChange={(e) => setPinDraft((s) => ({ ...s, [a.id]: e.target.value }))}
-                          placeholder="PIN (required for destructive)"
+                          placeholder="Enter your PIN to confirm"
                           disabled={busyApprovalId === a.id}
                           className="w-full rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm text-zinc-900 shadow-sm focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500 dark:border-red-900 dark:bg-zinc-900 dark:text-zinc-100"
                         />
+                      )}
+                      {isDecision && a.category && (
+                        <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+                          <input
+                            type="checkbox"
+                            checked={!!dontAskDraft[a.id]}
+                            onChange={(e) => setDontAskDraft((s) => ({ ...s, [a.id]: e.target.checked }))}
+                            disabled={busyApprovalId === a.id}
+                            className="h-3.5 w-3.5"
+                          />
+                          Don&apos;t ask again about this ({a.category})
+                        </label>
                       )}
                       <textarea
                         rows={2}
                         value={askDraft[a.id] ?? ""}
                         onChange={(e) => setAskDraft((s) => ({ ...s, [a.id]: e.target.value }))}
-                        placeholder="Ask a question instead of deciding (optional)"
+                        placeholder="Or ask a question instead (optional)"
                         disabled={busyApprovalId === a.id}
                         className="w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                       />
