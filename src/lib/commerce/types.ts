@@ -233,6 +233,29 @@ export interface ReplacementView {
 
 // ── CustomerView ────────────────────────────────────────────────────
 
+/**
+ * Compact rollup of the customer's [[../tables/customer_events]] append log —
+ * total count + most-recent event. Full timelines still read the table
+ * directly; this is a card-header projection.
+ */
+export interface CustomerEventsSummaryView {
+  total_events: number;
+  last_event_type: string | null;
+  last_event_at: string | null;
+}
+
+/**
+ * Subset of [[../tables/customer_demographics]] hydrated on the CustomerView.
+ * Every field nullable — the record itself may not exist for a customer that
+ * hasn't been enriched yet.
+ */
+export interface CustomerDemographicsView {
+  inferred_gender: string | null;
+  inferred_age_range: string | null;
+  zip_income_bracket: string | null;
+  zip_urban_classification: string | null;
+}
+
 export interface CustomerView {
   id: string;
   workspace_id: string;
@@ -253,6 +276,10 @@ export interface CustomerView {
   sms_marketing_status: string;
   portal_banned: boolean;
   is_internal: boolean;
+  /** Rollup of the customer_events timeline; null when hydration is skipped. */
+  events_summary: CustomerEventsSummaryView | null;
+  /** Compact demographics hydration; null when the row is missing. */
+  demographics: CustomerDemographicsView | null;
   created_at: string;
 }
 
@@ -275,6 +302,23 @@ export interface LoyaltyView {
   redemption_tiers: LoyaltyRedemptionTierView[];
   needs_points_backfill: boolean;
   source: "native" | string;
+}
+
+/**
+ * One row of [[../tables/loyalty_transactions]] — the append-only points
+ * ledger (earn / spend / adjust). `listLoyaltyLedger` returns these in
+ * created_at DESC order.
+ */
+export interface LoyaltyLedgerEntryView {
+  id: string;
+  member_id: string;
+  workspace_id: string;
+  points_change: number;
+  type: string;
+  description: string | null;
+  order_id: string | null;
+  shopify_discount_id: string | null;
+  created_at: string;
 }
 
 // ── ChargebackView ──────────────────────────────────────────────────
@@ -324,6 +368,23 @@ export interface FraudView {
   created_at: string;
 }
 
+/**
+ * Per-customer fraud posture — the shape `getFraudPosture` returns. Mirrors
+ * the discriminators the orchestrator gate reads: any confirmed_fraud OR any
+ * amazon_reseller match (any status) OR any known-reseller address match →
+ * block. The underlying cases are attached so callers can render evidence.
+ */
+export interface FraudPostureView {
+  workspace_id: string;
+  customer_id: string;
+  is_confirmed_fraud: boolean;
+  is_amazon_reseller: boolean;
+  is_known_reseller_address: boolean;
+  should_block: boolean;
+  block_reason: string | null;
+  cases: FraudView[];
+}
+
 // ── CrisisView ──────────────────────────────────────────────────────
 
 /** One customer's tier state within a crisis (out-of-stock swap flow). */
@@ -358,6 +419,18 @@ export interface CrisisView {
   tier_wait_days: number;
   actions: CrisisCustomerActionView[];
   created_at: string;
+}
+
+/**
+ * Per-customer crisis context — the shape `getCrisisContext` returns. Gathers
+ * every crisis affecting the customer PLUS their current per-crisis tier state
+ * (from [[../tables/crisis_customer_actions]]) so a surface can render the
+ * customer's active retention offers in one read.
+ */
+export interface CrisisContextView {
+  workspace_id: string;
+  customer_id: string;
+  crises: CrisisView[];
 }
 
 // ── Operation contract ──────────────────────────────────────────────
