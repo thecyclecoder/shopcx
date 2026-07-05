@@ -15877,6 +15877,7 @@ async function runDrContentJob(job: Job) {
     setBlueprintStatus,
     writeCategorizedProductMedia,
     listCategorizedProductMedia,
+    findExistingRealAsset,
     openContentGap,
     listContentGaps,
     REAL_EVIDENCE_CATEGORIES: SDK_REAL_EVIDENCE_CATEGORIES,
@@ -15923,17 +15924,12 @@ async function runDrContentJob(job: Job) {
     most_powerful_phrases?: string[];
   };
 
-  // Existing categorized product_media — the reuse-vs-open-gap probe input. A real-evidence slot
-  // whose category already has a row here is REUSED (no gap opened); a generatable slot whose
-  // category already has a row is regenerated only when Carrie says so (new context per blueprint).
+  // Existing categorized product_media — the prompt-side "what does Carrie already own?" summary
+  // (see `mediaSummary` below). The per-slot reuse-vs-open-gap decision is a separate call to
+  // `findExistingRealAsset` inside the loop (source<>'generated' + category-or-slot/alt match) —
+  // this list intentionally does NOT gate the reuse path, so historic non-categorized rows still
+  // count on the semantic slot match.
   const categorizedMedia = await listCategorizedProductMedia(job.workspace_id, productId).catch(() => []);
-  const mediaByCategory = new Map<string, typeof categorizedMedia>();
-  for (const m of categorizedMedia) {
-    if (!m.category) continue;
-    const list = mediaByCategory.get(m.category) || [];
-    list.push(m);
-    mediaByCategory.set(m.category, list);
-  }
 
   // Pick a hero reference image for the Nano Banana Pro combine — the "compose our real product"
   // rule. Any product_media row whose slot='hero' + has a URL (the bag hero) qualifies. Fallback:
@@ -16050,9 +16046,21 @@ async function runDrContentJob(job: Job) {
             refused++;
             console.warn(`${tag} refused generate on real-evidence category '${assetRole}' — routing to gap instead`);
           }
-          const existing = mediaByCategory.get(assetRole);
-          if (existing && existing.length > 0 && existing[0].url) {
-            assets.push({ kind: "image_ref", ref: existing[0].url });
+          // Reuse-before-flag probe — an SDK helper (source<>'generated', category-first then
+          // slot/alt semantic match) so a product that already owns before/after or press logos
+          // (categorized OR by legacy slot) reuses them instead of re-asking the founder. The
+          // source<>'generated' filter is the compliance rail: an AI image can never satisfy a
+          // real-evidence slot even if its category matches.
+          const existing = await findExistingRealAsset(
+            job.workspace_id,
+            productId,
+            assetRole as "before_after" | "ugc" | "testimonial_photo" | "press_logo",
+          ).catch((e) => {
+            console.warn(`${tag} findExistingRealAsset failed for role=${role} asset_role=${assetRole}: ${e instanceof Error ? e.message : e}`);
+            return null;
+          });
+          if (existing?.url) {
+            assets.push({ kind: "image_ref", ref: existing.url });
             reused++;
             continue;
           }

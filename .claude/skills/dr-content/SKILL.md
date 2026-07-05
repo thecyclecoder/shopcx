@@ -75,6 +75,25 @@ description for a flagged gap so a founder can supply the real thing on the firs
   product. The worker reuses these before opening a gap for a real-evidence slot; you may
   reference them by url in a `caption`.
 
+### Reuse-before-flag (the worker enforces this — you don't have to)
+
+For every real-evidence slot you `flag_gap`, the worker probes
+[[../../../src/lib/lander-blueprints.ts]] `findExistingRealAsset(workspaceId, productId, assetRole)`
+FIRST. Two match paths, tried in order:
+
+1. `category = assetRole` — a row Carrie's DR-content pass already categorized (or the founder
+   resolved a prior gap into).
+2. Legacy slot / alt semantic match on any still-uncategorized row: `before_after` ← slot
+   `before` / `after` · `press_logo` ← slot `press_*` · `testimonial_photo` ← slot
+   `endorsement_*_avatar` · `ugc` ← slot / alt containing `ugc` / `selfie` / `customer`.
+
+On a hit the worker references the existing media in the blueprint `content` bucket and SKIPS the
+gap; on a miss it opens the [[../../../docs/brain/tables/lander_content_gaps]] row as before. A
+row with `source='generated'` is NEVER eligible — an AI image cannot satisfy a real-evidence slot
+even if the category matches (the never-fake-a-customer-result compliance line, defended at the
+SDK). So keep flagging real-evidence slots — the worker suppresses the gap when we already own
+the asset, and only routes the genuinely-missing ones to the founder.
+
 ## DR copy voice (per block, `copy` field)
 
 - **Intense, emotional, urgency-driven.** Not "supports focus" — the customer's actual friction
