@@ -1,0 +1,1 @@
+- **Loyalty: program-wide stats + negative-balance guard on manual adjust** · verified 2026-07-05 · → [[../libraries/loyalty]]

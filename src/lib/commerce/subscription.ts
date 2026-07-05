@@ -1,19 +1,43 @@
-// commerce/subscription.ts — Mutation ops for subscriptions.
-//
-// Every subscription mutation flows through here as one canonical
-// subscriptionX surface (renaming the current appstleX + subX exports).
-// Each op branches on isInternalSubscription() — internal → internalSub*
-// handlers; else → the existing appstleX / subX wrappers, which top-guard
-// with healOnTouch and handle the Appstle boundary.
-//
-// Ships with zero consumers. Phase 3 flips src/lib/appstle.ts and
-// src/lib/subscription-items.ts to thin @deprecated shims that call the
-// exports below; M4/M5 migrates callers off the shims.
-//
-// See docs/brain/reference/commerce-sdk-inventory.html § Rename map for
-// the full old→new pairing, and docs/brain/libraries/commerce__subscription.md
-// for the surface reference.
-
+/**
+ * commerce/subscription.ts — Display + mutation ops for subscriptions.
+ *
+ * DISPLAY: Every op is internal-vs-Appstle-aware via `./price.ts.priceSubscription`
+ * (branches on `sub.is_internal`) so `SubscriptionView.pricing` is fully
+ * populated on the returned view — no downstream surface renders $NaN / $0.
+ *
+ * `listSubscriptions` and `listSubscriptionsByCustomer` back onto the
+ * `commerce_list_subscriptions` Postgres RPC — one round trip per page projects
+ * the sub + latest renewal order + upcoming (projected) order (see
+ * [[../../docs/brain/tables/subscriptions]] and the accompanying migration
+ * `supabase/migrations/20260914120000_commerce_list_subscriptions_rpc.sql`).
+ * The SDK walks past Postgres' 1000-row default cap by cursor-paginating on
+ * `(updated_at DESC, id DESC)` — matches the goal's "no silent truncation"
+ * invariant and the [[../../docs/brain/README]] § Probing technique note.
+ *
+ * MUTATION: Every subscription mutation flows through here as one canonical
+ * subscriptionX surface (renaming the current appstleX + subX exports).
+ * Each op branches on isInternalSubscription() — internal → internalSub*
+ * handlers; else → the existing appstleX / subX wrappers, which top-guard
+ * with healOnTouch and handle the Appstle boundary.
+ *
+ * Ships with zero call-site consumers — the M3 harness compares parity before
+ * any surface migrates. Phase 3 flips src/lib/appstle.ts and
+ * src/lib/subscription-items.ts to thin @deprecated shims that call the
+ * mutation exports below; M4/M5 migrates callers off the shims.
+ *
+ * See docs/brain/reference/commerce-sdk-inventory.html § Rename map for
+ * the full old→new pairing, and docs/brain/libraries/commerce__subscription.md
+ * for the surface reference.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { priceSubscription } from "./price";
+import type {
+  SubscriptionLineView,
+  SubscriptionListFilters,
+  SubscriptionView,
+  SubscriptionLatestOrderView,
+  SubscriptionUpcomingOrderView,
+} from "./types";
 import {
   isInternalSubscription,
   internalSubscriptionAction,
@@ -41,7 +65,268 @@ import {
   subUpdateLineItemPrice,
 } from "@/lib/subscription-items";
 
-export type { SubscriptionView, SubscriptionLineView, SubscriptionPricingView } from "./types";
+export type { SubscriptionView, SubscriptionLineView, SubscriptionPricingView, SubscriptionListFilters } from "./types";
+
+// ── Raw shapes returned by the RPC / from `subscriptions` ────────────
+
+interface RawSubscriptionRow {
+  id: string;
+  workspace_id: string;
+  customer_id: string | null;
+  shopify_contract_id: string | null;
+  status: string;
+  is_internal: boolean | null;
+  comp: boolean | null;
+  billing_interval: string | null;
+  billing_interval_count: number | null;
+  next_billing_date: string | null;
+  last_payment_status: string | null;
+  items: unknown;
+  delivery_price_cents: number | null;
+  shipping_address: Record<string, unknown> | null;
+  shipping_protection_added: boolean | null;
+  shipping_protection_amount_cents: number | null;
+  applied_discounts: unknown;
+  pricing_offer_id: string | null;
+  payment_method_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RawLatestOrder {
+  id: string;
+  order_number: string | null;
+  financial_status: string | null;
+  delivery_status: string | null;
+  total_cents: number | null;
+  created_at: string;
+  delivered_at: string | null;
+}
+
+interface RawItem {
+  line_id?: string;
+  variant_id?: string;
+  product_id?: string | null;
+  title?: string;
+  variant_title?: string | null;
+  sku?: string | null;
+  quantity?: number;
+  is_gift?: boolean;
+  price_override_cents?: number | null;
+}
+
+interface CommerceListRow {
+  sub: RawSubscriptionRow;
+  latest_order: RawLatestOrder | null;
+  upcoming_order: { next_billing_date: string | null } | null;
+}
+
+// ── Shape helpers ────────────────────────────────────────────────────
+
+function coerceStatus(s: string | null): SubscriptionView["status"] {
+  if (s === "paused" || s === "cancelled" || s === "active") return s;
+  return "cancelled";
+}
+
+function coerceLastPaymentStatus(s: string | null): SubscriptionView["last_payment_status"] {
+  if (s === "succeeded" || s === "failed" || s === "skipped") return s;
+  return null;
+}
+
+function buildLineViews(items: unknown, priced: Map<string, { base_cents: number; unit_cents: number }>): SubscriptionLineView[] {
+  const arr = Array.isArray(items) ? (items as RawItem[]) : [];
+  return arr.map((it) => {
+    const lineId = String(it.line_id ?? it.variant_id ?? "");
+    const variantId = String(it.variant_id ?? "");
+    const p = priced.get(lineId) || priced.get(variantId) || { base_cents: 0, unit_cents: 0 };
+    return {
+      line_id: lineId,
+      variant_id: variantId,
+      product_id: it.product_id ?? null,
+      title: it.title ?? "",
+      variant_title: it.variant_title ?? null,
+      sku: it.sku ?? null,
+      quantity: Number(it.quantity ?? 1),
+      is_gift: Boolean(it.is_gift),
+      price_override_cents: it.price_override_cents ?? null,
+      base_cents: p.base_cents,
+      unit_cents: p.unit_cents,
+    };
+  });
+}
+
+function buildLatestOrder(row: RawLatestOrder | null): SubscriptionLatestOrderView | null {
+  if (!row) return null;
+  return {
+    id: row.id,
+    order_number: row.order_number ?? "",
+    financial_status: row.financial_status,
+    delivery_status: row.delivery_status,
+    total_cents: Number(row.total_cents ?? 0),
+    created_at: row.created_at,
+    delivered_at: row.delivered_at,
+  };
+}
+
+async function buildViewFromRaw(
+  workspaceId: string,
+  sub: RawSubscriptionRow,
+  latest: RawLatestOrder | null,
+): Promise<SubscriptionView> {
+  const rawForPrice: Record<string, unknown> = {
+    id: sub.id,
+    is_internal: sub.is_internal ?? false,
+    items: sub.items,
+    delivery_price_cents: sub.delivery_price_cents ?? 0,
+    shipping_protection_added: sub.shipping_protection_added ?? false,
+    shipping_protection_amount_cents: sub.shipping_protection_amount_cents ?? 0,
+    applied_discounts: sub.applied_discounts,
+  };
+  const { priced, pricing } = await priceSubscription(workspaceId, rawForPrice);
+
+  const upcoming: SubscriptionUpcomingOrderView | null = sub.next_billing_date
+    ? {
+        next_billing_date: sub.next_billing_date,
+        projected_total_cents: pricing.total_cents,
+      }
+    : null;
+
+  return {
+    id: sub.id,
+    workspace_id: sub.workspace_id,
+    customer_id: sub.customer_id,
+    shopify_contract_id: sub.shopify_contract_id,
+    status: coerceStatus(sub.status),
+    is_internal: Boolean(sub.is_internal),
+    comp: Boolean(sub.comp),
+    billing_interval: sub.billing_interval,
+    billing_interval_count: sub.billing_interval_count,
+    next_billing_date: sub.next_billing_date,
+    last_payment_status: coerceLastPaymentStatus(sub.last_payment_status),
+    items: buildLineViews(sub.items, priced),
+    pricing: {
+      msrp_cents: pricing.msrp_cents,
+      subtotal_cents: pricing.subtotal_cents,
+      discount_cents: pricing.discount_cents,
+      shipping_cents: pricing.shipping_cents,
+      protection_cents: pricing.protection_cents,
+      tax_cents: null,
+      total_cents: pricing.total_cents,
+      free_shipping: pricing.free_shipping,
+      pills: pricing.pills,
+    },
+    shipping_address: sub.shipping_address,
+    shipping_protection_added: Boolean(sub.shipping_protection_added),
+    shipping_protection_amount_cents: sub.shipping_protection_amount_cents ?? 0,
+    applied_discounts: Array.isArray(sub.applied_discounts) ? (sub.applied_discounts as Array<Record<string, unknown>>) : [],
+    pricing_offer_id: sub.pricing_offer_id,
+    payment_method_id: sub.payment_method_id,
+    latest_order: buildLatestOrder(latest),
+    upcoming_order: upcoming,
+    created_at: sub.created_at,
+    updated_at: sub.updated_at,
+  };
+}
+
+// ── Display ops ──────────────────────────────────────────────────────
+
+const SUBSCRIPTION_COLUMNS =
+  "id, workspace_id, customer_id, shopify_contract_id, status, is_internal, comp, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, shipping_address, shipping_protection_added, shipping_protection_amount_cents, applied_discounts, pricing_offer_id, payment_method_id, created_at, updated_at";
+
+/**
+ * Fetch one subscription by internal UUID, priced for display.
+ * Latest renewal is joined in the same call so a caller can render the "last
+ * shipped" chip without a second query.
+ * Throws if the sub is missing or not in the given workspace.
+ */
+export async function getSubscription(workspaceId: string, subId: string): Promise<SubscriptionView> {
+  const admin = createAdminClient();
+  const { data: sub, error } = await admin
+    .from("subscriptions")
+    .select(SUBSCRIPTION_COLUMNS)
+    .eq("workspace_id", workspaceId)
+    .eq("id", subId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!sub) throw new Error(`getSubscription: not found — workspace=${workspaceId} sub=${subId}`);
+
+  const { data: latest } = await admin
+    .from("orders")
+    .select("id, order_number, financial_status, delivery_status, total_cents, created_at, delivered_at")
+    .eq("workspace_id", workspaceId)
+    .eq("subscription_id", subId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return buildViewFromRaw(workspaceId, sub as RawSubscriptionRow, (latest as RawLatestOrder | null) ?? null);
+}
+
+/**
+ * All subscriptions belonging to one customer, priced for display. Walks past
+ * the 1000-row cap via the same cursor pagination as `listSubscriptions`.
+ * Note: match is direct on `customer_id` — link-follow (`linkedIds`) is a
+ * caller-side concern, not a Display invariant.
+ */
+export async function listSubscriptionsByCustomer(workspaceId: string, customerId: string): Promise<SubscriptionView[]> {
+  return listSubscriptions(workspaceId, { customer_id: customerId });
+}
+
+/**
+ * List subscriptions for a workspace with cursor-pagination past the 1000-row
+ * cap. Backs onto the `commerce_list_subscriptions` RPC — one round trip per
+ * page projects sub + latest_order + upcoming_order. Filters map 1:1 to
+ * `SubscriptionListFilters`.
+ *
+ * "No silent truncation" (the goal invariant): the SDK walks until the RPC
+ * returns fewer rows than `page_size`. `max_rows` is an optional caller-set
+ * ceiling — omit it to walk the whole workspace.
+ */
+export async function listSubscriptions(
+  workspaceId: string,
+  filters: SubscriptionListFilters = {},
+): Promise<SubscriptionView[]> {
+  const admin = createAdminClient();
+  const pageSize = Math.max(1, Math.min(1000, filters.page_size ?? 500));
+  const maxRows = filters.max_rows ?? Number.POSITIVE_INFINITY;
+
+  const out: SubscriptionView[] = [];
+  let cursorUpdatedAt: string | null = null;
+  let cursorId: string | null = null;
+
+  while (out.length < maxRows) {
+    const { data, error } = await admin.rpc("commerce_list_subscriptions", {
+      p_workspace_id: workspaceId,
+      p_status: filters.status ?? null,
+      p_last_payment_status: filters.last_payment_status ?? null,
+      p_is_internal: filters.is_internal ?? null,
+      p_comp: filters.comp ?? null,
+      p_customer_id: filters.customer_id ?? null,
+      p_cursor_updated_at: cursorUpdatedAt,
+      p_cursor_id: cursorId,
+      p_limit: pageSize,
+    });
+    if (error) throw error;
+
+    const rows = (data ?? []) as CommerceListRow[];
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      if (out.length >= maxRows) break;
+      const view = await buildViewFromRaw(workspaceId, row.sub, row.latest_order);
+      out.push(view);
+    }
+
+    if (rows.length < pageSize) break;
+    const last = rows[rows.length - 1].sub;
+    cursorUpdatedAt = last.updated_at;
+    cursorId = last.id;
+  }
+
+  return out;
+}
+
+// ── Mutation ops ─────────────────────────────────────────────────────
 
 type OpResult = { success: boolean; error?: string };
 

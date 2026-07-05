@@ -1,0 +1,1 @@
+- **Commerce SDK — Mutation operations + subscriptionX rename** · verified 2026-07-05 · → [[../lifecycles/commerce-sdk-core-build]]

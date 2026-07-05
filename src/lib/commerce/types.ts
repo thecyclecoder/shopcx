@@ -33,7 +33,7 @@ export interface PricedLine {
 
 /** A discount pill rendered next to the total (Subscribe & Save, Buy 2, Coupon, …). */
 export interface DiscountPill {
-  kind: "sns" | "break" | "free_shipping" | "coupon" | "renewal_offer";
+  kind: "sns" | "quantity_break" | "free_shipping" | "coupon" | "renewal_offer";
   label: string;
 }
 
@@ -54,6 +54,32 @@ export interface SubscriptionLineView {
   /** Money resolved by ./price.ts — never undefined. */
   base_cents: Cents;
   unit_cents: Cents;
+}
+
+/**
+ * The most recent renewal order for the subscription — compact projection joined
+ * by the list RPC so a caller can render "last shipped on …" without a second
+ * round-trip. Full OrderView arrives in Phase 2 (commerce/order.ts).
+ */
+export interface SubscriptionLatestOrderView {
+  id: string;
+  order_number: string;
+  financial_status: string | null;
+  delivery_status: string | null;
+  total_cents: Cents;
+  created_at: string;
+  delivered_at: string | null;
+}
+
+/**
+ * The next scheduled renewal — the projection the RPC computes so a caller can
+ * render "next ships on …, projected total …" without a second round-trip.
+ * `projected_total_cents` is the priced total from `./price.ts.priceSubscription`;
+ * `next_billing_date` mirrors the column on the sub.
+ */
+export interface SubscriptionUpcomingOrderView {
+  next_billing_date: string | null;
+  projected_total_cents: Cents;
 }
 
 /** The one shape every subscription surface (portal, dashboard, AI) hydrates. */
@@ -79,8 +105,30 @@ export interface SubscriptionView {
   applied_discounts: Array<Record<string, unknown>>;
   pricing_offer_id: string | null;
   payment_method_id: string | null;
+  /** Most recent renewal order (compact); null when the sub has never billed. */
+  latest_order: SubscriptionLatestOrderView | null;
+  /** Next scheduled renewal (compact); null when cancelled or with no next date. */
+  upcoming_order: SubscriptionUpcomingOrderView | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Filters accepted by `listSubscriptions`. Any subset is optional. */
+export interface SubscriptionListFilters {
+  /** Match a single lifecycle state — lowercase per [[../../docs/brain/tables/subscriptions]] § Gotchas. */
+  status?: "active" | "paused" | "cancelled";
+  /** Match one `last_payment_status`; combine with `status` for e.g. active-and-failing. */
+  last_payment_status?: "succeeded" | "failed" | "skipped";
+  /** Only internal (engine-priced) subs; unset returns both branches. */
+  is_internal?: boolean;
+  /** Only comp (free-ship) subs. */
+  comp?: boolean;
+  /** Restrict to a single customer — for the customer-scoped list op. */
+  customer_id?: string;
+  /** Per-page ceiling on the RPC's returned rows. Defaults to 500. */
+  page_size?: number;
+  /** Hard cap on the total rows walked before the SDK stops. Defaults to Infinity. */
+  max_rows?: number;
 }
 
 export interface SubscriptionPricingView {
@@ -185,6 +233,29 @@ export interface ReplacementView {
 
 // ── CustomerView ────────────────────────────────────────────────────
 
+/**
+ * Compact rollup of the customer's [[../tables/customer_events]] append log —
+ * total count + most-recent event. Full timelines still read the table
+ * directly; this is a card-header projection.
+ */
+export interface CustomerEventsSummaryView {
+  total_events: number;
+  last_event_type: string | null;
+  last_event_at: string | null;
+}
+
+/**
+ * Subset of [[../tables/customer_demographics]] hydrated on the CustomerView.
+ * Every field nullable — the record itself may not exist for a customer that
+ * hasn't been enriched yet.
+ */
+export interface CustomerDemographicsView {
+  inferred_gender: string | null;
+  inferred_age_range: string | null;
+  zip_income_bracket: string | null;
+  zip_urban_classification: string | null;
+}
+
 export interface CustomerView {
   id: string;
   workspace_id: string;
@@ -205,6 +276,10 @@ export interface CustomerView {
   sms_marketing_status: string;
   portal_banned: boolean;
   is_internal: boolean;
+  /** Rollup of the customer_events timeline; null when hydration is skipped. */
+  events_summary: CustomerEventsSummaryView | null;
+  /** Compact demographics hydration; null when the row is missing. */
+  demographics: CustomerDemographicsView | null;
   created_at: string;
 }
 
@@ -227,6 +302,23 @@ export interface LoyaltyView {
   redemption_tiers: LoyaltyRedemptionTierView[];
   needs_points_backfill: boolean;
   source: "native" | string;
+}
+
+/**
+ * One row of [[../tables/loyalty_transactions]] — the append-only points
+ * ledger (earn / spend / adjust). `listLoyaltyLedger` returns these in
+ * created_at DESC order.
+ */
+export interface LoyaltyLedgerEntryView {
+  id: string;
+  member_id: string;
+  workspace_id: string;
+  points_change: number;
+  type: string;
+  description: string | null;
+  order_id: string | null;
+  shopify_discount_id: string | null;
+  created_at: string;
 }
 
 // ── ChargebackView ──────────────────────────────────────────────────
@@ -276,6 +368,23 @@ export interface FraudView {
   created_at: string;
 }
 
+/**
+ * Per-customer fraud posture — the shape `getFraudPosture` returns. Mirrors
+ * the discriminators the orchestrator gate reads: any confirmed_fraud OR any
+ * amazon_reseller match (any status) OR any known-reseller address match →
+ * block. The underlying cases are attached so callers can render evidence.
+ */
+export interface FraudPostureView {
+  workspace_id: string;
+  customer_id: string;
+  is_confirmed_fraud: boolean;
+  is_amazon_reseller: boolean;
+  is_known_reseller_address: boolean;
+  should_block: boolean;
+  block_reason: string | null;
+  cases: FraudView[];
+}
+
 // ── CrisisView ──────────────────────────────────────────────────────
 
 /** One customer's tier state within a crisis (out-of-stock swap flow). */
@@ -310,6 +419,18 @@ export interface CrisisView {
   tier_wait_days: number;
   actions: CrisisCustomerActionView[];
   created_at: string;
+}
+
+/**
+ * Per-customer crisis context — the shape `getCrisisContext` returns. Gathers
+ * every crisis affecting the customer PLUS their current per-crisis tier state
+ * (from [[../tables/crisis_customer_actions]]) so a surface can render the
+ * customer's active retention offers in one read.
+ */
+export interface CrisisContextView {
+  workspace_id: string;
+  customer_id: string;
+  crises: CrisisView[];
 }
 
 // ── Operation contract ──────────────────────────────────────────────
