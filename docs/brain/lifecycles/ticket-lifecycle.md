@@ -162,7 +162,47 @@ When `workspaces.sandbox_mode = true`, every outbound message from the AI become
 
 **Shipped:** All seven phases — inbound capture (Resend, Twilio, Meta, chat widget), unified pipeline (resolve → fraud short-circuit → playbook/Sonnet → execute), outbound delivery (deliver-pending-send cron), engagement tracking (email_events, SMS callbacks), auto-resolve, CSAT, archive. Sandbox mode + agent-involved escalation gaps both closed. Escalation lifecycle complete: routine-escalated tickets show the "🔍 AI Investigation" badge + triage paper-trail notes, and all three escalation flags clear on every terminal-status write path (Escalated view also filters terminal statuses).
 
-**Known gaps / not yet shipped:** None identified.
+**Known gaps / not yet shipped:** Ticket-detail Commerce SDK migration (spec [[../specs/commerce-sdk-migrate-ticket-detail]] — parent goal milestone M4 — Migrate internal surfaces). Phase 1 enumeration is landed below; Phase 2 repoints reads onto `commerce/*` Display ops; Phase 3 repoints mutations onto `commerce/*` Mutation ops and ADDS the currently-missing `change_frequency` + `switch_payment_method` actions; Phase 4 gates ticket-detail on `scripts/_check-ticket-detail-sdk-only.ts` and retires the raw fetches. The § Files touched list above will get updated in Phase 4 to point at `commerce/*` instead of `appstle.ts` + `enrich-pricing.ts` for ticket-detail rows.
+
+### Ticket-detail SDK migration — Phase 1 enumeration
+
+The spec's Phase 1 verification bullet requires a mapping table pinned into this § Status / open work block. Below: every ticket-detail read (server component loader + client-side card fetches + Improve tab context) and every mutation the surface offers, mapped to the SDK Display / Mutation op that replaces it and the ticket-lifecycle § phase it participates in. The full companion table lives on [[../reference/commerce-sdk-inventory]] § 1 Surface map → Ticket detail (Support).
+
+**Reads → Display ops**
+
+| # | Site | Current call (file:line) | SDK op | § Phase reference |
+|---|---|---|---|---|
+| R1 | Customer identity + linked group + LTV rollup | `src/app/api/tickets/[id]/route.ts:65,73–79,102` (`.from("customers")` + `.from("customer_links")` + `@/lib/customer-stats#getCustomerStats`) | `commerce/customer.getCustomer` | § Phase 2e — Sonnet orchestrator context |
+| R2 | Subscription hydration (engine-priced) | `src/app/api/tickets/[id]/route.ts:88,95` (`.from("subscriptions")` + `@/lib/portal/helpers/enrich-pricing#priceSubItemsForDisplay`) | `commerce/subscription.listSubscriptionsByCustomer` | § Phase 2e — Sonnet orchestrator context |
+| R3 | Orders list (recent 10) | `src/app/api/tickets/[id]/route.ts:82` (`.from("orders")`) | `commerce/order.listOrdersByCustomer` | § Phase 2e — Sonnet orchestrator context |
+| R4 | Returns list | `src/app/dashboard/tickets/[id]/page.tsx:541–542` → `/api/workspaces/[id]/returns?ticket_id=…&customer_id=…` | `commerce/return.listReturnsByCustomer` | § Phase 2f executor (`create_return`) / § Phase 5 auto-resolve |
+| R5 | Replacements list | `src/app/dashboard/tickets/[id]/page.tsx:553–554` → `/api/workspaces/[id]/replacements?ticket_id=…&customer_id=…` | `commerce/replacement.listReplacementsByCustomer` | § Phase 2f executor (`create_replacement`) |
+| R6 | Loyalty balance + redemption tiers + workspace loyalty settings | `src/app/dashboard/tickets/[id]/page.tsx:519–532` → `/api/loyalty/members`, `/api/loyalty/redemptions`, `/api/workspaces/[id]/loyalty` | `commerce/loyalty.getLoyaltyBalance` | § Phase 2f executor (`redeem_points`, `apply_loyalty_coupon`) |
+| R7 | Chargebacks list | `src/app/dashboard/tickets/[id]/page.tsx:565` → `/api/chargebacks?customer_id=…` | `commerce/chargeback.listChargebacksByCustomer` | § Cast of characters — chargeback context (agent-facing sidebar card) |
+| R8 | Fraud posture | `src/app/dashboard/tickets/[id]/page.tsx:571` → `/api/workspaces/[id]/fraud-cases?customer_id=…` | `commerce/fraud.getFraudPosture` | § Phase 2c — fraud short-circuit |
+| R9 | Crisis context | `src/app/dashboard/tickets/[id]/page.tsx:2941` (`<CrisisEnrollmentCard>`) → `/api/customers/[id]/events` + workspace crisis query | `commerce/crisis.getCrisisContext` | § Phase 2f executor (crisis journeys) |
+
+**Mutations → Mutation ops**
+
+The Improve tab's plan executor (`src/lib/improve-plan-executor.ts:93`) dispatches an approved `orchestrator_action` through `executeSonnetDecision` in `src/lib/action-executor.ts`, so every direct-action handler listed below is reachable from ticket-detail. The two rows tagged **Phase 3 ADD** are the currently-MISSING subscription actions the spec's Phase 3 verification bullet requires the migration to ADD — the handlers already exist in `action-executor.ts`, but no ticket-detail UI trigger surfaces them today.
+
+| # | Action | Current dispatcher (file:line) | SDK op | § Phase reference |
+|---|---|---|---|---|
+| M1 | `refund` (Improve tab + AI `partial_refund`) | `src/app/api/tickets/[id]/order-actions/route.ts:97` → `@/lib/refund#refundOrder`; `src/lib/action-executor.ts:1050` (`partial_refund`) → same | `commerce/refund.issueRefund` (M2c — preserves internal→Braintree / Shopify→REST routing) | § Phase 2f — action executor |
+| M2 | `apply_coupon` | `src/lib/action-executor.ts:597` → `@/lib/coupons#applyCoupon` | `commerce/subscription.applyCoupon` (M2c — LOYALTY-* redirect from `apply_loyalty_coupon` preserved) | § Phase 2f — action executor |
+| M3 | `remove_coupon` | `src/lib/action-executor.ts:616` → `@/lib/coupons#removeCoupon` | `commerce/subscription.removeCoupon` (M2c) | § Phase 2f — action executor |
+| M4 | `pause` | `src/lib/action-executor.ts:1182` → `@/lib/appstle#appstleSubscriptionAction("pause")` | `commerce/subscription.subscriptionAction(id, "pause")` | § Phase 2f — action executor |
+| M5 | `resume` | `src/lib/action-executor.ts:345` → `@/lib/appstle#appstleSubscriptionAction("resume")` | `commerce/subscription.subscriptionAction(id, "resume")` | § Phase 2f — action executor |
+| M6 | `cancel` (via cancel-flow / cancel_now) | `src/lib/action-executor.ts` (cancel branch) → `@/lib/appstle#appstleSubscriptionAction("cancel")` | `commerce/subscription.subscriptionAction(id, "cancel")` | § Phase 2f — action executor |
+| M7 | `skip_next_order` | `src/lib/action-executor.ts:442` → `@/lib/appstle#appstleSkipNextOrder` | `commerce/subscription.subscriptionSkipNextOrder` | § Phase 2f — action executor |
+| M8 | `change_next_date` | `src/lib/action-executor.ts:456` → `@/lib/appstle#appstleUpdateNextBillingDate` | `commerce/subscription.subscriptionUpdateNextBillingDate` | § Phase 2f — action executor |
+| M9 | `swap_variant` | `src/lib/action-executor.ts:570` → `@/lib/subscription-items#subSwapVariant` | `commerce/subscription.subscriptionSwapVariant` | § Phase 2f — action executor |
+| M10 | `add_item` | `src/lib/action-executor.ts:500` → `@/lib/subscription-items#subAddItem` | `commerce/subscription.subscriptionAddItem` | § Phase 2f — action executor |
+| M11 | `remove_item` | `src/lib/action-executor.ts:519` → `@/lib/subscription-items#subRemoveItem` | `commerce/subscription.subscriptionRemoveItem` | § Phase 2f — action executor |
+| M12 | `bill_now` | `src/lib/action-executor.ts:494` → `@/lib/appstle#orderNowByContract` | `commerce/subscription.subscriptionOrderNow` | § Phase 2f — action executor |
+| M13 | `apply_loyalty_coupon` (composite redeem_points ↦ applyCoupon) | `src/lib/action-executor.ts:732` → `@/lib/loyalty` + `@/lib/coupons` | `commerce/loyalty.spendPoints` + `commerce/subscription.applyCoupon` (M2c — the LOYALTY-* redirect the executor documents is preserved by the dispatcher) | § Phase 2f — action executor |
+| M14 **Phase 3 ADD** | `change_frequency` — *currently not exposed on ticket-detail*; handler exists at `src/lib/action-executor.ts:448` but no UI trigger | (not exposed) | `commerce/subscription.subscriptionUpdateBillingInterval` — Phase 3 wires the UI (per `commerce-sdk-inventory` watch-item) | § Phase 2f — action executor |
+| M15 **Phase 3 ADD** | `switch_payment_method` — *currently not exposed on ticket-detail*; handler exists at `src/lib/action-executor.ts:1800` but no UI trigger | (not exposed) | `commerce/subscription.subscriptionSwitchPaymentMethod` — Phase 3 wires the UI (per `commerce-sdk-inventory` watch-item) | § Phase 2f — action executor |
 
 **Recent activity:**
 - `a6844aaa` CSAT: resolution-gate survey + cron-driven send + dashboard
