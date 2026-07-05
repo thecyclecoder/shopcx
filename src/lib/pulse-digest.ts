@@ -35,11 +35,20 @@ export interface DigestThread {
   cite?: string;
 }
 
-/** A pointer the session referenced — spec slug, brain page, file, URL. */
+/**
+ * A pointer the session referenced. `migration` is new in the session-authored
+ * path (docs/brain/specs/pulse-session-authored-recaps.md) — the assistant
+ * cites `supabase/migrations/*.sql` filenames by name; keeping them as their
+ * own kind (not `file`) lets Phase 3 reconciliation match on the exact
+ * migration filename instead of a slug-substring guess.
+ */
 export interface DigestRef {
-  kind: "spec" | "brain" | "file" | "url" | "commit" | "pr";
+  kind: "spec" | "brain" | "file" | "url" | "commit" | "pr" | "migration";
   value: string;
 }
+
+/** The accepted `DigestRef.kind` vocabulary — single source of truth for validators. */
+export const DIGEST_REF_KINDS: DigestRef["kind"][] = ["spec", "brain", "file", "url", "commit", "pr", "migration"];
 
 /** The structured digest of one session — mirrors the pulse_session_digests columns. */
 export interface SessionDigest {
@@ -183,7 +192,7 @@ const SYSTEM_PROMPT = `You distill one Claude Code coding session into a compact
     { "title": string, "status": "open" | "resolved" | "noise", "cite": string }
   ],
   "refs": [                       // 0-10 pointers the founder mentioned by name
-    { "kind": "spec" | "brain" | "file" | "url" | "commit" | "pr", "value": string }
+    { "kind": "spec" | "brain" | "file" | "url" | "commit" | "pr" | "migration", "value": string }
   ]
 }
 Rules: NO free-floating claims — every decisions[].summary and threads[].title must have a cite drawn from a real turn. If the session is trivial (a one-line question), return minimal fields but never an empty intent.`;
@@ -266,7 +275,7 @@ export function normalizeDigest(raw: Partial<SessionDigest> | null | undefined):
     ? raw!.refs
         .filter((r): r is DigestRef => !!r && typeof r.value === "string" && r.value.trim().length > 0)
         .map((r) => ({
-          kind: (["spec", "brain", "file", "url", "commit", "pr"].includes(r.kind as string) ? r.kind : "file") as DigestRef["kind"],
+          kind: (DIGEST_REF_KINDS.includes(r.kind as DigestRef["kind"]) ? r.kind : "file") as DigestRef["kind"],
           value: r.value.trim(),
         }))
         .slice(0, 10)

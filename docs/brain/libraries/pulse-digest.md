@@ -4,6 +4,17 @@ LLM-distiller for the founder's local Claude Code session transcripts. Reads eve
 
 **File:** `src/lib/pulse-digest.ts`
 
+## Two writers, one row — session-authored precedence
+
+There are TWO paths that write a `pulse_session_digests` row for a session; both upsert through `upsertDigestRow` on the same `(workspace_id, session_id)` spine so the session gets exactly ONE row.
+
+1. **Session-authored** — the [[../.claude/skills/recap|/recap]] skill (`scripts/pulse-recap.ts`). Runs INSIDE a live Claude Code session; the assistant distills the digest from its own ground truth (what it actually did, decided, and left open), then pipes the JSON to the script which upserts with `digest_model='session-authored'`. This path knows exact PR numbers, exact spec slugs, exact commit shas, exact migration filenames, and each thread's true status — no paraphrase. See [[../specs/pulse-session-authored-recaps]].
+2. **SessionEnd Haiku ingest** — `scripts/pulse-digest.ts` (`ingestProjectDirectory`). Runs AFTER the session on the founder's Mac (wired via a SessionEnd hook); reads the `.jsonl`, extracts human turns, and calls Haiku to distill. Falls back to `heuristicDigest` when the API is unavailable so a row always lands. `digest_model` is the model id (or the literal `heuristic`).
+
+**Precedence rule (Phase 2 of `pulse-session-authored-recaps`):** the SessionEnd ingest MUST NOT overwrite a row whose current `digest_model='session-authored'` — the session-authored row is the authoritative recap for that session; the Haiku ingest is the forget-fallback for sessions that never ran `/recap`. Guard on the current row's `digest_model` in `upsertDigestRow` / `ingestProjectDirectory` before re-distilling.
+
+**Same shape for both writers.** `SessionDigest.refs[].kind` accepts `spec | brain | file | url | commit | pr | migration`. The session-authored path introduced `migration` (Phase 1 of `pulse-session-authored-recaps`) so a `.sql` filename is a first-class ref, not a stringly-typed `file`. `DIGEST_REF_KINDS` is the single source of truth for validators.
+
 ## Why
 
 The founder resumes work from a cold context every time they close and reopen Claude Code. Grepping a hundred `*.jsonl` transcripts is not context-reconstitution — it is discovery. This module turns each raw transcript into a compact structured digest (`intent` + `resume_point` + a small set of `decisions` / `threads` / `refs`) so the Phase-2 synthesizer ([[../libraries/pulse]]) can join it against the specs / agent_jobs ledger and write the five lenses that render on `/dashboard/developer/pulse`. Every claim on that page carries a cite back to one of these digests, so the surface stays evidence-anchored.
@@ -16,6 +27,9 @@ The founder resumes work from a cold context every time they close and reopen Cl
 
 ### `SessionDigest` — interface
 Structured shape of one distilled session: `{ intent, resume_point, decisions[], threads[], refs[] }`. Mirrors the [[../tables/pulse_session_digests]] columns.
+
+### `DigestRef` — interface · `DIGEST_REF_KINDS` — constant
+`DigestRef = { kind, value }`. `kind` ∈ `spec | brain | file | url | commit | pr | migration`; `DIGEST_REF_KINDS` is the exported array of accepted kinds — a single source of truth for validators (`normalizeDigest`, `scripts/pulse-recap.ts`, and any future writer). `migration` was added by the session-authored path (Phase 1 of [[../specs/pulse-session-authored-recaps]]) so a `supabase/migrations/*.sql` filename is a first-class ref rather than being flattened into `file`.
 
 ### `DigestRow` — interface
 `SessionDigest` + the columnar fields the upserter writes: `session_id`, `project`, `started_at`, `last_activity_at`, `digest_model`, `source_mtime_ms`, `source_size_bytes`.
@@ -61,8 +75,9 @@ Renders a UTC ISO in America/Puerto_Rico (AST, UTC-4, **no DST**). The single-so
 
 ## Callers
 
-- `scripts/pulse-digest.ts` (the local runnable)
-- `src/lib/pulse.ts` (Phase 2, upcoming — the synthesizer reads the digests it produces)
+- `scripts/pulse-digest.ts` — the SessionEnd Haiku ingest (the forget-fallback)
+- `scripts/pulse-recap.ts` — the [[../.claude/skills/recap|/recap]] skill's runnable (session-authored writer). Calls `upsertDigestRow` with `digest_model='session-authored'` and delegates ref-kind normalization to `normalizeDigest`.
+- `src/lib/pulse.ts` (Phase 2, upcoming — the synthesizer reads the digests both writers produce)
 
 ## Gotchas
 
