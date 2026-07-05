@@ -4,9 +4,28 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 
 **File:** `src/lib/commerce/subscription.ts`
 
-**Status:** Ships with zero consumers (Phase 1 complete). Phase 3 wraps [[appstle]] and [[subscription-items]] in @deprecated shims pointing here; M4/M5 migrates callers. See [[../reference/commerce-sdk-inventory.html]] § Rename map for the full legacy→new pairing.
+**Status:** Display operations shipped (Phase 1 complete). Mutation operations shipped; Phase 3 wraps [[appstle]] and [[subscription-items]] in @deprecated shims pointing here; M4/M5 migrates callers. See [[../reference/commerce-sdk-inventory.html]] § Rename map for the full legacy→new pairing.
 
 ## Exports
+
+### Display (reads)
+
+**`getSubscription(workspaceId, subId) → SubscriptionView`**
+- Retrieves a single subscription with fully enriched view (priced lines, MSRP/discount/tax, coupon, payment, dunning).
+- All money fields resolve through [[./pricing]] so totals never show $NaN.
+- Per [[../reference/commerce-sdk-inventory.html]], SubscriptionView is consumed by dashboard, portal (2 surfaces), ticket, and AI paths.
+
+**`listSubscriptionsByCustomer(workspaceId, customerId, filters?) → SubscriptionView[]`**
+- Lists all subscriptions for a customer, paginated by cursor on `updated_at + id` per [[../README.md]] § Probing technique.
+- Handles >1000-row result sets without silent truncation.
+- Returns fully enriched `SubscriptionView` for each subscription.
+
+**`listSubscriptions(workspaceId, filters?) → SubscriptionView[]`**
+- Lists all subscriptions in a workspace, paginated by cursor.
+- Backed by Postgres RPC that projects the sub + latest order + upcoming order in one round trip.
+- Supports filtering by status, billing date, and other subscription attributes.
+
+### Mutation
 
 ### Status mutations
 
