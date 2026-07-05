@@ -1,0 +1,1 @@
+- **Pulse: session-authored recaps (stop trusting cheap-AI transcript skims)** · verified 2026-07-05 · → [[../libraries/pulse]] [[../libraries/pulse-digest]] [[../tables/pulse_session_digests]]
