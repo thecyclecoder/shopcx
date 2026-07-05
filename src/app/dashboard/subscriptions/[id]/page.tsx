@@ -13,7 +13,7 @@ import ChargebacksList from "@/components/shared/ChargebacksList";
 import FraudCasesList from "@/components/shared/FraudCasesList";
 import type { ChargebackItem } from "@/components/shared/ChargebacksList";
 import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
-import { formatCents, formatDate, formatItemName } from "@/components/shared/format-utils";
+import { formatCents, formatDate, formatOrderDate, formatItemName } from "@/components/shared/format-utils";
 import type { OrderRow } from "@/components/shared/OrdersTable";
 
 interface CustomerData {
@@ -470,7 +470,7 @@ export default function SubscriptionDetailPage() {
             <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Subscription Info</h3>
             <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
               <div><span className="text-zinc-400">Frequency</span><p className="font-medium text-zinc-700 dark:text-zinc-300">{formatInterval(sub.billing_interval, sub.billing_interval_count)}</p></div>
-              <div><span className="text-zinc-400">Next Billing</span><p className="font-medium text-zinc-700 dark:text-zinc-300">{formatDate(sub.next_billing_date)}</p></div>
+              <div><span className="text-zinc-400">Next Billing</span><p className="font-medium text-zinc-700 dark:text-zinc-300">{formatOrderDate(sub.next_billing_date)}</p></div>
               <div><span className="text-zinc-400">Last Payment</span><p className={`font-medium ${sub.last_payment_status === "succeeded" ? "text-emerald-600" : sub.last_payment_status === "failed" ? "text-red-600" : "text-zinc-600"}`}>{sub.last_payment_status || "--"}</p></div>
               <div><span className="text-zinc-400">Created</span><p className="font-medium text-zinc-700 dark:text-zinc-300">{formatDate(sub.created_at)}</p></div>
               <div><span className="text-zinc-400">Shipping</span><p className="font-medium text-zinc-700 dark:text-zinc-300">{sub.delivery_price_cents ? formatCents(sub.delivery_price_cents) : "Free"}</p></div>
