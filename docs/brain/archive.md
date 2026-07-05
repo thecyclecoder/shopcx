@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Reduce call volume / cache the hot query on query 5250820927256751610** · verified 2026-07-05 · → [[../libraries/db-health]]
+- **Pulse: session-authored recaps (stop trusting cheap-AI transcript skims)** · verified 2026-07-05 · → [[../libraries/pulse]] [[../libraries/pulse-digest]] [[../tables/pulse_session_digests]]
 - **Harden the Bo agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[../recipes/build-box-setup#bo-agents-durable-mandate]]
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Carrie — DR content session (copy + AI imagery + real-asset gap flags)** · verified 2026-07-04 · → [[../functions/growth]]
