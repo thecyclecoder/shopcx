@@ -191,8 +191,9 @@ interface BuildSpecArtifact {
 
 /**
  * Author the deterministic build spec off a verified blueprint. The spec is one owner
- * (`growth`), one parent (the acquisition-research-engine goal — Cleo's landers hang off
- * that goal by design), and three phases mirroring the storefront lander build steps: build
+ * (`growth`), one parent (Growth's "Ad-matched landing pages" mandate — Cleo's scent-matched
+ * lander build is perpetual acquisition work, so it anchors on the mandate rather than a
+ * finite goal milestone), and three phases mirroring the storefront lander build steps: build
  * the addressable page + wire it as an ad destination, owner-gated preview, and a fold-once-
  * live pass. Slug is `lander-build-{funnel}-{product}-{shortid}` — collision-safe by embedding
  * the blueprint id's tail.
@@ -267,7 +268,7 @@ Build the ${productTitle} ${blueprint.funnel_type} lander from lander_blueprints
     title: `Build the ${productTitle} ${blueprint.funnel_type} lander from Cleo's blueprint`,
     summary,
     owner: "growth",
-    parent: "[[../goals/acquisition-research-engine]]",
+    parent: `[[../functions/growth]] — "Ad-matched landing pages" mandate: ${productTitle} ${blueprint.funnel_type} lander build.`,
     why: specWhy,
     what: specWhat,
     phases: [phaseRender, phasePreview, phaseQA],
@@ -355,11 +356,12 @@ export async function verifyAndSubmitBlueprint(
   const { slug, input } = composeBuildSpec(blueprint, productTitle, productHandle);
   const authored = await authorSpecRowStructured(workspaceId, slug, input, "planned", {
     intendedStatusSetBy: "cleo:content-upload-and-lander-build",
-    parentKind: "milestone",
-    // The parent is a wikilink to the goal; parentRef would carry a goal_milestones.id when
-    // Cleo has an explicit milestone binding. Left null here — the parent wikilink is enough
-    // for a Vale/Ada read (the goal planner attaches specs to milestones separately).
-    parentRef: null,
+    // Cleo's scent-matched lander builds are perpetual acquisition work — anchor on Growth's
+    // "Ad-matched landing pages" mandate, not a finite goal milestone. The goal planner can
+    // still attach a milestone_id separately later if a specific goal wants to claim this
+    // spec; the mandate parent is the durable anchor Vale checks.
+    parentKind: "mandate",
+    parentRef: "growth#ad-matched-landing-pages",
   });
   if (!authored) {
     return { status: "error", blueprint_id: blueprint.id, reason: `authorSpecRowStructured returned false for slug ${slug}` };

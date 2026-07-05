@@ -32,12 +32,20 @@
 //   2. process.env.CLAUDE_CODE_SESSION_ID    (the harness's own signal —
 //      Claude Code sets it to the current session UUID, which is exactly the
 //      *.jsonl basename)
-//   3. mtime fallback — ONLY when neither of the above is available AND
-//      EXACTLY ONE transcript was modified in the last ~60s. If two or more
-//      were modified in that window, we refuse: two concurrent sessions can't
-//      be told apart by mtime, and guessing has already caused one incident
-//      (2026-07-05: one session's digest overwrote a concurrent session's row
-//      and had to be restored by hand).
+//   3. mtime fallback — ONLY when NEITHER of the above is set AND EXACTLY ONE
+//      transcript was modified in the last ~60s. Two-or-more → refuse.
+//
+// An explicit (1) or harness (2) id is AUTHORITATIVE and NEVER falls through to
+// the mtime guess. Its transcript is located across EVERY ~/.claude/projects/*
+// dir (not just the current cwd's slug) so a session that ran in a git worktree
+// or nested cwd is still found; if the transcript is genuinely gone (a removed
+// worktree) we STILL honor the stated id (with best-effort null boundary
+// timestamps) rather than guess a different session. This closes the 2026-07-05
+// incident TWICE over: once (the original) a stale-newest mtime guess overwrote a
+// concurrent session's row; and again (2026-07-05, second occurrence) a recap run
+// from the main repo after a worktree was removed didn't find the env-id's
+// transcript under the current projectDir, fell to mtime, and clobbered a
+// concurrent session that had just run /recap itself.
 //
 // Idempotent on (workspace_id, session_id): re-running /recap in the SAME
 // session overwrites the row in place — one row per session.
@@ -117,9 +125,40 @@ export class SessionAmbiguityError extends Error {
  * harness signal was actually available or whether we fell through to mtime. */
 export type ResolvedSession = {
   session_id: string;
-  filepath: string;
-  via: "flag" | "harness-env" | "mtime-unique";
+  /** The session's transcript, if we could locate it (under projectDir OR any other
+   *  ~/.claude/projects/* dir — a worktree/nested-cwd session lives under a different slug).
+   *  `null` when the id is authoritative (flag/env) but no transcript file was found anywhere —
+   *  recap authors from the piped digest, not the transcript, so a null filepath just means
+   *  best-effort boundary timestamps, NOT a failure. */
+  filepath: string | null;
+  via: "flag" | "flag-no-transcript" | "harness-env" | "harness-env-no-transcript" | "mtime-unique";
 };
+
+/**
+ * Locate a session's transcript across EVERY `~/.claude/projects/*` dir, not just the current
+ * cwd's slug. A session that ran in a git worktree (or any nested cwd) writes its `{id}.jsonl`
+ * under that cwd's slug — so a recap invoked from a DIFFERENT cwd (e.g. after the worktree was
+ * removed) won't find it under the current `projectDir`. Returns the first match's absolute path,
+ * or null if no `{sessionId}.jsonl` exists under any project dir. `projectsRoot` defaults to
+ * `~/.claude/projects`.
+ */
+export function findTranscriptAcrossProjects(
+  sessionId: string,
+  projectsRoot: string = join(homedir(), ".claude/projects"),
+): string | null {
+  if (!existsSync(projectsRoot)) return null;
+  let dirs: string[];
+  try {
+    dirs = readdirSync(projectsRoot);
+  } catch {
+    return null;
+  }
+  for (const d of dirs) {
+    const candidate = join(projectsRoot, d, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 
 /**
  * Deterministic session resolution. Priority order (see file header):
@@ -132,12 +171,14 @@ export type ResolvedSession = {
  *      plain Error (no live session; a stale-newest guess is exactly the
  *      2026-07-05 misfire we're fixing).
  *
- * For (1) and (2), a stated id whose `.jsonl` doesn't exist under `projectDir`
- * is a hard error — we do NOT silently fall through, because the caller
- * asserting an id and us picking a different one is worse than telling them.
- * The one exception is `envSessionId`: when it's set but the transcript isn't
- * under `projectDir` (e.g. a nested `claude -p` inheriting the parent's env
- * while running in a different cwd), we fall through to mtime.
+ * For (1) and (2), the stated id IS the answer — it's authoritative, so we NEVER fall through to
+ * the mtime guess (that's how the 2026-07-05 clobber happened: a recap run from a different cwd
+ * than the session's own — a git worktree that was later removed — didn't find the env-id's
+ * transcript under the current `projectDir`, fell to mtime, and overwrote a CONCURRENT session's
+ * row). We look for the transcript across EVERY project dir (`findTranscriptAcrossProjects`) so a
+ * worktree/nested-cwd session is still located; if it's genuinely missing we STILL use the stated
+ * id (with a null filepath → best-effort boundary timestamps) rather than guess a different one.
+ * mtime is reached ONLY when neither a flag nor the env id is present.
  */
 export function resolveCurrentSession(opts: {
   projectDir: string;
@@ -145,26 +186,22 @@ export function resolveCurrentSession(opts: {
   envSessionId?: string;
   nowMs?: number;
   windowMs?: number;
+  projectsRoot?: string;
 }): ResolvedSession {
   const { projectDir } = opts;
   const windowMs = opts.windowMs ?? MTIME_LIVE_WINDOW_MS;
+  const projectsRoot = opts.projectsRoot;
 
-  if (opts.flagSessionId) {
-    const filepath = join(projectDir, `${opts.flagSessionId}.jsonl`);
-    if (!existsSync(filepath)) {
-      throw new Error(`--session-id=${opts.flagSessionId} but no transcript at ${filepath}`);
-    }
-    return { session_id: opts.flagSessionId, filepath, via: "flag" };
-  }
-
-  if (opts.envSessionId) {
-    const filepath = join(projectDir, `${opts.envSessionId}.jsonl`);
-    if (existsSync(filepath)) {
-      return { session_id: opts.envSessionId, filepath, via: "harness-env" };
-    }
-    // Env is set but the transcript isn't under this projectDir — a nested
-    // `claude -p` in a different cwd is the common case. Fall through to
-    // mtime; the ambiguity guard still protects us.
+  // (1)/(2): an explicit --session-id or the harness CLAUDE_CODE_SESSION_ID is AUTHORITATIVE.
+  // Locate its transcript (under projectDir first, then any other project dir); if not found
+  // anywhere, still honor the id — NEVER fall to mtime, which could clobber a concurrent session.
+  const stated = opts.flagSessionId ?? opts.envSessionId;
+  if (stated) {
+    const local = join(projectDir, `${stated}.jsonl`);
+    const filepath = existsSync(local) ? local : findTranscriptAcrossProjects(stated, projectsRoot);
+    const fromFlag = !!opts.flagSessionId;
+    if (filepath) return { session_id: stated, filepath, via: fromFlag ? "flag" : "harness-env" };
+    return { session_id: stated, filepath: null, via: fromFlag ? "flag-no-transcript" : "harness-env-no-transcript" };
   }
 
   if (!existsSync(projectDir)) {
@@ -318,7 +355,7 @@ async function main() {
   //   refuses rather than guessing). See file header for the incident this
   //   guards against.
   let session_id: string;
-  let filepath: string;
+  let filepath: string | null;
   let via: ResolvedSession["via"];
   try {
     const resolved = resolveCurrentSession({
@@ -352,8 +389,11 @@ async function main() {
     process.exit(1);
   }
 
-  const { firstAt, lastAt } = extractBoundaryTimestamps(filepath);
-  const stat = statSync(filepath);
+  // filepath may be null when the id is authoritative (flag/env) but the transcript wasn't found
+  // anywhere (a removed worktree). The digest still upserts — recap authors from the piped JSON, not
+  // the transcript — so boundary timestamps + source stats are best-effort (null when absent).
+  const { firstAt, lastAt } = filepath ? extractBoundaryTimestamps(filepath) : { firstAt: null, lastAt: null };
+  const stat = filepath ? statSync(filepath) : null;
   const row: DigestRow = {
     session_id,
     project,
@@ -365,8 +405,8 @@ async function main() {
     threads: digest.threads,
     refs: digest.refs,
     digest_model: SESSION_AUTHORED_MODEL,
-    source_mtime_ms: Math.floor(stat.mtimeMs),
-    source_size_bytes: stat.size,
+    source_mtime_ms: stat ? Math.floor(stat.mtimeMs) : 0,
+    source_size_bytes: stat ? stat.size : 0,
   };
 
   const admin = createAdminClient();

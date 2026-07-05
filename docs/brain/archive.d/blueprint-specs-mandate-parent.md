@@ -1,0 +1,1 @@
+- **Blueprint specs mandate parent** · verified 2026-07-05 · → [[../lifecycles/advertorial-landers]]
