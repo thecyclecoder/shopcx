@@ -10,7 +10,11 @@ import {
   internalSubRemoveItem,
   internalSubSwapVariant,
   internalSubUpdateLineItemPrice,
+  internalSubApplyDiscount,
+  internalSubRemoveDiscount,
 } from "@/lib/internal-subscription";
+import { resolveCoupon } from "@/lib/coupons";
+import { applyDiscountWithReplace, removeExistingDiscounts } from "@/lib/appstle-discount";
 
 /** Look up product title + variant title from our catalog by variant ID */
 export async function resolveVariantTitles(
@@ -573,6 +577,68 @@ export async function getLastOrderPrice(
 export function calcBasePrice(targetPriceCents: number, discountPercent: number): number {
   if (discountPercent <= 0 || discountPercent >= 100) return targetPriceCents;
   return Math.round(targetPriceCents / (1 - discountPercent / 100));
+}
+
+/**
+ * Apply a coupon to a subscription — internal-aware dispatcher.
+ *
+ * Internal subs: resolve the code through resolveCoupon (internal-wins →
+ * Shopify fallback) so we never write an unresolvable code onto
+ * subscriptions.applied_discounts, then delegate to internalSubApplyDiscount.
+ * Appstle subs: healOnTouch first (so any null-policy line is structured
+ * before the mutation), then applyDiscountWithReplace which enforces the
+ * 1-coupon-per-sub invariant on Appstle's side.
+ */
+export async function subscriptionApplyCoupon(
+  workspaceId: string,
+  contractId: string,
+  code: string,
+): Promise<{ success: boolean; error?: string }> {
+  if (!code) return { success: false, error: "Missing coupon code" };
+
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("customer_id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    const resolved = await resolveCoupon(workspaceId, code, sub?.customer_id as string | null);
+    if (!resolved) return { success: false, error: "coupon_not_found" };
+    return internalSubApplyDiscount(workspaceId, contractId, resolved.code);
+  }
+
+  await healOnTouch(workspaceId, contractId);
+  const config = await getAppstleConfig(workspaceId);
+  if (!config) return { success: false, error: "Appstle not configured" };
+  const r = await applyDiscountWithReplace(config.apiKey, contractId, code);
+  return { success: r.success, error: r.error };
+}
+
+/**
+ * Remove a coupon from a subscription — internal-aware dispatcher.
+ *
+ * Internal subs: delegate to internalSubRemoveDiscount, which filters
+ * subscriptions.applied_discounts by title or id.
+ * Appstle subs: healOnTouch, then removeExistingDiscounts (which clears the
+ * whole applied_discounts set — matches the 1-coupon-per-sub invariant, so
+ * the discountIdOrCode argument is retained for API symmetry only).
+ */
+export async function subscriptionRemoveCoupon(
+  workspaceId: string,
+  contractId: string,
+  discountIdOrCode: string,
+): Promise<{ success: boolean; error?: string }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return internalSubRemoveDiscount(workspaceId, contractId, discountIdOrCode);
+  }
+
+  await healOnTouch(workspaceId, contractId);
+  const config = await getAppstleConfig(workspaceId);
+  if (!config) return { success: false, error: "Appstle not configured" };
+  const r = await removeExistingDiscounts(config.apiKey, contractId);
+  return { success: !r.error, error: r.error };
 }
 
 /** Swap one variant for another (e.g., change flavor or swap product) */

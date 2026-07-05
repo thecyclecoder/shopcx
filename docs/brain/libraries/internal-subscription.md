@@ -103,7 +103,7 @@ function internalSubNotYetSupported(action: string) : ActionResult
 ## Callers
 
 - `src/lib/appstle.ts`
-- `src/lib/subscription-items.ts`
+- `src/lib/subscription-items.ts` — every internal short-circuit for line-item mutations, plus `internalSubApplyDiscount` / `internalSubRemoveDiscount` under the `subscriptionApplyCoupon` / `subscriptionRemoveCoupon` dispatcher
 
 ## Gotchas
 

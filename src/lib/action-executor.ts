@@ -607,21 +607,18 @@ export const directActionHandlers: Record<
       return directActionHandlers.apply_loyalty_coupon(ctx, p);
     }
 
-    const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
-    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
-    return { ...r, summary: `Applied coupon ${code}` };
+    if (!p.contract_id) return { success: false, error: "apply_coupon missing contract_id" };
+    const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
+    const r = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, code);
+    return { ...r, summary: r.success ? `Applied coupon ${code}` : undefined };
   },
 
   remove_coupon: async (ctx, p) => {
-    const { removeExistingDiscounts } = await import("@/lib/appstle-discount");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
-    const r = await removeExistingDiscounts(config.apiKey, p.contract_id!);
-    return { success: !r.error, error: r.error, summary: "Removed coupon" };
+    if (!p.contract_id) return { success: false, error: "remove_coupon missing contract_id" };
+    const { subscriptionRemoveCoupon } = await import("@/lib/subscription-items");
+    const discountIdOrCode = p.code || p.coupon_code || "";
+    const r = await subscriptionRemoveCoupon(ctx.workspaceId, p.contract_id, discountIdOrCode);
+    return { success: r.success, error: r.error, summary: r.success ? "Removed coupon" : undefined };
   },
 
   redeem_points: async (ctx, p) => {
@@ -733,19 +730,17 @@ export const directActionHandlers: Record<
   },
 
   apply_loyalty_coupon: async (ctx, p) => {
-    const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
+    const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
 
     const code = p.code || p.coupon_code;
     if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
+    if (!p.contract_id) return { success: false, error: "apply_loyalty_coupon missing contract_id" };
 
     // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Try applying the existing coupon first
-    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
+    const r = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, code);
     if (r.success) return { ...r, summary: `Applied loyalty coupon ${code}` };
 
     // Coupon failed — may be stale/deleted in Shopify. Generate a fresh one.
@@ -825,7 +820,7 @@ export const directActionHandlers: Record<
       });
 
       // Now apply the fresh coupon
-      const r2 = await applyDiscountWithReplace(config.apiKey, p.contract_id!, newCode);
+      const r2 = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, newCode);
       if (r2.success) {
         return { success: true, summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})`, couponCode: newCode };
       }
