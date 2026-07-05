@@ -1,0 +1,1 @@
+- **Centralized Commerce SDK — one internal-aware layer for every customer-facing read & write** · folded 2026-07-05 · → [[lifecycles/commerce-sdk]]
