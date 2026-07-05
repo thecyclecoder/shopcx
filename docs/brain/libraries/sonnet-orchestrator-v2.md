@@ -16,6 +16,10 @@ Data-only tools — actions stay in SonnetDecision → action executor flow.
 
 ## Exports
 
+### Data tools (M4 migration)
+
+All data tools now call [[../libraries/commerce__*]] Display operations (subscriptions, orders, returns, refunds, chargebacks, fraud, crisis, loyalty) instead of legacy appstle/subscription-items paths. The tool set is unchanged; internal routing is unified via [[../reference/commerce-sdk-inventory.html]].
+
 ### `executeToolCall` — function
 
 ```ts

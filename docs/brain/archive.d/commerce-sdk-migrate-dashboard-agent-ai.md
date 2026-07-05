@@ -1,0 +1,1 @@
+- **Migrate the remaining dashboard + agent + AI stack onto the Commerce SDK** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]] · [[../libraries/commerce__subscription]] · [[../libraries/appstle]] · [[../libraries/action-executor]] · [[../libraries/sonnet-orchestrator-v2]]

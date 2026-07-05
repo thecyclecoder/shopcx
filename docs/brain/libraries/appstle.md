@@ -1,6 +1,8 @@
 # libraries/appstle
 
-Appstle Subscriptions API client. Per-workspace API key + shop domain. Every helper checks `isInternalSubscription()` first and routes to `internal-subscription.ts` for internal subs. See [[../integrations/appstle]].
+**Status:** Deprecated for internal surfaces (M4 migrated dashboard + agent + AI to [[../libraries/commerce__subscription]]). Portal surfaces still use appstle; M5 will retire the portal shims.
+
+Legacy Appstle Subscriptions API client. Per-workspace API key + shop domain. Every helper checks `isInternalSubscription()` first and routes to `internal-subscription.ts` for internal subs. See [[../integrations/appstle]].
 
 **File:** `src/lib/appstle.ts`
 
@@ -108,16 +110,7 @@ async function appstleSwapProduct(workspaceId: string, contractId: string, oldVa
 
 ## Callers
 
-- `src/app/api/chargebacks/[id]/cancel-subscription/route.ts`
-- `src/app/api/chargebacks/[id]/reinstate/route.ts`
-- `src/app/api/workspaces/[id]/fraud-cases/[caseId]/cancel-subscription/route.ts`
-- `src/app/api/workspaces/[id]/fraud-cases/[caseId]/confirm-fraud/route.ts`
-- `src/app/api/workspaces/[id]/replacements/[replacementId]/route.ts`
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts`
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/payment-update/route.ts`
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts`
-- `src/lib/inngest/chargeback-processing.ts`
-- `src/lib/inngest/dunning.ts`
+**Portal-only** (M4 migrated internal surfaces to [[../libraries/commerce__subscription]]):
 - `src/lib/portal/handlers/frequency.ts`
 - `src/lib/portal/handlers/order-now.ts`
 - `src/lib/portal/handlers/reactivate.ts`
