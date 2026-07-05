@@ -41,6 +41,10 @@ Everything the reporter needs is a local env — nothing lives on the box.
 
 Put them in `~/.zshrc` (or the Mac's `.env.local` next to [[founder-pulse-capture|pulse-digest]]) — **never committed**.
 
+> **Middleware exemption (required):** `POST /api/developer/usage/report` is machine-to-machine (Bearer-token auth in the route handler), so it must be exempted in [[../../src/proxy]] — otherwise the cookie-session auth gate 307-redirects it to `/login` and the reporter's `fetch` follows that to a 405. The bypass sits next to the `/api/showcase/unlock` exemption. Latent until the reporter is actually wired (2026-07-05).
+>
+> **`CLAUDE_CONFIG_DIR=""` gotcha:** `usage-report.ts` sets `CLAUDE_CONFIG_DIR` to `USAGE_REPORT_CLAUDE_HOME || ""`; an empty string makes ccusage error `No valid Claude data directories`. Set `USAGE_REPORT_CLAUDE_HOME=~/.claude` (+ `USAGE_REPORT_CODEX_HOME=~/.codex`) in `.env.local`.
+
 ## The two triggers — same shape as [[founder-pulse-capture]]
 
 Both run the same guarded command, so nothing happens until the script exists:
