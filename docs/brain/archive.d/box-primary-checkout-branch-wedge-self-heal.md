@@ -1,0 +1,1 @@
+- **Box builds: self-heal a primary checkout wedged on a build branch** · verified 2026-07-05 · → [[../recipes/build-box-setup#primary-checkout-self-healing]]

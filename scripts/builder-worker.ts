@@ -2401,15 +2401,91 @@ function removeWorktreeDir(path: string) {
 //
 // SAFETY: an empty/falsy branch must NEVER enter the match loop — the primary checkout shows as a
 // detached worktree (branch === null), so matching null/"" would target the main repo. Bail on no branch.
+//
+// box-primary-checkout-branch-wedge-self-heal (Phase 2) — PRIMARY-HELD BRANCH RECOVERY: when the matching
+// worktree IS the primary repo (path === REPO_DIR), the removeWorktreeDir guard (line ~2384) CORRECTLY
+// refuses to `rm -rf` it — and pre-Phase-2 the loop simply skipped that entry, which meant the follow-up
+// `git worktree add -B <branch>` still failed with "already used by worktree at <REPO_DIR>" (the exact
+// 2026-07-05 wedge). Phase 2 replaces the skip with a SWITCH-based recovery: heal the primary back to
+// main via ensurePrimaryOnMain (Phase 1) so the branch is freed on origin's terms — NEVER by nuking the
+// primary. The rm-rf primary guard stays intact; this only adds a switch recovery for the one path that
+// guard dead-ended. Non-primary matches keep the existing removeWorktreeDir teardown (build worktrees
+// under BUILDS_DIR are still force-removed as before).
 function removeWorktreeForBranch(branch: string) {
   if (!branch) {
     console.error("[worktree] removeWorktreeForBranch called with empty branch — skipping (never match the primary checkout).");
     return;
   }
+  const primary = resolve(REPO_DIR);
   for (const e of listWorktrees()) {
-    if (e.branch && e.branch === branch) removeWorktreeDir(e.path);
+    if (!e.branch || e.branch !== branch) continue;
+    if (resolve(e.path) === primary) {
+      // Primary is holding <branch> — switch it to main (freeing the branch) instead of the guarded
+      // rm-rf. Composes with the build-dispatch precondition: this is the recovery arm for callers of
+      // removeWorktreeForBranch (pr-resolve, resume paths, …), matching Phase 1's precondition at claim.
+      console.warn(
+        `[worktree] branch ${branch} is held by PRIMARY (${e.path}) — switching primary to main (never rm -rf) to free it`,
+      );
+      ensurePrimaryOnMain(`[worktree:primary-held ${branch}]`);
+      continue;
+    }
+    removeWorktreeDir(e.path);
   }
   sh("git", ["worktree", "prune"]);
+}
+
+// box-primary-checkout-branch-wedge-self-heal (Phase 1): assert the PRIMARY checkout (REPO_DIR) is on
+// main + clean, and AUTO-HEAL it if not — as a precondition before any build's `git worktree add -B`.
+//
+// The wedge this fixes (2026-07-05 commerce-sdk-display-operations): a botched brain-page generation
+// left REPO_DIR parked on `claude/build-commerce-sdk-display-operations` with uncommitted files, so
+// every subsequent build of that spec failed at `git worktree add -B <same-branch>` with "already used
+// by worktree at /home/builder/shopcx". removeWorktreeDir CORRECTLY refuses to `rm -rf` the primary
+// (guards the live checkout — see line ~2384), so absent this helper the failure was a SILENT WEDGE
+// that blocked every subsequent build until a human reset the primary by hand.
+//
+// The heal is what a human would do to recover: reset any tracked-file modifications, `git clean -fd`
+// (preserves gitignored node_modules + builds/), fetch origin/main fresh, `git switch main`, `git
+// reset --hard origin/main`, then delete the stale local build branch. Runs as the worker's own user
+// (correct git ownership). Composes with maybeSelfUpdate: that is the WHEN-IDLE reset; this is the
+// WHEN-CLAIMING precondition — both compose safely because both end on `git reset --hard origin/main`.
+function ensurePrimaryOnMain(tag = "[primary-heal]"): void {
+  const curBranch = sh("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: REPO_DIR }).out.trim();
+  const dirty = sh("git", ["status", "--porcelain"], { cwd: REPO_DIR }).out.trim().length > 0;
+  if (curBranch === "main" && !dirty) return; // healthy — no-op fast path
+
+  console.warn(
+    `${tag} PRIMARY REPO_DIR (${REPO_DIR}) is off-main or dirty (branch=${curBranch || "<detached>"}, dirty=${dirty}) — HEALING to main before worktree add`,
+  );
+
+  // Drop ALL loose tracked-file modifications + untracked files. REPO_DIR is a SCRATCH mirror of
+  // origin/main; anything modified here is drift from a prior wedge. `git clean -fd` (no -x) preserves
+  // gitignored dirs — critically `node_modules/` (npm-ci is expensive) and `builds/` (where every live
+  // build worktree lives — nuking it would kill in-flight lanes).
+  sh("git", ["reset", "--hard", "HEAD"], { cwd: REPO_DIR });
+  sh("git", ["clean", "-fd"], { cwd: REPO_DIR });
+
+  // Refresh origin/main so we switch to the freshest tip (the same base every worktree is added from).
+  sh("git", ["fetch", "origin", "main"], { cwd: REPO_DIR });
+  const sw = sh("git", ["switch", "main"], { cwd: REPO_DIR });
+  if (sw.code !== 0) {
+    // Fallback: recreate local main from origin/main (covers a REPO_DIR that lost its local main ref).
+    sh("git", ["checkout", "-B", "main", "origin/main"], { cwd: REPO_DIR });
+  }
+  sh("git", ["reset", "--hard", "origin/main"], { cwd: REPO_DIR });
+
+  // If REPO_DIR was parked on a stale `claude/build-<slug>` local branch, delete the local ref so a
+  // subsequent `git worktree add -B <same-branch>` can create a fresh worktree for it. The branch's
+  // durable state lives on origin (removeWorktreeForBranch already frees any WORKTREE holding it; this
+  // deletes the local BRANCH ref left behind by a bare `git switch <branch>` on the primary). Ignore
+  // failure — the branch may not exist locally, or may be `main` / `HEAD` (guarded above).
+  if (curBranch && curBranch !== "main" && curBranch !== "HEAD") {
+    sh("git", ["branch", "-D", curBranch], { cwd: REPO_DIR });
+  }
+
+  const newBranch = sh("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: REPO_DIR }).out.trim();
+  const stillDirty = sh("git", ["status", "--porcelain"], { cwd: REPO_DIR }).out.trim().length > 0;
+  console.log(`${tag} REPO_DIR healed → branch=${newBranch} dirty=${stillDirty}`);
 }
 
 // Sweep stale build worktrees: every `builds/<job.id>` worktree whose backing job is terminal — or no
@@ -2465,6 +2541,15 @@ async function reapOrphanWorktrees() {
 }
 
 async function reapOrphans() {
+  // box-primary-checkout-branch-wedge-self-heal (Phase 3) — STARTUP ASSERTION: on every worker boot,
+  // verify REPO_DIR is on main + clean; heal (never silently accept) an off-main / dirty primary. A
+  // prior worker (or an ad-hoc human step, or a botched brain-page generation — the 2026-07-05 wedge)
+  // may have left REPO_DIR parked on a feature branch; without this check the next build claim would
+  // still catch it via ensurePrimaryOnMain, but a regression that manifests OUTSIDE the build path
+  // (spec-chat / plan / fold, which read REPO_DIR via git-show / git-diff on origin/*) would silently
+  // observe stale tree state. Belt-and-suspenders with the periodic tick below in reapStaleSessions.
+  ensurePrimaryOnMain("[startup]");
+
   // 1) Orphaned in-flight JOBS from a previous instance.
   const { data, error } = await db
     .from("agent_jobs")
@@ -2525,6 +2610,18 @@ async function reapOrphans() {
 // released the slot when the dead process exited (or it died with the whole process — counter gone).
 const REAP_STALE_STATUSES = ["building", "claimed", "queued_resume"] as const;
 async function reapStaleSessions(active: Map<string, { kind: Job["kind"] }>) {
+  // box-primary-checkout-branch-wedge-self-heal (Phase 3) — PERIODIC ASSERTION: on every stale-session
+  // sweep tick (~1min throttle, poll loop) verify the PRIMARY REPO_DIR checkout is on main + clean;
+  // heal on drift. Startup + build-claim callers still guarantee coverage; this catches a regression
+  // that flips REPO_DIR off-main between claims (e.g. a bug in a non-build path that runs a git
+  // command with cwd defaulted to REPO_DIR). Fast when healthy (single rev-parse + status --porcelain),
+  // loud + heal-in-place on drift — never a silent wedge. Best-effort: a heal-internal crash must NEVER
+  // break the reaper tick, so wrap it.
+  try {
+    ensurePrimaryOnMain("[reaper-tick]");
+  } catch (e) {
+    console.error("[reaper] primary-on-main assertion threw (continuing):", e instanceof Error ? e.message : e);
+  }
   const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
   // Pull in-flight rows whose heartbeat (or, if never set, updated_at) is older than the cutoff. We OR
   // the two so a pre-migration row with a NULL heartbeat still qualifies via updated_at. Capped — a tick
@@ -17888,6 +17985,14 @@ async function dispatchJob(job: Job) {
   stampLaneAccount(job.id, configDir); // box view: which Round Robin account this lane is on
 
   // Set up the worktree (its own dir + branch).
+  // box-primary-checkout-branch-wedge-self-heal (Phase 1): assert REPO_DIR is on main + clean BEFORE
+  // `git worktree add -B` runs. If the primary was left parked on a feature branch (e.g. a botched
+  // brain-page generation the 2026-07-05 wedge incident hit), `git worktree add -B <same-branch>`
+  // fails with "already used by worktree at <REPO_DIR>" and the existing rm-rf guard (correctly)
+  // refuses to force-free the primary — so absent this heal the failure was a silent wedge until a
+  // human reset REPO_DIR by hand. Runs BEFORE the fetch so we recover BEFORE any worktree machinery
+  // touches state that would collide with a wedged primary.
+  ensurePrimaryOnMain(tag);
   sh("git", ["fetch", "origin"]);
   // chained-phase-null-branch-fix: a chained-phase RESUME job (queued by queueNextChainedPhase) carries the
   // claude session but NOT spec_branch, so job.spec_branch is null on Phase 2+. The resume worktree-add below
