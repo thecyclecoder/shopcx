@@ -28,7 +28,12 @@
  *
  * Defaults:
  *   --per-cohort=50 (verification requires ≥ 50 per cohort)
- *   --appstle-scan=500 (candidate Appstle subs to inspect for grandfathering)
+ *   --appstle-scan=25000 (max candidate Appstle subs to inspect, paginated
+ *     oldest-first — grandfathering historically lives in migration-era subs;
+ *     heal-on-touch has since structured most recent contracts, so a
+ *     newest-first sweep of a few hundred rows will not surface any and
+ *     the cohort defaults to 0. Paginated oldest-first + a materially larger
+ *     cap keeps the default fill against the pinned baseline workspace).
  */
 import { writeFileSync } from "fs";
 import { createAdminClient } from "./_bootstrap";
@@ -45,7 +50,7 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-  const out: Args = { perCohort: 50, appstleScan: 500 };
+  const out: Args = { perCohort: 50, appstleScan: 25_000 };
   for (const a of argv.slice(2)) {
     if (a.startsWith("--workspace=")) out.workspace = a.slice("--workspace=".length);
     else if (a.startsWith("--per-cohort=")) out.perCohort = Math.max(1, parseInt(a.slice("--per-cohort=".length), 10));
@@ -189,33 +194,50 @@ async function main() {
   const appstle = await sampleByInternalFlag(admin, workspaceId, false, args.perCohort);
   console.log(`cohort appstle: ${appstle.length}`);
 
-  // Cohort C — grandfathered subset of the Appstle cohort. Pull a larger
-  // candidate pool and probe each contract until we've filled per-cohort.
+  // Cohort C — grandfathered subset of the Appstle cohort.
+  //
+  // Ordering matters: grandfathering historically lives in migration-era subs
+  // (Appstle's original migration wrote `pricingPolicy = null` on the oldest
+  // contracts — see docs/brain/libraries/appstle-pricing.md § Overcharge
+  // remediation). Recent contracts have almost all been structured by
+  // heal-on-touch, so a newest-first sweep finds zero null-policy lines and
+  // the cohort defaults to 0. Paginate OLDEST-FIRST in chunks and early-exit
+  // as soon as the cohort fills, up to `--appstle-scan` total candidates.
   const grandfathered: SubRow[] = [];
+  let candidatesScanned = 0;
   const apiKey = await getAppstleApiKey(admin, workspaceId);
   if (!apiKey) {
     console.warn("WARN: workspace has no Appstle API key — grandfathered cohort will be empty");
   } else {
-    const { data: candidatesRaw, error } = await admin
-      .from("subscriptions")
-      .select("id, workspace_id, shopify_contract_id, status, is_internal")
-      .eq("workspace_id", workspaceId)
-      .eq("is_internal", false)
-      .order("created_at", { ascending: false })
-      .limit(args.appstleScan);
-    if (error) throw error;
-    const candidates = (candidatesRaw ?? []) as SubRow[];
-    for (const sub of candidates) {
-      if (grandfathered.length >= args.perCohort) break;
-      if (!sub.shopify_contract_id) continue;
-      const contract = await fetchAppstleContract(apiKey, sub.shopify_contract_id);
-      if (!contract) continue;
-      if (await isContractGrandfathered(admin, workspaceId, contract)) {
-        grandfathered.push(sub);
+    const pageSize = 500;
+    let offset = 0;
+    outer: while (grandfathered.length < args.perCohort && offset < args.appstleScan) {
+      const upper = Math.min(offset + pageSize, args.appstleScan) - 1;
+      const { data: pageRaw, error } = await admin
+        .from("subscriptions")
+        .select("id, workspace_id, shopify_contract_id, status, is_internal")
+        .eq("workspace_id", workspaceId)
+        .eq("is_internal", false)
+        .order("created_at", { ascending: true })
+        .range(offset, upper);
+      if (error) throw error;
+      const page = (pageRaw ?? []) as SubRow[];
+      if (page.length === 0) break; // exhausted the pool
+      for (const sub of page) {
+        candidatesScanned++;
+        if (!sub.shopify_contract_id) continue;
+        const contract = await fetchAppstleContract(apiKey, sub.shopify_contract_id);
+        if (!contract) continue;
+        if (await isContractGrandfathered(admin, workspaceId, contract)) {
+          grandfathered.push(sub);
+          if (grandfathered.length >= args.perCohort) break outer;
+        }
       }
+      if (page.length < pageSize) break; // last page — pool exhausted
+      offset += pageSize;
     }
   }
-  console.log(`cohort grandfathered: ${grandfathered.length}`);
+  console.log(`cohort grandfathered: ${grandfathered.length} (scanned ${candidatesScanned} candidates)`);
 
   const manifest: CohortManifest = {
     generated_at: new Date().toISOString(),
