@@ -23,7 +23,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { listSpecs, type SpecRow, type SpecStatus } from "@/lib/specs-table";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
-import type { DigestThread, DigestRef, DigestDecision } from "@/lib/pulse-digest";
+import { SESSION_AUTHORED_MODEL, type DigestThread, type DigestRef, type DigestDecision } from "@/lib/pulse-digest";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -72,6 +72,15 @@ export interface DigestInput {
   decisions: DigestDecision[];
   threads: DigestThread[];
   refs: DigestRef[];
+  /**
+   * The digest_model marker from `pulse_session_digests.digest_model`.
+   * When it equals `SESSION_AUTHORED_MODEL`, the assistant wrote this digest
+   * from ground truth inside a live session ([[../.claude/skills/recap]]) —
+   * `thread.status` is authoritative and exact refs should override the
+   * slug-substring fallback in `matchThreadsToSpecs`. See
+   * [[../specs/pulse-session-authored-recaps]] Phase 3.
+   */
+  digest_model: string | null;
 }
 
 interface JobInput {
@@ -145,38 +154,179 @@ export function normalizeForMatch(text: string | null | undefined): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * How a thread resolved to its ledger anchor:
+ *  - `ref:spec` — the digest's refs[] carried a `kind='spec'` value that matched a workspace spec slug EXACTLY.
+ *  - `ref:pr` — the digest's refs[] carried a `kind='pr'` value that matched an active spec's `merged_pr` or a phase's `pr`, OR an agent_jobs row's `pr_number`.
+ *  - `ref:commit` — the digest's refs[] carried a `kind='commit'` value (a sha — treated as "shipped" per [[../specs/pulse-session-authored-recaps]] Phase 3).
+ *  - `slug-substring` — the legacy fallback: the workspace slug appears somewhere in the thread's title/cite or a digest ref value.
+ *  - `none` — no ledger anchor at all.
+ * Session-authored digests prefer the ref-based paths so exact citations override lossy substring guessing.
+ */
+export type ThreadMatchVia = "ref:spec" | "ref:pr" | "ref:commit" | "slug-substring" | "none";
+
 interface ThreadMatch {
   thread: DigestThread;
   digest: DigestInput;
   matchedSpec: SpecRow | null;
+  /** Set when a `kind='pr'` ref resolved to an active build job. In-flight signal even if no spec matched. */
+  matchedJob: JobInput | null;
+  /** Raw `kind='commit'` sha from refs — a work-landed signal for the no-spec-work-stuck-open case. */
+  matchedCommit: string | null;
+  /** Raw `kind='pr'` number from refs — used to look up the PR against specs' merged_pr / phase.pr. */
+  matchedPr: number | null;
+  /** How the anchor was found. */
+  matchedVia: ThreadMatchVia;
+  /**
+   * The digest thread's explicit status, ONLY when the digest is session-authored
+   * ([[../specs/pulse-session-authored-recaps]] Phase 3). Null for Haiku-ingest threads
+   * whose status was derived from tone. `synthesizeDeterministic` treats a non-null
+   * `authorStatus` as authoritative — a `resolved` here bypasses the ledger re-derive.
+   */
+  authorStatus: DigestThread["status"] | null;
 }
 
 /**
- * For every thread across every digest, find the spec that most likely
- * matches by slug substring in the thread's title or its cite. Threads
- * pointing at script-noise or with no textual anchor at all are ignored.
+ * Look up a PR ref value (the number as a string) against the workspace specs — a
+ * spec whose `merged_pr` equals the number, or one whose `phase.pr` does. Returns
+ * the matching spec (settled OR in-flight — the caller decides via
+ * `isSpecSettledOrInFlight`) so the confirming predicate for "this PR belongs to
+ * this workspace's ledger" is proved at match time, not by a bare number.
  */
-export function matchThreadsToSpecs(digests: DigestInput[], specs: SpecRow[]): ThreadMatch[] {
+function findSpecByPrNumber(specs: SpecRow[], prNumber: number): SpecRow | null {
+  for (const s of specs) {
+    if (s.merged_pr === prNumber) return s;
+    for (const p of s.phases) {
+      if (p.pr === prNumber) return s;
+    }
+  }
+  return null;
+}
+
+/**
+ * Is a `pr` ref value already MERGED anywhere in the ledger? A number counts as
+ * merged when a spec's `merged_pr` (one-shot spec) equals it AND `last_merge_sha`
+ * is set, OR when any phase carries `phase.pr === n && phase.merge_sha !== null`.
+ * Used to answer "this thread has a merged PR ref, no spec anchor found — is it
+ * still done?" (Phase 3 verification: PR '1160' should render under what's-working
+ * even without a slug-substring anchor).
+ */
+function isPrNumberMerged(specs: SpecRow[], prNumber: number): boolean {
+  for (const s of specs) {
+    if (s.merged_pr === prNumber && s.last_merge_sha !== null) return true;
+    for (const p of s.phases) {
+      if (p.pr === prNumber && p.merge_sha !== null) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Look up a PR ref value against the OPEN agent_jobs list (buildPulse's `jobs`
+ * arg is already narrowed to non-terminal statuses — see the `in(...)` filter).
+ * Returns the active job if there is one, so an in-flight PR still surfaces as
+ * such even when the spec ledger hasn't caught up.
+ */
+function findJobByPrNumber(jobs: JobInput[], prNumber: number): JobInput | null {
+  for (const j of jobs) {
+    if (j.pr_number === prNumber) return j;
+  }
+  return null;
+}
+
+/**
+ * For every thread across every digest, resolve it to its ledger anchor.
+ *
+ * Match order ([[../specs/pulse-session-authored-recaps]] Phase 3):
+ *  1. **Exact refs first.** The digest's `refs[]` are consulted before anything
+ *     else — `kind='spec'` joins the workspace specs by exact slug (via `listSpecs`),
+ *     `kind='pr'` joins agent_jobs/specs by pr_number (in that order — the workspace
+ *     spec ledger is the authority; the job list is a fallback in-flight signal),
+ *     `kind='commit'` records the sha (treated as work-landed downstream).
+ *  2. **Slug-substring fallback.** When no exact ref matched, the legacy path
+ *     kicks in — normalize the thread's title/cite + digest.refs into a haystack
+ *     and pick the longest workspace slug that appears in it.
+ *
+ * Threads pointing at script-noise are dropped BEFORE either match attempt (same
+ * class the drift detector already ignores). A session-authored digest additionally
+ * has its thread `status` carried on the match as `authorStatus` (Phase 3 authority
+ * rule) so the caller can treat it as ground truth without re-deriving.
+ */
+export function matchThreadsToSpecs(digests: DigestInput[], specs: SpecRow[], jobs: JobInput[] = []): ThreadMatch[] {
   const out: ThreadMatch[] = [];
   const bySlug = new Map<string, SpecRow>();
   const slugs = specs.map((s) => s.slug);
   for (const s of specs) bySlug.set(s.slug, s);
   slugs.sort((a, b) => b.length - a.length); // longest first so `founder-pulse-v2` wins over `founder-pulse`
   for (const digest of digests) {
+    const isAuthored = digest.digest_model === SESSION_AUTHORED_MODEL;
     for (const thread of digest.threads || []) {
       if (isScriptNoise(thread.title) || isScriptNoise(thread.cite)) continue;
-      const haystack = [thread.title, thread.cite, ...(digest.refs || []).map((r) => r.value)]
-        .filter((v): v is string => typeof v === "string" && v.length > 0)
-        .map((v) => normalizeForMatch(v))
-        .join(" ");
-      let matched: SpecRow | null = null;
-      for (const slug of slugs) {
-        if (haystack.includes(slug)) {
-          matched = bySlug.get(slug) || null;
-          break;
+
+      let matchedSpec: SpecRow | null = null;
+      let matchedJob: JobInput | null = null;
+      let matchedCommit: string | null = null;
+      let matchedPr: number | null = null;
+      let matchedVia: ThreadMatchVia = "none";
+
+      // 1. Exact refs first — a session-authored ref (or any digest's ref that
+      //    happens to be exact) beats any slug-substring guess. Refs are digest-scope
+      //    so all threads in a digest share the pool; the fallback path did the same.
+      for (const r of digest.refs || []) {
+        if (!r || typeof r.value !== "string") continue;
+        const value = r.value.trim();
+        if (!value) continue;
+        if (r.kind === "spec" && !matchedSpec) {
+          const s = bySlug.get(value);
+          if (s) {
+            matchedSpec = s;
+            matchedVia = "ref:spec";
+          }
+        } else if (r.kind === "pr" && matchedPr === null) {
+          const asNumber = Number(value);
+          if (Number.isFinite(asNumber) && asNumber > 0) {
+            matchedPr = asNumber;
+            // The workspace spec ledger is the authority for "this PR belongs to a spec".
+            // Fall back to the open-jobs list for an in-flight PR that hasn't stamped a phase yet.
+            const specForPr = findSpecByPrNumber(specs, asNumber);
+            if (specForPr && !matchedSpec) matchedSpec = specForPr;
+            const jobForPr = findJobByPrNumber(jobs, asNumber);
+            if (jobForPr) matchedJob = jobForPr;
+            if (matchedVia === "none") matchedVia = "ref:pr";
+          }
+        } else if (r.kind === "commit" && !matchedCommit) {
+          matchedCommit = value;
+          if (matchedVia === "none") matchedVia = "ref:commit";
         }
       }
-      out.push({ thread, digest, matchedSpec: matched });
+
+      // 2. Slug-substring fallback — only when NO exact ref matched anything. Preserves
+      //    the pre-Phase-3 behavior for Haiku-ingest threads (and session-authored threads
+      //    that forgot to include exact refs) so the surface degrades gracefully.
+      if (matchedVia === "none") {
+        const haystack = [thread.title, thread.cite, ...(digest.refs || []).map((r) => r.value)]
+          .filter((v): v is string => typeof v === "string" && v.length > 0)
+          .map((v) => normalizeForMatch(v))
+          .join(" ");
+        for (const slug of slugs) {
+          if (haystack.includes(slug)) {
+            matchedSpec = bySlug.get(slug) || null;
+            if (matchedSpec) matchedVia = "slug-substring";
+            break;
+          }
+        }
+      }
+
+      out.push({
+        thread,
+        digest,
+        matchedSpec,
+        matchedJob,
+        matchedCommit,
+        matchedPr,
+        matchedVia,
+        authorStatus: isAuthored ? (thread.status ?? null) : null,
+      });
     }
   }
   return out;
@@ -248,33 +398,91 @@ export function synthesizeDeterministic(fixtures: BuildPulseFixtures, opts?: { s
     };
   }
 
-  const matches = matchThreadsToSpecs(digestsByRecency, specs);
+  const matches = matchThreadsToSpecs(digestsByRecency, specs, jobs);
   const resolvedSlugsSeen = new Set<string>();
   const openSlugsSeen = new Set<string>();
+  const resolvedNoSpecKeysSeen = new Set<string>();
 
   for (const m of matches) {
     const digest = m.digest;
     const digestCite = citeIdForSession(digest);
-    // A thread pointing at a settled/in-flight spec is RESOLVED — it goes under what's_working, NOT where_you_left_off.
-    if (m.matchedSpec && isSpecSettledOrInFlight(m.matchedSpec)) {
-      const specCite = citeIdForSpec(m.matchedSpec);
-      const specStatus = deriveSpecStatus(m.matchedSpec);
-      if (!resolvedSlugsSeen.has(m.matchedSpec.slug)) {
+
+    // Author-noise wins immediately — a session-authored thread the founder marked as noise
+    // goes to rabbit_holes below, not where_you_left_off, even if it happens to match a spec.
+    // (For non-authored digests we still respect the ingest's `noise` classification.)
+    if (m.thread.status === "noise") continue;
+
+    // [[../specs/pulse-session-authored-recaps]] Phase 3 resolution rules — a thread is DONE when:
+    //  (a) it's session-authored + author declared it resolved (authoritative), OR
+    //  (b) the exact-matched spec is settled/in-flight (post-session shipping flips it), OR
+    //  (c) an exact PR ref is merged in the ledger, OR
+    //  (d) an exact commit ref exists (a sha means work landed).
+    // Rule (a) trusts the assistant's ground truth even when the ledger hasn't caught up yet;
+    // rules (b–d) trust the ledger even when the digest was authored before the work landed —
+    // so "a session-authored thread with a ref kind='pr' value='1160' (merged) renders under
+    // what's-working/done" (verification checklist).
+    const authoredResolved = m.authorStatus === "resolved";
+    const specSettled = m.matchedSpec && isSpecSettledOrInFlight(m.matchedSpec);
+    const prMerged = m.matchedPr !== null && isPrNumberMerged(specs, m.matchedPr);
+    const hasCommitRef = m.matchedCommit !== null;
+    const isDone = authoredResolved || specSettled || prMerged || hasCommitRef;
+
+    if (isDone) {
+      if (m.matchedSpec) {
+        // Ledger anchor available — reuse the spec-title claim shape so what's_working reads
+        // as "the shipped spec, not a repeat of the raw thread title". Dedup by spec slug.
+        if (resolvedSlugsSeen.has(m.matchedSpec.slug)) continue;
         resolvedSlugsSeen.add(m.matchedSpec.slug);
+        const specCite = citeIdForSpec(m.matchedSpec);
+        const specStatus = deriveSpecStatus(m.matchedSpec);
+        // If the ledger hasn't caught up yet but the assistant already witnessed resolution,
+        // present the spec neutrally as "landed" so the claim doesn't contradict the ledger.
+        const stateLabel = specStatus === "folded" || specStatus === "shipped"
+          ? specStatus
+          : authoredResolved && !specSettled
+            ? "landed (per session)"
+            : "in flight";
         lenses.whats_working.push({
-          claim: `${m.matchedSpec.title} is ${specStatus === "folded" || specStatus === "shipped" ? specStatus : "in flight"} (started as “${short(m.thread.title, 60)}”).`,
+          claim: `${m.matchedSpec.title} is ${stateLabel} (started as “${short(m.thread.title, 60)}”).`,
           cite_ids: [specCite, digestCite],
         });
+        continue;
       }
+      // No spec anchor — but a merged PR / commit sha / author-declared resolution still counts.
+      // (fixes no-spec-work-stuck-open per Phase 3.) Dedup so a PR referenced by many threads
+      // doesn't fan out to N identical claims in what's_working.
+      const dedupKey = m.matchedPr !== null
+        ? `pr:${m.matchedPr}`
+        : m.matchedCommit
+          ? `commit:${m.matchedCommit}`
+          : `thread:${normalizeForMatch(m.thread.title) || m.thread.title}`;
+      if (resolvedNoSpecKeysSeen.has(dedupKey)) continue;
+      resolvedNoSpecKeysSeen.add(dedupKey);
+      const cite_ids: string[] = [digestCite];
+      if (m.matchedJob) cite_ids.unshift(citeIdForJob(m.matchedJob));
+      const anchor = m.matchedPr !== null
+        ? `PR #${m.matchedPr} merged`
+        : m.matchedCommit
+          ? `commit ${m.matchedCommit.slice(0, 7)}`
+          : `resolved in session`;
+      lenses.whats_working.push({
+        claim: `${short(m.thread.title, 90)} — ${anchor}.`,
+        cite_ids,
+      });
       continue;
     }
-    // Otherwise it's a genuinely OPEN thread — surfaces on where_you_left_off + threads_in_flight.
-    if (m.thread.status === "noise") continue;
+
+    // Genuinely OPEN thread — surfaces on where_you_left_off + threads_in_flight.
     const key = normalizeForMatch(m.thread.title) || m.thread.title;
     if (openSlugsSeen.has(key)) continue;
     openSlugsSeen.add(key);
+    // A session-authored `open` thread's phrasing is stronger than the ingest's guess — surface it
+    // as the assistant wrote it, not with the "no matching spec yet" suffix that assumes we're guessing.
+    const whereClaim = m.authorStatus === "open"
+      ? short(m.thread.title, 100)
+      : `${short(m.thread.title, 100)} — open, no matching spec yet.`;
     lenses.where_you_left_off.push({
-      claim: `${short(m.thread.title, 100)} — open, no matching spec yet.`,
+      claim: whereClaim,
       cite_ids: [digestCite],
     });
     lenses.threads_in_flight.push({
@@ -305,9 +513,19 @@ export function synthesizeDeterministic(fixtures: BuildPulseFixtures, opts?: { s
   }
 
   // Next moves: derive from any planned specs in the workspace (not yet in flight).
-  // Prefer specs referenced by an open thread; fall back to the newest planned specs.
+  // Prefer specs referenced by an OPEN thread — a thread the founder marked resolved OR whose
+  // PR/commit is already merged is NOT open, so it should NOT drag its planned-parent spec up
+  // the next-moves queue. Same Phase-3 resolution rules as the main lens fan-out.
   const openMatchedSlugs = new Set(
-    matches.filter((m) => m.matchedSpec && !isSpecSettledOrInFlight(m.matchedSpec)).map((m) => m.matchedSpec!.slug),
+    matches
+      .filter((m) => {
+        if (!m.matchedSpec || isSpecSettledOrInFlight(m.matchedSpec)) return false;
+        if (m.authorStatus === "resolved") return false;
+        if (m.matchedPr !== null && isPrNumberMerged(specs, m.matchedPr)) return false;
+        if (m.matchedCommit !== null) return false;
+        return true;
+      })
+      .map((m) => m.matchedSpec!.slug),
   );
   const plannedSpecs = specs.filter((s) => {
     const status = deriveSpecStatus(s);
@@ -444,7 +662,7 @@ export async function buildPulse(opts: {
   const [digestRows, specs, jobRows] = await Promise.all([
     admin
       .from("pulse_session_digests")
-      .select("id, session_id, intent, resume_point, last_activity_at, decisions, threads, refs")
+      .select("id, session_id, intent, resume_point, last_activity_at, decisions, threads, refs, digest_model")
       .eq("workspace_id", opts.workspaceId)
       .order("last_activity_at", { ascending: false })
       .limit(40),
@@ -468,6 +686,7 @@ export async function buildPulse(opts: {
     decisions: Array.isArray(r.decisions) ? (r.decisions as DigestDecision[]) : [],
     threads: Array.isArray(r.threads) ? (r.threads as DigestThread[]) : [],
     refs: Array.isArray(r.refs) ? (r.refs as DigestRef[]) : [],
+    digest_model: (r.digest_model as string | null) ?? null,
   }));
   const jobs: JobInput[] = (jobRows.data || []).map((j) => ({
     id: j.id as string,

@@ -53,7 +53,7 @@ async function main() {
   });
 
   console.log(
-    `[pulse-digest] scanned=${result.scanned} distilled=${result.distilled} skipped_unchanged=${result.skipped_unchanged} upserted=${result.upserted} errors=${result.errors.length}`,
+    `[pulse-digest] scanned=${result.scanned} distilled=${result.distilled} skipped_unchanged=${result.skipped_unchanged} skipped_session_authored=${result.skipped_session_authored} upserted=${result.upserted} errors=${result.errors.length}`,
   );
   for (const err of result.errors) {
     console.error(`  ! ${err.session_id || "(readdir)"}: ${err.message}`);
