@@ -274,6 +274,32 @@ export function calculateEarningPoints(
   return Math.floor(qualifying * settings.points_per_dollar);
 }
 
+// ── Manual-adjustment guard ──
+
+/**
+ * Pure predicate that gates the /api/loyalty/members/[memberId] POST route
+ * (loyalty-list-stats-and-adjust-guard.md Phase 2). Rejects zero / non-finite
+ * deltas and any negative delta that would drive points_balance below zero —
+ * so the route returns 4xx instead of silently under-flowing to Math.max(0,…).
+ * deductPoints itself re-reads the live balance and clamps as a defense-in-depth
+ * layer; this predicate is the fast-fail at the API boundary.
+ */
+export function validateManualAdjustment(
+  currentBalance: number,
+  delta: number,
+): { ok: true } | { ok: false; error: string } {
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: false, error: "Points amount required (positive or negative)" };
+  }
+  if (delta < 0 && currentBalance + delta < 0) {
+    return {
+      ok: false,
+      error: `Adjustment of ${delta} would drive balance below zero (current: ${currentBalance})`,
+    };
+  }
+  return { ok: true };
+}
+
 // ── Points mutations ──
 
 export async function earnPoints(
@@ -281,6 +307,7 @@ export async function earnPoints(
   points: number,
   orderId: string | null,
   description: string,
+  type: "earning" | "adjustment" = "earning",
 ): Promise<void> {
   if (points <= 0) return;
   const admin = createAdminClient();
@@ -289,7 +316,7 @@ export async function earnPoints(
     workspace_id: member.workspace_id,
     member_id: member.id,
     points_change: points,
-    type: "earning",
+    type,
     description,
     order_id: orderId,
   });
@@ -363,7 +390,7 @@ export async function deductPoints(
   member: LoyaltyMember,
   points: number,
   orderId: string | null,
-  type: "refund" | "chargeback",
+  type: "refund" | "chargeback" | "adjustment",
   description: string,
 ): Promise<void> {
   if (points <= 0) return;
