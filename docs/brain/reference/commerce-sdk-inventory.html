@@ -488,6 +488,21 @@
       </div>
     </section>
 
+    <!-- SUCCESS GATES -->
+    <section id="gates">
+      <h2>Verification</h2>
+      <div class="sec-title">Success gates — before any surface migrates</div>
+      <p class="tight">Milestone 2 (Battle-test in isolation) is the gate that gates all others. The harness runs entirely locally against read-only prod data via <code>scripts/commerce-diff-sample.ts</code>, the Phase 1 sampler.</p>
+      <h3>Phase 1 — Sampler across internal + Appstle + grandfathered</h3>
+      <p>The harness's entry point: <code>scripts/commerce-diff-sample.ts</code> samples three cohorts of subscriptions from prod (internal via <code>is_internal=true</code>, Appstle via <code>is_internal=false</code>, grandfathered by detecting Appstle contracts with <code>pricingPolicy === null</code> via <code>inferAppstleLineBase</code> from [[../libraries/appstle-pricing]]). Persists the cohort JSON to <code>/tmp/commerce-sample-&lt;ts&gt;.json</code> for downstream phases.</p>
+      <p><b>Read-only by construction:</b> every Supabase call is <code>.select()</code>; Appstle contracts fetched via raw <code>fetch()</code> (not <code>loggedAppstleFetch</code>) so no rows land in <code>appstle_call_log</code>. Preserves the DB-write-audit verification.</p>
+      <p><b>Usage:</b></p>
+      <pre style="background:var(--panel-2);padding:12px;border-radius:8px;font-family:var(--mono);font-size:12px;overflow-x:auto">npx tsx scripts/commerce-diff-sample.ts \
+  [--workspace=&lt;uuid&gt;] [--per-cohort=50] [--appstle-scan=25000] [--out=/path]</pre>
+      <p><b>Defaults:</b> <code>--per-cohort=50</code> (verification requires ≥50 per cohort), <code>--appstle-scan=25000</code> (grandfathering historically lives in migration-era subs; pagination is oldest-first to surface legacy contracts before heal-on-touch structures them).</p>
+      <p><b>Status:</b> Phase 1 shipped 2026-07-05 with Phase 5 fix (grandfathered cohort pagination; see [[../archive.d/commerce-sdk-differential-harness]]).</p>
+    </section>
+
     <footer>
       Research complete · 6 nav-driven catalog passes + 4 stack-mapping passes · grounded in <code>src/app/dashboard/sidebar.tsx</code>. Next step: lock this contract, then open the goal with these milestones. Findings are labeled from code inspection; runtime scale figures are not asserted here.
     </footer>

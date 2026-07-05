@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Blueprint specs mandate parent** · verified 2026-07-05 · → [[../lifecycles/advertorial-landers]]
 - **Box builds: self-heal a primary checkout wedged on a build branch** · verified 2026-07-05 · → [[../recipes/build-box-setup#primary-checkout-self-healing]]
 - **Carrie — reuse existing product media before flagging a real-asset gap** · verified 2026-07-05 · → [[recipes/dr-content]]
+- **Commerce SDK — differential battle-test harness (Phase 1 sampler)** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html#gates]]
 - **Commerce SDK — Display operations** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]]
 - **Commerce SDK — Mutation operations + subscriptionX rename** · verified 2026-07-05 · → [[../lifecycles/commerce-sdk-core-build]]
 - **Scaffold src/lib/commerce SDK + centralize priceSubscription** · verified 2026-07-05 · → [[../libraries/pricing]]
