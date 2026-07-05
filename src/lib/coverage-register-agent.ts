@@ -165,7 +165,7 @@ export function buildRegisterSpecBody(entry: InferredLoopEntry): string {
   const slug = registerSpecSlug(entry.id);
   return `# Register monitored loop: ${entry.id} ⏳
 
-**Owner:** [[../functions/${entry.owner}]] · **Parent:** extends the [[control-tower-complete-coverage]] coverage self-audit · auto-proposed by [[../libraries/coverage-register-agent]].
+**Owner:** [[../functions/${entry.owner}]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).
 
 The coverage self-audit found a cron \`createFunction\` served in code (\`${entry.id}\`, ${entry.expectedCadence}) with **no \`MONITORED_LOOPS\` tile** — an unregistered loop. This spec adds the inferred registry entry so the loop becomes a real monitored tile. Confirm the inferred **owner-function** (\`${entry.owner}\`) + cadence/window before merging.
 
@@ -191,7 +191,7 @@ export function buildExemptSpecBody(loopId: string, owner: OwnerFunction): strin
   const slug = exemptSpecSlug(loopId);
   return `# Exempt loop from coverage monitoring: ${loopId} ⏳
 
-**Owner:** [[../functions/${owner}]] · **Parent:** extends the [[control-tower-complete-coverage]] coverage self-audit · auto-proposed by [[../libraries/coverage-register-agent]].
+**Owner:** [[../functions/${owner}]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).
 
 The owner marked \`${loopId}\` **intentionally-unmonitored** — a registered exemption so the coverage self-audit stops flagging it (silence is never the default; this is the owner-confirmed exception).
 

@@ -87,6 +87,9 @@ export interface SpecRow {
    *  fix (mirrors the `**Regression-signature:** `<sig>`` header line). Same-signature recurrences converge
    *  on one spec, sibling to repair_signature. */
   regression_signature: string | null;
+  /** no-spec-parent — origin-spec slug this fix-spec RELATES to (a link, never a parent). A self-healing
+   *  agent (repair / db-health / …) sets this instead of an `extends [[../specs/…]]` parent. */
+  related_spec: string | null;
   auto_build: boolean;
   /** spec-review-agent Phase 3 — Vale's CHECKLIST verdict; `true` once she's passed the spec. The In
    *  Review board lane reads this to render Vale's pending vs Vale-passed state per card. */
@@ -163,6 +166,9 @@ export interface SpecRowInput {
   regression_of_slug?: string | null;
   /** When set, mirrors the regression-agent header `**Regression-signature:** `<sig>``. */
   regression_signature?: string | null;
+  /** no-spec-parent — origin-spec slug this fix-spec RELATES to (a link, never a parent). Set by a
+   *  self-healing agent instead of an `extends [[../specs/…]]` parent. PASS `null` to CLEAR; OMIT to preserve. */
+  related_spec?: string | null;
   auto_build?: boolean;
   milestone_id?: string | null;
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHY this spec exists. HARD gated at the
@@ -228,6 +234,7 @@ interface SpecRowDb {
   repair_signature: string | null;
   regression_of_slug: string | null;
   regression_signature: string | null;
+  related_spec: string | null;
   auto_build: boolean;
   vale_pass: boolean | null;
   vale_review_passed_at: string | null;
@@ -247,7 +254,7 @@ interface SpecRowDb {
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, related_spec, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, kind, origin_check_keys, created_at, updated_at";
 
@@ -295,6 +302,7 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     repair_signature: db.repair_signature,
     regression_of_slug: db.regression_of_slug,
     regression_signature: db.regression_signature,
+    related_spec: db.related_spec,
     auto_build: db.auto_build,
     vale_pass: db.vale_pass,
     vale_review_passed_at: db.vale_review_passed_at,
@@ -407,6 +415,8 @@ export async function upsertSpec(
     repair_signature: row.repair_signature ?? null,
     regression_of_slug: row.regression_of_slug ?? null,
     regression_signature: row.regression_signature ?? null,
+    // no-spec-parent — persist the origin-spec LINK (never a parent). Omitted → PRESERVE (undefined skips).
+    ...(row.related_spec !== undefined ? { related_spec: row.related_spec } : {}),
     auto_build: row.auto_build ?? false,
     milestone_id: row.milestone_id ?? null,
     updated_at: new Date().toISOString(),
@@ -1011,6 +1021,7 @@ export async function setSpecParent(
     parentKind?: "function" | "mandate" | "milestone" | null;
     parentRef?: string | null;
     milestoneId?: string | null;
+    relatedSpec?: string | null;
   },
 ): Promise<void> {
   const fields: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -1018,6 +1029,8 @@ export async function setSpecParent(
   if (patch.parentKind !== undefined) fields.parent_kind = patch.parentKind;
   if (patch.parentRef !== undefined) fields.parent_ref = patch.parentRef;
   if (patch.milestoneId !== undefined) fields.milestone_id = patch.milestoneId;
+  // no-spec-parent — the origin-spec LINK moves off `parent` onto its own column.
+  if (patch.relatedSpec !== undefined) fields.related_spec = patch.relatedSpec;
   const admin = createAdminClient();
   const { error } = await admin
     .from("specs")
