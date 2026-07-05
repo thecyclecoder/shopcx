@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, forbidden } from "next/navigation";
 import { cookies } from "next/headers";
 import { cacheLife, cacheTag } from "next/cache";
 import type { Metadata } from "next";
@@ -10,6 +10,11 @@ import {
   loadBlueprintRenderContent,
   type BlueprintRenderContent,
 } from "@/lib/blueprint-render";
+import {
+  isBlueprintLanderPubliclyServed,
+  isWorkspaceOwner,
+} from "@/lib/blueprint-preview-gate";
+import { mapFunnelTypeToLanderType } from "@/lib/cleo-blueprint";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   resolveExperimentsForRender,
@@ -219,7 +224,18 @@ export default async function StorefrontProductPage({
   // `_sxv=<variantId>` is the edge-assigned PDP arm (pdp-edge-served-experiments):
   // the middleware sticky-assigned the visitor + rewrote to this variant-keyed URL
   // so each arm is a distinct cacheable render.
-  searchParams: Promise<{ variant?: string; angle?: string; sx_preview?: string; _sxv?: string }>;
+  // `preview=1` is the OWNER-GATED blueprint-lander preview (Phase 2 of the
+  // "build the {slug} lander" spec chain): only workspace_members.role='owner'
+  // may view a not-yet-promoted blueprint lander via this flag; every other
+  // visitor is 403'd. Without the flag the blueprint route is only reachable
+  // when its paired storefront_experiments row is serving traffic.
+  searchParams: Promise<{
+    variant?: string;
+    angle?: string;
+    sx_preview?: string;
+    _sxv?: string;
+    preview?: string;
+  }>;
 }) {
   const { workspace, slug } = await params;
   const sp = await searchParams;
@@ -264,6 +280,46 @@ export default async function StorefrontProductPage({
       blueprint = null;
     }
     if (!blueprint) notFound();
+
+    // Owner-gated preview vs. public visibility (Phase 2). Two disjoint gates,
+    // both narrowing to serving-state before the render can proceed:
+    //
+    //   • `?preview=1` → owner-only. Non-owner → 403. Content of the
+    //     underlying storefront_experiments row is irrelevant here — this is
+    //     the founder's pre-promotion review path.
+    //   • no preview flag → public iff the paired storefront_experiments row
+    //     is SERVING (status in ('running','promoted')). Every other status
+    //     (draft/killed/rolled_back) → 403 for non-owners; owners still pass
+    //     so the promoted-lander URL is verifiable end-to-end from the
+    //     owner's browser without the preview flag.
+    //
+    // The gate keys the storefront_experiments lookup on `lander_type`
+    // (mapped from the blueprint's funnel_type via the same helper Cleo used
+    // to write the row), so the render check and the wiring INSERT agree on
+    // the same predicate — no "the row exists but the render doesn't see it"
+    // drift.
+    const previewMode = sp.preview === "1";
+    const landerType = mapFunnelTypeToLanderType(blueprintVariant);
+    if (previewMode) {
+      const owner = await isWorkspaceOwner(data.workspace.id);
+      if (!owner) forbidden();
+    } else if (landerType) {
+      const served = await isBlueprintLanderPubliclyServed(
+        data.workspace.id,
+        data.product.id,
+        landerType,
+      );
+      if (!served) {
+        const owner = await isWorkspaceOwner(data.workspace.id);
+        if (!owner) forbidden();
+      }
+    } else {
+      // funnel_type doesn't map to a known lander_type → treated as
+      // not-yet-public regardless of DB state (a lander_type the optimizer
+      // can't wire is by definition never serving). Owner-only.
+      const owner = await isWorkspaceOwner(data.workspace.id);
+      if (!owner) forbidden();
+    }
   }
 
   if (variant && advertorial) {
