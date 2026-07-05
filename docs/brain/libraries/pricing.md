@@ -41,9 +41,13 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 - **protection** — billed/displayed from the sub's `shipping_protection_added` + `_amount_cents` **columns** (the renewal + engine read the column), so it's excluded from the product subtotal. For **internal** subs the portal toggle is column-based (`route=shippingProtection`) — NOT a line item — so the toggle, the order summary, and billing share one source of truth. (Appstle subs keep the line-item add/remove flow.) A protection *item* in `items` is legacy and gets excluded from the subtotal by title match.
 - **gift** — `is_gift` → $0. (Free gifts are a storefront concern, passthrough here.)
 
-## Display layer — `portal/helpers/enrich-pricing.ts`
+## Display layer — `commerce/price.ts`
 
-`priceSubscription(workspaceId, sub)` is the shape-agnostic core for the **portal display**: it returns a per-line `{ base_cents, unit_cents }` map (keyed by line_id + variant_id) and an order-level summary (`subtotal / discount / shipping / protection / total / free_shipping / pills`). It runs the engine for internal subs and uses the baked item prices for Appstle subs. Consumers:
+`priceSubscription(workspaceId, sub)` is the shape-agnostic core for **every display surface** (portal, mini-site, dashboard, ticket detail, AI stack): it returns a per-line `{ base_cents, unit_cents }` map (keyed by line_id + variant_id) and an order-level summary (`subtotal / discount / shipping / protection / total / free_shipping / pills`). It runs the engine for internal subs and uses the baked item prices for Appstle subs. Lives at `src/lib/commerce/price.ts` — moved from `portal/helpers/enrich-pricing.ts` by [[../specs/commerce-sdk-scaffold-money-resolver]] Phase 2; the old path is now a deprecated re-export shim.
+
+**Money invariant.** If either branch would yield an `undefined` / `NaN` `base_cents` or `unit_cents` on a real product line, `priceSubscription` throws `PriceInvariantError` (exported alongside) with the sub id + line id in the message — so no display surface can silently render `$NaN` / `$0` / undefined. Gifts (unit $0) + shipping-protection lines are expected zeros and pass. Repro: `npx tsx scripts/_probe-price-invariant.ts`.
+
+Consumers:
 - `enrichContractPricing(...)` — API-handler wrapper; writes `currentPrice` + `basePrice` onto `contract.lines`. Used by [[portal__handlers__subscriptions]] (list) and [[portal__handlers__subscription-detail]].
 - `page.tsx` (mini-site server render) calls `priceSubscription` directly and maps onto `PortalSubscription.items[].{price_cents, base_price_cents}` + `pricing`. **The mini-site list paints from page.tsx, not the API handler — both paths must price.**
 
