@@ -17,6 +17,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Carrie — reuse existing product media before flagging a real-asset gap** · verified 2026-07-05 · → [[recipes/dr-content]]
 - **Commerce SDK — differential battle-test harness (Phase 1 sampler)** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html#gates]]
 - **Commerce SDK — Display operations** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]]
+- **Migrate ticket detail onto the Commerce SDK** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]] · [[../libraries/commerce__subscription]] · [[../libraries/commerce__order]] · [[../libraries/commerce__return]] · [[../libraries/commerce__replacement]] · [[../libraries/action-executor]] · [[../dashboard/tickets]]
 - **Commerce SDK — Mutation operations + subscriptionX rename** · verified 2026-07-05 · → [[../lifecycles/commerce-sdk-core-build]]
 - **Scaffold src/lib/commerce SDK + centralize priceSubscription** · verified 2026-07-05 · → [[../libraries/pricing]]
 - **Reduce call volume / cache the hot query on query 5250820927256751610** · verified 2026-07-05 · → [[../libraries/db-health]]

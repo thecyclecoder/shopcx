@@ -1,0 +1,1 @@
+- **Migrate ticket detail onto the Commerce SDK** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]] · [[../libraries/commerce__subscription]] · [[../libraries/commerce__order]] · [[../libraries/commerce__return]] · [[../libraries/commerce__replacement]] · [[../libraries/action-executor]] · [[../dashboard/tickets]]
