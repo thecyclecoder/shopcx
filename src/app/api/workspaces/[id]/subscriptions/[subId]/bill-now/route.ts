@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { orderNowByContract } from "@/lib/appstle";
+import { subscriptionOrderNow } from "@/lib/commerce/subscription";
 import { logCustomerEvent } from "@/lib/customer-events";
 
 export async function POST(
@@ -26,7 +26,7 @@ export async function POST(
   // Appstle subs attempt the upcoming Appstle billing. Calling appstle directly
   // here silently no-ops on internal subs (appstleAttemptBilling short-circuits a
   // synthetic internal-* id to fake success), so order-now must go through this.
-  const result = await orderNowByContract(workspaceId, sub.shopify_contract_id);
+  const result = await subscriptionOrderNow(workspaceId, sub.shopify_contract_id);
 
   if (!result.success) {
     return NextResponse.json({ error: result.error || "Billing failed" }, { status: 500 });

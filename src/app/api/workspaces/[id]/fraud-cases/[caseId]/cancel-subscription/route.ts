@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+import { subscriptionAction } from "@/lib/commerce/subscription";
 
 export async function POST(
   request: Request,
@@ -58,7 +58,7 @@ export async function POST(
     return NextResponse.json({ error: "Already cancelled" }, { status: 400 });
   }
 
-  const result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud", displayName);
+  const result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud", displayName);
 
   if (result.success) {
     // Add history entry

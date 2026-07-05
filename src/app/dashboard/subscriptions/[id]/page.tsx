@@ -207,6 +207,8 @@ export default function SubscriptionDetailPage() {
   const [subReplacements, setSubReplacements] = useState<ReplacementItem[]>([]);
   const [chargebacks, setChargebacks] = useState<ChargebackItem[]>([]);
   const [fraudCases, setFraudCases] = useState<FraudCaseItem[]>([]);
+  const [couponCode, setCouponCode] = useState("");
+  const [couponError, setCouponError] = useState<string | null>(null);
 
   const loadSub = useCallback(async () => {
     const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}`);
@@ -659,41 +661,94 @@ export default function SubscriptionDetailPage() {
             </div>
           )}
 
-          {/* Applied Discounts */}
+          {/* Applied Discounts + Apply Coupon */}
           {(() => {
             const discounts = (sub.applied_discounts as { id: string; type: string; title: string; value: number; valueType: string }[] | null) || [];
-            return discounts.length > 0 ? (
+            const canApply = sub.status !== "cancelled";
+            if (discounts.length === 0 && !canApply) return null;
+            return (
               <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-                <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Applied Discounts ({discounts.length})</h3>
-                <div className="space-y-2">
-                  {discounts.map((d) => (
-                    <div key={d.id} className="flex items-center justify-between rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
-                      <div>
-                        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{d.title}</span>
-                        <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                          {d.value}{d.valueType === "PERCENTAGE" ? "%" : ""} off
-                        </span>
-                        <span className="ml-2 text-xs text-zinc-400">{d.type === "CODE_DISCOUNT" ? "Code" : d.type === "MANUAL" ? "Manual" : d.type}</span>
+                <h3 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  Applied Discounts{discounts.length > 0 ? ` (${discounts.length})` : ""}
+                </h3>
+                {discounts.length > 0 && (
+                  <div className="space-y-2">
+                    {discounts.map((d) => (
+                      <div key={d.id} className="flex items-center justify-between rounded-md border border-zinc-100 px-3 py-2 dark:border-zinc-800">
+                        <div>
+                          <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{d.title}</span>
+                          <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                            {d.value}{d.valueType === "PERCENTAGE" ? "%" : ""} off
+                          </span>
+                          <span className="ml-2 text-xs text-zinc-400">{d.type === "CODE_DISCOUNT" ? "Code" : d.type === "MANUAL" ? "Manual" : d.type}</span>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Remove discount "${d.title}"?`)) return;
+                            setActing("remove_coupon");
+                            const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
+                              method: "DELETE",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ discountId: d.id }),
+                            });
+                            setActing(null);
+                            if (res.ok) loadSub();
+                          }}
+                          disabled={acting === "remove_coupon"}
+                          className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 disabled:opacity-50 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40"
+                        >
+                          {acting === "remove_coupon" ? "Removing..." : "Remove"}
+                        </button>
                       </div>
-                      <button
-                        onClick={async () => {
-                          if (!confirm(`Remove discount "${d.title}"?`)) return;
-                          const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
-                            method: "DELETE",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ discountId: d.id }),
-                          });
-                          if (res.ok) loadSub();
-                        }}
-                        className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/40"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
+                {canApply && (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      const code = couponCode.trim();
+                      if (!code) return;
+                      setCouponError(null);
+                      setActing("apply_coupon");
+                      const res = await fetch(`/api/workspaces/${workspace.id}/subscriptions/${subId}/coupon`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ couponCode: code }),
+                      });
+                      setActing(null);
+                      if (res.ok) {
+                        setCouponCode("");
+                        loadSub();
+                      } else {
+                        const body = await res.json().catch(() => ({}));
+                        setCouponError(body?.error || "Failed to apply coupon");
+                      }
+                    }}
+                    className={`${discounts.length > 0 ? "mt-3" : ""} flex items-center gap-2`}
+                  >
+                    <input
+                      type="text"
+                      value={couponCode}
+                      onChange={(e) => setCouponCode(e.target.value)}
+                      placeholder="Coupon code"
+                      autoCapitalize="characters"
+                      className="flex-1 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!couponCode.trim() || acting === "apply_coupon"}
+                      className="rounded-md border border-emerald-300 px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-400"
+                    >
+                      {acting === "apply_coupon" ? "Applying..." : "Apply"}
+                    </button>
+                  </form>
+                )}
+                {couponError && (
+                  <p className="mt-2 text-xs text-red-600 dark:text-red-400">{couponError}</p>
+                )}
               </div>
-            ) : null;
+            );
           })()}
 
           {/* Order History */}
