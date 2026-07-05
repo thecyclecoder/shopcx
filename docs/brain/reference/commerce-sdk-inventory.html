@@ -334,7 +334,7 @@ interface DiscountPill { kind: "sns" | "break" | "free_shipping" | "coupon" | "r
       <thead><tr><th class="mono">Old (appstle)</th><th class="mono">New (commerce)</th><th>Module</th><th>Notes</th></tr></thead>
       <tbody>
         <tr><td class="mono">appstleSubscriptionAction</td><td class="mono">subscriptionAction</td><td>subscription</td><td>pause / cancel / resume dispatch</td></tr>
-        <tr><td class="mono">appstleSkipNextOrder</td><td class="mono">subscriptionSkipNext</td><td>subscription</td><td>skip the very next scheduled order</td></tr>
+        <tr><td class="mono">appstleSkipNextOrder</td><td class="mono">subscriptionSkipNextOrder</td><td>subscription</td><td>skip the very next scheduled order</td></tr>
         <tr><td class="mono">appstleUpdateBillingInterval</td><td class="mono">subscriptionUpdateBillingInterval</td><td>subscription</td><td>DAY | WEEK | MONTH | YEAR</td></tr>
         <tr><td class="mono">appstleUpdateNextBillingDate</td><td class="mono">subscriptionUpdateNextBillingDate</td><td>subscription</td><td>YYYY-MM-DD or ISO datetime</td></tr>
         <tr><td class="mono">appstleGetUpcomingOrders</td><td class="mono">subscriptionListUpcomingOrders</td><td>subscription</td><td>upcoming billing attempts</td></tr>
@@ -361,7 +361,7 @@ interface DiscountPill { kind: "sns" | "break" | "free_shipping" | "coupon" | "r
         <tr><td class="mono">subAddItem</td><td class="mono">subscriptionAddItem</td><td>subscription</td><td>add a variant (defaults qty 1)</td></tr>
         <tr><td class="mono">subRemoveItem</td><td class="mono">subscriptionRemoveItem</td><td>subscription</td><td>public remove; supports variant or line</td></tr>
         <tr><td class="mono">subChangeQuantity</td><td class="mono">subscriptionChangeQuantity</td><td>subscription</td><td>change qty for a variant</td></tr>
-        <tr><td class="mono">subUpdateLineItemPrice</td><td class="mono">subscriptionUpdateLinePrice</td><td>subscription</td><td>grandfathered price update</td></tr>
+        <tr><td class="mono">subUpdateLineItemPrice</td><td class="mono">subscriptionUpdateLineItemPrice</td><td>subscription</td><td>grandfathered price update</td></tr>
         <tr><td class="mono">getLastOrderPrice</td><td class="mono">subscriptionGetLastPricePaid</td><td>subscription</td><td>customer's last-paid price by variant</td></tr>
         <tr><td class="mono">calcBasePrice</td><td class="mono">priceCalcBase</td><td>price</td><td>target × discount → base (pure)</td></tr>
         <tr><td class="mono">subSwapVariant</td><td class="mono">subscriptionSwapVariant</td><td>subscription</td><td>swap on line (qty defaults 1)</td></tr>
