@@ -17,6 +17,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Loyalty: program-wide stats + negative-balance guard on manual adjust** · verified 2026-07-05 · → [[../libraries/loyalty]]
 - **Pulse: session-authored recaps (stop trusting cheap-AI transcript skims)** · verified 2026-07-05 · → [[../libraries/pulse]] [[../libraries/pulse-digest]] [[../tables/pulse_session_digests]]
 - **/recap: deterministic current-session resolution** · verified 2026-07-05 · → [[../libraries/pulse-digest]]
+- **Route every refund through partialRefundByAmount + refundBraintreeTransaction** · verified 2026-07-05 · → [[lifecycles/return-pipeline]]
 - **Route subscription coupon apply/remove through the internal-vs-Appstle dispatcher** · verified 2026-07-05 · → [[../libraries/subscription-items]]
 - **Harden the Bo agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[../recipes/build-box-setup#bo-agents-durable-mandate]]
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
