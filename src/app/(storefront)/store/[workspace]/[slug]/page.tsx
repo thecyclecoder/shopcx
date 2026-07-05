@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, forbidden } from "next/navigation";
 import { cookies } from "next/headers";
 import { cacheLife, cacheTag } from "next/cache";
 import type { Metadata } from "next";
@@ -6,6 +6,15 @@ import type { Metadata } from "next";
 import { getPageData, listPublishedProducts, type PageData, type MediaItem } from "../../../_lib/page-data";
 import { StorefrontPage } from "../../../_lib/render-page";
 import { loadAdvertorialContent, type AdvertorialVariant } from "@/lib/advertorial-pages";
+import {
+  loadBlueprintRenderContent,
+  type BlueprintRenderContent,
+} from "@/lib/blueprint-render";
+import {
+  isBlueprintLanderPubliclyServed,
+  isWorkspaceOwner,
+} from "@/lib/blueprint-preview-gate";
+import { mapFunnelTypeToLanderType } from "@/lib/cleo-blueprint";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   resolveExperimentsForRender,
@@ -14,6 +23,17 @@ import {
   parsePreviewParam,
   type ExperimentExposureMeta,
 } from "@/lib/storefront/experiments";
+
+/**
+ * Additional ?variant= values reachable BEYOND the three
+ * AdvertorialVariant landers — one per lander_blueprints.funnel_type Cleo's
+ * blueprint-authoring session has produced. When a URL carries
+ * `?variant=advertorial-listicle` we load the matching blueprint by
+ * (workspace_id, product_id, funnel_type) and render its skeleton via
+ * `BlueprintLander`. New funnel_type values land here as blueprints get
+ * built; the render is generic across funnel_types (block-by-block).
+ */
+const BLUEPRINT_VARIANTS = new Set<string>(["advertorial-listicle"]);
 
 /**
  * The single storefront route.
@@ -204,15 +224,27 @@ export default async function StorefrontProductPage({
   // `_sxv=<variantId>` is the edge-assigned PDP arm (pdp-edge-served-experiments):
   // the middleware sticky-assigned the visitor + rewrote to this variant-keyed URL
   // so each arm is a distinct cacheable render.
-  searchParams: Promise<{ variant?: string; angle?: string; sx_preview?: string; _sxv?: string }>;
+  // `preview=1` is the OWNER-GATED blueprint-lander preview (Phase 2 of the
+  // "build the {slug} lander" spec chain): only workspace_members.role='owner'
+  // may view a not-yet-promoted blueprint lander via this flag; every other
+  // visitor is 403'd. Without the flag the blueprint route is only reachable
+  // when its paired storefront_experiments row is serving traffic.
+  searchParams: Promise<{
+    variant?: string;
+    angle?: string;
+    sx_preview?: string;
+    _sxv?: string;
+    preview?: string;
+  }>;
 }) {
   const { workspace, slug } = await params;
   const sp = await searchParams;
 
   const variant: AdvertorialVariant | null =
     sp.variant === "advertorial" || sp.variant === "beforeafter" || sp.variant === "reasons" ? sp.variant : null;
-  const preview = !variant ? parsePreviewParam(sp.sx_preview) : null;
-  const isDynamic = Boolean(variant || preview);
+  const blueprintVariant = !variant && sp.variant && BLUEPRINT_VARIANTS.has(sp.variant) ? sp.variant : null;
+  const preview = !variant && !blueprintVariant ? parsePreviewParam(sp.sx_preview) : null;
+  const isDynamic = Boolean(variant || blueprintVariant || preview);
 
   // Bare PDP branch. Edge-served A/B (pdp-edge-served-experiments Phase 2):
   // assignment happens at the Vercel edge (middleware), NOT inline here — so the
@@ -232,6 +264,63 @@ export default async function StorefrontProductPage({
   let experimentExposures: ExperimentExposureMeta[] = [];
   let renderData = data;
   let advertorial = variant ? await loadAdvertorialContent(data, variant, sp.angle ?? null) : null;
+  let blueprint: BlueprintRenderContent | null = null;
+  if (blueprintVariant) {
+    // Blueprint lander: the ?variant= value matches lander_blueprints.funnel_type
+    // for a (workspace, product) pair Cleo authored + Carrie filled. When no
+    // matching content_complete row exists (or the blueprint's `content` isn't
+    // filled yet), 404 — a not-yet-public blueprint must not be reachable.
+    try {
+      blueprint = await loadBlueprintRenderContent(
+        data.workspace.id,
+        data.product.id,
+        blueprintVariant,
+      );
+    } catch {
+      blueprint = null;
+    }
+    if (!blueprint) notFound();
+
+    // Owner-gated preview vs. public visibility (Phase 2). Two disjoint gates,
+    // both narrowing to serving-state before the render can proceed:
+    //
+    //   • `?preview=1` → owner-only. Non-owner → 403. Content of the
+    //     underlying storefront_experiments row is irrelevant here — this is
+    //     the founder's pre-promotion review path.
+    //   • no preview flag → public iff the paired storefront_experiments row
+    //     is SERVING (status in ('running','promoted')). Every other status
+    //     (draft/killed/rolled_back) → 403 for non-owners; owners still pass
+    //     so the promoted-lander URL is verifiable end-to-end from the
+    //     owner's browser without the preview flag.
+    //
+    // The gate keys the storefront_experiments lookup on `lander_type`
+    // (mapped from the blueprint's funnel_type via the same helper Cleo used
+    // to write the row), so the render check and the wiring INSERT agree on
+    // the same predicate — no "the row exists but the render doesn't see it"
+    // drift.
+    const previewMode = sp.preview === "1";
+    const landerType = mapFunnelTypeToLanderType(blueprintVariant);
+    if (previewMode) {
+      const owner = await isWorkspaceOwner(data.workspace.id);
+      if (!owner) forbidden();
+    } else if (landerType) {
+      const served = await isBlueprintLanderPubliclyServed(
+        data.workspace.id,
+        data.product.id,
+        landerType,
+      );
+      if (!served) {
+        const owner = await isWorkspaceOwner(data.workspace.id);
+        if (!owner) forbidden();
+      }
+    } else {
+      // funnel_type doesn't map to a known lander_type → treated as
+      // not-yet-public regardless of DB state (a lander_type the optimizer
+      // can't wire is by definition never serving). Owner-only.
+      const owner = await isWorkspaceOwner(data.workspace.id);
+      if (!owner) forbidden();
+    }
+  }
 
   if (variant && advertorial) {
     // Ad-matched lander branch (advertorial / before-after / reasons): patch the
@@ -287,6 +376,7 @@ export default async function StorefrontProductPage({
       canonicalPath={canonical}
       reviewSlug={slug}
       advertorial={advertorial}
+      blueprint={blueprint}
       experimentExposures={experimentExposures}
     />
   );

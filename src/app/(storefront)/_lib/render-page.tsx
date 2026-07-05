@@ -40,8 +40,10 @@ import { AdvertorialChapter } from "../_sections/AdvertorialChapter";
 import { ReasonsListicle } from "../_sections/ReasonsListicle";
 import { BeforeAfterHero } from "../_sections/BeforeAfterHero";
 import { WeightLossTestimonialWall } from "../_sections/WeightLossTestimonialWall";
+import { BlueprintLander } from "../_sections/BlueprintLander";
 import { StickyJumpNav } from "../_components/StickyJumpNav";
 import type { AdvertorialContent } from "@/lib/advertorial-pages";
+import type { BlueprintRenderContent } from "@/lib/blueprint-render";
 import type { ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 // PriceTable is mid-page but interactive on first scroll — load its
@@ -86,6 +88,7 @@ export function StorefrontPage({
   canonicalPath,
   reviewSlug,
   advertorial = null,
+  blueprint = null,
   experimentExposures = [],
 }: {
   data: PageData;
@@ -95,6 +98,11 @@ export function StorefrontPage({
    *  instead of the standard PDP. The custom top swaps; everything below the
    *  custom top (ingredients, pricing, reviews, checkout) is reused unchanged. */
   advertorial?: AdvertorialContent | null;
+  /** When set, renders a blueprint-driven lander (whole-missing-funnel-type
+   *  authored by Cleo + filled by Carrie) instead of the standard PDP. Every
+   *  block above the SHARED-CHECKOUT closers (ingredients / pricing / reviews)
+   *  comes from `content.blocks[]` — no fallback derivation. */
+  blueprint?: BlueprintRenderContent | null;
   /** Storefront-experiment exposures resolved server-side (sticky assignment) for
    *  the client pixel to emit as `experiment_exposure` events. */
   experimentExposures?: ExperimentExposureMeta[];
@@ -160,7 +168,10 @@ export function StorefrontPage({
       />
       {/* Phase 2 instrumentation — observes [data-section] nodes for
           chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}
-      <StorefrontChapterTracker productId={data.product.id} pageVariant={advertorial?.variant ?? "pdp"} />
+      <StorefrontChapterTracker
+        productId={data.product.id}
+        pageVariant={blueprint ? "blueprint" : advertorial?.variant ?? "pdp"}
+      />
       {/* Phase 4 — behaviorally-triggered smart popup. Silent for
           decisive buyers; intervenes only on hesitation/indecision. */}
       <SmartPopup
@@ -171,10 +182,11 @@ export function StorefrontPage({
         benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
       />
 
-      {/* No storefront chrome on advertorial/before-after landers — the fixed
-          brand nav breaks the "native editorial article" illusion that makes an
-          advertorial convert. The masthead inside AdvertorialHero stands in for it. */}
-      {!advertorial && (
+      {/* No storefront chrome on advertorial/before-after/blueprint landers — the
+          fixed brand nav breaks the "native editorial article" illusion that
+          makes these landers convert. Their editorial hero/masthead stands in
+          for it. */}
+      {!advertorial && !blueprint && (
         <StorefrontHeader
           workspaceId={data.product.workspace_id}
           productId={data.product.id}
@@ -211,7 +223,25 @@ export function StorefrontPage({
           }
         >
           <main className="flex w-full flex-col">
-            {advertorial ? (
+            {blueprint ? (
+              <>
+                {/* Blueprint-driven lander: every above-the-fold block comes
+                    from lander_blueprints.content.blocks[] (Carrie's copy +
+                    resolved product_media). The SHARED-CHECKOUT closers
+                    (ingredients / pricing / reviews / final CTA) are reused
+                    unchanged so the buy-flow matches every other lander. */}
+                <BlueprintLander data={data} content={blueprint} />
+                <IngredientsSection data={data} />
+                <PriceTableSection data={data} />
+                <ReviewsSection
+                  data={data}
+                  slug={reviewSlug}
+                  workspaceSlug={data.workspace.storefront_slug || ""}
+                />
+                <FinalCTASection data={data} />
+                <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
+              </>
+            ) : advertorial ? (
               advertorial.variant === "reasons" ? (
                 <>
                   {/* "N reasons why" listicle lander: editorial hero → numbered
