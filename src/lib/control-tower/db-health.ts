@@ -1133,26 +1133,37 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     connection_saturation: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Active + waiting backends are eating a big fraction of \`max_connections\`. At this utilization, new sessions queue at the pooler or fail to connect (the customer-visible "DATABASE errors" class). The lever is compute tier (more max_connections + RAM headroom) OR a pgBouncer-style layer for short-lived sessions. Check whether the culprit is a genuine traffic spike vs a leaked pool before proposing a resize. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
   };
   const guidance = instanceGuidanceByCause[finding.cause] ?? fixGuidance[finding.fixKind];
+  // dbhealth-spec-evidence-survives-parse: the markdown MUST follow the proven author-spec shape or the
+  // parser mangles it — the INTENT paragraph FIRST (it, and only it, becomes `specs.summary`; a meta line
+  // placed before it gets swallowed as the summary), then the Owner/Parent + meta lines, then a SINGLE
+  // `## Phase 1` whose BODY carries the fix guidance + the EVIDENCE (as a `### Evidence` subsection — a
+  // top-level `## Evidence` section survives in NEITHER the summary NOR a phase body, so Bo saw an empty
+  // Evidence block and stalled needs_input). `### Verification` under the phase splits into the verification
+  // column. Evidence is never blank (a fallback marks it unavailable rather than emitting a hollow section).
+  const evidenceBlock = (finding.evidence || "").trim()
+    || "(evidence unavailable — the slow-query pass captured no query text / EXPLAIN plan for this signature; confirm the offender from pg_stat_statements before building.)";
   return [
     `# ${finding.specTitle} ⏳`,
     ``,
+    // Intent paragraph FIRST → becomes the summary (meta lines below can't be swallowed into it).
+    `The DB Health Agent flagged this read-only and proposes the fix below. It applied **zero** DDL/deletes — the owner approves the build. Impact: ${finding.impact}.`,
+    ``,
     // no-spec-parent: parent is the platform reliability MANDATE (a DB-health fix targets infra, not a spec).
-    // The provenance ("proposed by the DB Health Agent, surface-don't-apply") moves onto its own line below.
     `**Owner:** [[../functions/platform]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (owner-approval-only; the DB Health Agent surfaces reliability fixes, never auto-applies).`,
     `**DBHealth-signature:** \`${finding.signature}\``,
     `**DBHealth-fix:** \`${finding.fixKind}\``,
     `**Diagnosed cause:** \`${finding.cause}\` (${finding.category} pass) — a fix proposed by the [[../libraries/db-health|DB Health Agent]] ([[db-health-agent]]), surface-don't-apply.`,
     ``,
-    `The DB Health Agent flagged this read-only and proposes the fix below. It applied **zero** DDL/deletes — the owner approves the build. Impact: ${finding.impact}.`,
-    ``,
-    `## Evidence`,
-    finding.evidence,
-    ``,
     `## Phase 1 — ${finding.fixKind.replace(/_/g, " ")} ⏳`,
     guidance,
     `Gate on \`npx tsc --noEmit\`; land the brain page in the same PR.`,
     ``,
-    `## Verification`,
+    // Evidence lives INSIDE the phase body (a `### Evidence` subsection) so it survives the markdown→DB
+    // round-trip — this is exactly what Bo reads to author the CREATE INDEX / query rewrite safely.
+    `### Evidence`,
+    evidenceBlock,
+    ``,
+    `### Verification`,
     `- Build + deploy the fix → on the DB Health Agent's next pass, this signature (\`${finding.signature}\`) is **no longer flagged** (the seq-scan share / growth rate / dead-tuple ratio / mean time drops below threshold), and no duplicate proposal is created.`,
     ``,
     `> Proposed by the box DB Health Agent (signature \`${finding.signature}\`, cause \`${finding.cause}\`). Commission the build from the Control Tower DB Health panel.`,
