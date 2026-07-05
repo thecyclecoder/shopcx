@@ -19,6 +19,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Commerce SDK — Mutation operations + subscriptionX rename** · verified 2026-07-05 · → [[../lifecycles/commerce-sdk-core-build]]
 - **Scaffold src/lib/commerce SDK + centralize priceSubscription** · verified 2026-07-05 · → [[../libraries/pricing]]
 - **Reduce call volume / cache the hot query on query 5250820927256751610** · verified 2026-07-05 · → [[../libraries/db-health]]
+- **Build the Amazing Coffee advertorial-listicle lander from Cleo's blueprint** · verified 2026-07-05 · → [[lifecycles/lander-from-teardown]]
 - **Loyalty: program-wide stats + negative-balance guard on manual adjust** · verified 2026-07-05 · → [[../libraries/loyalty]]
 - **Pulse: session-authored recaps (stop trusting cheap-AI transcript skims)** · verified 2026-07-05 · → [[../libraries/pulse]] [[../libraries/pulse-digest]] [[../tables/pulse_session_digests]]
 - **/recap: deterministic current-session resolution** · verified 2026-07-05 · → [[../libraries/pulse-digest]]
