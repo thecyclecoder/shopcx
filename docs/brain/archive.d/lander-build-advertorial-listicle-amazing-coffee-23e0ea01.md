@@ -1,0 +1,1 @@
+- **Build the Amazing Coffee advertorial-listicle lander from Cleo's blueprint** · verified 2026-07-05 · → [[lifecycles/lander-from-teardown]]
