@@ -1,0 +1,1 @@
+- **Scaffold src/lib/commerce SDK + centralize priceSubscription** · verified 2026-07-05 · → [[../libraries/pricing]]
