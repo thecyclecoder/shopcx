@@ -12,9 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scaffold src/lib/commerce SDK + centralize priceSubscription** · verified 2026-07-05 · → [[../libraries/pricing]]
 - **Reduce call volume / cache the hot query on query 5250820927256751610** · verified 2026-07-05 · → [[../libraries/db-health]]
+- **Loyalty: program-wide stats + negative-balance guard on manual adjust** · verified 2026-07-05 · → [[../libraries/loyalty]]
 - **Pulse: session-authored recaps (stop trusting cheap-AI transcript skims)** · verified 2026-07-05 · → [[../libraries/pulse]] [[../libraries/pulse-digest]] [[../tables/pulse_session_digests]]
 - **/recap: deterministic current-session resolution** · verified 2026-07-05 · → [[../libraries/pulse-digest]]
+- **Route subscription coupon apply/remove through the internal-vs-Appstle dispatcher** · verified 2026-07-05 · → [[../libraries/subscription-items]]
 - **Harden the Bo agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[../recipes/build-box-setup#bo-agents-durable-mandate]]
 - **Harden the Vale agent — roll persistent coaching into its mandate** · verified 2026-07-04 · → [[libraries/agents-spec-review]]
 - **Carrie — DR content session (copy + AI imagery + real-asset gap flags)** · verified 2026-07-04 · → [[../functions/growth]]

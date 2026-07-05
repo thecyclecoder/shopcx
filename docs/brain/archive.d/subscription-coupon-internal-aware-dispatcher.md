@@ -1,0 +1,1 @@
+- **Route subscription coupon apply/remove through the internal-vs-Appstle dispatcher** · verified 2026-07-05 · → [[../libraries/subscription-items]]
