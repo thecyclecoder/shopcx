@@ -83,20 +83,27 @@ export const SLIDING_TTL_MS = 20 * 60 * 1000;
 /** Hard ceiling — arm() + 12h. Never bumped; the reaper force-disarms past this. */
 export const ABSOLUTE_TTL_MS = 12 * 60 * 60 * 1000;
 
+// 'checklist' is a live progress widget the box emits at the start of a turn and
+// checks off as it works (content = JSON `{title, steps:[{label,state}]}`). It keeps
+// the founder from staring at a blank screen. The three text roles are unchanged.
 export type GodModeMessage = {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "checklist";
   content: string;
   ts: string;
 };
 
 export type GodModeStatus = "armed" | "disarmed" | "expired";
 
-// 'plan' is a plain-language, founder-approved UNIT OF WORK (not a single tool
-// call). While a session's active_plan_id points at an approved plan row, the box
-// gate auto-allows the non-destructive mechanical calls that implement it — the
-// founder approves the DECISION once instead of every keystroke. 'plan' never
-// triggers the destructive PIN gate (only 'destructive' does).
-export type GodModeApprovalRisk = "safe" | "write" | "destructive" | "plan";
+// The god-mode approval risk tiers:
+//   • 'safe'/'write' — legacy per-tool-call cards (the CEO-grade model no longer
+//     raises these; the gate now allows all non-catastrophic work outright).
+//   • 'destructive' — the deterministic CATASTROPHIC FLOOR (DROP/TRUNCATE/mass-DELETE/
+//     rm -rf/force-push/db reset). ALWAYS PIN-gated, never standing-grantable.
+//   • 'decision' — a box-initiated, plain-language CEO-grade decision ("ok to ship
+//     this hotfix?"). Carries a `category`; the founder can grant it standing approval
+//     ("don't ask again") so future decisions in that category auto-approve.
+//   • 'plan' — legacy plan-scoped card (retained for back-compat render).
+export type GodModeApprovalRisk = "safe" | "write" | "destructive" | "plan" | "decision";
 export type GodModeApprovalStatus = "pending" | "approved" | "denied" | "asked";
 
 export type GodModeApprovalRow = {
@@ -111,10 +118,24 @@ export type GodModeApprovalRow = {
   question_text: string | null;
   decided_at: string | null;
   created_at: string;
+  // The plain-language category a 'decision' card belongs to (null for legacy
+  // safe/write/destructive/plan rows). Keyed on by standing grants — "don't ask
+  // again about this type" grants the category, and a future decision in the same
+  // category auto-approves.
+  category: string | null;
   // When the 5-min "still waiting" nudge SMS fired for this pending row (null =
   // not yet nudged). See `nudgeStalePendingApprovals`. We deliberately do NOT
   // text on insert anymore — only if it sits unanswered 5+ min.
   sms_notified_at: string | null;
+};
+
+/** One founder "don't ask again" standing approval — a granted decision category. */
+export type GodModeStandingGrant = {
+  id: string;
+  workspace_id: string;
+  category: string;
+  granted_by: string | null;
+  created_at: string;
 };
 
 export type GodModeSessionRow = {
@@ -351,6 +372,7 @@ export async function openApproval(
     toolInput: Record<string, unknown>;
     preview: string;
     risk: GodModeApprovalRisk;
+    category?: string | null;
   },
 ): Promise<GodModeApprovalRow> {
   const { data, error } = await admin
@@ -362,6 +384,7 @@ export async function openApproval(
       tool_input: args.toolInput,
       preview: args.preview,
       risk: args.risk,
+      category: args.category ?? null,
       status: "pending",
     })
     .select("*")
@@ -484,6 +507,210 @@ export async function openPlan(
     preview,
     risk: "plan",
   });
+}
+
+// ── CEO-grade decisions + standing grants ("don't ask again") ──────────────
+//
+// The CEO-grade model: the box does all ordinary work with NO approval and
+// escalates only genuine CEO-grade DECISIONS in plain language, via a
+// `risk='decision'` card carrying a plain-language `category`. The founder can
+// grant a category STANDING approval ("don't ask again"); a future decision in
+// that category auto-approves without a card. The destructive floor is a
+// SEPARATE tier (`risk='destructive'`, deterministic gate + PIN) that is never
+// standing-grantable — so "don't ask again" can never grant catastrophic power.
+
+/** Normalize a category label so "Dismiss Stale" and "dismiss stale" match one grant. */
+export function normalizeCategory(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 80);
+}
+
+/**
+ * Raise a plain-language CEO decision card and return it. The box's decision
+ * primitive (`scripts/god-mode-plan.ts decide`) calls this AFTER checking
+ * `isCategoryStandingGranted` — so a card only lands when the founder hasn't
+ * already granted the category standing approval.
+ */
+export async function openDecision(
+  admin: Admin,
+  args: {
+    sessionId: string;
+    workspaceId: string;
+    question: string;
+    detail?: string;
+    category: string;
+  },
+): Promise<GodModeApprovalRow> {
+  const preview = args.detail && args.detail.trim() ? `${args.question}\n\n${args.detail.trim()}` : args.question;
+  return openApproval(admin, {
+    sessionId: args.sessionId,
+    workspaceId: args.workspaceId,
+    toolName: "Decision",
+    toolInput: { question: args.question, detail: args.detail ?? "", category: args.category },
+    preview,
+    risk: "decision",
+    category: normalizeCategory(args.category),
+  });
+}
+
+/** Is this decision category on the workspace's "don't ask again" allowlist? */
+export async function isCategoryStandingGranted(
+  admin: Admin,
+  workspaceId: string,
+  category: string,
+): Promise<boolean> {
+  const cat = normalizeCategory(category);
+  if (!cat) return false;
+  const { data } = await admin
+    .from("god_mode_standing_grants")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("category", cat)
+    .maybeSingle();
+  return !!data;
+}
+
+/** List the workspace's standing grants (the "don't ask again" allowlist), newest first. */
+export async function listStandingGrants(admin: Admin, workspaceId: string): Promise<GodModeStandingGrant[]> {
+  const { data } = await admin
+    .from("god_mode_standing_grants")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false });
+  return (data as GodModeStandingGrant[] | null) ?? [];
+}
+
+/** Grant a decision category standing approval (idempotent on the unique key). */
+export async function grantStanding(
+  admin: Admin,
+  args: { workspaceId: string; category: string; grantedBy?: string | null },
+): Promise<void> {
+  const cat = normalizeCategory(args.category);
+  if (!cat) return;
+  await admin
+    .from("god_mode_standing_grants")
+    .upsert(
+      { workspace_id: args.workspaceId, category: cat, granted_by: args.grantedBy ?? null },
+      { onConflict: "workspace_id,category" },
+    );
+}
+
+/** Revoke a standing grant (the founder wants to be asked again about this category). */
+export async function revokeStanding(admin: Admin, args: { workspaceId: string; category: string }): Promise<void> {
+  await admin
+    .from("god_mode_standing_grants")
+    .delete()
+    .eq("workspace_id", args.workspaceId)
+    .eq("category", normalizeCategory(args.category));
+}
+
+// ── Live checklist + notes (the "so you're never left wondering" surface) ──
+//
+// The box emits a checklist at the start of a turn and checks it off as it works,
+// so the founder watches progress instead of a blank screen. A checklist is ONE
+// message with role='checklist' whose content is JSON `{title, steps:[{label,state}]}`
+// (state ∈ 'pending'|'active'|'done'); the box updates it in place via the progress
+// primitive. `note` appends a plain confirmation line (role='system').
+
+export type ChecklistStepState = "pending" | "active" | "done";
+export type ChecklistPayload = { title: string; steps: { label: string; state: ChecklistStepState }[] };
+
+/** Find the index of the LAST checklist message in a transcript (or -1). */
+function lastChecklistIndex(messages: GodModeMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "checklist") return i;
+  return -1;
+}
+
+/** Emit a fresh checklist (title + steps, first step active). Appends a role='checklist' message. */
+export async function startChecklist(
+  admin: Admin,
+  sessionId: string,
+  args: { title: string; steps: string[] },
+): Promise<void> {
+  const steps = args.steps.map((s) => s.trim()).filter(Boolean);
+  const payload: ChecklistPayload = {
+    title: args.title.trim(),
+    steps: steps.map((label, i) => ({ label, state: i === 0 ? "active" : "pending" })),
+  };
+  await appendMessage(admin, sessionId, { role: "checklist", content: JSON.stringify(payload), ts: new Date().toISOString() });
+}
+
+/** Mark step N (1-based) done + advance the next to active. Updates the last checklist message in place. */
+export async function checklistStep(admin: Admin, sessionId: string, stepNumber: number): Promise<void> {
+  const { data } = await admin.from("god_mode_sessions").select("messages").eq("id", sessionId).maybeSingle();
+  const messages = Array.isArray(data?.messages) ? (data!.messages as GodModeMessage[]) : [];
+  const idx = lastChecklistIndex(messages);
+  if (idx < 0) return;
+  let payload: ChecklistPayload;
+  try {
+    payload = JSON.parse(messages[idx].content) as ChecklistPayload;
+  } catch {
+    return;
+  }
+  const i = stepNumber - 1;
+  if (i < 0 || i >= payload.steps.length) return;
+  payload.steps[i].state = "done";
+  const next = payload.steps.find((s) => s.state !== "done");
+  if (next) next.state = "active";
+  messages[idx] = { ...messages[idx], content: JSON.stringify(payload) };
+  await admin.from("god_mode_sessions").update({ messages, last_activity_at: new Date().toISOString() }).eq("id", sessionId);
+}
+
+/** Mark every step of the last checklist done. */
+export async function finishChecklist(admin: Admin, sessionId: string): Promise<void> {
+  const { data } = await admin.from("god_mode_sessions").select("messages").eq("id", sessionId).maybeSingle();
+  const messages = Array.isArray(data?.messages) ? (data!.messages as GodModeMessage[]) : [];
+  const idx = lastChecklistIndex(messages);
+  if (idx < 0) return;
+  let payload: ChecklistPayload;
+  try {
+    payload = JSON.parse(messages[idx].content) as ChecklistPayload;
+  } catch {
+    return;
+  }
+  payload.steps = payload.steps.map((s) => ({ ...s, state: "done" }));
+  messages[idx] = { ...messages[idx], content: JSON.stringify(payload) };
+  await admin.from("god_mode_sessions").update({ messages, last_activity_at: new Date().toISOString() }).eq("id", sessionId);
+}
+
+/** Append a plain-language confirmation line to the transcript (role='system'). */
+export async function appendNote(admin: Admin, sessionId: string, text: string): Promise<void> {
+  await appendMessage(admin, sessionId, { role: "system", content: text.trim(), ts: new Date().toISOString() });
+}
+
+/** The plain-language headline for an approval card (the decision question, or the preview's first line). */
+export function plainApprovalLabel(a: GodModeApprovalRow): string {
+  const q = typeof a.tool_input?.question === "string" ? (a.tool_input.question as string) : "";
+  return (q || a.preview.split("\n")[0] || a.tool_name).trim();
+}
+
+/**
+ * Log the founder's decision back into the chat, so the transcript keeps a running
+ * record of every approval asked + his answer (the confirmation of what was DONE is
+ * posted separately by the box via `appendNote`). Plain language, no jargon.
+ */
+export async function logApprovalDecision(
+  admin: Admin,
+  sessionId: string,
+  args: {
+    approval: GodModeApprovalRow;
+    decision: "approve" | "deny" | "ask";
+    questionText?: string;
+    grantedStanding?: boolean;
+  },
+): Promise<void> {
+  const label = plainApprovalLabel(args.approval);
+  let line: string;
+  if (args.decision === "approve") {
+    line = args.approval.risk === "destructive" ? `✅ You approved (with PIN): ${label}` : `✅ You approved: ${label}`;
+  } else if (args.decision === "deny") {
+    line = `🚫 You declined: ${label}`;
+  } else {
+    line = `❓ You asked: ${(args.questionText ?? "").trim()}`;
+  }
+  await appendNote(admin, sessionId, line);
+  if (args.grantedStanding && args.approval.category) {
+    await appendNote(admin, sessionId, `📌 Won't ask again about "${args.approval.category}".`);
+  }
 }
 
 /**
