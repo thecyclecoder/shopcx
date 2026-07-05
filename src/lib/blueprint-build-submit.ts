@@ -191,8 +191,8 @@ interface BuildSpecArtifact {
 
 /**
  * Author the deterministic build spec off a verified blueprint. The spec is one owner
- * (`growth`), one parent (the acquisition-research-engine goal — Cleo's landers hang off
- * that goal by design), and three phases mirroring the storefront lander build steps: build
+ * (`growth`), one parent (Growth's `ad-matched-landing-pages` mandate — a build-a-lander spec
+ * is not milestone-bound), and three phases mirroring the storefront lander build steps: build
  * the addressable page + wire it as an ad destination, owner-gated preview, and a fold-once-
  * live pass. Slug is `lander-build-{funnel}-{product}-{shortid}` — collision-safe by embedding
  * the blueprint id's tail.
@@ -267,7 +267,7 @@ Build the ${productTitle} ${blueprint.funnel_type} lander from lander_blueprints
     title: `Build the ${productTitle} ${blueprint.funnel_type} lander from Cleo's blueprint`,
     summary,
     owner: "growth",
-    parent: "[[../goals/acquisition-research-engine]]",
+    parent: "[[../functions/growth#ad-matched-landing-pages]] — the Ad-matched landing pages mandate (Growth operates; Ada/Platform builds — [[../functions/platform]]).",
     why: specWhy,
     what: specWhat,
     phases: [phaseRender, phasePreview, phaseQA],
@@ -355,11 +355,11 @@ export async function verifyAndSubmitBlueprint(
   const { slug, input } = composeBuildSpec(blueprint, productTitle, productHandle);
   const authored = await authorSpecRowStructured(workspaceId, slug, input, "planned", {
     intendedStatusSetBy: "cleo:content-upload-and-lander-build",
-    parentKind: "milestone",
-    // The parent is a wikilink to the goal; parentRef would carry a goal_milestones.id when
-    // Cleo has an explicit milestone binding. Left null here — the parent wikilink is enough
-    // for a Vale/Ada read (the goal planner attaches specs to milestones separately).
-    parentRef: null,
+    parentKind: "mandate",
+    // A build-a-lander spec is NOT milestone-bound — it parents to Growth's `ad-matched-landing-pages`
+    // MANDATE. (The old bare-goal parent + parentKind:"milestone" slipped the write gate but Vale bounced
+    // it every pass, since a bare goal resolves to no real milestone — see assertValidParent.)
+    parentRef: "growth#ad-matched-landing-pages",
   });
   if (!authored) {
     return { status: "error", blueprint_id: blueprint.id, reason: `authorSpecRowStructured returned false for slug ${slug}` };
