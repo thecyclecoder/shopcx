@@ -2541,6 +2541,15 @@ async function reapOrphanWorktrees() {
 }
 
 async function reapOrphans() {
+  // box-primary-checkout-branch-wedge-self-heal (Phase 3) — STARTUP ASSERTION: on every worker boot,
+  // verify REPO_DIR is on main + clean; heal (never silently accept) an off-main / dirty primary. A
+  // prior worker (or an ad-hoc human step, or a botched brain-page generation — the 2026-07-05 wedge)
+  // may have left REPO_DIR parked on a feature branch; without this check the next build claim would
+  // still catch it via ensurePrimaryOnMain, but a regression that manifests OUTSIDE the build path
+  // (spec-chat / plan / fold, which read REPO_DIR via git-show / git-diff on origin/*) would silently
+  // observe stale tree state. Belt-and-suspenders with the periodic tick below in reapStaleSessions.
+  ensurePrimaryOnMain("[startup]");
+
   // 1) Orphaned in-flight JOBS from a previous instance.
   const { data, error } = await db
     .from("agent_jobs")
@@ -2601,6 +2610,18 @@ async function reapOrphans() {
 // released the slot when the dead process exited (or it died with the whole process — counter gone).
 const REAP_STALE_STATUSES = ["building", "claimed", "queued_resume"] as const;
 async function reapStaleSessions(active: Map<string, { kind: Job["kind"] }>) {
+  // box-primary-checkout-branch-wedge-self-heal (Phase 3) — PERIODIC ASSERTION: on every stale-session
+  // sweep tick (~1min throttle, poll loop) verify the PRIMARY REPO_DIR checkout is on main + clean;
+  // heal on drift. Startup + build-claim callers still guarantee coverage; this catches a regression
+  // that flips REPO_DIR off-main between claims (e.g. a bug in a non-build path that runs a git
+  // command with cwd defaulted to REPO_DIR). Fast when healthy (single rev-parse + status --porcelain),
+  // loud + heal-in-place on drift — never a silent wedge. Best-effort: a heal-internal crash must NEVER
+  // break the reaper tick, so wrap it.
+  try {
+    ensurePrimaryOnMain("[reaper-tick]");
+  } catch (e) {
+    console.error("[reaper] primary-on-main assertion threw (continuing):", e instanceof Error ? e.message : e);
+  }
   const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
   // Pull in-flight rows whose heartbeat (or, if never set, updated_at) is older than the cutoff. We OR
   // the two so a pre-migration row with a NULL heartbeat still qualifies via updated_at. Capped — a tick
