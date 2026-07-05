@@ -40,10 +40,13 @@ description: Use inside a live Claude Code session — invoked by `/recap` — t
    ```
 
    The script:
-   - Resolves the current `session_id` by finding the newest `*.jsonl` under `~/.claude/projects/{cwd-slug}/` (the file being actively appended to as you speak) — pass `--session-id={id}` to override if that heuristic is wrong.
+   - Resolves the current `session_id` **deterministically** — no more newest-by-mtime guessing (that misfired on 2026-07-05 and overwrote a concurrent session's row). Priority order:
+     1. `--session-id={id}` — explicit caller override.
+     2. `process.env.CLAUDE_CODE_SESSION_ID` — the harness's own signal (Claude Code sets it to the current session UUID, which is exactly the `*.jsonl` basename under `~/.claude/projects/{cwd-slug}/`).
+     3. mtime fallback — **only** when neither of the above is available AND **exactly one** transcript was modified in the last ~60s. Two-or-more → the script refuses and exits non-zero with the ambiguity error; pass `--session-id=…` to disambiguate.
    - Upserts on `(workspace_id, session_id)` via `upsertDigestRow` — SAME spine as the ingest → one row per session, no duplicates.
    - Stamps `digest_model='session-authored'` — the Phase-2 guard marker.
-   - Prints one summary line: `[pulse-recap] upserted session=… workspace=… digest_model=session-authored threads=N refs=M`.
+   - Prints one summary line: `[pulse-recap] upserted session=… via={flag|harness-env|mtime-unique} workspace=… digest_model=session-authored threads=N refs=M`. The `via=` field surfaces which resolver step fired so you can tell a real harness resolution from a mtime fallback at a glance.
 
 4. **Read back the summary line** and tell the founder what landed (session id, thread count, ref count). If the script exits non-zero, surface the error — do not retry blindly.
 
@@ -54,6 +57,7 @@ description: Use inside a live Claude Code session — invoked by `/recap` — t
 - **Don't re-open a `.jsonl`.** You already know what happened. Reading the transcript makes you paraphrase yourself — the whole point of session-authored is *witnessed*, not re-derived.
 - **Don't run `/recap` twice reflexively.** The upsert is idempotent — a second run just overwrites in place. Fine when the founder asks for a refresh; noisy if you self-trigger.
 - **Read-only against every table other than `pulse_session_digests`.** This skill writes ONE row on the (workspace, session) spine and touches nothing else.
+- **Refuse-on-ambiguity, don't guess.** If the script exits with `refusing to guess the current session_id: N transcripts were modified in the last 60s`, do NOT retry with a shorter window or a --project-dir hack — that's the exact class of guess the 2026-07-05 incident produced. Pass `--session-id=…` (grab it from `CLAUDE_CODE_SESSION_ID` or the `~/.claude/projects/{cwd-slug}/{uuid}.jsonl` filename) and re-run.
 
 ## Related
 
