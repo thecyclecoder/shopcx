@@ -58,20 +58,18 @@ export default function LoyaltyPage() {
 
   useEffect(() => { fetchMembers(); }, [fetchMembers]);
 
-  // Fetch aggregate stats
+  // Fetch program-wide aggregate stats — server-side SUM/AVG over ALL loyalty_members via
+  // /api/loyalty/stats. Previously summed a 250-row sample on the client, which was wrong for
+  // any workspace with >250 members (loyalty-list-stats-and-adjust-guard.md Phase 1).
   useEffect(() => {
-    fetch(`/api/loyalty/members?workspace_id=${workspace.id}&limit=250&sort=points_balance&order=desc`)
+    fetch(`/api/loyalty/stats?workspace_id=${workspace.id}`)
       .then((r) => r.json())
       .then((d) => {
-        const mems: LoyaltyMember[] = d.members || [];
-        const totalPts = mems.reduce((sum, m) => sum + m.points_balance, 0);
-        const totalEarned = mems.reduce((sum, m) => sum + m.points_earned, 0);
-        const avgPts = mems.length > 0 ? Math.round(totalPts / mems.length) : 0;
         setStats({
-          total_members: d.total || 0,
-          total_points: totalPts,
-          earned_month: totalEarned,
-          avg_points: avgPts,
+          total_members: d.total_members || 0,
+          total_points: d.total_points || 0,
+          earned_month: d.total_earned || 0,
+          avg_points: d.avg_points || 0,
         });
       })
       .catch(() => {});
