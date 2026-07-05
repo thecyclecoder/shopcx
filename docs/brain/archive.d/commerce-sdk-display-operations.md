@@ -1,0 +1,1 @@
+- **Commerce SDK — Display operations** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]]

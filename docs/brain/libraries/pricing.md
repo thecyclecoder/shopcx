@@ -41,11 +41,15 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 - **protection** — billed/displayed from the sub's `shipping_protection_added` + `_amount_cents` **columns** (the renewal + engine read the column), so it's excluded from the product subtotal. For **internal** subs the portal toggle is column-based (`route=shippingProtection`) — NOT a line item — so the toggle, the order summary, and billing share one source of truth. (Appstle subs keep the line-item add/remove flow.) A protection *item* in `items` is legacy and gets excluded from the subtotal by title match.
 - **gift** — `is_gift` → $0. (Free gifts are a storefront concern, passthrough here.)
 
-## Display layer — `portal/helpers/enrich-pricing.ts`
+## Display layer — `portal/helpers/enrich-pricing.ts` and `commerce/*.ts` reads
 
-`priceSubscription(workspaceId, sub)` is the shape-agnostic core for the **portal display**: it returns a per-line `{ base_cents, unit_cents }` map (keyed by line_id + variant_id) and an order-level summary (`subtotal / discount / shipping / protection / total / free_shipping / pills`). It runs the engine for internal subs and uses the baked item prices for Appstle subs. Consumers:
+`priceSubscription(workspaceId, sub)` is the shape-agnostic core for all enriched displays: it returns a per-line `{ base_cents, unit_cents }` map (keyed by line_id + variant_id) and an order-level summary (`subtotal / discount / shipping / protection / total / free_shipping / pills`). It runs the engine for internal subs and uses the baked item prices for Appstle subs. 
+
+**Portal display consumers** (`enrichContractPricing`):
 - `enrichContractPricing(...)` — API-handler wrapper; writes `currentPrice` + `basePrice` onto `contract.lines`. Used by [[portal__handlers__subscriptions]] (list) and [[portal__handlers__subscription-detail]].
 - `page.tsx` (mini-site server render) calls `priceSubscription` directly and maps onto `PortalSubscription.items[].{price_cents, base_price_cents}` + `pricing`. **The mini-site list paints from page.tsx, not the API handler — both paths must price.**
+
+**Non-portal surfaces** (dashboard, ticket, AI, APIs) now read through the unified [[./commerce__subscription]], [[./commerce__order]], etc. Display operations. These surfaces consume `SubscriptionView`, `OrderView`, etc. returned by `getSubscription`, `listSubscriptions`, `getOrder`, `listOrders`, etc. — every view is pre-priced by the same `priceSubscription` engine. The Commerce SDK's Display layer is the single unified read surface; calling `priceSubscription` directly outside the SDK is a bypass.
 
 **Discount pills** (`pricing.discounts`): `{kind, label}` — `25% Subscribe & Save`, `8% OFF Buy 2` (active quantity-break tier), `Free Shipping`, plus a `coupon` pill appended from `applied_discounts`. Pills render in a row under the per-delivery total on **both** the list card and the detail header, and **re-derive on mutation** — the detail screen reloads from the list endpoint after every action, so swapping a product or changing quantity updates the tier (e.g. Buy 2 → Buy 3).
 
