@@ -1048,42 +1048,41 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+    const { refundOrder } = await import("@/lib/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
-    const r = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id!, p.amount_cents!, reason);
-    if (r.success) {
-      await notifySlack(ctx, p, amountDecimal);
-      // Prevent a DOUBLE refund: if this order already has an open return set to
-      // refund on receipt, mark it already-refunded (pointing at this refund) so
-      // the returns pipeline doesn't refund the customer a SECOND time when the
-      // product is delivered back. (Sonia Stevens, SC132396: a direct goodwill
-      // refund + a `refund_return` on the same order would have refunded twice.)
-      try {
-        const oid = String(p.shopify_order_id);
-        const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
-        const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
-        if (ord?.id) {
-          await ctx.admin.from("returns")
-            .update({ refund_id: r.braintreeRefundId || "direct_refund", refunded_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-            .eq("order_id", ord.id)
-            .is("refunded_at", null);
-        }
-      } catch (e) {
-        console.error("[partial_refund] failed to mark existing return as refunded:", e);
-      }
-    }
+    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+    if (!p.amount_cents) return { success: false, error: "Missing amount_cents" };
+
+    // Resolve internal order UUID — refundOrder takes our internal
+    // orders.id, never the human-facing shopify_order_id / order_number.
+    const oid = String(p.shopify_order_id);
+    const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
+    if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+
+    // refundOrder dispatches on the order's gateway (Braintree /
+    // Shopify), preserves the double-refund guard (stamps refunded_at
+    // on open returns), and logs the customer_events row.
+    const r = await refundOrder(ctx.workspaceId, ord.id, p.amount_cents, reason, {
+      source: "ai",
+      customerId: ctx.customerId,
+      eventProperties: { ticket_id: ctx.ticketId },
+    });
+    if (r.success) await notifySlack(ctx, p, amountDecimal);
+
     // When the refund went directly through Braintree (Shopify's native
     // Braintree refund is broken), record that on the ticket so agents/AI
     // reading the thread know the money moved off-Shopify, with the Braintree
     // refund id for reconciliation. Note any failed Shopify-side bookkeeping.
     let methodNote = "";
     if (r.success && r.method === "braintree") {
-      methodNote = ` — refunded directly via Braintree${r.braintreeRefundId ? ` (txn ${r.braintreeRefundId})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
+      methodNote = ` — refunded directly via Braintree${r.refund_id ? ` (txn ${r.refund_id})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
     }
     return {
-      ...r,
+      success: r.success,
+      error: r.error,
       summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}` : undefined,
       // Drives {{refund_amount}} substitution in response_message. Without
       // this, the placeholder leaked through verbatim — see ticket
@@ -1094,7 +1093,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+    const { refundOrder } = await import("@/lib/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1116,7 +1115,7 @@ export const directActionHandlers: Record<
     if (!validation.valid) return { success: false, error: validation.error };
 
     const { data: order } = await ctx.admin.from("orders")
-      .select("order_number, total_cents, financial_status")
+      .select("id, order_number, total_cents, financial_status")
       .eq("workspace_id", ctx.workspaceId).eq("shopify_order_id", p.shopify_order_id).single();
     if (!order) return { success: false, error: "Order not found" };
     if (order.financial_status === "refunded") return { success: false, error: "Order already fully refunded" };
@@ -1124,8 +1123,12 @@ export const directActionHandlers: Record<
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
 
-    const refund = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id, amountCents, reason);
-    if (!refund.success) return { ...refund, summary: undefined };
+    const refund = await refundOrder(ctx.workspaceId, order.id, amountCents, reason, {
+      source: "ai",
+      customerId: ctx.customerId,
+      eventProperties: { ticket_id: ctx.ticketId, loyalty_tier: tier.label, points_spent: tier.points_cost },
+    });
+    if (!refund.success) return { success: false, error: refund.error };
 
     await spendPoints(member, tier.points_cost, `Redeemed for partial refund on order #${order.order_number}`, null);
 

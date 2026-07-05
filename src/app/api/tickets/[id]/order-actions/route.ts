@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
-import { refundOrder, cancelOrder, updateShippingAddress } from "@/lib/shopify-order-actions";
+import { cancelOrder, updateShippingAddress } from "@/lib/shopify-order-actions";
+import { refundOrder } from "@/lib/refund";
 
 export async function POST(
   request: Request,
@@ -56,15 +57,51 @@ export async function POST(
 
   switch (action) {
     case "refund": {
-      result = await refundOrder(workspaceId, order_id, {
-        full: options.full,
-        lineItems: options.line_items,
-        reason: options.reason,
-        notify: options.notify,
+      // The UI sends `order_id = orders.shopify_order_id` — resolve to
+      // the internal orders.id that refundOrder takes.
+      const { data: dbOrder } = await admin.from("orders")
+        .select("id, total_cents")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_order_id", String(order_id))
+        .maybeSingle();
+      if (!dbOrder?.id) {
+        result = { success: false, error: `Order not found for shopify_order_id ${order_id}` };
+        noteText = `Refund failed for order ${orderLabel}: ${result.error}`;
+        break;
+      }
+      // Compute amount from `full: true` (order total) or an explicit
+      // `amount_cents`. Line-item-scoped refunds go through the
+      // dispatcher too — the caller resolves the sum first and passes
+      // amount_cents (raw line-item refund mutations are retired per
+      // the Phase-3 refund-dispatcher spec).
+      let amountCents = 0;
+      if (typeof options.amount_cents === "number" && options.amount_cents > 0) {
+        amountCents = options.amount_cents;
+      } else if (options.full) {
+        amountCents = dbOrder.total_cents || 0;
+      } else if (Array.isArray(options.line_items) && options.line_items.length) {
+        result = { success: false, error: "Line-item refunds must pass a computed amount_cents; raw line-item refund mutations are retired (see src/lib/refund.ts)." };
+        noteText = `Refund failed for order ${orderLabel}: ${result.error}`;
+        break;
+      } else {
+        result = { success: false, error: "Refund requires full=true, amount_cents, or line_items with a resolved amount_cents" };
+        noteText = `Refund failed for order ${orderLabel}: ${result.error}`;
+        break;
+      }
+      if (amountCents <= 0) {
+        result = { success: false, error: `Refund amount resolved to $0 — order total_cents is ${dbOrder.total_cents}` };
+        noteText = `Refund failed for order ${orderLabel}: ${result.error}`;
+        break;
+      }
+      const reason = options.reason || (options.full ? "Full refund" : "Partial refund");
+      const r = await refundOrder(workspaceId, dbOrder.id, amountCents, reason, {
+        source: "agent",
+        eventProperties: { ticket_id: ticketId, agent_name: agentName, action: "ticket_order_actions" },
       });
-      noteText = result.success
-        ? `Order ${orderLabel} ${options.full ? "fully" : "partially"} refunded by ${agentName}`
-        : `Refund failed for order ${orderLabel}: ${result.error}`;
+      result = { success: r.success, error: r.error };
+      noteText = r.success
+        ? `Order ${orderLabel} ${options.full ? "fully" : "partially"} refunded by ${agentName} via ${r.method}`
+        : `Refund failed for order ${orderLabel}: ${r.error}`;
       break;
     }
     case "cancel": {

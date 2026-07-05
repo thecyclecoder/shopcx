@@ -1,40 +1,39 @@
-// Gateway-aware refund dispatcher.
+// Gateway-aware refund dispatcher — the ONLY refund entry point.
 //
-// Every refund entry point in the codebase (returns Inngest, 30-day
-// playbook, AI partial_refund, ticket-detail Improve tab, goodwill,
-// fraud offsets) must resolve to `refundOrder` — the ONE wrapper that
+// Every refund path in the codebase (returns Inngest, 30-day playbook
+// downstream, AI direct_action, ticket-detail Improve tab, manual
+// return-refund route, fraud offsets) resolves to `refundOrder`. It
 // asks the order which gateway paid it, then routes the mutation:
 //
 //   - Internal order (SHOPCX*, no `shopify_order_id`, has
 //     `braintree_transaction_id`) → refundBraintreeTransaction()
 //     (Braintree API refund of the specific transaction id).
 //   - Shopify order (has `shopify_order_id`) → partialRefundByAmount()
-//     from `src/lib/shopify-order-actions.ts`, which internally probes
-//     the Shopify sale transaction and further re-routes to Braintree
-//     when the Shopify gateway is Braintree (the Shopify↔Braintree
-//     connection is dead — see the SC128233 phantom-refund incident
-//     in shopify-order-actions.ts).
+//     from `src/lib/shopify-order-actions.ts`. That helper probes the
+//     Shopify sale transaction: healthy gateway → Shopify REST refund;
+//     Braintree gateway → returns { needsBraintreeFallback: true,
+//     braintreeTxnId } so THIS wrapper executes the Braintree refund
+//     + recordManualRefund bookkeeping itself (the Shopify↔Braintree
+//     connection is dead — SC128233 phantom refund).
 //
-// This mirrors the returns Inngest `issue-refund` step (the reference
-// implementation documented in docs/brain/lifecycles/return-pipeline.md
-// § Phase 4). Phase 3 will migrate every enumerated caller onto this
-// wrapper so nothing outside src/lib/refund.ts, shopify-order-actions.ts,
-// and integrations/braintree.ts can fire a refund mutation.
+// Contract with the SDK boundary: `refundBraintreeTransaction` is
+// called ONLY from this file and from `src/lib/integrations/braintree.ts`
+// (its definition). The Shopify REST refund POST and any Shopify
+// refund mutations live ONLY inside `src/lib/shopify-order-actions.ts`.
+// Nothing else in the codebase touches a refund mutation.
 //
 // Double-refund guard: on success, stamp `refund_id` + `refunded_at`
 // on any open (`refunded_at IS NULL`) return for this order in this
 // workspace, so the returns pipeline can't refund the customer a
-// second time when the product comes back. Same guard as the
-// `partial_refund` direct_action in action-executor.ts (added after
-// the Sonia Stevens SC132396 double-refund near-miss — see
-// docs/brain/operational-rules.md § Returns).
+// second time when the product comes back. See
+// docs/brain/operational-rules.md § Returns (Sonia Stevens SC132396).
 //
 // Customer event: on success, write one `order.refunded` row into
 // customer_events so the timeline shows the refund + method + reason.
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { refundBraintreeTransaction } from "@/lib/integrations/braintree";
-import { partialRefundByAmount } from "@/lib/shopify-order-actions";
+import { partialRefundByAmount, recordManualRefund } from "@/lib/shopify-order-actions";
 import { logCustomerEvent } from "@/lib/customer-events";
 
 export type RefundMethod = "shopify" | "braintree";
@@ -166,18 +165,39 @@ export async function refundOrder(
     };
   } else {
     const r = await partialRefundByAmount(workspaceId, order.shopify_order_id, amountCents, reason);
-    // partialRefundByAmount returns method='shopify' when the
-    // refundCreate mutation ran, method='braintree' when it detected
-    // the Shopify sale was Braintree-gateway and rerouted. Surface
-    // that verbatim so the caller can distinguish (Braintree refund
-    // id, manual-reconciliation flag).
-    result = {
-      success: r.success,
-      refund_id: r.braintreeRefundId,
-      method: (r.method as RefundMethod | undefined) ?? "shopify",
-      error: r.error,
-      needsManualShopifyRecord: r.needsManualShopifyRecord,
-    };
+    if (r.needsBraintreeFallback && r.braintreeTxnId) {
+      // Shopify order paid via the Shopify↔Braintree gateway. Shopify
+      // won't refund it (dead connection), so we refund the Braintree
+      // transaction directly + record the movement on the Shopify
+      // order for reconciliation. Money-first / bookkeeping-second —
+      // matches the flow that lived in shopify-order-actions.ts's
+      // refundOrderViaBraintree before Phase 3 consolidated it here.
+      const bt = await refundBraintreeTransaction(workspaceId, r.braintreeTxnId, amountCents);
+      if (!bt.success) {
+        result = {
+          success: false,
+          method: "braintree",
+          error: `Braintree refund failed: ${bt.error}`,
+        };
+      } else {
+        const note = `${reason} — refunded via Braintree (txn ${bt.refundId || r.braintreeTxnId})`;
+        const rec = await recordManualRefund(workspaceId, order.shopify_order_id, amountCents, note);
+        result = {
+          success: true,
+          refund_id: bt.refundId,
+          method: "braintree",
+          needsManualShopifyRecord: !rec.success,
+          error: rec.success ? undefined : `Braintree refund succeeded but Shopify record failed: ${rec.error}`,
+        };
+      }
+    } else {
+      result = {
+        success: r.success,
+        method: (r.method as RefundMethod | undefined) ?? "shopify",
+        error: r.error,
+        needsManualShopifyRecord: r.needsManualShopifyRecord,
+      };
+    }
   }
 
   if (!result.success) return result;

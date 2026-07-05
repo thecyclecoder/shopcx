@@ -149,16 +149,18 @@ If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost
 
 | File | Purpose |
 |---|---|
-| `src/lib/shopify-returns.ts` | `createFullReturn()`, `closeReturn()`, `partialRefundByAmount()`, `issueStoreCredit()`, `attachReturnTracking()` |
+| `src/lib/refund.ts` | `refundOrder()` — the ONLY refund entry point (Phase-3 dispatcher). Reads `orders`, routes internal orders to Braintree and Shopify orders to `partialRefundByAmount` (with the Braintree-gateway fallback for Shopify orders paid via Braintree). Stamps `refunded_at` on any open return for the order (double-refund guard). Logs `order.refunded` on `customer_events`. |
+| `src/lib/shopify-returns.ts` | `createFullReturn()`, `closeReturn()`, `issueStoreCredit()`, `attachReturnTracking()` |
+| `src/lib/shopify-order-actions.ts` | `partialRefundByAmount()` (Shopify REST refund + Braintree-fallback signal), `recordManualRefund()` — internal helpers of `refundOrder` |
 | `src/lib/easypost.ts` | Address validation, rate selection, Shipment.buy |
 | `src/lib/easypost-order-sync.ts` | Per-order shipment + tracker creation |
 | `src/lib/easypost-email.ts` | Label email send |
-| `src/lib/integrations/braintree.ts` | `refundBraintreeTransaction()` |
-| `src/lib/inngest/returns.ts` | process-delivery + issue-refund |
+| `src/lib/integrations/braintree.ts` | `refundBraintreeTransaction()` — called ONLY from `src/lib/refund.ts` |
+| `src/lib/inngest/returns.ts` | process-delivery + issue-refund (delegates to `refundOrder`) |
 | `src/lib/inngest/delivery-audit.ts` | Stuck-in-transit detection |
 | `src/lib/store-credit.ts` | Store credit helper |
 | `src/lib/email.ts` | sendReturnConfirmationEmail |
-| `src/lib/customer-events.ts` | Log return.* events |
+| `src/lib/customer-events.ts` | Log return.* + order.refunded events |
 | `src/app/api/webhooks/easypost/route.ts` | EasyPost tracker webhook handler |
 
 ## Status / open work
@@ -168,6 +170,7 @@ If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- Defect #1 (phantom refund on internal orders) **closed by the Phase-3 refund dispatcher.** Every refund entry point in the codebase — returns Inngest issue-refund, AI `partial_refund` + `redeem_points_as_refund`, ticket-detail Improve-tab refund, manual return-refund route, fraud-case `cancel_refund_orders` step — now routes through `src/lib/refund.ts` `refundOrder()`, which reads the order's gateway and can never fire a Shopify refund mutation on a Braintree-paid order. `refundBraintreeTransaction` is called from ONE file (`src/lib/refund.ts`); the Shopify-side refund REST + `refundCreate` mutations are constrained to `src/lib/shopify-order-actions.ts`. See [[../reference/commerce-sdk-inventory]] § Defect register. (2026-07-05)
 - 30-day MBG flow (`handle30DayFlow.confirm_return`) now routes through `createFullReturn()` + inline label instead of a bare `pending_label` insert that silently failed. See § "30-day flow regression". (2026-06-08)
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents
 - `5be66e2b` Returns: advance status to label_created when EasyPost label is bought

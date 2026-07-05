@@ -1,6 +1,5 @@
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
-import { refundBraintreeTransaction } from "@/lib/integrations/braintree";
 
 // ── Shopify GraphQL with variables support ──
 
@@ -40,124 +39,33 @@ function toGid(numericId: string, type: string): string {
   return `gid://shopify/${type}/${numericId}`;
 }
 
-// ── Refund Order ──
-
-export async function refundOrder(
-  workspaceId: string,
-  shopifyOrderId: string,
-  options: {
-    full?: boolean;
-    lineItems?: { lineItemId: string; quantity: number }[];
-    reason?: string;
-    notify?: boolean;
-  }
-): Promise<{ success: boolean; error?: string }> {
-  const orderId = toGid(shopifyOrderId, "Order");
-
-  try {
-    if (options.full) {
-      // Use suggestedRefund to calculate the full refund amounts
-      const suggestQuery = `
-        query suggestedRefund($id: ID!) {
-          order(id: $id) {
-            suggestedRefund(suggestFullRefund: true) {
-              refundLineItems {
-                lineItem { id }
-                quantity
-              }
-              shipping { maximumRefundableSet { shopMoney { amount currencyCode } } }
-              subtotalSet { shopMoney { amount currencyCode } }
-              totalCartDiscountAmountSet { shopMoney { amount currencyCode } }
-            }
-          }
-        }
-      `;
-      const suggestData = await shopifyMutation(workspaceId, suggestQuery, { id: orderId });
-      const order = suggestData.order as Record<string, unknown> | null;
-      if (!order?.suggestedRefund) {
-        return { success: false, error: "Could not calculate refund" };
-      }
-      const suggested = order.suggestedRefund as Record<string, unknown>;
-      const refundLineItems = (suggested.refundLineItems as { lineItem: { id: string }; quantity: number }[]).map(
-        (rli) => ({ lineItemId: rli.lineItem.id, quantity: rli.quantity })
-      );
-      const shipping = suggested.shipping as { maximumRefundableSet: { shopMoney: { amount: string } } } | null;
-      const shippingAmount = shipping?.maximumRefundableSet?.shopMoney?.amount
-        ? parseFloat(shipping.maximumRefundableSet.shopMoney.amount)
-        : 0;
-
-      const mutation = `
-        mutation refundCreate($input: RefundInput!) {
-          refundCreate(input: $input) {
-            refund { id }
-            userErrors { field message }
-          }
-        }
-      `;
-      const input: Record<string, unknown> = {
-        orderId,
-        notify: options.notify ?? true,
-        note: options.reason || "Full refund",
-        refundLineItems: refundLineItems.map((li) => ({
-          lineItemId: li.lineItemId,
-          quantity: li.quantity,
-        })),
-        shipping: { fullRefund: true },
-      };
-
-      // Only include shipping amount if > 0
-      if (shippingAmount > 0) {
-        input.shipping = { fullRefund: true };
-      }
-
-      const data = await shopifyMutation(workspaceId, mutation, { input });
-      const result = data.refundCreate as { refund: { id: string } | null; userErrors: { field: string; message: string }[] };
-      if (result.userErrors?.length) {
-        return { success: false, error: result.userErrors.map((e) => e.message).join(", ") };
-      }
-      return { success: true };
-    } else if (options.lineItems?.length) {
-      // Partial refund by line items
-      const mutation = `
-        mutation refundCreate($input: RefundInput!) {
-          refundCreate(input: $input) {
-            refund { id }
-            userErrors { field message }
-          }
-        }
-      `;
-      const input = {
-        orderId,
-        notify: options.notify ?? true,
-        note: options.reason || "Partial refund",
-        refundLineItems: options.lineItems.map((li) => ({
-          lineItemId: toGid(li.lineItemId, "LineItem"),
-          quantity: li.quantity,
-        })),
-      };
-
-      const data = await shopifyMutation(workspaceId, mutation, { input });
-      const result = data.refundCreate as { refund: { id: string } | null; userErrors: { field: string; message: string }[] };
-      if (result.userErrors?.length) {
-        return { success: false, error: result.userErrors.map((e) => e.message).join(", ") };
-      }
-      return { success: true };
-    }
-
-    return { success: false, error: "Must specify full refund or line items" };
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
-  }
-}
-
 // ── Partial Refund by Amount ──
 
+// INTERNAL — call via `refundOrder` from `@/lib/refund`.
+//
+// Fires the Shopify REST `POST /orders/{id}/refunds` mutation.
+//
+// SC128233 guard: if the Shopify sale-transaction gateway is Braintree
+// (Shopify↔Braintree connection is dead — Shopify's POST creates a
+// refund whose inner transaction FAILS silently while still returning
+// a refund.id), we do NOT fire the Shopify mutation. Instead we
+// resolve the Braintree transaction id (via saleTx.authorization or
+// the metadata-search fallback) and return `{ needsBraintreeFallback:
+// true, braintreeTxnId }` so `refundOrder` (in `src/lib/refund.ts`)
+// executes the Braintree refund + `recordManualRefund` bookkeeping.
 export async function partialRefundByAmount(
   workspaceId: string,
   shopifyOrderId: string,
   amountCents: number,
   reason?: string,
-): Promise<{ success: boolean; error?: string; method?: "shopify" | "braintree"; braintreeRefundId?: string; needsManualShopifyRecord?: boolean }> {
+): Promise<{
+  success: boolean;
+  error?: string;
+  method?: "shopify" | "braintree";
+  needsBraintreeFallback?: boolean;
+  braintreeTxnId?: string;
+  needsManualShopifyRecord?: boolean;
+}> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const amountDecimal = (amountCents / 100).toFixed(2);
 
@@ -192,16 +100,45 @@ export async function partialRefundByAmount(
     ) || (txData?.transactions || [])[0];
     if (!saleTx) return { success: false, error: "No transaction found on order" };
 
-    // Braintree orders can't be refunded through Shopify — the Shopify↔Braintree
-    // gateway connection is gone, so Shopify's refund POST creates a refund record
-    // whose inner transaction FAILS ("undefined method 'refund' for nil" /
-    // ID_NOT_FOUND) while still returning a refund.id. We previously read that
-    // refund.id as success and reported a refund that never moved money (SC128233
-    // — 4 phantom "refunds", customer never paid back). Route Braintree gateways
-    // to the direct-Braintree path instead.
+    // SC128233 guard — Shopify's Braintree gateway is broken. Signal
+    // the caller (`refundOrder`) to run the Braintree refund itself
+    // instead of firing the Shopify mutation (which would phantom-succeed).
     if (String(saleTx.gateway).toLowerCase().includes("braintree")) {
-      const r = await refundOrderViaBraintree(workspaceId, shopifyOrderId, amountCents, reason);
-      return { success: r.success, error: r.error, method: "braintree", braintreeRefundId: r.braintreeRefundId, needsManualShopifyRecord: r.needsManualShopifyRecord };
+      let braintreeTxnId: string | null = saleTx.authorization || null;
+      // Appstle-renewal orders frequently have a null `authorization`
+      // field. Fall back to searching Braintree by email + amount +
+      // day-bracketed processedAt.
+      if (!braintreeTxnId) {
+        const orderRes = await fetch(
+          `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}.json?fields=email,contact_email,processed_at`,
+          { headers: { "X-Shopify-Access-Token": accessToken } },
+        );
+        const orderData = await orderRes.json();
+        const email = orderData?.order?.email || orderData?.order?.contact_email;
+        const processedAt = orderData?.order?.processed_at || saleTx.processed_at || saleTx.created_at;
+        if (email && processedAt) {
+          const { findBraintreeTransactionByMetadata } = await import("@/lib/integrations/braintree");
+          const match = await findBraintreeTransactionByMetadata(workspaceId, {
+            email: String(email).toLowerCase(),
+            amountDecimal: String(saleTx.amount),
+            processedAt: String(processedAt),
+          });
+          if (match) braintreeTxnId = match.id;
+        }
+      }
+      if (!braintreeTxnId) {
+        return {
+          success: false,
+          method: "braintree",
+          error: "Shopify sale is Braintree-gateway but no Braintree transaction id could be resolved (no authorization field and metadata search returned no match)",
+        };
+      }
+      return {
+        success: false,
+        method: "braintree",
+        needsBraintreeFallback: true,
+        braintreeTxnId,
+      };
     }
 
     // Step 2: Issue the partial refund with gateway from original transaction
@@ -392,94 +329,6 @@ export async function recordManualRefund(
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
   }
-}
-
-/**
- * Refund an order paid through Braintree by refunding the Braintree transaction
- * DIRECTLY (Shopify's native Braintree refund is broken — see partialRefundByAmount),
- * then recording a manual refund on the Shopify order so the order reflects it.
- *
- * Two-step, and the order matters: money first (Braintree), bookkeeping second
- * (Shopify). If the Braintree refund fails we never touch Shopify. If the
- * Braintree refund succeeds but the Shopify record fails, the customer still got
- * their money — we surface needsManualShopifyRecord so a human can reconcile.
- */
-export async function refundOrderViaBraintree(
-  workspaceId: string,
-  shopifyOrderId: string,
-  amountCents: number,
-  reason?: string,
-): Promise<{ success: boolean; braintreeRefundId?: string; shopifyRefundId?: string; needsManualShopifyRecord?: boolean; error?: string }> {
-  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
-
-  // Resolve order_number → numeric id if needed.
-  if (!/^\d+$/.test(shopifyOrderId)) {
-    const { createAdminClient } = await import("@/lib/supabase/admin");
-    const admin = createAdminClient();
-    const { data: order } = await admin.from("orders")
-      .select("shopify_order_id")
-      .eq("workspace_id", workspaceId)
-      .eq("order_number", shopifyOrderId)
-      .maybeSingle();
-    if (!order?.shopify_order_id) return { success: false, error: `Could not resolve order: "${shopifyOrderId}"` };
-    shopifyOrderId = order.shopify_order_id as string;
-  }
-
-  // Find the sale transaction → the Braintree transaction id lives in `authorization`.
-  const txRes = await fetch(
-    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}/transactions.json`,
-    { headers: { "X-Shopify-Access-Token": accessToken } },
-  );
-  const txData = await txRes.json();
-  const saleTx = (txData?.transactions || []).find((t: { kind: string; status: string }) =>
-    t.kind === "sale" && t.status === "success"
-  );
-  if (!saleTx) return { success: false, error: "No successful sale transaction found on order" };
-
-  let braintreeTxnId: string | null = saleTx.authorization || null;
-
-  // Fallback: Appstle subscription renewal orders frequently have a
-  // null `authorization` field — Shopify just doesn't expose the BT
-  // id on those transaction rows. When that happens, search BT
-  // directly by customer email + amount + processed_at to find the
-  // matching transaction.
-  if (!braintreeTxnId) {
-    // Pull the order's email + processed_at — needed for the BT search.
-    const orderRes = await fetch(
-      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${shopifyOrderId}.json?fields=email,contact_email,processed_at`,
-      { headers: { "X-Shopify-Access-Token": accessToken } },
-    );
-    const orderData = await orderRes.json();
-    const email = orderData?.order?.email || orderData?.order?.contact_email;
-    const processedAt = orderData?.order?.processed_at || saleTx.processed_at || saleTx.created_at;
-    if (!email || !processedAt) {
-      return { success: false, error: "Sale transaction has no Braintree authorization id, and order is missing email/processed_at for the BT search fallback" };
-    }
-    const { findBraintreeTransactionByMetadata } = await import("@/lib/integrations/braintree");
-    const match = await findBraintreeTransactionByMetadata(workspaceId, {
-      email: String(email).toLowerCase(),
-      amountDecimal: String(saleTx.amount),
-      processedAt: String(processedAt),
-    });
-    if (!match) {
-      return { success: false, error: `Sale transaction has no Braintree authorization id, and no matching BT transaction found via search (email=${email}, amount=${saleTx.amount}, processed_at=${processedAt})` };
-    }
-    braintreeTxnId = match.id;
-  }
-
-  // 1) Refund the money in Braintree.
-  const bt = await refundBraintreeTransaction(workspaceId, braintreeTxnId, amountCents);
-  if (!bt.success) return { success: false, error: `Braintree refund failed: ${bt.error}` };
-
-  // 2) Record it on the Shopify order (manual gateway — no second money movement).
-  const note = `${reason || "Refund"} — refunded via Braintree (txn ${bt.refundId || braintreeTxnId})`;
-  const rec = await recordManualRefund(workspaceId, shopifyOrderId, amountCents, note);
-  if (!rec.success) {
-    // Money already returned — don't fail the whole op, but flag for reconciliation.
-    return { success: true, braintreeRefundId: bt.refundId, needsManualShopifyRecord: true, error: `Braintree refund succeeded but Shopify record failed: ${rec.error}` };
-  }
-
-  return { success: true, braintreeRefundId: bt.refundId, shopifyRefundId: rec.refundId };
 }
 
 // ── Cancel Order ──
