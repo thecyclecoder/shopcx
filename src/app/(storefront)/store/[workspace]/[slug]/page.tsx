@@ -6,6 +6,10 @@ import type { Metadata } from "next";
 import { getPageData, listPublishedProducts, type PageData, type MediaItem } from "../../../_lib/page-data";
 import { StorefrontPage } from "../../../_lib/render-page";
 import { loadAdvertorialContent, type AdvertorialVariant } from "@/lib/advertorial-pages";
+import {
+  loadBlueprintRenderContent,
+  type BlueprintRenderContent,
+} from "@/lib/blueprint-render";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   resolveExperimentsForRender,
@@ -14,6 +18,17 @@ import {
   parsePreviewParam,
   type ExperimentExposureMeta,
 } from "@/lib/storefront/experiments";
+
+/**
+ * Additional ?variant= values reachable BEYOND the three
+ * AdvertorialVariant landers — one per lander_blueprints.funnel_type Cleo's
+ * blueprint-authoring session has produced. When a URL carries
+ * `?variant=advertorial-listicle` we load the matching blueprint by
+ * (workspace_id, product_id, funnel_type) and render its skeleton via
+ * `BlueprintLander`. New funnel_type values land here as blueprints get
+ * built; the render is generic across funnel_types (block-by-block).
+ */
+const BLUEPRINT_VARIANTS = new Set<string>(["advertorial-listicle"]);
 
 /**
  * The single storefront route.
@@ -211,8 +226,9 @@ export default async function StorefrontProductPage({
 
   const variant: AdvertorialVariant | null =
     sp.variant === "advertorial" || sp.variant === "beforeafter" || sp.variant === "reasons" ? sp.variant : null;
-  const preview = !variant ? parsePreviewParam(sp.sx_preview) : null;
-  const isDynamic = Boolean(variant || preview);
+  const blueprintVariant = !variant && sp.variant && BLUEPRINT_VARIANTS.has(sp.variant) ? sp.variant : null;
+  const preview = !variant && !blueprintVariant ? parsePreviewParam(sp.sx_preview) : null;
+  const isDynamic = Boolean(variant || blueprintVariant || preview);
 
   // Bare PDP branch. Edge-served A/B (pdp-edge-served-experiments Phase 2):
   // assignment happens at the Vercel edge (middleware), NOT inline here — so the
@@ -232,6 +248,23 @@ export default async function StorefrontProductPage({
   let experimentExposures: ExperimentExposureMeta[] = [];
   let renderData = data;
   let advertorial = variant ? await loadAdvertorialContent(data, variant, sp.angle ?? null) : null;
+  let blueprint: BlueprintRenderContent | null = null;
+  if (blueprintVariant) {
+    // Blueprint lander: the ?variant= value matches lander_blueprints.funnel_type
+    // for a (workspace, product) pair Cleo authored + Carrie filled. When no
+    // matching content_complete row exists (or the blueprint's `content` isn't
+    // filled yet), 404 — a not-yet-public blueprint must not be reachable.
+    try {
+      blueprint = await loadBlueprintRenderContent(
+        data.workspace.id,
+        data.product.id,
+        blueprintVariant,
+      );
+    } catch {
+      blueprint = null;
+    }
+    if (!blueprint) notFound();
+  }
 
   if (variant && advertorial) {
     // Ad-matched lander branch (advertorial / before-after / reasons): patch the
@@ -287,6 +320,7 @@ export default async function StorefrontProductPage({
       canonicalPath={canonical}
       reviewSlug={slug}
       advertorial={advertorial}
+      blueprint={blueprint}
       experimentExposures={experimentExposures}
     />
   );
