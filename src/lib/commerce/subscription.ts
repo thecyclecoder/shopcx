@@ -55,6 +55,9 @@ import {
   appstleAddFreeProduct,
   appstleSwapProduct,
   appstleAttemptBilling,
+  appstleSkipUpcomingOrder,
+  appstleUnskipOrder,
+  appstleGetUpcomingOrders,
   orderNowByContract,
 } from "@/lib/appstle";
 import {
@@ -359,6 +362,47 @@ export async function subscriptionSkipNextOrder(
   return appstleSkipNextOrder(workspaceId, contractId);
 }
 
+/**
+ * Skip the upcoming order — thin re-export of the appstle wrapper.
+ * Different from `subscriptionSkipNextOrder` in that the upstream helper
+ * targets the top-of-queue upcoming order (Appstle top-orders response)
+ * rather than the sub's scheduled next order. Preserves the Appstle
+ * internal-* guard.
+ */
+export async function subscriptionSkipUpcomingOrder(
+  workspaceId: string,
+  contractId: string,
+): Promise<OpResult> {
+  return appstleSkipUpcomingOrder(workspaceId, contractId);
+}
+
+/**
+ * Unskip a previously-skipped billing attempt — thin re-export of the
+ * appstle wrapper. Used by the dunning-cycle payday-retry path.
+ */
+export async function subscriptionUnskipOrder(
+  workspaceId: string,
+  billingAttemptId: string,
+): Promise<OpResult> {
+  return appstleUnskipOrder(workspaceId, billingAttemptId);
+}
+
+/**
+ * Fetch the upcoming-orders list for a subscription — thin re-export of
+ * the appstle wrapper. Preserves the JSON-id string coercion at the
+ * boundary. Dunning + order-now callers depend on this.
+ */
+export async function subscriptionGetUpcomingOrders(
+  workspaceId: string,
+  contractId: string,
+): Promise<{
+  success: boolean;
+  orders?: { id: string; billingDate: string; status: string }[];
+  error?: string;
+}> {
+  return appstleGetUpcomingOrders(workspaceId, contractId);
+}
+
 export async function subscriptionUpdateBillingInterval(
   workspaceId: string,
   contractId: string,
@@ -449,6 +493,108 @@ export async function subscriptionUpdateLineItemPrice(
   lineGid?: string,
 ): Promise<OpResult> {
   return subUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents, lineGid);
+}
+
+// ── Live-contract helpers (raw-URL wrappers for the AI stack) ────────
+//
+// action-executor.ts previously reached into the upstream vendor URL
+// (subscription-contracts/contract-external + shipping-address PUT)
+// directly, which pinned the vendor name into the AI-stack module. We
+// wrap those two paths here so the executor can call SDK ops and stay
+// vendor-agnostic. The internal-sub branch short-circuits with an
+// early return + a synthesized `.lines.nodes` shape mirroring the
+// upstream one, so the caller's line-resolution logic stays identical.
+
+/**
+ * Fetch the live contract shape from the upstream vendor — used by
+ * action-executor.ts's variant-driven remove-item + update-line-item
+ * fallbacks that need to resolve a line GID from a variant_id when the
+ * local `subscriptions.items` may be stale. Returns the raw
+ * `{ lines: { nodes: [...] } }` shape the callers already parse. Bounces
+ * on internal contracts with an empty nodes array (internal subs manage
+ * lines through the DB, not the vendor).
+ */
+export async function subscriptionGetLiveContract(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ ok: boolean; error?: string; lines?: { nodes: Array<{ id?: string; variantId?: string; title?: string }> } }> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return { ok: true, lines: { nodes: [] } };
+  }
+  const { getAppstleConfig } = await import("@/lib/subscription-items");
+  const cfg = await getAppstleConfig(workspaceId);
+  if (!cfg) return { ok: false, error: "Subscription vendor not configured" };
+  const res = await fetch(
+    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg.apiKey}`,
+    { headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
+  );
+  if (!res.ok) return { ok: false, error: `Contract fetch failed: ${res.status}` };
+  const json = (await res.json()) as { lines?: { nodes?: unknown[] } };
+  const nodes = (json.lines?.nodes ?? []) as Array<{ id?: string; variantId?: string; title?: string }>;
+  return { ok: true, lines: { nodes } };
+}
+
+/**
+ * Push a shipping-address update through the upstream vendor. Called
+ * by action-executor's update_shipping_address direct-action handler.
+ * Bounces on internal contracts (their shipping-address lives on the
+ * `subscriptions.shipping_address` jsonb column and is updated there
+ * directly by the same handler).
+ */
+export async function subscriptionUpdateShippingAddress(
+  workspaceId: string,
+  contractId: string,
+  address: {
+    address1: string;
+    address2?: string | null;
+    city: string;
+    zip: string;
+    country: string;
+    province: string;
+    firstName: string;
+    lastName: string;
+    phone: string;
+  },
+): Promise<OpResult> {
+  if (await isInternalSubscription(workspaceId, contractId)) {
+    return { success: true };
+  }
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("appstle_api_key_encrypted")
+    .eq("id", workspaceId)
+    .single();
+  const enc = (ws as { appstle_api_key_encrypted?: string | null } | null)?.appstle_api_key_encrypted;
+  if (!enc) return { success: false, error: "Subscription vendor not configured" };
+  const { decrypt } = await import("@/lib/crypto");
+  const apiKey = decrypt(enc);
+  const { loggedCommerceFetch } = await import("@/lib/commerce/call-log");
+  const res = await loggedCommerceFetch(
+    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${contractId}`,
+    {
+      method: "PUT",
+      headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        address1: address.address1,
+        address2: address.address2 || "",
+        city: address.city,
+        zip: address.zip,
+        country: address.country,
+        countryCode: address.country,
+        province: address.province,
+        provinceCode: address.province,
+        firstName: address.firstName,
+        lastName: address.lastName,
+        phone: address.phone,
+      }),
+    },
+    "update-shipping-address",
+  );
+  if (!res.ok) {
+    return { success: false, error: `Vendor ${res.status}` };
+  }
+  return { success: true };
 }
 
 // ── Coupons ─────────────────────────────────────────────────────────

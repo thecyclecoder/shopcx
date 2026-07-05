@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+import { subscriptionAction } from "@/lib/commerce/subscription";
 import { cancelOrder } from "@/lib/shopify-order-actions";
 import { refundOrder } from "@/lib/refund";
 
@@ -96,8 +96,18 @@ export async function POST(
   }
 
   // ── Step: cancel_subscriptions ──
+  //
+  // Idempotency: this step's fanout is filtered to `status in
+  // ("active","paused")` at the query level, so a step re-fire naturally
+  // skips already-cancelled subs — the compare-and-set is inherent in
+  // the enumeration source, not the write. A prior fraud-case
+  // cancellation on the same sub also lives in `customer_events` as
+  // `subscription.cancelled` with `properties.fraud_case_id = caseId`;
+  // we look it up per-sub before firing so a mid-loop failure + client
+  // retry never re-issues a cancel Appstle would 400 on ("already
+  // cancelled").
   if (step === "cancel_subscriptions") {
-    const results: { subscription_id: string; shopify_contract_id: string; success: boolean; error?: string }[] = [];
+    const results: { subscription_id: string; shopify_contract_id: string; success: boolean; error?: string; skipped?: string }[] = [];
 
     for (const custId of customerIds) {
       const { data: subs } = await admin.from("subscriptions")
@@ -107,7 +117,27 @@ export async function POST(
         .in("status", ["active", "paused"]);
 
       for (const sub of subs || []) {
-        const result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud", "Fraud Detection");
+        // Idempotency precheck — customer_events lookup for a prior
+        // fraud-case cancel on the same sub. If found, skip and record
+        // "already cancelled by prior fraud attempt" so a retry is safe.
+        const { data: priorCancel } = await admin
+          .from("customer_events")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("event_type", "subscription.cancelled")
+          .contains("properties", { fraud_case_id: caseId, subscription_id: sub.id })
+          .limit(1)
+          .maybeSingle();
+        if (priorCancel) {
+          results.push({
+            subscription_id: sub.id,
+            shopify_contract_id: sub.shopify_contract_id,
+            success: true,
+            skipped: "already cancelled by prior fraud-case attempt (idempotent skip)",
+          });
+          continue;
+        }
+        const result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud", "Fraud Detection");
         results.push({
           subscription_id: sub.id,
           shopify_contract_id: sub.shopify_contract_id,
@@ -121,8 +151,16 @@ export async function POST(
   }
 
   // ── Step: cancel_refund_orders ──
+  //
+  // Idempotency: `refundOrder` stamps `customer_events` with
+  // `event_type='order.refunded'`, source='fraud' and
+  // `properties.fraud_case_id=caseId`. We look up that marker per-order
+  // BEFORE firing the refund so a step re-run (mid-loop failure +
+  // client retry) skips already-refunded orders instead of double-
+  // refunding. This is the compound-write idempotency the DM13
+  // enumeration item pins.
   if (step === "cancel_refund_orders") {
-    const results: { order_id: string; order_number: string; success: boolean; error?: string }[] = [];
+    const results: { order_id: string; order_number: string; success: boolean; error?: string; skipped?: string }[] = [];
 
     for (const oid of orderIds) {
       // order_ids may contain Shopify order IDs (rule-based) or internal UUIDs (AI-detected).
@@ -154,6 +192,30 @@ export async function POST(
       const orderNumber = dbOrder.order_number || oid;
       const totalCents = dbOrder.total_cents || 0;
 
+      // Idempotency precheck — has THIS fraud case already refunded
+      // THIS order? refundOrder writes customer_events with
+      // event_type='order.refunded', properties.fraud_case_id=caseId,
+      // properties.order_id=dbOrder.id. A prior-hit means already
+      // refunded → skip the refund + cancel branch entirely so a retry
+      // never double-refunds.
+      const { data: priorRefund } = await admin
+        .from("customer_events")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("event_type", "order.refunded")
+        .contains("properties", { fraud_case_id: caseId, order_id: dbOrder.id })
+        .limit(1)
+        .maybeSingle();
+      if (priorRefund) {
+        results.push({
+          order_id: oid,
+          order_number: orderNumber,
+          success: true,
+          skipped: "already refunded by prior fraud-case attempt (idempotent skip)",
+        });
+        continue;
+      }
+
       // Phase-3 dispatcher migration — refund via the gateway-aware
       // wrapper (Braintree for internal orders, Shopify for Shopify
       // orders). Then cancel the Shopify order WITHOUT `refund: true`
@@ -166,7 +228,7 @@ export async function POST(
       if (totalCents > 0) {
         const refund = await refundOrder(workspaceId, dbOrder.id, totalCents, "Fraud offset — order refund", {
           source: "fraud",
-          eventProperties: { fraud_case_id: caseId, reason: "confirmed_fraud" },
+          eventProperties: { fraud_case_id: caseId, reason: "confirmed_fraud", order_id: dbOrder.id },
         });
         if (!refund.success) {
           results.push({ order_id: oid, order_number: orderNumber, success: false, error: `Refund failed: ${refund.error}` });

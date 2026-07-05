@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createAndCompleteReplacement } from "@/lib/shopify-draft-orders";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+import { subscriptionAction } from "@/lib/commerce/subscription";
 
 // GET — single replacement with related data
 export async function GET(
@@ -183,10 +183,10 @@ export async function POST(
 
     const newDateStr = newDate.toISOString().split("T")[0];
 
-    // Update via Appstle
+    // Update via the commerce SDK — internal-aware dispatcher
     try {
-      const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
-      await appstleUpdateNextBillingDate(workspaceId, sub.shopify_contract_id, newDateStr);
+      const { subscriptionUpdateNextBillingDate } = await import("@/lib/commerce/subscription");
+      await subscriptionUpdateNextBillingDate(workspaceId, sub.shopify_contract_id, newDateStr);
 
       // Update local
       await admin.from("subscriptions").update({

@@ -225,7 +225,7 @@ async function executeActionsInline(
     }
   }
 
-  const { withActionContext } = await import("@/lib/appstle-call-log");
+  const { withActionContext } = await import("@/lib/commerce/call-log");
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   for (const action of actions) {
@@ -343,8 +343,8 @@ export const directActionHandlers: Record<
   (ctx: ActionContext, p: ActionParams) => Promise<ActionResult>
 > = {
   resume: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
     return { ...r, summary: "Resumed subscription" };
   },
 
@@ -440,35 +440,35 @@ export const directActionHandlers: Record<
   },
 
   skip_next_order: async (ctx, p) => {
-    const { appstleSkipNextOrder } = await import("@/lib/appstle");
-    const r = await appstleSkipNextOrder(ctx.workspaceId, p.contract_id!);
+    const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
   },
 
   change_frequency: async (ctx, p) => {
-    const { appstleUpdateBillingInterval } = await import("@/lib/appstle");
-    const r = await appstleUpdateBillingInterval(
+    const { subscriptionUpdateBillingInterval } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionUpdateBillingInterval(
       ctx.workspaceId, p.contract_id!, p.interval! as "DAY" | "WEEK" | "MONTH" | "YEAR", Number(p.interval_count!),
     );
     return { ...r, summary: `Changed frequency to every ${p.interval_count} ${p.interval}` };
   },
 
   change_next_date: async (ctx, p) => {
-    const { appstleUpdateNextBillingDate, orderNowByContract } = await import("@/lib/appstle");
+    const { subscriptionUpdateNextBillingDate, subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     // Appstle rejects past/today timestamps. If Sonnet passes a date
     // ≤ today (Central) — which it does when a customer says "ship
     // it ASAP" or "send right away" — we don't shove next_billing
     // into the future; we just charge now via order-now. This matches
     // customer intent (get product TODAY) and avoids the 400 we used
-    // to bounce on. orderNowByContract is flavor-aware (internal → Braintree
-    // renewal pipeline, Appstle → attempt-billing); a raw appstle call here
-    // silently no-ops on internal subs.
+    // to bounce on. subscriptionOrderNow is flavor-aware (internal →
+    // Braintree renewal pipeline, external vendor → attempt-billing);
+    // a raw vendor call here silently no-ops on internal subs.
     let date = p.date!;
     const centralToday = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
     centralToday.setHours(0, 0, 0, 0);
     const requested = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
     if (!isNaN(requested.getTime()) && requested.getTime() <= centralToday.getTime()) {
-      const billed = await orderNowByContract(ctx.workspaceId, p.contract_id!);
+      const billed = await subscriptionOrderNow(ctx.workspaceId, p.contract_id!);
       if (billed.success) {
         return { success: true, summary: "Triggered order now (customer asked to ship today)" };
       }
@@ -479,7 +479,7 @@ export const directActionHandlers: Record<
       date = tomorrow.toISOString().slice(0, 10);
       p.date = date;
     }
-    const r = await appstleUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
+    const r = await subscriptionUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
     return { ...r, summary: `Changed next billing date to ${date}` };
   },
 
@@ -489,12 +489,12 @@ export const directActionHandlers: Record<
    * "I'm out of product". Does NOT change next_billing_date — after
    * the charge, the schedule advances by one cycle. Flavor-aware:
    * internal subs fire the Braintree renewal pipeline, Appstle subs
-   * attempt the upcoming Appstle billing (orderNowByContract).
+   * attempt the upcoming Appstle billing (subscriptionOrderNow).
    */
   bill_now: async (ctx, p) => {
-    const { orderNowByContract } = await import("@/lib/appstle");
+    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "bill_now missing contract_id" };
-    return orderNowByContract(ctx.workspaceId, p.contract_id);
+    return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
   },
 
   add_item: async (ctx, p) => {
@@ -535,18 +535,12 @@ export const directActionHandlers: Record<
     // over EVERY line matching the variant_id. Multi-line case (same
     // variant, different lines) is common when customers built up the
     // sub over time. Stop on first failure so we don't keep hammering
-    // Appstle if its credentials died mid-loop.
+    // the vendor if its credentials died mid-loop.
     type Line = { id?: string; variantId?: string };
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const cfg = await getAppstleConfig(ctx.workspaceId);
-    if (!cfg) return { success: false, error: "Appstle not configured" };
-    const cRes = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${p.contract_id}?api_key=${cfg.apiKey}`,
-      { cache: "no-store" },
-    );
-    if (!cRes.ok) return { success: false, error: `Contract fetch failed: ${cRes.status}` };
-    const cJson = await cRes.json();
-    const lines = ((cJson.lines?.nodes || []) as Line[])
+    const { subscriptionGetLiveContract } = await import("@/lib/commerce/subscription");
+    const contract = await subscriptionGetLiveContract(ctx.workspaceId, String(p.contract_id!));
+    if (!contract.ok) return { success: false, error: contract.error || "Contract fetch failed" };
+    const lines = ((contract.lines?.nodes || []) as Line[])
       .filter((l) => {
         const vid = String(l.variantId || "").split("/").pop();
         return vid === String(variantId);
@@ -832,15 +826,14 @@ export const directActionHandlers: Record<
 
   update_line_item_price: async (ctx, p) => {
     const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
 
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     if (p.base_price_cents == null) return { success: false, error: "Missing base_price_cents" };
 
-    // Internal subs aren't on Appstle — restore the grandfathered base by
-    // writing price_override_cents directly. Route here FIRST, before the
-    // Appstle config / live-contract fetch below (which would fail with
-    // "Appstle not configured" for an internal sub). subUpdateLineItemPrice
+    // Internal subs aren't on the external vendor — restore the grandfathered
+    // base by writing price_override_cents directly. Route here FIRST, before
+    // the vendor config / live-contract fetch below (which would fail with
+    // "vendor not configured" for an internal sub). subUpdateLineItemPrice
     // delegates to internalSubUpdateLineItemPrice for these.
     const { isInternalSubscription } = await import("@/lib/internal-subscription");
     if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
@@ -883,20 +876,15 @@ export const directActionHandlers: Record<
     const subRealItems = subItems.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
     for (const it of subRealItems) pushUnique(it.variant_id);
 
-    // Fetch the live contract from Appstle ONCE — source of truth for current line GIDs.
+    // Fetch the live contract via the SDK ONCE — source of truth for current line GIDs.
     // After a swap, our DB items/variants may match but the customer-facing variant id
-    // changes, so we always resolve lineId from live Appstle data.
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
+    // changes, so we always resolve lineId from the live contract data.
     let liveLines: { id: string; variantId: string; title?: string }[] = [];
     try {
-      const detailRes = await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${p.contract_id}?api_key=${config.apiKey}`,
-        { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
-      );
-      if (detailRes.ok) {
-        const detail = await detailRes.json();
-        const nodes = (detail?.lines?.nodes || []) as { id?: string; variantId?: string; title?: string }[];
+      const { subscriptionGetLiveContract } = await import("@/lib/commerce/subscription");
+      const detail = await subscriptionGetLiveContract(ctx.workspaceId, String(p.contract_id!));
+      if (detail.ok) {
+        const nodes = (detail.lines?.nodes || []) as { id?: string; variantId?: string; title?: string }[];
         liveLines = nodes
           .filter(n => n.id && n.variantId)
           .map(n => ({ id: n.id!, variantId: (n.variantId!.split("/").pop() || n.variantId!) as string, title: n.title }));
@@ -1148,7 +1136,7 @@ export const directActionHandlers: Record<
   },
 
   pause_timed: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     // We only ever do 30- or 60-day pauses. Coerce before validating: the
     // orchestrator and journey configs carry pause_days as a STRING ("60"), so a
@@ -1157,7 +1145,7 @@ export const directActionHandlers: Record<
     const days = Number(p.pause_days);
     if (days !== 30 && days !== 60) return { success: false, error: "pause_days must be 30 or 60" };
 
-    const r = await appstleSubscriptionAction(
+    const r = await subscriptionAction(
       ctx.workspaceId, p.contract_id, "pause",
       `Customer requested ${days}-day pause after renewal charge`,
     );
@@ -1331,8 +1319,8 @@ export const directActionHandlers: Record<
   },
 
   reactivate: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
     if (r.success) {
       const { addTicketTag } = await import("@/lib/ticket-tags");
       await addTicketTag(ctx.ticketId, "wb");
@@ -1355,9 +1343,9 @@ export const directActionHandlers: Record<
   },
 
   crisis_pause: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id, "pause", "Crisis — customer requested pause until restock");
+    const r = await subscriptionAction(ctx.workspaceId, p.contract_id, "pause", "Crisis — customer requested pause until restock");
     if (r.success && p.crisis_action_id) {
       await ctx.admin.from("crisis_customer_actions").update({
         tier3_response: "accepted_pause", paused_at: new Date().toISOString(),
@@ -1614,49 +1602,39 @@ export const directActionHandlers: Record<
     // Subscription branch — Appstle endpoint
     if (p.contract_id) {
       try {
-        const { healOnTouch } = await import("@/lib/appstle-pricing");
+        const { healOnTouch } = await import("@/lib/commerce/pricing");
         await healOnTouch(ctx.workspaceId, String(p.contract_id));
-        const { data: ws } = await ctx.admin.from("workspaces")
-          .select("appstle_api_key_encrypted").eq("id", ctx.workspaceId).single();
-        if (ws?.appstle_api_key_encrypted) {
-          const { decrypt } = await import("@/lib/crypto");
-          const apiKey = decrypt(ws.appstle_api_key_encrypted);
-          const { loggedAppstleFetch } = await import("@/lib/appstle-call-log");
-          const res = await loggedAppstleFetch(
-            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${p.contract_id}`,
-            {
-              method: "PUT",
-              headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-              // Appstle's GraphQL validation reads countryCode + provinceCode
-              // specifically (the bare `country`/`province` fields aren't
-              // wired to the SubscriptionDraftInput → deliveryMethod.shipping
-              // path). Sending both keeps the REST shape happy while
-              // satisfying the GraphQL validator. The portal handler sends
-              // the same shape — keep them in sync.
-              body: JSON.stringify({
-                address1: a.address1, address2: a.address2 || "",
-                city: a.city, zip,
-                country, countryCode: country,
-                province, provinceCode: province,
-                firstName: a.first_name, lastName: a.last_name, phone: a.phone,
-              }),
+        // The vendor's GraphQL validation reads countryCode + provinceCode
+        // specifically (the bare `country`/`province` fields aren't wired
+        // to the SubscriptionDraftInput → deliveryMethod.shipping path).
+        // subscriptionUpdateShippingAddress sends both to keep the REST
+        // shape happy while satisfying the GraphQL validator; the portal
+        // handler sends the same shape — keep them in sync.
+        const { subscriptionUpdateShippingAddress } = await import("@/lib/commerce/subscription");
+        const upd = await subscriptionUpdateShippingAddress(ctx.workspaceId, String(p.contract_id), {
+          address1: a.address1,
+          address2: a.address2 || "",
+          city: a.city,
+          zip,
+          country,
+          province,
+          firstName: a.first_name || "",
+          lastName: a.last_name || "",
+          phone: a.phone || "",
+        });
+        if (upd.success) {
+          await ctx.admin.from("subscriptions").update({
+            shipping_address: {
+              first_name: a.first_name, last_name: a.last_name, phone: a.phone,
+              address1: a.address1, address2: a.address2 || null,
+              city: a.city, province_code: province, zip, country_code: country,
             },
-            "update-shipping-address",
-          );
-          if (res.ok) {
-            await ctx.admin.from("subscriptions").update({
-              shipping_address: {
-                first_name: a.first_name, last_name: a.last_name, phone: a.phone,
-                address1: a.address1, address2: a.address2 || null,
-                city: a.city, province_code: province, zip, country_code: country,
-              },
-              updated_at: new Date().toISOString(),
-            }).eq("shopify_contract_id", p.contract_id);
-            anySuccess = true;
-            summaries.push(`Subscription ${p.contract_id} address updated`);
-          } else {
-            return { success: false, error: `Appstle ${res.status}` };
-          }
+            updated_at: new Date().toISOString(),
+          }).eq("shopify_contract_id", p.contract_id);
+          anySuccess = true;
+          summaries.push(`Subscription ${p.contract_id} address updated`);
+        } else if (upd.error) {
+          return { success: false, error: upd.error };
         }
       } catch (err) {
         return { success: false, error: `Subscription update failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -1783,7 +1761,7 @@ export const directActionHandlers: Record<
    * method on one (or all) of the customer's active subscriptions.
    * Identified by last4 since that's what the customer cites in chat.
    *
-   * Reuses the dunning-system helper appstleSwitchPaymentMethod, which
+   * Reuses the dunning-system helper subscriptionSwitchPaymentMethod, which
    * already handles BOTH internal (Braintree-vaulted) subs AND legacy
    * Appstle/Shopify-Payments subs — for Appstle ones it calls
    * subscription-contracts-update-existing-payment-method.
@@ -1844,11 +1822,11 @@ export const directActionHandlers: Record<
     }
 
     // Loop the switch across each active sub.
-    const { appstleSwitchPaymentMethod } = await import("@/lib/appstle");
+    const { subscriptionSwitchPaymentMethod } = await import("@/lib/commerce/subscription");
     const summaries: string[] = [];
     const failures: string[] = [];
     for (const sub of subs) {
-      const r = await appstleSwitchPaymentMethod(ctx.workspaceId, sub.shopify_contract_id as string, card.id);
+      const r = await subscriptionSwitchPaymentMethod(ctx.workspaceId, sub.shopify_contract_id as string, card.id);
       if (r.success) {
         summaries.push(sub.shopify_contract_id as string);
       } else {
@@ -2127,9 +2105,9 @@ async function handleDirectAction(
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   // Per-action call logging — wrap each handler in an AsyncLocalStorage
-  // context so any Appstle fetch deep in the call chain auto-logs its
-  // request/response back to appstle_api_calls with the ticket reference.
-  const { withActionContext } = await import("@/lib/appstle-call-log");
+  // context so any vendor fetch deep in the call chain auto-logs its
+  // request/response with the ticket reference (see [[commerce/call-log]]).
+  const { withActionContext } = await import("@/lib/commerce/call-log");
 
   for (const action of actions) {
     const handler = directActionHandlers[action.type];

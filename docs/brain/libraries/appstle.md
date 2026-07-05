@@ -108,19 +108,17 @@ async function appstleSwapProduct(workspaceId: string, contractId: string, oldVa
 
 ## Callers
 
-- `src/app/api/chargebacks/[id]/cancel-subscription/route.ts`
-- `src/app/api/chargebacks/[id]/reinstate/route.ts`
-- `src/app/api/workspaces/[id]/fraud-cases/[caseId]/cancel-subscription/route.ts`
-- `src/app/api/workspaces/[id]/fraud-cases/[caseId]/confirm-fraud/route.ts`
-- `src/app/api/workspaces/[id]/replacements/[replacementId]/route.ts`
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts`
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/payment-update/route.ts`
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts`
-- `src/lib/inngest/chargeback-processing.ts`
-- `src/lib/inngest/dunning.ts`
+Post-Phase-4 (spec [[../specs/commerce-sdk-migrate-dashboard-agent-ai]]), only the portal handlers still import directly from `@/lib/appstle`. Every other surface routes through [[commerce__subscription]] — the internal-aware dispatcher that handles the `isInternalSubscription()` branch centrally and re-exports the appstle wrappers so a single migration flip can retire this module.
+
+- `src/lib/portal/handlers/change-date.ts`
 - `src/lib/portal/handlers/frequency.ts`
 - `src/lib/portal/handlers/order-now.ts`
+- `src/lib/portal/handlers/pause.ts`
 - `src/lib/portal/handlers/reactivate.ts`
+- `src/lib/portal/handlers/resume.ts`
+- `src/lib/portal/remediation.ts`
+
+**Retired callers** (previously listed here, now route through `@/lib/commerce/subscription`): `src/app/api/chargebacks/[id]/cancel-subscription/route.ts`, `src/app/api/chargebacks/[id]/reinstate/route.ts`, `src/app/api/workspaces/[id]/fraud-cases/[caseId]/cancel-subscription/route.ts`, `src/app/api/workspaces/[id]/fraud-cases/[caseId]/confirm-fraud/route.ts`, `src/app/api/workspaces/[id]/replacements/[replacementId]/route.ts`, `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts`, `src/app/api/workspaces/[id]/subscriptions/[subId]/payment-update/route.ts`, `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts`, `src/lib/inngest/chargeback-processing.ts`, `src/lib/inngest/dunning.ts`. Each import was flipped from `import { appstleX } from "@/lib/appstle"` to `import { subscriptionX } from "@/lib/commerce/subscription"` — the SDK op re-exports the appstle wrapper with the internal-vs-Appstle branch preserved.
 
 ## Gotchas
 

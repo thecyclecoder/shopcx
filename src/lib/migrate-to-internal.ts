@@ -21,7 +21,7 @@
 import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+import { subscriptionAction } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -310,7 +310,7 @@ export async function migrateContractToInternalComp(
       // Cancel Appstle FIRST so a later flip failure stops the sub rather than
       // letting Appstle keep billing it.
       if (!isCancelled) {
-        const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx (comp)", "ShopCX comp migration");
+        const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx (comp)", "ShopCX comp migration");
         if (!cancelR.success) return { ok: false, error: `Appstle cancel failed: ${cancelR.error}` };
       }
     } else {
@@ -442,7 +442,7 @@ export async function migrateCustomerAppstleSubsToInternal(
         // sub rather than letting both systems bill it). Already-cancelled subs
         // have nothing to cancel.
         if (!isCancelled) {
-          const cancelR = await appstleSubscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx", "ShopCX migration");
+          const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx", "ShopCX migration");
           if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
         }
       } else {

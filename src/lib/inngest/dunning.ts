@@ -20,13 +20,13 @@ import {
   isTerminalErrorCode,
 } from "@/lib/dunning";
 import {
-  appstleAttemptBilling,
-  appstleSkipUpcomingOrder,
-  appstleUnskipOrder,
-  appstleSwitchPaymentMethod,
-  appstleGetUpcomingOrders,
-  appstleSubscriptionAction,
-} from "@/lib/appstle";
+  subscriptionAttemptBilling,
+  subscriptionSkipUpcomingOrder,
+  subscriptionUnskipOrder,
+  subscriptionSwitchPaymentMethod,
+  subscriptionGetUpcomingOrders,
+  subscriptionAction,
+} from "@/lib/commerce/subscription";
 import {
   sendDunningRecoveryEmail,
 } from "@/lib/email";
@@ -205,7 +205,7 @@ export const dunningPaymentFailed = inngest.createFunction(
         });
 
         // Cancel subscription — recovery webhook will reactivate if customer adds new card
-        await appstleSubscriptionAction(
+        await subscriptionAction(
           workspace_id, shopify_contract_id, "cancel", "dunning",
           `Cancelled by ShopCX — terminal billing error: ${error_code} (${error_message || "no details"}), no other payment methods available`
         );
@@ -271,7 +271,7 @@ export const dunningPaymentFailed = inngest.createFunction(
       const card = untried[0];
 
       await step.run(`rotate-card-${i}`, async () => {
-        const switchRes = await appstleSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
+        const switchRes = await subscriptionSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
         if (!switchRes.success) {
           console.log(`[Dunning] Card switch rejected for ${shopify_contract_id} → ${card.last4}: ${switchRes.error}`);
           // Still track the card as tried even if switch failed
@@ -280,14 +280,14 @@ export const dunningPaymentFailed = inngest.createFunction(
           return;
         }
 
-        const ordersRes = await appstleGetUpcomingOrders(workspace_id, shopify_contract_id);
+        const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, shopify_contract_id);
         if (!ordersRes.success || !ordersRes.orders?.length) {
           console.log(`[Dunning] No upcoming orders for ${shopify_contract_id}: ${ordersRes.error || "empty"}`);
           return;
         }
 
         const attemptId = ordersRes.orders[0].id;
-        const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
+        const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
 
         // Log the attempt — includes whether Appstle accepted or rejected it
         await logPaymentFailure({
@@ -349,7 +349,7 @@ export const dunningPaymentFailed = inngest.createFunction(
           terminal_error_code: error_code || "all_cards_terminal",
         });
 
-        await appstleSubscriptionAction(
+        await subscriptionAction(
           workspace_id, shopify_contract_id, "cancel", "dunning",
           `Cancelled by ShopCX — all ${paymentMethods.length} payment methods returned terminal errors`
         );
@@ -476,21 +476,21 @@ export const dunningNewCardRecovery = inngest.createFunction(
       const result = await step.run(`reactivate-${cancelled.contractId}`, async () => {
         try {
           // Reactivate the subscription
-          await appstleSubscriptionAction(workspace_id, cancelled.contractId, "resume");
+          await subscriptionAction(workspace_id, cancelled.contractId, "resume");
 
           // Switch to new payment method
           if (payment_method_id) {
-            await appstleSwitchPaymentMethod(workspace_id, cancelled.contractId, payment_method_id);
+            await subscriptionSwitchPaymentMethod(workspace_id, cancelled.contractId, payment_method_id);
           }
 
           // Attempt billing
-          const ordersRes = await appstleGetUpcomingOrders(workspace_id, cancelled.contractId);
+          const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, cancelled.contractId);
           if (!ordersRes.success || !ordersRes.orders?.length) {
             return { contractId: cancelled.contractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
           }
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
+          const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -525,7 +525,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
         try {
           // Unskip the order if it was skipped or retrying
           if ((cycle.status === "skipped" || cycle.status === "retrying") && cycle.billing_attempt_id) {
-            await appstleUnskipOrder(workspace_id, cycle.billing_attempt_id);
+            await subscriptionUnskipOrder(workspace_id, cycle.billing_attempt_id);
           }
 
           // If subscription was cancelled (dunning exhausted), reactivate
@@ -537,25 +537,25 @@ export const dunningNewCardRecovery = inngest.createFunction(
             .single();
 
           if (sub?.status === "cancelled") {
-            await appstleSubscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
+            await subscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
           } else if (sub?.status === "paused") {
             // Legacy paused subs — resume them too
-            await appstleSubscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
+            await subscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
           }
 
           // Switch to new payment method if we have a specific ID
           if (payment_method_id) {
-            await appstleSwitchPaymentMethod(workspace_id, cycle.shopify_contract_id, payment_method_id);
+            await subscriptionSwitchPaymentMethod(workspace_id, cycle.shopify_contract_id, payment_method_id);
           }
 
           // Get upcoming order and trigger billing
-          const ordersRes = await appstleGetUpcomingOrders(workspace_id, cycle.shopify_contract_id);
+          const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, cycle.shopify_contract_id);
           if (!ordersRes.success || !ordersRes.orders?.length) {
             return { contractId: cycle.shopify_contract_id, recovered: false, error: "No upcoming orders" };
           }
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await appstleAttemptBilling(workspace_id, attemptId);
+          const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -682,7 +682,7 @@ async function handleAllCardsExhausted(
   } else if (action === "pause" || action === "cancel") {
     // Cancel the subscription — cleaner than indefinite pause
     // If customer adds a new payment method later, auto-reactivate via webhook
-    await appstleSubscriptionAction(workspaceId, shopifyContractId, "cancel", "dunning", "Cancelled by ShopCX — payment failed after multiple billing cycles");
+    await subscriptionAction(workspaceId, shopifyContractId, "cancel", "dunning", "Cancelled by ShopCX — payment failed after multiple billing cycles");
     await updateDunningCycle(cycle.id, { status: "exhausted", paused_at: new Date().toISOString() });
     await tagCustomerTickets(workspaceId, customerId, "dunning:cancelled");
   }
@@ -864,7 +864,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
     // subs don't go through the Appstle card-rotation path (their initial failure
     // is routed to handleInternalDunningFailure above), but the legacy retrying
     // rows that still carry an internal-* shopify_contract_id would otherwise be
-    // fed back into appstleAttemptBilling with a synthetic billing-attempt id and
+    // fed back into subscriptionAttemptBilling with a synthetic billing-attempt id and
     // 400 against Appstle. Signature vercel:cdfbac68e30a91f9.
     const cycles = await step.run("find-retryable-cycles", async () => {
       const { data } = await admin
@@ -951,13 +951,13 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           if (!check || check.status === "recovered") { recovered = true; break; }
 
           try {
-            await appstleSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
+            await subscriptionSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
 
-            const ordersRes = await appstleGetUpcomingOrders(cycle.workspace_id, cycle.shopify_contract_id);
+            const ordersRes = await subscriptionGetUpcomingOrders(cycle.workspace_id, cycle.shopify_contract_id);
             if (!ordersRes.success || !ordersRes.orders?.length) continue;
 
             const attemptId = ordersRes.orders[0].id;
-            await appstleAttemptBilling(cycle.workspace_id, attemptId);
+            await subscriptionAttemptBilling(cycle.workspace_id, attemptId);
 
             await logPaymentFailure({
               workspaceId: cycle.workspace_id,
