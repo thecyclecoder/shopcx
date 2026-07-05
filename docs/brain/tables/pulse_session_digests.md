@@ -26,14 +26,23 @@ The Phase-2 synthesizer ([[../libraries/pulse]], upcoming) joins these rows agai
 | `resume_point` | `text?` | one-sentence "where the founder left off" (from the final turns) |
 | `decisions` | `jsonb` | NOT NULL · default `'[]'` · array of `{ summary, cite? }` — 0-5 concrete in-session decisions |
 | `threads` | `jsonb` | NOT NULL · default `'[]'` · array of `{ title, status?, cite? }` — 0-5 threads of work touched. `status ∈ open ｜ resolved ｜ noise`; the Phase-2 join flips a thread's status to `resolved` when a matching spec is folded/shipped |
-| `refs` | `jsonb` | NOT NULL · default `'[]'` · array of `{ kind, value }` — 0-10 pointers mentioned by name. `kind ∈ spec ｜ brain ｜ file ｜ url ｜ commit ｜ pr` |
-| `digest_model` | `text?` | the Anthropic model that produced the digest, or the literal `heuristic` when the LLM was unavailable |
+| `refs` | `jsonb` | NOT NULL · default `'[]'` · array of `{ kind, value }` — 0-10 pointers mentioned by name. `kind ∈ spec ｜ brain ｜ file ｜ url ｜ commit ｜ pr ｜ migration` (`migration` added by [[../specs/pulse-session-authored-recaps]] Phase 1) |
+| `digest_model` | `text?` | the Anthropic model that produced the digest, the literal `heuristic` when the LLM was unavailable, or the literal `session-authored` when the assistant wrote the digest INSIDE a live session via [[../.claude/skills/recap|/recap]]. **Precedence marker — see "Session-authored precedence" below** |
 | `source_mtime_ms` | `bigint?` | mtime of the `.jsonl` at ingest time — the idempotency fingerprint (paired with `source_size_bytes`) |
 | `source_size_bytes` | `bigint?` | file size at ingest time — completes the idempotency fingerprint |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | default `now()` · auto-bumped by `pulse_session_digests_touch_updated_at` trigger |
 
-**Unique:** `(workspace_id, session_id)` — one row per (workspace, session). `scripts/pulse-digest.ts` upserts on this pair.
+**Unique:** `(workspace_id, session_id)` — one row per (workspace, session). BOTH writers ([[../.claude/skills/recap|/recap]]'s `scripts/pulse-recap.ts` AND the SessionEnd `scripts/pulse-digest.ts`) upsert on this pair — the session lands in exactly ONE row regardless of which writer got there first.
+
+## Session-authored precedence ([[../specs/pulse-session-authored-recaps]] Phase 2)
+
+Two writers, one row, one rule: **the session-authored row is authoritative — the SessionEnd Haiku ingest MUST NOT clobber it.**
+
+- If `digest_model = 'session-authored'`, the row was written by [[../.claude/skills/recap|/recap]] from inside a live session — the model that already knows the truth. The SessionEnd ingest skips these outright (counted in `IngestResult.skipped_session_authored` — surfaced in the `scripts/pulse-digest.ts` console line).
+- If `digest_model` is any other value (a Haiku model id or the literal `heuristic`), the SessionEnd ingest owns the row — the (mtime_ms, size_bytes) fingerprint governs whether to re-distill on the next run.
+- A `/recap` re-run in the SAME session overwrites the row in place — the same session-authored writer refreshing its own row is fine.
+- Enforcement lives in [[../libraries/pulse-digest]] `ingestProjectDirectory` (read-side; short-circuits before the model call) and `upsertDigestRow` (write-side; the belt-and-suspenders returning `{ ok:false, skipped:'session_authored' }` to close the read-then-write race).
 
 **Indexes:** `pulse_session_digests_workspace_last_activity_idx` on `(workspace_id, last_activity_at desc)` — the /pulse renderer scans "recent sessions first" and the Phase-2 synthesizer prioritizes the last-N sessions when composing the five lenses.
 
@@ -43,7 +52,8 @@ The Phase-2 synthesizer ([[../libraries/pulse]], upcoming) joins these rows agai
 
 ## Who writes / reads
 
-- **Writer:** [[../libraries/pulse-digest]] `ingestProjectDirectory`, invoked by `scripts/pulse-digest.ts`. Upserts on `(workspace_id, session_id)`; skips a file whose `(mtime_ms, size_bytes)` match the prior row (idempotent — cheap repeat runs).
+- **Writer (session-authored):** [[../libraries/pulse-digest]] `upsertDigestRow`, invoked by `scripts/pulse-recap.ts` (the [[../.claude/skills/recap|/recap]] skill's runnable). Runs INSIDE a live session; the assistant distills the digest from its own ground truth and upserts with `digest_model='session-authored'`. Authoritative — the SessionEnd ingest below will not clobber it.
+- **Writer (SessionEnd fallback):** [[../libraries/pulse-digest]] `ingestProjectDirectory`, invoked by `scripts/pulse-digest.ts`. Upserts on `(workspace_id, session_id)`; skips a file whose `(mtime_ms, size_bytes)` match the prior row (idempotent — cheap repeat runs) AND skips any session whose current row is session-authored (Phase 2 precedence rule — the counter is `IngestResult.skipped_session_authored`).
 - **Reader (Phase 2):** `src/lib/pulse.ts` `buildPulse` (upcoming) reads the last-N digests, joins them against [[specs]] via [[../libraries/specs-table]] `listSpecs` and the `agent_jobs↔specs` join on `spec_slug`, and hands the merged evidence to an LLM narrative pass that writes each of the five lenses with cites.
 - **Reader (Phase 3):** `/dashboard/developer/pulse` renders the snapshot; every cite is a superscript link back to the session digest row / spec detail page / commit.
 

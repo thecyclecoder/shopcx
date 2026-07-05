@@ -50,6 +50,16 @@ export interface DigestRef {
 /** The accepted `DigestRef.kind` vocabulary — single source of truth for validators. */
 export const DIGEST_REF_KINDS: DigestRef["kind"][] = ["spec", "brain", "file", "url", "commit", "pr", "migration"];
 
+/**
+ * Marker stamped on the row when the assistant authored the digest INSIDE
+ * a live session via the /recap skill + `scripts/pulse-recap.ts`. The
+ * SessionEnd Haiku ingest MUST NOT overwrite a row whose current
+ * `digest_model` equals this value — session-authored is the authoritative
+ * recap; the Haiku ingest is the forget-fallback for sessions that never
+ * ran /recap. See docs/brain/specs/pulse-session-authored-recaps.md Phase 2.
+ */
+export const SESSION_AUTHORED_MODEL = "session-authored";
+
 /** The structured digest of one session — mirrors the pulse_session_digests columns. */
 export interface SessionDigest {
   intent: string;
@@ -75,6 +85,15 @@ export interface IngestResult {
   scanned: number;
   distilled: number;
   skipped_unchanged: number;
+  /**
+   * Number of sessions the ingest skipped because their existing
+   * `pulse_session_digests` row was authored inside a live session via
+   * [[../.claude/skills/recap|/recap]] (`digest_model='session-authored'`).
+   * See [[../specs/pulse-session-authored-recaps]] Phase 2 — the SessionEnd
+   * Haiku ingest is the forget-fallback; it MUST NOT clobber the founder's
+   * witnessed recap with a paraphrased transcript-skim.
+   */
+  skipped_session_authored: number;
   upserted: number;
   errors: Array<{ session_id: string; message: string }>;
 }
@@ -344,8 +363,40 @@ export async function digestSessionFile(opts: {
 /**
  * Upsert one digest row into pulse_session_digests. Idempotent on
  * (workspace_id, session_id) — the unique constraint in the migration.
+ *
+ * Precedence guard (pulse-session-authored-recaps Phase 2): if the current row
+ * carries `digest_model='session-authored'` and the incoming row does NOT, the
+ * write is refused and the function returns `{ skipped: 'session_authored' }`.
+ * The session-authored row is authoritative; the SessionEnd Haiku ingest must
+ * never clobber a witnessed recap with a paraphrased transcript-skim. A /recap
+ * re-run in the SAME session (both current + incoming are session-authored)
+ * overwrites in place — that's the expected refresh path.
+ *
+ * The read-then-write is a defensive re-assertion of the precondition at the
+ * write site (belt-and-suspenders — the primary guard is in
+ * `ingestProjectDirectory`, which never even calls the model). It also
+ * protects any future direct caller of `upsertDigestRow` that might not
+ * know about the precedence rule.
  */
-export async function upsertDigestRow(admin: ReturnType<typeof createAdminClient>, workspaceId: string, row: DigestRow): Promise<void> {
+export type UpsertDigestRowResult = { ok: true } | { ok: false; skipped: "session_authored" };
+
+export async function upsertDigestRow(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  row: DigestRow,
+): Promise<UpsertDigestRowResult> {
+  if (row.digest_model !== SESSION_AUTHORED_MODEL) {
+    const { data: existing, error: readErr } = await admin
+      .from("pulse_session_digests")
+      .select("digest_model")
+      .eq("workspace_id", workspaceId)
+      .eq("session_id", row.session_id)
+      .maybeSingle();
+    if (readErr) throw new Error(`upsertDigestRow (precheck): ${readErr.message}`);
+    if (existing && (existing.digest_model as string | null) === SESSION_AUTHORED_MODEL) {
+      return { ok: false, skipped: "session_authored" };
+    }
+  }
   const { error } = await admin
     .from("pulse_session_digests")
     .upsert(
@@ -367,6 +418,7 @@ export async function upsertDigestRow(admin: ReturnType<typeof createAdminClient
       { onConflict: "workspace_id,session_id" },
     );
   if (error) throw new Error(`upsertDigestRow: ${error.message}`);
+  return { ok: true };
 }
 
 /**
@@ -398,7 +450,14 @@ export async function ingestProjectDirectory(opts: {
   admin?: ReturnType<typeof createAdminClient>;
 }): Promise<IngestResult> {
   const admin = opts.admin || createAdminClient();
-  const result: IngestResult = { scanned: 0, distilled: 0, skipped_unchanged: 0, upserted: 0, errors: [] };
+  const result: IngestResult = {
+    scanned: 0,
+    distilled: 0,
+    skipped_unchanged: 0,
+    skipped_session_authored: 0,
+    upserted: 0,
+    errors: [],
+  };
   let entries: string[];
   try {
     entries = readdirSync(opts.projectDir).filter((f) => f.endsWith(".jsonl"));
@@ -407,17 +466,21 @@ export async function ingestProjectDirectory(opts: {
     return result;
   }
   const sessionIds = entries.map((f) => f.replace(/\.jsonl$/, ""));
-  const priorBySession = new Map<string, { mtime: number; size: number }>();
+  const priorBySession = new Map<string, { mtime: number; size: number; digest_model: string | null }>();
   if (sessionIds.length > 0) {
+    // `digest_model` is fetched so we can guard the session-authored precedence rule
+    // (pulse-session-authored-recaps Phase 2) BEFORE calling the model — a Haiku round-trip
+    // we're about to throw away is the exact waste the guard exists to prevent.
     const { data } = await admin
       .from("pulse_session_digests")
-      .select("session_id, source_mtime_ms, source_size_bytes")
+      .select("session_id, source_mtime_ms, source_size_bytes, digest_model")
       .eq("workspace_id", opts.workspaceId)
       .in("session_id", sessionIds);
     for (const r of data || []) {
       priorBySession.set(r.session_id as string, {
         mtime: Number(r.source_mtime_ms) || 0,
         size: Number(r.source_size_bytes) || 0,
+        digest_model: (r.digest_model as string | null) ?? null,
       });
     }
   }
@@ -428,6 +491,14 @@ export async function ingestProjectDirectory(opts: {
     try {
       const stat = statSync(filepath);
       const prior = priorBySession.get(session_id);
+      // Precedence guard — the session-authored row is authoritative; a re-ingest here would
+      // paraphrase a truth the assistant already wrote from ground truth. Never re-distill,
+      // never re-upsert, regardless of mtime/size (a touch of the .jsonl still doesn't override
+      // /recap). See pulse-session-authored-recaps.md Phase 2.
+      if (prior && prior.digest_model === SESSION_AUTHORED_MODEL) {
+        result.skipped_session_authored++;
+        continue;
+      }
       if (prior && prior.mtime === Math.floor(stat.mtimeMs) && prior.size === stat.size) {
         result.skipped_unchanged++;
         continue;
@@ -435,8 +506,15 @@ export async function ingestProjectDirectory(opts: {
       const row = await digestSessionFile({ filepath, session_id, project: opts.project, model: opts.model });
       if (!row) continue;
       result.distilled++;
-      await upsertDigestRow(admin, opts.workspaceId, row);
-      result.upserted++;
+      const writeResult = await upsertDigestRow(admin, opts.workspaceId, row);
+      if (writeResult.ok) {
+        result.upserted++;
+      } else if (writeResult.skipped === "session_authored") {
+        // The read-side guard already skips these; if we reach here a session-authored row
+        // landed BETWEEN the prefetch and the write (e.g. a /recap ran mid-ingest). The
+        // write-time guard is the belt-and-suspenders — count it and move on.
+        result.skipped_session_authored++;
+      }
     } catch (err) {
       result.errors.push({ session_id, message: (err as Error).message });
     }

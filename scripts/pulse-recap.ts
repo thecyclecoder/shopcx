@@ -33,12 +33,19 @@ import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, join, resolve } from "path";
 import { createAdminClient } from "./_bootstrap";
-import { DigestRow, normalizeDigest, SessionDigest, upsertDigestRow } from "../src/lib/pulse-digest";
+import {
+  DigestRow,
+  normalizeDigest,
+  SESSION_AUTHORED_MODEL,
+  SessionDigest,
+  upsertDigestRow,
+} from "../src/lib/pulse-digest";
 
 const DEFAULT_WORKSPACE_ID = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
-/** Marker recorded on session-authored rows so Phase 2 can guard against clobber. */
-export const SESSION_AUTHORED_MODEL = "session-authored";
+// Re-export so imports of `SESSION_AUTHORED_MODEL` from this script keep working — the
+// canonical definition lives in src/lib/pulse-digest.ts (single source of truth).
+export { SESSION_AUTHORED_MODEL };
 
 /**
  * Parse `--key=value` flags. Positional args are ignored (this script takes
