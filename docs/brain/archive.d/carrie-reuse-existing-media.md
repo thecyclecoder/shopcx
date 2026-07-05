@@ -1,0 +1,1 @@
+- **Carrie — reuse existing product media before flagging a real-asset gap** · verified 2026-07-05 · → [[recipes/dr-content]]
