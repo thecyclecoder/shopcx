@@ -104,6 +104,16 @@ export async function proxy(request: NextRequest) {
   }
   const botInit = botRequestHeaders ? { request: { headers: botRequestHeaders } } : undefined;
 
+  // Machine-to-machine ingest endpoint: authenticates via its OWN Bearer token
+  // (DEVELOPER_USAGE_INGEST_TOKEN, checked in the route handler), so it must
+  // bypass the cookie-session auth gate below that would otherwise 307 it to
+  // /login (the Mac usage-reporter POST has no session cookie). Mirrors the
+  // /api/showcase/unlock exemption above. See
+  // src/app/api/developer/usage/report/route.ts + docs/brain/recipes/mac-usage-reporter.md.
+  if (request.nextUrl.pathname === "/api/developer/usage/report") {
+    return NextResponse.next(botInit);
+  }
+
   // Widget/API routes — bypass auth + CORS (no subdomain rewrite needed)
   if (request.nextUrl.pathname.startsWith("/api/widget/") || request.nextUrl.pathname.startsWith("/widget/") || request.nextUrl.pathname.startsWith("/api/portal/")) {
     if (request.method === "OPTIONS") {
