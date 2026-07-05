@@ -10921,6 +10921,14 @@ async function runGodModeClaude(
   });
 }
 
+// A `claude --resume <id>` whose conversation is gone from the account's session store — the box restarted
+// (e.g. a self-update deploy), the store rotated, or the turn was pinned to an account that no longer has it.
+// The healthy-account resume path doesn't treat this as a usage cap, so without a fresh retry the turn just
+// errors. Detected on the result text so the caller can re-run FRESH (context rebuilt from the transcript).
+function isNoConversationError(text: string): boolean {
+  return /No conversation found with session ID/i.test(text);
+}
+
 function godModeFraming(): string {
   return [
     `You are the FOUNDER'S CHIEF OF STAFF, running inside the ShopCX box with full power — full repo access, prod-write database creds, and every deploy credential. You are talking to the CEO (Dylan), who is NOT a coder. He should never see engineering jargon.`,
@@ -11039,18 +11047,32 @@ async function runGodModeJob(job: Job) {
     // time when this turn ran). `latestUser` is read straight off the loaded transcript.
     const latestUser = [...messages].reverse().find((m) => m.role === "user")?.content
       || (params.user_message?.trim() ?? "");
-    const turnPrompt = isResume
-      ? latestUser
-      : [godModeFraming(), ``, `Conversation so far:`, renderGodModeTranscript(messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+    // The FRESH prompt carries the full framing + transcript; the RESUME prompt is just the latest message
+    // (Claude already holds the history in the resumed session). We keep both so a failed resume can fall
+    // back to a fresh run WITHOUT losing context.
+    const freshPrompt = [godModeFraming(), ``, `Conversation so far:`, renderGodModeTranscript(messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+    const turnPrompt = isResume ? latestUser : freshPrompt;
 
     // Multi-account: RESUME pins to the prior config dir; a FRESH turn round-robins across
     // healthy accounts (same discipline as every other resumable Max lane).
-    const { result: coachRun, configDir: usedConfigDir, allCapped } = await withAccountFailover(
+    let { result: coachRun, configDir: usedConfigDir, allCapped } = await withAccountFailover(
       { sessionId: priorBoxSession, configDir: priorConfigDir },
       async (cfg, sid) => {
         return runGodModeClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id, sessionId);
       },
     );
+    // Self-heal a STALE resume: the pinned Claude conversation is gone ("No conversation found") — the box
+    // restarted (a self-update deploy), the store rotated, etc. Retry ONCE as a FRESH session with the full
+    // transcript prompt, so a founder mid-session isn't dead-ended by "god mode errored". No context lost.
+    if (isResume && coachRun && coachRun.isError && isNoConversationError(`${coachRun.resultText ?? ""}\n${coachRun.raw}`)) {
+      console.warn(`${tag} pinned resume conversation gone → retrying FRESH with full transcript`);
+      ({ result: coachRun, configDir: usedConfigDir, allCapped } = await withAccountFailover(
+        { sessionId: null, configDir: priorConfigDir },
+        async (cfg, sid) => {
+          return runGodModeClaude(await withCoaching(job, freshPrompt), sid, wt, cfg, job.id, sessionId);
+        },
+      ));
+    }
     if (allCapped || !coachRun) {
       await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — god-mode turn parked" });
       console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
