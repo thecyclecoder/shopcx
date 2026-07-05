@@ -63,6 +63,51 @@ Every enumerated entry point migrated onto `refundOrder`:
 
 Usage: `npx tsx scripts/_verify-refund-dispatcher.ts <workspaceId> [--samples=N] [--guard-days=N] [--verbose]`. Exit 0 = all cohorts routed correctly + guard preserved.
 
+## Dashboard-commerce SDK migration — Phase 1 enumeration
+
+Spec [[../specs/commerce-sdk-migrate-dashboard-agent-ai]] (parent goal milestone M4 — Migrate internal surfaces). Phase 1 moves the eight dashboard commerce page groups — subscription / order / return / replacement / loyalty / chargeback / fraud / crisis — onto `commerce/*` Display + Mutation ops so raw `.from("subscriptions"|"orders"|…)` reads and per-page pricing enrichment retire, and the three verification-required behavior additions land in the same phase: Apply-Coupon UI trigger on subscription detail, Crisis "Resolve" executes its promised subscription side-effects, and fraud confirm-fraud gains compare-and-set idempotency across its multi-step wizard. The dashboard pages themselves are client components; the raw `.from()` reads live in the per-surface API routes under `src/app/api/…`. Full HTML companion table: [[commerce-sdk-inventory.html]] § 1 Surface map → Dashboard commerce pages.
+
+**Reads → Display ops**
+
+| # | Surface | Current raw fetch (file:line) | SDK Display op | Notes |
+|---|---|---|---|---|
+| D1 | Subscriptions list | `src/app/api/workspaces/[id]/subscriptions/route.ts:30,55,111` (`.from("subscriptions"|"dunning_cycles")`) | `commerce/subscription.listSubscriptions` | Fixes the silent 1000-row cap on the product-filter branch (line 54–56 fetches with no `range/limit`). Recovery status + MRR annotation stays route-side. |
+| D2 | Subscription detail | `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts:28,45,53,62,71` | `commerce/subscription.getSubscription` + `commerce/order.listOrders({ subscription_id })` | Dunning + payment-failures + activity-events stay route-side. |
+| D3 | Orders list (+ Amplifier SLA + counts mode) | `src/app/api/workspaces/[id]/orders/route.ts:77,105,139,191` | `commerce/order.listOrders` (with new filter surface for Amplifier chips) + `commerce/order.orderCounts` | **Phase 1 SDK ADD** — `OrderListFilters` today only accepts `financial_status`/`fulfillment_status`/`order_type`; needs `tags` / Amplifier-status fields for the dashboard chips. |
+| D4 | Order detail | `src/app/api/workspaces/[id]/orders/[orderId]/route.ts:21,52,124,129,183,336,397` | `commerce/order.getOrder` + `commerce/subscription.getSubscription` + `commerce/replacement.listReplacements({ order_id })` | Storefront-attribution reads stay route-side. |
+| D5 | Returns list | `src/app/api/workspaces/[id]/returns/route.ts:31,60,69` | `commerce/return.listReturns` | Existing SDK op cursor-paginates past 1000. |
+| D6 | Return detail | `src/app/api/workspaces/[id]/returns/[returnId]/route.ts:19,86` | `commerce/return.getReturn` | — |
+| D7 | Replacements list | `src/app/api/workspaces/[id]/replacements/route.ts:30,81,105` | `commerce/replacement.listReplacements` | — |
+| D8 | Replacement detail | `src/app/api/workspaces/[id]/replacements/[replacementId]/route.ts:19,55,83,159` | `commerce/replacement.getReplacement` + `commerce/subscription.getSubscription` | — |
+| D9 | Chargebacks dashboard | `src/app/api/chargebacks/route.ts:26,55,72,82,111` + `/api/chargebacks/[id]/subscriptions:24,35,42,56` | `commerce/chargeback.listChargebacks` + `commerce/subscription.listSubscriptionsByCustomer` | — |
+| D10 | Fraud cases list | `src/app/api/workspaces/[id]/fraud-cases/route.ts:37,68,79,87` | `commerce/fraud.listFraudCases` + `commerce/order.getOrder` (per-case enrichment) | **Phase 1 SDK ADD** — today only `getFraudPosture` (customer-scoped) exists. |
+| D11 | Fraud case detail | `src/app/api/workspaces/[id]/fraud-cases/[caseId]/route.ts:34,46,53,114,173` | `commerce/fraud.getFraudCase` (workspace + caseId scoped) | **Phase 1 SDK ADD**. |
+| D12 | Loyalty members list | `src/app/api/loyalty/members/route.ts:33,44,48` | `commerce/loyalty.listLoyaltyMembers` | **Phase 1 SDK ADD** — today only `getLoyaltyBalance` (customer-scoped) + `listLoyaltyLedger` exist. |
+| D13 | Loyalty member detail | `src/app/dashboard/loyalty/[memberId]/page.tsx` → `/api/loyalty/balance` + `/api/loyalty/redemptions` | `commerce/loyalty.getLoyaltyBalance` + `commerce/loyalty.listLoyaltyLedger` | Existing SDK ops. |
+| D14 | Crisis events list | `src/app/api/workspaces/[id]/crisis/route.ts:33,56` | `commerce/crisis.listCrisisEvents` | **Phase 1 SDK ADD** — today only `getCrisisContext` (per-customer) exists. |
+| D15 | Crisis event detail | `src/app/api/workspaces/[id]/crisis/[crisisId]/route.ts:31,43,92` — line 92 walks all active/paused subs cursor-paginated (500-row batches) | `commerce/crisis.getCrisisEvent` + `commerce/subscription.listSubscriptions({ status_in:['active','paused'] })` | **Phase 1 SDK ADD** for `getCrisisEvent`. |
+
+**Mutations → Mutation ops**
+
+| # | Action | Current dispatcher (file:line) | SDK Mutation op | Notes |
+|---|---|---|---|---|
+| DM1 | Subscription pause/resume/cancel | `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts:152,157,163` → `appstleSubscriptionAction` | `commerce/subscription.subscriptionAction(id, "pause"|"resume"|"cancel")` | — |
+| DM2 | Subscription skip-next-order | `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts:168` → `appstleSkipUpcomingOrder` | `commerce/subscription.subscriptionSkipNextOrder` | — |
+| DM3 | Subscription change-frequency | `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts:175` → `appstleUpdateBillingInterval` | `commerce/subscription.subscriptionUpdateBillingInterval` | — |
+| DM4 | Subscription change-next-date | `src/app/api/workspaces/[id]/subscriptions/[subId]/route.ts:191` (direct `.from("subscriptions").update()`) | `commerce/subscription.subscriptionUpdateNextBillingDate` | Today writes `next_billing_date` raw — must route through the SDK dispatcher so internal + Appstle subs stay coherent. |
+| DM5 | Subscription add/remove/change-qty/swap-variant | `src/app/api/workspaces/[id]/subscriptions/[subId]/items/route.ts:32,70,112` → `subAddItem`/`subRemoveItem`/`subChangeQuantity`/`subSwapVariant` | `commerce/subscription.subscriptionAddItem` / `subscriptionRemoveItem` / `subscriptionChangeQuantity` / `subscriptionSwapVariant` | — |
+| DM6 | Subscription apply / remove coupon | `src/app/api/workspaces/[id]/subscriptions/[subId]/coupon/route.ts:27,64` → `subscriptionApplyCoupon` / `subscriptionRemoveCoupon` | `commerce/subscription.applyCoupon` / `commerce/subscription.removeCoupon` | SDK re-exports the internal-aware dispatcher already in `subscription-items.ts` — landed in this Phase-1 enumeration commit. |
+| DM7 **Phase 1 ADD** | Apply-Coupon UI trigger on subscription detail | *(not exposed)* — `src/app/dashboard/subscriptions/[id]/page.tsx:662–697` only exposes the Remove button; POST endpoint already exists at `coupon/route.ts:8` | `commerce/subscription.applyCoupon` (via the existing coupon POST route) | Verification bullet #4 — this commit adds the input + Apply button. |
+| DM8 | Subscription bill-now / payment-update email | `bill-now/route.ts:19+` → `orderNowByContract`; `payment-update/route.ts:25` → `appstleSendPaymentUpdateEmail` | `commerce/subscription.subscriptionOrderNow` / `commerce/subscription.subscriptionSendPaymentUpdateEmail` | — |
+| DM9 | Chargeback reinstate (resume subscription) | `src/app/api/chargebacks/[id]/reinstate/route.ts:59` → `appstleSubscriptionAction("resume")` | `commerce/subscription.subscriptionAction(id, "resume")` | — |
+| DM10 | Chargeback cancel-subscription | `src/app/api/chargebacks/[id]/cancel-subscription/route.ts:69` → `appstleSubscriptionAction("cancel", "chargeback")` | `commerce/subscription.subscriptionAction(id, "cancel", reason, "chargeback")` | — |
+| DM11 | Fraud confirm-fraud — cancel-subscriptions step | `src/app/api/workspaces/[id]/fraud-cases/[caseId]/confirm-fraud/route.ts:110` → `appstleSubscriptionAction("cancel", "fraud")` | `commerce/subscription.subscriptionAction(id, "cancel", "fraud", "Fraud Detection")` | Already filters `status in ("active","paused")` at line 107 — compare-and-set is inherent; SDK migration is the swap. |
+| DM12 | Fraud confirm-fraud — cancel-refund-orders step | `confirm-fraud/route.ts:167,178` → `refundOrder` + `cancelOrder` | `commerce/refund.issueRefund` + `commerce/order.cancelOrder` (M2c mutations) | Refund op inherits the internal→Braintree / Shopify→REST dispatch behavior. |
+| DM13 **Phase 1 ADD** | Fraud confirm-fraud — compound-write idempotency | *(not guarded)* — `route.ts:98–121,123–196` steps are client-driven but a mid-loop failure + step-retry today re-refunds already-refunded orders | Precheck on `cancel_refund_orders` — skip orders whose `customer_events` shows a prior fraud-case refund; skip `cancel_subscriptions` subs already terminally cancelled | Verification bullet #6. |
+| DM14 | Fraud cancel-subscription (single, from case detail) | `src/app/api/workspaces/[id]/fraud-cases/[caseId]/cancel-subscription/route.ts:61` → `appstleSubscriptionAction("cancel", "fraud")` | `commerce/subscription.subscriptionAction(id, "cancel", "fraud", displayName)` | — |
+| DM15 **Phase 1 ADD** | Crisis "Resolve" — execute promised subscription side-effects | *(stub)* — `src/app/api/workspaces/[id]/crisis/[crisisId]/route.ts:239–252` only writes `crisis_events.status="resolved"` | `commerce/subscription.subscriptionAction(id, "resume")` for every paused `crisis_customer_actions` row + `commerce/subscription.subscriptionAddItem` for every row with `removed_item_at IS NOT NULL AND auto_readd = true` | Verification bullet #5. |
+| DM16 | Loyalty redeem-points | `src/app/api/loyalty/redeem/route.ts:178` (`.from("loyalty_redemptions").insert()`) | `commerce/loyalty.redeemPoints` (M2c mutation) | Mutation op is planned in M2c; migration lands when it ships. |
+
 ## Related
 
 [[../lifecycles/return-pipeline]] · [[../lifecycles/chargeback-pipeline]] · [[../libraries/shopify-order-actions]] · [[../libraries/action-executor]] · [[../libraries/playbook-executor]] · [[../inngest/returns]] · [[../integrations/braintree]] · [[../operational-rules]]

@@ -63,6 +63,8 @@ import {
   subChangeQuantity,
   subSwapVariant,
   subUpdateLineItemPrice,
+  subscriptionApplyCoupon,
+  subscriptionRemoveCoupon,
 } from "@/lib/subscription-items";
 
 export type { SubscriptionView, SubscriptionLineView, SubscriptionPricingView, SubscriptionListFilters } from "./types";
@@ -447,6 +449,37 @@ export async function subscriptionUpdateLineItemPrice(
   lineGid?: string,
 ): Promise<OpResult> {
   return subUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents, lineGid);
+}
+
+// ── Coupons ─────────────────────────────────────────────────────────
+
+/**
+ * Apply a coupon to a subscription — internal-aware dispatcher.
+ * Delegates to the existing `subscription-items.ts` wrapper which:
+ *   - internal subs → resolveCoupon (internal-wins → Shopify fallback) then
+ *     internalSubApplyDiscount so we never write an unresolvable code onto
+ *     subscriptions.applied_discounts;
+ *   - Appstle subs → healOnTouch then applyDiscountWithReplace which enforces
+ *     the 1-coupon-per-sub invariant on Appstle's side.
+ */
+export async function applyCoupon(
+  workspaceId: string,
+  contractId: string,
+  code: string,
+): Promise<OpResult> {
+  return subscriptionApplyCoupon(workspaceId, contractId, code);
+}
+
+/**
+ * Remove a coupon from a subscription — internal-aware dispatcher.
+ * Delegates to the existing `subscription-items.ts` wrapper.
+ */
+export async function removeCoupon(
+  workspaceId: string,
+  contractId: string,
+  discountIdOrCode: string,
+): Promise<OpResult> {
+  return subscriptionRemoveCoupon(workspaceId, contractId, discountIdOrCode);
 }
 
 // ── Free / swap product convenience wrappers ────────────────────────
