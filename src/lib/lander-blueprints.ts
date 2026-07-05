@@ -488,6 +488,89 @@ export async function writeCategorizedProductMedia(
 }
 
 /**
+ * Semantic slot/alt match for a real-evidence asset role — the fallback path
+ * `findExistingRealAsset` uses on rows where `category` hasn't been backfilled
+ * yet (historic uploads pre-date Carrie's DR-content columns). Kept private —
+ * this is a compat shim over the legacy `slot`/`alt_text` vocabulary, not a
+ * public classifier.
+ *
+ *   before_after      ← slot `before` / `after` / `before_{n}` / `after_{n}`
+ *   press_logo        ← slot `press_*` (or the bare `press`)
+ *   testimonial_photo ← slot `endorsement_*_avatar` (re-hosted headshots)
+ *   ugc               ← slot / alt_text containing ugc | selfie | customer
+ */
+function matchesRealEvidenceRoleBySlotOrAlt(
+  assetRole: "before_after" | "ugc" | "testimonial_photo" | "press_logo",
+  slot: string | null,
+  altText: string | null,
+): boolean {
+  const s = (slot || "").toLowerCase();
+  const a = (altText || "").toLowerCase();
+  switch (assetRole) {
+    case "before_after":
+      return /^before(_\d+)?$/.test(s) || /^after(_\d+)?$/.test(s);
+    case "press_logo":
+      return s === "press" || s.startsWith("press_");
+    case "testimonial_photo":
+      return /^endorsement_[a-z0-9]+_avatar$/.test(s);
+    case "ugc":
+      return (
+        s.includes("ugc") ||
+        s.includes("selfie") ||
+        s.includes("customer") ||
+        a.includes("ugc") ||
+        a.includes("selfie") ||
+        a.includes("customer")
+      );
+    default:
+      return false;
+  }
+}
+
+/**
+ * Carrie's reuse-before-flag probe — for a real-evidence slot on a lander
+ * blueprint, find an existing `product_media` row that satisfies the slot
+ * BEFORE Carrie opens a [[lander_content_gaps]] row. Two match paths, tried in
+ * order:
+ *   1. `category = assetRole` — a row Carrie's DR-content pass already
+ *      categorized (or the founder resolved a prior gap into).
+ *   2. Slot/alt semantic match — a historic row whose legacy `slot` / `alt_text`
+ *      names it as the same asset (before/after, press_*, endorsement_*_avatar,
+ *      ugc/selfie/customer). Covers products that already own the imagery from
+ *      the seeding pass but haven't been Carrie-categorized.
+ *
+ * Never returns a `source='generated'` row — that's the never-fake-a-customer-
+ * result compliance line (an AI image can't stand in as real customer / press
+ * evidence, even if the category matches). Rows with `source IS NULL` (historic
+ * uploads from before the DR columns landed) are treated as non-generated and
+ * eligible. Returns null when nothing eligible exists — the caller opens a
+ * gap.
+ */
+export async function findExistingRealAsset(
+  workspaceId: string,
+  productId: string,
+  assetRole: "before_after" | "ugc" | "testimonial_photo" | "press_logo",
+): Promise<ProductMediaCategorizedRow | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("product_media")
+    .select(
+      "id, workspace_id, product_id, slot, url, storage_path, category, source, caption, alt_text, display_order, created_at, updated_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .not("url", "is", null)
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(`findExistingRealAsset: ${error.message}`);
+  const rows = ((data || []) as ProductMediaCategorizedRow[]).filter((r) => r.source !== "generated");
+  if (rows.length === 0) return null;
+  const categorized = rows.find((r) => r.category === assetRole);
+  if (categorized) return categorized;
+  const slotHit = rows.find((r) => matchesRealEvidenceRoleBySlotOrAlt(assetRole, r.slot, r.alt_text));
+  return slotHit ?? null;
+}
+
+/**
  * Read categorized `product_media` for a product — Carrie's "do we already
  * have an X for this product?" probe. Filter by `category` to answer a single
  * slot's question; omit to load every categorized asset for a decision pass.
