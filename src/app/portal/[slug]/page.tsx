@@ -168,7 +168,7 @@ export default async function PortalHome({
   // Layer live pricing onto each sub — per-line charged + strikethrough base, and
   // the per-delivery total + qualified-discount pills. Internal subs price via the
   // engine; Appstle subs keep baked prices and just get the coupon reflected.
-  const { priceSubscription } = await import("@/lib/portal/helpers/enrich-pricing");
+  const { priceSubscription } = await import("@/lib/commerce/price");
   const enrichedSubs = await Promise.all(
     (imagedSubs as Array<Record<string, unknown>>).map(async (sub) => {
       const { priced, pricing } = await priceSubscription(workspaceId, sub);

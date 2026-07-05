@@ -94,6 +94,9 @@ interface RawSubscriptionRow {
   applied_discounts: unknown;
   pricing_offer_id: string | null;
   payment_method_id: string | null;
+  pause_resume_at: string | null;
+  subscription_created_at: string | null;
+  avalara_quote_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -226,6 +229,9 @@ async function buildViewFromRaw(
     applied_discounts: Array.isArray(sub.applied_discounts) ? (sub.applied_discounts as Array<Record<string, unknown>>) : [],
     pricing_offer_id: sub.pricing_offer_id,
     payment_method_id: sub.payment_method_id,
+    pause_resume_at: sub.pause_resume_at ?? null,
+    subscription_created_at: sub.subscription_created_at ?? null,
+    avalara_quote_at: sub.avalara_quote_at ?? null,
     latest_order: buildLatestOrder(latest),
     upcoming_order: upcoming,
     created_at: sub.created_at,
@@ -236,7 +242,44 @@ async function buildViewFromRaw(
 // ── Display ops ──────────────────────────────────────────────────────
 
 const SUBSCRIPTION_COLUMNS =
-  "id, workspace_id, customer_id, shopify_contract_id, status, is_internal, comp, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, shipping_address, shipping_protection_added, shipping_protection_amount_cents, applied_discounts, pricing_offer_id, payment_method_id, created_at, updated_at";
+  "id, workspace_id, customer_id, shopify_contract_id, status, is_internal, comp, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, delivery_price_cents, shipping_address, shipping_protection_added, shipping_protection_amount_cents, applied_discounts, pricing_offer_id, payment_method_id, pause_resume_at, subscription_created_at, avalara_quote_at, created_at, updated_at";
+
+/**
+ * Resolve a subscription by upstream contract id (Appstle's
+ * `shopify_contract_id`, our legacy boundary key), priced for display.
+ * Returns `null` when no row matches — callers pick their own error
+ * shape.
+ *
+ * Portal detail routes accept either the internal UUID or the legacy
+ * contract id in their URL, and this op is the SDK-side companion to
+ * `getSubscription` for the second shape.
+ */
+export async function getSubscriptionByContractId(
+  workspaceId: string,
+  contractId: string,
+): Promise<SubscriptionView | null> {
+  const admin = createAdminClient();
+  const { data: sub, error } = await admin
+    .from("subscriptions")
+    .select(SUBSCRIPTION_COLUMNS)
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!sub) return null;
+
+  const raw = sub as RawSubscriptionRow;
+  const { data: latest } = await admin
+    .from("orders")
+    .select("id, order_number, financial_status, delivery_status, total_cents, created_at, delivered_at")
+    .eq("workspace_id", workspaceId)
+    .eq("subscription_id", raw.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return buildViewFromRaw(workspaceId, raw, (latest as RawLatestOrder | null) ?? null);
+}
 
 /**
  * Fetch one subscription by internal UUID, priced for display.
@@ -316,9 +359,37 @@ export async function listSubscriptions(
     const rows = (data ?? []) as CommerceListRow[];
     if (rows.length === 0) break;
 
+    // Fill in per-sub scalars the RPC's jsonb projection does not carry
+    // (pause_resume_at, subscription_created_at, avalara_quote_at). One
+    // batched read per page — no per-row round trip.
+    const pageIds = rows.map((r) => r.sub.id);
+    const extrasMap = new Map<string, { pause_resume_at: string | null; subscription_created_at: string | null; avalara_quote_at: string | null }>();
+    if (pageIds.length > 0) {
+      const { data: extras, error: extrasErr } = await admin
+        .from("subscriptions")
+        .select("id, pause_resume_at, subscription_created_at, avalara_quote_at")
+        .eq("workspace_id", workspaceId)
+        .in("id", pageIds);
+      if (extrasErr) throw extrasErr;
+      for (const row of (extras ?? []) as Array<{ id: string; pause_resume_at: string | null; subscription_created_at: string | null; avalara_quote_at: string | null }>) {
+        extrasMap.set(row.id, {
+          pause_resume_at: row.pause_resume_at ?? null,
+          subscription_created_at: row.subscription_created_at ?? null,
+          avalara_quote_at: row.avalara_quote_at ?? null,
+        });
+      }
+    }
+
     for (const row of rows) {
       if (out.length >= maxRows) break;
-      const view = await buildViewFromRaw(workspaceId, row.sub, row.latest_order);
+      const extras = extrasMap.get(row.sub.id);
+      const subWithExtras: RawSubscriptionRow = {
+        ...row.sub,
+        pause_resume_at: extras?.pause_resume_at ?? row.sub.pause_resume_at ?? null,
+        subscription_created_at: extras?.subscription_created_at ?? row.sub.subscription_created_at ?? null,
+        avalara_quote_at: extras?.avalara_quote_at ?? row.sub.avalara_quote_at ?? null,
+      };
+      const view = await buildViewFromRaw(workspaceId, subWithExtras, row.latest_order);
       out.push(view);
     }
 

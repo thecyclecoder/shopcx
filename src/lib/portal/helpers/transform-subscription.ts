@@ -1,5 +1,7 @@
-// Transform our DB subscription shape into the contract shape the portal frontend expects.
-// Bridges: DB (snake_case, items[], price_cents) → Frontend (camelCase, lines[], MoneyV2).
+// Transform a commerce SDK SubscriptionView into the frontend contract shape.
+// Bridges: SubscriptionView (from @/lib/commerce/subscription) → Frontend
+// (camelCase, lines[], MoneyV2). All money already resolved by the SDK's
+// priceSubscription — this layer only reshapes fields and resolves images.
 //
 // Image priority on each line item:
 //   1. product_variants.image_url — canonical UUID rows. Storefront
@@ -11,23 +13,8 @@
 //      canonical table doesn't have a hit.
 //   3. products.image_url — Shopify product hero. Final fallback only
 //      when no variant-level image exists anywhere.
-//   4. item.image_url — stamped at checkout for internal subs; safety
-//      net for cases where the catalog lookup can't resolve the
-//      product at all (e.g. variant rotated out of the catalog).
 
-interface DbItem {
-  sku?: string;
-  title?: string;
-  quantity?: number;
-  product_id?: string;
-  variant_id?: string;
-  price_cents?: number;
-  selling_plan?: string;
-  variant_title?: string;
-  line_id?: string;
-  image_url?: string | null;
-  is_gift?: boolean;
-}
+import type { SubscriptionLineView, SubscriptionView } from "@/lib/commerce/subscription";
 
 interface ProductInfo {
   productImage: string;
@@ -41,8 +28,8 @@ interface ProductMap {
   [productId: string]: ProductInfo;
 }
 
-function resolveLineImage(info: ProductInfo | undefined, item: DbItem): string {
-  if (!info) return item.image_url || "";
+function resolveLineImage(info: ProductInfo | undefined, item: SubscriptionLineView): string {
+  if (!info) return "";
   const tryKeys: string[] = [];
   if (item.variant_id) tryKeys.push(String(item.variant_id));
   if (item.sku) tryKeys.push(item.sku);
@@ -51,48 +38,45 @@ function resolveLineImage(info: ProductInfo | undefined, item: DbItem): string {
     const hit = info.byKey.get(k);
     if (hit) return hit;
   }
-  return info.productImage || item.image_url || "";
+  return info.productImage || "";
 }
 
 export function transformSubscription(
-  sub: Record<string, unknown>,
+  sub: SubscriptionView,
   productMap: ProductMap = {}
 ) {
-  const items = Array.isArray(sub.items) ? (sub.items as DbItem[]) : [];
-
-  const lines = items.map(item => {
+  const lines = sub.items.map((item) => {
     const pid = item.product_id || "";
     const product = productMap[pid];
-
-    // Resolve variant id for the frontend — prefer what's on the item;
-    // fall back to looking it up by sku/title against the catalog.
-    let resolvedVariantId = item.variant_id || "";
-    if (!resolvedVariantId && product) {
-      // The byKey map's values are image URLs not variant ids, so we
-      // can't look up the variant id from it. Best-effort: leave as-is.
-      // (This path was rare in the old transformer too.)
-    }
-
     const imageUrl = resolveLineImage(product, item);
 
+    // The SDK's price resolver puts the charged unit price on
+    // `unit_cents` and the strikethrough MSRP on `base_cents`. Surface
+    // both so the frontend can render a strikethrough when a discount
+    // applies (base > unit).
+    const unitCents = item.unit_cents;
+    const baseCents = item.base_cents;
+
     return {
-      // Appstle items carry a Shopify line_id; internal items don't (they key
-      // on the catalog variant_id UUID). Falling back to variant_id gives every
-      // line a stable identifier the portal can send back for swap/remove/qty —
-      // the backend handlers resolve internal subs by matching this against
-      // variant_id. Without this, internal lines had id="" and the portal
-      // couldn't identify which line to mutate.
+      // Appstle lines carry a Shopify line_id; internal lines don't
+      // (they key on the variant_id UUID). Falling back to variant_id
+      // gives every line a stable identifier the portal can send back
+      // for swap/remove/qty — the backend handlers match this against
+      // the internal sub's variant_id.
       id: item.line_id || String(item.variant_id || "") || "",
       title: item.title || "Item",
       variantTitle: item.variant_title || "",
       quantity: item.quantity || 1,
-      variantId: resolvedVariantId,
+      variantId: item.variant_id || "",
       productId: pid,
       sku: item.sku || "",
       currentPrice: {
-        amount: String(((item.price_cents || 0) / 100).toFixed(2)),
+        amount: (unitCents / 100).toFixed(2),
         currencyCode: "USD",
       },
+      basePrice: baseCents > unitCents
+        ? { amount: (baseCents / 100).toFixed(2), currencyCode: "USD" }
+        : null,
       variantImage: {
         transformedSrc: imageUrl,
       },
@@ -108,9 +92,10 @@ export function transformSubscription(
     id: sub.shopify_contract_id || sub.id,
     internal_id: sub.id,
     shopify_contract_id: sub.shopify_contract_id,
-    is_internal: sub.is_internal ?? null,
-    // Internal subs track shipping protection on the row (the renewal bills from
-    // it), not as a line item — surface it so the toggle + summary use one source.
+    is_internal: sub.is_internal,
+    // Internal subs track shipping protection on the row (the renewal
+    // bills from it), not as a line item — surface it so the toggle +
+    // summary use one source.
     shipping_protection_added: !!sub.shipping_protection_added,
     shipping_protection_amount_cents: Number(sub.shipping_protection_amount_cents || 0),
     status: String(sub.status || "active").toUpperCase(),
@@ -124,7 +109,9 @@ export function transformSubscription(
     lines,
     createdAt: sub.created_at,
     updatedAt: sub.updated_at,
-    deliveryMethod: sub.delivery_method || null,
+    // deliveryMethod is resolved from the sub's shipping_address by the
+    // detail handler; the list handler leaves it null.
+    deliveryMethod: null as { address?: Record<string, unknown> } | null,
   };
 }
 

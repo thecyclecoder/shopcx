@@ -105,6 +105,25 @@ export interface SubscriptionView {
   applied_discounts: Array<Record<string, unknown>>;
   pricing_offer_id: string | null;
   payment_method_id: string | null;
+  /**
+   * ISO timestamp the sub auto-resumes at, when the customer chose a
+   * timed pause. `null` for indefinite pauses / non-paused subs. Portal
+   * surfaces this in the pause banner + the auto-resume cron reads it.
+   */
+  pause_resume_at: string | null;
+  /**
+   * Original creation date on the upstream vendor's contract (Appstle's
+   * `createdAt`, mirrored on the Appstle sync). Diverges from
+   * `created_at` (our DB row insert). Portal uses this for the
+   * lock-days gate so lock timing tracks the customer's real signup.
+   */
+  subscription_created_at: string | null;
+  /**
+   * ISO timestamp of the last Avalara tax quote cached on the sub. Portal
+   * detail surfaces this alongside the projected tax to indicate how
+   * fresh the quote is. `null` when the sub has never been quoted.
+   */
+  avalara_quote_at: string | null;
   /** Most recent renewal order (compact); null when the sub has never billed. */
   latest_order: SubscriptionLatestOrderView | null;
   /** Next scheduled renewal (compact); null when cancelled or with no next date. */

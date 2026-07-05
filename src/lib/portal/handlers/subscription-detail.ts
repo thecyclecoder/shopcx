@@ -1,8 +1,20 @@
+// Portal subscription-detail — reads via the commerce SDK
+// (@/lib/commerce/subscription.getSubscription / getSubscriptionByContractId),
+// which returns one priced SubscriptionView. Money is resolved by the SDK's
+// priceSubscription; this handler layers on tax, dunning, events, payment
+// method, and delivery-address resolution.
+
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan, portalFetch } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
-// decrypt removed — discounts now read from local DB, not Appstle API
+import {
+  getSubscription,
+  getSubscriptionByContractId,
+  type SubscriptionView,
+} from "@/lib/commerce/subscription";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -18,21 +30,30 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
 
   const admin = createAdminClient();
 
-  // Resolve by our UUID (the portal's canonical key) OR the legacy contract id.
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  let subQuery = admin.from("subscriptions").select("*").eq("workspace_id", auth.workspaceId);
-  subQuery = UUID_RE.test(idParam) ? subQuery.eq("id", idParam) : subQuery.eq("shopify_contract_id", idParam);
-  const { data: sub } = await subQuery.maybeSingle();
-
+  // Resolve by our UUID (the portal's canonical key) OR the legacy
+  // contract id. Both paths use the SDK — no direct `subscriptions`
+  // reads in the portal.
+  let sub: SubscriptionView | null;
+  if (UUID_RE.test(idParam)) {
+    try {
+      sub = await getSubscription(auth.workspaceId, idParam);
+    } catch {
+      sub = null;
+    }
+  } else {
+    sub = await getSubscriptionByContractId(auth.workspaceId, idParam);
+  }
   if (!sub) return jsonErr({ error: "subscription_not_found" }, 404);
-  // Downstream shopify_contract_id-keyed lookups (dunning, failures, events).
-  const contractId = (sub.shopify_contract_id as string) || idParam;
+
+  // Downstream shopify_contract_id-keyed lookups (dunning, failures,
+  // events).
+  const contractId = sub.shopify_contract_id || idParam;
 
   // Tax quote. Internal subs only — Appstle subs are handled by
   // Shopify's tax pipeline. Returns null when Avalara isn't enabled
   // or the sub isn't quote-able yet (no address, no items, etc.).
   let taxQuote: { tax_cents: number; total_cents: number } | null = null;
-  if (sub.is_internal && ["active", "paused"].includes(sub.status as string)) {
+  if (sub.is_internal && ["active", "paused"].includes(sub.status)) {
     try {
       const { ensureFreshSubscriptionTaxQuote } = await import("@/lib/avalara-subscription");
       taxQuote = await ensureFreshSubscriptionTaxQuote(auth.workspaceId, sub.id);
@@ -64,9 +85,8 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   // Get product images for items — pass both product_ids and
   // variant_ids so the helper can resolve via either path (Appstle
   // items may not carry product_id).
-  const itemsArr = (Array.isArray(sub.items) ? sub.items : []) as Array<{ product_id?: string; variant_id?: string | number }>;
-  const productIds = itemsArr.map((it) => it.product_id).filter(Boolean) as string[];
-  const variantIds = itemsArr.map((it) => (it.variant_id != null ? String(it.variant_id) : "")).filter(Boolean);
+  const productIds = sub.items.map((it) => it.product_id).filter((v): v is string => !!v);
+  const variantIds = sub.items.map((it) => it.variant_id).filter((v) => !!v).map(String);
   const productMap = await getProductMap(
     admin,
     auth.workspaceId,
@@ -74,20 +94,8 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     [...new Set(variantIds)],
   );
 
-  // Transform to frontend shape
+  // View → frontend shape (money already resolved by the SDK).
   const contract = transformSubscription(sub, productMap);
-
-  // Layer live pricing onto the contract — lines get a strikethrough base +
-  // charged price, plus the per-delivery total + qualified-discount pills.
-  // Internal subs price via the engine; Appstle subs keep baked prices and just
-  // get the coupon reflected.
-  let pricing: Awaited<ReturnType<typeof import("@/lib/portal/helpers/enrich-pricing").enrichContractPricing>> | null = null;
-  try {
-    const { enrichContractPricing } = await import("@/lib/portal/helpers/enrich-pricing");
-    pricing = await enrichContractPricing(auth.workspaceId, sub, contract as unknown as Record<string, unknown> & { lines?: unknown });
-  } catch (err) {
-    console.warn(`[portal] enrichContractPricing failed for ${sub.id}:`, err);
-  }
 
   // Dunning cycles
   const { data: dunningCycles } = await admin.from("dunning_cycles")
@@ -136,8 +144,9 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     ? `https://${ws.shopify_myshopify_domain}/account`
     : null;
 
-  // Add delivery address: prefer subscription's shipping_address, fall back to last order, then customer default
-  const subAddr = sub.shipping_address as Record<string, unknown> | null;
+  // Delivery address: prefer subscription's shipping_address, fall back
+  // to the last order for this sub, then customer default.
+  const subAddr = sub.shipping_address;
   let orderAddr: Record<string, unknown> | null = null;
   if (!subAddr) {
     const { data: lastOrder } = await admin.from("orders")
@@ -154,9 +163,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   }
   const defaultAddr = (customer as Record<string, unknown>)?.default_address as Record<string, unknown> | null;
   const addr = subAddr || orderAddr || defaultAddr;
-  const dm = contract.deliveryMethod as { address?: { address1?: string } } | null;
-  const hasDeliveryAddress = dm?.address?.address1;
-  if (addr && !hasDeliveryAddress) {
+  if (addr) {
     contract.deliveryMethod = {
       address: {
         firstName: addr.firstName || addr.first_name || "",
@@ -164,8 +171,9 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
         address1: addr.address1 || "",
         address2: addr.address2 || "",
         city: addr.city || "",
-        // Stored addresses use snake_case (province_code/country_code); order +
-        // Appstle shapes use camelCase. Accept both so the state isn't dropped.
+        // Stored addresses use snake_case (province_code/country_code);
+        // order + Appstle shapes use camelCase. Accept both so state
+        // isn't dropped.
         province: addr.province || addr.province_code || addr.provinceCode || "",
         provinceCode: addr.provinceCode || addr.province_code || addr.province || "",
         zip: addr.zip || "",
@@ -174,15 +182,14 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     };
   }
 
-  // Read applied discounts from local DB (synced via Appstle webhook)
-  const discounts = (sub.applied_discounts as { id: string; title: string; type: string; value: number; valueType: string }[]) || [];
-  const appliedDiscounts = discounts.map(d => ({
-    id: d.id,
-    code: d.title,
-    title: d.title,
-    type: d.type, // "MANUAL" or "CODE_DISCOUNT"
-    value: d.value,
-    valueType: d.valueType,
+  // Applied discounts (normalized for the frontend)
+  const appliedDiscounts = sub.applied_discounts.map((d) => ({
+    id: d.id as string,
+    code: (d.title as string) ?? (d.code as string) ?? null,
+    title: (d.title as string) ?? (d.code as string) ?? null,
+    type: d.type as string, // "MANUAL" or "CODE_DISCOUNT"
+    value: d.value as number,
+    valueType: d.valueType as string,
   }));
   // Keep backward compat: appliedDiscount = first discount
   const appliedDiscount = appliedDiscounts[0] || null;
@@ -224,28 +231,27 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
-  // Payment method. Internal subs bill via Braintree — show the default card the
-  // renewal will actually charge (customer_payment_methods, same resolution as
-  // internal-subscription-renewals). Appstle subs read the last Shopify order's
-  // transaction.
+  // Payment method. Internal subs bill via Braintree — show the default
+  // card the renewal will actually charge (customer_payment_methods,
+  // same resolution as internal-subscription-renewals). Appstle subs
+  // read the last Shopify order's transaction.
   let paymentMethod: { brand: string | null; last4: string | null; expiry: string | null; gateway: string | null } | null = null;
   if (sub.is_internal) {
-    // Show the sub's PINNED card if set + still valid, else the customer default —
-    // mirrors the renewal's resolution so the displayed card is what gets charged.
     let pm: { card_brand: string | null; last4: string | null; expiration_month: string | null; expiration_year: string | null } | null = null;
     if (sub.payment_method_id) {
       const { data } = await admin.from("customer_payment_methods")
         .select("card_brand, last4, expiration_month, expiration_year")
         .eq("workspace_id", auth.workspaceId)
-        .eq("id", sub.payment_method_id as string)
+        .eq("id", sub.payment_method_id)
         .eq("status", "active")
         .maybeSingle();
       pm = data;
     }
     if (!pm) {
-      // Default spans the link group (one default per person) — may be on a sibling.
+      // Default spans the link group (one default per person) — may be
+      // on a sibling.
       const { linkGroupIds } = await import("@/lib/customer-links");
-      const groupIds = await linkGroupIds(admin, auth.workspaceId, sub.customer_id as string);
+      const groupIds = await linkGroupIds(admin, auth.workspaceId, sub.customer_id ?? "");
       const { data } = await admin.from("customer_payment_methods")
         .select("card_brand, last4, expiration_month, expiration_year")
         .eq("workspace_id", auth.workspaceId)
@@ -266,7 +272,8 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
       };
     }
   } else {
-    // Find last order tied to THIS subscription, fall back to any order for this customer
+    // Find last order tied to THIS subscription, fall back to any order
+    // for this customer.
     let lastOrder: { shopify_order_id: string } | null = null;
     const { data: subOrder } = await admin.from("orders")
       .select("shopify_order_id")
@@ -322,12 +329,13 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
-  // First-delivery mutation gate (anti-gaming): block content/schedule/discount
-  // changes until the first order is delivered. Surfaced so both portals can
-  // disable the options + show why. Cheap for delivered subs (stored flag);
-  // a live EasyPost lookup only happens for an undelivered internal sub.
+  // First-delivery mutation gate (anti-gaming): block content/schedule/
+  // discount changes until the first order is delivered. Surfaced so
+  // both portals can disable the options + show why. Cheap for
+  // delivered subs (stored flag); a live EasyPost lookup only happens
+  // for an undelivered internal sub.
   const { canMutateSubscription } = await import("@/lib/portal/mutation-guard");
-  const mutationGate = await canMutateSubscription(auth.workspaceId, sub as { id: string; is_internal?: boolean | null });
+  const mutationGate = await canMutateSubscription(auth.workspaceId, { id: sub.id, is_internal: sub.is_internal });
 
   return jsonOk({
     ok: true,
@@ -336,7 +344,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     route,
     contract: {
       ...contract,
-      pricing,
+      pricing: sub.pricing,
       appliedDiscount,
       appliedDiscounts,
       crisisBanner,
@@ -346,7 +354,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
         ? {
             tax_cents: taxQuote.tax_cents,
             total_cents: taxQuote.total_cents,
-            quoted_at: sub.avalara_quote_at as string | null,
+            quoted_at: sub.avalara_quote_at,
           }
         : null,
       portalState: {

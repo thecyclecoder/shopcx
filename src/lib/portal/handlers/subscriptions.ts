@@ -1,21 +1,24 @@
-// DB-first subscription list with contract shape transformation
+// Portal subscriptions list — reads via the commerce SDK
+// (@/lib/commerce/subscription.listSubscriptionsByCustomer), which
+// produces one priced SubscriptionView per row (money resolved by the
+// SDK's priceSubscription — no direct `subscriptions` reads here).
 
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
-import { enrichContractPricing } from "@/lib/portal/helpers/enrich-pricing";
+import { listSubscriptionsByCustomer, type SubscriptionView } from "@/lib/commerce/subscription";
 
-function isSubscriptionLocked(sub: Record<string, unknown>, lockDays: number): boolean {
+function isSubscriptionLocked(sub: SubscriptionView, lockDays: number): boolean {
   // Lock only truly new subscriptions that haven't been billed yet.
   // If they've had a successful payment, they're not new.
   if (sub.last_payment_status === "succeeded") return false;
 
-  // For subs that haven't billed yet, check if they're younger than lockDays.
-  // Use next_billing_date as a proxy: if the first billing hasn't happened yet
-  // and the sub was created recently, lock it.
-  const nextBilling = sub.next_billing_date ? new Date(sub.next_billing_date as string).getTime() : 0;
-  const created = sub.created_at ? new Date(sub.created_at as string).getTime() : 0;
+  // For subs that haven't billed yet, check if they're younger than
+  // lockDays. Use next_billing_date as a proxy: if the first billing
+  // hasn't happened yet and the sub was created recently, lock it.
+  const nextBilling = sub.next_billing_date ? new Date(sub.next_billing_date).getTime() : 0;
+  const created = sub.created_at ? new Date(sub.created_at).getTime() : 0;
   if (!created) return false;
 
   // If next billing is in the future and sub is younger than lockDays, lock it
@@ -48,15 +51,16 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
   const admin = createAdminClient();
 
-  // DB-first: get all subscriptions for this customer
-  const { data: subs } = await admin.from("subscriptions")
-    .select("*")
-    .eq("workspace_id", auth.workspaceId)
-    .eq("customer_id", customer.id)
-    .order("created_at", { ascending: false });
+  // Primary customer's subs via the commerce SDK — the returned view
+  // carries `pricing` resolved by the money invariant, and the two
+  // legacy portal fields (pause_resume_at, subscription_created_at).
+  const primaryViews = await listSubscriptionsByCustomer(auth.workspaceId, customer.id);
 
-  // Also include linked account subscriptions
-  let linkedSubs: typeof subs = [];
+  // Linked-account subs (same person, sibling profiles) — one SDK call
+  // per sibling. Keep the id set so we can annotate `isLinkedAccount`
+  // on each contract.
+  const linkedSubIds = new Set<string>();
+  const linkedViews: SubscriptionView[] = [];
   const { data: link } = await admin.from("customer_links")
     .select("group_id")
     .eq("customer_id", customer.id)
@@ -68,18 +72,17 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
       .eq("group_id", link.group_id)
       .neq("customer_id", customer.id);
 
-    if (linkedCustomers?.length) {
-      const linkedIds = linkedCustomers.map(c => c.customer_id);
-      const { data: linked } = await admin.from("subscriptions")
-        .select("*")
-        .eq("workspace_id", auth.workspaceId)
-        .in("customer_id", linkedIds)
-        .order("created_at", { ascending: false });
-      linkedSubs = linked || [];
+    for (const lc of linkedCustomers || []) {
+      const cid = lc.customer_id as string;
+      const siblings = await listSubscriptionsByCustomer(auth.workspaceId, cid);
+      for (const s of siblings) {
+        linkedSubIds.add(s.id);
+        linkedViews.push(s);
+      }
     }
   }
 
-  const allSubs = [...(subs || []), ...linkedSubs];
+  const allSubs: SubscriptionView[] = [...primaryViews, ...linkedViews];
 
   // Get lock_days from portal config
   const { data: wsConfig } = await admin.from("workspaces")
@@ -92,14 +95,13 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
   // Get product images for all items across all subscriptions. Collect
   // both product_ids and variant_ids — Appstle webhook items may carry
-  // either or both, and the getProductMap helper resolves through both.
+  // either or both, and getProductMap resolves through both.
   const allProductIds = new Set<string>();
   const allVariantIds = new Set<string>();
   for (const sub of allSubs) {
-    const items = Array.isArray(sub.items) ? sub.items : [];
-    for (const item of items) {
-      if (item?.product_id) allProductIds.add(item.product_id);
-      if (item?.variant_id) allVariantIds.add(String(item.variant_id));
+    for (const item of sub.items) {
+      if (item.product_id) allProductIds.add(item.product_id);
+      if (item.variant_id) allVariantIds.add(String(item.variant_id));
     }
   }
   const productMap = await getProductMap(
@@ -109,8 +111,8 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
     Array.from(allVariantIds),
   );
 
-  // Load dunning status for all contracts
-  const contractIds = allSubs.map(s => s.shopify_contract_id).filter(Boolean);
+  // Load dunning status for all contracts (keyed on shopify_contract_id).
+  const contractIds = allSubs.map(s => s.shopify_contract_id).filter((v): v is string => !!v);
   const dunningMap: Record<string, { status: string; recovered_at: string | null }> = {};
 
   if (contractIds.length) {
@@ -155,9 +157,9 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
   const buckets: Record<Bucket, unknown[]> = { active: [], paused: [], cancelled: [], other: [] };
   let needsAttentionCount = 0;
 
-  const contracts = await Promise.all(allSubs.map(async sub => {
+  const contracts = allSubs.map((sub) => {
     const bucket = bucketStatus(sub.status);
-    const dunning = dunningMap[sub.shopify_contract_id];
+    const dunning = sub.shopify_contract_id ? dunningMap[sub.shopify_contract_id] : undefined;
     const needsAttention = sub.last_payment_status === "failed" || (dunning && ["active", "skipped"].includes(dunning.status));
 
     let recoveryStatus: string | null = null;
@@ -172,16 +174,14 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
 
     if (needsAttention) needsAttentionCount++;
 
-    // Transform DB shape → frontend contract shape, then layer live pricing
-    // (engine for internal subs, baked + coupon for Appstle) — lines get a
-    // strikethrough base + charged price, plus the per-delivery total + pills.
+    // View → frontend contract shape. Money is already resolved by the
+    // SDK; the transformer only reshapes + attaches images.
     const contract = transformSubscription(sub, productMap);
-    const pricing = await enrichContractPricing(auth.workspaceId, sub, contract);
 
-    // Surface the live coupon(s) so the detail screen's Coupon card can show
-    // them + a Remove button (it loads from this list endpoint). Normalize both
-    // shapes — internal {code,type,value} and Appstle {id,title,valueType,value}.
-    const appliedDiscounts = ((sub.applied_discounts as Array<Record<string, unknown>>) || []).map((d) => ({
+    // Surface the live coupon(s) so the detail screen's Coupon card can
+    // show them + a Remove button. Normalize both shapes — internal
+    // {code,type,value} and Appstle {id,title,valueType,value}.
+    const appliedDiscounts = (sub.applied_discounts || []).map((d) => ({
       id: (d.id as string) ?? null,
       code: (d.code as string) ?? (d.title as string) ?? null,
       title: (d.code as string) ?? (d.title as string) ?? null,
@@ -190,9 +190,9 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
       valueType: (d.valueType as string) ?? null,
     }));
 
-    const enriched = {
+    return {
       ...contract,
-      pricing,
+      pricing: sub.pricing,
       appliedDiscounts,
       appliedDiscount: appliedDiscounts[0] || null,
       crisisBanner: crisisMap[sub.id] || null,
@@ -201,14 +201,15 @@ export const subscriptions: RouteHandler = async ({ auth, route }) => {
         needsAttention: !!needsAttention,
         attentionReason: needsAttention ? "payment_failed" : "",
         recoveryStatus,
-        isLinkedAccount: linkedSubs?.some(l => l.id === sub.id) || false,
+        isLinkedAccount: linkedSubIds.has(sub.id),
         isLocked: isSubscriptionLocked(sub, lockDays),
       },
     };
+  });
 
-    buckets[bucket].push(enriched);
-    return enriched;
-  }));
+  for (const enriched of contracts) {
+    buckets[enriched.portalState.bucket].push(enriched);
+  }
 
   return jsonOk({
     ok: true,
