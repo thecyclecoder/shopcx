@@ -57,3 +57,14 @@ The write chokepoint for [[../tables/god_mode_sessions]] and (Phase 2+) [[../tab
 ## RLS + safety
 
 All exported writes assume the caller passes a service-role client (`createAdminClient()`) — the tables are service-role-only ([[../tables/god_mode_sessions]] / [[../tables/god_mode_approvals]]). The PIN plaintext is only ever in memory inside `hashPin` / `verifyPin`; never persisted, never logged.
+
+## CEO-grade model additions (2026-07)
+
+New SDK surface for the CEO-grade approval model ([[../lifecycles/god-mode]] § CEO-grade approval model):
+
+- **Decisions:** `openDecision` (raise a plain-language `risk='decision'` card), `plainApprovalLabel` + `logApprovalDecision` (log the founder's decision back into the chat).
+- **Standing grants ("don't ask again"):** `isCategoryStandingGranted`, `listStandingGrants`, `grantStanding`, `revokeStanding`, `normalizeCategory` (over [[../tables/god_mode_standing_grants]]). Only `risk='decision'` cards are grantable — the destructive floor never is.
+- **Live checklist + notes:** `startChecklist` / `checklistStep` / `finishChecklist` (a `role='checklist'` transcript message the box updates in place) + `appendNote` (a plain confirmation line). Driven by `scripts/god-mode-progress.ts`.
+- `openApproval` gained an optional `category`; `GodModeApprovalRow` gained `category`; `GodModeMessage.role` gained `checklist`; `GodModeApprovalRisk` gained `decision`.
+
+The box escalates decisions via `scripts/god-mode-plan.ts decide "<category>" "<question>"` (checks the standing grant, else raises + polls a decision card). The double-print fix lives in the worker (`runGodModeJob` no longer re-appends the founder message — the message route already did).

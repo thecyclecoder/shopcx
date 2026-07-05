@@ -93,3 +93,7 @@ Poll every 2s. No hard cap on the poll loop — the outer god-mode session timeo
 - [[../tables/god_mode_approvals]] — the row shape.
 - [[../lifecycles/god-mode]] — end-to-end trace including the gate's role.
 - [[../specs/god-mode]] — the spec this script implements (Phase 2).
+
+## CEO-grade rewrite (2026-07) — allow-by-default + catastrophic floor
+
+The gate was rewritten from per-tool-call classification (safe/write/destructive) to a THIN DETERMINISTIC FLOOR. It now ALLOWS everything — writes, edits, scripts, database queries, ordinary shell, git, PRs, MCP/unknown tools — and gates exactly ONE thing: a **Bash command on the catastrophic rail** (`rm -rf`, `DROP TABLE/DATABASE/…`, `TRUNCATE`, `DELETE FROM` with NO `WHERE`, `git push --force`, `supabase db reset`), which lands a `risk='destructive'` card with a plain-language headline and requires the founder's PIN. Writing a script is always free (even destructive contents) — approval attaches to EXECUTING something catastrophic. The plan-scoped `getActivePlan` auto-allow was removed (non-destructive work now allows unconditionally). Routing genuine CEO-grade decisions is the BOX's job (`scripts/god-mode-plan.ts decide`), not the gate's. See [[../lifecycles/god-mode]] § CEO-grade approval model.

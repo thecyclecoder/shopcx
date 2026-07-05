@@ -4,7 +4,21 @@ The founder's ELEVATED bridge to the box for incident remediation. A deliberate 
 
 ## North-star (supervisable autonomy)
 
-God-mode is the founder's **manual supervisor** bridge over a full-power box session. Every mutation the box makes is COUNTER-SIGNED by the founder via [[../tables/god_mode_approvals]] — never a silent proxy-optimizer. When the CEO exec layer can carry this supervision itself, god-mode retires.
+God-mode is the founder's **manual supervisor** bridge over a full-power box session. But it supervises by JUDGMENT, not by counter-signing every keystroke: the box surfaces its reasoning (a live checklist + a plain-language reply) and escalates only genuine CEO-grade decisions — never a silent proxy-optimizer, but also never a rubber-stamp treadmill. When the CEO exec layer can carry this supervision itself, god-mode retires.
+
+## CEO-grade approval model (2026-07 redesign)
+
+The founder is a CEO, not a coder. God-mode was reshaped from "gate every non-safe tool call" to **near-unlimited autonomy + escalate only CEO-grade decisions, in plain language**. Three tiers:
+
+- **Just do it (no approval).** The box does ALL ordinary work with zero prompts — investigating, running database queries, writing code + scripts, editing files, additive migrations, committing, opening PRs. Writing a script is ALWAYS free even if its contents are drastic; approval attaches to EXECUTING something catastrophic, never to authoring it.
+- **Escalate a DECISION (plain language, the box's judgment).** Before a genuine CEO-grade move — shipping a fix to production, submitting a spec, dismissing/deleting business items, spending money, anything irreversible or strategic — the box raises ONE plain-language question via `scripts/god-mode-plan.ts decide "<category>" "<question>"` (a `risk='decision'` [[../tables/god_mode_approvals]] card) and waits. This is driven by the box's PERSONA (`godModeFraming`), not the gate.
+- **The catastrophic floor (deterministic, PIN, non-negotiable).** A narrow deterministic rail in [[../libraries/god-mode-permission-gate]] — DROP/TRUNCATE/mass-DELETE (no WHERE)/rm -rf/force-push/`supabase db reset` — ALWAYS lands a `risk='destructive'` card that requires the founder's PIN, even under an approved decision. It is never standing-grantable, so nothing can silently grant catastrophic power.
+
+**Standing approvals ("don't ask again").** On a decision card the founder can tap *Don't ask again about this* — grants the category standing approval ([[../tables/god_mode_standing_grants]]); a future `decide` in that category AUTO-APPROVES (no card) and posts a note. Revocable from a "Standing approvals" list on both surfaces. The destructive floor is excluded (the button never appears on a PIN card).
+
+**Live checklist + chat log-back (so the founder is never left wondering).** The moment a turn starts the box emits a plain-language checklist (`scripts/god-mode-progress.ts start/step/done`) rendered as a live checkbox widget (a `role='checklist'` transcript message). Every approval the founder decides is logged back into the chat ("✅ You approved: …"), and the box posts a confirmation of what it DID (`... progress.ts note "Done — 4 stale approvals removed."`) — so the transcript reads: box asks → founder answers → box confirms → box replies. The box's persona + all cards/replies are plain business English (no tool names, paths, git, or SQL surfaced to the founder).
+
+**Double-print fix.** The message routes append the founder's turn to the transcript; the box worker no longer re-appends it (it reads the already-saved transcript), so a message shows exactly once.
 
 ## What's in the same PR (Phase 1)
 
@@ -76,23 +90,17 @@ Unlike every other box lane, the `god-mode` `claude -p` invocation is spawned WI
 
 And an env var `GOD_MODE_SESSION_ID=<uuid>` so the gate knows which session's approval queue to write.
 
-For every tool call the box tries, the CLI pipes the PreToolUse event (`{ tool_name, tool_input, ... }`) to the gate on stdin. The gate:
+**CEO-grade model (2026-07):** the gate is now a THIN DETERMINISTIC FLOOR, not a per-call gate. For every tool call the CLI pipes the PreToolUse event to the gate; the gate:
 
-1. **Bails fast** if the session isn't `armed` anymore (the founder disarmed while the box was mid-call) — returns `deny`.
-2. **Classifies** the call:
-   - **safe** — `Read`/`Grep`/`Glob`/`WebSearch`/`WebFetch`, task-tracking tools, and Bash matching a **read-only allowlist** (`git status/diff/log/show/branch/ls-files/rev-parse/config --get`, `ls`, `cat`, `pwd`, `wc`, `head`, `tail`, `find`, `which`, `printf`, `node -v`, `npm -v`, `npx tsc --noEmit`, `grep`, `rg`, `gh pr list/view`, `gh issue list/view`, `gh run list/view`, `psql -c 'SELECT …'` without a second statement, and the plan primitive `npx tsx …scripts/god-mode-plan.ts open|close|status …`). Auto-allow — no `god_mode_approvals` row.
-   - **destructive** — deterministic rail over the command text: `rm -rf`, `rmdir`, `git push --force`, `git reset --hard`, `git clean -f`, `git branch -D`, `DROP TABLE/DATABASE/…`, `TRUNCATE`, `DELETE FROM`, `ALTER TABLE … DROP`, `supabase db reset|push`, `vercel … --prod`. Land a row with `risk='destructive'`.
-   - **write** — everything else non-safe. Land a row with `risk='write'`.
-3. **Polls** the approval row every 2s until it leaves `pending`:
-   - `approved` → return `{ hookSpecificOutput: { permissionDecision: 'allow' } }`; the tool executes.
-   - `denied` → return `deny`; the box tool call is blocked and the session continues without it.
-   - `asked` → return `deny` with the founder's `question_text` in `permissionDecisionReason` so the box reads it in the tool's reject-reason and can respond in-transcript, then re-request approval on the next tool call. **A live back-and-forth, not a dead end.**
+1. **Bails fast** if the session isn't `armed` anymore — returns `deny`.
+2. **Allows everything EXCEPT the catastrophic floor.** Writes, edits, scripts, database queries, ordinary shell, git, commits, PRs, MCP/unknown tools → `allow`, no card. The ONLY blocked path is a **Bash command matching the catastrophic rail** (`rm -rf`, `DROP TABLE/DATABASE/…`, `TRUNCATE`, `DELETE FROM` with NO `WHERE`, `git push --force`, `supabase db reset`) → lands a `risk='destructive'` card with a PLAIN-LANGUAGE headline ("Permanently delete files — cannot be undone", the raw command underneath).
+3. **Polls** the destructive card every 2s: `approved` → allow, `denied` → deny, `asked` → deny with the founder's question in the reason (a live back-and-forth). `risk='destructive'` approvals verify the founder PIN in the approve route before flipping to `approved`.
 
-For `risk='destructive'` cards, Phase 3's `/api/god/[token]/approve` route additionally verifies the founder PIN against `workspaces.god_mode_pin_hash` (via `verifyPin` — constant-time) BEFORE flipping the row to `approved`. The gate itself just waits — it never sees the PIN.
+The other half — routing genuine CEO-grade DECISIONS to the founder in plain language — is NOT the gate's job. The BOX raises those by judgment via `scripts/god-mode-plan.ts decide` (see § CEO-grade approval model above); the gate simply allows that call like any other. The gate is the safety backstop; the box's persona is the primary supervisor.
 
-### Plan-scoped approvals (hotfix) — approve the DECISION, not every keystroke
+### Legacy: plan-scoped approvals (superseded)
 
-Per-call gating meant one logical decision fanned out into many cards (a "dismiss 4 stale approvals" incident = ~9 rubber-stamps: write-probe → run → write-probe → run → write-fix → run → verify). The fix: a **plan** — a plain-language unit of work the founder approves ONCE. The box investigates read-only (auto-allowed), then runs `npx tsx scripts/god-mode-plan.ts open "<decision>" "step" …` (allowlisted); that raises ONE `risk='plan'` card ([[../libraries/god-mode]] `openPlan`) and polls it. On approval the script points `god_mode_sessions.active_plan_id` at the plan, and the gate then AUTO-ALLOWS the non-destructive mechanical calls that implement it (`getActivePlan` returns the approved open plan → allow, no new card). **Destructive calls still gate individually with the PIN even under a plan** (`cls.risk !== 'destructive'` guard); the Chat tab streams every auto-allowed call and disarm kills mid-flight, so it stays supervisable. A plan is scoped to its turn — `runGodModeJob` clears `active_plan_id` at turn start and `god-mode-plan.ts close` clears it explicitly; no open plan ⇒ pre-hotfix per-call behavior. Mechanism detail: [[../libraries/god-mode-permission-gate]] § Plan-scoped approvals.
+The earlier hotfix added a **plan** (`active_plan_id` + `getActivePlan` + `openPlan`) so the founder approved a unit of work once and the gate auto-allowed the mechanical calls under it. The CEO-grade model supersedes this — non-destructive work now auto-allows unconditionally, so the plan's auto-allow is moot. The `active_plan_id` column and `open`/`close`/`status` subcommands remain for back-compat but the model uses `decide`.
 
 ### Turn flow
 

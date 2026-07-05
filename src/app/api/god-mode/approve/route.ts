@@ -23,6 +23,8 @@ import {
   bumpActivity,
   loadPinHash,
   verifyPin,
+  logApprovalDecision,
+  grantStanding,
   type GodModeApprovalRow,
 } from "@/lib/god-mode";
 
@@ -49,6 +51,7 @@ function publicApproval(a: GodModeApprovalRow) {
     preview: a.preview,
     risk: a.risk,
     status: a.status,
+    category: a.category,
     question_text: a.question_text,
     created_at: a.created_at,
     decided_at: a.decided_at,
@@ -65,6 +68,7 @@ export async function POST(request: Request) {
     decision?: string;
     question?: string;
     pin?: string;
+    dontAskAgain?: boolean;
   };
 
   const decision = body.decision;
@@ -102,6 +106,22 @@ export async function POST(request: Request) {
     approvalId: body.approvalId,
     decision,
     questionText: decision === "ask" ? questionText : undefined,
+  });
+
+  // "Don't ask again" — only for a CEO-grade DECISION card (never the destructive
+  // floor). Grants the category standing approval so future decisions auto-approve.
+  const grantedStanding =
+    decision === "approve" && !!body.dontAskAgain && existing.risk === "decision" && !!existing.category;
+  if (grantedStanding && existing.category) {
+    await grantStanding(admin, { workspaceId, category: existing.category, grantedBy: auth.user.id });
+  }
+
+  // Log the decision back into the chat (the running record of what you approved).
+  await logApprovalDecision(admin, session.id, {
+    approval: updated ?? existing,
+    decision,
+    questionText: decision === "ask" ? questionText : undefined,
+    grantedStanding,
   });
 
   await bumpActivity(admin, session.id);

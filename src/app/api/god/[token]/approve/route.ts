@@ -29,6 +29,8 @@ import {
   bumpActivity,
   loadPinHash,
   verifyPin,
+  logApprovalDecision,
+  grantStanding,
   type GodModeApprovalRow,
 } from "@/lib/god-mode";
 
@@ -39,6 +41,7 @@ function publicApproval(a: GodModeApprovalRow) {
     preview: a.preview,
     risk: a.risk,
     status: a.status,
+    category: a.category,
     question_text: a.question_text,
     created_at: a.created_at,
     decided_at: a.decided_at,
@@ -55,6 +58,7 @@ export async function POST(
     decision?: string;
     question?: string;
     pin?: string;
+    dontAskAgain?: boolean;
   };
 
   const decision = body.decision;
@@ -111,6 +115,21 @@ export async function POST(
     approvalId: body.approvalId,
     decision,
     questionText: decision === "ask" ? questionText : undefined,
+  });
+
+  // "Don't ask again" — only for a CEO-grade DECISION card (never the destructive
+  // floor). Grants the category standing approval for this workspace.
+  const grantedStanding =
+    decision === "approve" && !!body.dontAskAgain && existing.risk === "decision" && !!existing.category;
+  if (grantedStanding && existing.category) {
+    await grantStanding(admin, { workspaceId: res.session.workspace_id, category: existing.category });
+  }
+
+  await logApprovalDecision(admin, res.session.id, {
+    approval: updated ?? existing,
+    decision,
+    questionText: decision === "ask" ? questionText : undefined,
+    grantedStanding,
   });
 
   await bumpActivity(admin, res.session.id);
