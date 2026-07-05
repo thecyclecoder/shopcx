@@ -2401,13 +2401,35 @@ function removeWorktreeDir(path: string) {
 //
 // SAFETY: an empty/falsy branch must NEVER enter the match loop — the primary checkout shows as a
 // detached worktree (branch === null), so matching null/"" would target the main repo. Bail on no branch.
+//
+// box-primary-checkout-branch-wedge-self-heal (Phase 2) — PRIMARY-HELD BRANCH RECOVERY: when the matching
+// worktree IS the primary repo (path === REPO_DIR), the removeWorktreeDir guard (line ~2384) CORRECTLY
+// refuses to `rm -rf` it — and pre-Phase-2 the loop simply skipped that entry, which meant the follow-up
+// `git worktree add -B <branch>` still failed with "already used by worktree at <REPO_DIR>" (the exact
+// 2026-07-05 wedge). Phase 2 replaces the skip with a SWITCH-based recovery: heal the primary back to
+// main via ensurePrimaryOnMain (Phase 1) so the branch is freed on origin's terms — NEVER by nuking the
+// primary. The rm-rf primary guard stays intact; this only adds a switch recovery for the one path that
+// guard dead-ended. Non-primary matches keep the existing removeWorktreeDir teardown (build worktrees
+// under BUILDS_DIR are still force-removed as before).
 function removeWorktreeForBranch(branch: string) {
   if (!branch) {
     console.error("[worktree] removeWorktreeForBranch called with empty branch — skipping (never match the primary checkout).");
     return;
   }
+  const primary = resolve(REPO_DIR);
   for (const e of listWorktrees()) {
-    if (e.branch && e.branch === branch) removeWorktreeDir(e.path);
+    if (!e.branch || e.branch !== branch) continue;
+    if (resolve(e.path) === primary) {
+      // Primary is holding <branch> — switch it to main (freeing the branch) instead of the guarded
+      // rm-rf. Composes with the build-dispatch precondition: this is the recovery arm for callers of
+      // removeWorktreeForBranch (pr-resolve, resume paths, …), matching Phase 1's precondition at claim.
+      console.warn(
+        `[worktree] branch ${branch} is held by PRIMARY (${e.path}) — switching primary to main (never rm -rf) to free it`,
+      );
+      ensurePrimaryOnMain(`[worktree:primary-held ${branch}]`);
+      continue;
+    }
+    removeWorktreeDir(e.path);
   }
   sh("git", ["worktree", "prune"]);
 }
