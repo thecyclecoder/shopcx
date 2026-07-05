@@ -331,18 +331,27 @@ export default function Sidebar({
     // high_call_volume family. Prior widens 10s→30s (queryid -7821780334453251234)
     // and 30s→60s (queryid -7726440967385220442) each addressed a follow-on offender;
     // the DB Health Agent then flagged queryid 2430642232831032083 (same
-    // set_config-class high_call_volume pattern, signature dbhealth:slowq:2430642232831032083).
-    // Widening further past 60s hurts badge freshness; the remaining lever at
-    // this level is to stop RE-FIRING the fan-out on every navigation. The prior
-    // dep list `[workspace.id, pathname]` tore this interval down on each route
-    // change and immediately re-issued all 13-17 requests — a large multiplier
-    // on top of the 60s cadence for any user who clicks between dashboard pages.
-    // Dropping `pathname` from the deps keeps the interval alive across
-    // navigations while the 60s poll still covers freshness. Counts change on
-    // events, not routes, so nothing that reads them needed the route-driven
-    // refresh.
-    const interval = setInterval(fetchCounts, 60000);
-    return () => clearInterval(interval);
+    // set_config-class high_call_volume pattern) and the lever was the RE-FIRING
+    // multiplier from the `[workspace.id, pathname]` dep list — dropping `pathname`
+    // kept the interval alive across navigations. The agent then flagged queryid
+    // 5250820927256751610 (same set_config-class high_call_volume pattern, signature
+    // dbhealth:slowq:5250820927256751610) — with widening bottomed out and the
+    // re-firing gone, the next remaining lever is the BACKGROUND-TAB multiplier:
+    // any dashboard tab left open (a common state for an operator flipping between
+    // apps all day) keeps firing the full 13-17-request fan-out every 60s despite
+    // the user not looking at it. document.visibilityState lets us skip the tick
+    // while hidden (the counts are for a badge the user can't see) and refresh
+    // immediately on visibilitychange to visible so badges are fresh the moment
+    // the tab returns to the foreground. Counts change on events, not routes, so
+    // deferring while hidden is safe.
+    const runPoll = () => { if (document.visibilityState === "visible") fetchCounts(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") fetchCounts(); };
+    const interval = setInterval(runPoll, 60000);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [workspace.id]);
 
   // Prevent body scroll when sidebar is open on mobile
