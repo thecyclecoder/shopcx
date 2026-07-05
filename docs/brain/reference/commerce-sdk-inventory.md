@@ -52,6 +52,17 @@ Every enumerated entry point migrated onto `refundOrder`:
 - Retired call sites: the ticket-detail order-actions route no longer imports from `shopify-order-actions` for refunds; the returns Inngest no longer dynamic-imports `refundBraintreeTransaction`; the fraud-case route no longer passes `refund: true` to `cancelOrder`; the manual return-refund route no longer calls `processReturn` for `method="shopify_refund"`.
 - New surfaces: `src/lib/refund.ts` `refundOrder` (dispatcher) + `resolveRefundMethod` (read-only preview). `scripts/_probe-refund-order.ts` (Phase 2 dry-run probe).
 
+## Phase-4 regression probe
+
+`refundOrder` gained a `dryRun` opt (`RefundOrderOptions.dryRun`) that runs the order-lookup + branch resolution, then returns `{ success: true, method, dryRun: true }` with ZERO SDK calls, no returns-table stamp, and no `customer_events` write. When `dryRun: true`, callers pass `amountCents: 0` — the positive-amount guard is bypassed because the probe never spends money.
+
+`scripts/_verify-refund-dispatcher.ts` uses `dryRun` to answer both Phase-4 verification bullets against a real workspace:
+
+1. **Cohort routing.** Sample N Shopify-paid + N Braintree-paid orders (most recent), call `refundOrder(..., 0, { dryRun: true })` on each, assert the resolved `method` matches the order's gateway. Any mismatch → exit 1.
+2. **Double-refund guard preservation.** Read recent `customer_events` where `event_type = 'order.refunded'` (source: this dispatcher), for each check whether any `returns` row exists for the same order — if so, assert `refunded_at IS NOT NULL` (proof that the success-path stamp fired). If the dispatcher hasn't been exercised yet in the window, the guard section is skipped with a warning (not a failure — nothing to falsify against).
+
+Usage: `npx tsx scripts/_verify-refund-dispatcher.ts <workspaceId> [--samples=N] [--guard-days=N] [--verbose]`. Exit 0 = all cohorts routed correctly + guard preserved.
+
 ## Related
 
 [[../lifecycles/return-pipeline]] · [[../lifecycles/chargeback-pipeline]] · [[../libraries/shopify-order-actions]] · [[../libraries/action-executor]] · [[../libraries/playbook-executor]] · [[../inngest/returns]] · [[../integrations/braintree]] · [[../operational-rules]]

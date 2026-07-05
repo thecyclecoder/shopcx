@@ -106,6 +106,14 @@ export interface RefundOrderOptions {
   // Extra properties merged into customer_events.properties for the
   // `order.refunded` row (subscription_id, ticket_id, tier, etc.).
   eventProperties?: Record<string, unknown>;
+  // Strict dry-run: run only the order lookup + branch resolution,
+  // then return `{ success: true, method, dryRun: true }` without
+  // firing any SDK call, stamping any return, or writing any
+  // customer_events row. Used by `scripts/_verify-refund-dispatcher.ts`
+  // to cohort-check that every order still resolves to the right
+  // gateway. In dryRun the `amountCents` positional is ignored (0 is
+  // legal — the probe never spends money).
+  dryRun?: boolean;
 }
 
 export interface RefundOrderResult {
@@ -118,6 +126,9 @@ export interface RefundOrderResult {
   // Shopify-side reconciliation record didn't land — the caller must
   // reconcile the Shopify order manually.
   needsManualShopifyRecord?: boolean;
+  // Set to true when the wrapper returned early from a `dryRun`
+  // preview — no SDK call was made, no side effects occurred.
+  dryRun?: boolean;
 }
 
 export async function refundOrder(
@@ -129,7 +140,9 @@ export async function refundOrder(
 ): Promise<RefundOrderResult> {
   if (!workspaceId) return { success: false, error: "workspaceId is required" };
   if (!orderId) return { success: false, error: "orderId is required" };
-  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+  // A live refund must be a positive amount; a dryRun probe is
+  // amount-agnostic and callers pass 0 to make that explicit.
+  if (!opts.dryRun && (!Number.isFinite(amountCents) || amountCents <= 0)) {
     return { success: false, error: `amountCents must be a positive integer (got ${amountCents})` };
   }
 
@@ -156,6 +169,9 @@ export async function refundOrder(
     if (!order.braintree_transaction_id) {
       return { success: false, error: "Order has no Shopify order or Braintree transaction to refund" };
     }
+    if (opts.dryRun) {
+      return { success: true, method: "braintree", dryRun: true };
+    }
     const r = await refundBraintreeTransaction(workspaceId, order.braintree_transaction_id, amountCents);
     result = {
       success: r.success,
@@ -164,6 +180,9 @@ export async function refundOrder(
       error: r.error,
     };
   } else {
+    if (opts.dryRun) {
+      return { success: true, method: "shopify", dryRun: true };
+    }
     const r = await partialRefundByAmount(workspaceId, order.shopify_order_id, amountCents, reason);
     if (r.needsBraintreeFallback && r.braintreeTxnId) {
       // Shopify order paid via the Shopify↔Braintree gateway. Shopify
