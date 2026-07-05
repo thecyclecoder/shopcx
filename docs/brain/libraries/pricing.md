@@ -70,4 +70,4 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 
 ---
 
-[[../README]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/customer-portal]]
+[[../README]] · [[../lifecycles/commerce-sdk]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/customer-portal]]

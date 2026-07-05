@@ -35,6 +35,7 @@ The mandates above are the function **charter** (the perpetual scope). What the 
 
 ## Owned / contributed goals
 
+- **Centralized Commerce SDK** ✅ (folded → [[../lifecycles/commerce-sdk]]) — one internal-aware `src/lib/commerce` layer for every customer-facing commerce read & write. M1–M4 shipped: the two critical money bugs closed, the SDK core + money resolver ([[../libraries/pricing]]) landed, the differential harness proved zero `$NaN`/`$0`, and the dashboard/agent/AI/ticket surfaces migrated. M5 (customer-portal migration, LAST) remains the open final domino.
 - Enables every other function — the build platform is what turns their specs into shipped code. Underpins [[../goals/ceo-mode]] (the engine that ships the capability-gap specs the CEO surfaces).
 
 ## Status
