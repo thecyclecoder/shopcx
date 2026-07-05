@@ -1,123 +1,48 @@
 # libraries/commerce__subscription
 
-Canonical subscription mutation surface for the Commerce SDK. Every subscription operation flows through here with unified internal-vs-Appstle branching and healOnTouch guards.
+The **Display** half of the commerce SDK for subscriptions — one read/list surface, internal-vs-Appstle-aware via [[commerce__price]] `priceSubscription`, backing onto a Postgres RPC so a workspace with >1000 subs is walked without silent truncation.
 
-**File:** `src/lib/commerce/subscription.ts`
+**File:** `src/lib/commerce/subscription.ts` · **Spec:** [[../specs/commerce-sdk-display-operations]] Phase 1 · **Depends on:** [[commerce__price]] · [[../tables/subscriptions]] · [[../tables/orders]]
 
-**Status:** Ships with zero consumers (Phase 1 complete). Phase 3 wraps [[appstle]] and [[subscription-items]] in @deprecated shims pointing here; M4/M5 migrates callers. See [[../reference/commerce-sdk-inventory.html]] § Rename map for the full legacy→new pairing.
+## Why this exists
+
+The M2 goal ([[../specs/spec-goal-branch-pm-flow]] · Centralized Commerce SDK) collapses every surface's per-page subscription hydration onto one contract. Two invariants matter for the Display layer:
+
+- **No money render says `$NaN` / `$0` / `undefined`.** Every op runs the sub through [[commerce__price]] `priceSubscription`, so `SubscriptionView.pricing` is populated on internal (engine-priced) AND Appstle-baked branches with a `PriceInvariantError` on any drift.
+- **No silent truncation.** Ad-hoc `.from('subscriptions').select(...)` is capped at 1000 rows by PostgREST. The list ops cursor-paginate on `(updated_at DESC, id DESC)` via the `commerce_list_subscriptions` RPC (see [[../tables/subscriptions]] and `supabase/migrations/20260914120000_commerce_list_subscriptions_rpc.sql`), so a workspace with >1000 subs is walked to completion.
+
+Ships with zero call-site consumers — the M3 harness compares SDK output to the current portal / dashboard / AI hydration paths before any surface migrates.
 
 ## Exports
 
-### Status mutations
+- **`getSubscription(workspaceId, subId)`** → `SubscriptionView` — one sub fetched by internal UUID, priced for display, latest renewal joined in a follow-up round trip. Throws when the sub is missing or not in the given workspace.
+- **`listSubscriptionsByCustomer(workspaceId, customerId)`** → `SubscriptionView[]` — every sub for one customer (direct `customer_id` match — link-follow is a caller concern), priced and paginated the same way as `listSubscriptions`.
+- **`listSubscriptions(workspaceId, filters?)`** → `SubscriptionView[]` — a workspace's subs with optional `SubscriptionListFilters` (`status`, `last_payment_status`, `is_internal`, `comp`, `customer_id`, `page_size`, `max_rows`). Backs onto the `commerce_list_subscriptions` RPC — each page projects sub + latest_order + upcoming_order in one round trip; the SDK walks the cursor until fewer rows than `page_size` come back or `max_rows` caps it. Default `page_size = 500`, default `max_rows = ∞`.
 
-**`subscriptionAction`** — `async (workspaceId, contractId, action, cancelReason?, cancelledBy?) → OpResult`
-- Branches on `isInternalSubscription()` → [[internal-subscription]]'s `internalSubscriptionAction` (internal Braintree flow) or [[appstle]]'s `appstleSubscriptionAction` (Appstle flow).
-- Actions: `"pause"` | `"cancel"` | `"resume"`.
-- Replaces `appstleSubscriptionAction`.
+Type re-exports: `SubscriptionView`, `SubscriptionLineView`, `SubscriptionPricingView`, `SubscriptionListFilters`.
 
-### Schedule mutations
+The RPC's returned upcoming_order carries just `next_billing_date`; the SDK fills in `projected_total_cents` from `priceSubscription`'s rollup on the same view.
 
-**`subscriptionSkipNextOrder`** — `async (workspaceId, contractId) → OpResult`
-- Branches on `isInternalSubscription()` → `internalSubSkipNextOrder` or `appstleSkipNextOrder`.
-- Replaces `appstleSkipNextOrder`.
+## SubscriptionView latest_order + upcoming_order
 
-**`subscriptionUpdateBillingInterval`** — `async (workspaceId, contractId, interval, intervalCount) → OpResult`
-- Branches on `isInternalSubscription()` → `internalSubUpdateBillingInterval` or `appstleUpdateBillingInterval`.
-- Intervals: `"DAY"` | `"WEEK"` | `"MONTH"` | `"YEAR"`.
-- Replaces `appstleUpdateBillingInterval`.
+Compact projections joined by the list RPC so a caller can render a subscription card without a second query:
 
-**`subscriptionUpdateNextBillingDate`** — `async (workspaceId, contractId, nextBillingDate) → OpResult`
-- Branches on `isInternalSubscription()` → `internalSubUpdateNextBillingDate` or `appstleUpdateNextBillingDate`.
-- Date format: YYYY-MM-DD or full ISO datetime.
-- Replaces `appstleUpdateNextBillingDate`.
+- `latest_order` — `{ id, order_number, financial_status, delivery_status, total_cents, created_at, delivered_at }` from the most recent [[../tables/orders]] row keyed on `subscription_id`. `null` when the sub has never billed. Full `OrderView` arrives via [[commerce__order]].
+- `upcoming_order` — `{ next_billing_date, projected_total_cents }` where `projected_total_cents` comes from `priceSubscription`'s own rollup on the same view. `null` when the sub carries no `next_billing_date`.
 
-### Payment method mutations
+## Callers
 
-**`subscriptionSwitchPaymentMethod`** — `async (workspaceId, contractId, paymentMethodId) → OpResult`
-- Delegates to [[appstle]]'s `appstleSwitchPaymentMethod` (which internally handles both Braintree and Appstle paths).
-- Top-guards with [[appstle-pricing]]'s `healOnTouch` on the Appstle branch.
-- Replaces `appstleSwitchPaymentMethod`.
+None. The M3 harness ([[../specs/spec-goal-branch-pm-flow]] M3) compares SDK output vs the existing per-surface hydration paths before rollout — no consumer is retargeted yet.
 
-**`subscriptionSendPaymentUpdateEmail`** — `async (workspaceId, contractId) → OpResult`
-- Delegates to [[appstle]]'s `appstleSendPaymentUpdateEmail`.
-- Replaces `appstleSendPaymentUpdateEmail`.
+## Verification
 
-### Line item mutations
+The Phase 1 verification probe is `scripts/_probe-commerce-display-subs.ts`. Two checks:
 
-**`subscriptionAddItem`** — `async (workspaceId, contractId, variantId, quantity=1) → OpResult`
-- Delegates to [[subscription-items]]'s `subAddItem`.
-- New consolidated name (was `subAddItem`).
+- **Walk past 1000.** Picks the largest workspace by `subscriptions.workspace_id` bucket (or a `--workspace=<uuid>` override), runs `listSubscriptions`, asserts the returned count exceeds 1000 when the DB count does.
+- **Appstle canary pricing to the cent.** Optional (opt-in via `--canary-sub=<uuid>`). Reads the sub row + runs `getSubscription`, asserts `SubscriptionView.pricing.total_cents` matches `priceSubscription`'s own rollup to the cent — locks in the invariant that the SDK's view doesn't drift from the money resolver.
 
-**`subscriptionRemoveItem`** — `async (workspaceId, contractId, variantOrLine) → OpResult & { alreadyAbsent?: boolean }`
-- Delegates to [[subscription-items]]'s `subRemoveItem`.
-- Accepts variantId string or `{ variantId?, lineGid? }` object.
-- New consolidated name (was `subRemoveItem`).
+Install the RPC first: `npx tsx scripts/apply-commerce-list-subscriptions-rpc-migration.ts`.
 
-**`subscriptionChangeQuantity`** — `async (workspaceId, contractId, variantId, quantity) → OpResult`
-- Delegates to [[subscription-items]]'s `subChangeQuantity`.
-- New consolidated name (was `subChangeQuantity`).
+---
 
-**`subscriptionSwapVariant`** — `async (workspaceId, contractId, oldVariantId, newVariantId, quantity?) → OpResult`
-- Delegates to [[subscription-items]]'s `subSwapVariant`.
-- New consolidated name (was `subSwapVariant`).
-
-**`subscriptionUpdateLineItemPrice`** — `async (workspaceId, contractId, variantId, basePriceCents, lineGid?) → OpResult`
-- Delegates to [[subscription-items]]'s `subUpdateLineItemPrice`.
-- **0.75 SubSave multiplier baked in** — pass the visible customer price; the function shifts to post-SubSave contract price.
-- New consolidated name (was `subUpdateLineItemPrice`).
-
-### Product mutations
-
-**`subscriptionAddFreeProduct`** — `async (workspaceId, contractId, variantId, quantity=1) → OpResult`
-- Delegates to [[appstle]]'s `appstleAddFreeProduct`.
-- Replaces `appstleAddFreeProduct`.
-
-**`subscriptionSwapProduct`** — `async (workspaceId, contractId, oldVariantId, newVariantId) → OpResult`
-- Delegates to [[appstle]]'s `appstleSwapProduct`.
-- Replaces `appstleSwapProduct`.
-
-### Billing & order
-
-**`subscriptionAttemptBilling`** — `async (workspaceId, billingAttemptId) → OpResult`
-- Delegates to [[appstle]]'s `appstleAttemptBilling`.
-- **Internal-billing-attempt-id guard:** If `billingAttemptId.startsWith("internal-")`, returns `{ success: true }` with no Appstle API call. Internal subs are Braintree-billed by the daily [[../inngest/internal-subscription-renewals]] cron; upstream callers (dunning payday-retry, new-card-recovery) synthesize synthetic `internal-*` ids. The guard prevents 400-ing the real API — see [[../specs/archive.d/dunning-payday-retry-skip-internal-subs]].
-- Replaces `appstleAttemptBilling`.
-
-**`subscriptionOrderNow`** — `async (workspaceId, contractId) → { success, error?, internal? }`
-- **Flavor-aware "order now" — the single entry point for on-demand immediate billing.** Resolves by `shopify_contract_id`, then branches:
-  - **Internal sub** (`is_internal=true`): requires `status === "active"`, fires [[../inngest/internal-subscription-renewals]] via `inngest.send` → real Braintree charge → order → Avalara → Amplifier → advance `next_billing_date`. Returns `{ success: true, internal: true }`.
-  - **Appstle sub:** `appstleGetUpcomingOrders` → `appstleAttemptBilling`.
-- **Why it exists:** `appstleAttemptBilling`'s `internal-*` guard is a NO-OP success — fine for dunning cron (real renewal follows separately), but for on-demand order-now with no cron follow-up, calling Appstle directly **silently drops the charge** (the bug that left internal sub's "Order Now" reporting success while never billing — ticket `dd67f3c7`, customer Angel). Replaces the fragmented path.
-
-### Types
-
-**`export type { SubscriptionView, SubscriptionLineView, SubscriptionPricingView }`**
-- Re-exported from [[./types]] (commerce SDK internal type set).
-
-## Pattern: Internal-vs-Appstle branching
-
-Every mutation checks `isInternalSubscription()` at the top:
-- **Internal path:** delegates to `internal*` handlers from [[internal-subscription]] (Braintree charge, internal state management).
-- **Appstle path:** delegates to `appstleX` wrappers from [[appstle]] (Appstle API + healOnTouch top-guard from [[appstle-pricing]]).
-
-This keeps the internal-subscription + Appstle billing logic isolated in their respective modules while presenting a unified surface to callers. Callers never decide whether to call internal or Appstle — they call the subscription* function and the SDK branches on the actual sub type.
-
-## Migration path
-
-Phase 3 (in-flight) wraps the old exports in [[appstle]] and [[subscription-items]] with thin @deprecated shims that delegate to these new surface functions:
-```ts
-// src/lib/appstle.ts (Phase 3)
-export async function appstleSubscriptionAction(...) {
-  return subscriptionAction(...);  // @deprecated — use subscriptionAction from commerce SDK
-}
-```
-
-Callers on the old names continue to work until M4/M5 migrate them to the new surface. The old modules' pages are updated to note the deprecation; this page is the new authoritative reference.
-
-## See also
-
-[[../reference/commerce-sdk-inventory.html]] — Rename map (old→new pairings), defect register, and full SDK structure.
-[[appstle]] — Appstle API client (now called via this surface).
-[[subscription-items]] — Line item mutations (now called via this surface).
-[[internal-subscription]] — Internal (Braintree) billing path (now called via this surface).
-[[appstle-pricing]] — healOnTouch guards (applied by the Appstle paths).
+[[../README]] · [[../../CLAUDE]] · [[commerce__price]]
