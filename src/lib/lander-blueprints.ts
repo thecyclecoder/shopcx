@@ -82,6 +82,12 @@ export interface LanderBlueprintContent {
   blocks: LanderBlueprintContentBlock[];
   /** Optional overall CTA copy. */
   cta?: string;
+  /** URL the shipped lander renders at — snapshotted here by the Phase-3 QA pass
+   *  ([[blueprint-render-qa]] `snapshotBlueprintRenderedUrl`) once the build lands.
+   *  Optional; set once per blueprint. Persists next to `blocks`/`cta` so a
+   *  reader on this row can pivot straight to the live page without a second
+   *  query. */
+  rendered_url?: string;
 }
 
 export interface LanderBlueprint {
@@ -322,6 +328,61 @@ export async function setBlueprintContent(
     .eq("id", id)
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`setBlueprintContent: ${error.message}`);
+}
+
+/**
+ * Phase-3 QA snapshot — record the URL the shipped lander renders at onto the
+ * blueprint's `content.rendered_url` field. Read-modify-write on `content` so
+ * the existing `blocks` / `cta` are preserved verbatim (jsonb column, no
+ * partial-set operator on the client). Idempotent — passing the same URL a
+ * second time is a no-op re-write; passing a NEW URL overwrites the previous
+ * snapshot (a blueprint carries at most one live URL at a time).
+ *
+ * Gated on `content.blocks` already being present. Refuses to stamp a
+ * rendered URL when the blueprint's content isn't filled — the URL points at
+ * a live page, and stamping it before Carrie's content lands would create a
+ * dangling reference the QA is supposed to prevent, not paper over.
+ *
+ * Guard: the UPDATE re-asserts the workspace scope + `id` filter, and
+ * `.select("id")` proves exactly one row changed. Bails if zero (cross-workspace
+ * or wrong id — see the coaching mandate on compare-and-set writes).
+ */
+export async function setBlueprintRenderedUrl(
+  workspaceId: string,
+  id: string,
+  renderedUrl: string,
+): Promise<void> {
+  if (!renderedUrl || typeof renderedUrl !== "string") {
+    throw new Error("setBlueprintRenderedUrl: renderedUrl is required");
+  }
+  const admin = createAdminClient();
+  const { data: row, error: readErr } = await admin
+    .from("lander_blueprints")
+    .select("content")
+    .eq("id", id)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (readErr) throw new Error(`setBlueprintRenderedUrl: ${readErr.message}`);
+  if (!row) throw new Error(`setBlueprintRenderedUrl: blueprint ${id} not found`);
+  const current = (row.content as LanderBlueprintContent | null) ?? null;
+  if (!current || !Array.isArray(current.blocks) || current.blocks.length === 0) {
+    throw new Error(
+      `setBlueprintRenderedUrl: blueprint ${id} has no content.blocks — refusing to stamp a rendered URL that would dangle`,
+    );
+  }
+  const nextContent: LanderBlueprintContent = { ...current, rendered_url: renderedUrl };
+  const { data: written, error: writeErr } = await admin
+    .from("lander_blueprints")
+    .update({ content: nextContent })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId)
+    .select("id");
+  if (writeErr) throw new Error(`setBlueprintRenderedUrl: ${writeErr.message}`);
+  if (!written || written.length !== 1) {
+    throw new Error(
+      `setBlueprintRenderedUrl: expected exactly one row updated for blueprint ${id}, got ${written?.length ?? 0}`,
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
