@@ -28,10 +28,10 @@ Written by:
 | `window_kind` | `text` | NOT NULL · CHECK `in ('5h','weekly')` · rolling 5-hour session window OR the trailing 7-day / weekly / opus_weekly wall window. Named `window_kind` (not `window`) — `WINDOW` is a SQL non-reserved keyword that parses ambiguously in `CHECK` clauses |
 | `window_start` | `timestamptz?` | wall-clock the window started (or `now - windowLength` for a trailing window). Informational — the unique key is `(workspace, source, account, window)` |
 | `window_reset_at` | `timestamptz?` | when the window is scheduled to reset (from the parsed wall message when known, or the account's live `cappedUntil`) |
-| `input_tokens` | `integer` | NOT NULL · SUM over [[agent_job_costs]].`input_tokens` for `(account, window)` on `source='box'`; the ccusage per-block total on `source='mac'` |
-| `output_tokens` | `integer` | NOT NULL · same shape, `output_tokens` column |
-| `cache_creation_tokens` | `integer` | NOT NULL · same shape, `cache_creation_tokens` column |
-| `cache_read_tokens` | `integer` | NOT NULL · same shape, `cache_read_tokens` column |
+| `input_tokens` | `bigint` | NOT NULL · SUM over [[agent_job_costs]].`input_tokens` for `(account, window)` on `source='box'`; the ccusage per-block total on `source='mac'` |
+| `output_tokens` | `bigint` | NOT NULL · same shape, `output_tokens` column |
+| `cache_creation_tokens` | `bigint` | NOT NULL · same shape, `cache_creation_tokens` column |
+| `cache_read_tokens` | `bigint` | NOT NULL · same shape, `cache_read_tokens` column |
 | `capped` | `boolean` | NOT NULL · default `false` · true when the account was capped at capture — `AccountState.cappedUntil > now` / `codexState.cappedUntil > now` (box) or ccusage says the block hit a wall (mac) |
 | `capped_until` | `timestamptz?` | the cap's stated reset — mirrors `window_reset_at` for a capped row; NULL when not capped |
 | `limit_pct` | `numeric?` | **Codex only** — the reported `/status` percentage (0..100). Claude leaves this NULL — its % comes from `burn / discoverLimit(account, window)` (see [[usage_wall_events]]) |
