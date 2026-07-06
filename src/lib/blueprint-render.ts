@@ -62,6 +62,14 @@ export interface ReasonItem {
   imageAlt: string | null;
 }
 
+/** The intro/proof band's lander-specific bits (mechanism image + product description). The
+ *  press logos, press quote, and review widget are reused from PageData, not stored here. */
+export interface IntroData {
+  imageUrl: string | null;
+  imageAlt: string | null;
+  description: string;
+}
+
 /** Everything the storefront blueprint-lander section needs to render. */
 export interface BlueprintRenderContent {
   blueprintId: string;
@@ -69,6 +77,8 @@ export interface BlueprintRenderContent {
   funnelType: string;
   /** Composited hero fields, when the blueprint carries a structured `content.hero`. */
   hero: BlueprintHeroData | null;
+  /** Intro/proof band (mechanism image + product description), when `content.intro` is set. */
+  intro: IntroData | null;
   /** The 8 discrete reason rows, when the blueprint carries a structured `content.reasons`. */
   reasons: ReasonItem[] | null;
   blocks: BlueprintRenderBlock[];
@@ -218,6 +228,7 @@ export async function loadBlueprintRenderContent(
     productId,
     funnelType: blueprint.funnel_type,
     hero: (content as { hero?: BlueprintHeroData }).hero ?? null,
+    intro: (content as { intro?: IntroData }).intro ?? null,
     reasons: (content as { reasons?: ReasonItem[] }).reasons ?? null,
     blocks,
     cta: content.cta ?? null,

@@ -3,6 +3,7 @@ import type { BlueprintRenderContent, BlueprintRenderBlock } from "@/lib/bluepri
 import { ShopCTA } from "../_components/ShopCTA";
 import { BlueprintHero } from "./BlueprintHero";
 import { BlueprintReasons } from "./BlueprintReasons";
+import { BlueprintIntro } from "./BlueprintIntro";
 
 /**
  * Blueprint-driven storefront lander — renders a [[lander_blueprints]] row's
@@ -104,7 +105,9 @@ export function BlueprintLander({
     ? content.blocks.filter((b) => b.role.toLowerCase() !== "hero")
     : content.blocks;
   const firstReasonIdx = content.reasons ? nonHero.findIndex((b) => isReasonBlock(b.role)) : -1;
-  const preBlocks = firstReasonIdx >= 0 ? nonHero.slice(0, firstReasonIdx) : nonHero;
+  const preRaw = firstReasonIdx >= 0 ? nonHero.slice(0, firstReasonIdx) : nonHero;
+  // BlueprintIntro replaces the generic "intro_proof" block when content.intro is set.
+  const preBlocks = content.intro ? preRaw.filter((b) => !b.role.toLowerCase().includes("intro")) : preRaw;
   const postBlocks = firstReasonIdx >= 0 ? nonHero.slice(firstReasonIdx).filter((b) => !isReasonBlock(b.role)) : [];
 
   const renderBlock = (block: BlueprintRenderBlock, i: number) => (
@@ -126,6 +129,7 @@ export function BlueprintLander({
   return (
     <>
       {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} />}
+      {content.intro && <BlueprintIntro data={data} intro={content.intro} />}
       {preBlocks.length > 0 && (
         <section data-section="blueprint-lander-pre" className="w-full bg-[#FBF8F2]">
           <div className="mx-auto max-w-2xl px-5 py-10 md:px-8 md:py-14">{preBlocks.map(renderBlock)}</div>
