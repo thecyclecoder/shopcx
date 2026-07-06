@@ -152,7 +152,8 @@ export default async function PortalHome({
   // ── Recent orders for the Orders section.
   const { data: orders } = await admin
     .from("orders")
-    .select("id, order_number, created_at, total_cents, financial_status, line_items, source_name, amplifier_tracking_number, amplifier_carrier, amplifier_status, amplifier_shipped_at, shipping_address")
+    // Phase 3: shopify_order_id + fulfillment_status + delivered_at + easypost_status drive the honest three-state (Created/Shipped/Delivered) classifier in [[order-status.ts]].
+    .select("id, order_number, created_at, total_cents, financial_status, line_items, source_name, amplifier_tracking_number, amplifier_carrier, amplifier_status, amplifier_shipped_at, shipping_address, shopify_order_id, fulfillment_status, delivered_at, easypost_status")
     .eq("workspace_id", workspaceId)
     .in("customer_id", linkedIds)
     .order("created_at", { ascending: false })
@@ -243,6 +244,11 @@ export interface PortalOrder {
   amplifier_carrier: string | null;
   amplifier_status: string | null;
   amplifier_shipped_at: string | null;
+  /** NULL = internal (Amplifier-fulfilled) · non-null = Shopify. Drives the three-state classifier in [[order-status.ts]]. */
+  shopify_order_id: string | null;
+  fulfillment_status: string | null;
+  delivered_at: string | null;
+  easypost_status: string | null;
   shipping_address: {
     first_name?: string;
     last_name?: string;

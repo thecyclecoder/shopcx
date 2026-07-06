@@ -12,11 +12,20 @@
 
 import { useState } from "react";
 import type { PortalOrder } from "../page";
+import { deliveryStatusTag, financialTag, type OrderStatusTag } from "./order-status";
 
 interface Props {
   orders: PortalOrder[];
   primaryColor: string;
 }
+
+/** Tone → Tailwind. Kept in the renderer so the pure classifier stays free of styling. */
+const TONE_CLASS: Record<OrderStatusTag["tone"], string> = {
+  emerald: "bg-emerald-50 text-emerald-700",
+  sky: "bg-sky-50 text-sky-700",
+  amber: "bg-amber-50 text-amber-800",
+  zinc: "bg-zinc-100 text-zinc-600",
+};
 
 function trackingUrl(carrier: string | null, tracking: string): string | null {
   if (!tracking) return null;
@@ -32,19 +41,17 @@ function fmtCents(c: number): string {
   return `$${(c / 100).toFixed(2)}`;
 }
 
-function statusLabel(o: PortalOrder): { label: string; tone: "emerald" | "amber" | "zinc" } | null {
-  if (o.amplifier_status === "Shipped" || o.amplifier_tracking_number) return { label: "Shipped", tone: "emerald" };
-  if (o.amplifier_status === "Cancelled") return { label: "Cancelled", tone: "zinc" };
-  if (o.financial_status === "refunded" || o.financial_status === "partially_refunded") return { label: "Refunded", tone: "amber" };
-  if (o.amplifier_status) return { label: o.amplifier_status, tone: "amber" };
-  // Fallback is "Processing" — but a historical sync gap left old orders stuck
-  // there with no real status. Rather than show a misleading "Processing" badge
-  // on orders we'll never reconcile, omit the status for anything older than 2
-  // months (not worth a backfill). Recent orders still legitimately process.
-  const twoMonthsAgo = new Date();
-  twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
-  if (new Date(o.created_at) < twoMonthsAgo) return null;
-  return { label: "Processing", tone: "amber" };
+/**
+ * Row-status: the honest three-state delivery tag + an optional financial tag
+ * (Cancelled / Refunded). Both may render together — the delivery lane and the
+ * financial lane carry different information, so a Refunded order still shows
+ * where the box got to. See [[./order-status.ts]] for the classifier.
+ */
+function statusTags(o: PortalOrder): { delivery: OrderStatusTag; financial: OrderStatusTag | null } {
+  return {
+    delivery: deliveryStatusTag(o, Date.now()),
+    financial: financialTag(o),
+  };
 }
 
 export function OrdersSection({ orders }: Props) {
@@ -63,12 +70,7 @@ export function OrdersSection({ orders }: Props) {
     <div className="space-y-3">
       {orders.map((o) => {
         const isOpen = openId === o.id;
-        const status = statusLabel(o);
-        const toneClass = status?.tone === "emerald"
-          ? "bg-emerald-50 text-emerald-700"
-          : status?.tone === "amber"
-            ? "bg-amber-50 text-amber-800"
-            : "bg-zinc-100 text-zinc-600";
+        const { delivery, financial } = statusTags(o);
         const realItems = o.line_items.filter((l) => !l.is_gift);
         const firstItem = realItems[0];
         return (
@@ -79,11 +81,14 @@ export function OrdersSection({ orders }: Props) {
               className="flex w-full items-center gap-4 p-4 text-left transition hover:bg-zinc-50 sm:p-5"
             >
               <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2">
+                <div className="flex flex-wrap items-baseline gap-2">
                   <span className="text-base font-semibold text-zinc-900">{o.order_number}</span>
-                  {status && (
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${toneClass}`}>
-                      {status.label}
+                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${TONE_CLASS[delivery.tone]}`}>
+                    {delivery.label}
+                  </span>
+                  {financial && (
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${TONE_CLASS[financial.tone]}`}>
+                      {financial.label}
                     </span>
                   )}
                 </div>
