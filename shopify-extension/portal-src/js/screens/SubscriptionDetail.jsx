@@ -1125,7 +1125,7 @@ export default function SubscriptionDetail() {
       {mutationsLocked ? (
         <div class="sp-alert">
           <div class="sp-alert__title">{deliveryState === 'in_transit' ? 'Your first order is on its way!' : 'Your first order is being prepared'}</div>
-          <div class="sp-alert__body sp-muted">Once it's delivered, you'll be able to fully manage your subscription here — swap products, change quantities, adjust your schedule, and more. You can still cancel or update your payment method anytime.</div>
+          <div class="sp-alert__body sp-muted">Your subscription is read-only until your first order is delivered. Once it arrives, you'll be able to fully manage it here — swap products, change quantities, adjust your schedule, and more.</div>
         </div>
       ) : isLocked && (
         <div class="sp-alert">
@@ -1136,7 +1136,8 @@ export default function SubscriptionDetail() {
 
       <div class="sp-grid sp-detail__grid">
         <div class="sp-detail__col">
-          {isCancelled && <ReactivateCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
+          {/* Phase 2: reactivate is gated too — reactivating a cancelled sub bypasses the first-delivery observation. */}
+          {isCancelled && !mutationsLocked && <ReactivateCard contract={contract} showToast={showToast} onUpdate={handleUpdate} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
           {b === 'paused' && !isReadOnly && <ResumeCard contract={contract} onUpdate={handleUpdate} showToast={showToast} startAction={startAction} completeAction={completeAction} failAction={failAction} />}
           <ItemsCard contract={contract} lines={lines} shipLine={shipLine}
             onUpdate={handleUpdate} onPatchLines={patchLines} showToast={showToast}
@@ -1148,11 +1149,13 @@ export default function SubscriptionDetail() {
         <div class="sp-detail__col">
           {!isCancelled && <RewardsCard contractId={shortId(contract.id)} hideRedeem={!couponAppliedLocal} showRedeemOverride={couponAppliedLocal} />}
           {!isReadOnly && <CouponCard contract={contract} startAction={startAction} completeAction={completeAction} failAction={failAction} onUpdate={handleUpdate} onCouponStateChange={(v) => setCouponAppliedLocal(v)} />}
-          <PaymentMethodCard contract={contract} />
+          {/* Phase 2: hide the payment-method card while the first-delivery gate holds — updating card details on a not-yet-delivered sub is gated on the backend too. */}
+          {!mutationsLocked && <PaymentMethodCard contract={contract} />}
           {!isReadOnly && <AddressCard contract={contract} startAction={startAction} completeAction={completeAction} failAction={failAction} onUpdate={handleUpdate} />}
           {!isReadOnly && <ShippingProtectionCard contract={contract} shipLine={shipLine} onUpdate={handleUpdate} />}
           {!isCancelled && productIds.length > 0 && <ReviewsCard productIds={productIds} />}
-          {!isCancelled && !isLocked && <CancelCard router={router} contractId={shortId(contract.id)} />}
+          {/* Phase 2: cancel is gated too — no CancelCard while mutationsLocked. */}
+          {!isCancelled && !isLocked && !mutationsLocked && <CancelCard router={router} contractId={shortId(contract.id)} />}
         </div>
       </div>
     </div>
