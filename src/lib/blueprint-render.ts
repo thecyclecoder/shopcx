@@ -37,11 +37,28 @@ export interface BlueprintRenderBlock {
   imageAlt: string | null;
 }
 
+/** Discrete, composited-hero fields (the "8 Reasons…" top fold). Authored on
+ *  `lander_blueprints.content.hero` — distinct from the copy blocks so the hero renders as a
+ *  real composition, not a stacked copy blob. Null when a blueprint has no structured hero yet. */
+export interface BlueprintHeroData {
+  brand: string;
+  headline: string;
+  reviewCount: string;
+  /** Static urgency, no season word — e.g. "65% Off — Ends Soon". */
+  urgency: string;
+  quote: { text: string; name: string; title: string; avatarUrl: string | null };
+  offer: { discount: string; base: string; subtext: string; heading: string };
+  heroImageUrl: string;
+  ctaLabel: string;
+}
+
 /** Everything the storefront blueprint-lander section needs to render. */
 export interface BlueprintRenderContent {
   blueprintId: string;
   productId: string;
   funnelType: string;
+  /** Composited hero fields, when the blueprint carries a structured `content.hero`. */
+  hero: BlueprintHeroData | null;
   blocks: BlueprintRenderBlock[];
   /** Overall CTA copy authored by Carrie on `content.cta`. */
   cta: string | null;
@@ -188,6 +205,7 @@ export async function loadBlueprintRenderContent(
     blueprintId: blueprint.id,
     productId,
     funnelType: blueprint.funnel_type,
+    hero: (content as { hero?: BlueprintHeroData }).hero ?? null,
     blocks,
     cta: content.cta ?? null,
   };

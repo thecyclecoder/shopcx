@@ -1,6 +1,7 @@
 import type { PageData } from "../_lib/page-data";
 import type { BlueprintRenderContent, BlueprintRenderBlock } from "@/lib/blueprint-render";
 import { ShopCTA } from "../_components/ShopCTA";
+import { BlueprintHero } from "./BlueprintHero";
 
 /**
  * Blueprint-driven storefront lander — renders a [[lander_blueprints]] row's
@@ -96,10 +97,14 @@ export function BlueprintLander({
   content: BlueprintRenderContent;
 }) {
   const price = lowestPriceCents(data);
+  // The composited hero replaces the generic "hero" copy block; render the rest below it.
+  const bodyBlocks = content.blocks.filter((b) => b.role.toLowerCase() !== "hero");
   return (
-    <section data-section="blueprint-lander" className="w-full bg-[#FBF8F2]">
+    <>
+      {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} />}
+      <section data-section="blueprint-lander" className="w-full bg-[#FBF8F2]">
       <div className="mx-auto max-w-2xl px-5 py-10 md:px-8 md:py-14">
-        {content.blocks.map((block, i) => (
+        {bodyBlocks.map((block, i) => (
           <div
             key={`${block.role}-${i}`}
             data-section={`blueprint-block-${block.role}`}
@@ -128,6 +133,7 @@ export function BlueprintLander({
           </div>
         )}
       </div>
-    </section>
+      </section>
+    </>
   );
 }
