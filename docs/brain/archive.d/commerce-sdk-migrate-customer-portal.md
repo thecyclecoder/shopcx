@@ -1,0 +1,1 @@
+- **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]

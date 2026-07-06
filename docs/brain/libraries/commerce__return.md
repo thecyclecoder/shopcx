@@ -1,30 +1,41 @@
 # libraries/commerce__return
 
-The **Display** half of the commerce SDK for returns — one read/list surface, cursor-paginated past PostgREST's 1000-row cap, with an explicit "we own the refund" gate.
+Return read and mutation operations in the Commerce SDK. Handles return lifecycle and refund issuance.
 
-**File:** `src/lib/commerce/return.ts` · **Spec:** [[../specs/commerce-sdk-display-operations]] Phase 2 · **Depends on:** [[../tables/returns]]
+**File:** `src/lib/commerce/return.ts`
 
-## Why this exists
-
-Returns refund on EasyPost `delivered` (not carrier first-scan). Rows we own the refund for are those with `easypost_shipment_id NOT NULL` — see [[../tables/returns]] § Gotchas. The `refundableOnly` filter enforces that at the source so a caller can't accidentally refund an imported/external return.
-
-Cursor pagination on `(created_at DESC, id DESC)` walks past PostgREST's 1000-row cap per the goal's "no silent truncation" invariant.
-
-Ships with zero call-site consumers — the M3 harness compares parity before any surface migrates.
+**Status:** Display operations shipped (Phase 2 complete). Mutation operations planned per [[../reference/commerce-sdk-inventory.html]].
 
 ## Exports
 
-- **`getReturn(workspaceId, returnId)`** → `ReturnView` — one return fetched by internal UUID. Throws when the return is missing or not in the given workspace.
-- **`listReturnsByCustomer(workspaceId, customerId, filters?)`** → `ReturnView[]` — every return for one customer via direct `customer_id` match, with optional `refundableOnly` / `status` filters.
-- **`listRefundableReturns(workspaceId, filters?)`** → `ReturnView[]` — a workspace's returns with `easypost_shipment_id NOT NULL` — convenience wrapper for the refund pipeline surface.
-- **`listReturns(workspaceId, filters?)`** → `ReturnView[]` — a workspace's returns with optional `ReturnListFilters` (`customer_id`, `status`, `refundableOnly`, `page_size`, `max_rows`). Default `page_size = 500`, default `max_rows = ∞`.
+### Display (reads)
 
-Type re-exports: `ReturnView`, `ReturnLineView`.
+**`getReturn(workspaceId, returnId) → ReturnView`**
+- Retrieves a single return with fully enriched view (items, order/label/net refund, resolution).
+- Per [[../reference/commerce-sdk-inventory.html]], ReturnView includes items, order reference, shipping label, net refund amount, and resolution status.
 
-## Callers
+**`listReturnsByCustomer(workspaceId, customerId, filters?) → ReturnView[]`**
+- Lists all returns for a customer, paginated by cursor on `updated_at + id` per [[../README.md]] § Probing technique.
+- Supports filtering by status and date range.
 
-None. The M3 harness ([[../specs/spec-goal-branch-pm-flow]] M3) compares SDK output vs the existing per-surface hydration paths before rollout — no consumer is retargeted yet.
+**`listRefundableReturns(workspaceId, filters?) → ReturnView[]`**
+- Lists returns where `easypost_shipment_id IS NOT NULL` — only returns with proof of return can be refunded.
+- Per [[../tables/returns]] § Gotchas, `net_refund_cents` is set at creation and MUST be trusted at refund time.
 
----
+**`listReturns(workspaceId, filters?) → ReturnView[]`**
+- Lists all returns in a workspace, paginated by cursor.
+- Backed by Postgres RPC for performance.
 
-[[../README]] · [[../../CLAUDE]] · [[commerce__order]]
+### Types
+
+**`export type { ReturnView, ReturnLineView }`**
+- Canonical return and line item views, re-exported from [[./types]] (commerce SDK internal type set).
+
+## Design notes
+
+Returns refund on EasyPost `delivered` (not carrier first-scan), and `net_refund_cents` is set at creation and MUST be trusted at refund time — the Mutation op enforces that invariant.
+
+## See also
+
+[[../reference/commerce-sdk-inventory.html]] — Full SDK structure and Phase sequencing.
+[[./types]] — Commerce SDK type definitions.

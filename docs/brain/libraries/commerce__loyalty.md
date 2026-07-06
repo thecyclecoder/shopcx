@@ -1,26 +1,35 @@
 # libraries/commerce__loyalty
 
-The **Display** half of the commerce SDK for loyalty — one balance read + one append-log walk, both cursor-paginated past PostgREST's 1000-row cap.
+Loyalty program read and mutation operations in the Commerce SDK.
 
-**File:** `src/lib/commerce/loyalty.ts` · **Spec:** [[../specs/commerce-sdk-display-operations]] Phase 3 · **Depends on:** [[../tables/loyalty_members]] · [[../tables/loyalty_transactions]] · [[loyalty]]
+**File:** `src/lib/commerce/loyalty.ts`
 
-## Why this exists
-
-Loyalty state is split across two tables: `loyalty_members` (per-customer enrollment + balance) and `loyalty_transactions` (the append-only earn/spend/adjust ledger). Every surface that renders points reads both — the SDK collapses them behind two entity-named ops.
-
-Ships with zero call-site consumers — the M3 harness compares parity before any surface migrates.
+**Status:** Display operations shipped (Phase 3 complete). Mutation operations planned per [[../reference/commerce-sdk-inventory.html]].
 
 ## Exports
 
-- **`getLoyaltyBalance(workspaceId, customerId)`** → `LoyaltyView` — the customer's balance + dollar value + redemption tiers they qualify for. Returns a zero-balance view when the customer is not enrolled (no `loyalty_members` row).
-- **`listLoyaltyLedger(workspaceId, filters?)`** → `LoyaltyLedgerEntryView[]` — one customer's ledger walked past the 1000-row cap. Cursor on `(created_at DESC, id DESC)`. Filters: `member_id` or `customer_id` (the SDK looks up the member row from customer id), `type`, `page_size`, `max_rows`.
+### Display (reads)
 
-Type re-exports: `LoyaltyView`, `LoyaltyRedemptionTierView`, `LoyaltyLedgerEntryView`.
+**`getLoyaltyBalance(workspaceId, customerId) → LoyaltyView`**
+- Retrieves a loyalty member's current balance, tiers, redemptions, and dollar value.
+- Per [[../reference/commerce-sdk-inventory.html]], LoyaltyView includes balance, tiers, redemptions, and dollar value.
 
-## Callers
+**`listLoyaltyLedger(workspaceId, customerId, filters?) → LoyaltyRedemptionTierView[]`**
+- Lists all loyalty ledger entries (adjustments, redemptions, tier changes) for a customer.
+- Paginated by cursor for large histories.
+- Consumed by dashboard and customer-facing UIs for transparency.
 
-None. The M3 harness ([[../specs/spec-goal-branch-pm-flow]] M3) compares SDK output vs the existing per-surface hydration paths before rollout — no consumer is retargeted yet.
+### Types
 
----
+**`export type { LoyaltyView, LoyaltyRedemptionTierView }`**
+- Canonical loyalty member and redemption views, re-exported from [[./types]] (commerce SDK internal type set).
 
-[[../README]] · [[../../CLAUDE]] · [[commerce__customer]]
+## Design notes
+
+Balance mutators re-read the live row before writing (see [[../libraries/loyalty]] gotcha) — the Mutation op wraps that discipline so callers never trust a stale `member` snapshot.
+
+## See also
+
+[[../reference/commerce-sdk-inventory.html]] — Full SDK structure and Phase sequencing.
+[[../libraries/loyalty]] — Core loyalty logic and mutation discipline.
+[[./types]] — Commerce SDK type definitions.

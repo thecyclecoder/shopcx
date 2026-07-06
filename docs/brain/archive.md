@@ -12,10 +12,18 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
-- **Commerce SDK — Mutation operations + subscriptionX rename** · verified 2026-07-05 · → [[../lifecycles/commerce-sdk-core-build]]
+- **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]
 - **Blueprint specs mandate parent** · verified 2026-07-05 · → [[../lifecycles/advertorial-landers]]
+- **Box builds: self-heal a primary checkout wedged on a build branch** · verified 2026-07-05 · → [[../recipes/build-box-setup#primary-checkout-self-healing]]
+- **Carrie — reuse existing product media before flagging a real-asset gap** · verified 2026-07-05 · → [[recipes/dr-content]]
+- **Commerce SDK — differential battle-test harness (Phase 1 sampler)** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html#gates]]
+- **Commerce SDK — Display operations** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]]
+- **Migrate the remaining dashboard + agent + AI stack onto the Commerce SDK** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]] · [[../libraries/commerce__subscription]] · [[../libraries/appstle]] · [[../libraries/action-executor]] · [[../libraries/sonnet-orchestrator-v2]]
+- **Migrate ticket detail onto the Commerce SDK** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html]] · [[../libraries/commerce__subscription]] · [[../libraries/commerce__order]] · [[../libraries/commerce__return]] · [[../libraries/commerce__replacement]] · [[../libraries/action-executor]] · [[../dashboard/tickets]]
+- **Commerce SDK — Mutation operations + subscriptionX rename** · verified 2026-07-05 · → [[../lifecycles/commerce-sdk-core-build]]
 - **Scaffold src/lib/commerce SDK + centralize priceSubscription** · verified 2026-07-05 · → [[../libraries/pricing]]
 - **Reduce call volume / cache the hot query on query 5250820927256751610** · verified 2026-07-05 · → [[../libraries/db-health]]
+- **Build the Amazing Coffee advertorial-listicle lander from Cleo's blueprint** · verified 2026-07-05 · → [[lifecycles/lander-from-teardown]]
 - **Loyalty: program-wide stats + negative-balance guard on manual adjust** · verified 2026-07-05 · → [[../libraries/loyalty]]
 - **Pulse: session-authored recaps (stop trusting cheap-AI transcript skims)** · verified 2026-07-05 · → [[../libraries/pulse]] [[../libraries/pulse-digest]] [[../tables/pulse_session_digests]]
 - **/recap: deterministic current-session resolution** · verified 2026-07-05 · → [[../libraries/pulse-digest]]
@@ -462,6 +470,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Shopify theme management via ShopCX (AI-driven, GitHub-commit)** · verified 2026-06-18 · → [[recipes/edit-shopify-theme]]
 - **Storefront MVP — Amazing Coffee subscription funnel (internal subs · instrumentation · Meta CAPI · smart popup · checkout hardening)** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
 - **Storefront: survey chapter + converter-first PDP reorder** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
+- **Centralized Commerce SDK — one internal-aware layer for every customer-facing read & write** · folded 2026-07-05 · → [[lifecycles/commerce-sdk]]
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 
 ## Related

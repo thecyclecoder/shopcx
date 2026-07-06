@@ -1,34 +1,41 @@
 # libraries/commerce__order
 
-The **Display** half of the commerce SDK for orders — one read/list surface, cursor-paginated past PostgREST's 1000-row cap.
+Order read and mutation operations in the Commerce SDK. Unified surface for order reads, refunds, and shipping updates.
 
-**File:** `src/lib/commerce/order.ts` · **Spec:** [[../specs/commerce-sdk-display-operations]] Phase 2 · **Depends on:** [[../tables/orders]]
+**File:** `src/lib/commerce/order.ts`
 
-## Why this exists
-
-Orders are historical records — pricing is snapshotted at renewal time onto `orders.line_items`, so the Display op reads them as-is and does NOT re-price through [[commerce__price]] `priceSubscription`. The "no silent truncation" invariant ([[../specs/spec-goal-branch-pm-flow]]) is enforced by cursor-paginating on `(created_at DESC, id DESC)` past the 1000-row PostgREST cap.
-
-Ships with zero call-site consumers — the M3 harness compares SDK output to the current dashboard / portal / AI hydration paths before any surface migrates.
+**Status:** Display operations shipped (Phase 2 complete). Mutation operations planned per [[../reference/commerce-sdk-inventory.html]].
 
 ## Exports
 
-- **`getOrder(workspaceId, orderId)`** → `OrderView` — one order fetched by internal UUID. Throws when the order is missing or not in the given workspace.
-- **`listOrdersByCustomer(workspaceId, customerId)`** → `OrderView[]` — every order for one customer via direct `customer_id` match (link-follow is a caller concern), cursor-paginated the same way as `listOrders`.
-- **`listOrders(workspaceId, filters?)`** → `OrderView[]` — a workspace's orders with optional `OrderListFilters` (`customer_id`, `subscription_id`, `financial_status`, `fulfillment_status`, `order_type`, `page_size`, `max_rows`). Walks the cursor until fewer rows than `page_size` come back or `max_rows` caps it. Default `page_size = 500`, default `max_rows = ∞`.
+### Display (reads)
 
-Type re-exports: `OrderView`, `OrderLineView`.
+**`getOrder(workspaceId, orderId) → OrderView`**
+- Retrieves a single order with fully enriched view (lines, totals, fulfillment, gateway, attribution).
+- Per [[../reference/commerce-sdk-inventory.html]], OrderView includes lines, totals, fulfillment, gateway, and attribution fields.
 
-## Verification
+**`listOrdersByCustomer(workspaceId, customerId, filters?) → OrderView[]`**
+- Lists all orders for a customer, paginated by cursor on `updated_at + id` per [[../README.md]] § Probing technique.
+- Handles >1000-row result sets without silent truncation.
+- Returns fully enriched `OrderView` for each order.
 
-The Phase 2 verification probe is `scripts/_probe-commerce-display-orders.ts`. Two checks:
+**`listOrders(workspaceId, filters?) → OrderView[]`**
+- Lists all orders in a workspace, paginated by cursor.
+- Backed by Postgres RPC for performance (SQL/list ops match the 3h→8s precedent).
+- Supports filtering by status, date range, and other order attributes.
 
-- **Row count parity.** Picks the customer with the most orders in the largest workspace (or `--customer=<uuid>` / `--workspace=<uuid>` overrides), runs `listOrdersByCustomer`, asserts the returned count matches `SELECT COUNT(*) FROM orders WHERE customer_id = $1`.
-- **`refundableOnly` filter.** Runs `listReturnsByCustomer(refundableOnly:true)` and asserts every returned row has `easypost_shipment_id NOT NULL` (see [[commerce__return]]).
+### Types
 
-## Callers
+**`export type { OrderView }`**
+- Canonical order view, re-exported from [[./types]] (commerce SDK internal type set).
 
-None. The M3 harness ([[../specs/spec-goal-branch-pm-flow]] M3) compares SDK output vs the existing per-surface hydration paths before rollout — no consumer is retargeted yet.
+## Design notes
 
----
+Order reads project the order + fulfillment + payment gateway state in one round trip via a Postgres RPC. This avoids the N+1 pattern of per-order fulfillment lookups. All money fields resolve through [[./pricing]] so totals never show $NaN or $0 unintentionally.
 
-[[../README]] · [[../../CLAUDE]] · [[commerce__price]] · [[commerce__subscription]]
+## See also
+
+[[../reference/commerce-sdk-inventory.html]] — Full SDK structure and Phase sequencing.
+[[../tables/orders]] — Order table schema.
+[[./types]] — Commerce SDK type definitions.
+[[./pricing]] — Pricing enrichment applied to order totals.

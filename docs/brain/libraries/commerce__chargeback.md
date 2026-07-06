@@ -1,28 +1,36 @@
 # libraries/commerce__chargeback
 
-The **Display** half of the commerce SDK for chargebacks — one read/list surface, cursor-paginated past PostgREST's 1000-row cap.
+Chargeback dispute read and mutation operations in the Commerce SDK.
 
-**File:** `src/lib/commerce/chargeback.ts` · **Spec:** [[../specs/commerce-sdk-display-operations]] Phase 3 · **Depends on:** [[../tables/chargeback_events]] · [[../lifecycles/chargeback-pipeline]]
+**File:** `src/lib/commerce/chargeback.ts`
 
-## Why this exists
-
-Consolidates the historical `from("chargebacks"` reads (a mix of `chargeback_events` reads across dashboard, ticket detail, AI stack) behind one entity-named Display op. Reads always project the full `ChargebackView` shape so an upstream surface can render the dispute + linked action state without a second query.
-
-Cursor pagination on `(created_at DESC, id DESC)` walks past PostgREST's 1000-row cap per the goal's "no silent truncation" invariant.
-
-Ships with zero call-site consumers — the M3 harness compares parity before any surface migrates.
+**Status:** Display operations shipped (Phase 3 complete). Mutation operations planned per [[../reference/commerce-sdk-inventory.html]].
 
 ## Exports
 
-- **`listChargebacksByCustomer(workspaceId, customerId)`** → `ChargebackView[]` — every chargeback for one customer via direct `customer_id` match (link-follow is a caller concern).
-- **`listChargebacks(workspaceId, filters?)`** → `ChargebackView[]` — a workspace's chargebacks with optional `ChargebackListFilters` (`customer_id`, `status`, `page_size`, `max_rows`). Default `page_size = 500`, default `max_rows = ∞`.
+### Display (reads)
 
-Type re-export: `ChargebackView`.
+**`listChargebacksByCustomer(workspaceId, customerId, filters?) → ChargebackView[]`**
+- Lists all chargebacks for a customer, paginated by cursor on `updated_at + id` per [[../README.md]] § Probing technique.
+- Includes joined `chargeback_subscription_actions` so the view carries WHICH subs were cancelled, not just that SOMETHING was.
+- Per [[../reference/commerce-sdk-inventory.html]], ChargebackView includes dispute, linked subs, and suggestions.
 
-## Callers
+**`listChargebacks(workspaceId, filters?) → ChargebackView[]`**
+- Lists all chargebacks in a workspace, paginated by cursor.
+- Backed by Postgres RPC that joins the events + actions + dispute evidence in one round trip.
+- Supports filtering by status, amount, and date range.
 
-None. The M3 harness ([[../specs/spec-goal-branch-pm-flow]] M3) compares SDK output vs the existing per-surface hydration paths before rollout — no consumer is retargeted yet.
+### Types
 
----
+**`export type { ChargebackView }`**
+- Canonical chargeback view, re-exported from [[./types]] (commerce SDK internal type set).
 
-[[../README]] · [[../../CLAUDE]] · [[commerce__fraud]] · [[commerce__customer]]
+## Design notes
+
+Sub cancellations from `auto_action_taken='subscriptions_cancelled'` live in `chargeback_subscription_actions` keyed by `chargeback_event_id` — the Display op joins them so the view carries WHICH subs were cancelled, not just that SOMETHING was.
+
+## See also
+
+[[../reference/commerce-sdk-inventory.html]] — Full SDK structure and Phase sequencing.
+[[../tables/chargebacks]] — Chargeback table schema.
+[[./types]] — Commerce SDK type definitions.

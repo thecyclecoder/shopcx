@@ -1,0 +1,1 @@
+- **Commerce SDK — differential battle-test harness (Phase 1 sampler)** · verified 2026-07-05 · → [[../reference/commerce-sdk-inventory.html#gates]]

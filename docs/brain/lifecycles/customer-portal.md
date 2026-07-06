@@ -154,6 +154,8 @@ When a customer clicks "Cancel subscription" in the portal, the handler does NOT
 
 **Shipped 2026-06-17 — Shopify→portal handoff:** the account drawer + `/pages/portal` (theme app extension `shopcx-98`) redirect to the in-house portal — logged-in via the App-Proxy SSO route (`route=sso` handler → magic-link → authenticated, no second login), logged-out → bare portal. Drawer = 1 CTA + capability showcase ([[../recipes/edit-shopify-theme]]). Login-page anonymous chat widget. Help Center sidebar (product cards + General). Orders list: stale "Processing" hidden on >2-month-old orders, line-item prices read `price_cents × qty` (0 omitted, not "$0.00").
 
+**Shipped 2026-06-20 — Commerce SDK migration (M5):** portal read handlers migrated to `commerce/subscription.getSubscription` + `listSubscriptions` + `commerce/price.priceSubscription`. Portal mutation handlers (order-now, coupon, address, cancel, change-date, swap variants, loyalty) now route through the Commerce SDK (subscription-action, coupon, loyalty, etc.). Both surfaces (extension + mini-site) rebuilt and verified byte-exact parity via `scripts/commerce-diff-run.ts`. Legacy appstle.ts + subscription-items.ts shims retired where the portal no longer references them. Portal is now a thin consumer of the Commerce SDK, enforcing the outcome invariant: zero direct commerce reads/writes in customer-facing surfaces.
+
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**

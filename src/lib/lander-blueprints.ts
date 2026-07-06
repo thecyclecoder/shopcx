@@ -82,6 +82,12 @@ export interface LanderBlueprintContent {
   blocks: LanderBlueprintContentBlock[];
   /** Optional overall CTA copy. */
   cta?: string;
+  /** URL the shipped lander renders at — snapshotted here by the Phase-3 QA pass
+   *  ([[blueprint-render-qa]] `snapshotBlueprintRenderedUrl`) once the build lands.
+   *  Optional; set once per blueprint. Persists next to `blocks`/`cta` so a
+   *  reader on this row can pivot straight to the live page without a second
+   *  query. */
+  rendered_url?: string;
 }
 
 export interface LanderBlueprint {
@@ -324,6 +330,61 @@ export async function setBlueprintContent(
   if (error) throw new Error(`setBlueprintContent: ${error.message}`);
 }
 
+/**
+ * Phase-3 QA snapshot — record the URL the shipped lander renders at onto the
+ * blueprint's `content.rendered_url` field. Read-modify-write on `content` so
+ * the existing `blocks` / `cta` are preserved verbatim (jsonb column, no
+ * partial-set operator on the client). Idempotent — passing the same URL a
+ * second time is a no-op re-write; passing a NEW URL overwrites the previous
+ * snapshot (a blueprint carries at most one live URL at a time).
+ *
+ * Gated on `content.blocks` already being present. Refuses to stamp a
+ * rendered URL when the blueprint's content isn't filled — the URL points at
+ * a live page, and stamping it before Carrie's content lands would create a
+ * dangling reference the QA is supposed to prevent, not paper over.
+ *
+ * Guard: the UPDATE re-asserts the workspace scope + `id` filter, and
+ * `.select("id")` proves exactly one row changed. Bails if zero (cross-workspace
+ * or wrong id — see the coaching mandate on compare-and-set writes).
+ */
+export async function setBlueprintRenderedUrl(
+  workspaceId: string,
+  id: string,
+  renderedUrl: string,
+): Promise<void> {
+  if (!renderedUrl || typeof renderedUrl !== "string") {
+    throw new Error("setBlueprintRenderedUrl: renderedUrl is required");
+  }
+  const admin = createAdminClient();
+  const { data: row, error: readErr } = await admin
+    .from("lander_blueprints")
+    .select("content")
+    .eq("id", id)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (readErr) throw new Error(`setBlueprintRenderedUrl: ${readErr.message}`);
+  if (!row) throw new Error(`setBlueprintRenderedUrl: blueprint ${id} not found`);
+  const current = (row.content as LanderBlueprintContent | null) ?? null;
+  if (!current || !Array.isArray(current.blocks) || current.blocks.length === 0) {
+    throw new Error(
+      `setBlueprintRenderedUrl: blueprint ${id} has no content.blocks — refusing to stamp a rendered URL that would dangle`,
+    );
+  }
+  const nextContent: LanderBlueprintContent = { ...current, rendered_url: renderedUrl };
+  const { data: written, error: writeErr } = await admin
+    .from("lander_blueprints")
+    .update({ content: nextContent })
+    .eq("id", id)
+    .eq("workspace_id", workspaceId)
+    .select("id");
+  if (writeErr) throw new Error(`setBlueprintRenderedUrl: ${writeErr.message}`);
+  if (!written || written.length !== 1) {
+    throw new Error(
+      `setBlueprintRenderedUrl: expected exactly one row updated for blueprint ${id}, got ${written?.length ?? 0}`,
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Carrie's DR content STORE — Phase 1 of carrie-dr-content.md
 //
@@ -485,6 +546,89 @@ export async function writeCategorizedProductMedia(
     .single();
   if (error) throw new Error(`writeCategorizedProductMedia: ${error.message}`);
   return data as ProductMediaCategorizedRow;
+}
+
+/**
+ * Semantic slot/alt match for a real-evidence asset role — the fallback path
+ * `findExistingRealAsset` uses on rows where `category` hasn't been backfilled
+ * yet (historic uploads pre-date Carrie's DR-content columns). Kept private —
+ * this is a compat shim over the legacy `slot`/`alt_text` vocabulary, not a
+ * public classifier.
+ *
+ *   before_after      ← slot `before` / `after` / `before_{n}` / `after_{n}`
+ *   press_logo        ← slot `press_*` (or the bare `press`)
+ *   testimonial_photo ← slot `endorsement_*_avatar` (re-hosted headshots)
+ *   ugc               ← slot / alt_text containing ugc | selfie | customer
+ */
+function matchesRealEvidenceRoleBySlotOrAlt(
+  assetRole: "before_after" | "ugc" | "testimonial_photo" | "press_logo",
+  slot: string | null,
+  altText: string | null,
+): boolean {
+  const s = (slot || "").toLowerCase();
+  const a = (altText || "").toLowerCase();
+  switch (assetRole) {
+    case "before_after":
+      return /^before(_\d+)?$/.test(s) || /^after(_\d+)?$/.test(s);
+    case "press_logo":
+      return s === "press" || s.startsWith("press_");
+    case "testimonial_photo":
+      return /^endorsement_[a-z0-9]+_avatar$/.test(s);
+    case "ugc":
+      return (
+        s.includes("ugc") ||
+        s.includes("selfie") ||
+        s.includes("customer") ||
+        a.includes("ugc") ||
+        a.includes("selfie") ||
+        a.includes("customer")
+      );
+    default:
+      return false;
+  }
+}
+
+/**
+ * Carrie's reuse-before-flag probe — for a real-evidence slot on a lander
+ * blueprint, find an existing `product_media` row that satisfies the slot
+ * BEFORE Carrie opens a [[lander_content_gaps]] row. Two match paths, tried in
+ * order:
+ *   1. `category = assetRole` — a row Carrie's DR-content pass already
+ *      categorized (or the founder resolved a prior gap into).
+ *   2. Slot/alt semantic match — a historic row whose legacy `slot` / `alt_text`
+ *      names it as the same asset (before/after, press_*, endorsement_*_avatar,
+ *      ugc/selfie/customer). Covers products that already own the imagery from
+ *      the seeding pass but haven't been Carrie-categorized.
+ *
+ * Never returns a `source='generated'` row — that's the never-fake-a-customer-
+ * result compliance line (an AI image can't stand in as real customer / press
+ * evidence, even if the category matches). Rows with `source IS NULL` (historic
+ * uploads from before the DR columns landed) are treated as non-generated and
+ * eligible. Returns null when nothing eligible exists — the caller opens a
+ * gap.
+ */
+export async function findExistingRealAsset(
+  workspaceId: string,
+  productId: string,
+  assetRole: "before_after" | "ugc" | "testimonial_photo" | "press_logo",
+): Promise<ProductMediaCategorizedRow | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("product_media")
+    .select(
+      "id, workspace_id, product_id, slot, url, storage_path, category, source, caption, alt_text, display_order, created_at, updated_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .not("url", "is", null)
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(`findExistingRealAsset: ${error.message}`);
+  const rows = ((data || []) as ProductMediaCategorizedRow[]).filter((r) => r.source !== "generated");
+  if (rows.length === 0) return null;
+  const categorized = rows.find((r) => r.category === assetRole);
+  if (categorized) return categorized;
+  const slotHit = rows.find((r) => matchesRealEvidenceRoleBySlotOrAlt(assetRole, r.slot, r.alt_text));
+  return slotHit ?? null;
 }
 
 /**

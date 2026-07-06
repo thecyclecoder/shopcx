@@ -1,25 +1,33 @@
 # libraries/commerce__crisis
 
-The **Display** half of the commerce SDK for out-of-stock crises — one entity-named read that rolls up every crisis affecting a customer PLUS their per-crisis tier state.
+Crisis campaign operations in the Commerce SDK. Unified surface for reading crisis state and context.
 
-**File:** `src/lib/commerce/crisis.ts` · **Spec:** [[../specs/commerce-sdk-display-operations]] Phase 3 · **Depends on:** [[../tables/crisis_events]] · [[../tables/crisis_customer_actions]] · [[../lifecycles/crisis-campaign]]
+**File:** `src/lib/commerce/crisis.ts`
 
-## Why this exists
-
-A crisis is an event (`crisis_events`) + per-customer tier state (`crisis_customer_actions`). Surfaces that render a customer's active retention offers need BOTH — the Display op rolls them into one view so nothing re-joins.
-
-Ships with zero call-site consumers — the M3 harness compares parity before any surface migrates.
+**Status:** Display operations shipped (Phase 3 complete). Mutation operations planned per [[../reference/commerce-sdk-inventory.html]].
 
 ## Exports
 
-- **`getCrisisContext(workspaceId, customerId)`** → `CrisisContextView` — every crisis affecting the customer with their per-crisis tier state. Reads `crisis_customer_actions` for the customer, then hydrates each linked `crisis_events` row with its action list.
+### Display (reads)
 
-Type re-exports: `CrisisView`, `CrisisCustomerActionView`, `CrisisContextView`.
+**`getCrisisContext(workspaceId, customerId) → CrisisView`**
+- Retrieves crisis context for a customer (if any active crisis).
+- Per [[../reference/commerce-sdk-inventory.html]], CrisisView includes segments, outcomes, and financial impact.
+- Returns empty if no active crisis, non-empty if crisis is open.
+- Used for dunning, chargeback, and fraud decision gates per [[../lifecycles/crisis-campaign]].
 
-## Callers
+### Types
 
-None. The M3 harness ([[../specs/spec-goal-branch-pm-flow]] M3) compares SDK output vs the existing per-surface hydration paths before rollout — no consumer is retargeted yet.
+**`export type { CrisisView }`**
+- Canonical crisis view, re-exported from [[./types]] (commerce SDK internal type set).
 
----
+## Design notes
 
-[[../README]] · [[../../CLAUDE]] · [[commerce__customer]]
+Crisis reads are lightweight — most callers only need to know "is this customer in crisis?" and the high-level impact. The view carries enough context for dunning and triage to make decisions without a second query.
+
+## See also
+
+[[../reference/commerce-sdk-inventory.html]] — Full SDK structure and Phase sequencing.
+[[../lifecycles/crisis-campaign]] — Crisis campaign lifecycle and decision gates.
+[[../tables/crises]] — Crisis table schema.
+[[./types]] — Commerce SDK type definitions.

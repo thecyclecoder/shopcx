@@ -46,6 +46,10 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[hide-comment]] — `applyModerationDecision({decision:'hide'})`
 - [[link-meta-sender-to-customer]] — upsert `meta_sender_customer_links`
 
+## Growth / DR content
+
+- [[dr-content]] — Carrie's DR-content lane: reuse existing [[../tables/product_media]] before opening a real-evidence [[../tables/lander_content_gaps]] row ([[../libraries/lander-blueprints]] `findExistingRealAsset`, category+slot/alt match, source<>generated compliance rail)
+
 ## Infra
 
 - [[fire-an-inngest-event]] — `inngest.send({name, data})`
