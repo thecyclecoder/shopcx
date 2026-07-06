@@ -621,7 +621,8 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  * regression definition so the gate can never disagree with the surfaced regression banner. A spec missing a
  * run is NOT eligible (it hasn't been machine-tested yet).
  *
- * Two correctness rails (fix(fold) — getAutoFoldEligibleSlugs requires derived-shipped + approved spec-test):
+ * Three correctness rails (fix(fold) — getAutoFoldEligibleSlugs requires derived-shipped + approved
+ * spec-test + goal-not-in-flight):
  *   1. DERIVED-shipped, never the stored column. `getRoadmap()` builds each SpecCard's `status` from the
  *      PHASE ROLLUP (`deriveSpecCardStatus`→`rollupPhaseStatus`: all phases shipped ⇒ shipped; terminal
  *      deferred/in_review/folded win), NOT the vestigial `specs.status` column — so a spec stamped
@@ -635,12 +636,52 @@ export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin
  *      human checks fully advisory per CEO) AND have 0 unresolved auto-`fail` regressions. A degenerate 0-check
  *      row — the "silent empty pass" the AgentVerdict doc warns about (an unparseable/empty verdict that reads
  *      like a clean pass) — asserted nothing, so it is NOT eligible. Absence of a `fail` ≠ a pass.
+ *   3. GOAL-BOUND DEFER (goal-promotion-fold-collision-and-held-surfacing Phase 1). A spec whose parent
+ *      goal is still IN-FLIGHT (stored `goals.status` ∈ {`proposed`,`greenlit`} — the atomic goal→main
+ *      promotion has NOT yet landed) DEFERS its fold. Otherwise the fold PR writes the goal's brain pages
+ *      to main WHILE the goal branch is also editing them, and M5's `mergeGoalBranchIntoMain` 409s on the
+ *      resulting add/add + content conflicts — the 2026-07-06 centralized-commerce-sdk incident. Once M5
+ *      lands (`finalizePromotedGoal` flips the goal → `complete`) the guard clears and the next fold-cron
+ *      sweep picks the spec back up. A one-off spec (`null` goal) or a spec whose goal is already
+ *      `complete`/`folded` folds normally. Redirects the fold's write target off `main` at the source.
+ *      See [[isFoldSafeGivenGoalStatus]] for the pure predicate + tests.
  *
  * Supervisable-autonomy posture: hitting the security rail (live/surfaced) = DEFER + escalate (the Build
  * card surfaces the routed fix); the gate NEVER folds past it.
  */
+/**
+ * goal-promotion-fold-collision-and-held-surfacing Phase 1 — the pure predicate the goal-bound-defer rail
+ * evaluates. Returns TRUE iff a spec's fold-to-brain is safe to land on `main` given the STORED status of
+ * its parent goal (or `null` when the spec is a one-off with no goal).
+ *
+ * The atomic goal→main promotion ([[../libraries/agent-jobs]] `promoteCompleteGoalsToMain` → M5's
+ * `mergeGoalBranchIntoMain`) is the ONLY sanctioned path for a goal-bound spec's code (and its accumulated
+ * `docs/brain/` edits) to reach `main`. Before that atomic merge lands, a fold PR editing the SAME brain
+ * pages the goal branch also touches would 409 the atomic merge on add/add + content conflicts (the
+ * 2026-07-06 centralized-commerce-sdk incident). So:
+ *   - `null` — the spec is a one-off (no goal). No goal branch to collide with. Safe.
+ *   - `'proposed'` / `'greenlit'` — the goal is still in-flight; M5's atomic promotion has NOT yet landed.
+ *     DEFER the fold. `finalizePromotedGoal` flips the goal → `complete` right after the atomic merge, so
+ *     the next fold-cron sweep clears the guard and folds normally.
+ *   - `'complete'` / `'folded'` — the goal's atomic promotion landed (its brain-page edits are already on
+ *     `main`); the fold is now additive-only. Safe.
+ *
+ * Pure — no I/O. See `spec-test-runs.test.ts` for the state pins.
+ */
+export type GoalStoredStatus = "proposed" | "greenlit" | "complete" | "folded" | null;
+export function isFoldSafeGivenGoalStatus(goalStatus: GoalStoredStatus): boolean {
+  if (goalStatus === null) return true;
+  if (goalStatus === "complete" || goalStatus === "folded") return true;
+  return false;
+}
+
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
   const admin = createAdminClient();
+  // Rail 3 imports (goal-promotion-fold-collision-and-held-surfacing Phase 1) — hoisted so the loop
+  // doesn't re-import per spec. Dynamic to break the specs-table ↔ agent-jobs ↔ spec-test-runs cycle the
+  // rest of this module already navigates the same way.
+  const { resolveGoalSlugForSpec } = await import("@/lib/agent-jobs");
+  const { getGoal } = await import("@/lib/goals-table");
   const [{ specs }, archived, runs, resolutions, liveRows, securityBySlug] = await Promise.all([
     // Grade the SAME workspace whose spec-test runs we read below — `getRoadmap()` with no arg resolves a
     // non-deterministic DEFAULT workspace (latest agent_job), so the gate would otherwise grade the wrong
@@ -668,6 +709,10 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
   ]);
   const archivedSet = new Set(archived);
   const liveSlugs = new Set(((liveRows.data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
+  // Rail 3 cache: goalSlug → stored status. Every member spec of the same goal resolves to the same
+  // status, so this collapses N spec lookups → 1 goal lookup per goal in the batch. Populated lazily
+  // as we resolve.
+  const goalStatusCache = new Map<string, GoalStoredStatus>();
   const eligible: string[] = [];
   for (const s of specs) {
     // Rail 1 — DERIVED-shipped only. `s.status` is the PHASE ROLLUP from getRoadmap (deriveSpecCardStatus),
@@ -698,6 +743,36 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     // Security node renders as `done`.
     const sec = securityBySlug[s.slug];
     if (!sec?.completedClean) continue;
+
+    // Rail 3 — GOAL-BOUND DEFER (goal-promotion-fold-collision-and-held-surfacing Phase 1). A spec whose
+    // parent goal is still in-flight (`goals.status` ∈ {`proposed`,`greenlit`} — atomic goal→main promotion
+    // has not landed yet) MUST NOT fold to main: its brain-page edits would race the goal branch's own,
+    // 409ing `mergeGoalBranchIntoMain`. `finalizePromotedGoal` flips the goal to `complete` right after M5's
+    // atomic merge, so a deferred spec is picked up on the next cron sweep. `resolveGoalSlugForSpec` returns
+    // null for a one-off spec (no milestone / no goal chain) — we fail OPEN there (fold normally), matching
+    // the "no goal-bound guard needed" case. A `getGoal` read miss also falls through to safe (never block
+    // the fold on a lookup blip; the incident this rail prevents requires the goal to actually be in-flight).
+    let goalSlug: string | null = null;
+    try {
+      goalSlug = await resolveGoalSlugForSpec(workspaceId, s.slug);
+    } catch {
+      goalSlug = null;
+    }
+    if (goalSlug) {
+      let goalStatus: GoalStoredStatus;
+      if (goalStatusCache.has(goalSlug)) {
+        goalStatus = goalStatusCache.get(goalSlug) ?? null;
+      } else {
+        try {
+          const goal = await getGoal(workspaceId, goalSlug);
+          goalStatus = (goal?.status ?? null) as GoalStoredStatus;
+        } catch {
+          goalStatus = null;
+        }
+        goalStatusCache.set(goalSlug, goalStatus);
+      }
+      if (!isFoldSafeGivenGoalStatus(goalStatus)) continue;
+    }
 
     eligible.push(s.slug);
   }
