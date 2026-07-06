@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleSendPaymentUpdateEmail } from "@/lib/appstle";
+import { subscriptionSendPaymentUpdateEmail } from "@/lib/commerce/subscription";
 import { logCustomerEvent } from "@/lib/customer-events";
 
 export async function POST(
@@ -22,7 +22,7 @@ export async function POST(
 
   if (!sub) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const result = await appstleSendPaymentUpdateEmail(workspaceId, sub.shopify_contract_id);
+  const result = await subscriptionSendPaymentUpdateEmail(workspaceId, sub.shopify_contract_id);
 
   if (!result.success) {
     return NextResponse.json({ error: result.error || "Failed to send" }, { status: 500 });

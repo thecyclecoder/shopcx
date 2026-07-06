@@ -40,6 +40,26 @@ async function callSonnetOrchestratorV2(workspaceId: string, ticketId: string, c
 
 - `src/lib/improve-tools.ts`
 
+## Tools
+
+The orchestrator's tool schemas (rendered by `buildToolSchemas` inside `src/lib/sonnet-orchestrator-v2.ts` and dispatched by `executeToolCall`) are the on-demand data-fetch surface: each tool loads a targeted slice of context so Sonnet doesn't pre-load a customer's full history. Every commerce-touching tool sources its data through the centralized `@/lib/commerce` SDK — the same Display ops the ticket-detail page + dashboard commerce pages consume — so the AI stack cannot silently drift from what the UI shows. The mutation-side counterpart (direct-action handlers in [[action-executor]]) lives in a separate module by design; tools here are read-only.
+
+| Tool | Data returned | SDK op called |
+|---|---|---|
+| `get_customer_account` | Customer identity + linked-group + LTV rollup + subscription block + order block | `commerce/customer.getCustomer` + `commerce/subscription.listSubscriptionsByCustomer` + `commerce/order.listOrdersByCustomer` |
+| `get_returns` | Return + replacement rows for this customer | `commerce/return.listReturnsByCustomer` + `commerce/replacement.listReplacementsByCustomer` |
+| `get_loyalty_balance` | Points balance + redemption tiers + workspace loyalty settings | `commerce/loyalty.getLoyaltyBalance` |
+| `get_chargebacks` | Open chargeback events for this customer | `commerce/chargeback.listChargebacksByCustomer` |
+| `get_fraud_posture` | Confirmed-fraud / reseller flags + open fraud cases | `commerce/fraud.getFraudPosture` |
+| `get_crisis_status` | Active enrollments for this customer + workspace crisis inventory | `commerce/crisis.getCrisisContext` |
+| `check_inventory` | Live variant / SKU stock signals — crisis-aware (`crisis_events.active` overrides `variants.inventory_quantity`) | `commerce/crisis.getCrisisContext` (crisis override) + `.from("products")` catalog read (non-commerce metadata) |
+| `get_product_knowledge` | Product catalog + review-analysis + KB entries — crisis-aware (same override) | `commerce/crisis.getCrisisContext` (crisis override) + `.from("products"|"product_knowledge")` (non-commerce metadata) |
+| `get_dunning_state` | Active `dunning_cycles` row(s) for the customer + latest failure signal | `commerce/subscription.listSubscriptionsByCustomer` (for contract joins) + `.from("dunning_cycles")` (non-commerce metadata) |
+
+Every commerce-touching tool schema description points at its `commerce/*` op above so a reader of the tool definition sees the same source-of-truth the executor calls. Tools whose data is intrinsically non-commerce (workspace settings, ticket metadata, brand voice, knowledge base) remain on their existing table reads — they don't cross the SDK boundary.
+
+Migration status (spec [[../specs/commerce-sdk-migrate-dashboard-agent-ai]] Phase 3): the tool-schema pointers landed in this Fix commit; the executor call-site repointing (converting each `executeToolCall` branch from `.from("subscriptions")` / `.from("orders")` / `@/lib/appstle` to the SDK op above) is tracked as the follow-up landing.
+
 ## Prompt caching (cost-critical)
 
 `buildPreContext` returns **`{ system, userBlock }`** — a deliberate split for prompt caching (the orchestrator is ~98% of all AI spend, and input context dwarfs output ~184:1):

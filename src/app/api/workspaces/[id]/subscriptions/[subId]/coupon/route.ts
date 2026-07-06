@@ -2,15 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logCustomerEvent } from "@/lib/customer-events";
-import { decrypt } from "@/lib/crypto";
-
-async function getAppstleCreds(admin: ReturnType<typeof createAdminClient>, workspaceId: string) {
-  const { data: ws } = await admin.from("workspaces")
-    .select("appstle_api_key_encrypted, shopify_myshopify_domain")
-    .eq("id", workspaceId).single();
-  if (!ws?.appstle_api_key_encrypted) return null;
-  return { apiKey: decrypt(ws.appstle_api_key_encrypted), shop: ws.shopify_myshopify_domain };
-}
+import { subscriptionApplyCoupon, subscriptionRemoveCoupon } from "@/lib/subscription-items";
 
 // POST: Apply coupon
 export async function POST(
@@ -29,15 +21,10 @@ export async function POST(
     .eq("id", subId).eq("workspace_id", workspaceId).single();
   if (!sub) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const creds = await getAppstleCreds(admin, workspaceId);
-  if (!creds) return NextResponse.json({ error: "Appstle not configured" }, { status: 400 });
-
   const { couponCode } = await request.json();
   if (!couponCode) return NextResponse.json({ error: "couponCode required" }, { status: 400 });
 
-  // Remove existing discounts first, then apply (only 1 coupon per subscription)
-  const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-  const result = await applyDiscountWithReplace(creds.apiKey, sub.shopify_contract_id, couponCode);
+  const result = await subscriptionApplyCoupon(workspaceId, String(sub.shopify_contract_id), couponCode);
   if (!result.success) {
     return NextResponse.json({ error: result.error || "Failed to apply coupon" }, { status: 500 });
   }
@@ -71,23 +58,12 @@ export async function DELETE(
     .eq("id", subId).eq("workspace_id", workspaceId).single();
   if (!sub) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const creds = await getAppstleCreds(admin, workspaceId);
-  if (!creds) return NextResponse.json({ error: "Appstle not configured" }, { status: 400 });
-
   const { discountId } = await request.json();
   if (!discountId) return NextResponse.json({ error: "discountId required" }, { status: 400 });
 
-  const { healOnTouch } = await import("@/lib/appstle-pricing");
-  await healOnTouch(workspaceId, String(sub.shopify_contract_id));
-
-  const res = await fetch(
-    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-discount?contractId=${sub.shopify_contract_id}&discountId=${discountId}`,
-    { method: "PUT", headers: { "X-API-Key": creds.apiKey } }
-  );
-
-  if (!res.ok && res.status !== 204) {
-    const text = await res.text();
-    return NextResponse.json({ error: `Appstle error: ${res.status} ${text}` }, { status: 500 });
+  const result = await subscriptionRemoveCoupon(workspaceId, String(sub.shopify_contract_id), discountId);
+  if (!result.success) {
+    return NextResponse.json({ error: result.error || "Failed to remove coupon" }, { status: 500 });
   }
 
   if (sub.customer_id) {

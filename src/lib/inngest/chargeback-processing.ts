@@ -1,6 +1,6 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+import { subscriptionAction } from "@/lib/commerce/subscription";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 import { emitReactiveHeartbeat, emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -184,7 +184,7 @@ export const chargebackReceived = inngest.createFunction(
         for (const sub of subs) {
           if (!sub.shopify_contract_id) continue;
 
-          const result = await appstleSubscriptionAction(
+          const result = await subscriptionAction(
             workspaceId,
             sub.shopify_contract_id,
             "cancel",

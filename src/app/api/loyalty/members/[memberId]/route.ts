@@ -2,9 +2,13 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
+  deductPoints,
+  earnPoints,
   getLoyaltySettings,
   getRedemptionTiers,
   pointsToDollarValue,
+  validateManualAdjustment,
+  type LoyaltyMember,
 } from "@/lib/loyalty";
 
 export async function GET(
@@ -147,29 +151,30 @@ export async function POST(
 
   const body = await request.json();
   const { points, reason } = body as { points?: number; reason?: string };
+  const delta = typeof points === "number" ? points : Number.NaN;
 
-  if (!points || points === 0) {
-    return NextResponse.json({ error: "Points amount required (positive or negative)" }, { status: 400 });
+  // Guard predicate (loyalty-list-stats-and-adjust-guard.md Phase 2): reject
+  // zero / non-finite / would-underflow before any write. deductPoints's own
+  // live-balance clamp is a defense-in-depth layer; this is the fast-fail 4xx.
+  const gate = validateManualAdjustment(member.points_balance, delta);
+  if (!gate.ok) {
+    return NextResponse.json(
+      { error: gate.error, balance: member.points_balance },
+      { status: 400 },
+    );
   }
 
-  // Create transaction
-  await admin.from("loyalty_transactions").insert({
-    workspace_id: member.workspace_id,
-    member_id: memberId,
-    points_change: points,
-    type: "adjustment",
-    description: reason || `Manual adjustment: ${points > 0 ? "+" : ""}${points} points`,
-  });
+  // Route through the guarded helpers instead of raw table writes. earnPoints
+  // stamps type='adjustment' (not 'earning') so the ledger stays semantically
+  // correct; deductPoints stamps type='adjustment' and re-reads the balance
+  // live before writing.
+  const description = reason || `Manual adjustment: ${delta > 0 ? "+" : ""}${delta} points`;
+  const loyaltyMember = member as LoyaltyMember;
+  if (delta > 0) {
+    await earnPoints(loyaltyMember, delta, null, description, "adjustment");
+  } else {
+    await deductPoints(loyaltyMember, -delta, null, "adjustment", description);
+  }
 
-  // Update balance
-  const newBalance = Math.max(0, member.points_balance + points);
-  const updates: Record<string, unknown> = {
-    points_balance: newBalance,
-    updated_at: new Date().toISOString(),
-  };
-  if (points > 0) updates.points_earned = member.points_earned + points;
-
-  await admin.from("loyalty_members").update(updates).eq("id", memberId);
-
-  return NextResponse.json({ ok: true, new_balance: newBalance });
+  return NextResponse.json({ ok: true, new_balance: loyaltyMember.points_balance });
 }

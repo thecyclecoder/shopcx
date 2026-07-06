@@ -225,7 +225,7 @@ async function executeActionsInline(
     }
   }
 
-  const { withActionContext } = await import("@/lib/appstle-call-log");
+  const { withActionContext } = await import("@/lib/commerce/call-log");
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   for (const action of actions) {
@@ -343,8 +343,8 @@ export const directActionHandlers: Record<
   (ctx: ActionContext, p: ActionParams) => Promise<ActionResult>
 > = {
   resume: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
     return { ...r, summary: "Resumed subscription" };
   },
 
@@ -440,35 +440,35 @@ export const directActionHandlers: Record<
   },
 
   skip_next_order: async (ctx, p) => {
-    const { appstleSkipNextOrder } = await import("@/lib/appstle");
-    const r = await appstleSkipNextOrder(ctx.workspaceId, p.contract_id!);
+    const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
   },
 
   change_frequency: async (ctx, p) => {
-    const { appstleUpdateBillingInterval } = await import("@/lib/appstle");
-    const r = await appstleUpdateBillingInterval(
+    const { subscriptionUpdateBillingInterval } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionUpdateBillingInterval(
       ctx.workspaceId, p.contract_id!, p.interval! as "DAY" | "WEEK" | "MONTH" | "YEAR", Number(p.interval_count!),
     );
     return { ...r, summary: `Changed frequency to every ${p.interval_count} ${p.interval}` };
   },
 
   change_next_date: async (ctx, p) => {
-    const { appstleUpdateNextBillingDate, orderNowByContract } = await import("@/lib/appstle");
+    const { subscriptionUpdateNextBillingDate, subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     // Appstle rejects past/today timestamps. If Sonnet passes a date
     // ≤ today (Central) — which it does when a customer says "ship
     // it ASAP" or "send right away" — we don't shove next_billing
     // into the future; we just charge now via order-now. This matches
     // customer intent (get product TODAY) and avoids the 400 we used
-    // to bounce on. orderNowByContract is flavor-aware (internal → Braintree
-    // renewal pipeline, Appstle → attempt-billing); a raw appstle call here
-    // silently no-ops on internal subs.
+    // to bounce on. subscriptionOrderNow is flavor-aware (internal →
+    // Braintree renewal pipeline, external vendor → attempt-billing);
+    // a raw vendor call here silently no-ops on internal subs.
     let date = p.date!;
     const centralToday = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
     centralToday.setHours(0, 0, 0, 0);
     const requested = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00`) : new Date(date);
     if (!isNaN(requested.getTime()) && requested.getTime() <= centralToday.getTime()) {
-      const billed = await orderNowByContract(ctx.workspaceId, p.contract_id!);
+      const billed = await subscriptionOrderNow(ctx.workspaceId, p.contract_id!);
       if (billed.success) {
         return { success: true, summary: "Triggered order now (customer asked to ship today)" };
       }
@@ -479,7 +479,7 @@ export const directActionHandlers: Record<
       date = tomorrow.toISOString().slice(0, 10);
       p.date = date;
     }
-    const r = await appstleUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
+    const r = await subscriptionUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
     return { ...r, summary: `Changed next billing date to ${date}` };
   },
 
@@ -489,12 +489,12 @@ export const directActionHandlers: Record<
    * "I'm out of product". Does NOT change next_billing_date — after
    * the charge, the schedule advances by one cycle. Flavor-aware:
    * internal subs fire the Braintree renewal pipeline, Appstle subs
-   * attempt the upcoming Appstle billing (orderNowByContract).
+   * attempt the upcoming Appstle billing (subscriptionOrderNow).
    */
   bill_now: async (ctx, p) => {
-    const { orderNowByContract } = await import("@/lib/appstle");
+    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "bill_now missing contract_id" };
-    return orderNowByContract(ctx.workspaceId, p.contract_id);
+    return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
   },
 
   add_item: async (ctx, p) => {
@@ -535,18 +535,12 @@ export const directActionHandlers: Record<
     // over EVERY line matching the variant_id. Multi-line case (same
     // variant, different lines) is common when customers built up the
     // sub over time. Stop on first failure so we don't keep hammering
-    // Appstle if its credentials died mid-loop.
+    // the vendor if its credentials died mid-loop.
     type Line = { id?: string; variantId?: string };
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const cfg = await getAppstleConfig(ctx.workspaceId);
-    if (!cfg) return { success: false, error: "Appstle not configured" };
-    const cRes = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${p.contract_id}?api_key=${cfg.apiKey}`,
-      { cache: "no-store" },
-    );
-    if (!cRes.ok) return { success: false, error: `Contract fetch failed: ${cRes.status}` };
-    const cJson = await cRes.json();
-    const lines = ((cJson.lines?.nodes || []) as Line[])
+    const { subscriptionGetLiveContract } = await import("@/lib/commerce/subscription");
+    const contract = await subscriptionGetLiveContract(ctx.workspaceId, String(p.contract_id!));
+    if (!contract.ok) return { success: false, error: contract.error || "Contract fetch failed" };
+    const lines = ((contract.lines?.nodes || []) as Line[])
       .filter((l) => {
         const vid = String(l.variantId || "").split("/").pop();
         return vid === String(variantId);
@@ -607,21 +601,18 @@ export const directActionHandlers: Record<
       return directActionHandlers.apply_loyalty_coupon(ctx, p);
     }
 
-    const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
-    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
-    return { ...r, summary: `Applied coupon ${code}` };
+    if (!p.contract_id) return { success: false, error: "apply_coupon missing contract_id" };
+    const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
+    const r = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, code);
+    return { ...r, summary: r.success ? `Applied coupon ${code}` : undefined };
   },
 
   remove_coupon: async (ctx, p) => {
-    const { removeExistingDiscounts } = await import("@/lib/appstle-discount");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
-    const r = await removeExistingDiscounts(config.apiKey, p.contract_id!);
-    return { success: !r.error, error: r.error, summary: "Removed coupon" };
+    if (!p.contract_id) return { success: false, error: "remove_coupon missing contract_id" };
+    const { subscriptionRemoveCoupon } = await import("@/lib/subscription-items");
+    const discountIdOrCode = p.code || p.coupon_code || "";
+    const r = await subscriptionRemoveCoupon(ctx.workspaceId, p.contract_id, discountIdOrCode);
+    return { success: r.success, error: r.error, summary: r.success ? "Removed coupon" : undefined };
   },
 
   redeem_points: async (ctx, p) => {
@@ -733,19 +724,17 @@ export const directActionHandlers: Record<
   },
 
   apply_loyalty_coupon: async (ctx, p) => {
-    const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
+    const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
 
     const code = p.code || p.coupon_code;
     if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
+    if (!p.contract_id) return { success: false, error: "apply_loyalty_coupon missing contract_id" };
 
     // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Try applying the existing coupon first
-    const r = await applyDiscountWithReplace(config.apiKey, p.contract_id!, code);
+    const r = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, code);
     if (r.success) return { ...r, summary: `Applied loyalty coupon ${code}` };
 
     // Coupon failed — may be stale/deleted in Shopify. Generate a fresh one.
@@ -825,7 +814,7 @@ export const directActionHandlers: Record<
       });
 
       // Now apply the fresh coupon
-      const r2 = await applyDiscountWithReplace(config.apiKey, p.contract_id!, newCode);
+      const r2 = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, newCode);
       if (r2.success) {
         return { success: true, summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})`, couponCode: newCode };
       }
@@ -837,15 +826,14 @@ export const directActionHandlers: Record<
 
   update_line_item_price: async (ctx, p) => {
     const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
-    const { getAppstleConfig } = await import("@/lib/subscription-items");
 
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     if (p.base_price_cents == null) return { success: false, error: "Missing base_price_cents" };
 
-    // Internal subs aren't on Appstle — restore the grandfathered base by
-    // writing price_override_cents directly. Route here FIRST, before the
-    // Appstle config / live-contract fetch below (which would fail with
-    // "Appstle not configured" for an internal sub). subUpdateLineItemPrice
+    // Internal subs aren't on the external vendor — restore the grandfathered
+    // base by writing price_override_cents directly. Route here FIRST, before
+    // the vendor config / live-contract fetch below (which would fail with
+    // "vendor not configured" for an internal sub). subUpdateLineItemPrice
     // delegates to internalSubUpdateLineItemPrice for these.
     const { isInternalSubscription } = await import("@/lib/internal-subscription");
     if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
@@ -888,20 +876,15 @@ export const directActionHandlers: Record<
     const subRealItems = subItems.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
     for (const it of subRealItems) pushUnique(it.variant_id);
 
-    // Fetch the live contract from Appstle ONCE — source of truth for current line GIDs.
+    // Fetch the live contract via the SDK ONCE — source of truth for current line GIDs.
     // After a swap, our DB items/variants may match but the customer-facing variant id
-    // changes, so we always resolve lineId from live Appstle data.
-    const config = await getAppstleConfig(ctx.workspaceId);
-    if (!config) return { success: false, error: "Appstle not configured" };
+    // changes, so we always resolve lineId from the live contract data.
     let liveLines: { id: string; variantId: string; title?: string }[] = [];
     try {
-      const detailRes = await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${p.contract_id}?api_key=${config.apiKey}`,
-        { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
-      );
-      if (detailRes.ok) {
-        const detail = await detailRes.json();
-        const nodes = (detail?.lines?.nodes || []) as { id?: string; variantId?: string; title?: string }[];
+      const { subscriptionGetLiveContract } = await import("@/lib/commerce/subscription");
+      const detail = await subscriptionGetLiveContract(ctx.workspaceId, String(p.contract_id!));
+      if (detail.ok) {
+        const nodes = (detail.lines?.nodes || []) as { id?: string; variantId?: string; title?: string }[];
         liveLines = nodes
           .filter(n => n.id && n.variantId)
           .map(n => ({ id: n.id!, variantId: (n.variantId!.split("/").pop() || n.variantId!) as string, title: n.title }));
@@ -1048,42 +1031,41 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+    const { refundOrder } = await import("@/lib/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
-    const r = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id!, p.amount_cents!, reason);
-    if (r.success) {
-      await notifySlack(ctx, p, amountDecimal);
-      // Prevent a DOUBLE refund: if this order already has an open return set to
-      // refund on receipt, mark it already-refunded (pointing at this refund) so
-      // the returns pipeline doesn't refund the customer a SECOND time when the
-      // product is delivered back. (Sonia Stevens, SC132396: a direct goodwill
-      // refund + a `refund_return` on the same order would have refunded twice.)
-      try {
-        const oid = String(p.shopify_order_id);
-        const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
-        const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
-        if (ord?.id) {
-          await ctx.admin.from("returns")
-            .update({ refund_id: r.braintreeRefundId || "direct_refund", refunded_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-            .eq("order_id", ord.id)
-            .is("refunded_at", null);
-        }
-      } catch (e) {
-        console.error("[partial_refund] failed to mark existing return as refunded:", e);
-      }
-    }
+    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+    if (!p.amount_cents) return { success: false, error: "Missing amount_cents" };
+
+    // Resolve internal order UUID — refundOrder takes our internal
+    // orders.id, never the human-facing shopify_order_id / order_number.
+    const oid = String(p.shopify_order_id);
+    const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
+    if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+
+    // refundOrder dispatches on the order's gateway (Braintree /
+    // Shopify), preserves the double-refund guard (stamps refunded_at
+    // on open returns), and logs the customer_events row.
+    const r = await refundOrder(ctx.workspaceId, ord.id, p.amount_cents, reason, {
+      source: "ai",
+      customerId: ctx.customerId,
+      eventProperties: { ticket_id: ctx.ticketId },
+    });
+    if (r.success) await notifySlack(ctx, p, amountDecimal);
+
     // When the refund went directly through Braintree (Shopify's native
     // Braintree refund is broken), record that on the ticket so agents/AI
     // reading the thread know the money moved off-Shopify, with the Braintree
     // refund id for reconciliation. Note any failed Shopify-side bookkeeping.
     let methodNote = "";
     if (r.success && r.method === "braintree") {
-      methodNote = ` — refunded directly via Braintree${r.braintreeRefundId ? ` (txn ${r.braintreeRefundId})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
+      methodNote = ` — refunded directly via Braintree${r.refund_id ? ` (txn ${r.refund_id})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
     }
     return {
-      ...r,
+      success: r.success,
+      error: r.error,
       summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}` : undefined,
       // Drives {{refund_amount}} substitution in response_message. Without
       // this, the placeholder leaked through verbatim — see ticket
@@ -1094,7 +1076,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { partialRefundByAmount } = await import("@/lib/shopify-order-actions");
+    const { refundOrder } = await import("@/lib/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1116,7 +1098,7 @@ export const directActionHandlers: Record<
     if (!validation.valid) return { success: false, error: validation.error };
 
     const { data: order } = await ctx.admin.from("orders")
-      .select("order_number, total_cents, financial_status")
+      .select("id, order_number, total_cents, financial_status")
       .eq("workspace_id", ctx.workspaceId).eq("shopify_order_id", p.shopify_order_id).single();
     if (!order) return { success: false, error: "Order not found" };
     if (order.financial_status === "refunded") return { success: false, error: "Order already fully refunded" };
@@ -1124,8 +1106,12 @@ export const directActionHandlers: Record<
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
 
-    const refund = await partialRefundByAmount(ctx.workspaceId, p.shopify_order_id, amountCents, reason);
-    if (!refund.success) return { ...refund, summary: undefined };
+    const refund = await refundOrder(ctx.workspaceId, order.id, amountCents, reason, {
+      source: "ai",
+      customerId: ctx.customerId,
+      eventProperties: { ticket_id: ctx.ticketId, loyalty_tier: tier.label, points_spent: tier.points_cost },
+    });
+    if (!refund.success) return { success: false, error: refund.error };
 
     await spendPoints(member, tier.points_cost, `Redeemed for partial refund on order #${order.order_number}`, null);
 
@@ -1150,7 +1136,7 @@ export const directActionHandlers: Record<
   },
 
   pause_timed: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     // We only ever do 30- or 60-day pauses. Coerce before validating: the
     // orchestrator and journey configs carry pause_days as a STRING ("60"), so a
@@ -1159,7 +1145,7 @@ export const directActionHandlers: Record<
     const days = Number(p.pause_days);
     if (days !== 30 && days !== 60) return { success: false, error: "pause_days must be 30 or 60" };
 
-    const r = await appstleSubscriptionAction(
+    const r = await subscriptionAction(
       ctx.workspaceId, p.contract_id, "pause",
       `Customer requested ${days}-day pause after renewal charge`,
     );
@@ -1333,8 +1319,8 @@ export const directActionHandlers: Record<
   },
 
   reactivate: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionAction(ctx.workspaceId, p.contract_id!, "resume");
     if (r.success) {
       const { addTicketTag } = await import("@/lib/ticket-tags");
       await addTicketTag(ctx.ticketId, "wb");
@@ -1357,9 +1343,9 @@ export const directActionHandlers: Record<
   },
 
   crisis_pause: async (ctx, p) => {
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
-    const r = await appstleSubscriptionAction(ctx.workspaceId, p.contract_id, "pause", "Crisis — customer requested pause until restock");
+    const r = await subscriptionAction(ctx.workspaceId, p.contract_id, "pause", "Crisis — customer requested pause until restock");
     if (r.success && p.crisis_action_id) {
       await ctx.admin.from("crisis_customer_actions").update({
         tier3_response: "accepted_pause", paused_at: new Date().toISOString(),
@@ -1616,49 +1602,39 @@ export const directActionHandlers: Record<
     // Subscription branch — Appstle endpoint
     if (p.contract_id) {
       try {
-        const { healOnTouch } = await import("@/lib/appstle-pricing");
+        const { healOnTouch } = await import("@/lib/commerce/pricing");
         await healOnTouch(ctx.workspaceId, String(p.contract_id));
-        const { data: ws } = await ctx.admin.from("workspaces")
-          .select("appstle_api_key_encrypted").eq("id", ctx.workspaceId).single();
-        if (ws?.appstle_api_key_encrypted) {
-          const { decrypt } = await import("@/lib/crypto");
-          const apiKey = decrypt(ws.appstle_api_key_encrypted);
-          const { loggedAppstleFetch } = await import("@/lib/appstle-call-log");
-          const res = await loggedAppstleFetch(
-            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${p.contract_id}`,
-            {
-              method: "PUT",
-              headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-              // Appstle's GraphQL validation reads countryCode + provinceCode
-              // specifically (the bare `country`/`province` fields aren't
-              // wired to the SubscriptionDraftInput → deliveryMethod.shipping
-              // path). Sending both keeps the REST shape happy while
-              // satisfying the GraphQL validator. The portal handler sends
-              // the same shape — keep them in sync.
-              body: JSON.stringify({
-                address1: a.address1, address2: a.address2 || "",
-                city: a.city, zip,
-                country, countryCode: country,
-                province, provinceCode: province,
-                firstName: a.first_name, lastName: a.last_name, phone: a.phone,
-              }),
+        // The vendor's GraphQL validation reads countryCode + provinceCode
+        // specifically (the bare `country`/`province` fields aren't wired
+        // to the SubscriptionDraftInput → deliveryMethod.shipping path).
+        // subscriptionUpdateShippingAddress sends both to keep the REST
+        // shape happy while satisfying the GraphQL validator; the portal
+        // handler sends the same shape — keep them in sync.
+        const { subscriptionUpdateShippingAddress } = await import("@/lib/commerce/subscription");
+        const upd = await subscriptionUpdateShippingAddress(ctx.workspaceId, String(p.contract_id), {
+          address1: a.address1,
+          address2: a.address2 || "",
+          city: a.city,
+          zip,
+          country,
+          province,
+          firstName: a.first_name || "",
+          lastName: a.last_name || "",
+          phone: a.phone || "",
+        });
+        if (upd.success) {
+          await ctx.admin.from("subscriptions").update({
+            shipping_address: {
+              first_name: a.first_name, last_name: a.last_name, phone: a.phone,
+              address1: a.address1, address2: a.address2 || null,
+              city: a.city, province_code: province, zip, country_code: country,
             },
-            "update-shipping-address",
-          );
-          if (res.ok) {
-            await ctx.admin.from("subscriptions").update({
-              shipping_address: {
-                first_name: a.first_name, last_name: a.last_name, phone: a.phone,
-                address1: a.address1, address2: a.address2 || null,
-                city: a.city, province_code: province, zip, country_code: country,
-              },
-              updated_at: new Date().toISOString(),
-            }).eq("shopify_contract_id", p.contract_id);
-            anySuccess = true;
-            summaries.push(`Subscription ${p.contract_id} address updated`);
-          } else {
-            return { success: false, error: `Appstle ${res.status}` };
-          }
+            updated_at: new Date().toISOString(),
+          }).eq("shopify_contract_id", p.contract_id);
+          anySuccess = true;
+          summaries.push(`Subscription ${p.contract_id} address updated`);
+        } else if (upd.error) {
+          return { success: false, error: upd.error };
         }
       } catch (err) {
         return { success: false, error: `Subscription update failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -1785,7 +1761,7 @@ export const directActionHandlers: Record<
    * method on one (or all) of the customer's active subscriptions.
    * Identified by last4 since that's what the customer cites in chat.
    *
-   * Reuses the dunning-system helper appstleSwitchPaymentMethod, which
+   * Reuses the dunning-system helper subscriptionSwitchPaymentMethod, which
    * already handles BOTH internal (Braintree-vaulted) subs AND legacy
    * Appstle/Shopify-Payments subs — for Appstle ones it calls
    * subscription-contracts-update-existing-payment-method.
@@ -1846,11 +1822,11 @@ export const directActionHandlers: Record<
     }
 
     // Loop the switch across each active sub.
-    const { appstleSwitchPaymentMethod } = await import("@/lib/appstle");
+    const { subscriptionSwitchPaymentMethod } = await import("@/lib/commerce/subscription");
     const summaries: string[] = [];
     const failures: string[] = [];
     for (const sub of subs) {
-      const r = await appstleSwitchPaymentMethod(ctx.workspaceId, sub.shopify_contract_id as string, card.id);
+      const r = await subscriptionSwitchPaymentMethod(ctx.workspaceId, sub.shopify_contract_id as string, card.id);
       if (r.success) {
         summaries.push(sub.shopify_contract_id as string);
       } else {
@@ -2129,9 +2105,9 @@ async function handleDirectAction(
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   // Per-action call logging — wrap each handler in an AsyncLocalStorage
-  // context so any Appstle fetch deep in the call chain auto-logs its
-  // request/response back to appstle_api_calls with the ticket reference.
-  const { withActionContext } = await import("@/lib/appstle-call-log");
+  // context so any vendor fetch deep in the call chain auto-logs its
+  // request/response with the ticket reference (see [[commerce/call-log]]).
+  const { withActionContext } = await import("@/lib/commerce/call-log");
 
   for (const action of actions) {
     const handler = directActionHandlers[action.type];

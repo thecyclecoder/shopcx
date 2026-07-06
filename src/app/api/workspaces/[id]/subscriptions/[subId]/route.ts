@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
-  appstleSubscriptionAction,
-  appstleSkipUpcomingOrder,
-  appstleUpdateBillingInterval,
-} from "@/lib/appstle";
+  subscriptionAction,
+  subscriptionSkipUpcomingOrder,
+  subscriptionUpdateBillingInterval,
+} from "@/lib/commerce/subscription";
 import { changeNextBillingDate } from "@/lib/shopify-subscriptions";
 import { logCustomerEvent } from "@/lib/customer-events";
 
@@ -149,30 +149,30 @@ export async function PATCH(
 
   switch (action) {
     case "pause": {
-      result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "pause");
+      result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "pause");
       eventSummary = "Subscription paused";
       break;
     }
     case "resume": {
-      result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "resume");
+      result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "resume");
       eventSummary = "Subscription resumed";
       break;
     }
     case "cancel": {
       const reason = body.reason || "manual";
-      result = await appstleSubscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", reason, member.display_name || user.email || "agent");
+      result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", reason, member.display_name || user.email || "agent");
       eventSummary = `Subscription cancelled — ${reason}`;
       break;
     }
     case "skip": {
-      result = await appstleSkipUpcomingOrder(workspaceId, sub.shopify_contract_id);
+      result = await subscriptionSkipUpcomingOrder(workspaceId, sub.shopify_contract_id);
       eventSummary = "Next order skipped";
       break;
     }
     case "change_frequency": {
       const { interval, intervalCount } = body;
       if (!interval || !intervalCount) return NextResponse.json({ error: "interval and intervalCount required" }, { status: 400 });
-      result = await appstleUpdateBillingInterval(workspaceId, sub.shopify_contract_id, interval, intervalCount);
+      result = await subscriptionUpdateBillingInterval(workspaceId, sub.shopify_contract_id, interval, intervalCount);
       eventSummary = `Frequency changed to every ${intervalCount} ${interval.toLowerCase()}(s)`;
       break;
     }
