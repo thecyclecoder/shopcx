@@ -2314,9 +2314,14 @@ async function handleDirectAction(
 /**
  * Verify that a direct action's expected state change is reflected in the DB.
  * Returns true if verified, false if the expected state wasn't found.
+ *
+ * Exported for unit tests (see action-executor.verify-in-db.test.ts). The
+ * production caller passes the executor's ActionContext; tests pass a
+ * minimal object that carries { admin, ticketId } — the only fields this
+ * switch reads.
  */
-async function verifyActionInDB(
-  ctx: ActionContext,
+export async function verifyActionInDB(
+  ctx: Pick<ActionContext, "admin" | "ticketId">,
   action: ActionParams,
 ): Promise<boolean> {
   const admin = ctx.admin;
@@ -2364,8 +2369,162 @@ async function verifyActionInDB(
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
     }
+    case "create_return":
+    case "create_replacement": {
+      // Both action types write a `returns` row scoped to this ticket
+      // (create_return via createFullReturn; create_replacement is a
+      // routing alias that lands in the same table). The create_return
+      // handler enforces at-most-one non-cancelled return per ticket
+      // (HARD INVARIANT — see the create_return case above), so we
+      // read by ticket_id and expect a non-cancelled row.
+      //
+      // The initial Phase-1 landing gated on status IN ('pending','approved') —
+      // strings NO code path writes. The real `returns.status` enum that
+      // createFullReturn writes is 'open' (shopify-returns.ts:210,781) at
+      // creation and 'label_created' (line 327,944) once EasyPost issues the
+      // label, transitioning to 'in_transit' / 'delivered' / 'refunded' /
+      // 'restocked' / 'closed' downstream. Only 'cancelled' means "not a
+      // real return" — so the confirming predicate is: a row exists for
+      // this ticket AND status ≠ 'cancelled'. That mirrors the HARD
+      // invariant used at the create_return case (~line 972) and keeps
+      // the verify semantic stable as the enum grows. Per CLAUDE.md:
+      // "the database is the spec" — the switch reads the live shape.
+      if (!ctx.ticketId) return true;
+      const { data } = await admin.from("returns")
+        .select("status")
+        .eq("ticket_id", ctx.ticketId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!data?.status) return false;
+      return data.status !== "cancelled";
+    }
+    case "skip_next_order": {
+      // After a skip, `subscriptions.next_billing_date` must be strictly
+      // in the future — the whole point of the skip is to move the next
+      // charge past the currently-scheduled cycle. A next_billing_date
+      // that's still today/past means the mutation didn't stick.
+      // (skip_next_order is retired by the sibling M3 spec, so this
+      // case exists just for the transition window.)
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      return new Date(String(nbd)).getTime() > Date.now();
+    }
+    case "change_next_date": {
+      // Expect subscriptions.next_billing_date's calendar day equals
+      // action.date's calendar day (YYYY-MM-DD). Edge case: the
+      // change_next_date handler fires order-now instead when action.date
+      // is ≤ today (customer said "ship now"), in which case
+      // next_billing_date isn't touched and instead advances on the
+      // next successful renewal. For that path we accept any future
+      // next_billing_date as verified — the customer's intent (get
+      // product ASAP) was satisfied by the order-now dispatch.
+      if (!action.contract_id || !action.date) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      const requested = String(action.date).slice(0, 10);
+      const actualDay = String(nbd).slice(0, 10);
+      if (actualDay === requested) return true;
+      const today = new Date().toISOString().slice(0, 10);
+      if (requested <= today) {
+        return new Date(String(nbd)).getTime() > Date.now();
+      }
+      return false;
+    }
+    case "change_frequency": {
+      // Read the mirror columns billing_interval + billing_interval_count
+      // — those are the ACTUAL DB column names (docs/brain/tables/subscriptions.md).
+      // The spec calls them `billing_policy_interval` / `billing_policy_interval_count`;
+      // per CLAUDE.md "the database is the spec" — we use the live shape.
+      if (!action.contract_id || !action.interval) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("billing_interval, billing_interval_count")
+        .eq("shopify_contract_id", action.contract_id).single();
+      if (!data) return false;
+      const wantInterval = String(action.interval).toUpperCase();
+      const gotInterval = String(data.billing_interval || "").toUpperCase();
+      if (gotInterval !== wantInterval) return false;
+      if (action.interval_count != null) {
+        return Number(data.billing_interval_count) === Number(action.interval_count);
+      }
+      return true;
+    }
+    case "swap_variant":
+    case "add_item":
+    case "remove_item":
+    case "change_quantity":
+    case "change_item_quantity":
+    case "update_line_item_price": {
+      // Item-op / base-price cases all read the subscription's `items` jsonb
+      // (there is no standalone subscription_items table — the mirror lives
+      // as an array on subscriptions.items; see docs/brain/tables/subscriptions.md
+      // and src/lib/subscription-items.ts). Each entry carries { variant_id,
+      // quantity, price_cents } — the columns the spec's phase-2 bullets
+      // name. Verify against that array.
+      if (!action.contract_id) return true;
+      const { data: sub } = await admin.from("subscriptions")
+        .select("items")
+        .eq("shopify_contract_id", action.contract_id).single();
+      type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
+      const items = (sub?.items || []) as Line[];
+
+      if (action.type === "swap_variant") {
+        // Post-swap: the target line's variant_id should equal
+        // action.new_variant_id; the pre-swap variant_id should be gone
+        // (unless the customer had it on multiple lines — we only assert
+        // the invariant the spec names: NEW is present).
+        const newVid = action.new_variant_id || (action as { new_id?: string }).new_id;
+        if (!newVid) return true;
+        return items.some(i => String(i.variant_id) === String(newVid));
+      }
+
+      if (action.type === "add_item") {
+        if (!action.variant_id) return true;
+        return items.some(i => String(i.variant_id) === String(action.variant_id));
+      }
+
+      if (action.type === "remove_item") {
+        const vid = action.variant_id || (action as { variantId?: string }).variantId;
+        if (!vid) return true;
+        return !items.some(i => String(i.variant_id) === String(vid));
+      }
+
+      if (action.type === "change_quantity" || action.type === "change_item_quantity") {
+        if (!action.variant_id || action.quantity == null) return true;
+        const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+        if (!line) return false;
+        return Number(line.quantity) === Number(action.quantity);
+      }
+
+      // update_line_item_price — base-price restore. Compare price_cents
+      // on the target line. Handler resolves candidate variants when
+      // action.variant_id is stale (crisis-swap history); here we verify
+      // ONLY the explicit variant_id the caller declared, since that's
+      // the invariant the spec's bullet names ("subscription_items.price_cents
+      // matches action.base_price_cents"). If a self-healed swap-target
+      // ended up carrying the new price on a different variant, that
+      // still passes the handler's own success flag; verifyActionInDB
+      // stays conservative and reads only what the action declared.
+      if (action.variant_id == null || action.base_price_cents == null) return true;
+      const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+      if (!line) return false;
+      return Number(line.price_cents) === Number(action.base_price_cents);
+    }
     default:
-      // No verification logic for this action type — assume OK
+      // Fail-safe: no verification wired for this action type yet —
+      // return true so we don't wrongly escalate, but WARN so coverage
+      // gaps are OBSERVABLE (grep server logs for "[verifyActionInDB]").
+      // Spec Phase-2 bullet: "unknown/still-uncovered action types fall
+      // through to 'return true' with a WARN-level console log naming
+      // the uncovered type so we can watch coverage grow".
+      console.warn(`[verifyActionInDB] uncovered action type — assuming OK: ${action.type}`);
       return true;
   }
 }
