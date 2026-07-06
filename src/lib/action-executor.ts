@@ -9,6 +9,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
 import { resolveAlias } from "@/lib/action-handler-aliases";
+import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 
 // ── Types ──
 
@@ -238,6 +239,16 @@ async function executeActionsInline(
         action.type = aliased;
         handler = directActionHandlers[aliased];
       } else {
+        // Record the miss on the review queue so an admin can approve it
+        // into a permanent alias (Phase 2). Fire-and-forget — a telemetry
+        // failure must not change customer-facing behavior.
+        await recordUnknownActionType({
+          admin: ctx.admin,
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          sourceType: action.type,
+          handlerKeys: Object.keys(directActionHandlers),
+        });
         results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
         continue;
       }
@@ -2126,6 +2137,16 @@ async function handleDirectAction(
         action.type = aliased;
         handler = directActionHandlers[aliased];
       } else {
+        // Record the miss on the review queue so an admin can approve it
+        // into a permanent alias (Phase 2). Fire-and-forget — a telemetry
+        // failure must not change customer-facing behavior.
+        await recordUnknownActionType({
+          admin: ctx.admin,
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          sourceType: action.type,
+          handlerKeys: Object.keys(directActionHandlers),
+        });
         results.push({
           action,
           result: { success: false, error: `Unknown action type: ${action.type}` },
