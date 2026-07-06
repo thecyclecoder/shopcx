@@ -12,7 +12,9 @@
  * is a one-call replay of what the AI said it did.
  *
  * Cancel claims always emit a high-severity gap with NO proposed_heal —
- * cancellations are irreversible and require human review.
+ * executing a cancellation is destructive/high-impact, so it requires
+ * human review. (A cancel itself is NOT terminal — it's reactivatable via
+ * `subscriptionAction(..,"resume")` — but we still don't auto-execute one.)
  *
  * Heal proposals are limited to ones where we can resolve the target
  * variant_id (for swap/remove) and contract_id (explicit, single-sub
@@ -452,7 +454,8 @@ function buildProposedHeal(claim: SubscriptionClaim, sub: SubState): ProposedHea
       };
     }
     case "cancel":
-      // Cancel is irreversible — never auto-propose.
+      // Executing a cancellation is destructive/high-impact — never auto-propose
+      // (human review). Not because it's terminal: a cancel is reactivatable.
       return undefined;
     default:
       return undefined;

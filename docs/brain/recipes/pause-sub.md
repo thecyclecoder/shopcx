@@ -49,7 +49,7 @@ await admin
 ## Gotchas
 
 - **Internal-sub guard** runs first. Internal subs flip `status='paused'` in our DB; no Appstle call.
-- **`status='paused'` means not auto-charging.** It's different from `cancelled` (terminal) and `active` (paying).
+- **`status='paused'` means not auto-charging.** It's different from `cancelled` (not billing — but reactivatable via `resume`/`status=ACTIVE`, [[../integrations/appstle]] § Cancel is reversible) and `active` (paying).
 - **Crisis Tier 3 berry_only pause** doesn't set `pause_resume_at` — it stays paused until crisis resolution, which sets it manually.
 
 ## Related
