@@ -174,13 +174,16 @@ export function StorefrontPage({
       />
       {/* Phase 4 — behaviorally-triggered smart popup. Silent for
           decisive buyers; intervenes only on hesitation/indecision. */}
-      <SmartPopup
-        workspaceId={data.workspace.id}
-        productId={data.product.id}
-        productHandle={data.product.handle}
-        hasActiveSub={false}
-        benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
-      />
+      {/* PDPs only — advertorial/blueprint landers stay distraction-free (no lead-capture popup). */}
+      {!advertorial && !blueprint && (
+        <SmartPopup
+          workspaceId={data.workspace.id}
+          productId={data.product.id}
+          productHandle={data.product.handle}
+          hasActiveSub={false}
+          benefitOptions={data.benefit_selections.map((b) => b.benefit_name).filter(Boolean)}
+        />
+      )}
 
       {/* No storefront chrome on advertorial/before-after/blueprint landers — the
           fixed brand nav breaks the "native editorial article" illusion that
@@ -306,7 +309,8 @@ export function StorefrontPage({
       </ActiveMemberProvider>
       </AutoCouponProvider>
 
-      <RecentOrdersToast orders={data.recent_orders_for_proof} />
+      {/* PDPs only — no "someone just bought" toast on the distraction-free landers. */}
+      {!advertorial && !blueprint && <RecentOrdersToast orders={data.recent_orders_for_proof} />}
     </div>
   );
 }
