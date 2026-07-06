@@ -2,6 +2,7 @@ import type { PageData } from "../_lib/page-data";
 import type { BlueprintRenderContent, BlueprintRenderBlock } from "@/lib/blueprint-render";
 import { ShopCTA } from "../_components/ShopCTA";
 import { BlueprintHero } from "./BlueprintHero";
+import { BlueprintReasons } from "./BlueprintReasons";
 
 /**
  * Blueprint-driven storefront lander — renders a [[lander_blueprints]] row's
@@ -97,46 +98,64 @@ export function BlueprintLander({
   content: BlueprintRenderContent;
 }) {
   const price = lowestPriceCents(data);
-  // Only when a composited hero renders does it REPLACE the generic "hero" copy block;
-  // without one, keep rendering every block (no regression for blueprints lacking content.hero).
-  const bodyBlocks = content.hero
+  const isReasonBlock = (role: string) => /^reasons?_/.test(role.toLowerCase());
+  // Composited hero replaces the "hero" block; BlueprintReasons replaces the grouped reason blocks.
+  const nonHero = content.hero
     ? content.blocks.filter((b) => b.role.toLowerCase() !== "hero")
     : content.blocks;
+  const firstReasonIdx = content.reasons ? nonHero.findIndex((b) => isReasonBlock(b.role)) : -1;
+  const preBlocks = firstReasonIdx >= 0 ? nonHero.slice(0, firstReasonIdx) : nonHero;
+  const postBlocks = firstReasonIdx >= 0 ? nonHero.slice(firstReasonIdx).filter((b) => !isReasonBlock(b.role)) : [];
+
+  const renderBlock = (block: BlueprintRenderBlock, i: number) => (
+    <div
+      key={`${block.role}-${i}`}
+      data-section={`blueprint-block-${block.role}`}
+      className={i === 0 ? "" : "mt-10 border-t border-zinc-200 pt-10"}
+    >
+      <BlockImage block={block} />
+      <BlockCopy block={block} />
+      {blockHasInlineCta(block.role) && (
+        <div className="mt-6">
+          <ShopCTA lowestPriceCents={price} align="center" />
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <>
       {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} />}
-      <section data-section="blueprint-lander" className="w-full bg-[#FBF8F2]">
-      <div className="mx-auto max-w-2xl px-5 py-10 md:px-8 md:py-14">
-        {bodyBlocks.map((block, i) => (
-          <div
-            key={`${block.role}-${i}`}
-            data-section={`blueprint-block-${block.role}`}
-            className={i === 0 ? "" : "mt-10 border-t border-zinc-200 pt-10"}
-          >
-            <BlockImage block={block} />
-            <BlockCopy block={block} />
-            {blockHasInlineCta(block.role) && (
-              <div className="mt-6">
-                <ShopCTA lowestPriceCents={price} align="center" />
+      {preBlocks.length > 0 && (
+        <section data-section="blueprint-lander-pre" className="w-full bg-[#FBF8F2]">
+          <div className="mx-auto max-w-2xl px-5 py-10 md:px-8 md:py-14">{preBlocks.map(renderBlock)}</div>
+        </section>
+      )}
+      {content.reasons && content.reasons.length > 0 && (
+        <BlueprintReasons
+          reasons={content.reasons}
+          ctaLabel={content.hero?.ctaLabel || "Shop Now"}
+          reassurance="Feel the difference in 45 days — or your money back"
+          lowestPriceCents={price}
+        />
+      )}
+      {(postBlocks.length > 0 || content.cta) && (
+        <section data-section="blueprint-lander" className="w-full bg-[#FBF8F2]">
+          <div className="mx-auto max-w-2xl px-5 py-10 md:px-8 md:py-14">
+            {postBlocks.map(renderBlock)}
+            {content.cta && (
+              <div className="mt-12 rounded-2xl bg-white p-7 text-center shadow-sm sm:p-9">
+                <p style={{ fontFamily: SERIF }} className="text-xl font-black leading-snug text-zinc-900 sm:text-2xl">
+                  {content.cta}
+                </p>
+                <div className="mt-6">
+                  <ShopCTA lowestPriceCents={price} align="center" />
+                </div>
               </div>
             )}
           </div>
-        ))}
-        {content.cta && (
-          <div className="mt-12 rounded-2xl bg-white p-7 text-center shadow-sm sm:p-9">
-            <p
-              style={{ fontFamily: SERIF }}
-              className="text-xl font-black leading-snug text-zinc-900 sm:text-2xl"
-            >
-              {content.cta}
-            </p>
-            <div className="mt-6">
-              <ShopCTA lowestPriceCents={price} align="center" />
-            </div>
-          </div>
-        )}
-      </div>
-      </section>
+        </section>
+      )}
     </>
   );
 }
