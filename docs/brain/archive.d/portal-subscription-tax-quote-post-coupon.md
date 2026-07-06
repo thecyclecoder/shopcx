@@ -1,0 +1,1 @@
+- **Portal: quote subscription tax on the post-coupon base** · verified 2026-07-06 · → [[lifecycles/subscription-billing]]
