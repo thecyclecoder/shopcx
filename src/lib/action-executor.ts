@@ -2301,9 +2301,19 @@ export async function verifyActionInDB(
       // routing alias that lands in the same table). The create_return
       // handler enforces at-most-one non-cancelled return per ticket
       // (HARD INVARIANT — see the create_return case above), so we
-      // read by ticket_id and expect status in ('pending','approved').
-      // A missing row means the handler reported success but the row
-      // was never inserted → self-heal picks it up.
+      // read by ticket_id and expect a non-cancelled row.
+      //
+      // The initial Phase-1 landing gated on status IN ('pending','approved') —
+      // strings NO code path writes. The real `returns.status` enum that
+      // createFullReturn writes is 'open' (shopify-returns.ts:210,781) at
+      // creation and 'label_created' (line 327,944) once EasyPost issues the
+      // label, transitioning to 'in_transit' / 'delivered' / 'refunded' /
+      // 'restocked' / 'closed' downstream. Only 'cancelled' means "not a
+      // real return" — so the confirming predicate is: a row exists for
+      // this ticket AND status ≠ 'cancelled'. That mirrors the HARD
+      // invariant used at the create_return case (~line 972) and keeps
+      // the verify semantic stable as the enum grows. Per CLAUDE.md:
+      // "the database is the spec" — the switch reads the live shape.
       if (!ctx.ticketId) return true;
       const { data } = await admin.from("returns")
         .select("status")
@@ -2312,7 +2322,7 @@ export async function verifyActionInDB(
         .limit(1)
         .maybeSingle();
       if (!data?.status) return false;
-      return data.status === "pending" || data.status === "approved";
+      return data.status !== "cancelled";
     }
     case "skip_next_order": {
       // After a skip, `subscriptions.next_billing_date` must be strictly

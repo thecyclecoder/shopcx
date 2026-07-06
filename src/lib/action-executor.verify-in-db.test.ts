@@ -102,25 +102,47 @@ function makeCtx(tables: Tables, ticketId = "ticket-1") {
 }
 
 // ── create_return / create_replacement ────────────────────────────────
+// The predicate reads returns.status via the LIVE DB enum that
+// createFullReturn actually writes: 'open' at row-insert (shopify-returns.ts:210,781),
+// 'label_created' after EasyPost issues the label (line 327,944), then
+// 'in_transit'/'delivered'/'refunded'/'restocked'/'closed' downstream.
+// Only 'cancelled' means "not a real return" — verified is: row exists AND
+// status ≠ 'cancelled'.
 
-test("create_return — returns row present with status='pending' → verified TRUE", async () => {
+test("create_return — happy path: status='open' (the state createFullReturn writes at insert) → verified TRUE", async () => {
+  // Fix-1 regression test: the initial Phase-1 landing gated on
+  // ('pending','approved'), which no code path writes — every real
+  // successful create_return would have been flagged as failed and
+  // false-positive-escalated. This test pins the fix to the real enum.
   const ctx = makeCtx({
     returns: [
-      { id: "r1", ticket_id: "ticket-1", status: "pending", created_at: "2026-07-06T10:00:00Z" },
+      { id: "r1", ticket_id: "ticket-1", status: "open", created_at: "2026-07-06T10:00:00Z" },
     ],
   });
   const action: ActionParams = { type: "create_return", order_number: "12345" };
   assert.equal(await verifyActionInDB(ctx, action), true);
 });
 
-test("create_return — returns row present with status='approved' → verified TRUE", async () => {
+test("create_return — status='label_created' (post-EasyPost) → verified TRUE", async () => {
   const ctx = makeCtx({
     returns: [
-      { id: "r1", ticket_id: "ticket-1", status: "approved", created_at: "2026-07-06T10:00:00Z" },
+      { id: "r1", ticket_id: "ticket-1", status: "label_created", created_at: "2026-07-06T10:00:00Z" },
     ],
   });
   const action: ActionParams = { type: "create_return", order_number: "12345" };
   assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("create_return — later-lifecycle status ('in_transit'/'delivered'/'refunded') still verifies TRUE", async () => {
+  for (const status of ["in_transit", "delivered", "refunded", "restocked", "closed"] as const) {
+    const ctx = makeCtx({
+      returns: [
+        { id: "r1", ticket_id: "ticket-1", status, created_at: "2026-07-06T10:00:00Z" },
+      ],
+    });
+    const action: ActionParams = { type: "create_return", order_number: "12345" };
+    assert.equal(await verifyActionInDB(ctx, action), true, `status=${status} should verify true`);
+  }
 });
 
 test("create_return — HANDLER SAID SUCCESS but returns row was never inserted → verified FALSE (self-heal retries)", async () => {
@@ -149,7 +171,7 @@ test("create_return — only a cancelled row exists on this ticket → verified 
 test("create_replacement — same verification as create_return (both routes write the returns table)", async () => {
   const ctx = makeCtx({
     returns: [
-      { id: "r1", ticket_id: "ticket-1", status: "pending", created_at: "2026-07-06T10:00:00Z" },
+      { id: "r1", ticket_id: "ticket-1", status: "open", created_at: "2026-07-06T10:00:00Z" },
     ],
   });
   const action: ActionParams = { type: "create_replacement", order_number: "12345" };
@@ -159,7 +181,7 @@ test("create_replacement — same verification as create_return (both routes wri
 test("create_return — a foreign ticket's return does not verify this ticket's action", async () => {
   const ctx = makeCtx({
     returns: [
-      { id: "r-other", ticket_id: "ticket-OTHER", status: "pending", created_at: "2026-07-06T10:00:00Z" },
+      { id: "r-other", ticket_id: "ticket-OTHER", status: "open", created_at: "2026-07-06T10:00:00Z" },
     ],
   });
   const action: ActionParams = { type: "create_return", order_number: "12345" };
