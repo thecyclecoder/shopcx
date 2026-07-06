@@ -1,0 +1,1 @@
+- **Goal promotion: stop fold/promotion doc collisions + surface a HELD promotion** · verified 2026-07-06 · → [[lifecycles/spec-goal-branch-pm-flow]]
