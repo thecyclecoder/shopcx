@@ -76,8 +76,13 @@ export default async function GoalsBoardPage() {
               <RollupBar pct={g.pct} />
               {/* spec-goal-branch-pm-flow M6 — the goal-branch accumulation ("N of M specs on the goal
                   branch") + a "ready to promote" badge when fully accumulated. A parent goal shows the
-                  sub-goals-promote-independently note instead. */}
-              <GoalAccumulation accumulation={g.accumulation} />
+                  sub-goals-promote-independently note instead. HELD state (Phase 2) supersedes both when
+                  the atomic goal→main promotion 409'd or code isn't on main. */}
+              <GoalAccumulation
+                accumulation={g.accumulation}
+                promotionHeld={g.promotionHeld}
+                promotionHeldReason={g.promotionHeldReason}
+              />
               <div className="mt-3 flex items-center gap-2 text-[11px] text-zinc-400">
                 <span className="tabular-nums">{g.milestones.length} milestones</span>
                 <span className="text-zinc-300 dark:text-zinc-600">·</span>

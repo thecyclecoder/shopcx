@@ -68,6 +68,18 @@ export interface GoalRow {
    *  NOT add a `goals.what` column; treat `outcome` as the what everywhere. The chokepoint (`proposeGoal`
    *  and future goal-authoring surfaces) gates this non-empty going forward. */
   why: string | null;
+  /** goal-promotion-fold-collision-and-held-surfacing Phase 2 — the M5 atomic goal→main merge SHA. Stamped
+   *  by `promoteCompleteGoalsToMain` (via [[stampGoalPromotedToMain]]) the moment `mergeGoalBranchIntoMain`
+   *  returns merged. NULL while the goal branch has not landed on main. A folded/complete goal reading NULL
+   *  is the silent-stall shape — the roadmap card reader flips it to HELD (backstop) so the goal never
+   *  renders as fully shipped while its code isn't on main. */
+  main_merge_sha: string | null;
+  /** goal-promotion-fold-collision-and-held-surfacing Phase 2 — the human-readable conflict reason from a
+   *  failed `mergeGoalBranchIntoMain` (409). Written by [[stampGoalPromotionHeld]] on the pass that saw the
+   *  conflict; cleared to NULL by [[stampGoalPromotedToMain]] when a subsequent merge succeeds. Non-NULL →
+   *  `GoalCard.promotionHeld = true` with this reason on the badge; also forces the card status OFF
+   *  `complete`, so the roadmap board never leaks a HELD goal as fully shipped. */
+  promotion_held_reason: string | null;
   created_at: string;
   updated_at: string;
   milestones: GoalMilestoneRow[];
@@ -133,12 +145,15 @@ interface GoalRowDb {
   is_parent: boolean;
   status: GoalRowStatus;
   why: string | null;
+  // goal-promotion-fold-collision-and-held-surfacing Phase 2 — atomic promotion state.
+  main_merge_sha: string | null;
+  promotion_held_reason: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const GOAL_COLUMNS =
-  "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, is_parent, status, why, created_at, updated_at";
+  "id, workspace_id, slug, title, body, outcome, success_metric, owner, proposer_function, parent_goal_id, is_parent, status, why, main_merge_sha, promotion_held_reason, created_at, updated_at";
 const MILESTONE_COLUMNS = "id, goal_id, position, title, body, why, what, created_at, updated_at";
 
 function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
@@ -156,6 +171,11 @@ function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
     is_parent: db.is_parent,
     status: db.status,
     why: db.why,
+    // goal-promotion-fold-collision-and-held-surfacing Phase 2 — fall back to null when the migration hasn't
+    // been applied yet (defensive; Supabase omits absent columns from the row rather than 500ing on
+    // .select(), so this preserves the safe "not held / no merge SHA on record" state).
+    main_merge_sha: db.main_merge_sha ?? null,
+    promotion_held_reason: db.promotion_held_reason ?? null,
     created_at: db.created_at,
     updated_at: db.updated_at,
     milestones,
@@ -355,6 +375,78 @@ export async function setGoalStatus(
     .update({ status, updated_at: new Date().toISOString() })
     .eq("id", goalId);
   if (error) throw error;
+}
+
+/**
+ * goal-promotion-fold-collision-and-held-surfacing Phase 2 — the sanctioned writer for `goals.main_merge_sha`.
+ * Called by `promoteCompleteGoalsToMain` the moment `mergeGoalBranchIntoMain` returns merged (M5's atomic
+ * goal→main merge landed). ALSO clears any lingering `promotion_held_reason` from a prior 409 pass, so a
+ * previously-HELD goal that just landed drops its HELD badge in the same write.
+ *
+ * Compare-and-set on `id` (the goal-row primary key) — the caller resolved the goal via `listGoals` /
+ * `getGoal` seconds earlier, so a stale-row race is not a concern; but we still `.select("id")` and require
+ * exactly one row transitioned so a wrong id (deleted goal, cross-workspace mismatch) surfaces as a throw
+ * rather than a silent no-op. Idempotent: re-running with the same SHA re-writes the same value.
+ */
+export async function stampGoalPromotedToMain(
+  goalId: string,
+  mergeSha: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _actor: string,
+): Promise<void> {
+  if (!mergeSha || !mergeSha.trim()) {
+    throw new Error(`stampGoalPromotedToMain: mergeSha required (goalId=${goalId})`);
+  }
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("goals")
+    .update({
+      main_merge_sha: mergeSha,
+      promotion_held_reason: null, // atomic clear of the prior 409 reason (if any) on success
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", goalId)
+    .select("id");
+  if (error) throw error;
+  if (!data || data.length !== 1) {
+    throw new Error(`stampGoalPromotedToMain: expected 1 row transitioned for goalId=${goalId}, got ${data?.length ?? 0}`);
+  }
+}
+
+/**
+ * goal-promotion-fold-collision-and-held-surfacing Phase 2 — the sanctioned writer for
+ * `goals.promotion_held_reason`. Called by `promoteCompleteGoalsToMain` on a 409 from
+ * `mergeGoalBranchIntoMain` (or any other "atomic promotion cannot land" branch). Records the reason so
+ * the roadmap reader can surface the HELD/needs-owner badge AND flip the card status off `complete`.
+ *
+ * Does NOT touch `main_merge_sha` — a prior successful landing (if any; would be atypical) stays visible.
+ * Guarded the same way `stampGoalPromotedToMain` is: `.eq("id", …).select("id")` re-asserts exactly one
+ * row transitioned so a stale/wrong goal id surfaces as a throw. Idempotent: re-running with the same
+ * reason re-writes the same value.
+ */
+export async function stampGoalPromotionHeld(
+  goalId: string,
+  reason: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _actor: string,
+): Promise<void> {
+  const clean = (reason ?? "").trim();
+  if (!clean) {
+    throw new Error(`stampGoalPromotionHeld: reason required (goalId=${goalId})`);
+  }
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("goals")
+    .update({
+      promotion_held_reason: clean,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", goalId)
+    .select("id");
+  if (error) throw error;
+  if (!data || data.length !== 1) {
+    throw new Error(`stampGoalPromotionHeld: expected 1 row transitioned for goalId=${goalId}, got ${data?.length ?? 0}`);
+  }
 }
 
 /**

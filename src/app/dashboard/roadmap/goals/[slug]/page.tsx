@@ -95,8 +95,15 @@ export default async function GoalDetailPage({ params }: { params: Promise<{ slu
                 {card.milestones.length} milestones · {card.linkedSpecCount} specs linked
               </div>
               {/* spec-goal-branch-pm-flow M6 — the goal-branch accumulation + atomic-promote readiness
-                  (or the parent-goal exemption note). The detail variant adds the explanatory copy. */}
-              <GoalAccumulation accumulation={card.accumulation} variant="detail" />
+                  (or the parent-goal exemption note). The detail variant adds the explanatory copy.
+                  goal-promotion-fold-collision-and-held-surfacing Phase 2 — HELD supersedes ready-to-
+                  promote / exempt when the atomic goal→main promotion 409'd or code isn't on main. */}
+              <GoalAccumulation
+                accumulation={card.accumulation}
+                variant="detail"
+                promotionHeld={card.promotionHeld}
+                promotionHeldReason={card.promotionHeldReason}
+              />
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">

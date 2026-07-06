@@ -33,6 +33,9 @@ import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow
 // derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
 // module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
+// goal-promotion-fold-collision-and-held-surfacing Phase 2 — pure predicate for the HELD promotion surface.
+// One-truth-per-derivation: `promoteCompleteGoalsToMain` writes the state, this reader derives the badge.
+import { deriveGoalPromotionSurface } from "@/lib/goal-promotion-surface";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -1353,6 +1356,17 @@ export interface GoalCard {
    *  the goal branch" + "ready to promote" surface). Computed from the linked specs' `goal_branch_sha`
    *  markers (M4) + the parent-goal exemption (M5). Always present (a zero-spec goal reads 0-of-0). */
   accumulation: GoalBranchAccumulation;
+  /** goal-promotion-fold-collision-and-held-surfacing Phase 2 — TRUE iff the M5 atomic goal→main promotion
+   *  either 409'd (stored `goals.promotion_held_reason`) OR the goal is derived-complete but has no atomic
+   *  merge SHA on record (silent-stall backstop; the 2026-07-06 incident shape). When true, the roadmap
+   *  goal list + detail render a "HELD — needs owner" badge with `promotionHeldReason`, and `status` is
+   *  forced OFF `complete` so the goal never leaks as fully shipped. See [[deriveGoalPromotionSurface]]. */
+  promotionHeld: boolean;
+  /** Human-readable HELD reason to render on the badge. Empty string when `promotionHeld` is false. */
+  promotionHeldReason: string;
+  /** The M5 atomic goal→main merge SHA, or null while the goal branch has not landed on main. Surfaced so
+   *  the detail page can link to the merge commit and any downstream verifier can prove "code is on main". */
+  mainMergeSha: string | null;
 }
 
 /**
@@ -1566,13 +1580,24 @@ function goalRowToCard(
   // IS complete; otherwise the stored row status (proposed | greenlit). Completion comes from the linked
   // specs — never invent `complete` for a goal with zero milestones or a milestone with no linked specs.
   const allComplete = milestones.length > 0 && milestones.every((m) => m.completion >= 1);
-  const status: GoalStatus = allComplete ? "complete" : dbGoalRowStatus(row.status);
   // spec-goal-branch-pm-flow M6 — the goal-branch accumulation, derived from THIS goal's deduped member
   // specs (collected above from `row.milestones`) so the "N of M on the goal branch" count matches
   // `goalBranchState`'s unique-spec set + the `linkedSpecCount`/detail-page scoping.
   const members = [...memberBySlug.values()];
   const exempt = deriveGoalExemption(row, allRows, members.length);
   const accumulation = deriveGoalAccumulation(members, exempt);
+  // goal-promotion-fold-collision-and-held-surfacing Phase 2 — resolve the HELD surface via the pure
+  // predicate. Overrides the naive `status = allComplete ? complete : storedStatus` derivation so a goal
+  // whose atomic promotion has NOT landed (409'd, or silent-stall shape) never leaks as `complete`. See
+  // [[deriveGoalPromotionSurface]] for the four rules.
+  const promotion = deriveGoalPromotionSurface({
+    storedStatus: row.status,
+    derivedComplete: allComplete,
+    exempt: exempt.exempt,
+    mainMergeSha: row.main_merge_sha,
+    promotionHeldReason: row.promotion_held_reason,
+  });
+  const status: GoalStatus = promotion.cardStatus;
   return {
     slug: row.slug,
     title: row.title,
@@ -1586,6 +1611,9 @@ function goalRowToCard(
     pct,
     linkedSpecCount,
     accumulation,
+    promotionHeld: promotion.promotionHeld,
+    promotionHeldReason: promotion.promotionHeldReason,
+    mainMergeSha: row.main_merge_sha,
   };
 }
 

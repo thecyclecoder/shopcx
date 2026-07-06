@@ -10,6 +10,9 @@
  *   - a "ready to promote" badge when `allOnGoalBranch` (the goal is fully accumulated + about to promote).
  *   - a parent-goal note when the goal is EXEMPT from atomic promotion (a PARENT goal — its sub-goals
  *     promote INDEPENDENTLY; there's no single whole-goal promote).
+ *   - a "HELD — needs owner" badge with the conflict reason when M5's atomic promotion 409'd or the goal
+ *     is derived-complete without a main merge SHA on record
+ *     (goal-promotion-fold-collision-and-held-surfacing Phase 2 — the 2026-07-06 incident's visibility gap).
  *
  * Pure + server-renderable. `variant="card"` (default) = the compact form on the goals-board card;
  * `variant="detail"` = the fuller form in the goal-detail sidebar (adds the explanatory copy).
@@ -19,11 +22,40 @@ import type { GoalBranchAccumulation } from "@/lib/brain-roadmap";
 export default function GoalAccumulation({
   accumulation,
   variant = "card",
+  promotionHeld = false,
+  promotionHeldReason = "",
 }: {
   accumulation: GoalBranchAccumulation;
   variant?: "card" | "detail";
+  /** goal-promotion-fold-collision-and-held-surfacing Phase 2 — surface a HELD state when the M5 atomic
+   *  goal→main promotion 409'd (or the code is not yet on main). Renders a "HELD — needs owner" badge
+   *  with the reason; supersedes the "ready to promote" chip because the goal is NOT ready. */
+  promotionHeld?: boolean;
+  promotionHeldReason?: string;
 }) {
   const { onGoalBranch, totalSpecs, allOnGoalBranch, exempt, exemptReason } = accumulation;
+
+  // goal-promotion-fold-collision-and-held-surfacing Phase 2 — HELD supersedes both the exempt / ready
+  // states. A HELD goal's code is not on main; nothing else about "ready to promote" is relevant until
+  // the conflict clears. Detail variant adds the reason as explanatory copy.
+  if (promotionHeld) {
+    return (
+      <div className="mt-3">
+        <span
+          title={`Atomic goal→main promotion HELD — needs owner. ${promotionHeldReason || "The goal's code is not on main."}`}
+          className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+        >
+          <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500" />
+          HELD — needs owner
+        </span>
+        {variant === "detail" && promotionHeldReason && (
+          <p className="mt-1.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+            {promotionHeldReason}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   // A parent goal doesn't accumulate on a single goal branch — its sub-goals promote independently. Surface
   // the exemption instead of a (meaningless) whole-goal accumulation count.
