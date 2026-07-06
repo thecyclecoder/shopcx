@@ -21,6 +21,8 @@ Two functions, fan-out architecture (the cron only dispatches; the per-workspace
 
 > **The SQL function `public.refresh_customer_segments(p_workspace_id uuid, p_all boolean)`** is the single source of the segment logic; both the cron and the manual escape hatch call it. `p_all=false` = SMS-subscribed scope (campaign targeting); `p_all=true` = everyone in the workspace. Returns the updated row count.
 
+> **⚠️ `statement_timeout` gotcha (migration `20260706180000`).** The function runs **~56s** for the 138K-subscriber book. Over a direct pooler connection (the manual script / apply scripts) that's fine, but the cron calls it via `admin.rpc(...)` through **PostgREST, which enforces the DB role's short `statement_timeout`** — so from 2026-07-05 every daily run died with `canceling statement due to statement timeout` and the book went stale again (the exact staleness this whole system exists to prevent). Fix: `ALTER FUNCTION … SET statement_timeout TO '180s'` — the function raises its own timeout on entry, regardless of caller. Kept under Vercel's 300s maxDuration so a future >180s runtime surfaces as a clear DB error (time to chunk the UPDATE), not a silent hang. **If you `create or replace` this function, re-apply the `SET statement_timeout` (or it reverts to the role default and the cron breaks again).**
+
 ## Coverage heartbeat + `segment-coverage` output assertion (Phase 2)
 
 The cron's end-of-run heartbeat carries three fields in `produced`:
