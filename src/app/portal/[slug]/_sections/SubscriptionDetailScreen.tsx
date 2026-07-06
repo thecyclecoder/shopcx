@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ActionOverlay, type ActionPhase } from "../_components/ActionOverlay";
 import { friendlyCadence } from "@/lib/portal/helpers/cadence";
+import { deliveryStatusTag, financialTag, type OrderStatusInput, type OrderStatusTag } from "./order-status";
 
 // ─────────────────────────────── types ──────────────────────────────
 
@@ -133,6 +134,15 @@ export type ActionApi = {
   failAction: (description?: string) => void;
 };
 
+/** One row of the last-5-orders widget. Fields cover both the render
+ *  (order_number, created_at, total_cents) and the honest-status
+ *  classifier keys ([[./order-status.ts]] OrderStatusInput). */
+interface RecentOrder extends OrderStatusInput {
+  id: string;
+  order_number: string;
+  total_cents: number;
+}
+
 interface Props {
   subscriptionId: string;
   workspace: { primaryColor: string };
@@ -145,6 +155,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   const [catalog, setCatalog] = useState<CatalogProduct[]>([]);
   const [taxCents, setTaxCents] = useState<number | null>(null);
   const [shipProtVariantIds, setShipProtVariantIds] = useState<string[]>([]);
+  const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionPhase, setActionPhase] = useState<ActionPhase>("idle");
@@ -176,6 +187,9 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
     // Tax is included in the detail response (re-quoted on each load via the
     // input-hash freshness check). No separate fetch.
     setTaxCents((found.tax?.tax_cents as number | undefined) ?? null);
+    // Last-5-orders widget payload — the detail handler scopes these to
+    // this subscription's orders and orders them newest-first.
+    setRecentOrders(Array.isArray(data.recent_orders) ? (data.recent_orders as RecentOrder[]) : []);
   }, [subscriptionId]);
 
   const loadCatalog = useCallback(async () => {
@@ -295,18 +309,20 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         </div>
       )}
 
-      {/* Pre-delivery gate — the subscription is READ-ONLY (Phase 2). Every
-          mutating action is gated on the backend AND hidden from the UI here;
-          the banner sets that expectation without the misleading
-          "cancel/update payment anytime" language it used to carry. */}
+      {/* Pre-delivery gate — customer-friendly setup message. One title
+          regardless of deliveryState (no "being prepared" vs "on its
+          way" split) and no developer-language "read-only" phrasing —
+          the mutation lockdown is expressed as a positive setup state.
+          Every mutating action is still gated on the backend AND hidden
+          from the UI here. */}
       {contract.portalState?.mutationsLocked && (
         <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
           <p className="flex items-center gap-2 text-sm font-semibold text-sky-900">
             <span aria-hidden>🚚</span>
-            {contract.portalState.deliveryState === "in_transit" ? "Your first order is on its way!" : "Your first order is being prepared"}
+            Your subscription is being setup!
           </p>
           <p className="mt-1 text-xs text-sky-800">
-            Your subscription is read-only until your first order is delivered. Once it arrives, you&apos;ll be able to fully manage it here — swap products, change quantities, adjust your schedule, and more.
+            You can see the details below. Once you receive your first order, you can return here to make changes.
           </p>
         </div>
       )}
@@ -376,6 +392,13 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
 
       {/* Order summary — full breakdown of what they'll be charged. */}
       {!isCancelled && <OrderSummaryCard pricing={contract.pricing} taxCents={taxCents} showTax={!!contract.is_internal} />}
+
+      {/* Recent orders — last 5 orders on THIS sub, newest first.
+          ALWAYS shown (read-only display), including during the
+          first-delivery window: the customer needs to see the box
+          they're about to receive even when the sub is gated. */}
+      <RecentOrdersCard orders={recentOrders} />
+
 
       {/* Manage cadence — order now / change date / frequency (active only).
           Hidden until the first order is delivered (schedule mutations gated).
@@ -573,6 +596,64 @@ function OrderSummaryCard({ pricing, taxCents, showTax }: {
         <div className="my-1 border-t border-zinc-100" />
         <SummaryRow label="Total per delivery" bold>${(total / 100).toFixed(2)}</SummaryRow>
       </div>
+    </ActionCard>
+  );
+}
+
+/** Tone → Tailwind classes for the honest status badge. Kept local so the
+ *  order-status classifier stays free of styling concerns. */
+const RECENT_TONE_CLASS: Record<OrderStatusTag["tone"], string> = {
+  emerald: "bg-emerald-50 text-emerald-700",
+  sky: "bg-sky-50 text-sky-700",
+  amber: "bg-amber-50 text-amber-800",
+  zinc: "bg-zinc-100 text-zinc-600",
+};
+
+/** Last-5-orders widget — read-only. Renders order number, placed date,
+ *  the honest three-state delivery tag + optional financial tag, and
+ *  amount. Each row links into the Phase 1 order detail page
+ *  (`/orders/{uuid}`, rewritten by middleware to /portal/{slug}/orders/{uuid}). */
+function RecentOrdersCard({ orders }: { orders: RecentOrder[] }) {
+  return (
+    <ActionCard title="Recent orders" subtitle="The last 5 orders on this subscription.">
+      {orders.length === 0 ? (
+        <p className="text-sm text-zinc-500">No orders yet for this subscription.</p>
+      ) : (
+        <ul className="-mx-5 divide-y divide-zinc-100 border-t border-zinc-100">
+          {orders.map((o) => {
+            const delivery = deliveryStatusTag(o, Date.now());
+            const financial = financialTag(o);
+            const placed = new Date(o.created_at).toLocaleDateString("en-US", {
+              month: "long", day: "numeric", year: "numeric",
+            });
+            return (
+              <li key={o.id}>
+                <a
+                  href={`/orders/${o.id}`}
+                  onClick={(e) => { e.preventDefault(); window.location.href = `/orders/${o.id}`; }}
+                  className="flex items-center gap-4 px-5 py-3 text-left transition hover:bg-zinc-50"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-baseline gap-2">
+                      <span className="text-sm font-semibold text-zinc-900">{o.order_number}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${RECENT_TONE_CLASS[delivery.tone]}`}>
+                        {delivery.label}
+                      </span>
+                      {financial && (
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${RECENT_TONE_CLASS[financial.tone]}`}>
+                          {financial.label}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-xs text-zinc-500">{placed}</p>
+                  </div>
+                  <div className="text-sm font-medium text-zinc-900">${(o.total_cents / 100).toFixed(2)}</div>
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </ActionCard>
   );
 }

@@ -490,6 +490,15 @@ export async function updateSession(
             return NextResponse.rewrite(url, reqInit);
           }
 
+          // Order detail route — /orders/{uuid} rewrites to
+          // /portal/{slug}/orders/{uuid}. UUID is our internal
+          // orders.id (the same key the commerce SDK's detail op reads).
+          const orderDetailMatch = pathname.match(/^\/orders\/([0-9a-f-]{36})\/?$/i);
+          if (orderDetailMatch) {
+            url.pathname = `/portal/${slug}/orders/${orderDetailMatch[1]}`;
+            return NextResponse.rewrite(url, reqInit);
+          }
+
           // Server routes (login, callback, logout) — rewrite path as-is.
           const isServerRoute = pathname === "/login" || pathname === "/callback" || pathname === "/logout"
             || pathname.endsWith("/login") || pathname.endsWith("/callback") || pathname.endsWith("/logout");

@@ -10,6 +10,7 @@ export { bootstrap } from "./bootstrap";
 export { home } from "./home";
 export { subscriptions } from "./subscriptions";
 export { subscriptionDetail } from "./subscription-detail";
+export { orderDetail } from "./order-detail";
 export { pause } from "./pause";
 export { resume } from "./resume";
 export { cancel } from "./cancel";
@@ -35,6 +36,7 @@ import { bootstrap } from "./bootstrap";
 import { home } from "./home";
 import { subscriptions } from "./subscriptions";
 import { subscriptionDetail } from "./subscription-detail";
+import { orderDetail } from "./order-detail";
 import { pause } from "./pause";
 import { resume } from "./resume";
 import { cancel } from "./cancel";
@@ -84,6 +86,9 @@ export const routeMap: Record<string, RouteHandler> = {
   subscriptiondetail: subscriptionDetail,
   subscriptionDetail,
   subscription_detail: subscriptionDetail,
+  orderdetail: orderDetail,
+  orderDetail,
+  order_detail: orderDetail,
   pause,
   resume,
   cancel,

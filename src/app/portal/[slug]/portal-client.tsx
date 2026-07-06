@@ -38,6 +38,7 @@ import { HelpCenterSection } from "./_sections/HelpCenterSection";
 import { SupportSection } from "./_sections/SupportSection";
 import { PaymentMethodsSection } from "./_sections/PaymentMethodsSection";
 import { SubscriptionDetailScreen } from "./_sections/SubscriptionDetailScreen";
+import { OrderDetailScreen } from "./_sections/OrderDetailScreen";
 import { portalHref } from "@/lib/portal-nav";
 
 interface Props {
@@ -47,6 +48,10 @@ interface Props {
    *  this subscriptions.id instead of the list. URL bar shows
    *  /subscriptions/{id} thanks to the middleware rewrite. */
   detailSubscriptionId?: string | null;
+  /** When set, the Orders section renders the detail view for this
+   *  orders.id instead of the list. URL bar shows /orders/{id} via the
+   *  same middleware-rewrite pattern. */
+  detailOrderId?: string | null;
   workspace: {
     id: string;
     name: string;
@@ -101,6 +106,7 @@ export default function PortalClient(props: Props) {
   // list clears it — otherwise hitting /subscriptions kept showing the last
   // detail the SPA had open.
   const [detailSubscriptionId, setDetailSubscriptionId] = useState<string | null>(props.detailSubscriptionId || null);
+  const [detailOrderId, setDetailOrderId] = useState<string | null>(props.detailOrderId || null);
   // Update both state AND the URL bar without triggering a Next.js
   // server roundtrip. Middleware rewrites the section path internally
   // so links into specific sections (refresh, share, back button)
@@ -109,6 +115,8 @@ export default function PortalClient(props: Props) {
     setSectionState(s);
     // The Subscriptions nav always means "show the list".
     if (s === "subscriptions") setDetailSubscriptionId(null);
+    // Same for Orders — the nav always means "show the list".
+    if (s === "orders") setDetailOrderId(null);
     try {
       const path = SECTION_PATHS[s];
       if (typeof window !== "undefined") {
@@ -227,9 +235,9 @@ export default function PortalClient(props: Props) {
 
         <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-10">
           {/* Desktop section header — hidden on mobile (top bar shows it).
-              Suppressed on the subscription detail screen since that
-              screen renders its own header + breadcrumb. */}
-          {!(section === "subscriptions" && detailSubscriptionId) && (
+              Suppressed on the subscription and order detail screens since
+              they render their own header + breadcrumb. */}
+          {!(section === "subscriptions" && detailSubscriptionId) && !(section === "orders" && detailOrderId) && (
             <div className="mb-6 hidden lg:block">
               <p className="text-sm text-zinc-500">{greeting}</p>
               <h1 className="mt-1 text-3xl font-bold text-zinc-900">
@@ -261,7 +269,11 @@ export default function PortalClient(props: Props) {
             )
           )}
           {section === "orders" && (
-            <OrdersSection orders={props.orders} primaryColor={props.workspace.primaryColor} />
+            detailOrderId ? (
+              <OrderDetailScreen orderId={detailOrderId} />
+            ) : (
+              <OrdersSection orders={props.orders} primaryColor={props.workspace.primaryColor} />
+            )
           )}
           {section === "rewards" && (
             <RewardsSection primaryColor={props.workspace.primaryColor} firstName={props.customer.firstName} />
