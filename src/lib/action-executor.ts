@@ -8,6 +8,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
+import { unbackedEffectClaim } from "@/lib/claim-guard";
 
 // ── Types ──
 
@@ -2295,6 +2296,48 @@ async function verifyActionInDB(
   }
 }
 
+// ── Claim↔action binding guard (inline send path) ──
+
+/**
+ * Phase 1 wiring of the deterministic claim-guard onto the inline send path
+ * shared by handleJourney + handlePlaybook. If `response_message` asserts a
+ * COMPLETED effect ("I've cancelled your subscription") that no attached
+ * action family backs, write a sysNote + escalate INSTEAD of sending. Returns
+ * true when the guard blocked (caller must NOT proceed with the outbound
+ * insert). Fail-safe: any evaluator throw is treated as a non-hit so a bug
+ * in the guard can never block a real reply.
+ *
+ * Extracted as a small callback-based helper so it stays unit-testable
+ * without booting the whole ActionContext + Supabase surface.
+ * See [[../docs/brain/libraries/claim-guard.md]].
+ */
+export async function claimGuardBlocksInlineSend(
+  responseMessage: string | null | undefined,
+  actions: ActionParams[] | undefined,
+  actionType: string,
+  handlerName: string | undefined,
+  sysNote: SysNoteFn,
+  escalate: (reason: string) => Promise<void>,
+  evaluate: (m: string | null | undefined, b: Set<string>) => string | null = unbackedEffectClaim,
+): Promise<boolean> {
+  let hit: string | null = null;
+  try {
+    const backed = new Set((actions || []).map((a) => a.type));
+    hit = evaluate(responseMessage, backed);
+  } catch {
+    // Fail-safe: if the guard evaluator itself throws, treat it as a non-hit
+    // rather than blocking a legitimate reply. Deterministic pure code should
+    // never throw, but a future change could accidentally introduce one.
+    hit = null;
+  }
+  if (!hit) return false;
+  await sysNote(
+    `[Guard] Blocked unbacked "${hit}" claim in ${actionType}${handlerName ? ` (${handlerName})` : ""} — no matching action attached. Escalating instead of sending a false promise.`,
+  );
+  await escalate(`blocked_unbacked_claim:${hit}`);
+  return true;
+}
+
 // ── Handler: Journey ──
 
 async function handleJourney(
@@ -2305,6 +2348,22 @@ async function handleJourney(
 ): Promise<void> {
   if (!decision.handler_name) {
     await sysNote("Journey action missing handler_name.");
+    return;
+  }
+
+  // Pre-send: block a first-person "already done" claim that no attached
+  // action backs. A journey ROUTES (mini-site CTA / follow-up) — routing
+  // does not back a completed-effect assertion; only side actions that
+  // actually ran + verified in this decision do. Match Phase 0's
+  // sysNote/escalate shape ("blocked_unbacked_claim:<effect>").
+  if (await claimGuardBlocksInlineSend(
+    decision.response_message,
+    decision.actions,
+    decision.action_type,
+    decision.handler_name,
+    sysNote,
+    (reason) => escalateTicket(ctx, reason),
+  )) {
     return;
   }
 
@@ -2427,6 +2486,21 @@ async function handlePlaybook(
 ): Promise<void> {
   if (!decision.handler_name) {
     await sysNote("Playbook action missing handler_name.");
+    return;
+  }
+
+  // Pre-send: block a first-person "already done" claim in the launch
+  // response_message that no attached action backs. The playbook has not
+  // yet run any step at this point — a "cancelled/refunded/paused"
+  // assertion here is unbacked by definition.
+  if (await claimGuardBlocksInlineSend(
+    decision.response_message,
+    decision.actions,
+    decision.action_type,
+    decision.handler_name,
+    sysNote,
+    (reason) => escalateTicket(ctx, reason),
+  )) {
     return;
   }
 
