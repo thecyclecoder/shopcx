@@ -122,6 +122,7 @@ interface PricedTaxItem {
 interface TaxInputs {
   pricedItems: PricedTaxItem[];
   subtotalCents: number;
+  discountCents: number;
   shippingCents: number;
   protectionCents: number;
   shipTo: NonNullable<Awaited<ReturnType<typeof resolveSubAddress>>>;
@@ -132,6 +133,12 @@ interface TaxInputs {
  * lines + rule-decided shipping + protection column + resolved ship-to. Pure of
  * Avalara — used both to compute a quote and to detect staleness. Returns null
  * when the sub can't be quoted (wrong status / no items / no address).
+ *
+ * Entire-order coupons on the sub are applied to the Avalara-facing line prices
+ * by the same ratio the renewal uses (internal-subscription-renewals.ts:519-524)
+ * so the portal-quoted tax matches the actual renewal charge on a coupon'd sub.
+ * subtotalCents on the return stays the FULL pre-coupon subtotal — the caller
+ * subtracts discountCents for the post-coupon total.
  */
 async function buildTaxInputs(
   workspaceId: string,
@@ -140,17 +147,33 @@ async function buildTaxInputs(
   if (!["active", "paused"].includes(sub.status as string)) return null;
   const { resolveSubscriptionPricing } = await import("@/lib/pricing");
   const pricing = await resolveSubscriptionPricing(workspaceId, sub as { items?: unknown; delivery_price_cents?: number | null });
-  const pricedItems: PricedTaxItem[] = pricing.lines
+  const enginePriced = pricing.lines
     .filter((l) => l.kind === "product")
     .map((l) => ({ variant_id: l.variant_id, product_id: l.product_id, sku: l.sku, title: l.title, variant_title: l.variant_title, quantity: l.quantity, price_cents: l.unit_cents }));
-  if (pricedItems.length === 0) return null;
+  if (enginePriced.length === 0) return null;
   const subtotalCents = pricing.product_subtotal_cents;
   if (subtotalCents <= 0) return null;
   const shippingCents = pricing.shipping_cents;
   const protectionCents = sub.shipping_protection_added ? Number(sub.shipping_protection_amount_cents || 0) : 0;
   const shipTo = await resolveSubAddress(workspaceId, sub as unknown as RenewalSubFields);
   if (!shipTo) return null;
-  return { pricedItems, subtotalCents, shippingCents, protectionCents, shipTo };
+
+  const { resolveRenewalDiscount } = await import("@/lib/coupons");
+  const { discountCents } = await resolveRenewalDiscount(
+    workspaceId,
+    (sub.applied_discounts as Array<Record<string, unknown>> | null) ?? null,
+    subtotalCents,
+    (sub.customer_id as string | null) ?? null,
+  );
+
+  const pricedItems: PricedTaxItem[] = discountCents > 0 && subtotalCents > 0
+    ? enginePriced.map((i) => ({
+        ...i,
+        price_cents: Math.round(i.price_cents * (subtotalCents - discountCents) / subtotalCents),
+      }))
+    : enginePriced;
+
+  return { pricedItems, subtotalCents, discountCents, shippingCents, protectionCents, shipTo };
 }
 
 /**
@@ -188,18 +211,19 @@ export async function quoteSubscriptionTax(
 
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, workspace_id, customer_id, items, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal")
+    .select("id, workspace_id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal")
     .eq("id", subscriptionId)
     .single();
   if (!sub || !sub.is_internal) return null;
 
   // Engine-priced inputs (catalog + rules) — internal sub items carry no baked
   // price. Mirrors the renewal: tax quoted on the engine subtotal + rule-decided
-  // shipping. (Coupon on the taxable base is a documented refinement; the renewal
-  // quotes pre-coupon too.)
+  // shipping, with entire-order coupons applied to the taxable base (buildTaxInputs
+  // scales the Avalara-facing line prices by the coupon ratio, same as
+  // internal-subscription-renewals.ts:519-524).
   const inputs = await buildTaxInputs(workspaceId, sub);
   if (!inputs) return null;
-  const { pricedItems, subtotalCents, shippingCents, protectionCents, shipTo } = inputs;
+  const { pricedItems, subtotalCents, discountCents, shippingCents, protectionCents, shipTo } = inputs;
   const inputHash = hashTaxInputs(inputs);
   const cartLines = subItemsToCartLines(pricedItems);
   if (cartLines.length === 0) return null;
@@ -239,7 +263,7 @@ export async function quoteSubscriptionTax(
   }
 
   const taxCents = result.totalTaxCents ?? 0;
-  const totalCents = subtotalCents + shippingCents + protectionCents + taxCents;
+  const totalCents = Math.max(0, subtotalCents - discountCents) + shippingCents + protectionCents + taxCents;
 
   await admin
     .from("subscriptions")
@@ -270,7 +294,7 @@ export async function ensureFreshSubscriptionTaxQuote(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, customer_id, items, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
+    .select("id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
     .eq("id", subscriptionId)
     .single();
   if (!sub) return null;
