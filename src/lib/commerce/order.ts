@@ -1,14 +1,19 @@
 /**
- * commerce/order.ts — Display ops for orders.
+ * commerce/order.ts — Display + mutation ops for orders.
  *
- * An order is a historical record — pricing is snapshotted at renewal time onto
- * the row's line items, so the Display op reads them as-is and does NOT re-price
- * through `./price.ts`. Cursor pagination on `(created_at DESC, id DESC)` walks
- * past PostgREST's 1000-row cap per the goal's "no silent truncation" invariant
- * ([[../../docs/brain/README]] § Probing technique).
+ * DISPLAY: An order is a historical record — pricing is snapshotted at renewal
+ * time onto the row's line items, so the Display op reads them as-is and does
+ * NOT re-price through `./price.ts`. Cursor pagination on
+ * `(created_at DESC, id DESC)` walks past PostgREST's 1000-row cap per the
+ * goal's "no silent truncation" invariant ([[../../docs/brain/README]]
+ * § Probing technique).
  *
- * Ships with zero call-site consumers — the M3 harness compares parity before
- * any surface migrates.
+ * MUTATION: `createOrder` is the internal-aware-dispatcher entry point for
+ * creating a fresh order. Branches on `input.vendor`: `'shopify'` routes
+ * through the draft-order-then-complete flow so a real Shopify order id lands
+ * on the row; `'internal'` writes an orders row directly (no Shopify round
+ * trip). Mirrors the shape [[./subscription]] uses for its
+ * appstle-vs-internal dispatch.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { OrderView, OrderLineView } from "./types";
@@ -212,4 +217,151 @@ export async function listOrders(
   }
 
   return out;
+}
+
+// ── Mutation ops ─────────────────────────────────────────────────────
+
+/** Line item shape accepted by `createOrder`. `unit_cents` is the per-unit
+ *  price at the moment the order is created — the SDK snapshots it onto
+ *  `line_items[].price_cents` so downstream Display ops read from the
+ *  frozen row (never a live re-price). */
+export interface CreateOrderLineItem {
+  variant_id: string;
+  product_id?: string | null;
+  title: string;
+  quantity: number;
+  unit_cents: number;
+}
+
+export interface CreateOrderInput {
+  vendor: "shopify" | "internal";
+  customer_id: string | null;
+  email: string | null;
+  line_items: CreateOrderLineItem[];
+  currency?: string;
+  shipping_address?: Record<string, unknown> | null;
+  billing_address?: Record<string, unknown> | null;
+  subscription_id?: string | null;
+  order_type?: string | null;
+  tags?: string | null;
+  source_name?: string | null;
+  note?: string;
+}
+
+export interface CreateOrderResult {
+  success: boolean;
+  error?: string;
+  order_id?: string;
+  shopify_order_id?: string | null;
+  order_number?: string | null;
+}
+
+/**
+ * Pure: turn a `CreateOrderInput` into the `orders`-row shape that gets
+ * inserted. Extracted so the shape can be pinned in `node:test` without
+ * standing up a Supabase client — the wrapper below is the one that
+ * actually writes.
+ *
+ *  - `total_cents` is derived from the line-items sum, so the caller can't
+ *    silently ship a mismatched total.
+ *  - `line_items[].price_cents`/`total_cents` are stamped at create time
+ *    (Display reads them frozen — see the file header).
+ *  - Shopify-side identifiers (`shopify_order_id`, `order_number`) come
+ *    through `opts`, populated by the draft-order-complete step for the
+ *    `'shopify'` branch and left empty for `'internal'`.
+ */
+export function buildCreateOrderRow(
+  workspaceId: string,
+  input: CreateOrderInput,
+  opts: { shopify_order_id?: string | null; order_number?: string | null } = {},
+): Record<string, unknown> {
+  const lines = input.line_items.map((l) => ({
+    variant_id: String(l.variant_id),
+    product_id: l.product_id ?? null,
+    title: l.title,
+    quantity: l.quantity,
+    price_cents: l.unit_cents,
+    total_cents: l.unit_cents * l.quantity,
+  }));
+  const totalCents = lines.reduce((s, l) => s + l.total_cents, 0);
+  const row: Record<string, unknown> = {
+    workspace_id: workspaceId,
+    customer_id: input.customer_id ?? null,
+    email: input.email ?? null,
+    currency: input.currency ?? "USD",
+    total_cents: totalCents,
+    line_items: lines,
+    subscription_id: input.subscription_id ?? null,
+    shipping_address: input.shipping_address ?? null,
+    billing_address: input.billing_address ?? null,
+    order_type: input.order_type ?? null,
+    tags: input.tags ?? null,
+    source_name: input.source_name ?? (input.vendor === "internal" ? "internal" : "shopcx-created"),
+    financial_status: "paid",
+    fulfillment_status: "unfulfilled",
+  };
+  if (opts.shopify_order_id != null) row.shopify_order_id = opts.shopify_order_id;
+  if (opts.order_number != null) row.order_number = opts.order_number;
+  return row;
+}
+
+/**
+ * Create a fresh order — internal-aware dispatcher. Mirrors the
+ * appstle-vs-internal branch shape used by [[./subscription]]:
+ *
+ *  - `vendor: 'shopify'` → creates a real Shopify order via draft-order +
+ *    complete (`shopify-draft-orders.createShopifyOrder`), stamps the
+ *    resulting `shopify_order_id` + `order_number` on the mirror row.
+ *  - `vendor: 'internal'` → inserts the mirror row directly (no upstream
+ *    round trip). `shopify_order_id` stays null.
+ *
+ * Returns `{ success, order_id, shopify_order_id }` on success and
+ * `{ success: false, error }` if either the upstream call or the DB
+ * insert fails. Ships as a compiler-loop primitive — the "capability +
+ * compiler loop" milestone (parent goal) uses this to test playbooks
+ * that create fresh orders.
+ */
+export async function createOrder(
+  workspaceId: string,
+  input: CreateOrderInput,
+): Promise<CreateOrderResult> {
+  const admin = createAdminClient();
+
+  if (input.vendor === "shopify") {
+    const { createShopifyOrder } = await import("@/lib/shopify-draft-orders");
+    let shopifyResult: { shopifyOrderId: string; orderName: string };
+    try {
+      shopifyResult = await createShopifyOrder(workspaceId, input);
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    const row = buildCreateOrderRow(workspaceId, input, {
+      shopify_order_id: shopifyResult.shopifyOrderId,
+      order_number: shopifyResult.orderName,
+    });
+    const { data, error } = await admin.from("orders").insert(row).select("id").single();
+    if (error) return { success: false, error: error.message };
+    return {
+      success: true,
+      order_id: (data as { id: string }).id,
+      shopify_order_id: shopifyResult.shopifyOrderId,
+      order_number: shopifyResult.orderName,
+    };
+  }
+
+  if (input.vendor === "internal") {
+    const row = buildCreateOrderRow(workspaceId, input);
+    const { data, error } = await admin.from("orders").insert(row).select("id").single();
+    if (error) return { success: false, error: error.message };
+    return {
+      success: true,
+      order_id: (data as { id: string }).id,
+      shopify_order_id: null,
+    };
+  }
+
+  return { success: false, error: `createOrder: unknown vendor '${input.vendor as string}'` };
 }

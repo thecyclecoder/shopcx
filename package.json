@@ -49,7 +49,9 @@
     "test:growth-allocation": "tsx --test src/lib/growth-allocation.test.ts",
     "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts",
     "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts",
-    "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts"
+    "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts",
+    "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
+    "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

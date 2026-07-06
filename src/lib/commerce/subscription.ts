@@ -752,3 +752,154 @@ export async function subscriptionOrderNow(
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
   return orderNowByContract(workspaceId, contractId);
 }
+
+// ── Create ─────────────────────────────────────────────────────────
+
+/** Item shape accepted by `createSubscription`. `variant_id` is the internal
+ *  UUID (Shopify is being sunset — see [[../../CLAUDE]] § Local conventions). */
+export interface CreateSubscriptionItem {
+  variant_id: string;
+  product_id?: string | null;
+  title?: string;
+  variant_title?: string | null;
+  sku?: string | null;
+  quantity?: number;
+  is_gift?: boolean;
+  price_override_cents?: number | null;
+}
+
+export interface CreateSubscriptionInput {
+  vendor: "internal" | "appstle";
+  customer_id: string;
+  items: CreateSubscriptionItem[];
+  billing_interval: "day" | "week" | "month" | "year";
+  billing_interval_count: number;
+  /** ISO-8601 date/datetime for the first renewal. Required. */
+  next_billing_date: string;
+  status?: "active" | "paused" | "cancelled";
+  is_internal?: boolean;
+  comp?: boolean;
+  shipping_address?: Record<string, unknown> | null;
+  delivery_price_cents?: number;
+  shipping_protection_added?: boolean;
+  shipping_protection_amount_cents?: number;
+  applied_discounts?: Array<Record<string, unknown>>;
+  payment_method_id?: string | null;
+  /** Optional contract id for the internal branch — defaults to
+   *  `internal-${uuid}` at insert time when omitted. */
+  shopify_contract_id?: string | null;
+}
+
+export interface CreateSubscriptionResult {
+  success: boolean;
+  error?: string;
+  subscription_id?: string;
+  shopify_contract_id?: string | null;
+}
+
+/**
+ * Pure: turn a `CreateSubscriptionInput` into the `subscriptions`-row shape.
+ * Extracted so the shape (defaults, item normalization, next_billing_date
+ * coercion) can be pinned in `node:test` without standing up a Supabase
+ * client. Mirrors `commerce/order.buildCreateOrderRow`.
+ */
+export function buildCreateSubscriptionRow(
+  workspaceId: string,
+  input: CreateSubscriptionInput,
+  opts: { shopify_contract_id?: string } = {},
+): Record<string, unknown> {
+  const items = input.items.map((it) => ({
+    line_id: String(it.variant_id),
+    variant_id: String(it.variant_id),
+    product_id: it.product_id ?? null,
+    title: it.title ?? "",
+    variant_title: it.variant_title ?? null,
+    sku: it.sku ?? null,
+    quantity: Number(it.quantity ?? 1),
+    is_gift: Boolean(it.is_gift),
+    price_override_cents: it.price_override_cents ?? null,
+  }));
+
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(input.next_billing_date)
+    ? new Date(`${input.next_billing_date}T00:00:00Z`).toISOString()
+    : new Date(input.next_billing_date).toISOString();
+
+  return {
+    workspace_id: workspaceId,
+    customer_id: input.customer_id,
+    shopify_contract_id: opts.shopify_contract_id ?? input.shopify_contract_id ?? null,
+    status: input.status ?? "active",
+    is_internal: input.is_internal ?? (input.vendor === "internal"),
+    comp: Boolean(input.comp),
+    billing_interval: input.billing_interval,
+    billing_interval_count: input.billing_interval_count,
+    next_billing_date: iso,
+    items,
+    delivery_price_cents: input.delivery_price_cents ?? 0,
+    shipping_address: input.shipping_address ?? null,
+    shipping_protection_added: Boolean(input.shipping_protection_added),
+    shipping_protection_amount_cents: input.shipping_protection_amount_cents ?? null,
+    applied_discounts: input.applied_discounts ?? [],
+    subscription_created_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Create a fresh subscription — internal-aware dispatcher. Mirrors the
+ * appstle-vs-internal branch shape used by [[./subscription]]'s other
+ * mutation ops:
+ *
+ *  - `vendor: 'internal'` → inserts a `subscriptions` row with
+ *    `is_internal=true`, `status='active'` (default), and
+ *    `next_billing_date` populated. No upstream (Appstle) round trip —
+ *    internal subs are managed entirely by shopcx (see
+ *    [[../internal-subscription]]).
+ *  - `vendor: 'appstle'` → currently unsupported; the compiler-loop
+ *    primitive only ships the internal path in Phase 1.
+ *
+ * Returns `{ success, subscription_id, shopify_contract_id }` on success and
+ * `{ success: false, error }` on any failure.
+ */
+export async function createSubscription(
+  workspaceId: string,
+  input: CreateSubscriptionInput,
+): Promise<CreateSubscriptionResult> {
+  const admin = createAdminClient();
+
+  if (input.vendor === "internal") {
+    const row = buildCreateSubscriptionRow(workspaceId, input);
+    const { data, error } = await admin
+      .from("subscriptions")
+      .insert(row)
+      .select("id, shopify_contract_id")
+      .single();
+    if (error) return { success: false, error: error.message };
+    const inserted = data as { id: string; shopify_contract_id: string | null };
+    if (!inserted.shopify_contract_id) {
+      const synth = `internal-${inserted.id}`;
+      await admin
+        .from("subscriptions")
+        .update({ shopify_contract_id: synth })
+        .eq("id", inserted.id);
+      return { success: true, subscription_id: inserted.id, shopify_contract_id: synth };
+    }
+    return {
+      success: true,
+      subscription_id: inserted.id,
+      shopify_contract_id: inserted.shopify_contract_id,
+    };
+  }
+
+  if (input.vendor === "appstle") {
+    return {
+      success: false,
+      error:
+        "createSubscription: vendor 'appstle' not supported in Phase 1 — internal subs only",
+    };
+  }
+
+  return {
+    success: false,
+    error: `createSubscription: unknown vendor '${input.vendor as string}'`,
+  };
+}

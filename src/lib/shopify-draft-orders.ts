@@ -272,3 +272,80 @@ export async function createAndCompleteReplacement(
   const draft = await createReplacementDraftOrder(workspaceId, input);
   return completeDraftOrder(workspaceId, draft.draftOrderId);
 }
+
+/**
+ * Create a real Shopify order at full price via draft-order + complete —
+ * the underlying vendor call the commerce SDK's `createOrder` wrapper
+ * uses on the `vendor: 'shopify'` branch. Unlike `createAndCompleteReplacement`
+ * this applies NO discount and takes a generic `CreateOrderInput` shape
+ * (a subset of the row the SDK will then mirror into `orders`). Kept in
+ * this file so the low-level Shopify GraphQL machinery
+ * (`shopifyGraphQL` + throttle retry) stays a single-source primitive.
+ */
+export async function createShopifyOrder(
+  workspaceId: string,
+  input: {
+    email: string | null;
+    line_items: Array<{ variant_id: string; quantity: number }>;
+    shipping_address?: Record<string, unknown> | null;
+    note?: string;
+    tags?: string | null;
+  },
+): Promise<{ shopifyOrderId: string; orderName: string }> {
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+
+  const draftMutation = `
+    mutation draftOrderCreate($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder { id name }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const addr = (input.shipping_address ?? {}) as Record<string, unknown>;
+  const shippingAddress = input.shipping_address
+    ? {
+        firstName: (addr.first_name as string) || (addr.firstName as string) || "",
+        lastName: (addr.last_name as string) || (addr.lastName as string) || "",
+        address1: (addr.address1 as string) || "",
+        address2: (addr.address2 as string) || undefined,
+        city: (addr.city as string) || "",
+        provinceCode: (addr.province as string) || (addr.province_code as string) || "",
+        zip: (addr.zip as string) || (addr.postal_code as string) || "",
+        countryCode: (addr.country as string) || (addr.country_code as string) || "US",
+        phone: (addr.phone as string) || undefined,
+      }
+    : undefined;
+
+  const variables = {
+    input: {
+      lineItems: input.line_items.map((li) => ({
+        variantId: `gid://shopify/ProductVariant/${li.variant_id}`,
+        quantity: li.quantity,
+      })),
+      shippingAddress,
+      email: input.email || undefined,
+      note: input.note,
+      tags: input.tags ? input.tags.split(",").map((t) => t.trim()) : undefined,
+    },
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const draftResult = (await shopifyGraphQL(shop, accessToken, draftMutation, variables)) as any;
+  const draftData = draftResult.data?.draftOrderCreate;
+  if (draftData?.userErrors?.length) {
+    throw new Error(
+      `createShopifyOrder: draftOrderCreate failed: ${draftData.userErrors.map((e: { message: string }) => e.message).join(", ")}`,
+    );
+  }
+  const draftId = draftData?.draftOrder?.id as string | undefined;
+  if (!draftId) {
+    throw new Error(
+      `createShopifyOrder: draftOrderCreate returned no draft id: ${JSON.stringify(draftResult).slice(0, 500)}`,
+    );
+  }
+
+  const completed = await completeDraftOrder(workspaceId, draftId);
+  return { shopifyOrderId: completed.shopifyOrderId, orderName: completed.orderName };
+}

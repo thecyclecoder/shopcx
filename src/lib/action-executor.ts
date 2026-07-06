@@ -86,6 +86,30 @@ export interface ActionParams {
   // chat); the handler matches it against the Shopify payment methods
   // on file and applies the switch.
   card_last4?: string;
+  // create_order / create_subscription — compiler-loop primitives.
+  // The vendor arg picks the internal-aware-dispatcher branch (see
+  // commerce/order.createOrder + commerce/subscription.createSubscription).
+  // line_items[]/items[] are the freshly-created lines; unit_cents is
+  // the per-unit price at create time (frozen onto the row).
+  vendor?: "shopify" | "internal" | "appstle";
+  line_items?: Array<{
+    variant_id: string;
+    product_id?: string | null;
+    title: string;
+    quantity: number;
+    unit_cents: number;
+  }>;
+  items?: Array<{
+    variant_id: string;
+    product_id?: string | null;
+    title?: string;
+    variant_title?: string | null;
+    sku?: string | null;
+    quantity?: number;
+    is_gift?: boolean;
+    price_override_cents?: number | null;
+  }>;
+  next_billing_date?: string;
 }
 
 export interface ActionContext {
@@ -443,6 +467,68 @@ export const directActionHandlers: Record<
     const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
     const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
+  },
+
+  // create_order — compiler-loop primitive. Creates a fresh order via
+  // commerce/order.createOrder's internal-aware dispatcher. `vendor`
+  // picks the branch: `'shopify'` creates a real Shopify order and
+  // stamps `shopify_order_id`; `'internal'` writes the mirror row
+  // directly. Line items ship as `{ variant_id, title, quantity,
+  // unit_cents }` — `unit_cents` is the per-unit price at create time.
+  create_order: async (ctx, p) => {
+    const { createOrder } = await import("@/lib/commerce/order");
+    if (!p.vendor) return { success: false, error: "create_order missing vendor" };
+    if (!p.line_items?.length) return { success: false, error: "create_order missing line_items" };
+    if (p.vendor !== "shopify" && p.vendor !== "internal") {
+      return { success: false, error: `create_order: invalid vendor '${p.vendor}'` };
+    }
+    const r = await createOrder(ctx.workspaceId, {
+      vendor: p.vendor,
+      customer_id: ctx.customerId,
+      email: p.email ?? null,
+      line_items: p.line_items,
+      shipping_address: (p.address as unknown as Record<string, unknown> | undefined) ?? null,
+      order_type: "shopcx-created",
+    });
+    if (!r.success) return { success: false, error: r.error, summary: `Create order failed: ${r.error}` };
+    return {
+      success: true,
+      summary: `Created order (${p.vendor})${r.shopify_order_id ? ` shopify=${r.shopify_order_id}` : ""}`,
+    };
+  },
+
+  // create_subscription — compiler-loop primitive. Creates a fresh
+  // subscription via commerce/subscription.createSubscription's
+  // internal-aware dispatcher. Phase 1 ships the `'internal'` branch
+  // only (appstle path returns an explicit "unsupported" error). Items
+  // carry the same shape as internal-subscription: variant_id (UUID) +
+  // quantity + optional price_override_cents.
+  create_subscription: async (ctx, p) => {
+    const { createSubscription } = await import("@/lib/commerce/subscription");
+    if (!p.vendor) return { success: false, error: "create_subscription missing vendor" };
+    if (!p.items?.length) return { success: false, error: "create_subscription missing items" };
+    if (!p.interval || !p.interval_count) {
+      return { success: false, error: "create_subscription missing interval/interval_count" };
+    }
+    if (!p.next_billing_date) {
+      return { success: false, error: "create_subscription missing next_billing_date" };
+    }
+    if (p.vendor !== "internal" && p.vendor !== "appstle") {
+      return { success: false, error: `create_subscription: invalid vendor '${p.vendor}'` };
+    }
+    const r = await createSubscription(ctx.workspaceId, {
+      vendor: p.vendor,
+      customer_id: ctx.customerId,
+      items: p.items,
+      billing_interval: String(p.interval).toLowerCase() as "day" | "week" | "month" | "year",
+      billing_interval_count: Number(p.interval_count),
+      next_billing_date: p.next_billing_date,
+    });
+    if (!r.success) return { success: false, error: r.error, summary: `Create subscription failed: ${r.error}` };
+    return {
+      success: true,
+      summary: `Created subscription (${p.vendor})${r.shopify_contract_id ? ` contract=${r.shopify_contract_id}` : ""}`,
+    };
   },
 
   change_frequency: async (ctx, p) => {
