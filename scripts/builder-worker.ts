@@ -13627,7 +13627,19 @@ async function appendSignatureToSpec(slug: string, body: string, signature: stri
 //   2. Else author a new spec, stamping the Repair-root-cause key for future grouping.
 // Same-slug convergence stays idempotent (a recurring failure folds onto one spec). Returns the
 // resolved slug + whether it pre-existed + whether this was a group-onto-sibling, or null on failure.
-async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean; grouped: boolean; rootCause: string } | null> {
+// repair-verify-spec-persisted-before-build Phase 3 return shape — the caller (`runRepairJob`)
+// distinguishes three outcomes so a NAMED author-write error surfaces on the parked repair job's
+// `error` field instead of being flattened to the generic "no valid fix spec proposed" that the
+// swallowed throw used to leave. `null` = the box handed us a spec with no usable slug/title (a
+// pre-author failure — nothing to author); `authorError` = the write chokepoint threw
+// (`MissingVerificationError` / `EmptyPhaseBodyError` / any surfaced write failure) — the caller
+// carries `authored.authorError` straight onto the needs_attention park's `error` column so the
+// operator (and Ada's repair supervision) reads exactly why the box's proposed spec was rejected.
+type RepairAuthorSuccess = { slug: string; alreadyExists: boolean; grouped: boolean; rootCause: string };
+type RepairAuthorFailure = { authorError: string; slug: string };
+type RepairAuthorResult = RepairAuthorSuccess | RepairAuthorFailure | null;
+
+async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict: string, workspaceId: string): Promise<RepairAuthorResult> {
   const { rootCauseKey, REPAIR_RECENT_FIX_WINDOW_MS } = await import("../src/lib/repair-agent");
   const s = (raw || {}) as RepairSpecProposal;
   const rawSlug = String(s.slug || "");
@@ -13682,13 +13694,27 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
     try {
       await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`, markdown);
     } catch (e) {
-      console.warn(`[repair] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
-      return null;
+      // repair-verify-spec-persisted-before-build Phase 3 — SURFACE the throw's message on the
+      // parked repair job instead of swallowing it into a generic "no valid fix spec proposed".
+      // `markNewSpecInReview` re-throws `MissingVerificationError` / `EmptyPhaseBodyError` (a spec
+      // authored with no verification / an empty phase body — the exact box-authoring gap Phase 3
+      // targets), and any other loud throw the write chokepoint may add later. Preserve the error
+      // class + message so the operator (and Ada's supervision lane) reads WHY authoring was
+      // rejected, and re-drives the box against the CORRECT structural constraint instead of
+      // guessing.
+      const name = e instanceof Error ? e.name : "Error";
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[repair] spec DB author failed for ${slug}: ${name} — ${msg}`);
+      return { authorError: `${name}: ${msg}`, slug };
     }
     return { slug, alreadyExists: false, grouped: false, rootCause };
   } catch (e) {
-    console.warn(`[repair] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
-    return null;
+    // A non-author path threw (e.g. the sibling-lookup / signature-append leg). Same Phase-3
+    // discipline: preserve the message instead of collapsing to null.
+    const name = e instanceof Error ? e.name : "Error";
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[repair] spec author failed: ${name} — ${msg}`);
+    return { authorError: `${name}: ${msg}`, slug };
   }
 }
 
@@ -13859,6 +13885,27 @@ async function runRepairJob(job: Job) {
         await resolveRepairErrorRow(instr, `${verdict} but no valid fix spec proposed — parked for human review on the repair feed`);
         await update(job.id, { status: "needs_attention", error: "no valid fix spec proposed", log_tail: diagnosis.slice(-2000) || "no valid fix spec" });
         console.log(`${tag} ${verdict} but no valid spec → surfaced needs-human`);
+        return;
+      }
+      if ("authorError" in authored) {
+        // repair-verify-spec-persisted-before-build Phase 3 — the author chokepoint (author-spec.ts:
+        // MissingVerificationError / EmptyPhaseBodyError, or a raw write failure the outer catch
+        // now preserves) rejected the box's proposed spec. Surface the NAMED error on this parked
+        // repair's `error` column so getOpenRepairs shows "MissingVerificationError: spec … has a
+        // phase with no non-empty Verification …" instead of the generic "no valid fix spec"
+        // fallback — the operator (and Ada) reads exactly what the box got wrong. Leave the
+        // originating error row OPEN (no resolveRepairErrorRow) because no fix landed — the
+        // reconcile SHOULD keep re-scanning until the corrected box re-authors + persists.
+        const authorErr = `author-write chokepoint rejected [[${authored.slug}]] — ${authored.authorError}`.slice(0, 2000);
+        instr.signature = signature;
+        const failedLedgerInstr = JSON.stringify({ ...instr, authored_slug: authored.slug, author_error: authored.authorError });
+        await update(job.id, {
+          status: "needs_attention",
+          error: authorErr,
+          instructions: failedLedgerInstr,
+          log_tail: `${verdict} → author-write chokepoint rejected the box's proposed spec [[${authored.slug}]] — ${authored.authorError}\n\n${diagnosis}`.slice(-2000),
+        });
+        console.warn(`${tag} ${verdict} → author-write rejected [[${authored.slug}]]: ${authored.authorError}`);
         return;
       }
       // Persist this signature's root-cause key + authored slug onto the job — the dedup ledger the
