@@ -2553,6 +2553,33 @@ async function handlePlaybook(
 
   const { startPlaybook, executePlaybookStep } = await import("@/lib/playbook-executor");
 
+  // Step-level claim-guard: every playbook-step response_message is a model-
+  // or-code-authored outbound. Guard each one before the outbound insert,
+  // combining the decision's attached actions with the step's own
+  // `backedActions` hint (post-completion confirmations like "Your
+  // subscription is now cancelled" mark themselves backed so we don't
+  // false-positive escalate a truthful reply).
+  const guardedStepSend = async (
+    result: { response?: string; backedActions?: string[] },
+  ): Promise<void> => {
+    if (!result.response) return;
+    const combined: ActionParams[] = [
+      ...(decision.actions || []),
+      ...(result.backedActions || []).map((type) => ({ type })),
+    ];
+    if (await claimGuardBlocksInlineSend(
+      result.response,
+      combined,
+      "playbook_step",
+      decision.handler_name,
+      sysNote,
+      (reason) => escalateTicket(ctx, reason),
+    )) {
+      return;
+    }
+    await send(result.response, ctx.sandbox);
+  };
+
   // Check if this playbook is already active on the ticket (continuation vs new)
   const { data: ticketState } = await ctx.admin.from("tickets")
     .select("active_playbook_id").eq("id", ctx.ticketId).single();
@@ -2567,7 +2594,7 @@ async function handlePlaybook(
 
     let result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
     if (result.systemNote) await sysNote(result.systemNote);
-    if (result.response) { await send(result.response, ctx.sandbox); return; }
+    if (result.response) { await guardedStepSend(result); return; }
 
     // Auto-advance: keep executing steps until one sends a response or completes
     let advances = 0;
@@ -2575,7 +2602,7 @@ async function handlePlaybook(
       advances++;
       result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
-      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.response) { await guardedStepSend(result); return; }
       if (result.action === "complete") break;
     }
   } else {
@@ -2600,14 +2627,14 @@ async function handlePlaybook(
     );
 
     if (result.systemNote) await sysNote(result.systemNote);
-    if (result.response) { await send(result.response, ctx.sandbox); return; }
+    if (result.response) { await guardedStepSend(result); return; }
 
     let advances = 0;
     while (result.action === "advance" && advances < 10) {
       advances++;
       result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
-      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.response) { await guardedStepSend(result); return; }
       if (result.action === "complete") break;
     }
   }

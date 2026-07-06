@@ -74,6 +74,46 @@ test("(b) a backed claim (matching action attached) inside a journey step ships"
   assert.equal(rec.escalations.length, 0);
 });
 
+test("(d) unbacked cancel-claim from a playbook step is blocked + escalated (Phase 2)", async () => {
+  const { rec, sysNote, escalate } = makeRecorder();
+  // Synthetic playbook-step response asserting a completed cancellation
+  // with NO `cancel` action attached — the exact shape Phase 2's verification
+  // names. The helper is the same code path handlePlaybook's inline
+  // guardedStepSend invokes; the action_type label is "playbook_step".
+  const blocked = await claimGuardBlocksInlineSend(
+    "Your subscription has been cancelled — no further orders will ship.",
+    [],
+    "playbook_step",
+    "cancel_subscription",
+    sysNote,
+    escalate,
+  );
+  assert.equal(blocked, true, "helper should signal that the send is blocked");
+  assert.equal(rec.escalations.length, 1);
+  assert.equal(rec.escalations[0], "blocked_unbacked_claim:cancel");
+  assert.equal(rec.sysNotes.length, 1);
+  assert.match(rec.sysNotes[0], /\[Guard\] Blocked unbacked "cancel" claim in playbook_step/);
+});
+
+test("(e) post-completion truthful confirmation ships when `backedActions` hints the effect (Phase 2)", async () => {
+  const { rec, sysNote, escalate } = makeRecorder();
+  // The apply_policy branch after a cancel journey completes emits
+  // "Your subscription is now cancelled..." with `backedActions: ["cancel"]`.
+  // handlePlaybook's guardedStepSend merges that hint into the backed set —
+  // the helper receives `cancel` as a backing action_type and lets it ship.
+  const blocked = await claimGuardBlocksInlineSend(
+    "Your subscription is now cancelled and no future orders will be sent.",
+    [{ type: "cancel" }],   // seeded by playbook-executor's backedActions hint
+    "playbook_step",
+    "cancel_subscription",
+    sysNote,
+    escalate,
+  );
+  assert.equal(blocked, false, "post-completion confirmation must not be blocked");
+  assert.equal(rec.sysNotes.length, 0);
+  assert.equal(rec.escalations.length, 0);
+});
+
 test("(c) an evaluator throw ships (fail-safe)", async () => {
   const { rec, sysNote, escalate } = makeRecorder();
   // Inject a throwing evaluator to simulate a guard-code bug. Expected: the
