@@ -1,0 +1,1 @@
+- **Portal order detail: delivery tracking widget** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
