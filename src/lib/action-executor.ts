@@ -29,6 +29,21 @@ export interface SonnetDecision {
   response_message?: string;
   needs_clarification?: boolean;
   clarification_question?: string;
+  // ── Resolution-record fields (Phase 2 of ticket-resolution-events
+  // -writeahead-ledger-and-decision-schema-extension) ──
+  // Mirror the shape declared on src/lib/sonnet-orchestrator-v2.ts's
+  // SonnetDecision. All optional so a fallback / straggler decision
+  // still executes; stageResolutionEvent range-guards + coerces before
+  // insert (respects the DB CHECK constraints — confidence ∈ [0,1];
+  // verified_outcome enum). See docs/brain/tables/ticket_resolution_events.md.
+  problem?: string;
+  confidence?: number;
+  options?: Array<{
+    label: string;
+    action_shape?: unknown;
+    expected_effect?: string;
+  }>;
+  chosen?: { option_index: number; why: string };
 }
 
 export interface ActionParams {
@@ -2114,15 +2129,27 @@ async function stageResolutionEvent(
       .eq("ticket_id", ctx.ticketId);
     const turnIndex = (count ?? 0) + 1;
 
-    // Phase 2 populates problem/confidence/options/chosen on SonnetDecision.
-    // For Phase 1 the interface doesn't carry them, so we read them
-    // optimistically through a partial type so both phases can coexist.
-    const d = decision as Partial<{
-      problem: string;
-      confidence: number;
-      options: unknown[];
-      chosen: unknown;
-    }> & { reasoning: string };
+    // Phase 2 populates problem/confidence/options/chosen on SonnetDecision;
+    // the interface (src/lib/sonnet-orchestrator-v2.ts:32) declares them
+    // optional so a fallback / straggler prompt still executes. We coerce
+    // + range-guard here so the row respects the DB CHECK constraints
+    // (confidence ∈ [0,1]; options must be an array) — the model can and
+    // does return out-of-range floats and object-shaped options during
+    // the buildSystemPrompt rollout.
+    const problem = typeof decision.problem === "string" && decision.problem.length > 0
+      ? decision.problem
+      : null;
+    const confidence = typeof decision.confidence === "number"
+      && Number.isFinite(decision.confidence)
+      && decision.confidence >= 0
+      && decision.confidence <= 1
+      ? decision.confidence
+      : null;
+    const options = Array.isArray(decision.options) ? decision.options : null;
+    const chosen = decision.chosen && typeof decision.chosen === "object"
+      && typeof decision.chosen.option_index === "number"
+      ? decision.chosen
+      : null;
 
     const { data: row, error } = await ctx.admin
       .from("ticket_resolution_events")
@@ -2130,11 +2157,11 @@ async function stageResolutionEvent(
         workspace_id: ctx.workspaceId,
         ticket_id: ctx.ticketId,
         turn_index: turnIndex,
-        problem: d.problem ?? null,
-        confidence: typeof d.confidence === "number" ? d.confidence : null,
-        options: Array.isArray(d.options) ? d.options : null,
-        chosen: d.chosen ?? null,
-        reasoning: d.reasoning ?? null,
+        problem,
+        confidence,
+        options,
+        chosen,
+        reasoning: decision.reasoning ?? null,
       })
       .select("id")
       .single();

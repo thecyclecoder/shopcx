@@ -14,10 +14,10 @@ Written by [[../libraries/action-executor]] `executeSonnetDecision` (insert) + `
 | `workspace_id` | `uuid` | — | → [[workspaces]].id · ON DELETE CASCADE |
 | `ticket_id` | `uuid` | — | → [[tickets]].id · ON DELETE CASCADE — the resolved ticket |
 | `turn_index` | `int` | — | 1-based monotonic per-ticket ordering; = `count(prior rows on ticket) + 1` at insert time |
-| `problem` | `text` | ✓ | Phase 2 populates from `SonnetDecision.problem` — the orchestrator's one-line diagnosis |
-| `confidence` | `numeric` | ✓ | Phase 2 populates from `SonnetDecision.confidence` — 0..1, CHECK-enforced |
-| `options` | `jsonb` | ✓ | Phase 2 populates from `SonnetDecision.options` — array of `{label, action_shape, expected_effect}` the model considered |
-| `chosen` | `jsonb` | ✓ | Phase 2 populates from `SonnetDecision.chosen` — the picked `{option_index, why}` |
+| `problem` | `text` | ✓ | populated from `SonnetDecision.problem` — the orchestrator's one-line diagnosis (Phase 2 — [[../libraries/sonnet-orchestrator-v2]] `buildSystemPrompt` asks for it; `stageResolutionEvent` coerces empty/absent to NULL) |
+| `confidence` | `numeric` | ✓ | populated from `SonnetDecision.confidence` — 0..1, CHECK-enforced (out-of-range or NaN → coerced to NULL in `stageResolutionEvent`, keeps the CHECK green) |
+| `options` | `jsonb` | ✓ | populated from `SonnetDecision.options` — array of `{label, action_shape, expected_effect}` the model considered (non-array → NULL) |
+| `chosen` | `jsonb` | ✓ | populated from `SonnetDecision.chosen` — the picked `{option_index, why}` (non-object or missing `option_index` → NULL) |
 | `staged_at` | `timestamptz` | — | default `now()` — stamped at insert, BEFORE any customer-facing message ships |
 | `shipped_at` | `timestamptz` | ✓ | stamped by [[../libraries/action-executor]] `stampResolutionShipped` on the first send in this turn (compare-and-set on NULL — a re-send in the same turn doesn't overwrite) |
 | `verified_at` | `timestamptz` | ✓ | stamped by [[../libraries/action-executor]] `stampResolutionVerified` once per row (compare-and-set on NULL); NULL means the outcome is still in flight (escalated to an agent or M1's inline verify hasn't run yet) |
