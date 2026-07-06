@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { deliveryStatusTag, financialTag, type OrderStatusTag } from "./order-status";
+import { TrackingWidget, type TrackingWidgetDelivery } from "./TrackingWidget";
 
 interface OrderLine {
   variant_id: string | null;
@@ -59,6 +60,8 @@ interface OrderDetail {
     country?: string;
   } | null;
   discount_codes: Array<{ code?: string; amount?: string | number }>;
+  // Phase 2 resolver payload — the widget layer keys off `delivery.kind`.
+  delivery?: TrackingWidgetDelivery;
 }
 
 const TONE_CLASS: Record<OrderStatusTag["tone"], string> = {
@@ -71,16 +74,6 @@ const TONE_CLASS: Record<OrderStatusTag["tone"], string> = {
 function fmtCents(c: number, currency = "USD"): string {
   const symbol = currency === "USD" ? "$" : "";
   return `${symbol}${(c / 100).toFixed(2)}`;
-}
-
-function trackingUrl(carrier: string | null, tracking: string): string | null {
-  if (!tracking) return null;
-  const c = (carrier || "").toLowerCase();
-  if (c.includes("ups")) return `https://www.ups.com/track?tracknum=${encodeURIComponent(tracking)}`;
-  if (c.includes("usps")) return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(tracking)}`;
-  if (c.includes("fedex")) return `https://www.fedex.com/fedextrack/?tracknumbers=${encodeURIComponent(tracking)}`;
-  if (c.includes("dhl")) return `https://www.dhl.com/en/express/tracking.html?AWB=${encodeURIComponent(tracking)}`;
-  return `https://www.google.com/search?q=${encodeURIComponent(tracking)}+tracking`;
 }
 
 interface Props {
@@ -151,7 +144,6 @@ export function OrderDetailScreen({ orderId }: Props) {
     day: "numeric",
     year: "numeric",
   });
-  const trackUrl = order.tracking_number ? trackingUrl(order.carrier, order.tracking_number) : null;
 
   return (
     <div className="space-y-5">
@@ -271,24 +263,16 @@ export function OrderDetailScreen({ orderId }: Props) {
         </div>
       </article>
 
-      {/* Tracking */}
-      {order.tracking_number && (
-        <article className="overflow-hidden rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-sm text-emerald-900">
-          <div className="text-xs font-semibold uppercase tracking-wider text-emerald-700">
-            Tracking{order.carrier ? ` (${order.carrier})` : ""}
-          </div>
-          <div className="mt-1 font-mono">{order.tracking_number}</div>
-          {trackUrl && (
-            <a
-              href={trackUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 inline-block text-sm font-semibold underline-offset-2 hover:underline"
-            >
-              Track package →
-            </a>
-          )}
-        </article>
+      {/* Delivery tracking widget (Phase 3 of the tracking-widget spec).
+          Kind 'internal' → EasyPost milestone timeline. Kind 'shopify'
+          → shipment status + carrier link (no milestones). Kind 'none'
+          (or missing) → renders nothing (order not yet shipped). */}
+      {order.delivery && (
+        <TrackingWidget
+          delivery={order.delivery}
+          trackingNumber={order.tracking_number}
+          carrier={order.carrier}
+        />
       )}
 
       {/* Shipping address */}
