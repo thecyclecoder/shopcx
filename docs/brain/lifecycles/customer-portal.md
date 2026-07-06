@@ -25,6 +25,18 @@ Every Appstle **mutation** (portal action, ticket handler, orchestrator, cron) r
 - **Checkout** ([[storefront-checkout]]) now persists it on the subscription insert (previously only the order carried it → migrated/portal reads showed "No address on file").
 - **Display**: the detail screen loads from `route=subscriptionDetail` (now resolves by **UUID** via the same id-shape branch), which runs the full fallback resolution. The screen no longer pieces data together from the list endpoint — the detail handler is the single source (address + pricing + coupons + payment method + fresh tax in one response).
 
+## Subscription list freshness — no stale state after navigation
+
+**Problem (fixed 2026-07):** when a customer opened a subscription detail page, cancelled the sub, then clicked 'All subscriptions', the list showed only active/paused subs *and* the just-cancelled sub still appeared active (stale). Two root causes: (1) the detail route (`src/app/portal/[slug]/subscriptions/[id]/page.tsx:129`) bootstrapped the subscriptions prop with only `['active','paused']` — excluding cancelled — while the main list page included cancelled; (2) the list's `SubscriptionsSection` was prop-driven and never refetched, so it rendered the pre-cancel snapshot the detail route handed it. The detail route's subs also never ran `priceSubscription`, so internal subs rendered unpriced (`$0`) whenever the list was shown from a detail-page navigation.
+
+**Fix (Phase 1):** the detail route's subscriptions bootstrap now:
+- Filters to `['active','paused','cancelled','expired']` — matching the main list page's scope
+- Runs `priceSubscription` (same as the main page handler) so the seed is priced, not just image-hydrated
+
+**Fix (Phase 2):** `SubscriptionsSection` now refetches the subscriptions list fresh from the `subscriptions` handler on mount / section-entry, replacing the bootstrap snapshot. The bootstrap prop stays as the first-paint seed (SSR-friendly), but the fresh fetch replaces it so a cancel/pause/reactivate performed on a detail page (or anywhere) shows the correct status on next view — no manual reload. Per-line pricing fixes automatically (the subscriptions handler already returns priced `pricing` via the commerce SDK).
+
+**Mechanics:** on mount, SubscriptionsSection (or the portal client when entering the subscriptions section) calls `GET /api/portal?route=subscriptions` (hitting `src/lib/portal/handlers/subscriptions.ts:195`), which buckets the live list into active/paused/cancelled/other and preserves the same ordering (active-first / paused / cancelled). Both surfaces (extension + mini-site) share this handler.
+
 ## Identifier discipline: UUID internally, contract id only at the Appstle edge
 
 A subscription's canonical key is its **UUID** (`subscriptions.id`). `shopify_contract_id` is an *external* detail — numeric for Appstle-billed subs, `internal-<hex>` for subs flipped to internal billing ([[subscription-billing]] § Migration path). It exists only to talk to Appstle.
