@@ -1,0 +1,16 @@
+-- Raise refresh_customer_segments' OWN statement_timeout so the daily cron survives.
+--
+-- Regression from 20260704160000: the set-based refresh runs ~56s for the 138K-subscriber
+-- book. That's fine over a direct pooler connection (the manual script + apply scripts), but
+-- the Inngest cron calls it via `admin.rpc(...)` through PostgREST, which enforces the DB
+-- role's short statement_timeout — so every daily run since 2026-07-05 died with "canceling
+-- statement due to statement timeout" and the back of the book went stale again.
+--
+-- ALTER FUNCTION ... SET applies the setting for the function's own execution (like SET LOCAL
+-- on entry), which re-arms the timeout for the whole call regardless of caller. 180s gives ~3x
+-- headroom over the current ~56s runtime while staying under Vercel's 300s function maxDuration
+-- (so if the book ever grows past 180s we get a clear DB error to act on, not a silent hang).
+-- Idempotent. Already applied to prod.
+--
+-- See docs/brain/inngest/refresh-customer-segments.md.
+alter function public.refresh_customer_segments(uuid, boolean) set statement_timeout to '180s';
