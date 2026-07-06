@@ -52,6 +52,16 @@ export interface BlueprintHeroData {
   ctaLabel: string;
 }
 
+/** One "reason" row (image + numbered headline + copy + CTA). Authored on
+ *  `lander_blueprints.content.reasons` — the grouped reason copy blocks split into discrete rows. */
+export interface ReasonItem {
+  n: number;
+  headline: string;
+  copy: string;
+  imageUrl: string | null;
+  imageAlt: string | null;
+}
+
 /** Everything the storefront blueprint-lander section needs to render. */
 export interface BlueprintRenderContent {
   blueprintId: string;
@@ -59,6 +69,8 @@ export interface BlueprintRenderContent {
   funnelType: string;
   /** Composited hero fields, when the blueprint carries a structured `content.hero`. */
   hero: BlueprintHeroData | null;
+  /** The 8 discrete reason rows, when the blueprint carries a structured `content.reasons`. */
+  reasons: ReasonItem[] | null;
   blocks: BlueprintRenderBlock[];
   /** Overall CTA copy authored by Carrie on `content.cta`. */
   cta: string | null;
@@ -206,6 +218,7 @@ export async function loadBlueprintRenderContent(
     productId,
     funnelType: blueprint.funnel_type,
     hero: (content as { hero?: BlueprintHeroData }).hero ?? null,
+    reasons: (content as { reasons?: ReasonItem[] }).reasons ?? null,
     blocks,
     cta: content.cta ?? null,
   };
