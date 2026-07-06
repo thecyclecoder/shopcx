@@ -330,14 +330,22 @@ export async function escalateSpecRowMissingBuild(
     // 1) Find originating repair job(s) whose authored_slug matches the parked build's slug. If the
     //    parked build has no slug there's no repair to match — jump straight to the activity emit.
     if (slug) {
-      // The originating repair's `instructions` is a JSON string; Postgres `->>` extracts the field as
-      // text so we can equality-match without pulling every workspace repair row into memory.
+      // repair-verify-spec-persisted-before-build Fix 1 — `public.agent_jobs.instructions` is a
+      // TEXT column (information_schema.columns.data_type='text'), so the PostgREST JSON-extraction
+      // operator `.filter("instructions->>authored_slug", "eq", slug)` silently matches 0 rows and
+      // NO originating repair ever surfaces. Use the text-column `ilike` precedent (the codebase's
+      // proven pattern for filtering JSON-string columns — see scripts/builder-worker.ts:11958 for
+      // the same shape on `dedupe_key`). `JSON.stringify` emits `"authored_slug":"value"` with no
+      // whitespace, so the pattern matches every stored ledger. The candidate ceiling + the
+      // compare-and-set update below narrow to the actual originating repair — a false-positive
+      // text match on an unrelated field can't corrupt state (the update predicate re-asserts
+      // workspace_id + expected status + .select('id')).
       const { data: candidates } = await admin
         .from("agent_jobs")
         .select("id, status, spec_slug")
         .eq("workspace_id", workspaceId)
         .eq("kind", "repair")
-        .filter("instructions->>authored_slug", "eq", slug)
+        .filter("instructions", "ilike", `%"authored_slug":"${slug}"%`)
         .in("status", ["completed", "needs_approval"])
         .order("created_at", { ascending: false })
         .limit(10);

@@ -59,13 +59,21 @@ interface ParsedInstr {
 }
 
 async function findPhantomCompletedRepairs(admin: ReturnType<typeof createAdminClient>): Promise<Array<PhantomRepairRow & { instr: ParsedInstr }>> {
+  // repair-verify-spec-persisted-before-build Fix 1 — `public.agent_jobs.instructions` is a TEXT
+  // column (information_schema.columns.data_type='text'), so the PostgREST JSON-extraction
+  // operator `.filter("instructions->>authored_slug", "not.is", null)` silently matches 0 rows,
+  // leaving the phase-3 hydrator blind to every phantom repair. Server-side prune with the
+  // text-column `ilike` precedent (scripts/builder-worker.ts:11958 does the same for
+  // `dedupe_key`) so only rows whose JSON body actually carries an `"authored_slug"` key round-
+  // trip; the client-side JSON.parse loop below is authoritative and filters again for a real
+  // slug, so a false-positive text match (e.g. a slug substring in an unrelated field) is safe.
   const { data: rows } = await admin
     .from("agent_jobs")
     .select("id, workspace_id, spec_slug, status, created_at, instructions")
     .eq("kind", "repair")
     .eq("status", "completed")
     .not("instructions", "is", null)
-    .filter("instructions->>authored_slug", "not.is", null)
+    .filter("instructions", "ilike", '%"authored_slug":%')
     .order("created_at", { ascending: false })
     .limit(500);
   const candidates: Array<PhantomRepairRow & { instr: ParsedInstr }> = [];
