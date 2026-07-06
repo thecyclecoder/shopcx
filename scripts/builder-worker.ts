@@ -8024,6 +8024,68 @@ async function runFoldJob(job: Job) {
     }
   }
 
+  // goal-promotion-fold-collision-and-held-surfacing Phase 1 — GOAL-BOUND DEFER (defense-in-depth). The
+  // gate above [[getAutoFoldEligibleSlugs]] already excludes goal-bound-in-flight specs, but a batch can
+  // ALSO be populated by the manual "Mark verified & archive" click ([[roadmap-actions]] `queueRoadmapBuild`
+  // → `enqueue_fold` RPC) which bypasses the eligibility rails. Re-assert the goal-in-flight check here:
+  // a spec whose parent goal has NOT yet been atomically promoted to main (stored `goals.status` ∈
+  // {`proposed`,`greenlit`}) is RELEASED back to `pending_folds` (status=`pending`, job_id=null) — not
+  // failed, not folded — so the next fold sweep re-evaluates it after `finalizePromotedGoal` flips the goal
+  // to `complete`. Prevents the fold PR from writing docs/brain to main WHILE the goal branch also edits
+  // it (the 2026-07-06 centralized-commerce-sdk incident). This is the SAME `isFoldSafeGivenGoalStatus`
+  // predicate the gate uses — one truth for what "safe to fold" means.
+  {
+    const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+    const { getGoal } = await import("../src/lib/goals-table");
+    const { isFoldSafeGivenGoalStatus } = await import("../src/lib/spec-test-runs");
+    const goalStatusCache = new Map<string, "proposed" | "greenlit" | "complete" | "folded" | null>();
+    const held: string[] = [];
+    const clear: string[] = [];
+    for (const slug of slugs) {
+      let goalSlug: string | null = null;
+      try {
+        goalSlug = await resolveGoalSlugForSpec(job.workspace_id, slug);
+      } catch {
+        goalSlug = null;
+      }
+      if (!goalSlug) {
+        clear.push(slug);
+        continue;
+      }
+      let goalStatus = goalStatusCache.get(goalSlug);
+      if (goalStatus === undefined) {
+        try {
+          const goal = await getGoal(job.workspace_id, goalSlug);
+          goalStatus = (goal?.status ?? null) as "proposed" | "greenlit" | "complete" | "folded" | null;
+        } catch {
+          goalStatus = null;
+        }
+        goalStatusCache.set(goalSlug, goalStatus);
+      }
+      if (isFoldSafeGivenGoalStatus(goalStatus)) {
+        clear.push(slug);
+      } else {
+        held.push(slug);
+      }
+    }
+    if (held.length) {
+      await db
+        .from("pending_folds")
+        .update({ status: "pending", job_id: null, updated_at: new Date().toISOString() })
+        .eq("job_id", job.id)
+        .in("spec_slug", held);
+      console.warn(`${tag} released goal-bound-in-flight specs (goal→main atomic promotion not yet landed): ${held.join(", ")}`);
+    }
+    slugs = clear;
+    if (!slugs.length) {
+      await update(job.id, {
+        status: "completed",
+        log_tail: `nothing foldable — released ${held.length} goal-bound-in-flight spec(s); awaiting M5 atomic goal→main promotion`,
+      });
+      return;
+    }
+  }
+
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]);

@@ -1640,7 +1640,7 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
   const admin = adminClient || createAdminClient();
   if (!ghToken()) return result;
   try {
-    const { listGoals, isGoalParentExempt } = await import("@/lib/goals-table");
+    const { listGoals, isGoalParentExempt, stampGoalPromotedToMain, stampGoalPromotionHeld } = await import("@/lib/goals-table");
     const { goalBranchState } = await import("@/lib/specs-table");
     const { mergeGoalBranchIntoMain } = await import("@/lib/github-pr-resolve");
 
@@ -1689,6 +1689,21 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         const merge = await mergeGoalBranchIntoMain(goalSlug);
         if (merge.conflict) {
           result.conflicts.push(goalSlug);
+          // goal-promotion-fold-collision-and-held-surfacing Phase 2 — PERSIST the HELD state on the goal
+          // row so the roadmap reader can surface "HELD — needs owner" with the exact conflict reason. The
+          // 2026-07-06 centralized-commerce-sdk incident's root failure was invisibility: the 409 was
+          // console.warn'd here and NOTHING else, so the founder found the goal live-broken. Fail OPEN if
+          // the write itself throws — a promote-pass failure never blocks the next pass; the console.warn
+          // + the in-memory `result.conflicts` still surface the conflict elsewhere.
+          try {
+            await stampGoalPromotionHeld(
+              goal.id,
+              merge.reason ?? "atomic goal→main merge returned 409 with no reason",
+              `m5-promote:${goalSlug}`,
+            );
+          } catch (e) {
+            console.warn(`[goal-main-promote] ${goalSlug} stampGoalPromotionHeld failed (continuing):`, e instanceof Error ? e.message : e);
+          }
           console.warn(`[goal-main-promote] ${goalSlug}: goal→main CONFLICT — promotion HELD, NOT stamped (${merge.reason})`);
           continue;
         }
@@ -1701,6 +1716,16 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
           result.notReady.push(goalSlug);
           console.warn(`[goal-main-promote] ${goalSlug}: not merged (${merge.reason ?? "unknown"})`);
           continue;
+        }
+        // goal-promotion-fold-collision-and-held-surfacing Phase 2 — PERSIST the atomic merge SHA on the
+        // goal row so the roadmap reader knows the goal's code has ACTUALLY landed on main. Also clears any
+        // prior HELD reason (a previously-409'd goal that just landed drops its badge in the same write).
+        // Runs BEFORE `applyGoalPromotionEffects` so any reader firing off the effect chain (spec-fold gate,
+        // control-tower heartbeat) sees the promoted state. Best-effort — never blocks the effects.
+        try {
+          await stampGoalPromotedToMain(goal.id, merge.mergeSha, `m5-promote:${goalSlug}`);
+        } catch (e) {
+          console.warn(`[goal-main-promote] ${goalSlug} stampGoalPromotedToMain failed (continuing):`, e instanceof Error ? e.message : e);
         }
         // Reva (deploy-guardian) — open an ATOMIC deploy-watch over the goal→main deploy BEFORE the shipped
         // stamp/fold (the watch snapshots the pre-deploy baseline; do it as close to the merge as possible).
