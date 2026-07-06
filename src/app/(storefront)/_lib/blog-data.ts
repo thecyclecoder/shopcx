@@ -105,7 +105,7 @@ export interface BlogPostFull extends BlogPostCard {
 }
 
 const WORKSPACE_COLS =
-  "id, name, storefront_slug, storefront_domain, support_email, meta_pixel_id, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url";
+  "id, name, storefront_slug, storefront_domain, support_email, storefront_font, storefront_primary_color, storefront_accent_color, storefront_logo_url, storefront_favicon_url";
 
 type WorkspaceRow = {
   id: string;
@@ -113,7 +113,6 @@ type WorkspaceRow = {
   storefront_slug: string | null;
   storefront_domain: string | null;
   support_email: string | null;
-  meta_pixel_id: string | null;
   storefront_font: string | null;
   storefront_primary_color: string | null;
   storefront_accent_color: string | null;
@@ -128,7 +127,10 @@ function shapeWorkspace(ws: WorkspaceRow): BlogWorkspace {
     storefront_slug: ws.storefront_slug,
     storefront_domain: ws.storefront_domain,
     support_email: ws.support_email,
-    meta_pixel_id: ws.meta_pixel_id || null,
+    // `workspaces.meta_pixel_id` was never added by a migration — selecting it errored the whole
+    // query (→ null workspace → notFound() in a `use cache` scope → build fail). Null until the
+    // column + population land as a proper follow-up; BlogPixelInit no-ops on a null pixel id.
+    meta_pixel_id: null,
     design: {
       font_key: ws.storefront_font || null,
       primary_color: ws.storefront_primary_color || null,
