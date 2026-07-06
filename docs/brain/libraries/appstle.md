@@ -1,6 +1,6 @@
 # libraries/appstle
 
-**Status:** Deprecated for internal surfaces (M4 migrated dashboard + agent + AI to [[../libraries/commerce__subscription]]). Portal surfaces still use appstle; M5 will retire the portal shims.
+**Status:** Deprecated. M4 migrated dashboard + agent + AI to [[../libraries/commerce__subscription]]. M5 (2026-06-20) migrated portal surfaces to the Commerce SDK; legacy appstle.ts shims are preserved for backward compatibility but portal no longer calls them directly.
 
 Legacy Appstle Subscriptions API client. Per-workspace API key + shop domain. Every helper checks `isInternalSubscription()` first and routes to `internal-subscription.ts` for internal subs. See [[../integrations/appstle]].
 
