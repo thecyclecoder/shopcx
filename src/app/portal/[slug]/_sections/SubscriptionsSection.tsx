@@ -12,8 +12,15 @@
  * Reads from our `subscriptions` table — dual-handles Appstle
  * (is_internal=false/null) and internally-managed (is_internal=true)
  * rows with no caller-visible distinction.
+ *
+ * The bootstrap prop is a first-paint seed; on mount / section entry
+ * we refetch the portal `subscriptions` handler and render from that,
+ * so a cancel/pause/reactivate performed on a detail page (or anywhere)
+ * shows the correct status the next time the list is viewed — no
+ * manual reload.
  */
 
+import { useEffect, useState } from "react";
 import type { PortalSubscription } from "../page";
 import { friendlyCadence } from "@/lib/portal/helpers/cadence";
 
@@ -22,7 +29,31 @@ interface Props {
   workspace: { primaryColor: string };
 }
 
-export function SubscriptionsSection({ subscriptions, workspace }: Props) {
+export function SubscriptionsSection({ subscriptions: bootstrap, workspace }: Props) {
+  const [subscriptions, setSubscriptions] = useState<PortalSubscription[]>(bootstrap);
+
+  // Refetch the live list from the portal handler on section entry so
+  // the bootstrap snapshot handed in by the server can't stick around
+  // after a status change on the detail page. See docstring above.
+  useEffect(() => {
+    let cancelledFetch = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/portal?route=subscriptions", { credentials: "same-origin" });
+        if (!res.ok) return;
+        const body = await res.json();
+        if (!body?.ok || !Array.isArray(body.contracts)) return;
+        const fresh = (body.contracts as HandlerContract[])
+          .map(contractToPortalSubscription)
+          .filter((s): s is PortalSubscription => s !== null);
+        if (!cancelledFetch) setSubscriptions(fresh);
+      } catch {
+        /* keep the bootstrap; a network hiccup shouldn't clear the list */
+      }
+    })();
+    return () => { cancelledFetch = true; };
+  }, []);
+
   const active = subscriptions.filter((s) => s.status === "active");
   const paused = subscriptions.filter((s) => s.status === "paused");
   const cancelled = subscriptions.filter((s) => s.status === "cancelled");
@@ -80,6 +111,67 @@ export function SubscriptionsSection({ subscriptions, workspace }: Props) {
       )}
     </div>
   );
+}
+
+// The `contracts` shape returned by /api/portal?route=subscriptions.
+// Transformed frontend contract from transformSubscription() + the
+// portalState bucket the handler attaches. Only the fields we consume
+// here are typed — everything else on the response is ignored.
+interface HandlerContract {
+  internal_id: string;
+  shopify_contract_id: string;
+  is_internal: boolean | null;
+  lines: Array<{
+    title: string;
+    variantTitle: string;
+    quantity: number;
+    sku: string;
+    currentPrice: { amount: string; currencyCode: string };
+    basePrice: { amount: string; currencyCode: string } | null;
+    variantImage: { transformedSrc: string };
+    is_gift: boolean;
+  }>;
+  billingPolicy: { interval: string; intervalCount: number };
+  nextBillingDate: string | null;
+  pricing?: PortalSubscription["pricing"];
+  appliedDiscounts?: Array<{ title?: string | null; value?: number | null; valueType?: string | null }>;
+  portalState: { bucket: "active" | "paused" | "cancelled" | "other" };
+}
+
+// Map the handler's transformed contract back into the DB-shaped
+// PortalSubscription the section renders. Uses portalState.bucket
+// as the effective status so 'expired' folds into 'cancelled' the
+// same way the handler already treats it. Returns null for 'other'
+// so unrecognised statuses never leak into the customer-facing list.
+function contractToPortalSubscription(c: HandlerContract): PortalSubscription | null {
+  const bucket = c.portalState?.bucket ?? "other";
+  if (bucket === "other") return null;
+  return {
+    id: c.internal_id,
+    shopify_contract_id: c.shopify_contract_id,
+    status: bucket,
+    items: (c.lines || []).map((l) => ({
+      title: l.title,
+      variant_title: l.variantTitle || null,
+      quantity: l.quantity,
+      price_cents: Math.round(parseFloat(l.currentPrice.amount) * 100),
+      base_price_cents: l.basePrice ? Math.round(parseFloat(l.basePrice.amount) * 100) : null,
+      sku: l.sku || null,
+      image_url: l.variantImage?.transformedSrc || null,
+      is_gift: l.is_gift,
+    })),
+    billing_interval: (c.billingPolicy?.interval || "").toLowerCase(),
+    billing_interval_count: c.billingPolicy?.intervalCount || 1,
+    next_billing_date: c.nextBillingDate,
+    applied_discounts: (c.appliedDiscounts || []).map((d) => ({
+      title: d.title ?? undefined,
+      value: d.value ?? undefined,
+      valueType: d.valueType ?? undefined,
+    })),
+    is_internal: c.is_internal,
+    delivery_price_cents: null,
+    pricing: c.pricing,
+  };
 }
 
 function pillClasses(kind: string): string {

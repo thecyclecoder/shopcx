@@ -126,7 +126,7 @@ export default async function SubscriptionDetailPage({
     .select("id, shopify_contract_id, status, items, billing_interval, billing_interval_count, next_billing_date, applied_discounts, is_internal, delivery_price_cents")
     .eq("workspace_id", workspaceId)
     .in("customer_id", linkedIds)
-    .in("status", ["active", "paused"])
+    .in("status", ["active", "paused", "cancelled"])
     .order("created_at", { ascending: false });
 
   const { data: orders } = await admin
