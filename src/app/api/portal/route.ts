@@ -16,19 +16,9 @@ import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { findCustomer, resolveSub } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-
-// Content/schedule/discount mutations blocked until the first order is
-// delivered (route keys are lowercased by the dispatcher). NOT gated: cancel,
-// pause/resume, reactivate, payment, address (legit pre-ship fix), order-now.
-const MUTATION_GATED_ROUTES = new Set([
-  "replacevariants", "replace_variants",
-  "removelineitem", "remove_line_item",
-  "coupon",
-  "frequency",
-  "changedate", "change_date",
-  "shippingprotection", "shipping_protection",
-  "loyaltyapplytosubscription", "loyalty_apply_to_subscription",
-]);
+// Phase 2: every subscription mutation is gated while the first-delivery window
+// holds — the route list lives with the gate itself so it can be unit-tested.
+import { MUTATION_GATED_ROUTES } from "@/lib/portal/mutation-guard";
 
 function jsonErr(body: Record<string, unknown>, status = 400) {
   return NextResponse.json({ ok: false, ...body }, { status });
@@ -129,11 +119,12 @@ async function handle(req: NextRequest) {
       try { requestPayload = await req.clone().json(); } catch { /* not JSON */ }
     }
 
-    // First-delivery gate: content/schedule/discount mutations are blocked
-    // until the subscription's first order has been delivered (anti-gaming).
-    // Centralized here so it covers both the in-house + Shopify portals. Cancel,
-    // pause/resume, payment, address (legit pre-ship fix), and order-now are NOT
-    // gated. See [[mutation-guard]].
+    // First-delivery gate: EVERY subscription mutation is blocked until the
+    // first order is delivered (anti-gaming). Centralized here so it covers both
+    // the in-house + Shopify portals. Phase 2 expanded the set from just
+    // content/schedule/discount to every lifecycle + payment + address + order-now
+    // route — the sub is truly read-only during the first-delivery window. Route
+    // list is exported from [[mutation-guard]] so it stays testable.
     if (MUTATION_GATED_ROUTES.has(route) && auth.workspaceId && auth.loggedInCustomerId) {
       const payloadObj = (requestPayload || {}) as Record<string, unknown>;
       const sub = await resolveSub(createAdminClient(), auth.workspaceId, payloadObj.contractId, auth.loggedInCustomerId);

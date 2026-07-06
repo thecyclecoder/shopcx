@@ -295,7 +295,10 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         </div>
       )}
 
-      {/* Pre-delivery gate — changes unlock once the first order is delivered. */}
+      {/* Pre-delivery gate — the subscription is READ-ONLY (Phase 2). Every
+          mutating action is gated on the backend AND hidden from the UI here;
+          the banner sets that expectation without the misleading
+          "cancel/update payment anytime" language it used to carry. */}
       {contract.portalState?.mutationsLocked && (
         <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
           <p className="flex items-center gap-2 text-sm font-semibold text-sky-900">
@@ -303,7 +306,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
             {contract.portalState.deliveryState === "in_transit" ? "Your first order is on its way!" : "Your first order is being prepared"}
           </p>
           <p className="mt-1 text-xs text-sky-800">
-            Once it&apos;s delivered, you&apos;ll be able to fully manage your subscription here — swap products, change quantities, adjust your schedule, and more. You can still cancel or update your payment method anytime.
+            Your subscription is read-only until your first order is delivered. Once it arrives, you&apos;ll be able to fully manage it here — swap products, change quantities, adjust your schedule, and more.
           </p>
         </div>
       )}
@@ -344,14 +347,16 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       </article>
 
       {/* Lifecycle control — sits above the items so the primary state action
-          (pause / resume / reactivate) is front-and-center. */}
-      {status === "active" && (
+          (pause / resume / reactivate) is front-and-center. Hidden while the
+          first-delivery gate holds (Phase 2 — pause/resume/reactivate are all
+          gated on the backend; the button should not be offered). */}
+      {status === "active" && !contract.portalState?.mutationsLocked && (
         <PauseCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
       )}
-      {status === "paused" && (
+      {status === "paused" && !contract.portalState?.mutationsLocked && (
         <ResumeCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
       )}
-      {isCancelled && (
+      {isCancelled && !contract.portalState?.mutationsLocked && (
         <ReactivateCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
       )}
 
@@ -394,14 +399,20 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
               action={action}
             />
           )}
-          <AddressCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          {!contract.portalState?.mutationsLocked && (
+            <AddressCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          )}
           {!contract.portalState?.mutationsLocked && (
             <CouponCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
           )}
-          <PaymentMethodCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          {!contract.portalState?.mutationsLocked && (
+            <PaymentMethodCard contract={contract} primaryColor={workspace.primaryColor} onMutate={loadContract} action={action} />
+          )}
           <RewardsCard contract={contract} primaryColor={workspace.primaryColor} action={action} />
           {productIdsForReviews.length > 0 && <ReviewsCard productIds={productIdsForReviews} />}
-          <CancelCard onStart={() => setCancelMode(true)} />
+          {!contract.portalState?.mutationsLocked && (
+            <CancelCard onStart={() => setCancelMode(true)} />
+          )}
         </>
       )}
 

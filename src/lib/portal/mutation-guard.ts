@@ -33,6 +33,45 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 
+/**
+ * Every portal subscription-mutating route that is BLOCKED while the gate holds
+ * (canMutateSubscription → allowed=false). The dispatcher lowercases `route`
+ * before the gate check (src/app/api/portal/route.ts:119), so every key here is
+ * lowercase; we include both the concatenated (camelCase-lowered) and the
+ * underscored variant so a client sending either lands the gate.
+ *
+ * Phase 2 expansion: the gate now covers EVERY subscription-touching action —
+ * not just content/schedule/discount. During the first-delivery window the
+ * subscription is truly read-only: no cancel, no pause/resume/reactivate, no
+ * order-now, no payment-method change, no address change, no cancel-journey
+ * transition. Any exception lets a customer bypass the anti-gaming intent
+ * (e.g. cancel-then-repurchase to re-hit the intro deal, or pause+resume to
+ * reset the schedule).
+ */
+export const MUTATION_GATED_ROUTES = new Set([
+  // Content / schedule / discount (Phase 1 set).
+  "replacevariants", "replace_variants",
+  "removelineitem", "remove_line_item",
+  "coupon",
+  "frequency",
+  "changedate", "change_date",
+  "shippingprotection", "shipping_protection",
+  "loyaltyapplytosubscription", "loyalty_apply_to_subscription",
+  // Lifecycle (Phase 2).
+  "cancel",
+  "pause",
+  "resume",
+  "reactivate",
+  "canceljourney", "cancel_journey",
+  // Order-now (Phase 2) — pulling forward the next box skips the first-delivery observation window.
+  "ordernow", "order_now",
+  // Payment method (Phase 2) — mutating card details on a not-yet-delivered sub is a common attack shape.
+  "updatepaymentmethod", "update_payment_method",
+  "setsubscriptionpaymentmethod", "set_subscription_payment_method",
+  // Address (Phase 2) — pre-delivery address changes are a fraud/mis-ship risk.
+  "address",
+]);
+
 /** Don't re-hit EasyPost more than once per this window per order. */
 const LOOKUP_THROTTLE_MS = 30 * 60 * 1000;
 

@@ -14,7 +14,37 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideMutationGate, type GateOrder } from "./mutation-guard";
+import { decideMutationGate, MUTATION_GATED_ROUTES, type GateOrder } from "./mutation-guard";
+
+// Phase 2 — MUTATION_GATED_ROUTES expansion. All keys must be lowercase because
+// the portal dispatcher normalizes `route` via .toLowerCase() before the gate
+// check runs (src/app/api/portal/route.ts:119).
+test("MUTATION_GATED_ROUTES gates every subscription-mutating route named in the spec (Phase 2)", () => {
+  const required = [
+    // Existing (Phase 1 set) — must survive the expansion.
+    "replacevariants", "replace_variants",
+    "removelineitem", "remove_line_item",
+    "coupon",
+    "frequency",
+    "changedate", "change_date",
+    "shippingprotection", "shipping_protection",
+    "loyaltyapplytosubscription", "loyalty_apply_to_subscription",
+    // Phase 2 additions — the full spec-named list.
+    "cancel",
+    "pause",
+    "resume",
+    "reactivate",
+    "canceljourney", "cancel_journey",
+    "ordernow", "order_now",
+    "updatepaymentmethod", "update_payment_method",
+    "setsubscriptionpaymentmethod", "set_subscription_payment_method",
+    "address",
+  ];
+  for (const key of required) {
+    assert.equal(MUTATION_GATED_ROUTES.has(key), true, `MUTATION_GATED_ROUTES missing "${key}" (Phase 2 verification bullet 3)`);
+    assert.equal(key, key.toLowerCase(), `"${key}" must be lowercase — the dispatcher lowercases the incoming route before matching`);
+  }
+});
 
 const NOW = new Date("2026-07-06T12:00:00Z").getTime();
 
