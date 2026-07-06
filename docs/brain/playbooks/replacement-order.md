@@ -119,6 +119,57 @@ This playbook is for cases where we replace; the [[refund]] playbook is for case
 
 Sonnet classifies the intent during step 0 (clarify_issue) and if the intent is actually "refund" not "replace," the orchestrator switches playbooks via the action executor.
 
+## $-bearing replacement variant (`dollar_replacement`)
+
+Phase 3 of [[../specs/commerce-sdk-actions-create-order-create-subscription-refund-and-dollar-replacement]] added a compound "ship a replacement AND move money" primitive that the compiler loop + AI direct actions consume. Two flavors, both routed through `commerce/replacement.issueDollarReplacement` in [[../libraries/commerce__replacement]]:
+
+- **Refund flavor** — ship a replacement + refund `replacement_amount_cents` back on the original order. Used when the customer both needs the product AND is owed money back (e.g. shipping protection they paid for that didn't help, or a partial refund on a defective item that we're also replacing).
+- **Upcharge flavor** — ship a replacement AND bill the customer via `commerce/subscription.subscriptionOrderNow`. Used for upgrades / paid add-ons rolled into a replacement.
+
+### Atomicity (compensating rollback)
+
+The two halves are NOT wrapped in a single Supabase transaction (Shopify + Braintree are external systems). Instead the flow is a record-first / compensate-on-failure pattern:
+
+1. `issueReplacement` runs FIRST — inserts the `replacements` row + creates the Shopify draft-complete order. If this half fails, no money moves. Exit early.
+2. The money half (`commerce/refund.issueRefund` for the refund flavor, `subscriptionOrderNow` for the upcharge flavor) runs SECOND.
+3. If the money half fails, `rollbackReplacement` compensates by deleting the just-created `replacements` row. The delete is guarded on `workspace_id` (never cross-tenant) + `id` (exactly one row) + `status NOT IN ('shipped','delivered')` (never destroy a fulfilled row if a race put us there) + `.select('id')` (assert exactly one row transitioned).
+
+The Shopify order itself cannot be "un-created" — the guarantee this pattern preserves is **no orphan `replacements` row survives a failed refund**. Downstream reconcilers that trust "every replacements row has matching money movement" get that from this compound.
+
+### `order_refunds` mirror write (best-effort)
+
+On a successful refund half, the SDK writes an `order_refunds` mirror row (`{ workspace_id, order_id, replacement_id, amount_cents, method, refund_id, reason }`) so the shared reconciliation lens can see both sides of the movement. The mirror table itself lands with the M1 spec ([[../specs/returns-refund-internal-aware-dispatcher]] § order_refunds mirror); until it does, this insert soft-fails with a warning — the refund itself already succeeded (money moved) so a mirror miss never triggers rollback.
+
+### Example — refund flavor
+
+```ts
+import { issueDollarReplacement } from "@/lib/commerce/replacement";
+
+const result = await issueDollarReplacement(workspaceId, {
+  customerId,
+  shopifyCustomerId,
+  items: [{ variantId: "42614433513645", quantity: 1 }],
+  shippingAddress: { address1: "123 Main St", city: "Austin", provinceCode: "TX", zip: "78701", countryCode: "US" },
+  reason: "damaged_items",
+  originalOrderNumber: "SC132201",
+  ticketId,
+  initiatedBy: "ai",
+  refund: {
+    orderId: originalOrderInternalUuid,
+    amountCents: 1000, // $10 refund back on the original order
+    reason: "Partial refund alongside replacement (damaged items)",
+    source: "ai",
+    eventProperties: { ticket_id: ticketId },
+  },
+});
+// result.success === true → replacements row + refund + order_refunds mirror all landed
+// result.success === false && result.rolledBack === true → refund failed, replacements row deleted
+```
+
+### Direct-action wire-up
+
+The AI orchestrator emits action `type: "dollar_replacement"` — handled by `directActionHandlers.dollar_replacement` in [[../libraries/action-executor]]. Action shape: `{ variant_id, quantity, replacement_amount_cents, shopify_order_id | order_number, reason, address? }`. The handler resolves the customer's Shopify id + the original order's internal UUID + a shipping address (explicit → order-match → sub → recent order fallback chain), then delegates.
+
 ## Address fallback
 
 If the order ingestion ran without addresses (rare — see [[../lifecycles/fraud-detection]] address fallback chain), this playbook can stall at step 5 without a confirmable address. The shipping-address journey would have nothing to compare against. The fallback: ask the customer outright, validate via EasyPost, save back.

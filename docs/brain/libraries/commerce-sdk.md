@@ -64,6 +64,25 @@ Callsites migrated to `commerce/refund.issueRefund` in Phase 2:
 
 Callsites that still call `@/lib/refund.refundOrder` directly (unchanged): the `returns-issue-refund` Inngest step, the ticket-detail Improve tab refund route, the manual return-refund route, the fraud-case `cancel_refund_orders` step (see [[../reference/commerce-sdk-inventory]] § Defect register). Those migrate as their surrounding surfaces move onto commerce/*.
 
+## Mutation ops — replacement (Phase 3 of [[../specs/commerce-sdk-actions-create-order-create-subscription-refund-and-dollar-replacement]])
+
+### `issueReplacement(workspaceId, args)`
+
+`src/lib/commerce/replacement.ts` — SDK-side wrapper over [[../../src/lib/replacement-order]] `createReplacementOrder`. Kept as a thin surface so future concerns (per-workspace policy checks, mirror writes) drop in at the SDK boundary without touching every callsite.
+
+### `issueDollarReplacement(workspaceId, args)`
+
+`src/lib/commerce/replacement.ts` — the $-bearing replacement variant. Ships a replacement AND moves money atomically. Two flavors:
+
+- **Refund flavor** (`args.refund = { orderId, amountCents, reason }`) — replacement + refund back on the original order via `commerce/refund.issueRefund`. On success, best-effort mirror write to `order_refunds` (the mirror table ships with the M1 spec — until it does, the insert soft-fails with a warning; the refund already moved money, so a mirror miss is never a rollback trigger).
+- **Upcharge flavor** (`args.upcharge = { contractId }`) — replacement + fresh bill_now via `commerce/subscription.subscriptionOrderNow`.
+
+Atomicity (compensating rollback): the replacement is created FIRST (record-first — `replacements` row + Shopify draft-complete). If the money half fails, `rollbackReplacement` deletes the just-created row so no orphan record survives. The delete is guarded on `workspace_id` (never cross-tenant) + `id` (exactly one row) + `status NOT IN ('shipped','delivered')` (never destroy a fulfilled row on a race) + `.select('id')` (assert exactly one row transitioned; zero → treat as no-op).
+
+Testability: `issueDollarReplacement` accepts an optional `_deps` param (Partial<DollarReplacementDeps>) so the atomicity harness in [[../../src/lib/commerce/replacement.dollar.test]] can drive it deterministically without standing up Supabase + Shopify + Braintree. Real callers omit the param and get production wiring.
+
+Wired to `directActionHandlers.dollar_replacement` in [[action-executor]] — action shape `{ variant_id, quantity, replacement_amount_cents, shopify_order_id | order_number, reason, address? }`. See [[../playbooks/replacement-order#-bearing-replacement-variant-dollar_replacement]] for the operator-facing description.
+
 ## Related
 
 - [[../reference/commerce-sdk-inventory]] — per-callsite migration ledger
