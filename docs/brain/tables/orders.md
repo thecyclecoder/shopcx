@@ -44,6 +44,7 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 | `easypost_detail` | `text` | ✓ |  |
 | `easypost_location` | `text` | ✓ |  |
 | `easypost_checked_at` | `timestamptz` | ✓ |  |
+| `easypost_tracking` | `jsonb` | ✓ | Cached EasyPost Tracker milestone events (structured `{ events: [{ status, message, datetime, tracking_location }] }`). Complements the plain-text `easypost_detail`. Populated by the portal order-detail delivery resolver ([[../specs/portal-order-detail-tracking-widget]] Phase 2) on internal (Shopify-order-id-null) shipments, throttled to once per UTC day; not written on Shopify-fulfilled orders (they use `fulfillments.trackingInfo` instead). |
 | `billing_address` | `jsonb` | ✓ |  |
 | `payment_details` | `jsonb` | ✓ |  |
 | `landing_site` | `text` | ✓ |  |
