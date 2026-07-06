@@ -8,6 +8,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
+import { unbackedEffectClaim } from "@/lib/claim-guard";
 
 // ── Types ──
 
@@ -2060,7 +2061,18 @@ export async function executeSonnetDecision(
       break;
 
     case "kb_response":
-    case "ai_response":
+    case "ai_response": {
+      // Claim↔action binding guard (Phase 0). This path attaches NO actions, so
+      // a first-person completed-effect assertion in the reply ("I've refunded
+      // you", "your subscription has been cancelled") is by definition unbacked
+      // — the #1 false-promise mechanism. Block it and escalate to a human
+      // rather than ship a lie. Fail-safe + deterministic (no model).
+      const unbackedClaim = unbackedEffectClaim(decision.response_message, new Set<string>());
+      if (unbackedClaim) {
+        await sysNote(`[Guard] Blocked unbacked "${unbackedClaim}" claim in ${decision.action_type} — no action was attached. Escalating instead of sending a false promise.`);
+        await escalateTicket(ctx, `blocked_unbacked_claim:${unbackedClaim}`);
+        break;
+      }
       if (decision.response_message) {
         await trackedSend(decision.response_message, ctx.sandbox);
       }
@@ -2079,6 +2091,7 @@ export async function executeSonnetDecision(
         await escalateTicket(ctx, "ai_holding_promise");
       }
       break;
+    }
 
     case "escalate":
       await handleEscalate(ctx, decision, trackedSend, sysNote);
