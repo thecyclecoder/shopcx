@@ -117,6 +117,18 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-900/40",
     dot: "bg-sky-500", ring: "bg-sky-50 dark:bg-sky-900/20", accent: "text-sky-600 dark:text-sky-400",
   },
+  // Explicit "cs-director" alias so surfaces can look up the CS Director agent by its
+  // named key — matching how platform-director / growth-director are referenced across
+  // the org chart + inbox. Same June identity as the `cs` function-slug key; identity +
+  // placement scaffold for M5 (see docs/brain/libraries/cs-director.md).
+  "cs-director": {
+    key: "cs-director", name: "June", role: "CS Director", emoji: "💬",
+    personality: "Warm, fast, customer-first — turns tickets into product fixes. Supervises the ticket-improve loop + escalation-triage quorum, authors ticket-derived specs, escalates anything outside the CS leash to the CEO. Operates + authors, never builds.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "june", avatarUrl: `${AV}june-cs.jpg?v=4`,
+    chip: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-900/40",
+    dot: "bg-sky-500", ring: "bg-sky-50 dark:bg-sky-900/20", accent: "text-sky-600 dark:text-sky-400",
+  },
   retention: {
     key: "retention", name: "Theo", role: "Retention", emoji: "🧲",
     personality: "Calm closer — keeps people subscribed, recovers the dunning saves.",
