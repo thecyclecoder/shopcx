@@ -97,8 +97,11 @@ export function BlueprintLander({
   content: BlueprintRenderContent;
 }) {
   const price = lowestPriceCents(data);
-  // The composited hero replaces the generic "hero" copy block; render the rest below it.
-  const bodyBlocks = content.blocks.filter((b) => b.role.toLowerCase() !== "hero");
+  // Only when a composited hero renders does it REPLACE the generic "hero" copy block;
+  // without one, keep rendering every block (no regression for blueprints lacking content.hero).
+  const bodyBlocks = content.hero
+    ? content.blocks.filter((b) => b.role.toLowerCase() !== "hero")
+    : content.blocks;
   return (
     <>
       {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} />}
