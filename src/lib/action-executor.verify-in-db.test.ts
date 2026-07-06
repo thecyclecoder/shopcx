@@ -279,10 +279,195 @@ test("skip_next_order — subscription row missing entirely → verified FALSE",
   assert.equal(await verifyActionInDB(ctx, action), false);
 });
 
-// ── unmapped types fall through ───────────────────────────────────────
+// ── swap_variant / add_item / remove_item / change_quantity / update_line_item_price ──
+// (Phase 2 — item-op + price cases.)
+// All read subscriptions.items[] — a jsonb array of { variant_id, quantity, price_cents }
+// (see docs/brain/tables/subscriptions.md; there is no standalone subscription_items table).
 
-test("unknown/uncovered action type falls through to true (fail-safe pattern preserved)", async () => {
-  const ctx = makeCtx({});
-  const action: ActionParams = { type: "some_future_action" };
+test("swap_variant — target line's variant_id equals action.new_variant_id → verified TRUE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "NEW_V", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = {
+    type: "swap_variant",
+    contract_id: "SC1",
+    old_variant_id: "OLD_V",
+    new_variant_id: "NEW_V",
+  };
   assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("swap_variant — HANDLER SAID SUCCESS but subscription_items still points at the OLD variant_id → verified FALSE", async () => {
+  // The named failing state the spec's Verification bullet #2 calls out.
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "OLD_V", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = {
+    type: "swap_variant",
+    contract_id: "SC1",
+    old_variant_id: "OLD_V",
+    new_variant_id: "NEW_V",
+  };
+  assert.equal(await verifyActionInDB(ctx, action), false);
+});
+
+test("add_item — a line exists for action.variant_id under the contract → verified TRUE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V123", quantity: 2, price_cents: 4500 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "add_item", contract_id: "SC1", variant_id: "V123", quantity: 2 };
+  assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("add_item — no line matches action.variant_id → verified FALSE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V999", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "add_item", contract_id: "SC1", variant_id: "V123", quantity: 1 };
+  assert.equal(await verifyActionInDB(ctx, action), false);
+});
+
+test("remove_item — no line for action.variant_id remains → verified TRUE (row is absent)", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V_OTHER", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "remove_item", contract_id: "SC1", variant_id: "V_GONE" };
+  assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("remove_item — HANDLER SAID SUCCESS but the line is still present → verified FALSE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V_STILL", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "remove_item", contract_id: "SC1", variant_id: "V_STILL" };
+  assert.equal(await verifyActionInDB(ctx, action), false);
+});
+
+test("change_quantity — subscription_items.quantity matches action.quantity → verified TRUE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V1", quantity: 3, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "change_quantity", contract_id: "SC1", variant_id: "V1", quantity: 3 };
+  assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("change_quantity — quantity mismatch → verified FALSE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V1", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "change_quantity", contract_id: "SC1", variant_id: "V1", quantity: 3 };
+  assert.equal(await verifyActionInDB(ctx, action), false);
+});
+
+test("change_item_quantity — alias name behaves the same as change_quantity", async () => {
+  // The spec's Phase-2 bullet names `change_item_quantity`; the live
+  // handler dispatch key is `change_quantity`. Both action-type strings
+  // land on the same verify case.
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V1", quantity: 4, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "change_item_quantity", contract_id: "SC1", variant_id: "V1", quantity: 4 };
+  assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("update_line_item_price — price_cents on the target line matches action.base_price_cents → verified TRUE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V1", quantity: 1, price_cents: 2500 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "update_line_item_price", contract_id: "SC1", variant_id: "V1", base_price_cents: 2500 };
+  assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("update_line_item_price — price_cents mismatch → verified FALSE", async () => {
+  const ctx = makeCtx({
+    subscriptions: [
+      {
+        id: "s1",
+        shopify_contract_id: "SC1",
+        items: [{ variant_id: "V1", quantity: 1, price_cents: 3200 }],
+      },
+    ],
+  });
+  const action: ActionParams = { type: "update_line_item_price", contract_id: "SC1", variant_id: "V1", base_price_cents: 2500 };
+  assert.equal(await verifyActionInDB(ctx, action), false);
+});
+
+// ── unmapped types fall through (with a WARN) ─────────────────────────
+
+test("unknown/uncovered action type falls through to true AND writes a WARN naming the type (fail-safe pattern)", async () => {
+  const warnLog: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (msg: unknown) => { warnLog.push(String(msg)); };
+  try {
+    const ctx = makeCtx({});
+    const action: ActionParams = { type: "some_future_action" };
+    assert.equal(await verifyActionInDB(ctx, action), true);
+    // A single-line WARN entry naming the uncovered type — the
+    // observability handle the spec's Phase-2 bullet names.
+    assert.equal(warnLog.length, 1);
+    assert.match(warnLog[0], /verifyActionInDB/);
+    assert.match(warnLog[0], /some_future_action/);
+  } finally {
+    console.warn = origWarn;
+  }
 });

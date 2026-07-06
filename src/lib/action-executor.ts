@@ -2371,8 +2371,75 @@ export async function verifyActionInDB(
       }
       return true;
     }
+    case "swap_variant":
+    case "add_item":
+    case "remove_item":
+    case "change_quantity":
+    case "change_item_quantity":
+    case "update_line_item_price": {
+      // Item-op / base-price cases all read the subscription's `items` jsonb
+      // (there is no standalone subscription_items table — the mirror lives
+      // as an array on subscriptions.items; see docs/brain/tables/subscriptions.md
+      // and src/lib/subscription-items.ts). Each entry carries { variant_id,
+      // quantity, price_cents } — the columns the spec's phase-2 bullets
+      // name. Verify against that array.
+      if (!action.contract_id) return true;
+      const { data: sub } = await admin.from("subscriptions")
+        .select("items")
+        .eq("shopify_contract_id", action.contract_id).single();
+      type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
+      const items = (sub?.items || []) as Line[];
+
+      if (action.type === "swap_variant") {
+        // Post-swap: the target line's variant_id should equal
+        // action.new_variant_id; the pre-swap variant_id should be gone
+        // (unless the customer had it on multiple lines — we only assert
+        // the invariant the spec names: NEW is present).
+        const newVid = action.new_variant_id || (action as { new_id?: string }).new_id;
+        if (!newVid) return true;
+        return items.some(i => String(i.variant_id) === String(newVid));
+      }
+
+      if (action.type === "add_item") {
+        if (!action.variant_id) return true;
+        return items.some(i => String(i.variant_id) === String(action.variant_id));
+      }
+
+      if (action.type === "remove_item") {
+        const vid = action.variant_id || (action as { variantId?: string }).variantId;
+        if (!vid) return true;
+        return !items.some(i => String(i.variant_id) === String(vid));
+      }
+
+      if (action.type === "change_quantity" || action.type === "change_item_quantity") {
+        if (!action.variant_id || action.quantity == null) return true;
+        const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+        if (!line) return false;
+        return Number(line.quantity) === Number(action.quantity);
+      }
+
+      // update_line_item_price — base-price restore. Compare price_cents
+      // on the target line. Handler resolves candidate variants when
+      // action.variant_id is stale (crisis-swap history); here we verify
+      // ONLY the explicit variant_id the caller declared, since that's
+      // the invariant the spec's bullet names ("subscription_items.price_cents
+      // matches action.base_price_cents"). If a self-healed swap-target
+      // ended up carrying the new price on a different variant, that
+      // still passes the handler's own success flag; verifyActionInDB
+      // stays conservative and reads only what the action declared.
+      if (action.variant_id == null || action.base_price_cents == null) return true;
+      const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+      if (!line) return false;
+      return Number(line.price_cents) === Number(action.base_price_cents);
+    }
     default:
-      // No verification logic for this action type — assume OK
+      // Fail-safe: no verification wired for this action type yet —
+      // return true so we don't wrongly escalate, but WARN so coverage
+      // gaps are OBSERVABLE (grep server logs for "[verifyActionInDB]").
+      // Spec Phase-2 bullet: "unknown/still-uncovered action types fall
+      // through to 'return true' with a WARN-level console log naming
+      // the uncovered type so we can watch coverage grow".
+      console.warn(`[verifyActionInDB] uncovered action type — assuming OK: ${action.type}`);
       return true;
   }
 }
