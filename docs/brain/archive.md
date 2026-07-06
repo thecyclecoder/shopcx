@@ -19,6 +19,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Portal order detail: delivery tracking widget** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
 - **Portal: quote subscription tax on the post-coupon base** · verified 2026-07-06 · → [[lifecycles/subscription-billing]]
 - **Portal subscriptions list freshness: no stale state after detail-page navigation** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
+- **Repair pipeline: verify the fix spec persisted before queueing a build** · verified 2026-07-06 · → [[lifecycles/control-tower]]
 - **Blueprint specs mandate parent** · verified 2026-07-05 · → [[../lifecycles/advertorial-landers]]
 - **Box builds: self-heal a primary checkout wedged on a build branch** · verified 2026-07-05 · → [[../recipes/build-box-setup#primary-checkout-self-healing]]
 - **Carrie — reuse existing product media before flagging a real-asset gap** · verified 2026-07-05 · → [[recipes/dr-content]]

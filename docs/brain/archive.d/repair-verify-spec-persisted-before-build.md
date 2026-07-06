@@ -1,0 +1,1 @@
+- **Repair pipeline: verify the fix spec persisted before queueing a build** · verified 2026-07-06 · → [[lifecycles/control-tower]]
