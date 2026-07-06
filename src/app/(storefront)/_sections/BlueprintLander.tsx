@@ -134,7 +134,7 @@ export function BlueprintLander({
       {content.reasons && content.reasons.length > 0 && (
         <BlueprintReasons
           reasons={content.reasons}
-          ctaLabel={content.hero?.ctaLabel || "Shop Now"}
+          ctaLabel={content.hero?.ctaLabel || "Feel the Difference — 65% Off Now"}
           reassurance="Feel the difference in 45 days — or your money back"
           lowestPriceCents={price}
         />

@@ -1,4 +1,4 @@
-import { ShopCTA } from "../_components/ShopCTA";
+import { LanderCTA } from "../_components/LanderCTA";
 import type { ReasonItem } from "@/lib/blueprint-render";
 
 /**
@@ -16,8 +16,8 @@ const REASONS_CSS = `
 .bp-reasons__wrap{max-width:1120px;margin:0 auto;padding:2.6rem 1.4rem}
 .bp-reason{display:flex;flex-direction:column;gap:1.1rem;padding:2rem 0;border-top:1px solid rgba(36,24,16,.1)}
 .bp-reason:first-child{border-top:0;padding-top:.5rem}
-.bp-reason__img{width:100%;border-radius:16px;overflow:hidden;background:#efe7da;box-shadow:0 4px 16px rgba(36,24,16,.12)}
-.bp-reason__img img{display:block;width:100%;height:auto}
+.bp-reason__img{width:100%;aspect-ratio:4 / 3;border-radius:16px;overflow:hidden;background:#efe7da;box-shadow:0 4px 16px rgba(36,24,16,.12)}
+.bp-reason__img img{display:block;width:100%;height:100%;object-fit:cover}
 .bp-reason__body{display:flex;flex-direction:column;gap:1rem}
 .bp-reason__h{font-weight:800;font-size:1.6rem;line-height:1.12;letter-spacing:-.02em;text-wrap:balance;margin:0}
 .bp-reason__p{font-size:1.08rem;line-height:1.6;color:#3a2c22;margin:0}
@@ -64,7 +64,7 @@ export function BlueprintReasons({
                 <p className="bp-reason__p" key={i}>{p}</p>
               ))}
               <div>
-                <ShopCTA href={ctaHref} label={ctaLabel} lowestPriceCents={lowestPriceCents} showTrust={false} align="start" />
+                <LanderCTA label={ctaLabel} href={ctaHref} />
               </div>
               <div className="bp-reason__reassure">{reassurance}</div>
             </div>
