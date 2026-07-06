@@ -309,18 +309,20 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         </div>
       )}
 
-      {/* Pre-delivery gate — the subscription is READ-ONLY (Phase 2). Every
-          mutating action is gated on the backend AND hidden from the UI here;
-          the banner sets that expectation without the misleading
-          "cancel/update payment anytime" language it used to carry. */}
+      {/* Pre-delivery gate — customer-friendly setup message. One title
+          regardless of deliveryState (no "being prepared" vs "on its
+          way" split) and no developer-language "read-only" phrasing —
+          the mutation lockdown is expressed as a positive setup state.
+          Every mutating action is still gated on the backend AND hidden
+          from the UI here. */}
       {contract.portalState?.mutationsLocked && (
         <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
           <p className="flex items-center gap-2 text-sm font-semibold text-sky-900">
             <span aria-hidden>🚚</span>
-            {contract.portalState.deliveryState === "in_transit" ? "Your first order is on its way!" : "Your first order is being prepared"}
+            Your subscription is being setup!
           </p>
           <p className="mt-1 text-xs text-sky-800">
-            Your subscription is read-only until your first order is delivered. Once it arrives, you&apos;ll be able to fully manage it here — swap products, change quantities, adjust your schedule, and more.
+            You can see the details below. Once you receive your first order, you can return here to make changes.
           </p>
         </div>
       )}

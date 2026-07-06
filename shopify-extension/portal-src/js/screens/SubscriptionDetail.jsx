@@ -1051,7 +1051,6 @@ export default function SubscriptionDetail() {
   // First-delivery gate: content/schedule/discount edits are locked until the
   // first order is delivered (backend enforces; this drives the UI).
   const mutationsLocked = !!contract?.portalState?.mutationsLocked;
-  const deliveryState = contract?.portalState?.deliveryState;
   const isReadOnly = isCancelled || isLocked || mutationsLocked;
   const { lines, shipLine } = splitLines(contract);
   const appliedDiscount = contract?.appliedDiscount || contract?.discount || null;
@@ -1124,8 +1123,8 @@ export default function SubscriptionDetail() {
 
       {mutationsLocked ? (
         <div class="sp-alert">
-          <div class="sp-alert__title">{deliveryState === 'in_transit' ? 'Your first order is on its way!' : 'Your first order is being prepared'}</div>
-          <div class="sp-alert__body sp-muted">Your subscription is read-only until your first order is delivered. Once it arrives, you'll be able to fully manage it here — swap products, change quantities, adjust your schedule, and more.</div>
+          <div class="sp-alert__title">Your subscription is being setup!</div>
+          <div class="sp-alert__body sp-muted">You can see the details below. Once you receive your first order, you can return here to make changes.</div>
         </div>
       ) : isLocked && (
         <div class="sp-alert">
