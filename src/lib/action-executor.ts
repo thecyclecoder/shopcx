@@ -1117,24 +1117,28 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { refundOrder } = await import("@/lib/refund");
+    const { issueRefund } = await import("@/lib/commerce/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (!p.amount_cents) return { success: false, error: "Missing amount_cents" };
 
-    // Resolve internal order UUID — refundOrder takes our internal
+    // Resolve internal order UUID — issueRefund takes our internal
     // orders.id, never the human-facing shopify_order_id / order_number.
     const oid = String(p.shopify_order_id);
     const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
     const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
 
-    // refundOrder dispatches on the order's gateway (Braintree /
-    // Shopify), preserves the double-refund guard (stamps refunded_at
-    // on open returns), and logs the customer_events row.
-    const r = await refundOrder(ctx.workspaceId, ord.id, p.amount_cents, reason, {
+    // issueRefund (commerce/refund) delegates to refund.refundOrder,
+    // which dispatches on the order's gateway (Braintree / Shopify),
+    // preserves the double-refund guard (stamps refunded_at on open
+    // returns), and logs the customer_events row.
+    const r = await issueRefund(ctx.workspaceId, {
+      orderId: ord.id,
+      amountCents: p.amount_cents,
+      reason,
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId },
@@ -1162,7 +1166,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { refundOrder } = await import("@/lib/refund");
+    const { issueRefund } = await import("@/lib/commerce/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1192,7 +1196,10 @@ export const directActionHandlers: Record<
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
 
-    const refund = await refundOrder(ctx.workspaceId, order.id, amountCents, reason, {
+    const refund = await issueRefund(ctx.workspaceId, {
+      orderId: order.id,
+      amountCents,
+      reason,
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId, loyalty_tier: tier.label, points_spent: tier.points_cost },

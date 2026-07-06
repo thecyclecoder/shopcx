@@ -41,6 +41,29 @@ Returns `{ success, subscription_id, shopify_contract_id, error? }`.
 
 Pure helper: `buildCreateSubscriptionRow(workspaceId, input, opts?)` — returns the `subscriptions`-row shape without touching Supabase. Pinned in [[../../src/lib/commerce/subscription.create.test]].
 
+## Mutation ops — refund (Phase 2 of [[../specs/commerce-sdk-actions-create-order-create-subscription-refund-and-dollar-replacement]])
+
+### `issueRefund(workspaceId, args)`
+
+`src/lib/commerce/refund.ts` — SDK-side facade for order refunds. Delegates to the underlying gateway-aware dispatcher in [[../../src/lib/refund]] (`refundOrder`), which stays as the shared implementation for Inngest steps + non-commerce callsites (see the Defect register in [[../reference/commerce-sdk-inventory]]).
+
+Args shape (`IssueRefundArgs`): `{ orderId, amountCents, reason, source?, customerId?, eventProperties?, dryRun? }`. `orderId` is the internal `orders.id` UUID — callers resolve human-facing `shopify_order_id` / `order_number` to a UUID before calling.
+
+Returns `{ success, method?: 'shopify' | 'braintree', refund_id?, error?, needsManualShopifyRecord?, dryRun? }`.
+
+Guarantees preserved from `refundOrder`:
+
+- **Gateway routing** — orders with no `shopify_order_id` (SHOPCX*/internal) refund via Braintree; Shopify orders route through `partialRefundByAmount` with its own Shopify↔Braintree fallback.
+- **Double-refund guard** — on success, stamps `refunded_at` on every open (`refunded_at IS NULL`) return for this order in this workspace so the returns Inngest step can't refund the customer a second time. Compare-and-set on `workspace_id` + `refunded_at IS NULL` — can't overwrite an already-stamped row or reach across tenants.
+- **customer_events log** — writes one `order.refunded` row with method + amount + reason + caller-supplied `eventProperties` (ticket_id, subscription_id, loyalty_tier, points_spent, …).
+
+Callsites migrated to `commerce/refund.issueRefund` in Phase 2:
+
+- `directActionHandlers.partial_refund` in [[action-executor]] — AI `partial_refund` direct action.
+- `directActionHandlers.redeem_points_as_refund` in [[action-executor]] — AI loyalty-points redemption.
+
+Callsites that still call `@/lib/refund.refundOrder` directly (unchanged): the `returns-issue-refund` Inngest step, the ticket-detail Improve tab refund route, the manual return-refund route, the fraud-case `cancel_refund_orders` step (see [[../reference/commerce-sdk-inventory]] § Defect register). Those migrate as their surrounding surfaces move onto commerce/*.
+
 ## Related
 
 - [[../reference/commerce-sdk-inventory]] — per-callsite migration ledger
