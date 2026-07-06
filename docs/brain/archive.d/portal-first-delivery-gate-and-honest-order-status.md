@@ -1,0 +1,1 @@
+- **Portal: fix the first-delivery gate + true read-only + honest order status (slice 1)** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
