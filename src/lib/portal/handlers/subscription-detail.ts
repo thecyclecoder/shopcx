@@ -337,6 +337,34 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
   const { canMutateSubscription } = await import("@/lib/portal/mutation-guard");
   const mutationGate = await canMutateSubscription(auth.workspaceId, { id: sub.id, is_internal: sub.is_internal });
 
+  // Recent orders widget — last 5 orders tied to THIS subscription,
+  // newest first. Scoped by subscription_id so we never surface a
+  // sibling sub's box. The fields returned are exactly what the
+  // widget renders + what the honest-status classifier keys on
+  // ([[../../app/portal/[slug]/_sections/order-status.ts]]).
+  const { data: recentOrdersRaw } = await admin
+    .from("orders")
+    .select(
+      "id, order_number, created_at, total_cents, financial_status, fulfillment_status, delivered_at, shopify_order_id, easypost_status, amplifier_tracking_number, amplifier_status",
+    )
+    .eq("workspace_id", auth.workspaceId)
+    .eq("subscription_id", sub.id)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  const recentOrders = (recentOrdersRaw || []).map((o) => ({
+    id: o.id as string,
+    order_number: (o.order_number as string) || "",
+    created_at: o.created_at as string,
+    total_cents: Number(o.total_cents ?? 0),
+    financial_status: (o.financial_status as string | null) ?? null,
+    fulfillment_status: (o.fulfillment_status as string | null) ?? null,
+    delivered_at: (o.delivered_at as string | null) ?? null,
+    shopify_order_id: (o.shopify_order_id as string | null) ?? null,
+    easypost_status: (o.easypost_status as string | null) ?? null,
+    amplifier_tracking_number: (o.amplifier_tracking_number as string | null) ?? null,
+    amplifier_status: (o.amplifier_status as string | null) ?? null,
+  }));
+
   return jsonOk({
     ok: true,
     shop: auth.shop,
@@ -372,5 +400,6 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     dunning_cycles: dunningCycles || [],
     payment_failures: paymentFailures || [],
     events: events || [],
+    recent_orders: recentOrders,
   });
 };
