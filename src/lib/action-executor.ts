@@ -440,6 +440,18 @@ export const directActionHandlers: Record<
   },
 
   skip_next_order: async (ctx, p) => {
+    // skip_next_order is RETIRED — the orchestrator's system prompt + the
+    // seeded sonnet_prompts routing rule now alias skip intents to
+    // change_next_date / bill_now (spec:
+    // retire-skip-next-order-action-type-with-shadow-measured-alias Phase 2).
+    // This handler stays wired for two weeks as an idempotency net for
+    // any in-flight retries (Sonnet caches / older workflow queues); a hit
+    // here is a signal the retirement didn't fully land, so the WARN lets
+    // on-call investigate. Handler + subscriptionSkipNextOrder wrapper are
+    // deleted in a follow-up PR after the soft window closes.
+    console.warn(
+      `skip_next_order fired post-retire — investigate (workspace=${ctx.workspaceId}, ticket=${ctx.ticketId}, contract=${p.contract_id ?? "?"})`,
+    );
     const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
     const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
