@@ -50,6 +50,16 @@ interface OrderFulfillment {
   createdAt: string | null;
 }
 
+interface OrderRefundMirrorRow {
+  id: string;
+  vendor: string;
+  vendor_refund_id: string | null;
+  amount_cents: number;
+  status: string;
+  requested_at: string;
+  settled_at: string | null;
+}
+
 interface RecentOrder {
   id: string;
   shopify_order_id: string | null;
@@ -65,6 +75,7 @@ interface RecentOrder {
   fulfillments: OrderFulfillment[];
   shipping_address?: { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; zip?: string; country?: string } | null;
   created_at: string;
+  order_refunds?: OrderRefundMirrorRow[];
 }
 
 function getOrderShippingStatus(o: RecentOrder): { label: string; classes: string } {
@@ -3195,6 +3206,27 @@ export default function TicketDetailPage() {
                             <div key={idx} className="flex justify-between">
                               <span className="text-zinc-600 dark:text-zinc-400">{li.quantity}× {li.title}</span>
                               <span className="text-zinc-400">{formatCents(li.price_cents * li.quantity)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Refund lines — sourced from the order_refunds mirror
+                          (refund-integrity Phase 1). Replaces "read
+                          orders.financial_status" as the source of refund
+                          truth in this widget. */}
+                      {o.order_refunds && o.order_refunds.length > 0 && (
+                        <div className="mt-1.5 space-y-0.5 border-t border-zinc-200 pt-1.5 dark:border-zinc-700">
+                          {o.order_refunds.map((r) => (
+                            <div key={r.id} className="flex justify-between text-sm">
+                              <span className="text-zinc-600 dark:text-zinc-400">
+                                Refunded via {r.vendor}
+                                {r.status === "settled" ? " · settled" : ""}
+                                {r.vendor_refund_id ? ` · ${r.vendor_refund_id}` : ""}
+                              </span>
+                              <span className="text-zinc-400">
+                                −{formatCents(r.amount_cents)}
+                              </span>
                             </div>
                           ))}
                         </div>

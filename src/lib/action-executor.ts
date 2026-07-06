@@ -1043,7 +1043,7 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { refundOrder } = await import("@/lib/refund");
+    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
@@ -1057,6 +1057,33 @@ export const directActionHandlers: Record<
     const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
 
+    // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
+    // Compute the request_key up-front and check the order_refunds mirror
+    // BEFORE calling the vendor. If a succeeded/settled row already exists
+    // for this (order_id, request_key), a prior attempt succeeded and this
+    // is a retry (self-heal or otherwise) — short-circuit to success
+    // without touching Braintree/Shopify. Scoped by workspace so a
+    // cross-tenant row can never authorize a short-circuit.
+    // Passing the same requestKey down to refundOrder keeps the write-side
+    // hash consistent with this lookup, so the mirror insert Phase 1 does
+    // hits the exact same UNIQUE-index row Phase 2 checked here.
+    const requestKey = hashRefundRequestKey(ord.id, p.amount_cents, reason);
+    const { data: existing } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", ord.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        summary: `Partial refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
+        refundAmountCents: existing.amount_cents ?? (p.amount_cents || 0),
+      };
+    }
+
     // refundOrder dispatches on the order's gateway (Braintree /
     // Shopify), preserves the double-refund guard (stamps refunded_at
     // on open returns), and logs the customer_events row.
@@ -1064,6 +1091,7 @@ export const directActionHandlers: Record<
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId },
+      requestKey,
     });
     if (r.success) await notifySlack(ctx, p, amountDecimal);
 
@@ -1088,7 +1116,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { refundOrder } = await import("@/lib/refund");
+    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1118,10 +1146,33 @@ export const directActionHandlers: Record<
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
 
+    // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
+    // Compute request_key up-front and check the mirror. If a prior
+    // attempt already fired for this (order_id, request_key), do NOT
+    // call refundOrder AND do NOT spend points again — the earlier
+    // attempt already burned them. Matches the partial_refund pattern.
+    const requestKey = hashRefundRequestKey(order.id, amountCents, reason);
+    const { data: existingRedemption } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", order.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existingRedemption) {
+      return {
+        success: true,
+        summary: `${tier.points_cost}-point redemption for $${tier.discount_value} refund on order #${order.order_number} already fired${existingRedemption.vendor_refund_id ? ` — txn ${existingRedemption.vendor_refund_id}` : ""}`,
+        refundAmountCents: existingRedemption.amount_cents ?? amountCents,
+      };
+    }
+
     const refund = await refundOrder(ctx.workspaceId, order.id, amountCents, reason, {
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId, loyalty_tier: tier.label, points_spent: tier.points_cost },
+      requestKey,
     });
     if (!refund.success) return { success: false, error: refund.error };
 
@@ -2178,14 +2229,26 @@ async function handleDirectAction(
     await new Promise(resolve => setTimeout(resolve, 3000));
     const verifyFailures: string[] = [];
 
-    // Refunds are NOT idempotent — re-running one double-refunds the customer.
-    // They're also confirmed by their own handler (Braintree refund id / polled
-    // Shopify gateway status), and their DB verification (Shopify financial_status)
-    // is unreliable for Braintree-direct refunds, which never flip it. So never
-    // self-heal-retry a refund. (Sonia Stevens: a settled $179.88 Braintree refund
-    // couldn't be confirmed via financial_status, the retry tried to refund AGAIN,
-    // hit "amount too large", and falsely escalated a refund that had succeeded.)
-    const NO_SELF_HEAL_RETRY = new Set(["partial_refund", "redeem_points_as_refund"]);
+    // Verify-and-retry safety.
+    //
+    // Refunds used to be excluded from self-heal retry because a retry
+    // could double-refund (Sonia Stevens SC132396: the vendor refund
+    // succeeded, financial_status verification couldn't confirm it, the
+    // retry re-fired against Braintree, hit "amount too large", and
+    // falsely escalated).
+    //
+    // Refund-integrity Phase 2 makes verify+retry safe for refunds. The
+    // partial_refund + redeem_points_as_refund handlers now do a
+    // pre-flight lookup against order_refunds on the (order_id,
+    // request_key) pair; a retry sees the Phase-1 mirror row from the
+    // first successful attempt and short-circuits without touching the
+    // vendor. If the mirror row is genuinely missing (rare — mirror
+    // insert failure), a retry re-fires and re-inserts, which is the
+    // intended safety net for the Sonia Stevens exact failure mode
+    // (vendor succeeded, we couldn't confirm). The NO_SELF_HEAL_RETRY
+    // set is retained as the extension point for any FUTURE action
+    // whose handler doesn't carry its own idempotency guard.
+    const NO_SELF_HEAL_RETRY = new Set<string>([]);
 
     for (const s of successes) {
       if (NO_SELF_HEAL_RETRY.has(s.action.type)) continue;
