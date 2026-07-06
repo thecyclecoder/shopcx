@@ -8,6 +8,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
+import { resolveAlias } from "@/lib/action-handler-aliases";
 
 // ── Types ──
 
@@ -229,10 +230,17 @@ async function executeActionsInline(
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   for (const action of actions) {
-    const handler = directActionHandlers[action.type];
+    let handler = directActionHandlers[action.type];
     if (!handler) {
-      results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
-      continue;
+      const aliased = await resolveAlias(ctx.admin, ctx.workspaceId, action.type);
+      if (aliased && directActionHandlers[aliased]) {
+        await sysNote(`alias resolved: ${action.type}→${aliased}`);
+        action.type = aliased;
+        handler = directActionHandlers[aliased];
+      } else {
+        results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
+        continue;
+      }
     }
     const substituted = substituteActionParams(action, results);
     try {
@@ -2110,13 +2118,20 @@ async function handleDirectAction(
   const { withActionContext } = await import("@/lib/commerce/call-log");
 
   for (const action of actions) {
-    const handler = directActionHandlers[action.type];
+    let handler = directActionHandlers[action.type];
     if (!handler) {
-      results.push({
-        action,
-        result: { success: false, error: `Unknown action type: ${action.type}` },
-      });
-      continue;
+      const aliased = await resolveAlias(ctx.admin, ctx.workspaceId, action.type);
+      if (aliased && directActionHandlers[aliased]) {
+        await sysNote(`alias resolved: ${action.type}→${aliased}`);
+        action.type = aliased;
+        handler = directActionHandlers[aliased];
+      } else {
+        results.push({
+          action,
+          result: { success: false, error: `Unknown action type: ${action.type}` },
+        });
+        continue;
+      }
     }
 
     // Substitute placeholders in this action's string params using
