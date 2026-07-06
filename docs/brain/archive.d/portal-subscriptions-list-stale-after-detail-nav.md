@@ -1,0 +1,1 @@
+- **Portal subscriptions list freshness: no stale state after detail-page navigation** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
