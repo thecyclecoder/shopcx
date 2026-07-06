@@ -12,6 +12,7 @@ import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/help
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getOrder } from "@/lib/commerce/order";
 import { enrichLineItemImages } from "@/lib/portal/helpers/image-fallback";
+import { resolveOrderDelivery, type DeliveryResolverInput } from "@/lib/portal/helpers/delivery-resolver";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -70,7 +71,7 @@ export const orderDetail: RouteHandler = async ({ auth, route, url }) => {
   const { data: row } = await admin
     .from("orders")
     .select(
-      "shopify_order_id, easypost_status, avalara_total_tax_cents, shipping_protection_added, shipping_protection_amount_cents, discount_codes, amplifier_tracking_number, amplifier_carrier, amplifier_status, amplifier_shipped_at, line_items",
+      "shopify_order_id, easypost_status, easypost_checked_at, easypost_tracking, fulfillments, avalara_total_tax_cents, shipping_protection_added, shipping_protection_amount_cents, discount_codes, amplifier_tracking_number, amplifier_carrier, amplifier_status, amplifier_shipped_at, line_items",
     )
     .eq("workspace_id", auth.workspaceId)
     .eq("id", view.id)
@@ -122,6 +123,30 @@ export const orderDetail: RouteHandler = async ({ auth, route, url }) => {
   );
   const enrichedLineItems = (enriched.line_items ?? normalizedLines) as typeof normalizedLines;
 
+  // Delivery / tracking resolver (Phase 2 of the tracking-widget spec).
+  // Keyed per order on shopify_order_id — INTERNAL runs a paid EasyPost
+  // Tracker lookup (throttled to once per UTC day, terminal on
+  // delivered); SHOPIFY reads the synced fulfillments and refreshes them
+  // via a free Shopify GraphQL fetch. Never calls EasyPost on the
+  // Shopify branch. Persists any refresh on the orders row.
+  const trackingNumber = (view.tracking_number || row?.amplifier_tracking_number || null) as
+    | string
+    | null;
+  const carrier = (view.carrier || row?.amplifier_carrier || null) as string | null;
+  const resolverInput: DeliveryResolverInput = {
+    workspaceId: auth.workspaceId,
+    orderId: view.id,
+    shopifyOrderId: row?.shopify_order_id ?? null,
+    trackingNumber,
+    carrier,
+    delivered_at: view.delivered_at ?? null,
+    easypost_status: row?.easypost_status ?? null,
+    easypost_checked_at: row?.easypost_checked_at ?? null,
+    easypost_tracking: row?.easypost_tracking ?? null,
+    fulfillments: row?.fulfillments ?? null,
+  };
+  const delivery = await resolveOrderDelivery(admin, resolverInput);
+
   const subtotalCents = enrichedLineItems.reduce((s, l) => s + (l.total_cents || 0), 0);
   const discountCodes = Array.isArray(row?.discount_codes)
     ? (row!.discount_codes as Array<Record<string, unknown>>)
@@ -148,7 +173,9 @@ export const orderDetail: RouteHandler = async ({ auth, route, url }) => {
       id: view.id,
       order_number: view.order_number,
       created_at: view.created_at,
-      delivered_at: view.delivered_at,
+      // delivered_at reflects any refresh the delivery resolver just
+      // stamped, not just the value the SDK view read pre-resolve.
+      delivered_at: delivery.delivered_at,
       currency: view.currency,
       financial_status: view.financial_status,
       fulfillment_status: view.fulfillment_status,
@@ -166,13 +193,19 @@ export const orderDetail: RouteHandler = async ({ auth, route, url }) => {
       shipping_protection_added: !!row?.shipping_protection_added,
       shipping_protection_amount_cents: shippingProtectionCents,
       line_items: enrichedLineItems,
-      tracking_number: view.tracking_number || row?.amplifier_tracking_number || null,
-      carrier: view.carrier || row?.amplifier_carrier || null,
+      tracking_number: trackingNumber,
+      carrier,
       amplifier_status: row?.amplifier_status ?? null,
       amplifier_shipped_at: row?.amplifier_shipped_at ?? null,
       amplifier_tracking_number: row?.amplifier_tracking_number ?? null,
       shipping_address: view.shipping_address,
       discount_codes: discountCodes,
+      // Delivery / tracking widget payload (Phase 2). Widget layer keys
+      // off `delivery.kind` — 'internal' renders the EasyPost milestone
+      // timeline from `delivery.easypost_tracking.events`, 'shopify'
+      // renders the shipment status + trackingInfo from
+      // `delivery.fulfillments`, 'none' renders no widget.
+      delivery,
     },
   });
 };

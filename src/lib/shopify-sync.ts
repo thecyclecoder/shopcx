@@ -136,6 +136,64 @@ export async function getShopifyCounts(workspaceId: string): Promise<{ customers
   };
 }
 
+// ── Single-order fulfillment refresh (portal tracking widget) ──
+
+/** Storage-shape fulfillment row (matches shopify-webhooks.ts:579-588). */
+export interface StoredFulfillment {
+  trackingInfo: { number: string | null; url: string | null; company: string | null }[];
+  status: string | null;
+  shipmentStatus: string | null;
+  createdAt: string | null;
+}
+
+/**
+ * Portal delivery widget helper — fetch ONE order's fulfillment snapshot
+ * (trackingInfo + displayStatus + status + createdAt) via the Shopify
+ * GraphQL Admin API. FREE (no per-lookup billing, unlike EasyPost) —
+ * called by the portal order-detail delivery resolver on the SHOPIFY
+ * branch when the order isn't yet delivered. Never call EasyPost on the
+ * Shopify branch. Returns `null` when Shopify isn't connected, the order
+ * isn't found, or the request fails — the caller renders no widget in
+ * that case (fail-open).
+ */
+export async function fetchShopifyOrderFulfillments(
+  workspaceId: string,
+  shopifyOrderId: string,
+): Promise<StoredFulfillment[] | null> {
+  let creds: ShopifyCredentials;
+  try {
+    creds = await getShopifyCredentials(workspaceId);
+  } catch {
+    return null;
+  }
+  try {
+    const data = await shopifyGraphQL(
+      creds.shop,
+      creds.accessToken,
+      `{ order(id: "gid://shopify/Order/${shopifyOrderId}") { fulfillments { trackingInfo { number url company } status displayStatus createdAt } } }`,
+    );
+    const order = data.order as { fulfillments?: Record<string, unknown>[] } | null;
+    if (!order?.fulfillments) return null;
+    return order.fulfillments.map((f) => {
+      const ti = Array.isArray(f.trackingInfo) ? (f.trackingInfo as Record<string, unknown>[]) : [];
+      return {
+        trackingInfo: ti.map((t) => ({
+          number: typeof t.number === "string" ? (t.number as string) : null,
+          url: typeof t.url === "string" ? (t.url as string) : null,
+          company: typeof t.company === "string" ? (t.company as string) : null,
+        })),
+        status: typeof f.status === "string" ? (f.status as string) : null,
+        // GraphQL enum is UPPER_SNAKE (DELIVERED / IN_TRANSIT / OUT_FOR_DELIVERY / CONFIRMED / FAILURE …);
+        // the webhook stores lowercase (delivered / in_transit / …), so normalize to match.
+        shipmentStatus: f.displayStatus ? String(f.displayStatus).toLowerCase() : null,
+        createdAt: typeof f.createdAt === "string" ? (f.createdAt as string) : null,
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
 // ── Bulk Operations (for initial large syncs) ──
 
 const BULK_CUSTOMERS_QUERY = `
