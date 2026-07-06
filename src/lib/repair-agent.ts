@@ -276,6 +276,154 @@ export async function bounceRepairToAgent(
   }
 }
 
+/**
+ * repair-verify-spec-persisted-before-build Phase 2 — escalate a `spec_row_missing` build park to a
+ * SURFACE signal instead of the parked-router's silent dismissal (the fallout that hid ~16 phantom
+ * repairs in the trailing 7 days).
+ *
+ * A build that parked `needs_attention` class=`spec_row_missing` means the fix spec never actually
+ * landed in `public.specs` — the repair-agent's author path silently failed upstream (raw DB miss
+ * caught + warned by `markNewSpecInReview → authorSpecRowFromMarkdown`, or a mid-write bounce),
+ * `runRepairJob` still marked itself terminal (completed / needs_approval), and the build fired for
+ * a slug with no row. Phase 1 closes the source-side gap by verifying-after-author (a completed
+ * repair now can't slip past); this backstop covers races and pre-existing rows that already
+ * shipped without the verify: the parked build must not silently dismiss out of the CEO's view.
+ *
+ * The escalation strategy:
+ *   1) Find repair jobs originating this fix (`kind='repair'`, workspace-scoped, whose
+ *      `instructions->>'authored_slug'` matches the build's `spec_slug`) whose current status is
+ *      NOT already surfaced/settled — only the `completed` / `needs_approval` states, which are the
+ *      "silently terminal with a phantom fix" leaks Phase 1 didn't cover. `needs_attention` /
+ *      `failed` / `dismissed` are left alone (already surfaced or terminal-by-design). Flip each
+ *      matched row to `needs_attention` with an actionable error via a compare-and-set
+ *      (`.eq('workspace_id', …).eq('id', …).in('status', …).select('id')`) so an async-read result
+ *      cannot overwrite a row that flipped under us, and stamp ONE `spec_row_missing_escalated`
+ *      `director_activity` row per successful flip. `getOpenRepairs` (below) surfaces the flipped
+ *      repair on the Control Tower feed as state='needs-human' (no build action attached).
+ *   2) ALSO stamp ONE `spec_row_missing_escalated` `director_activity` row for the build itself
+ *      whenever nothing was flipped (e.g. the fix originated in the planner / spec-chat / a
+ *      migration-fix lane rather than the repair-agent, so there's no matching repair to escalate).
+ *      That guarantees Ada's activity feed / Control Tower ALWAYS carries a surfaced signal for a
+ *      `spec_row_missing` build — never a silent dismissal.
+ *
+ * Best-effort + never throws (mirrors `enqueueRepairJob`) — an audit write that crashes the caller
+ * would be strictly worse than the surface gap. Callers: the claim-gate park site
+ * (`scripts/builder-worker.ts` runBuildJob) fires this the moment it stamps `spec_row_missing`; the
+ * parked-router (`src/lib/agents/needs-attention-route.ts` routeSpecRowMissing) fires it right
+ * before dismissing the phantom build (the router still keeps 'do not build' — this only replaces
+ * the SILENT dismissal with a surfaced escalation).
+ */
+export async function escalateSpecRowMissingBuild(
+  admin: Admin,
+  input: {
+    workspaceId: string;
+    buildJobId: string;
+    slug: string | null;
+    reason: string;
+    /** where the escalation is fired from (audit metadata) — the immediate park at claim-time, or the parked-router. */
+    source: "claim_gate_park" | "parked_router";
+  },
+): Promise<{ escalatedRepairIds: string[]; activityRecorded: boolean }> {
+  const { workspaceId, buildJobId, slug, reason, source } = input;
+  const out: { escalatedRepairIds: string[]; activityRecorded: boolean } = { escalatedRepairIds: [], activityRecorded: false };
+  try {
+    // 1) Find originating repair job(s) whose authored_slug matches the parked build's slug. If the
+    //    parked build has no slug there's no repair to match — jump straight to the activity emit.
+    if (slug) {
+      // The originating repair's `instructions` is a JSON string; Postgres `->>` extracts the field as
+      // text so we can equality-match without pulling every workspace repair row into memory.
+      const { data: candidates } = await admin
+        .from("agent_jobs")
+        .select("id, status, spec_slug")
+        .eq("workspace_id", workspaceId)
+        .eq("kind", "repair")
+        .filter("instructions->>authored_slug", "eq", slug)
+        .in("status", ["completed", "needs_approval"])
+        .order("created_at", { ascending: false })
+        .limit(10);
+      for (const r of ((candidates ?? []) as Array<{ id: string; status: string; spec_slug: string | null }>)) {
+        // Compare-and-set: only flip a row that is STILL in a surfaced-terminal state — the
+        // .in('status', …) predicate + workspace_id re-assertion + .select('id') round-trip mean an
+        // async-read result cannot overwrite a row that flipped under us to needs_attention / failed
+        // / dismissed on its own. Bail on zero rows returned (nothing transitioned).
+        const escalatedError = `[repair-verify-spec-persisted-before-build P2] originating repair re-surfaced: build ${buildJobId.slice(0, 8)} parked spec_row_missing on [[${slug}]] — the fix spec never landed in public.specs; ${reason}`;
+        const { data: flipped, error } = await admin
+          .from("agent_jobs")
+          .update({
+            status: "needs_attention",
+            error: escalatedError.slice(0, 2000),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("workspace_id", workspaceId)
+          .eq("id", r.id)
+          .in("status", ["completed", "needs_approval"])
+          .select("id");
+        if (error) {
+          console.warn(`[repair-agent] escalateSpecRowMissingBuild flip failed for ${r.id}: ${error.message}`);
+          continue;
+        }
+        if (!Array.isArray(flipped) || flipped.length === 0) {
+          // Row already transitioned to a different state (needs_attention / failed / dismissed) —
+          // don't disturb it; and don't stamp a per-repair activity row if nothing actually flipped.
+          continue;
+        }
+        out.escalatedRepairIds.push(r.id);
+        // Per-repair audit line — the same shape Ada's other spec-slug activity rows use.
+        try {
+          const { recordDirectorActivity } = await import("./director-activity");
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: "platform",
+            actionKind: "spec_row_missing_escalated",
+            specSlug: slug,
+            reason: escalatedError,
+            metadata: {
+              build_job_id: buildJobId,
+              repair_job_id: r.id,
+              prior_repair_status: r.status,
+              slug,
+              source,
+              autonomous: true,
+            },
+          });
+          out.activityRecorded = true;
+        } catch (e) {
+          console.warn(`[repair-agent] escalateSpecRowMissingBuild activity write threw for repair ${r.id}:`, e instanceof Error ? e.message : e);
+        }
+      }
+    }
+    // 2) Nothing flipped (no repair matched, or all matches had already transitioned) — still stamp
+    //    ONE build-scoped activity row so Ada's feed / the Control Tower carries a surface signal
+    //    for this spec_row_missing park. That is the invariant Phase 2 owns: escalate instead of
+    //    silently dismiss.
+    if (!out.activityRecorded) {
+      try {
+        const { recordDirectorActivity } = await import("./director-activity");
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: "platform",
+          actionKind: "spec_row_missing_escalated",
+          specSlug: slug,
+          reason: `build ${buildJobId.slice(0, 8)} parked spec_row_missing on [[${slug ?? "(no slug)"}]] and no originating repair matched to re-surface — the fix spec never landed in public.specs. ${reason}`.slice(0, 2000),
+          metadata: {
+            build_job_id: buildJobId,
+            slug,
+            source,
+            no_matching_repair: true,
+            autonomous: true,
+          },
+        });
+        out.activityRecorded = true;
+      } catch (e) {
+        console.warn("[repair-agent] escalateSpecRowMissingBuild fallback activity write threw:", e instanceof Error ? e.message : e);
+      }
+    }
+  } catch (err) {
+    console.warn("[repair-agent] escalateSpecRowMissingBuild threw:", err instanceof Error ? err.message : err);
+  }
+  return out;
+}
+
 /** Shape of a `cluster:repair` job's `instructions` JSON — the batched list of signatures the box
  *  must investigate together. */
 interface ClusterInstructions {

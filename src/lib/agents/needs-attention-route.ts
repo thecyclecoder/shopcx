@@ -521,6 +521,29 @@ async function routeSpecRowMissing(admin: Admin, row: ParkedRow): Promise<"dismi
     }
   }
   const reason = `spec_row_missing: public.specs has no row for ${row.spec_slug ?? "(no slug)"} and no open plan owns the slug — auto-dismissing the park`;
+
+  // repair-verify-spec-persisted-before-build Phase 2 (backstop) — BEFORE we dismiss the phantom
+  // build, ESCALATE: flip the originating repair (matched by `instructions->>'authored_slug' ==
+  // row.spec_slug`, compare-and-set on `completed`/`needs_approval`) to needs_attention so
+  // `getOpenRepairs` surfaces it on the Control Tower feed, AND stamp a
+  // `spec_row_missing_escalated` director_activity row (guaranteed — the helper falls back to a
+  // build-scoped stamp when no matching repair exists, so Ada's feed ALWAYS carries a surface
+  // signal for this park). Keep 'do not build' — the dismiss still runs; we only replace the
+  // silent side of the dismissal with a surfaced escalation. Best-effort + non-throwing so this
+  // never wedges the router.
+  try {
+    const { escalateSpecRowMissingBuild } = await import("@/lib/repair-agent");
+    await escalateSpecRowMissingBuild(admin, {
+      workspaceId: row.workspace_id,
+      buildJobId: row.id,
+      slug: row.spec_slug,
+      reason,
+      source: "parked_router",
+    });
+  } catch (e) {
+    console.warn(`[needs-attention-route] escalateSpecRowMissingBuild threw for ${row.id}:`, e instanceof Error ? e.message : e);
+  }
+
   const { error } = await admin
     .from("agent_jobs")
     .update({

@@ -18021,13 +18021,35 @@ async function dispatchJob(job: Job) {
     }
     if (gate && !gate.ok) {
       if (gate.disposition === "park") {
+        const parkedClass = gate.parkClass ?? "spec_row_missing";
         await update(job.id, {
           status: "needs_attention",
-          needs_attention_class: gate.parkClass ?? "spec_row_missing",
+          needs_attention_class: parkedClass,
           error: gate.reason,
           log_tail: `claim-gate parked — ${gate.reason}; no PR opened`.slice(-2000),
         });
-        console.warn(`${tag} claim-gate → parked needs_attention (${gate.parkClass ?? "spec_row_missing"}): ${gate.reason}`);
+        console.warn(`${tag} claim-gate → parked needs_attention (${parkedClass}): ${gate.reason}`);
+        // repair-verify-spec-persisted-before-build Phase 2 — fire the escalation IMMEDIATELY at
+        // park time (don't wait for the parked-router's next standing pass, minutes later): flip
+        // the originating repair to needs_attention + stamp a `spec_row_missing_escalated`
+        // director_activity row so getOpenRepairs / Ada's feed surface the phantom-fix fallout
+        // right now. Best-effort + non-throwing (the helper swallows every error internally).
+        // Keep 'do not build' — the park stays; we only replace the silent side of the outcome
+        // with a surfaced escalation.
+        if (parkedClass === "spec_row_missing") {
+          try {
+            const { escalateSpecRowMissingBuild } = await import("../src/lib/repair-agent");
+            await escalateSpecRowMissingBuild(db, {
+              workspaceId: job.workspace_id,
+              buildJobId: job.id,
+              slug: slug || null,
+              reason: gate.reason,
+              source: "claim_gate_park",
+            });
+          } catch (e) {
+            console.warn(`${tag} escalateSpecRowMissingBuild threw at claim-gate park:`, e instanceof Error ? e.message : e);
+          }
+        }
       } else {
         // Un-claim: back to `queued`. build-gate-durable-review-signal — instead of clearing claimed_at
         // (which made the held build instantly re-claimable → re-evaluated EVERY poll tick → churn), stamp a
