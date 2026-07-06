@@ -32,7 +32,13 @@ import { StorefrontFooter } from "../../../_components/StorefrontFooter";
 const MAIN_SITE = "https://superfoodscompany.com";
 
 export async function generateStaticParams() {
-  return listBlogWorkspaceParams();
+  // A flaky build-time DB query here must NOT fail the whole production build — the blog
+  // pages fall back to on-demand rendering. (This was freezing every production deploy.)
+  try {
+    return await listBlogWorkspaceParams();
+  } catch {
+    return [];
+  }
 }
 
 function blogBaseUrl(domain: string | null, workspace: string): string {
