@@ -2239,9 +2239,14 @@ async function handleDirectAction(
 /**
  * Verify that a direct action's expected state change is reflected in the DB.
  * Returns true if verified, false if the expected state wasn't found.
+ *
+ * Exported for unit tests (see action-executor.verify-in-db.test.ts). The
+ * production caller passes the executor's ActionContext; tests pass a
+ * minimal object that carries { admin, ticketId } — the only fields this
+ * switch reads.
  */
-async function verifyActionInDB(
-  ctx: ActionContext,
+export async function verifyActionInDB(
+  ctx: Pick<ActionContext, "admin" | "ticketId">,
   action: ActionParams,
 ): Promise<boolean> {
   const admin = ctx.admin;
@@ -2288,6 +2293,83 @@ async function verifyActionInDB(
         .select("applied_discounts").eq("shopify_contract_id", action.contract_id).single();
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
+    }
+    case "create_return":
+    case "create_replacement": {
+      // Both action types write a `returns` row scoped to this ticket
+      // (create_return via createFullReturn; create_replacement is a
+      // routing alias that lands in the same table). The create_return
+      // handler enforces at-most-one non-cancelled return per ticket
+      // (HARD INVARIANT — see the create_return case above), so we
+      // read by ticket_id and expect status in ('pending','approved').
+      // A missing row means the handler reported success but the row
+      // was never inserted → self-heal picks it up.
+      if (!ctx.ticketId) return true;
+      const { data } = await admin.from("returns")
+        .select("status")
+        .eq("ticket_id", ctx.ticketId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!data?.status) return false;
+      return data.status === "pending" || data.status === "approved";
+    }
+    case "skip_next_order": {
+      // After a skip, `subscriptions.next_billing_date` must be strictly
+      // in the future — the whole point of the skip is to move the next
+      // charge past the currently-scheduled cycle. A next_billing_date
+      // that's still today/past means the mutation didn't stick.
+      // (skip_next_order is retired by the sibling M3 spec, so this
+      // case exists just for the transition window.)
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      return new Date(String(nbd)).getTime() > Date.now();
+    }
+    case "change_next_date": {
+      // Expect subscriptions.next_billing_date's calendar day equals
+      // action.date's calendar day (YYYY-MM-DD). Edge case: the
+      // change_next_date handler fires order-now instead when action.date
+      // is ≤ today (customer said "ship now"), in which case
+      // next_billing_date isn't touched and instead advances on the
+      // next successful renewal. For that path we accept any future
+      // next_billing_date as verified — the customer's intent (get
+      // product ASAP) was satisfied by the order-now dispatch.
+      if (!action.contract_id || !action.date) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      const requested = String(action.date).slice(0, 10);
+      const actualDay = String(nbd).slice(0, 10);
+      if (actualDay === requested) return true;
+      const today = new Date().toISOString().slice(0, 10);
+      if (requested <= today) {
+        return new Date(String(nbd)).getTime() > Date.now();
+      }
+      return false;
+    }
+    case "change_frequency": {
+      // Read the mirror columns billing_interval + billing_interval_count
+      // — those are the ACTUAL DB column names (docs/brain/tables/subscriptions.md).
+      // The spec calls them `billing_policy_interval` / `billing_policy_interval_count`;
+      // per CLAUDE.md "the database is the spec" — we use the live shape.
+      if (!action.contract_id || !action.interval) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("billing_interval, billing_interval_count")
+        .eq("shopify_contract_id", action.contract_id).single();
+      if (!data) return false;
+      const wantInterval = String(action.interval).toUpperCase();
+      const gotInterval = String(data.billing_interval || "").toUpperCase();
+      if (gotInterval !== wantInterval) return false;
+      if (action.interval_count != null) {
+        return Number(data.billing_interval_count) === Number(action.interval_count);
+      }
+      return true;
     }
     default:
       // No verification logic for this action type — assume OK
