@@ -1,0 +1,1 @@
+- **Portal orders slice 2: order detail page + last-5-orders widget + list navigation + friendly copy** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]

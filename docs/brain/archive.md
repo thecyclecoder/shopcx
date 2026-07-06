@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]
 - **Goal promotion: stop fold/promotion doc collisions + surface a HELD promotion** · verified 2026-07-06 · → [[lifecycles/spec-goal-branch-pm-flow]]
 - **Portal: fix the first-delivery gate + true read-only + honest order status (slice 1)** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
+- **Portal orders slice 2: order detail page + last-5-orders widget + list navigation + friendly copy** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
 - **Portal: quote subscription tax on the post-coupon base** · verified 2026-07-06 · → [[lifecycles/subscription-billing]]
 - **Blueprint specs mandate parent** · verified 2026-07-05 · → [[../lifecycles/advertorial-landers]]
 - **Box builds: self-heal a primary checkout wedged on a build branch** · verified 2026-07-05 · → [[../recipes/build-box-setup#primary-checkout-self-healing]]
