@@ -39,7 +39,7 @@ Sequenced build plan: stop the money bleeding → SDK core with zero consumers �
 
 ## Status / open work
 
-**Shipped + folded:** M1–M4. Every child spec landed clean and folded into its permanent home:
+**Shipped + folded:** M1–M5. Every child spec landed clean and folded into its permanent home:
 
 | Milestone | Spec (folded) | Permanent home |
 |---|---|---|
@@ -52,10 +52,10 @@ Sequenced build plan: stop the money bleeding → SDK core with zero consumers �
 | M4 | commerce-sdk-migrate-ticket-detail | [[ticket-lifecycle]] |
 | M4 | commerce-sdk-migrate-dashboard-agent-ai | [[../libraries/action-executor]] · [[../dashboard/customers]] |
 | M4 | loyalty-list-stats-and-adjust-guard | [[../libraries/commerce__loyalty]] · [[../dashboard/loyalty]] |
+| M5 | commerce-sdk-migrate-customer-portal | [[customer-portal]] |
 
 **Known gaps / not yet shipped:**
-- **M5 — customer-portal migration is the final open domino** (`commerce-sdk-migrate-customer-portal`, planned). The portal still paints from its own display wrappers (`enrichContractPricing` + the mini-site `page.tsx` server render) rather than consuming the SDK's `SubscriptionView` directly. Both portal paths already price through the same `priceSubscription` engine (so no `$NaN` risk), but the read shape is not yet the unified view. This migration is intentionally last and must be diff-verified against today's correct portal output before it lands. Until then, the portal is the one customer-facing surface not yet a thin SDK consumer.
-- The old `appstleX` exports remain as `@deprecated` shims; the final caller sweep retires them once M5 lands.
+- The old `appstleX` exports remain as `@deprecated` shims for backward compatibility; consider retiring them in a follow-up if no remaining callers exist.
 
 **Open questions:** None.
 
