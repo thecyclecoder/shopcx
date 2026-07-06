@@ -1,5 +1,5 @@
 import { SeasonalBanner } from "../_components/SeasonalBanner";
-import { ShopCTA } from "../_components/ShopCTA";
+import { LanderCTA } from "../_components/LanderCTA";
 
 /**
  * Composited advertorial hero for a blueprint lander (the "8 Reasons…" Erth-style top fold).
@@ -70,7 +70,7 @@ const HERO_CSS = `
 `;
 
 export function BlueprintHero(props: BlueprintHeroProps) {
-  const { brand, headline, reviewCount, urgency, quote, offer, heroImageUrl, ctaLabel, ctaHref, lowestPriceCents } = props;
+  const { brand, headline, reviewCount, urgency, quote, offer, heroImageUrl, ctaLabel, ctaHref } = props;
   return (
     <section className="bp-hero" data-section="blueprint-hero">
       <style dangerouslySetInnerHTML={{ __html: HERO_CSS }} />
@@ -101,7 +101,7 @@ export function BlueprintHero(props: BlueprintHeroProps) {
           </figcaption>
         </figure>
         <div className="bp-hero__cta">
-          <ShopCTA href={ctaHref} label={ctaLabel} lowestPriceCents={lowestPriceCents} showTrust={false} align="center" />
+          <LanderCTA label={ctaLabel} href={ctaHref} />
         </div>
         <div className="bp-hero__subtext">{offer.subtext}</div>
       </div>
