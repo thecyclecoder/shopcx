@@ -13867,6 +13867,59 @@ async function runRepairJob(job: Job) {
       const ledgerInstr = JSON.stringify({ ...instr, root_cause: authored.rootCause, authored_slug: authored.slug });
       const groupedNote = authored.grouped ? ` (grouped onto sibling for root cause ${authored.rootCause})` : authored.alreadyExists ? " (existing)" : "";
 
+      // ── VERIFY-AFTER-AUTHOR (repair-verify-spec-persisted-before-build Phase 1) ──
+      // groupOrAuthorRepairSpec swallows a raw DB-write failure in its inner try/catch AND
+      // markNewSpecInReview → authorSpecRowFromMarkdown console.warn-and-continues on any non-shape
+      // authoring error. Both paths return a slug string as if authored, then the terminal completion
+      // + build enqueue fire — and a build for a non-existent slug parks `spec_row_missing` at the
+      // claim-gate (~line 4898), which the parked-router dismisses as noise. The signature vanishes
+      // silently (16 "phantom-completed" repairs in the trailing 7 days). Gate the terminal path on
+      // a getSpec confirmation the row actually persisted — matches the claim-gate's own predicate
+      // so this catches the same class of slip earlier (at the source). Require the row (not
+      // phases≥1: a one-shot spec authors 0 phases and is still authored). On miss: DO NOT enqueue
+      // repair_build, DO NOT mark completed — park needs_attention with an actionable error so
+      // getOpenRepairs (src/lib/repair-agent.ts:372) surfaces it, and stamp one director_activity
+      // line so Ada sees the author-write fallout on her feed.
+      const { getSpec: getSpecCard } = await import("../src/lib/brain-roadmap");
+      let persistedCard: import("../src/lib/brain-roadmap").SpecCard | null = null;
+      try {
+        const got = await getSpecCard(authored.slug, job.workspace_id);
+        persistedCard = got?.card ?? null;
+      } catch (e) {
+        console.warn(`${tag} verify-after-author: getSpec(${authored.slug}) threw — ${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (!persistedCard) {
+        const authorErr = `authored fix spec [[${authored.slug}]] did not persist to public.specs — silent author-write fallout; do NOT enqueue repair_build (would phantom-complete)`;
+        const { recordDirectorActivity } = await import("../src/lib/director-activity");
+        await recordDirectorActivity(db, {
+          workspaceId: job.workspace_id,
+          directorFunction: "platform",
+          actionKind: "repair_author_write_failed",
+          specSlug: authored.slug,
+          reason: authorErr,
+          metadata: {
+            job_id: job.id,
+            signature,
+            verdict,
+            authored_slug: authored.slug,
+            root_cause: authored.rootCause,
+            grouped: authored.grouped,
+            already_existed: authored.alreadyExists,
+            autonomous: true,
+          },
+        });
+        // Leave the error row OPEN — no fix landed, so the reconcile SHOULD keep re-scanning. Park
+        // THIS job as needs_attention with the actionable message so getOpenRepairs surfaces it.
+        await update(job.id, {
+          status: "needs_attention",
+          error: authorErr,
+          instructions: ledgerInstr,
+          log_tail: `${verdict} → author-write fallout: proposed [[${authored.slug}]] but public.specs has no row after author. Parked for human review on the repair feed.\n\n${diagnosis}`.slice(-2000),
+        });
+        console.warn(`${tag} ${verdict} → author-write fallout on ${authored.slug} → surfaced needs_attention (no build enqueue, no completed)`);
+        return;
+      }
+
       // Narrow auto-queue allow-list (the ONE sanctioned auto path): a known-safe, mechanical,
       // monitor-only class auto-queues its build. Anything touching product code (real-bug) is
       // surfaced for one-tap owner Build instead (surface-don't-auto-build — the North star guard).
