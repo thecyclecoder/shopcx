@@ -827,6 +827,39 @@ async function isRunawayFixAuthoring(workspaceId: string, slug: string): Promise
   }
 }
 
+/**
+ * single-source-of-truth for a goal-bound spec's `**Parent:**` line. The bound `milestone_id` is the
+ * TRUTH; the Parent PROSE is its PROJECTION — generated here, never hand-authored — so it can never
+ * drift to a bare-goal. This closes the systematic 2026-07 planner bounce: the plan-author set
+ * `milestone_id` correctly on every spec but wrote the Parent prose as the bare goal slug, and Vale
+ * (which reads the rendered prose, not the FK) bounced all 14. Answers "why hand-write the parent at
+ * all" — for a goal-bound spec you don't; it's a rendering of the milestone it's bound to.
+ */
+export function formatMilestoneParentProse(goalSlug: string, position: number, title: string): string {
+  const anchor = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `[[../goals/${goalSlug}#${anchor}]] — M${position} "${title}" milestone.`;
+}
+
+/** Look up the bound milestone → its goal, and render the canonical Parent prose. Best-effort: a read
+ *  miss returns null and the caller leaves the author-supplied parent untouched. */
+async function deriveMilestoneParentProse(milestoneId: string): Promise<string | null> {
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: ms } = await admin
+      .from("goal_milestones")
+      .select("goal_id, title, position")
+      .eq("id", milestoneId)
+      .maybeSingle();
+    if (!ms || !ms.goal_id) return null;
+    const { data: goal } = await admin.from("goals").select("slug").eq("id", ms.goal_id).maybeSingle();
+    if (!goal?.slug) return null;
+    return formatMilestoneParentProse(goal.slug, Number(ms.position) || 1, String(ms.title || "milestone"));
+  } catch {
+    return null;
+  }
+}
+
 export async function authorSpecRowStructured(
   workspaceId: string,
   slug: string,
@@ -912,6 +945,13 @@ export async function authorSpecRowStructured(
       (typeof spec.parent === "string" && spec.parent.includes("../specs/"));
     if (!existing && isDerivativeFix && (await isRunawayFixAuthoring(workspaceId, slug))) {
       return false;
+    }
+    // single-source-of-truth: for a goal-bound spec, DERIVE the Parent prose from the bound milestone so it
+    // can never drift to a bare-goal (the 2026-07 systematic planner bounce). The milestone_id is the truth;
+    // the prose is its projection — the author's parent string is overridden when a milestone is bound.
+    if (opts.milestoneId) {
+      const derivedParent = await deriveMilestoneParentProse(opts.milestoneId);
+      if (derivedParent) spec = { ...spec, parent: derivedParent };
     }
     // one-off-spec-parent: reject a bare-goal parent BEFORE the write (fail-loud, like the Verification/Intent
     // gates) so a one-off spec never lands with a goal parent Vale will bounce forever. Trusts a declared
