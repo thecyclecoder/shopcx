@@ -33,6 +33,7 @@ The refund **mirror table** — one row per authoritative refund fired against a
 - **Written from the chokepoint only.** Every code path that fires a refund resolves to [[../libraries/refund]] `refundOrder`; the mirror row is written there and nowhere else, so no path can move money without an audit row.
 - **`vendor` mirrors the dispatch decision.** Internal / Shopify-order-paid-via-dead-Braintree-gateway ⇒ `braintree`; native Shopify REST refund ⇒ `shopify`. Never inferred from the order's `financial_status`.
 - **`request_key` is required and stable.** Same-shape retry ⇒ same key ⇒ the unique index short-circuits it. The default hash covers `(order_id, amount_cents, reason)` — a caller that legitimately fires two same-shape refunds MUST thread an explicit `requestKey` through `RefundOrderOptions`.
+- **Pre-dispatch idempotency guard.** [[../libraries/refund]] `refundOrder` reads this table by `(workspace_id, order_id, request_key)` in `('succeeded','settled')` BEFORE the gateway call and short-circuits to `{ success: true, method, refund_id: vendor_refund_id }` on hit — the money doesn't move a second time. The post-success mirror insert plus the unique index `(order_id, request_key)` are the second and third layers behind this read.
 - **`status='succeeded'` is the terminal Phase-1 state.** Phase 3 T+3d reconcile is what upgrades to `settled` / catches `reversed`; nothing else mutates this row.
 - **Admin-only.** RLS is OFF — every write comes from server-side [[../libraries/refund]] via `createAdminClient()`. No anon read path.
 

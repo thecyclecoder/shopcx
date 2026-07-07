@@ -184,6 +184,36 @@ export async function refundOrder(
   if (orderErr) return { success: false, error: `Order lookup failed: ${orderErr.message}` };
   if (!order) return { success: false, error: `Order ${orderId} not found in workspace` };
 
+  // ── Pre-dispatch idempotency guard ──
+  // Compute the stable request_key up front (opts.requestKey when the
+  // caller threads its own action id; otherwise the deterministic hash
+  // over order_id + amount_cents + reason). Look up the order_refunds
+  // ledger for an already-succeeded / already-settled row on the same
+  // (workspace, order, key) triple; if present, short-circuit BEFORE
+  // any gateway dispatch — the money already moved. This is the
+  // choke-point double-refund guard the spec is restoring; the
+  // post-success mirror write below plus the DB unique index are the
+  // second and third layers, and the open-return stamp handles the
+  // orthogonal return-vs-direct collision.
+  const requestKey = opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason);
+  if (!opts.dryRun) {
+    const { data: existing } = await admin
+      .from("order_refunds")
+      .select("id, vendor, vendor_refund_id")
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", order.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        method: (existing.vendor === "braintree" ? "braintree" : "shopify") as RefundMethod,
+        refund_id: existing.vendor_refund_id ?? undefined,
+      };
+    }
+  }
+
   // Mirror of returns.ts § Phase 4: absence of shopify_order_id is
   // the internal-order signal, not the presence of
   // braintree_transaction_id (a Shopify order paid via Braintree
@@ -258,7 +288,6 @@ export async function refundOrder(
   // refund back (the money already moved) — logged for the Phase 3
   // T+3d reconcile to catch.
   try {
-    const requestKey = opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason);
     await admin.from("order_refunds").insert({
       workspace_id: workspaceId,
       order_id: order.id,
