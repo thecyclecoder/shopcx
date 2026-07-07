@@ -1,0 +1,1 @@
+- **Summarize once at merge, then stop re-sending the full history to Opus every turn** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
