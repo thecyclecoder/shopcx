@@ -2306,10 +2306,25 @@ export async function executeSonnetDecision(
     await stampResolutionShipped(ctx);
   };
 
-  // Handle clarification first — applies regardless of action_type
-  if (decision.needs_clarification && decision.clarification_question) {
-    await stampedSend(decision.clarification_question, ctx.sandbox);
-    return { messageSent: true, escalated: false, closed: false, statusManaged: false };
+  // Handle clarification first — applies regardless of action_type.
+  //
+  // A clarification turn is a COMPLETE customer message (acknowledge the
+  // request → say what we can/can't do and why → set expectations → ask
+  // the one question we need), sent via the SAME response_message field a
+  // normal reply uses (see the ai_response branch at ~:2395). It must NOT
+  // execute actions — the turn is awaiting the customer's answer — so we
+  // return early either way. decision.clarification_question is retained
+  // on the decision shape as internal metadata (turn tracking / evals);
+  // it is never the thing sent as the whole customer message. Reason:
+  // sending only the bare question strips the reasoning the model just
+  // did (ticket 71538c70 — creamer→coffee swap emitted a two-word
+  // question). Spec: docs/brain/specs/clarification-turns-send-full-message-not-bare-question.md
+  if (decision.needs_clarification) {
+    if (decision.response_message) {
+      await stampedSend(decision.response_message, ctx.sandbox);
+      return { messageSent: true, escalated: false, closed: false, statusManaged: false };
+    }
+    return { messageSent: false, escalated: false, closed: false, statusManaged: false };
   }
 
   // Track whether a customer-facing message was sent
