@@ -513,6 +513,47 @@ export function isForeignGoTrueEdgeNoise(
 }
 
 /**
+ * Foreign-app noise — Supabase's own GoTrue `/user` 504 on the auth_logs feed (the
+ * app-level sibling of [[isForeignGoTrueEdgeNoise]] on edge_logs)
+ * ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]]).
+ *
+ * The same GoTrue saturation blip surfaces on TWO monitoring surfaces: the Cloudflare
+ * edge_logs (path `/auth/v1/user` + 504 — already dropped by
+ * [[isForeignGoTrueEdgeNoise]]) AND the GoTrue app-level auth_logs (msg starts with
+ * `504: Processing this request timed out…`, the request JSON carries `"path":"/user"`
+ * with method `GET`). We do not run GoTrue and cannot patch its gateway; we hold ZERO
+ * levers here. The prior fix scoped this auth-log shape into the transient class
+ * ([[isTransientSupabaseLogNoise]] `kind:'auth'` `processing this request timed out`
+ * branch), but because Supabase's gateway saturates on a cadence outside our control the
+ * signature recurs inside `TRANSIENT_RECUR_WINDOW_MS` — 46 sightings over 7 days —
+ * escalating to an open+paged incident and waking the Repair Agent on a healed
+ * foreign-app blip. Users see nothing (a normal `supabase.auth.getUser()` call just
+ * retries and succeeds); Platform owners see a churning red tile.
+ *
+ * Same choice we already made for the edge-log twin and supabase-edge-ssl-handshake /
+ * undici-headers-timeout noise: when the surface is foreign-owned and we hold no levers,
+ * DROP AT CAPTURE — do not even record the row. Narrowly gated to the exact
+ * `504: Processing this request timed out` + `"path":"/user"` + `"method":"GET"` shape so
+ * a real GoTrue outage on other paths (`/token`, `/admin`), a 5xx that isn't 504, or a
+ * real auth-signature bug on `/user` is still captured normally.
+ *
+ * `true` iff msg starts with `504: Processing this request timed out` AND eventMessage
+ * carries BOTH `"path":"/user"` AND `"method":"GET"`. Consumed by the `auth` LogQuery's
+ * `mapRow` in [[./supabase-log-poll]] — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null fully suppresses the row (no error_event, no loop_alert, no
+ * signature, no repair fan-out). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignGoTrueAuthLogNoise(
+  msg: string | null | undefined,
+  eventMessage: string | null | undefined,
+): boolean {
+  const m = (msg ?? "").trimStart();
+  if (!m.startsWith("504: Processing this request timed out")) return false;
+  const em = eventMessage ?? "";
+  return em.includes('"path":"/user"') && em.includes('"method":"GET"');
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
