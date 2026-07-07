@@ -7537,31 +7537,26 @@ async function markNewSpecInReview(
   }
   if (markdown && markdown.trim()) {
     const { authorSpecRowFromMarkdown, AuthorWriteFailedError } = await import("../src/lib/author-spec");
-    // repair-author-write-surface-real-error-not-swallow Phase 1 — CAPTURE the boolean return and
-    // PROPAGATE every author-write failure. Two prior swallow points closed here:
-    //   (1) `authorSpecRowFromMarkdown` wraps its DB write in a try/catch that returns `false` and
-    //       console.warn's on any raw upsert/DB error (author-spec.ts ~1214-1220). A bare `await` at
-    //       this call site threw that boolean away, so the caller (repair flow → groupOrAuthorRepair
-    //       Spec → runRepairJob) blindly enqueued a `repair_build` for a slug that had NEVER
-    //       persisted to public.specs — 16 phantom-completed repairs in the trailing 7 days.
-    //   (2) The old catch here re-threw only the two shape-gate throws (MissingVerificationError /
-    //       EmptyPhaseBodyError) and console.warn'd the rest — MissingIntentError, InvalidParentError,
-    //       and anything else propagated to `false` never made it out.
-    // Both routes now surface: `!ok` throws `AuthorWriteFailedError`; any thrown error re-throws
-    // unfiltered. `groupOrAuthorRepairSpec`'s catch (~14108) preserves the error name + message onto
-    // the parked repair job's `error` column so the operator (and Ada's supervision lane) reads
-    // exactly why the write was rejected. Callers that formerly relied on best-effort silence (e.g.
-    // the db-health / coverage-register lanes at markNewSpecInReview call sites in this file) fall
-    // through to the outer `runJob(job).catch(...)` handler that stamps the job `failed` with the
-    // real message — the whole point of this spec is to stop hiding the cause.
+    // repair-author-write-surface-real-error-not-swallow — Phase 1 CAPTUREd the boolean here so a
+    // silent-false didn't sail on; Phase 2 finished the job by having `authorSpecRowFromMarkdown`
+    // (a) THROW the real caught error (MissingVerification / EmptyPhaseBody / MissingIntent /
+    // InvalidParent / raw DB / AuthorWriteFailedError for a "row not visible after write") rather
+    // than collapse to `return false`, and (b) do a `getSpec` read-after-write so a silent no-op
+    // upsert also throws with the concrete cause. Result: every failure carries a NON-NULL concrete
+    // message end-to-end (author-spec → here → `groupOrAuthorRepairSpec` catch → parked repair job's
+    // `error` column), never the generic "silent author-write fallout" fallback. The `!ok` throw
+    // below is dead today (the source can no longer return false), but stays as a defense-in-depth
+    // if a future author path adds a soft-halt shape (e.g. a circuit-breaker like the structured
+    // path's runaway-authoring guard — see author-spec.ts:965) — a soft halt still means the spec
+    // was NOT persisted, and the caller must surface that instead of silently continuing.
     const ok = await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
       intendedStatusSetBy: actor,
     });
     if (!ok) {
       throw new AuthorWriteFailedError(
-        `authorSpecRowFromMarkdown ${slug} returned false — silent author-write fallout (the raw ` +
-          `DB/upsert error was swallowed inside the author chokepoint's inner try/catch; Phase 2 will ` +
-          `attach the concrete inner message).`,
+        `authorSpecRowFromMarkdown ${slug} returned false — a soft-halt path (e.g. the runaway-` +
+          `authoring circuit-breaker) tripped without throwing. The spec was NOT persisted; do not ` +
+          `proceed to enqueue a build for this slug.`,
       );
     }
   }
@@ -14256,6 +14251,19 @@ function repairSpecMarkdown(
     `**Repair-signature:** \`${signature}\``,
   ].join("\n");
 
+  // repair-author-write-surface-real-error-not-swallow Phase 2 — supply the plain-language `**Why:**`
+  // + `**What:**` intent headers `authorSpecRowFromMarkdown` → `extractIntentHeaders` reads into
+  // `public.specs.why` / `.what`. Before Phase 2 the repair markdown emitted no top-level intent
+  // headers (only a `### Why` SECTION inside the phase body, which the parser ignores) so every
+  // repair-authored spec landed with `why=null` / `what=null`. The markdown path only soft-warns
+  // today (no MissingIntentError throw from `authorSpecRowFromMarkdown` — the hard gate is on the
+  // structured path), so this wasn't the specific failure surfaced by the 4 parked signatures — but
+  // it IS the "supply why/what" hardening Phase 2's north star calls for (fix the ROOT cause, not
+  // just surface the throw): populate the intent columns so the spec is readable to humans + gives
+  // agents a motivational anchor, and future-proof against a hard-gate flip on the markdown path.
+  const specWhy = (spec.why || `The Control Tower signature \`${signature}\` (verdict: ${verdict}) is recurring; without a durable fix, the same error keeps re-firing and the parked repair job never clears.`).trim();
+  const specWhat = (spec.intent || `When this fix ships, the originating condition behind signature \`${signature}\` stops re-firing and the Control Tower tile stays green on the next re-trigger.`).trim();
+
   return [
     `# ${spec.title}`,
     ``,
@@ -14271,6 +14279,8 @@ function repairSpecMarkdown(
     // NEVER the parent — author-spec's assertValidParent rejects an `extends [[../specs/…]]` parent outright.
     `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || '[[../functions/platform]] — "Infra & DevOps / reliability" mandate'}`,
     ...(spec.relatedSpec ? [`**Related-spec:** ${spec.relatedSpec}`] : []),
+    `**Why:** ${specWhy}`,
+    `**What:** ${specWhat}`,
     ``,
     `## Phase 1 — ${phaseName}`,
     ``,
