@@ -23,6 +23,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **CS Director persona + org-placement (new-agent scaffold)** · verified 2026-07-07 · → [[libraries/cs-director]]
 - **CS Director storyline digests to founder + bidirectional reply steers leash + policy** · verified 2026-07-07 · → [[tables/cs_director_digests]]
 - **CS Director: third rung of the escalation ladder — hard calls above the triage quorum** · verified 2026-07-07 · → [[libraries/cs-director]]
+- **Digital goods catalog + PDF delivery** · verified 2026-07-07 · → [[../inngest/digital-goods-delivery]]
 - **Human directives are hard gates over the ticket AI — turn-off, don't-escalate, reviewed-lock; merges carry context, never control** · verified 2026-07-07 · → [[lifecycles/ai-analysis]]
 - **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
 - **Handler-alias catalog for orchestrator action-type misses** · verified 2026-07-07 · → [[tables/action_handler_aliases]]
