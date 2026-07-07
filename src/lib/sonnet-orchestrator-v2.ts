@@ -268,6 +268,33 @@ export function shouldRollupTail(tailMessageCount: number, tailCharCount: number
 }
 
 /**
+ * Hard cap on the raw-message window fed to the model per turn (Phase 3
+ * of ticket-merge-summary-and-context-cap). N > K by design, so under
+ * normal operation the rollup fires first and the cap never bites. The
+ * cap is a safety belt for edge cases: rollup fell behind because of a
+ * Sonnet outage, or a burst of customer messages arrived after the
+ * rollup triggered but before it landed. Beyond N, the merge_summary
+ * carries prior state — no information is lost from the model's view.
+ *
+ * Kept slightly above K so a normal K-triggered rollup on a bursty
+ * ticket leaves headroom before the cap kicks in and truncates.
+ */
+export const HARD_CONTEXT_CAP_N_MESSAGES = 25;
+export function applyRawWindowCap<T>(
+  messages: T[],
+  cap: number = HARD_CONTEXT_CAP_N_MESSAGES,
+): { tail: T[]; truncatedCount: number } {
+  if (messages.length <= cap) return { tail: messages, truncatedCount: 0 };
+  // Keep the NEWEST N (drop the oldest). The merge_summary carries the
+  // dropped-from-view state; the newest messages are what the model needs
+  // to reason about the current turn.
+  return {
+    tail: messages.slice(messages.length - cap),
+    truncatedCount: messages.length - cap,
+  };
+}
+
+/**
  * Render the per-ticket merge-summary cache prefix — the block that
  * downstream Opus turns read INSTEAD of re-deriving state from the full
  * merged history. Pure — used by buildPreContext to construct the
@@ -423,9 +450,37 @@ async function buildPreContext(
   // was fetched above; the summary carries prior state. Otherwise we render
   // the latest-12 slice (fetched desc → reverse to ascending).
   let convoBlock = "";
-  const convoSource: SinceMsg[] | null = sinceMessages
+  const rawConvoSource: SinceMsg[] | null = sinceMessages
     ? sinceMessages
     : (messages ? [...messages].reverse() as SinceMsg[] : null);
+  // ── Phase 3: hard context cap ──
+  // Applied AFTER the rollup fire-and-forget above and BEFORE render, so
+  // even a bursty merged ticket whose rollup fell behind still sends a
+  // bounded raw-message window. Non-merged tickets fetch limit:12 upstream
+  // and can never exceed N=25 — the cap is de-facto a merged-ticket
+  // safeguard. `applyRawWindowCap` is a pure slice; the merge_summary in
+  // userBlockPrefix preserves the dropped state so nothing is lost from
+  // the model's view (see docs/brain/specs/ticket-merge-summary-and-context-cap.md
+  // Phase 3 verification).
+  const capped = rawConvoSource
+    ? applyRawWindowCap(rawConvoSource, HARD_CONTEXT_CAP_N_MESSAGES)
+    : { tail: null as SinceMsg[] | null, truncatedCount: 0 };
+  if (capped.truncatedCount > 0) {
+    // Structured log so the cap is never silent — picked up by the Vercel
+    // log drain and surfaced on the [[ai-usage]] cost-audit pass. Not a
+    // sysNote (would clutter every capped turn); one log line per turn
+    // makes the truncation observable without noise on the ticket itself.
+    console.info(JSON.stringify({
+      event: "orchestrator_raw_window_capped",
+      ticketId,
+      workspaceId,
+      cap: HARD_CONTEXT_CAP_N_MESSAGES,
+      raw_count: rawConvoSource?.length ?? 0,
+      truncated: capped.truncatedCount,
+      relied_on_summary: Boolean(mergeSummary),
+    }));
+  }
+  const convoSource: SinceMsg[] | null = capped.tail;
   if (convoSource?.length) {
     const ordered = convoSource;
     convoBlock = ordered

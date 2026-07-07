@@ -89,6 +89,22 @@ On a merged ticket buildPreContext replaces the default "latest 12 messages" fet
 
 **Cost accounting.** Per [[ai-usage]] `usageCostCents`, cache_read is billed at 10% of input while cache_creation is billed at 125% of input. Sending the summary block once as cache_creation and reading it back on every subsequent turn as cache_read is the whole optimization — it eliminates the recost measured on ticket 49ddd6c4 ($8.92: `input 93k / output 7k / cache_create 216k / cache_read 2,058k`, dominated by re-writing merged history as fresh input each turn).
 
+### Hard context cap + no-progress guard (Phase 3)
+
+`buildPreContext` also enforces a **hard `HARD_CONTEXT_CAP_N_MESSAGES = 25` tail cap** via `applyRawWindowCap`. Applied after the fetch and after the rollup-fire-and-forget, so a bursty merged ticket whose rollup fell behind still sends a bounded raw window; older-than-N messages are covered by the `merge_summary` prefix (no information loss). Non-merged tickets fetch `limit:12` upstream and never exceed N — the cap is de-facto a merged-ticket safeguard. Truncations are surfaced through a structured `console.info({event:"orchestrator_raw_window_capped", ...})` log so the cap is never silent — picked up by the Vercel log drain for post-deploy cost audit. Pure, unit-tested in [[../../../src/lib/sonnet-orchestrator-v2-merge-summary.test.ts]].
+
+The complementary **no-progress circuit** lives in [[no-progress-guard]] and runs in `unified-ticket-handler.ts` **before** `pickOrchestratorModel` — a stuck ticket never reaches the paid Opus escalation ([[model-picker]]'s `ai_turn_count >= 1 → opus` route). When `M = NO_PROGRESS_M = 3` consecutive inbound customer messages sit at the tail with no outbound reply and no executed-action system note between them, `applyNoProgressCircuit` writes `escalated_at = now(), escalation_reason = "no_progress_context_cap"` via a compare-and-set (`.eq("id", tid).eq("workspace_id", ws).is("escalated_at", null).select("id")`) and drops a one-off `[System]` note, then returns `{tripped: true}` — the handler short-circuits before `callSonnetOrchestratorV2` fires.
+
+Reproducing the cost delta against the ticket 49ddd6c4 baseline (spec Phase-3 verification):
+
+```
+npx tsx scripts/measure-merge-summary-cost-delta.ts \
+  --ticket 49ddd6c4-... \
+  --cutoff 2026-07-07T00:00:00Z
+```
+
+Read-only probe — queries `ai_token_usage` rows tagged `purpose LIKE 'orchestrator-decision:%'`, splits by cutoff, and reports per-turn + total cost via `usageCostCents`. The spec's $8.92 baseline is the sum across the ticket's full pre-deploy history; the post-deploy total should show cache_read dominating cache_creation on every turn after the first.
+
 **Hard rule: never move per-ticket, per-turn, or per-call content into `system`.** Caching is a prefix match — one volatile byte in the system block invalidates the shared prefix for the whole workspace. That was the pre-2026-06 leak: the entire prompt was one user block with the customer + conversation *ahead* of the rules, so the ~60K stable payload re-billed at full freight on every ticket (`cache_creation ≈ cache_read`, only ~36% reads). The split + 1h TTL converts the bulk of cache-creation tokens into reads. Handler queries (`journey_definitions`/`playbooks`/`workflows`) carry `.order("name")` so the rendered list is byte-stable. **Verify after deploy:** `cache_read_input_tokens` share in [[ai-usage]] / [[../tables/ai_token_usage]] should climb well above the prior ~36%.
 
 ## Control Tower heartbeat (`ai:orchestrator`)

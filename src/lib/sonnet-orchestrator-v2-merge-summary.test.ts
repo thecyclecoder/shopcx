@@ -15,8 +15,10 @@ import assert from "node:assert/strict";
 import {
   shouldRollupTail,
   renderMergeSummaryPrefix,
+  applyRawWindowCap,
   MERGE_TAIL_ROLLUP_K_MESSAGES,
   MERGE_TAIL_ROLLUP_T_CHARS,
+  HARD_CONTEXT_CAP_N_MESSAGES,
 } from "./sonnet-orchestrator-v2";
 
 test("tail below both thresholds → no rollup", () => {
@@ -37,6 +39,24 @@ test("both thresholds crossed → rollup fires", () => {
     shouldRollupTail(MERGE_TAIL_ROLLUP_K_MESSAGES + 5, MERGE_TAIL_ROLLUP_T_CHARS + 500),
     true,
   );
+});
+
+test("hard cap on tail below N → passthrough, truncatedCount=0", () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({ id: i }));
+  const { tail, truncatedCount } = applyRawWindowCap(msgs, HARD_CONTEXT_CAP_N_MESSAGES);
+  assert.equal(tail.length, 10);
+  assert.equal(truncatedCount, 0);
+});
+
+test("hard cap on tail above N → keeps the NEWEST N and reports the drop (named failing state: full context via summary, cap logged)", () => {
+  const msgs = Array.from({ length: HARD_CONTEXT_CAP_N_MESSAGES + 7 }, (_, i) => ({ id: i }));
+  const { tail, truncatedCount } = applyRawWindowCap(msgs, HARD_CONTEXT_CAP_N_MESSAGES);
+  assert.equal(tail.length, HARD_CONTEXT_CAP_N_MESSAGES);
+  assert.equal(truncatedCount, 7);
+  // The newest N must be preserved so the model sees the current turn's
+  // context; the older 7 are covered by the merge_summary prefix (Phase 1/2).
+  assert.equal(tail[tail.length - 1].id, HARD_CONTEXT_CAP_N_MESSAGES + 6);
+  assert.equal(tail[0].id, 7);
 });
 
 test("prefix carries lock timestamp + summary body verbatim + since-window marker", () => {
