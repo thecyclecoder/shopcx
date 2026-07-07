@@ -2922,20 +2922,149 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   }
 }
 
-// The periodic migration-drift job: parse supabase/migrations/*.sql → diff the live schema → write
-// the result into the migration-drift-check loop's heartbeat. The Control Tower monitor's
-// migration-drift output assertion reads produced.missing and flips the tile red on drift; freshness
-// keeps a DEAD check visible. NEVER throws (guarded) — a check failure must not break the poll loop.
+// Read the applied migration versions from supabase_migrations.schema_migrations (the Supabase
+// system table that records every migration the apply pipeline has run). Returns null when the host
+// has no DB password (→ the applied-set reconcile is skipped honestly — never a false "no drift").
+// ci-guard-migrations-applied-not-just-merged spec Phase 1.
+async function fetchAppliedMigrationVersions(): Promise<string[] | null> {
+  let connectionString: string;
+  try {
+    const { poolerConnectionString } = await import("./_bootstrap");
+    connectionString = poolerConnectionString();
+  } catch {
+    return null; // no SUPABASE_DB_PASSWORD / SUPABASE_DB_URL on this host — skip honestly.
+  }
+  const { Client } = await import("pg");
+  const c = new Client({ connectionString });
+  await c.connect();
+  try {
+    const res = await c.query(
+      "select version from supabase_migrations.schema_migrations",
+    );
+    return (res.rows as Array<{ version: string }>).map((r) => r.version);
+  } finally {
+    await c.end();
+  }
+}
+
+// Apply ONE additive migration on the pooler AND record the version in
+// supabase_migrations.schema_migrations so the reconciler clears it. Sanctioned pattern from
+// [[docs/brain/recipes/write-a-migration-apply-script]] (raw pg Client + poolerConnectionString).
+// Records the version conflict-safely so a concurrent apply / dashboard runner race can't error
+// out the recording. Best-effort connect/teardown. Called ONLY by the migration-drift Phase 2 auto-
+// apply loop, and ONLY after classifyMigrationSql flagged the SQL 'additive'.
+// ci-guard-migrations-applied-not-just-merged spec Phase 2.
+async function applyMigrationAndRecord(input: { version: string; file: string; sql: string }): Promise<void> {
+  const { poolerConnectionString } = await import("./_bootstrap");
+  const connectionString = poolerConnectionString();
+  const { Client } = await import("pg");
+  const c = new Client({ connectionString });
+  await c.connect();
+  try {
+    // The DDL itself.
+    await c.query(input.sql);
+    // Record the version so the reconciler treats it as applied on the next tick. Uses a permissive
+    // shape (version + name; statements folded into an ARRAY the shape has room for) with ON
+    // CONFLICT DO NOTHING so a version already recorded by a concurrent dashboard apply is a no-op.
+    // Different Supabase revisions expose slightly different schemas — we try the extended shape
+    // first and fall back to (version, name) then (version) if a NOT-NULL column is missing.
+    const nameWithoutExt = input.file.replace(/\.sql$/, "");
+    try {
+      await c.query(
+        `insert into supabase_migrations.schema_migrations (version, name, statements)
+         values ($1, $2, array[$3]::text[])
+         on conflict (version) do nothing`,
+        [input.version, nameWithoutExt, input.sql],
+      );
+    } catch {
+      try {
+        await c.query(
+          `insert into supabase_migrations.schema_migrations (version, name)
+           values ($1, $2)
+           on conflict (version) do nothing`,
+          [input.version, nameWithoutExt],
+        );
+      } catch {
+        await c.query(
+          `insert into supabase_migrations.schema_migrations (version)
+           values ($1)
+           on conflict (version) do nothing`,
+          [input.version],
+        );
+      }
+    }
+  } finally {
+    await c.end();
+  }
+}
+
+// The periodic migration-drift job: runs BOTH drift axes (table-presence + applied-set reconcile)
+// and rides both on the same migration-drift-check loop heartbeat. The Control Tower monitor's
+// migration-drift output assertion reads produced.missing + produced.mergedButUnapplied and flips
+// the tile red on either; freshness keeps a DEAD check visible. NEVER throws (guarded) — a check
+// failure must not break the poll loop.
+// Phase 2 closes the loop: on merged-but-unapplied migrations, classify each via
+// classifyMigrationSql; additive → auto-apply on the pooler + record schema_migrations; destructive
+// → gate for approval (NEVER auto-apply — the tile alert names the version and stays until a human
+// runs the sanctioned apply script). Re-run the reconciler after any auto-apply so a resolved drift
+// clears the tile.
+// ci-guard-migrations-applied-not-just-merged spec Phase 1 added the second axis; Phase 2 the loop.
 async function runMigrationDriftJob(): Promise<void> {
   const startedAt = Date.now();
   try {
-    const { runMigrationDriftCheck, driftSummary, MIGRATION_DRIFT_LOOP_ID } = await import(
-      "../src/lib/control-tower/migration-drift"
-    );
-    const result = await runMigrationDriftCheck({
-      migrationsDir: resolve(REPO_DIR, "supabase/migrations"),
+    const {
+      runMigrationDriftCheck,
+      driftSummary,
+      applyMergedMigrations,
+      anyApplied,
+      MIGRATION_DRIFT_LOOP_ID,
+    } = await import("../src/lib/control-tower/migration-drift");
+    const migrationsDir = resolve(REPO_DIR, "supabase/migrations");
+    let result = await runMigrationDriftCheck({
+      migrationsDir,
       fetchLiveTables: fetchLivePublicTables,
+      fetchAppliedVersions: fetchAppliedMigrationVersions,
     });
+
+    // Phase 2: apply additive / gate destructive when the applied-set reconcile actually ran and
+    // surfaced merged-but-unapplied files. Skip cleanly on `appliedCheckSkipped` (no DB creds → no
+    // apply); a status='skipped' short-circuits the whole tile anyway.
+    if (
+      result.status === "drift" &&
+      !result.appliedCheckSkipped &&
+      result.mergedButUnapplied.length > 0
+    ) {
+      const processed = await applyMergedMigrations(result.mergedButUnapplied, {
+        readSql: (file) => readFileSync(resolve(migrationsDir, file), "utf8"),
+        applyMigration: applyMigrationAndRecord,
+        onApprovalNeeded: ({ version, file, severity, matches }) => {
+          // The tile alert (below) names the version; log for oncall visibility.
+          console.warn(
+            `[migration-drift] APPROVAL NEEDED: ${file} (version ${version}) is merged-but-unapplied and classifyMigrationSql flagged ${severity}${matches.length ? ` (${matches.join(", ")})` : ""}; NOT auto-applied — run the sanctioned apply script.`,
+          );
+        },
+      });
+      for (const p of processed) {
+        if (p.outcome === "applied") {
+          console.log(`[migration-drift] auto-applied ${p.file} (version ${p.version}, additive)`);
+        } else if (p.outcome === "apply-failed") {
+          console.error(
+            `[migration-drift] APPLY FAILED for ${p.file} (version ${p.version}): ${p.error ?? "unknown"}`,
+          );
+        }
+      }
+      // Merge the outcomes back into the result so the heartbeat carries them.
+      result = { ...result, mergedButUnapplied: processed };
+      // Re-check when anything actually applied — a resolved drift must clear the tile.
+      if (anyApplied(processed)) {
+        result = await runMigrationDriftCheck({
+          migrationsDir,
+          fetchLiveTables: fetchLivePublicTables,
+          fetchAppliedVersions: fetchAppliedMigrationVersions,
+        });
+      }
+    }
+
     const summary = driftSummary(result);
     await writeCronHeartbeat(
       MIGRATION_DRIFT_LOOP_ID,
@@ -2944,9 +3073,13 @@ async function runMigrationDriftJob(): Promise<void> {
         status: result.status,
         missing: result.missing,
         allowlistedMissing: result.allowlistedMissing,
+        mergedButUnapplied: result.mergedButUnapplied,
+        appliedNotOnMain: result.appliedNotOnMain,
         expectedCount: result.expectedCount,
         liveCount: result.liveCount,
         parsedFiles: result.parsedFiles,
+        appliedCount: result.appliedCount,
+        appliedCheckSkipped: result.appliedCheckSkipped,
         reason: result.reason,
       },
       Date.now() - startedAt,

@@ -883,6 +883,43 @@ function readMissingTables(produced: unknown): Array<{ table: string; migration:
   return out;
 }
 
+/**
+ * Read the migration-drift check's merged-but-unapplied list out of its heartbeat `produced` jsonb
+ * (ci-guard-migrations-applied-not-just-merged spec Phase 1). Detection happens on the box (it
+ * enumerates supabase/migrations/*.sql on main and reads supabase_migrations.schema_migrations);
+ * the monitor only reads the conveyed result. Phase 2 additionally attaches `severity` +
+ * `outcome` per item — the tile detail distinguishes 'applied'/'approval-needed'/'apply-failed'.
+ * Defensive against any shape — an unparseable blob ⇒ [].
+ */
+function readMergedButUnapplied(produced: unknown): Array<{
+  version: string;
+  file: string;
+  severity?: string;
+  outcome?: string;
+}> {
+  if (!produced || typeof produced !== "object" || Array.isArray(produced)) return [];
+  const raw = (produced as Record<string, unknown>).mergedButUnapplied;
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ version: string; file: string; severity?: string; outcome?: string }> = [];
+  for (const item of raw) {
+    if (item && typeof item === "object") {
+      const v = (item as Record<string, unknown>).version;
+      const f = (item as Record<string, unknown>).file;
+      const sev = (item as Record<string, unknown>).severity;
+      const oc = (item as Record<string, unknown>).outcome;
+      if (typeof v === "string" && v) {
+        out.push({
+          version: v,
+          file: typeof f === "string" ? f : "unknown",
+          severity: typeof sev === "string" ? sev : undefined,
+          outcome: typeof oc === "string" ? oc : undefined,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 /** Pull a numeric counter out of a loop_heartbeats.produced jsonb blob (0 if absent). */
 function producedCount(produced: unknown, key: string): number {
   if (produced && typeof produced === "object" && !Array.isArray(produced)) {
@@ -1054,20 +1091,62 @@ function evalOutputAssertion(
       return null;
     }
     case "migration-drift": {
-      // The box's migration-drift check parses every supabase/migrations/*.sql for the tables they
-      // CREATE (net of drops) and diffs the live public schema; an expected-but-absent table = a
-      // silently-skipped migration. Detection runs on the box (the deployed runtime can't read the
-      // .sql files); the result rides this loop's heartbeat `produced.missing`. Allowlisted/sunset
-      // tables are already excluded box-side, so any entry here is a genuine, alertable drift.
+      // The box's migration-drift check runs TWO axes and rides both on the same heartbeat:
+      //  1. TABLE-PRESENCE: parse every supabase/migrations/*.sql for the tables they CREATE (net of
+      //     drops/renames) and diff the live public schema; an expected-but-absent table = a
+      //     silently-skipped migration → `produced.missing`.
+      //  2. APPLIED-SET RECONCILE (ci-guard-migrations-applied-not-just-merged P1): compare local
+      //     migration versions against supabase_migrations.schema_migrations.version; a file on main
+      //     whose version isn't in the applied set = merged-but-unapplied →
+      //     `produced.mergedButUnapplied`.
+      // Either axis reddens the tile. Allowlisted/sunset tables are excluded box-side.
       const missing = readMissingTables(latest?.produced);
-      if (!latest || missing.length === 0) return null;
-      const n = missing.length;
-      const list = missing.slice(0, 5).map((m) => `${m.table} (${m.migration})`).join(", ");
+      const mergedButUnapplied = readMergedButUnapplied(latest?.produced);
+      if (!latest || (missing.length === 0 && mergedButUnapplied.length === 0)) return null;
+      const statusParts: string[] = [];
+      const detailParts: string[] = [];
+      if (missing.length > 0) {
+        const n = missing.length;
+        const list = missing.slice(0, 5).map((m) => `${m.table} (${m.migration})`).join(", ");
+        statusParts.push(`${n} migration table${n === 1 ? "" : "s"} missing from live schema`);
+        detailParts.push(
+          `${n} table${n === 1 ? "" : "s"} that a migration creates ${n === 1 ? "is" : "are"} absent from the live public schema — ${list}${n > 5 ? `, +${n - 5} more` : ""}. A migration was silently skipped in the apply pipeline (the code references the table; every upsert hits PGRST205). Re-apply the migration${n === 1 ? "" : "s"}.`,
+        );
+      }
+      if (mergedButUnapplied.length > 0) {
+        const n = mergedButUnapplied.length;
+        // Phase 2 (ci-guard-migrations-applied-not-just-merged): outcomes let the tile detail split
+        // applied / approval-needed / apply-failed so the CEO reads what's actionable (destructive
+        // migrations waiting for a human run) vs what auto-cleared (additive) vs what threw.
+        const approvalNeeded = mergedButUnapplied.filter((m) => m.outcome === "approval-needed");
+        const applyFailed = mergedButUnapplied.filter((m) => m.outcome === "apply-failed");
+        const list = mergedButUnapplied
+          .slice(0, 5)
+          .map((m) => {
+            const oc = m.outcome === "approval-needed"
+              ? ` — needs approval${m.severity ? `, ${m.severity}` : ""}`
+              : m.outcome === "apply-failed"
+                ? " — apply-failed"
+                : m.outcome === "applied"
+                  ? " — applied"
+                  : "";
+            return `${m.version} (${m.file})${oc}`;
+          })
+          .join(", ");
+        const gateNote: string[] = [];
+        if (approvalNeeded.length) gateNote.push(`${approvalNeeded.length} destructive await${approvalNeeded.length === 1 ? "s" : ""} approval`);
+        if (applyFailed.length) gateNote.push(`${applyFailed.length} apply-failed`);
+        const gateTail = gateNote.length ? ` — ${gateNote.join(", ")}` : "";
+        statusParts.push(`${n} merged-but-unapplied migration${n === 1 ? "" : "s"}${gateTail}`);
+        detailParts.push(
+          `${n} migration file${n === 1 ? "" : "s"} on main whose version${n === 1 ? " is" : "s are"} not in the DB's applied set (supabase_migrations.schema_migrations) — ${list}${n > 5 ? `, +${n - 5} more` : ""}. The PR merged but the apply pipeline never ran ${n === 1 ? "it" : "them"} — dependent code silently no-ops until applied. Additive DDL is auto-applied by the box; destructive DDL is gated for approval (classify via classifyMigrationSql — run the sanctioned apply script manually).`,
+        );
+      }
       return {
-        statusText: `${n} migration table${n === 1 ? "" : "s"} missing from live schema`,
+        statusText: statusParts.join("; "),
         violation: {
           reason: "migration_drift",
-          detail: `Migration drift: ${n} table${n === 1 ? "" : "s"} that a migration creates ${n === 1 ? "is" : "are"} absent from the live public schema — ${list}${n > 5 ? `, +${n - 5} more` : ""}. A migration was silently skipped in the apply pipeline (the code references the table; every upsert hits PGRST205). Re-apply the migration${n === 1 ? "" : "s"}.`,
+          detail: `Migration drift: ${detailParts.join(" ")}`,
         },
       };
     }
