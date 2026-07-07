@@ -105,17 +105,19 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  // Enrich with assigned user names
+  // Enrich with assigned user names — pull display_name from workspace_members
+  // for the specific assigned user_ids in scope (no auth.users scan).
   const assignedIds = [...new Set(tickets?.filter((t) => t.assigned_to).map((t) => t.assigned_to))];
   let assignedMap = new Map<string, string>();
 
   if (assignedIds.length > 0) {
-    const { data: usersData } = await admin.auth.admin.listUsers();
+    const { data: memberRows } = await admin
+      .from("workspace_members")
+      .select("user_id, display_name")
+      .eq("workspace_id", workspaceId)
+      .in("user_id", assignedIds);
     assignedMap = new Map(
-      usersData?.users
-        ?.filter((u) => assignedIds.includes(u.id))
-        .map((u) => [u.id, u.user_metadata?.full_name || u.user_metadata?.name || u.email || ""])
-      ?? []
+      (memberRows ?? []).map((m) => [m.user_id, m.display_name || ""]),
     );
   }
 

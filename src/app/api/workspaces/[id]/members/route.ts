@@ -39,16 +39,22 @@ export async function GET(
     return NextResponse.json({ error: "Failed to fetch members" }, { status: 500 });
   }
 
-  // Enrich with user info
-  const { data: usersData } = await admin.auth.admin.listUsers();
-  const usersMap = new Map(
-    usersData?.users?.map((u) => [u.id, { email: u.email, display_name: u.user_metadata?.full_name || u.user_metadata?.name }]) ?? []
+  // Enrich with user email — workspace_members.display_name is already selected
+  // above (the canonical user-facing name), and workspace_members has no email
+  // column, so getUserById per member (targeted, no auth.users scan).
+  const memberIds = (members ?? []).map((m) => m.user_id);
+  const emailByUser = new Map<string, string | null>();
+  await Promise.all(
+    memberIds.map(async (uid) => {
+      const { data } = await admin.auth.admin.getUserById(uid);
+      emailByUser.set(uid, data.user?.email ?? null);
+    }),
   );
 
   const enriched = members?.map((m) => ({
     ...m,
-    email: usersMap.get(m.user_id)?.email,
-    display_name: m.display_name || usersMap.get(m.user_id)?.display_name || null,
+    email: emailByUser.get(m.user_id) ?? null,
+    display_name: m.display_name || null,
   }));
 
   return NextResponse.json(enriched);
