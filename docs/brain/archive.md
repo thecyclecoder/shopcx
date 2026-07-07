@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **Assisted-purchase playbook — gate create_order / create_subscription behind a vaulted PM, launching add_payment_method when missing** · verified 2026-07-07 · → [[lifecycles/subscription-billing]]
 - **Recalibrate the Meta ad-performance sensor (source-family + scent-match tagging)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
+- **Replace auth.users full-table scans on hot-path routes** · verified 2026-07-07 · → [[../libraries/access]]
 - **Backfill the order_refunds ledger from historical refunds so past refunds are auditable too** · verified 2026-07-07 · → [[tables/order_refunds]]
 - **Builder applies migrations via the working pgClient apply-script, not the broken db push lane** · verified 2026-07-07 · → [[../recipes/write-a-migration-apply-script]]
 - **Guard against merged-but-unapplied migrations (applied-state drift), not just missing ones** · verified 2026-07-07 · → [[../libraries/control-tower]]
