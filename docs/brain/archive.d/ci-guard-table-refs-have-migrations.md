@@ -1,0 +1,1 @@
+- **CI guard: every table a code path queries must have a migration that creates it** · verified 2026-07-07 · → [[../operational-rules#Every code path must have a migration for every table it queries]]
