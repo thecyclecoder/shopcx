@@ -19,9 +19,9 @@ recent tickets → grader → ticket_analyses
                 reject → status='rejected' → not used
 ```
 
-### Phase 1 — nightly analysis
+### Phase 1 — per-ticket analysis
 
-[[../inngest/ai-nightly-analysis]] cron (currently **paused since 2026-04-28**):
+[[../inngest/ticket-analysis-cron]] (`*/30`, per closed AI ticket — replaced the old nightly batch, removed 2026-07-07):
 - Selects recent closed tickets (e.g. last 24h, AI-handled, customer rated low OR AI sentiment classified as failure).
 - Pulls full conversation + Sonnet decision JSON + customer outcome.
 - Runs each through a grader prompt (configured per workspace at [[../tables/grader_prompts]]) using Claude Opus.
@@ -87,7 +87,6 @@ Tickets where the grader flagged a *specific verifiable claim mismatch* (e.g. AI
 
 | File | Purpose |
 |---|---|
-| `src/lib/inngest/ai-nightly-analysis.ts` | The nightly cron (currently paused) |
 | `src/lib/inngest/ticket-analysis-cron.ts` | Per-ticket analysis fn |
 | `src/lib/inngest/daily-analysis-reports-cron.ts` | Pattern aggregation |
 | `src/lib/grader.ts` | Grader prompt assembly |
@@ -97,4 +96,4 @@ Tickets where the grader flagged a *specific verifiable claim mismatch* (e.g. AI
 
 ## Related
 
-[[ai-multi-turn]] · [[research-and-heal]] · [[ticket-lifecycle]] · [[../customer-voice]] · [[../orchestrator-tools]] · [[../tables/ticket_analyses]] · [[../tables/daily_analysis_reports]] · [[../tables/sonnet_prompts]] · [[../tables/knowledge_gaps]] · [[../tables/grader_prompts]] · [[../inngest/ai-nightly-analysis]] · [[../dashboard/ai-analysis]]
+[[ai-multi-turn]] · [[research-and-heal]] · [[ticket-lifecycle]] · [[../customer-voice]] · [[../orchestrator-tools]] · [[../tables/ticket_analyses]] · [[../tables/daily_analysis_reports]] · [[../tables/sonnet_prompts]] · [[../tables/knowledge_gaps]] · [[../tables/grader_prompts]] · [[../dashboard/ai-analysis]]
