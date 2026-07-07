@@ -29,6 +29,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **CS Director storyline digests to founder + bidirectional reply steers leash + policy** · verified 2026-07-07 · → [[tables/cs_director_digests]]
 - **CS Director: third rung of the escalation ladder — hard calls above the triage quorum** · verified 2026-07-07 · → [[libraries/cs-director]]
 - **Digital goods catalog + PDF delivery** · verified 2026-07-07 · → [[../inngest/digital-goods-delivery]]
+- **Draft/replacement orders send the ISO-2 country code ('US'), not the full country name — fixes every US replacement** · verified 2026-07-07 · → [[../libraries/shopify-draft-orders]]
 - **Drop Supabase GoTrue 504 /auth/v1/user edge noise at the error-feed capture layer** · verified 2026-07-07 · → [[libraries/control-tower]]
 - **Scope Supabase auth `dial tcp <addr>: i/o timeout` as transient in the log poller** · verified 2026-07-07 · → [[../libraries/control-tower]]
 - **God-mode becomes the CEO's executive-assistant agent** · verified 2026-07-07 · → [[../lifecycles/god-mode#autonomous-executive-assistant--god-mode-becomes-ceos-agent-phase-8]]

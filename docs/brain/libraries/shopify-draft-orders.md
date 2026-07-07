@@ -57,6 +57,27 @@ async function createAndCompleteReplacement(workspaceId: string, input: Replacem
   so the failure reason reaches logs / the ticket escalation note. The
   `"returned no data" / "returned no order"` throws now also echo the raw
   payload (first 500 chars) as a last-resort diagnostic.
+- **`countryCode` must be ISO-2, not full country name.** Shopify's draft order
+  `countryCode` field expects ISO-2 codes ('US', 'CA', 'GB') and rejects full
+  names ('United States', 'Canada'). The code normalizes at lines ~183 and ~316
+  to map 'United States'/'USA'/'US' → 'US', territories (PR/GU/VI/AS/MP) →
+  'US', and non-US full names → ISO-2 with 'US' fallback. Grounded in ticket
+  SC132896 (Catherine Green — carrier-lost replacement that failed when
+  countryCode was 'United States'). Cross-linked with [[replacement-order]].
+
+## Status / open work
+
+**Shipped:** Country code normalization in draft order creation (Phase 1).
+All code paths that build Shopify shipping addresses now send ISO-2 codes.
+
+**Known gaps / not yet shipped:**
+- None
+
+**Recent activity:**
+- Country code normalization landed in createReplacementDraftOrder and
+  createAndCompleteReplacement code paths
+
+**Open questions:** None
 
 ---
 
