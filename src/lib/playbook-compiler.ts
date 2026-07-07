@@ -284,7 +284,140 @@ export function normalizePlaybookCompileVerdict(raw: unknown): PlaybookCompileVe
 /** Result of `applyBoxPlaybookCompile` — the runner's summary of what it wrote. */
 export interface ApplyPlaybookCompileResult {
   treesUpserted: number;
+  proposedPlaybooksUpserted: number;
+  proposedStepsInserted: number;
   reasonSkipped: string[];
+}
+
+/** Provenance marker on `playbooks.proposed_by` for compiler-seeded rows.
+ *  Approval clears the column to null — the same shape agent_model_tiers uses. */
+export const PLAYBOOK_COMPILER_PROPOSED_BY = "playbook_compiler";
+
+/**
+ * Deterministic display name for a compiler-seeded playbook. Kept as a pure
+ * helper so the Phase-2 dashboard "Proposed" subsection can render an identical
+ * label without re-parsing the tree_key.
+ */
+export function proposedPlaybookName(tree: CompiledTreeVerdict): string {
+  const actions = tree.action_types.join(" + ");
+  return `Compiler seed — ${tree.problem} → ${actions}`;
+}
+
+/**
+ * Pure payload builder for the compiler-seeded playbook insert. Every seed row
+ * is HARD-PINNED to `is_active=false` + `proposed_by=PLAYBOOK_COMPILER_PROPOSED_BY`
+ * here — the [[compiled_trees]] runner NEVER constructs the row inline, so a
+ * grep for `"is_active: true"` inside `src/lib/playbook-compiler.ts` never
+ * matches (see scripts/_check-playbook-compiler-no-active.ts).
+ */
+export function buildProposedPlaybookRow(
+  workspaceId: string,
+  tree: CompiledTreeVerdict,
+): {
+  workspace_id: string;
+  name: string;
+  description: string;
+  trigger_intents: string[];
+  trigger_patterns: string[];
+  priority: number;
+  is_active: false;
+  proposed_by: typeof PLAYBOOK_COMPILER_PROPOSED_BY;
+  source_tree_key: string;
+} {
+  // trigger_intents from the analyzer's REAL intent distribution on this tree's
+  // tickets (not hand-guessed keywords, per the Phase-2 verification bullet).
+  const triggerIntents = Object.entries(tree.intent_distribution)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([k]) => k)
+    .filter(Boolean);
+  // trigger_patterns from the normalized problem token (fallback signal when
+  // the intent distribution is empty — the human reviewer can add more before
+  // approving). Never hand-guessed.
+  const triggerPatterns = [tree.problem].filter(Boolean);
+  return {
+    workspace_id: workspaceId,
+    name: proposedPlaybookName(tree),
+    description: (tree.reasoning || "").slice(0, 500),
+    trigger_intents: triggerIntents,
+    trigger_patterns: triggerPatterns,
+    priority: 0,
+    // ⚠️ Compiler-seeded playbooks land is_active=false ALWAYS — activation is
+    // human-gated via the proposed-review flow (see playbooks.md § Proposed).
+    // Never edit this literal without also updating
+    // scripts/_check-playbook-compiler-no-active.ts.
+    is_active: false as const,
+    proposed_by: PLAYBOOK_COMPILER_PROPOSED_BY,
+    source_tree_key: tree.tree_key,
+  };
+}
+
+/**
+ * Pure payload builder for the compiler-seeded playbook_steps rows for ONE
+ * tree. Steps land as `type='custom'` so a compiler seed never lands under a
+ * fine-grained flow-step type its human reviewer wouldn't have chosen — the
+ * orchestrator action_type + free-form notes ride in `config` + `instructions`.
+ * The human approver refines type before flipping is_active.
+ */
+export function buildProposedPlaybookStepRows(
+  workspaceId: string,
+  playbookId: string,
+  tree: CompiledTreeVerdict,
+): Array<{
+  workspace_id: string;
+  playbook_id: string;
+  step_order: number;
+  type: "custom";
+  name: string;
+  instructions: string | null;
+  data_access: string[];
+  resolved_condition: null;
+  config: Record<string, unknown>;
+  skippable: true;
+}> {
+  const rows: Array<{
+    workspace_id: string;
+    playbook_id: string;
+    step_order: number;
+    type: "custom";
+    name: string;
+    instructions: string | null;
+    data_access: string[];
+    resolved_condition: null;
+    config: Record<string, unknown>;
+    skippable: true;
+  }> = [];
+  const seq = Array.isArray(tree.resolution_sequence) && tree.resolution_sequence.length > 0
+    ? tree.resolution_sequence
+    // Fallback: if the agent didn't emit a resolution_sequence, materialize one
+    // step per action_type in the tree's tuple. Keeps the seed exercisable even
+    // for a minimally-verdict tree — same data source, deterministic order.
+    : tree.action_types.map((at) => ({ action_type: at }));
+  for (let i = 0; i < seq.length; i++) {
+    const step = seq[i] as { action_type?: unknown; notes?: unknown };
+    const actionType = typeof step.action_type === "string" ? step.action_type : `action_${i}`;
+    const notes = typeof step.notes === "string" ? step.notes : "";
+    rows.push({
+      workspace_id: workspaceId,
+      playbook_id: playbookId,
+      step_order: i,
+      // type='custom' — see the fn docstring; the CHECK constraint's
+      // fine-grained flow-step types are for human-authored steps.
+      type: "custom",
+      name: `${actionType}${notes ? ` — ${notes.slice(0, 40)}` : ""}`,
+      instructions: notes || null,
+      data_access: [],
+      resolved_condition: null,
+      config: {
+        source: PLAYBOOK_COMPILER_PROPOSED_BY,
+        source_tree_key: tree.tree_key,
+        action_type: actionType,
+        ...(notes ? { notes } : {}),
+      },
+      skippable: true,
+    });
+  }
+  return rows;
 }
 
 /**
@@ -292,8 +425,17 @@ export interface ApplyPlaybookCompileResult {
  * ONE `director_activity` row (director_function='cs',
  * action_kind='compiled_trees_extracted') carrying the reasoning.
  *
- * Idempotent: the UNIQUE (workspace_id, tree_key) constraint means re-running
- * over unchanged history no-ops (the upsert replaces the same row).
+ * Phase 2 — also upsert one PROPOSED playbook row per tree (`is_active=false`,
+ * `proposed_by='playbook_compiler'`, `source_tree_key=tree.tree_key`) + its
+ * `playbook_steps`. Idempotent via the partial UNIQUE index
+ * `(workspace_id, source_tree_key) WHERE source_tree_key IS NOT NULL` — a
+ * re-run over unchanged history upserts the same row.
+ *
+ * NEVER auto-activates. NEVER touches a playbook whose `proposed_by IS NULL`
+ * (human-authored or already-approved — those belong to the human). The write
+ * to `playbook_steps` is a delete-and-reinsert scoped to the seed's own
+ * playbook_id (never a workspace-wide broadcast) so the resolution_sequence
+ * refresh stays proportional to the tree's own churn.
  *
  * Best-effort: an upsert error on one tree logs + skips it — the sweep never
  * fails because of one bad row. director_activity write is best-effort by
@@ -308,7 +450,10 @@ export async function applyBoxPlaybookCompile(
   },
 ): Promise<ApplyPlaybookCompileResult> {
   const skipped: string[] = [];
-  let upserted = 0;
+  let treesUpserted = 0;
+  let proposedPlaybooksUpserted = 0;
+  let proposedStepsInserted = 0;
+
   for (const tree of input.verdict.trees) {
     const { error } = await admin.from("compiled_trees").upsert(
       {
@@ -332,7 +477,67 @@ export async function applyBoxPlaybookCompile(
       skipped.push(`${tree.tree_key}: ${error.message}`);
       continue;
     }
-    upserted++;
+    treesUpserted++;
+
+    // ── Phase 2: propose the seed playbook + its steps ────────────────────
+    // Only the SEED lane runs here — human-authored playbooks (proposed_by IS
+    // NULL) are never touched. Idempotent via the partial UNIQUE on
+    // (workspace_id, source_tree_key).
+    const seedRow = buildProposedPlaybookRow(input.workspaceId, tree);
+    const { data: seedUpsert, error: seedErr } = await admin
+      .from("playbooks")
+      .upsert(seedRow, { onConflict: "workspace_id,source_tree_key" })
+      .select("id, proposed_by, is_active")
+      .single();
+    if (seedErr) {
+      console.warn(`[playbook-compiler] playbooks upsert failed (${tree.tree_key}):`, seedErr.message);
+      skipped.push(`${tree.tree_key} playbook_upsert: ${seedErr.message}`);
+      continue;
+    }
+    const seedRowRes = seedUpsert as { id: string; proposed_by: string | null; is_active: boolean } | null;
+    if (!seedRowRes) {
+      skipped.push(`${tree.tree_key} playbook_upsert: no row returned`);
+      continue;
+    }
+    // Guard-before-mutation: refresh steps ONLY when the seed is still in the
+    // proposed lane (proposed_by='playbook_compiler' AND is_active=false).
+    // Belt-and-braces — the partial UNIQUE index already anchors on
+    // source_tree_key which is the seed's identity — but this re-asserts the
+    // spec invariant "compiler never touches an activated playbook" at the
+    // write point (per the director's coaching #1/#2).
+    if (seedRowRes.proposed_by !== PLAYBOOK_COMPILER_PROPOSED_BY || seedRowRes.is_active !== false) {
+      // Human already activated this seed — leave steps alone. This is the
+      // right outcome (spec: activation is human-gated, and once approved
+      // the seed is the human's playbook).
+      proposedPlaybooksUpserted++;
+      continue;
+    }
+    // Purge any prior seed steps for THIS playbook_id — never a workspace-wide
+    // broadcast (per coaching #2, filter enumeration source narrowly). Then
+    // re-insert from the current resolution_sequence.
+    const { error: delErr } = await admin
+      .from("playbook_steps")
+      .delete()
+      .eq("workspace_id", input.workspaceId)
+      .eq("playbook_id", seedRowRes.id);
+    if (delErr) {
+      console.warn(`[playbook-compiler] playbook_steps refresh delete failed (${tree.tree_key}):`, delErr.message);
+      skipped.push(`${tree.tree_key} steps_delete: ${delErr.message}`);
+      proposedPlaybooksUpserted++;
+      continue;
+    }
+    const stepRows = buildProposedPlaybookStepRows(input.workspaceId, seedRowRes.id, tree);
+    if (stepRows.length > 0) {
+      const { error: insErr } = await admin.from("playbook_steps").insert(stepRows);
+      if (insErr) {
+        console.warn(`[playbook-compiler] playbook_steps insert failed (${tree.tree_key}):`, insErr.message);
+        skipped.push(`${tree.tree_key} steps_insert: ${insErr.message}`);
+        proposedPlaybooksUpserted++;
+        continue;
+      }
+      proposedStepsInserted += stepRows.length;
+    }
+    proposedPlaybooksUpserted++;
   }
 
   try {
@@ -345,18 +550,86 @@ export async function applyBoxPlaybookCompile(
       reason: (input.verdict.reasoning || "").slice(0, 4000),
       metadata: {
         job_id: input.jobId,
-        trees_upserted: upserted,
+        trees_upserted: treesUpserted,
         trees_proposed: input.verdict.trees.length,
+        proposed_playbooks_upserted: proposedPlaybooksUpserted,
+        proposed_steps_inserted: proposedStepsInserted,
         skipped_reasons: skipped.slice(0, 20),
         autonomous: true,
-        phase: 1,
+        phase: 2,
       },
     });
   } catch (e) {
     console.warn("[playbook-compiler] director_activity write failed:", e instanceof Error ? e.message : e);
   }
 
-  return { treesUpserted: upserted, reasonSkipped: skipped };
+  return {
+    treesUpserted,
+    proposedPlaybooksUpserted,
+    proposedStepsInserted,
+    reasonSkipped: skipped,
+  };
+}
+
+/**
+ * Result of `approvePlaybookProposal` — the human-approval chokepoint.
+ */
+export interface ApprovePlaybookProposalResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Human-gated approval of a compiler-seeded playbook. Flips `is_active=true`
+ * AND clears `proposed_by=null` in ONE compare-and-set (guarded on
+ * workspace_id + current `proposed_by=PLAYBOOK_COMPILER_PROPOSED_BY` +
+ * current `is_active=false` — so an already-approved / cross-workspace /
+ * human-authored row can't be reflipped). Returns `{ ok: false, reason:
+ * "already_active_or_not_a_seed" }` when zero rows transition.
+ *
+ * The dashboard's existing is_active toggle (PATCH /workspaces/:id/playbooks)
+ * still works — this helper is the DEDICATED approval path so the audit /
+ * director_activity trail can be persisted alongside the flip. Approval is
+ * the ONLY authorized way to change is_active from false→true on a seed;
+ * a raw update() call would silently bypass this guard.
+ */
+export async function approvePlaybookProposal(
+  admin: SupabaseClient,
+  input: { workspaceId: string; playbookId: string; approverUserId?: string | null },
+): Promise<ApprovePlaybookProposalResult> {
+  const { data: flipped, error } = await admin
+    .from("playbooks")
+    .update({ is_active: true, proposed_by: null, updated_at: new Date().toISOString() })
+    .eq("workspace_id", input.workspaceId)
+    .eq("id", input.playbookId)
+    .eq("proposed_by", PLAYBOOK_COMPILER_PROPOSED_BY)
+    .eq("is_active", false)
+    .select("id, name, source_tree_key");
+  if (error) return { ok: false, reason: error.message };
+  if (!flipped || flipped.length === 0) {
+    return { ok: false, reason: "already_active_or_not_a_seed" };
+  }
+  const row = flipped[0] as { id: string; name: string; source_tree_key: string | null };
+  try {
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+    await recordDirectorActivity(admin, {
+      workspaceId: input.workspaceId,
+      directorFunction: "cs",
+      actionKind: "playbook_seed_approved",
+      specSlug: null,
+      reason: `Approved compiler-seeded playbook "${row.name}" (source_tree_key=${row.source_tree_key ?? "n/a"}).`,
+      metadata: {
+        playbook_id: row.id,
+        source_tree_key: row.source_tree_key,
+        approver_user_id: input.approverUserId ?? null,
+        autonomous: false,
+        phase: 2,
+      },
+    });
+  } catch (e) {
+    console.warn("[playbook-compiler] approval director_activity write failed:", e instanceof Error ? e.message : e);
+  }
+  return { ok: true };
 }
 
 /** One workspace's stats — enough for the cron to skip a workspace with no

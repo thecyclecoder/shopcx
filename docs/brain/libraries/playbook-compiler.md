@@ -7,7 +7,8 @@ Read + write chokepoints for the playbook-compiler box agent (kind `playbook-com
 Phase 1 of [[../specs/playbook-compiler-becomes-box-agent-mining-full-history]]: this module used to be a raw-Anthropic-API loop drafting `sonnet_prompts` rows. That path is **gone** — no code path here calls Fable or a raw external model API. What remains is the pure clustering helpers + the box-agent I/O:
 
 - **Read** — `loadPlaybookCompileBrief(admin, workspaceId)` builds the FULL-history brief the box agent reasons over (tickets + `ticket_analyses`, no 30-day floor).
-- **Write** — `applyBoxPlaybookCompile(admin, { workspaceId, jobId, verdict })` upserts each tree from the agent's verdict into [[../tables/compiled_trees]] and writes ONE [[director_activity]] row (`director_function='cs'`, `action_kind='compiled_trees_extracted'`).
+- **Write** — `applyBoxPlaybookCompile(admin, { workspaceId, jobId, verdict })` upserts each tree from the agent's verdict into [[../tables/compiled_trees]] AND (Phase 2) upserts one PROPOSED `playbooks` row per tree (`is_active=false`, `proposed_by='playbook_compiler'`, `source_tree_key=tree.tree_key`) + its `playbook_steps`, and writes ONE [[director_activity]] row (`director_function='cs'`, `action_kind='compiled_trees_extracted'`, `phase=2`).
+- **Approve** — `approvePlaybookProposal(admin, { workspaceId, playbookId, approverUserId? })` is the human-gated activation chokepoint. Compare-and-sets: `.eq('proposed_by', 'playbook_compiler').eq('is_active', false)` — so an already-approved / human-authored / cross-workspace row can never be reflipped. Flips `is_active=true` + clears `proposed_by=null` in one write and records a [[director_activity]] `action_kind='playbook_seed_approved'` row.
 
 The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the only mutator. Same supervisable-autonomy pattern as [[cs-director]] / [[deploy-guardian]] — north star: CEO → role agent → bounded tool.
 
@@ -25,7 +26,12 @@ The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the o
 | `loadPlaybookCompileBrief(admin, workspaceId)` | Builds the FULL-history brief (resolution rows + analyses + precomputed clusters + a formatted header the box agent Reads). No 30-day floor. |
 | `loadPlaybookCompileBriefFromWorkspaceId(workspaceId)` | Convenience wrapper — creates an admin client. |
 | `normalizePlaybookCompileVerdict(raw)` | Shape guards + `tree_key` re-derivation over an agent verdict. Returns `null` on a total shape miss; the runner surfaces that as `needs_attention`. |
-| `applyBoxPlaybookCompile(admin, {workspaceId, jobId, verdict})` | The write chokepoint. Upserts each tree to [[../tables/compiled_trees]] with `onConflict: "workspace_id,tree_key"` and writes ONE [[director_activity]] row summarizing. Best-effort per row — an upsert error on one tree logs + skips it; a director_activity write failure never rolls back the persisted trees. |
+| `applyBoxPlaybookCompile(admin, {workspaceId, jobId, verdict})` | The write chokepoint. Upserts each tree to [[../tables/compiled_trees]] with `onConflict: "workspace_id,tree_key"`, then (Phase 2) upserts one PROPOSED playbook per tree with `onConflict: "workspace_id,source_tree_key"` + refreshes `playbook_steps` for the seed's own playbook_id (never a workspace-wide broadcast), and writes ONE [[director_activity]] row summarizing. Guard-before-mutation: the step refresh runs ONLY when the upserted playbook row still has `proposed_by='playbook_compiler' AND is_active=false` — a human-activated seed is left alone. Best-effort per row — an upsert error on one tree logs + skips it; a director_activity write failure never rolls back the persisted rows. |
+| `PLAYBOOK_COMPILER_PROPOSED_BY` | The `'playbook_compiler'` provenance tag stamped on every compiler-seeded `playbooks.proposed_by`. Approval clears it to null. |
+| `proposedPlaybookName(tree)` | Deterministic human-readable name from a `CompiledTreeVerdict` — `"Compiler seed — <problem> → <action_type_a> + <action_type_b>"`. Pure. |
+| `buildProposedPlaybookRow(workspaceId, tree)` | Pure builder for the compiler-seeded `playbooks` INSERT payload. Hard-pins `is_active: false as const` + `proposed_by: PLAYBOOK_COMPILER_PROPOSED_BY`. `trigger_intents` are the top-N by ticket_count from `tree.intent_distribution` (the analyzer's REAL tags, NEVER hand-guessed keywords — the Phase-2 verification invariant). |
+| `buildProposedPlaybookStepRows(workspaceId, playbookId, tree)` | Pure builder for the compiler-seeded `playbook_steps` INSERT payloads. Every step lands `type='custom'` with the orchestrator `action_type` + notes in `config` — the CHECK-constrained fine-grained step types are for human-authored steps only. Falls back to `tree.action_types` when the resolution_sequence is empty. |
+| `approvePlaybookProposal(admin, {workspaceId, playbookId, approverUserId?})` | Human-gated activation. Compare-and-sets on `.eq('proposed_by', PLAYBOOK_COMPILER_PROPOSED_BY).eq('is_active', false)` — an already-approved / cross-workspace / human-authored row can never be reflipped. Records a `playbook_seed_approved` [[director_activity]] row on success. |
 
 ## Types
 
@@ -33,7 +39,8 @@ The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the o
 - `IntentDistributionEntry` — a single `{intent, ticket_count}` entry in the intent distribution the box agent surfaces per tree.
 - `CompiledTreeVerdict` — one tree the agent emits + the runner upserts verbatim.
 - `PlaybookCompileVerdict` — the full JSON verdict `{trees, reasoning}`.
-- `ApplyPlaybookCompileResult` — the runner's post-write summary (`treesUpserted`, `reasonSkipped`).
+- `ApplyPlaybookCompileResult` — the runner's post-write summary (`treesUpserted`, `proposedPlaybooksUpserted`, `proposedStepsInserted`, `reasonSkipped`).
+- `ApprovePlaybookProposalResult` — `{ ok: boolean, reason?: string }` returned by `approvePlaybookProposal`. `reason='already_active_or_not_a_seed'` when zero rows transition.
 - `PlaybookCompileScope` — one entry in `listCompilableWorkspaces`'s output (`workspaceId`, `ticketAnalysisCount`, `confirmedResolutionCount`).
 - `PlaybookCompileBrief` — the loaded brief the runner hands to the agent (`supportMin`, `resolutionRows`, `analysisRows`, `precomputedClusters`, `headerText`).
 - `FullHistoryResolutionRow`, `FullHistoryAnalysisRow` — the shapes read from `ticket_resolution_events` + `ticket_analyses`.
@@ -49,6 +56,8 @@ The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the o
 - **The agent NEVER mutates.** All writes go through `applyBoxPlaybookCompile`, called only by the deterministic runner. The agent's final message is one JSON object.
 - **Idempotent by construction.** `tree_key = treeKeyFor(problem, action_types)` + UNIQUE `(workspace_id, tree_key)` — a re-run over unchanged history upserts the same rows.
 - **Best-effort audit.** `applyBoxPlaybookCompile` best-efforts the director_activity write — an audit hiccup MUST NOT roll back the persisted trees (mirrors [[director-activity]] `recordDirectorActivity`).
+- **Compiler NEVER inserts an active playbook.** Enforced at CI by `scripts/_check-playbook-compiler-no-active.ts` (Phase 2 verification bullet: "A grep/audit confirms the compiler never inserts an active playbook directly"). The check strips comments and masks the sanctioned `approvePlaybookProposal` function, then greps for any remaining `is_active: true` in the compiler code.
+- **Guard-before-mutation on step refresh.** The `applyBoxPlaybookCompile` step-refresh sub-path re-asserts `proposed_by=PLAYBOOK_COMPILER_PROPOSED_BY` and `is_active=false` on the just-upserted row before deleting/re-inserting steps — a human-activated seed retains its human-edited steps.
 
 ## Related
 

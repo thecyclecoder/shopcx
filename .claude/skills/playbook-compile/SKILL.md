@@ -12,8 +12,19 @@ The old raw-Anthropic-API cron that mined only the 30-day
 with no external model API call. You read the FULL corpus and emit ONE JSON
 verdict listing the recurring problem × resolution TREES. The deterministic
 worker upserts them into [[../../../docs/brain/tables/compiled_trees]] — the
-substrate Phase 2 will read to propose data-grounded playbooks +
-playbook_steps (`is_active=false`).
+substrate Phase 2 uses to propose data-grounded playbooks +
+playbook_steps (`is_active=false`, `proposed_by='playbook_compiler'`).
+
+**Downstream persistence (Phase 2 — the worker does this, not you):** for every
+tree in your verdict, the runner ALSO upserts one row into
+[[../../../docs/brain/tables/playbooks]] (`is_active=false`,
+`proposed_by='playbook_compiler'`, `source_tree_key=tree.tree_key`) + one
+`playbook_steps` row per step of your `resolution_sequence` (`type='custom'`
+with the orchestrator `action_type` in `config`). Activation is human-gated —
+Wren (📝 Prompt Analyzer) or a dashboard reviewer flips `is_active=true` +
+clears `proposed_by` through the sanctioned `approvePlaybookProposal` compare-
+and-set. Your job is to make the tree evidence-grounded enough that the human
+reviewer can approve cleanly.
 
 You are on **Max** (no `ANTHROPIC_API_KEY`) with brain / `src/` powers and the
 read-only DB access the other CS agents use. **You never mutate anything** —

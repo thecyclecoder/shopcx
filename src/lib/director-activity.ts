@@ -151,9 +151,17 @@ export type DirectorActionKind =
   // (tickets + ticket_analyses) and persisted them to `compiled_trees`. One row
   // per box-agent run, written by applyBoxPlaybookCompile
   // ([[../libraries/playbook-compiler]]) under director_function='cs'. metadata:
-  // { job_id, trees_upserted, trees_proposed, skipped_reasons, autonomous:true,
-  // phase:1 }.
-  | "compiled_trees_extracted";
+  // { job_id, trees_upserted, trees_proposed, skipped_reasons,
+  // proposed_playbooks_upserted, proposed_steps_inserted, autonomous:true,
+  // phase:2 } — Phase 2 folds the seed proposal counts + carries phase=2.
+  | "compiled_trees_extracted"
+  // playbook-compiler-becomes-box-agent-mining-full-history Phase 2 — a human
+  // approver flipped one COMPILER-SEEDED playbook from proposed (is_active=false,
+  // proposed_by='playbook_compiler') to active. Written by
+  // `approvePlaybookProposal` ([[../libraries/playbook-compiler]]) under
+  // director_function='cs', spec_slug=null. metadata: { playbook_id,
+  // source_tree_key, approver_user_id?, autonomous:false, phase:2 }.
+  | "playbook_seed_approved";
 
 export interface DirectorActivityInput {
   workspaceId: string;

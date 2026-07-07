@@ -33,7 +33,7 @@ Phase 1 of [[../specs/playbook-compiler-becomes-box-agent-mining-full-history]]:
 
 **In (others → this):**
 
-_None yet — Phase 2 will land the proposed [[playbooks]] rows keyed off this store; see [[../specs/playbook-compiler-becomes-box-agent-mining-full-history]] § Phase 2._
+- [[playbooks]].`source_tree_key` — soft pointer (no formal FK — the partial UNIQUE `(workspace_id, source_tree_key) WHERE source_tree_key IS NOT NULL` on `playbooks` anchors idempotency). Each PROPOSED playbook the compiler seeds carries the source tree's key; approval leaves `source_tree_key` intact so Phase 3's Sol M4 selection can trace an approved playbook back to the tree that motivated it.
 
 ## Common queries
 
