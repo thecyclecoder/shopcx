@@ -1,0 +1,246 @@
+/**
+ * Offers SDK — the admin-layer over pricing rules that attaches extra
+ * included products to a variant order.
+ *
+ * Phase 1 of `offer-creator`: this file exposes typed reads/writes for
+ * the `public.offers` table + the shape helpers Phase 2 (cart-build)
+ * and Phase 3 (renewal-strip) will consume.
+ *
+ * See docs/brain/tables/offers.md.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+
+export type OfferKind = "physical" | "digital";
+export type OfferScope = "checkout_only" | "checkout_and_renewals";
+
+export interface OfferIncluded {
+  /**
+   * Physical → `product_variants.id` (Amplifier sku-bearing line).
+   * Digital  → `digital_goods.id` (no sku, triggers digital-goods-delivery).
+   */
+  ref_id: string;
+  kind: OfferKind;
+  quantity: number;
+}
+
+export interface Offer {
+  id: string;
+  workspace_id: string;
+  variant_id: string;
+  name: string | null;
+  included: OfferIncluded[];
+  scope: OfferScope;
+  overrides_pricing_rule_gifts: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OfferInput {
+  variant_id: string;
+  name?: string | null;
+  included: OfferIncluded[];
+  scope?: OfferScope;
+  overrides_pricing_rule_gifts?: boolean;
+  is_active?: boolean;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function normalizeIncluded(raw: unknown): OfferIncluded[] {
+  if (!Array.isArray(raw)) return [];
+  const out: OfferIncluded[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    const ref = typeof r.ref_id === "string" ? r.ref_id : "";
+    const kind = r.kind === "digital" ? "digital" : r.kind === "physical" ? "physical" : null;
+    const qtyN = typeof r.quantity === "number" ? r.quantity : Number(r.quantity);
+    if (!UUID_RE.test(ref) || !kind || !Number.isFinite(qtyN) || qtyN < 1) continue;
+    out.push({ ref_id: ref, kind, quantity: Math.floor(qtyN) });
+  }
+  return out;
+}
+
+export function normalizeScope(raw: unknown): OfferScope {
+  return raw === "checkout_and_renewals" ? "checkout_and_renewals" : "checkout_only";
+}
+
+export async function listOffersForWorkspace(workspaceId: string): Promise<Offer[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("offers")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return (data || []).map(hydrateOffer);
+}
+
+export async function getOffer(workspaceId: string, offerId: string): Promise<Offer | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("offers")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("id", offerId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? hydrateOffer(data) : null;
+}
+
+/** Cart-build (Phase 2) lookup — the active offer attached to a variant. */
+export async function getActiveOfferForVariant(
+  workspaceId: string,
+  variantId: string,
+): Promise<Offer | null> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("offers")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("variant_id", variantId)
+    .eq("is_active", true)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? hydrateOffer(data) : null;
+}
+
+/**
+ * Bulk lookup — active offers for a set of anchor variants (the Phase 2
+ * cart-build entry point). Returns the newest-active offer per anchor variant
+ * (dedupe key = `variant_id`); ties broken by `updated_at desc`.
+ */
+export async function getActiveOffersForVariants(
+  workspaceId: string,
+  variantIds: string[],
+): Promise<Map<string, Offer>> {
+  if (variantIds.length === 0) return new Map();
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("offers")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true)
+    .in("variant_id", variantIds)
+    .order("updated_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  const byVariant = new Map<string, Offer>();
+  for (const row of data || []) {
+    const offer = hydrateOffer(row);
+    if (!byVariant.has(offer.variant_id)) byVariant.set(offer.variant_id, offer);
+  }
+  return byVariant;
+}
+
+/**
+ * Phase 3 of offer-creator — renewal-aware fulfillment.
+ *
+ * A subscription's `items` may include $0 offer-sourced entries (physical or
+ * digital) that were attached at checkout. This helper is called BEFORE
+ * pricing at renewal time; it drops those entries whose current offer
+ * `scope='checkout_only'` (or whose offer has been deleted / deactivated —
+ * treated as `checkout_only` for safety, since a renewal must not ship items
+ * that no longer have an active offer backing them).
+ *
+ * "Reference not baked" (same shape as pricing_rule_offers): the sub stores a
+ * link (`offer_source_variant_id`), the current scope is looked up at renewal
+ * time. Flipping an offer from `checkout_and_renewals` back to `checkout_only`
+ * in the admin causes the next renewal to stop shipping the extras — no row
+ * mutation needed.
+ *
+ * Non-offer items are passed through untouched. Items without an
+ * `offer_source_variant_id` are always kept (they're not this helper's
+ * concern).
+ */
+export async function stripCheckoutOnlyOfferItems<
+  T extends { variant_id?: unknown; offer_source_variant_id?: unknown; is_gift?: unknown },
+>(workspaceId: string, items: T[]): Promise<T[]> {
+  const anchorIds = new Set<string>();
+  for (const it of items) {
+    const anchor = typeof it.offer_source_variant_id === "string" ? it.offer_source_variant_id : "";
+    if (anchor) anchorIds.add(anchor);
+  }
+  if (anchorIds.size === 0) return items;
+
+  const offersByAnchor = await getActiveOffersForVariants(workspaceId, Array.from(anchorIds));
+
+  return items.filter((it) => {
+    const anchor = typeof it.offer_source_variant_id === "string" ? it.offer_source_variant_id : "";
+    if (!anchor) return true; // non-offer items pass through untouched
+    const offer = offersByAnchor.get(anchor);
+    if (!offer) return false; // offer deleted / inactive — treat as checkout_only, drop
+    return offer.scope === "checkout_and_renewals";
+  });
+}
+
+export async function createOffer(workspaceId: string, input: OfferInput): Promise<Offer> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("offers")
+    .insert({
+      workspace_id: workspaceId,
+      variant_id: input.variant_id,
+      name: input.name ?? null,
+      included: normalizeIncluded(input.included),
+      scope: normalizeScope(input.scope),
+      overrides_pricing_rule_gifts: Boolean(input.overrides_pricing_rule_gifts),
+      is_active: input.is_active ?? true,
+    })
+    .select("*")
+    .single();
+  if (error) throw new Error(error.message);
+  return hydrateOffer(data);
+}
+
+export async function updateOffer(
+  workspaceId: string,
+  offerId: string,
+  patch: Partial<OfferInput>,
+): Promise<void> {
+  const admin = createAdminClient();
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (typeof patch.variant_id === "string") updates.variant_id = patch.variant_id;
+  if ("name" in patch) updates.name = patch.name ?? null;
+  if (Array.isArray(patch.included)) updates.included = normalizeIncluded(patch.included);
+  if (typeof patch.scope === "string") updates.scope = normalizeScope(patch.scope);
+  if (typeof patch.overrides_pricing_rule_gifts === "boolean") {
+    updates.overrides_pricing_rule_gifts = patch.overrides_pricing_rule_gifts;
+  }
+  if (typeof patch.is_active === "boolean") updates.is_active = patch.is_active;
+
+  const { error } = await admin
+    .from("offers")
+    .update(updates)
+    .eq("id", offerId)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(error.message);
+}
+
+export async function deleteOffer(workspaceId: string, offerId: string): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("offers")
+    .delete()
+    .eq("id", offerId)
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(error.message);
+}
+
+function hydrateOffer(row: Record<string, unknown>): Offer {
+  return {
+    id: String(row.id),
+    workspace_id: String(row.workspace_id),
+    variant_id: String(row.variant_id),
+    name: (row.name as string | null) ?? null,
+    included: normalizeIncluded(row.included),
+    scope: normalizeScope(row.scope),
+    overrides_pricing_rule_gifts: Boolean(row.overrides_pricing_rule_gifts),
+    is_active: Boolean(row.is_active),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
