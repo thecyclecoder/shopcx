@@ -19,7 +19,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { CheckoutClient } from "./_components/CheckoutClient";
 import type { CartDraft } from "../customize/_components/CustomizeClient";
 import { getStorefrontMetadata } from "../_lib/storefront-metadata";
-import { ensureFreeGifts, type CartLineLike } from "@/lib/cart-gifts";
+import { ensureCartAttachments, type CartLineLike } from "@/lib/cart-gifts";
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   await connection();
@@ -66,13 +66,14 @@ export default async function CheckoutPage({ searchParams }: PageProps) {
     redirect(cart.source_product_handle ? `/${cart.source_product_handle}` : "/");
   }
 
-  // Backfill / heal free gifts on every render. ensureFreeGifts
-  // strips existing gift lines and re-derives them from the current
-  // rules, so stale fields (image_url, title) refresh automatically.
-  // We persist back to the cart so subsequent loads + the eventual
-  // /api/checkout call see the healed lines.
+  // Backfill / heal offer-attached items + free gifts on every render.
+  // ensureCartAttachments strips existing gift/offer lines and re-derives
+  // them from the current offers + rules, so stale fields (image_url,
+  // title) refresh automatically. We persist back to the cart so
+  // subsequent loads + the eventual /api/checkout call see the healed
+  // lines.
   const baseLines = (cart.line_items as CartLineLike[]) || [];
-  const linesWithGifts = await ensureFreeGifts(cart.workspace_id as string, baseLines);
+  const linesWithGifts = await ensureCartAttachments(cart.workspace_id as string, baseLines);
   if (JSON.stringify(baseLines) !== JSON.stringify(linesWithGifts)) {
     const newSubtotalCents = linesWithGifts.reduce((s, l) => s + l.line_total_cents, 0);
     // Preserve any persisted coupon discount — gifts are $0 lines so the

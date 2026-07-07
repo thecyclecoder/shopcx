@@ -1,6 +1,6 @@
 # inngest/sonnet-prompt-auto-review
 
-Daily Claude-Opus auto-review of proposed [[../tables/sonnet_prompts]]. The downstream half of the self-improvement loop — see [[../lifecycles/ai-learning]] for the end-to-end trace.
+Daily **enqueue** cron for the sonnet-prompt auto-review box agent. The reviewer USED to be a headless Claude Opus API call fired straight from this cron; it is now a supervised box-session agent (`kind='prompt-review'`) under June (CS Director) — see [[../lifecycles/ai-learning]] for the end-to-end trace. This cron only enqueues rows; the review itself runs on the box lane in `scripts/builder-worker.ts → runPromptReviewJob`.
 
 **File:** `src/lib/inngest/sonnet-prompt-auto-review.ts`
 
@@ -9,18 +9,18 @@ Daily Claude-Opus auto-review of proposed [[../tables/sonnet_prompts]]. The down
 ### `sonnet-prompt-auto-review`
 - **Trigger:** cron `0 11 * * *` (11 UTC = 6 AM Central during CDT, fires right after [[daily-analysis-report-cron]]) **+ event** `prompt-learning/auto-review.run` (manual trigger from a script or admin)
 - **Retries:** 1
-- **Concurrency:** `[{ limit: 1 }]` — at most one workspace-sweep at a time
+- **Concurrency:** `[{ limit: 1 }]` — at most one enqueue-sweep at a time
 - **Per-workspace gate:** skips workspaces with `workspaces.sonnet_auto_review_enabled=false` (default for all)
 
 ## Pipeline
 
 For each enabled workspace:
-1. Pull up to 50 `sonnet_prompts` rows where `status='proposed' AND auto_decision IS NULL`.
-2. For each proposal, call `reviewSingleProposal()` in `src/lib/sonnet-prompt-auto-review.ts`:
-   - Load top-K similar approved prompts, active [[../tables/policies]], contributing tickets from [[../tables/daily_analysis_reports]] + [[../tables/ticket_analyses]], and the voice docs from disk.
-   - Call Claude Opus with the decision schema (`accept` / `reject` / `merge` / `supersede` / `revise` + `confidence` + `reasoning` + `references[]`). The system prompt explicitly tells the model there is **no human-review queue** — be decisive.
-   - Apply through Phase 3 safety guards.
-3. Return per-workspace + global counts.
+1. Pull up to 50 `sonnet_prompts` rows where `status='proposed' AND auto_decision IS NULL` (oldest first, capped by `MAX_PROPOSALS_PER_CRON_RUN` so a big backlog drains over consecutive daily ticks rather than flooding the box).
+2. Dedupe against already-in-flight prompt-review jobs (`kind='prompt-review' AND status IN (queued, queued_resume, claimed, building, needs_attention)`, matched by `spec_slug=proposal.id`).
+3. Insert one `agent_jobs` row per fresh proposal: `kind='prompt-review'`, `status='queued'`, `spec_slug=proposal.id`, `workspace_id`. That's it — no LLM call here.
+4. Return per-workspace + global candidate / enqueued / skipped counts.
+
+The box worker (`scripts/builder-worker.ts → runPromptReviewJob`) claims each row, assembles the review inputs (top-K similar approved prompts, active [[../tables/policies]], source-pattern tickets from [[../tables/daily_analysis_reports]] + [[../tables/ticket_analyses]], voice docs from disk — same inputs `loadReviewInputs` used to hand the retired direct-Opus fetch), runs ONE Max session with `buildSystemPrompt` + `buildUserPrompt`, parses the JSON verdict via `parseDecision`, then hands it to `applyDecision` — which writes the SAME auto_decision fields with the SAME safety guards.
 
 ## Phase 3 safety guards
 
@@ -51,25 +51,25 @@ The redesign (2026-06-03) makes the cron decisive. A reject is reversible (Dylan
 
 ## Downstream events sent
 
-_None._ Purely state-mutating.
+_None._ The cron writes `agent_jobs` rows the box worker claims; no Inngest events are fanned out.
 
 ## Tables written
 
+- `agent_jobs` — one row per proposal (`kind='prompt-review'`, `status='queued'`, `spec_slug=proposal.id`). The box worker's `runPromptReviewJob` writes the auto_decision fields below.
+
+The following are written by the box lane (`applyDecision` in `src/lib/sonnet-prompt-auto-review.ts`), not by this cron:
+
 - [[../tables/sonnet_prompts]] — `auto_decision`, `status`, `enabled`, `superseded_by_id`, `merged_into_id`, `reviewed_at`
 - [[../tables/sonnet_prompt_decisions]] — one row per decision, append-only
-- [[../tables/ai_token_usage]] — per-call cost accounting via `logAiUsage()`
+- [[../tables/ai_token_usage]] — per-call cost accounting via `logAiUsage()` (metered as part of the Max session, not a direct-API call)
 
 ## Tables read (not written)
 
 - [[../tables/workspaces]] — `sonnet_auto_review_enabled`, `sonnet_auto_review_daily_cap`
-- [[../tables/policies]] — active rules considered as references
-- [[../tables/daily_analysis_reports]] — source pattern + theme membership
-- [[../tables/ticket_analyses]] — contributing tickets
+- [[../tables/sonnet_prompts]] — backlog of proposed prompts to enqueue
+- `agent_jobs` — dedupe against in-flight prompt-review jobs
 
-Reads three files at function init (cached + hashed for audit replay):
-- `docs/brain/customer-voice.md`
-- `docs/brain/operational-rules.md`
-- `docs/brain/ui-conventions.md`
+The box lane's `runPromptReviewJob` reads [[../tables/policies]], [[../tables/daily_analysis_reports]], [[../tables/ticket_analyses]] + the voice docs on disk (`docs/brain/customer-voice.md`, `docs/brain/operational-rules.md`, `docs/brain/ui-conventions.md`) — not this cron.
 
 ## Per-workspace enable + cap
 
@@ -82,7 +82,7 @@ Reads three files at function init (cached + hashed for audit replay):
 
 ## Related
 
-[[../lifecycles/ai-learning]] · [[../tables/sonnet_prompts]] · [[../tables/sonnet_prompt_decisions]] · [[../tables/policies]] · [[ticket-analysis-cron]] · [[daily-analysis-report-cron]] · [[ai-nightly-analysis]] · [[../integrations/anthropic]] · [[../dashboard/ai-analysis]]
+[[../lifecycles/ai-learning]] · [[../tables/sonnet_prompts]] · [[../tables/sonnet_prompt_decisions]] · [[../tables/policies]] · [[ticket-analysis-cron]] · [[daily-analysis-report-cron]] · [[ai-nightly-analysis]] · [[../functions/cs]] · [[../dashboard/ai-analysis]]
 
 ---
 

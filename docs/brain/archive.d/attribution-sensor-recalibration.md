@@ -1,0 +1,1 @@
+- **Recalibrate the Meta ad-performance sensor (source-family + scent-match tagging)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]

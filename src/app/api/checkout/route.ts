@@ -147,6 +147,12 @@ export async function POST(request: NextRequest) {
     mode: "subscribe" | "onetime";
     frequency_days: number | null;
     is_gift?: boolean;
+    // Phase 2/3 of offer-creator: offer-sourced $0 lines carry these
+    // markers so the renewal handler can strip them at
+    // `scope='checkout_only'`, and the digital-goods-delivery Inngest can
+    // email the asset for digital ones.
+    offer_source_variant_id?: string;
+    digital_good_id?: string;
   };
   const lines = cart.line_items as Line[];
   const subtotalCents = lines.reduce((s, l) => s + l.line_total_cents, 0);
@@ -736,12 +742,17 @@ export async function POST(request: NextRequest) {
         billing_interval: "day",
         billing_interval_count: bucket.frequency_days,
         next_billing_date: nextBillingDate.toISOString(),
-        // Free gifts are first-order-only — they don't persist as
-        // recurring subscription line items. The customer keeps the
-        // gift from their initial order, but the next renewal ships
-        // only the paid products they actually subscribed to.
+        // Pricing-rule free gifts are first-order-only — they don't
+        // persist as recurring subscription line items. Offer-sourced
+        // items (Phase 3 of offer-creator) DO persist — tagged with
+        // `offer_source_variant_id` so the renewal Inngest handler can
+        // look up the offer's current `scope` and strip
+        // `checkout_only` items at renewal time (reference not baked:
+        // flipping the scope in admin takes effect at the next
+        // renewal). `stripCheckoutOnlyOfferItems` in src/lib/offers.ts
+        // performs the strip.
         items: bucket.items
-          .filter((i) => !i.is_gift)
+          .filter((i) => !i.is_gift || !!i.offer_source_variant_id)
           .map((i) => ({
             variant_id: i.variant_id,
             product_id: i.product_id,
@@ -752,6 +763,11 @@ export async function POST(request: NextRequest) {
             quantity: i.quantity,
             price_cents: i.unit_price_cents,
             sku: undefined,
+            ...(i.is_gift ? { is_gift: true } : {}),
+            ...(i.offer_source_variant_id
+              ? { offer_source_variant_id: i.offer_source_variant_id }
+              : {}),
+            ...(i.digital_good_id ? { digital_good_id: i.digital_good_id } : {}),
           })),
         delivery_price_cents: subDeliveryCents,
         applied_discounts: [],
