@@ -30,14 +30,13 @@
  */
 import { createAdminClient } from "./_bootstrap";
 
-// ── Fill these before running ──────────────────────────────────────────
-// (Query the DB with `probe-db` to confirm each id belongs to the target
-// workspace and matches the intended product / variant / digital good.)
-const WORKSPACE_ID = "REPLACE_ME_WORKSPACE_ID";
-const PRIMARY_PRODUCT_ID = "REPLACE_ME_PRIMARY_PRODUCT_ID"; // The product whose bundle PDP renders this Starter Kit
-const FROTHER_VARIANT_ID = "REPLACE_ME_FROTHER_VARIANT_ID"; // physical include #1
-const MUG_VARIANT_ID = "REPLACE_ME_MUG_VARIANT_ID";         // physical include #2
-const EGUIDE_DIGITAL_GOOD_ID = "REPLACE_ME_EGUIDE_DIGITAL_GOOD_ID"; // digital include
+// ── Superfoods production ids ──────────────────────────────────────────
+// Sourced from the founder 2026-07-07 (spec Q&A).
+const WORKSPACE_ID = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
+const PRIMARY_PRODUCT_ID = "ea433e56-0aa4-4b46-9107-feb11f77f533"; // The product whose bundle PDP renders this Starter Kit
+const FROTHER_VARIANT_ID = "6b09d7d2-d13d-43f1-b0e0-8001f147a6f1"; // physical include #1
+const MUG_VARIANT_ID = "3714ca2f-c1a9-47a9-818d-fb9c7aeb8728";     // physical include #2
+const EGUIDE_DIGITAL_GOOD_ID = "1bc2111a-11c6-472d-b2a9-5268a389aa5b"; // digital include
 
 // ── Configuration knobs (safe defaults) ────────────────────────────────
 const STARTER_KIT_SKU = "SF-STARTER-KIT";
