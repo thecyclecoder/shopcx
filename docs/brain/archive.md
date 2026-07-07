@@ -49,6 +49,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **ticket_resolution_events write-ahead ledger + SonnetDecision schema extension** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]
 - **Extend verifyActionInDB coverage: returns, date/frequency, item ops, price** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Verify+escalate on the inline (journey/playbook-alongside) send path** · verified 2026-07-07 · → [[libraries/action-executor]]
+- **Box self-update: anchor staleness to boot-time RUNNING_SHA, not a fresh disk HEAD** · verified 2026-07-07 · → [[recipes/build-box-setup]]
 - **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]
 - **Goal promotion: stop fold/promotion doc collisions + surface a HELD promotion** · verified 2026-07-06 · → [[lifecycles/spec-goal-branch-pm-flow]]
 - **Portal: fix the first-delivery gate + true read-only + honest order status (slice 1)** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]

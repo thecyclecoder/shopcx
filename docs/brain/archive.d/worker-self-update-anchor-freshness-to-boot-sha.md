@@ -1,0 +1,1 @@
+- **Box self-update: anchor staleness to boot-time RUNNING_SHA, not a fresh disk HEAD** · verified 2026-07-07 · → [[recipes/build-box-setup]]
