@@ -2747,6 +2747,48 @@ export async function verifyActionInDB(
   }
 }
 
+// ── Claim↔action binding guard (inline send path) ──
+
+/**
+ * Phase 1 wiring of the deterministic claim-guard onto the inline send path
+ * shared by handleJourney + handlePlaybook. If `response_message` asserts a
+ * COMPLETED effect ("I've cancelled your subscription") that no attached
+ * action family backs, write a sysNote + escalate INSTEAD of sending. Returns
+ * true when the guard blocked (caller must NOT proceed with the outbound
+ * insert). Fail-safe: any evaluator throw is treated as a non-hit so a bug
+ * in the guard can never block a real reply.
+ *
+ * Extracted as a small callback-based helper so it stays unit-testable
+ * without booting the whole ActionContext + Supabase surface.
+ * See [[../docs/brain/libraries/claim-guard.md]].
+ */
+export async function claimGuardBlocksInlineSend(
+  responseMessage: string | null | undefined,
+  actions: ActionParams[] | undefined,
+  actionType: string,
+  handlerName: string | undefined,
+  sysNote: SysNoteFn,
+  escalate: (reason: string) => Promise<void>,
+  evaluate: (m: string | null | undefined, b: Set<string>) => string | null = unbackedEffectClaim,
+): Promise<boolean> {
+  let hit: string | null = null;
+  try {
+    const backed = new Set((actions || []).map((a) => a.type));
+    hit = evaluate(responseMessage, backed);
+  } catch {
+    // Fail-safe: if the guard evaluator itself throws, treat it as a non-hit
+    // rather than blocking a legitimate reply. Deterministic pure code should
+    // never throw, but a future change could accidentally introduce one.
+    hit = null;
+  }
+  if (!hit) return false;
+  await sysNote(
+    `[Guard] Blocked unbacked "${hit}" claim in ${actionType}${handlerName ? ` (${handlerName})` : ""} — no matching action attached. Escalating instead of sending a false promise.`,
+  );
+  await escalate(`blocked_unbacked_claim:${hit}`);
+  return true;
+}
+
 // ── Handler: Journey ──
 
 async function handleJourney(
@@ -2757,6 +2799,22 @@ async function handleJourney(
 ): Promise<void> {
   if (!decision.handler_name) {
     await sysNote("Journey action missing handler_name.");
+    return;
+  }
+
+  // Pre-send: block a first-person "already done" claim that no attached
+  // action backs. A journey ROUTES (mini-site CTA / follow-up) — routing
+  // does not back a completed-effect assertion; only side actions that
+  // actually ran + verified in this decision do. Match Phase 0's
+  // sysNote/escalate shape ("blocked_unbacked_claim:<effect>").
+  if (await claimGuardBlocksInlineSend(
+    decision.response_message,
+    decision.actions,
+    decision.action_type,
+    decision.handler_name,
+    sysNote,
+    (reason) => escalateTicket(ctx, reason),
+  )) {
     return;
   }
 
@@ -2882,6 +2940,21 @@ async function handlePlaybook(
     return;
   }
 
+  // Pre-send: block a first-person "already done" claim in the launch
+  // response_message that no attached action backs. The playbook has not
+  // yet run any step at this point — a "cancelled/refunded/paused"
+  // assertion here is unbacked by definition.
+  if (await claimGuardBlocksInlineSend(
+    decision.response_message,
+    decision.actions,
+    decision.action_type,
+    decision.handler_name,
+    sysNote,
+    (reason) => escalateTicket(ctx, reason),
+  )) {
+    return;
+  }
+
   // Look up playbook by name or trigger_intents — case-insensitive AND
   // tolerant of space↔underscore swaps. The model frequently snake-cases
   // a handler ("Replacement Order" → "replacement_order") that wouldn't
@@ -2931,6 +3004,33 @@ async function handlePlaybook(
 
   const { startPlaybook, executePlaybookStep } = await import("@/lib/playbook-executor");
 
+  // Step-level claim-guard: every playbook-step response_message is a model-
+  // or-code-authored outbound. Guard each one before the outbound insert,
+  // combining the decision's attached actions with the step's own
+  // `backedActions` hint (post-completion confirmations like "Your
+  // subscription is now cancelled" mark themselves backed so we don't
+  // false-positive escalate a truthful reply).
+  const guardedStepSend = async (
+    result: { response?: string; backedActions?: string[] },
+  ): Promise<void> => {
+    if (!result.response) return;
+    const combined: ActionParams[] = [
+      ...(decision.actions || []),
+      ...(result.backedActions || []).map((type) => ({ type })),
+    ];
+    if (await claimGuardBlocksInlineSend(
+      result.response,
+      combined,
+      "playbook_step",
+      decision.handler_name,
+      sysNote,
+      (reason) => escalateTicket(ctx, reason),
+    )) {
+      return;
+    }
+    await send(result.response, ctx.sandbox);
+  };
+
   // Check if this playbook is already active on the ticket (continuation vs new)
   const { data: ticketState } = await ctx.admin.from("tickets")
     .select("active_playbook_id").eq("id", ctx.ticketId).single();
@@ -2945,7 +3045,7 @@ async function handlePlaybook(
 
     let result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
     if (result.systemNote) await sysNote(result.systemNote);
-    if (result.response) { await send(result.response, ctx.sandbox); return; }
+    if (result.response) { await guardedStepSend(result); return; }
 
     // Auto-advance: keep executing steps until one sends a response or completes
     let advances = 0;
@@ -2953,7 +3053,7 @@ async function handlePlaybook(
       advances++;
       result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
-      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.response) { await guardedStepSend(result); return; }
       if (result.action === "complete") break;
     }
   } else {
@@ -2978,14 +3078,14 @@ async function handlePlaybook(
     );
 
     if (result.systemNote) await sysNote(result.systemNote);
-    if (result.response) { await send(result.response, ctx.sandbox); return; }
+    if (result.response) { await guardedStepSend(result); return; }
 
     let advances = 0;
     while (result.action === "advance" && advances < 10) {
       advances++;
       result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
-      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.response) { await guardedStepSend(result); return; }
       if (result.action === "complete") break;
     }
   }

@@ -163,6 +163,17 @@ export interface PlaybookExecResult {
   newStep?: number;
   context?: Record<string, unknown>;
   error?: string;
+  /**
+   * Action families ([[claim-guard]] `EFFECT_PATTERNS.families`) that a
+   * step's `response` legitimately references as completed. Set by steps
+   * whose response confirms an effect that already ran + verified in a
+   * prior turn (e.g. the cancel-journey-completed confirmation at
+   * apply_policy → "Your subscription is now cancelled" is backed by
+   * `["cancel"]`). Consumed by the inline claim-guard in
+   * [[action-executor]] `handlePlaybook` so post-completion truthful
+   * confirmations aren't false-positive escalated.
+   */
+  backedActions?: string[];
 }
 
 // ── Main executor ──
@@ -503,6 +514,11 @@ async function executeStep(
         action: "respond", response,
         context: { cancel_journey_completed: true, paused_for_cancel: false, subscription_cancelled: cancelled, cancel_handled: true },
         systemNote: `[Playbook] Cancel journey completed. Outcome: ${latest.outcome}. ${cancelled ? "Subscription cancelled." : "Subscription saved."} Not mentioning refund. Playbook reset to apply_policy.`,
+        // The "Your subscription is now cancelled" response is truthful — the
+        // cancel journey completed in a prior turn and its outcome is what
+        // gates this branch. Tell the inline claim-guard `cancel` is backed
+        // so it doesn't false-positive block the confirmation.
+        backedActions: cancelled ? ["cancel"] : undefined,
       };
     }
 
@@ -3002,7 +3018,9 @@ async function handleAdjustSubscription(
   if (!sub || sub.status !== "active" || !isFullReplacement) {
     const replacementName = ctx.replacement_order_name ? `${ctx.replacement_order_name} ` : "";
     const response = `Your replacement order ${replacementName}has been created and will ship within 2-3 business days.`;
-    return { action: "complete", response, context: ctx };
+    // The replacement order was created by a prior step in this playbook —
+    // the "Your replacement order has been created" claim is truthful.
+    return { action: "complete", response, context: ctx, backedActions: ["create_replacement_order"] };
   }
 
   // Calculate new date
@@ -3055,7 +3073,9 @@ async function handleAdjustSubscription(
   const subNote = ctx.subscription_adjusted ? ` Your next subscription shipment has been adjusted to ${ctx.new_next_billing_date}.` : "";
   const response = `Your replacement order${orderRef} has been created and will ship within 2-3 business days.${subNote}`;
 
-  return { action: "complete", response, context: ctx };
+  // Same reasoning as the fallback branch above: replacement order was
+  // created by a prior step in this playbook.
+  return { action: "complete", response, context: ctx, backedActions: ["create_replacement_order"] };
 }
 
 // ══════════════════════════════════════════════════════════════════
