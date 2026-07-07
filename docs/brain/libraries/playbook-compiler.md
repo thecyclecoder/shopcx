@@ -32,6 +32,10 @@ The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the o
 | `buildProposedPlaybookRow(workspaceId, tree)` | Pure builder for the compiler-seeded `playbooks` INSERT payload. Hard-pins `is_active: false as const` + `proposed_by: PLAYBOOK_COMPILER_PROPOSED_BY`. `trigger_intents` are the top-N by ticket_count from `tree.intent_distribution` (the analyzer's REAL tags, NEVER hand-guessed keywords — the Phase-2 verification invariant). |
 | `buildProposedPlaybookStepRows(workspaceId, playbookId, tree)` | Pure builder for the compiler-seeded `playbook_steps` INSERT payloads. Every step lands `type='custom'` with the orchestrator `action_type` + notes in `config` — the CHECK-constrained fine-grained step types are for human-authored steps only. Falls back to `tree.action_types` when the resolution_sequence is empty. |
 | `approvePlaybookProposal(admin, {workspaceId, playbookId, approverUserId?})` | Human-gated activation. Compare-and-sets on `.eq('proposed_by', PLAYBOOK_COMPILER_PROPOSED_BY).eq('is_active', false)` — an already-approved / cross-workspace / human-authored row can never be reflipped. Records a `playbook_seed_approved` [[director_activity]] row on success. |
+| `listApprovedCompiledPlaybooks(admin, workspaceId)` | **Phase 3** — DB-driven reader for approved compiler-derived playbooks. Predicate: `is_active=true AND proposed_by IS NULL AND source_tree_key IS NOT NULL`. Sol's first-touch session pulls this alongside the built-in `.from("playbooks").eq("is_active", true)` catalog so a compiler-derived option can be flagged as data-grounded in reasoning. Best-effort. |
+| `listCompiledTrees(admin, workspaceId, {minSupport?, limit?})` | **Phase 3** — DB-driven reader for the persisted trees in [[../tables/compiled_trees]], highest-support first. Sol's session reads this as CONTEXT even when no compiler playbook is approved yet — the trees are evidence of "N tickets landed here" the model can lean on. Default limit 20. Best-effort. |
+| `buildCompiledLibraryPromptSection(approved, trees)` | **Phase 3** pure formatter — folds the two lists into ONE system-prompt section. Empty inputs → `""` (never a `(none)` false negative). |
+| `loadCompiledLibraryPromptSection(admin, workspaceId, {treesLimit?, treesMinSupport?})` | **Phase 3** wire point. One-call helper Sol's `buildPreContext` ([[../libraries/sonnet-orchestrator-v2]]) awaits inside its Promise.all — runs both reads in parallel and returns the composed string. Per-workspace, so it sits INSIDE the stable system prompt without invalidating the shared prefix. |
 
 ## Types
 
@@ -44,11 +48,15 @@ The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the o
 - `PlaybookCompileScope` — one entry in `listCompilableWorkspaces`'s output (`workspaceId`, `ticketAnalysisCount`, `confirmedResolutionCount`).
 - `PlaybookCompileBrief` — the loaded brief the runner hands to the agent (`supportMin`, `resolutionRows`, `analysisRows`, `precomputedClusters`, `headerText`).
 - `FullHistoryResolutionRow`, `FullHistoryAnalysisRow` — the shapes read from `ticket_resolution_events` + `ticket_analyses`.
+- `ApprovedCompiledPlaybook` — Phase 3 row shape returned by `listApprovedCompiledPlaybooks`.
+- `CompiledTreeRow` — Phase 3 row shape returned by `listCompiledTrees`.
+- `ListCompiledTreesOptions` — `{minSupport?, limit?}` knobs for `listCompiledTrees`.
 
 ## Callers
 
 - **Inngest cron** — [[../inngest/playbook-compiler]] `playbookCompilerCron` calls `listCompilableWorkspaces` to decide which workspaces get a `playbook-compile` agent_job enqueued.
 - **Box worker** — `scripts/builder-worker.ts` `runPlaybookCompileJob` calls `loadPlaybookCompileBrief`, `normalizePlaybookCompileVerdict`, and `applyBoxPlaybookCompile`.
+- **Sonnet orchestrator (Sol's first-touch)** — [[sonnet-orchestrator-v2]] `buildPreContext` awaits `loadCompiledLibraryPromptSection` inside its per-workspace Promise.all and injects the returned string into the stable system prompt right after `buildPromptSections` (Phase 3 of [[../specs/playbook-compiler-becomes-box-agent-mining-full-history]]).
 
 ## Invariants
 
@@ -58,6 +66,7 @@ The agent (Max `claude -p`) emits the verdict; the DETERMINISTIC worker is the o
 - **Best-effort audit.** `applyBoxPlaybookCompile` best-efforts the director_activity write — an audit hiccup MUST NOT roll back the persisted trees (mirrors [[director-activity]] `recordDirectorActivity`).
 - **Compiler NEVER inserts an active playbook.** Enforced at CI by `scripts/_check-playbook-compiler-no-active.ts` (Phase 2 verification bullet: "A grep/audit confirms the compiler never inserts an active playbook directly"). The check strips comments and masks the sanctioned `approvePlaybookProposal` function, then greps for any remaining `is_active: true` in the compiler code.
 - **Guard-before-mutation on step refresh.** The `applyBoxPlaybookCompile` step-refresh sub-path re-asserts `proposed_by=PLAYBOOK_COMPILER_PROPOSED_BY` and `is_active=false` on the just-upserted row before deleting/re-inserting steps — a human-activated seed retains its human-edited steps.
+- **Sol's option set is DB-driven, never hardcoded** (Phase 3 verification bullet). `listApprovedCompiledPlaybooks` runs the exact predicate the spec pins (`is_active=true AND proposed_by IS NULL AND source_tree_key IS NOT NULL`); retiring or approving a seed changes the returned rows immediately. Pinned by `src/lib/playbook-compiler-sol.test.ts` "DB-driven — flipping is_active=false empties the option set".
 
 ## Related
 

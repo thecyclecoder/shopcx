@@ -807,3 +807,183 @@ export async function loadPlaybookCompileBriefFromWorkspaceId(workspaceId: strin
   const admin = createAdminClient();
   return loadPlaybookCompileBrief(admin, workspaceId);
 }
+
+// ── Phase 3: wire the compiled library as a durable input to Sol's selection ──
+//
+// Sol (🧭, `ticket-handle`) is the first-touch direction-setter — implemented
+// as the Sonnet orchestrator's `buildPreContext` in
+// [[../sonnet-orchestrator-v2]]. It ALREADY reads active playbooks via the
+// generic `.from("playbooks").eq("is_active", true)` slice, so an APPROVED
+// compiler seed (Phase 2 flipped by `approvePlaybookProposal`) is
+// automatically part of Sol's selection catalog — DB-driven, no hardcoding
+// (verify: `matchPlaybookScored` also filters on is_active=true; adding/
+// retiring a compiled playbook changes Sol's option set the next turn).
+//
+// Phase 3 layers TWO durable inputs on top of the built-in catalog:
+//
+//   (a) `listApprovedCompiledPlaybooks(admin, workspaceId)` — the DEDICATED
+//       reader for the compiler-derived subset (`source_tree_key IS NOT NULL
+//       AND is_active=true AND proposed_by IS NULL`). Distinct from
+//       `matchPlaybook` so Sol's session can tag compiler-derived options
+//       as "data-grounded" in reasoning + so a test can pin the durable
+//       DB-driven behavior directly.
+//   (b) `listCompiledTrees(admin, workspaceId, opts?)` — the persisted
+//       trees as CONTEXT the direction-setting session reads. Useful even
+//       when no compiler playbook has been approved yet: the trees are
+//       evidence of "N tickets landed here" the model can lean on when
+//       reasoning about a novel problem.
+//
+// `buildCompiledLibraryPromptSection` folds the two into ONE string the
+// orchestrator injects into its stable system prompt (per-workspace, not
+// per-ticket → cache-safe). Empty input → empty string (never a "compiled
+// library: (none)" false negative in the prompt).
+
+/** One row returned by `listApprovedCompiledPlaybooks`. */
+export interface ApprovedCompiledPlaybook {
+  id: string;
+  name: string;
+  description: string | null;
+  trigger_intents: string[];
+  trigger_patterns: string[];
+  source_tree_key: string;
+  priority: number;
+}
+
+/**
+ * List APPROVED compiler-seeded playbooks for a workspace — the compiler-
+ * derived subset of `matchPlaybook`'s catalog. Filters: `is_active=true` AND
+ * `source_tree_key IS NOT NULL` AND `proposed_by IS NULL` (a still-proposed
+ * seed has `proposed_by='playbook_compiler'` — Phase 2 activation clears it
+ * on approval). DB-driven — a re-run after an approval / retire changes the
+ * returned set.
+ *
+ * Best-effort — a read error returns `[]` so Sol's session degrades to the
+ * built-in catalog rather than throwing on a transient hiccup.
+ */
+export async function listApprovedCompiledPlaybooks(
+  admin: SupabaseClient,
+  workspaceId: string,
+): Promise<ApprovedCompiledPlaybook[]> {
+  try {
+    const { data } = await admin
+      .from("playbooks")
+      .select("id, name, description, trigger_intents, trigger_patterns, source_tree_key, priority")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("proposed_by", null)
+      .not("source_tree_key", "is", null)
+      .order("priority", { ascending: false })
+      .order("name", { ascending: true });
+    return (data || []) as ApprovedCompiledPlaybook[];
+  } catch {
+    return [];
+  }
+}
+
+/** Filter/limit knobs for `listCompiledTrees`. */
+export interface ListCompiledTreesOptions {
+  /** Only return trees with `support >= minSupport`. Default 0 (return all). */
+  minSupport?: number;
+  /** Cap the returned list; default 20 (enough context for the system prompt). */
+  limit?: number;
+}
+
+/** One row returned by `listCompiledTrees`. */
+export interface CompiledTreeRow {
+  id: string;
+  tree_key: string;
+  problem: string;
+  action_types: string[];
+  support: number;
+  intent_distribution: Record<string, number>;
+  reasoning: string | null;
+  compiled_at: string;
+}
+
+/**
+ * List persisted `compiled_trees` for a workspace, highest-support first.
+ * Best-effort — a read error returns `[]`.
+ */
+export async function listCompiledTrees(
+  admin: SupabaseClient,
+  workspaceId: string,
+  opts: ListCompiledTreesOptions = {},
+): Promise<CompiledTreeRow[]> {
+  const minSupport = typeof opts.minSupport === "number" && opts.minSupport > 0 ? Math.floor(opts.minSupport) : 0;
+  const limit = typeof opts.limit === "number" && opts.limit > 0 ? Math.floor(opts.limit) : 20;
+  try {
+    let q = admin
+      .from("compiled_trees")
+      .select("id, tree_key, problem, action_types, support, intent_distribution, reasoning, compiled_at")
+      .eq("workspace_id", workspaceId)
+      .order("support", { ascending: false })
+      .limit(limit);
+    if (minSupport > 0) q = q.gte("support", minSupport);
+    const { data } = await q;
+    return (data || []) as CompiledTreeRow[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Format the top compiler-derived playbooks + top compiled trees as ONE
+ * system-prompt section the direction-setting session (Sonnet orchestrator)
+ * injects into its per-workspace stable prompt.
+ *
+ * PURE (no admin plumbing) — the wire helper `loadCompiledLibraryPromptSection`
+ * does the reads; this one shapes the string. Split so a test can assert on
+ * the deterministic output shape without a Supabase mock.
+ *
+ * Empty inputs (no approved compiler playbooks AND no compiled trees) → empty
+ * string. NEVER emits a "(none)" line — an empty section reads as ambient
+ * context vs a missing signal; the session should not see "no data" here.
+ */
+export function buildCompiledLibraryPromptSection(
+  approved: ApprovedCompiledPlaybook[],
+  trees: CompiledTreeRow[],
+): string {
+  if (approved.length === 0 && trees.length === 0) return "";
+  const lines: string[] = [];
+  lines.push("COMPILED LIBRARY (data-grounded; the box's playbook-compiler mined these from the FULL ticket history — [[docs/brain/tables/compiled_trees]]):");
+  if (approved.length > 0) {
+    lines.push("Approved compiler-derived playbooks — grounded in real ticket history, prefer these when the customer's problem matches (tree_key ties each back to the mined pattern):");
+    for (const p of approved) {
+      const intents = (p.trigger_intents || []).join(", ") || "manual";
+      const desc = p.description ? ` — ${p.description.slice(0, 80)}` : "";
+      lines.push(`- ${p.name} (${intents}) · tree_key=${p.source_tree_key}${desc}`);
+    }
+  }
+  if (trees.length > 0) {
+    lines.push("Persisted trees — data-grounded evidence for reasoning even when no approved playbook covers the problem (support = distinct-ticket count over the full history):");
+    for (const t of trees) {
+      const actions = (t.action_types || []).join(" + ") || "n/a";
+      const topIntents = Object.entries(t.intent_distribution || {})
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([k, n]) => `${k}(${n})`)
+        .join(", ");
+      const intentsSuffix = topIntents ? ` · top intents ${topIntents}` : "";
+      lines.push(`- ${t.problem} → ${actions} · support=${t.support}${intentsSuffix}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Load + format in ONE call — the sonnet-orchestrator-v2 wire point. Runs the
+ * two DB reads in parallel and folds the results through
+ * `buildCompiledLibraryPromptSection`. Best-effort by construction (the
+ * readers swallow errors).
+ */
+export async function loadCompiledLibraryPromptSection(
+  admin: SupabaseClient,
+  workspaceId: string,
+  opts: { treesLimit?: number; treesMinSupport?: number } = {},
+): Promise<string> {
+  const [approved, trees] = await Promise.all([
+    listApprovedCompiledPlaybooks(admin, workspaceId),
+    listCompiledTrees(admin, workspaceId, { limit: opts.treesLimit ?? 10, minSupport: opts.treesMinSupport }),
+  ]);
+  return buildCompiledLibraryPromptSection(approved, trees);
+}

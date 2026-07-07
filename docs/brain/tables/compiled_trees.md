@@ -70,6 +70,7 @@ The only write path is [[../libraries/playbook-compiler]] `applyBoxPlaybookCompi
 - Writer: [[../libraries/playbook-compiler]] `applyBoxPlaybookCompile` — the only mutation chokepoint.
 - Producer: [[../inngest/playbook-compiler]] (enqueuer) → `scripts/builder-worker.ts` `runPlaybookCompileJob` (the box lane).
 - Audit: [[director_activity]] `action_kind='compiled_trees_extracted'` under `director_function='cs'`.
+- Read by Sol (Phase 3): [[../libraries/sonnet-orchestrator-v2]] `buildPreContext` awaits [[../libraries/playbook-compiler]] `loadCompiledLibraryPromptSection` — the top-N trees (highest support first) are folded into Sol's stable system prompt as data-grounded context.
 
 ---
 
