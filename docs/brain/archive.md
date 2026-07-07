@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
+- **Guard against merged-but-unapplied migrations (applied-state drift), not just missing ones** · verified 2026-07-07 · → [[../libraries/control-tower]]
 - **CI guard: every table a code path queries must have a migration that creates it** · verified 2026-07-07 · → [[../operational-rules#Every code path must have a migration for every table it queries]]
 - **A clarification turn sends the model's full message, not a context-stripped bare question** · verified 2026-07-07 · → [[lifecycles/ai-multi-turn]]
 - **Commerce SDK: create_order, create_subscription, commerce/refund.ts, $-bearing replacement** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]

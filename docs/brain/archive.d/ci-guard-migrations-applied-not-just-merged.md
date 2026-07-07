@@ -1,0 +1,1 @@
+- **Guard against merged-but-unapplied migrations (applied-state drift), not just missing ones** · verified 2026-07-07 · → [[../libraries/control-tower]]
