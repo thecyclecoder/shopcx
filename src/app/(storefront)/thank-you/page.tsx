@@ -44,7 +44,7 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
   const { data: order } = await admin
     .from("orders")
     .select(
-      "id, order_number, email, total_cents, currency, line_items, shipping_address, workspace_id, created_at, payment_details",
+      "id, order_number, email, total_cents, currency, line_items, shipping_address, workspace_id, created_at, payment_details, discount_codes, shipping_protection_amount_cents, avalara_total_tax_cents",
     )
     .eq("id", params.order)
     .maybeSingle();
@@ -67,6 +67,14 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
     ?? orderLines.reduce((s, l) => s + (Number(l.line_total_cents) || lineUnit(l) * (Number(l.quantity) || 1)), 0);
   const msrpSubtotal = orderLines.reduce((s, l) => s + (Number(l.unit_msrp_cents) || lineUnit(l)) * (Number(l.quantity) || 1), 0);
   const savingsCents = Math.max(0, msrpSubtotal - paidSubtotal);
+
+  // Order-total breakdown for the summary. The discount amount isn't stored as its own column
+  // (only the codes), so derive it from the authoritative total:
+  //   total = subtotal − discount + shipping_protection + tax  →  discount = subtotal + prot + tax − total.
+  const shippingProtectionCents = Number(order.shipping_protection_amount_cents) || 0;
+  const taxCents = Number(order.avalara_total_tax_cents) || 0;
+  const discountCents = Math.max(0, paidSubtotal + shippingProtectionCents + taxCents - (order.total_cents as number));
+  const discountCode = Array.isArray(order.discount_codes) && order.discount_codes.length ? String(order.discount_codes[0]) : null;
 
   // One featured review on a purchased product for post-purchase reassurance.
   const productIds = Array.from(new Set(orderLines.map((l) => l.product_id).filter((id): id is string => typeof id === "string")));
@@ -96,6 +104,11 @@ export default async function ThankYouPage({ searchParams }: PageProps) {
           line_items: (order.line_items as Array<Record<string, unknown>>) || [],
           shipping_address: order.shipping_address as Record<string, string> | null,
           savings_cents: savingsCents,
+          subtotal_cents: paidSubtotal,
+          discount_cents: discountCents,
+          discount_code: discountCode,
+          shipping_protection_cents: shippingProtectionCents,
+          tax_cents: taxCents,
         }}
         workspace={{
           id: workspace?.id || order.workspace_id,
