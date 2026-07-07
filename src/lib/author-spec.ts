@@ -294,8 +294,15 @@ export function assertValidParent(
   // MANDATE or a goal MILESTONE. Everything else — a bare goal, a bare function, a sibling-`../specs/`
   // parent, or free-text provenance — is a defect that Vale would bounce every pass. We enforce it at the
   // write chokepoint so a bad parent fails FAST here instead of looping forever in review.
+  // parser-strips-parent-wikilink-brackets: parseAuthoredSpecMarkdown UNWRAPS `[[…]]` from the parsed
+  // `**Parent:**` value, so a markdown-authored parent reaches here bracket-stripped (e.g.
+  // `../functions/platform#infra-devops-reliability`). The old regex REQUIRED the `[[…]]` brackets, so
+  // EVERY markdown-path parent lacking a typed parentKind failed here as "free text" — the real reason
+  // repair fix-specs kept getting rejected (the #1290/#1295 chain surfaced it). Match `functions/{slug}`
+  // WITH OR WITHOUT the brackets; the `# or mandate` guard still keeps genuine free text out. The
+  // bracketed forms (structured/display) still contain `functions/{slug}`, so this only WIDENS acceptance.
   const hasFunctionMandate =
-    /\[\[[^\]]*functions\/[a-z0-9-]+[^\]]*\]\]/i.test(p) && (p.includes("#") || /mandate/i.test(p));
+    /functions\/[a-z0-9-]+/i.test(p) && (p.includes("#") || /mandate/i.test(p));
   const goalM = p.match(GOAL_PARENT_RE);
   const hasGoalMilestone =
     !!goalM && ((goalM[2] || "").includes("#") || /\(\s*M\s*\d|milestone|\bM\d+\b/i.test(p));

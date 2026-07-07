@@ -80,16 +80,16 @@ export default async function CustomizePage({ searchParams }: PageProps) {
   }
 
   // ── Heal stale carts on load ───────────────────────────────────
-  // Re-run ensureFreeGifts (strips paid lines for gift-target
-  // products + re-derives $0 gift lines from current rules) and
-  // recompute totals. Idempotent: if nothing changes, we skip the
-  // write. Covers carts created before the gift-target strip rule
-  // landed and any future drift.
+  // Re-run ensureCartAttachments (strips paid lines for gift-target
+  // products, re-derives offer-attached items + free-gift lines from
+  // current offers + rules) and recompute totals. Idempotent: if
+  // nothing changes, we skip the write. Covers carts created before
+  // an offer / rule landed and any future drift.
   {
-    const { ensureFreeGifts } = await import("@/lib/cart-gifts");
+    const { ensureCartAttachments } = await import("@/lib/cart-gifts");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const currentLines = (cart.line_items as any[]) || [];
-    const fixedLines = await ensureFreeGifts(cart.workspace_id as string, currentLines);
+    const fixedLines = await ensureCartAttachments(cart.workspace_id as string, currentLines);
     const fixedSubtotal = fixedLines.reduce((s, l) => s + (l.line_total_cents || 0), 0);
     // Preserve the auto-applied coupon: keep the same effective discount RATE
     // when the subtotal shifts (the percentage coupon should track the new
