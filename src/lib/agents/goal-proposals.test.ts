@@ -17,6 +17,8 @@ import {
   isValidGoalSlug,
   buildProposedGoalMarkdown,
   extractDecompositionMilestones,
+  normalizePlannerBlockedBySlug,
+  normalizePlannerBlockedByList,
 } from "./goal-proposals";
 
 test("a director may propose only for its OWN function", () => {
@@ -94,6 +96,68 @@ test("extractDecompositionMilestones: parses Decomposition bullets into position
   assert.match(out[0].body ?? "", /Extra wrap line for M1/);
   assert.equal(out[1].body, null);
   assert.equal(out[2].body, null);
+});
+
+// pia-decomposition-emits-plain-slug-blocked-by Phase 1 — the plain-slug write-path normalizer.
+// The Pia decomposition write path (parsePlannerSpecs in scripts/builder-worker.ts) MUST emit blocked_by
+// entries as bare member spec slugs — never namespaced `goalSlug:specSlug`, wikilinks, or path prefixes.
+// The build-gating (areSpecsGoalMates + Kahn sort in src/lib/agent-jobs.ts) resolves each blocker string
+// through the specs table by slug and does NOT split on `:` — a namespaced entry resolves to no spec, so
+// the gate silently treats it as an external blocker and lets the dependent build out of order (the
+// 2026-07-07 Sol-goal build shipped sol-cheap-execution-over-ticket-direction before its declared blocker
+// sol-ticket-direction-artifact for exactly this reason). Normalize at the write path so the DB row's
+// blocked_by is a list of plain slugs the gate can resolve.
+test("normalizePlannerBlockedBySlug: strips a `goalSlug:specSlug` namespace prefix", () => {
+  assert.equal(
+    normalizePlannerBlockedBySlug("sol-agent-boot-goal:sol-ticket-direction-artifact"),
+    "sol-ticket-direction-artifact",
+  );
+});
+
+test("normalizePlannerBlockedBySlug: strips wikilink brackets + `../specs/` path prefix + `#anchor` suffix", () => {
+  assert.equal(normalizePlannerBlockedBySlug("[[sol-ticket-direction-artifact]]"), "sol-ticket-direction-artifact");
+  assert.equal(normalizePlannerBlockedBySlug("[[../specs/sol-ticket-direction-artifact]]"), "sol-ticket-direction-artifact");
+  assert.equal(
+    normalizePlannerBlockedBySlug("[[../specs/sol-ticket-direction-artifact#phase-2]]"),
+    "sol-ticket-direction-artifact",
+  );
+});
+
+test("normalizePlannerBlockedBySlug: passes a plain kebab slug through unchanged", () => {
+  assert.equal(
+    normalizePlannerBlockedBySlug("sol-ticket-direction-artifact"),
+    "sol-ticket-direction-artifact",
+  );
+  assert.equal(normalizePlannerBlockedBySlug("m1-metric-groundwork"), "m1-metric-groundwork");
+});
+
+test("normalizePlannerBlockedBySlug: rejects empty / whitespace / junk that is not a resolvable slug", () => {
+  assert.equal(normalizePlannerBlockedBySlug(""), null);
+  assert.equal(normalizePlannerBlockedBySlug("   "), null);
+  assert.equal(normalizePlannerBlockedBySlug("Not_A_Slug"), null);
+  assert.equal(normalizePlannerBlockedBySlug("[[]]"), null);
+});
+
+test("normalizePlannerBlockedByList: filters non-strings, dedupes, drops the self-slug, keeps plain-slug order", () => {
+  const out = normalizePlannerBlockedByList(
+    [
+      "sol-agent-boot-goal:sol-ticket-direction-artifact",
+      "sol-cheap-execution-over-ticket-direction", // self — must be dropped
+      "[[sol-ticket-direction-artifact]]", // duplicate after normalization — must be deduped
+      "",
+      null,
+      42,
+      "another-real-blocker",
+    ] as unknown[],
+    "sol-cheap-execution-over-ticket-direction",
+  );
+  assert.deepEqual(out, ["sol-ticket-direction-artifact", "another-real-blocker"]);
+});
+
+test("normalizePlannerBlockedByList: returns [] for a non-array input", () => {
+  assert.deepEqual(normalizePlannerBlockedByList(undefined, "x"), []);
+  assert.deepEqual(normalizePlannerBlockedByList(null, "x"), []);
+  assert.deepEqual(normalizePlannerBlockedByList("not-an-array", "x"), []);
 });
 
 test("extractDecompositionMilestones: ignores bullets outside the Decomposition section", () => {
