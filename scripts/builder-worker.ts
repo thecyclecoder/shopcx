@@ -7249,6 +7249,230 @@ function clearStartupCrashCounter() {
   writeCrashFile({ sha: RUNNING_SHA, count: 0, alerted: false });
 }
 
+// builder-migration-apply-uses-working-pgclient — Phase 1 of the same-named spec. Historically an
+// `apply_migration` action landed as the cmd `npx supabase db push --db-url "$SUPABASE_POOLER_URL"
+// --include-all`, which dies on the builder because `SUPABASE_POOLER_URL` is unset in the systemd
+// EnvironmentFile (only `SUPABASE_DB_PASSWORD` is). The 2026-07-07 assisted-purchase-playbook seed
+// hit exactly that failure (`failed to connect to postgres: host=/tmp … dial unix /tmp/.s.PGSQL.5432`)
+// and the migration never applied. Route the broken form through the documented pgClient
+// apply-script pattern (docs/brain/recipes/write-a-migration-apply-script.md) — connect via
+// `poolerConnectionString()`/`pgClient()` off `SUPABASE_DB_PASSWORD` and run the pending
+// migrations in-process. A per-migration `npx tsx scripts/apply-*.ts` cmd already uses the
+// pgClient path internally and passes through the shell exec unchanged.
+function isBrokenSupabaseDbPush(cmd: string): boolean {
+  return /supabase\s+db\s+push/i.test(cmd);
+}
+
+// builder-migration-apply-uses-working-pgclient — Phase 2 verification probe. After the migration
+// SQL committed, confirm the DDL objects the migration DECLARED actually resolve in pg_catalog —
+// mirroring the "select 1 from pg_indexes where indexname in (…)" verify tail that
+// scripts/apply-*.ts scripts already print (see apply-account-matching-indexes-migration.ts).
+// Guards the exact ambiguity Phase 2 calls out: a no-op apply (empty INSERT list, IF NOT EXISTS
+// guard against nothing, a WHERE that always yields zero) leaves the SQL "succeeded" but nothing
+// landed — the probe fails the action so the caller marks it failed with the missing-object list
+// surfaced. Pure DML (seed) migrations that declare no CREATE-* / ADD-COLUMN objects skip the
+// probe (an INSERT that no-ops raises no per-row error we can catch here — write a per-migration
+// scripts/apply-*.ts if you need per-row verification, per the recipe).
+type MigrationProbe = {
+  kind: "table" | "column" | "index" | "schema" | "policy";
+  label: string;
+  sql: string;
+  params: unknown[];
+};
+
+function extractMigrationProbes(sql: string): MigrationProbe[] {
+  const stripped = sql.replace(/--[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const probes: MigrationProbe[] = [];
+  const seen = new Set<string>();
+  const push = (p: MigrationProbe) => {
+    const k = `${p.kind}:${p.label}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    probes.push(p);
+  };
+  // CREATE TABLE [IF NOT EXISTS] [schema.]name
+  for (const m of stripped.matchAll(
+    /\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?(\w+)"?/gi,
+  )) {
+    const schema = (m[1] || "public").toLowerCase();
+    const name = m[2].toLowerCase();
+    push({
+      kind: "table",
+      label: `${schema}.${name}`,
+      sql: `select 1 from information_schema.tables where table_schema=$1 and table_name=$2 limit 1`,
+      params: [schema, name],
+    });
+  }
+  // CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name
+  for (const m of stripped.matchAll(
+    /\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?"?(\w+)"?/gi,
+  )) {
+    const name = m[1].toLowerCase();
+    push({
+      kind: "index",
+      label: name,
+      sql: `select 1 from pg_indexes where indexname=$1 limit 1`,
+      params: [name],
+    });
+  }
+  // ALTER TABLE [ONLY] [schema.]tbl ADD COLUMN [IF NOT EXISTS] col
+  for (const m of stripped.matchAll(
+    /\balter\s+table\s+(?:only\s+)?(?:"?(\w+)"?\.)?"?(\w+)"?\s+add\s+column(?:\s+if\s+not\s+exists)?\s+"?(\w+)"?/gi,
+  )) {
+    const schema = (m[1] || "public").toLowerCase();
+    const table = m[2].toLowerCase();
+    const col = m[3].toLowerCase();
+    push({
+      kind: "column",
+      label: `${schema}.${table}.${col}`,
+      sql: `select 1 from information_schema.columns where table_schema=$1 and table_name=$2 and column_name=$3 limit 1`,
+      params: [schema, table, col],
+    });
+  }
+  // CREATE SCHEMA [IF NOT EXISTS] name
+  for (const m of stripped.matchAll(
+    /\bcreate\s+schema\s+(?:if\s+not\s+exists\s+)?"?(\w+)"?/gi,
+  )) {
+    const name = m[1].toLowerCase();
+    push({
+      kind: "schema",
+      label: name,
+      sql: `select 1 from information_schema.schemata where schema_name=$1 limit 1`,
+      params: [name],
+    });
+  }
+  // CREATE POLICY name ON [schema.]tbl
+  for (const m of stripped.matchAll(
+    /\bcreate\s+policy\s+"?(\w+)"?\s+on\s+(?:"?(\w+)"?\.)?"?(\w+)"?/gi,
+  )) {
+    const name = m[1].toLowerCase();
+    const schema = (m[2] || "public").toLowerCase();
+    const table = m[3].toLowerCase();
+    push({
+      kind: "policy",
+      label: `${schema}.${table}.${name}`,
+      sql: `select 1 from pg_policies where policyname=$1 and schemaname=$2 and tablename=$3 limit 1`,
+      params: [name, schema, table],
+    });
+  }
+  return probes;
+}
+
+async function probeMigrationDdl(
+  client: import("pg").Client,
+  sql: string,
+): Promise<{ ok: boolean; ran: number; missing: string[] }> {
+  const probes = extractMigrationProbes(sql);
+  if (probes.length === 0) return { ok: true, ran: 0, missing: [] };
+  const missing: string[] = [];
+  for (const p of probes) {
+    const { rowCount } = await client.query(p.sql, p.params);
+    if (!rowCount) missing.push(`${p.kind} ${p.label}`);
+  }
+  return { ok: missing.length === 0, ran: probes.length, missing };
+}
+
+async function applyPendingSupabaseMigrationsViaPgClient(
+  cwd: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const dir = join(cwd, "supabase", "migrations");
+  if (!existsSync(dir)) return { code: 1, out: "", err: `no migrations dir at ${dir}` };
+  const { readdirSync } = await import("fs");
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".sql") && !f.startsWith("_") && /^\d{14}_/.test(f))
+    .sort();
+  const { poolerConnectionString } = await import("./_bootstrap");
+  const { Client } = await import("pg");
+  let cs: string;
+  try {
+    cs = poolerConnectionString();
+  } catch (e) {
+    return { code: 1, out: "", err: `pooler connection string unavailable: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const client = new Client({ connectionString: cs });
+  const lines: string[] = [];
+  try {
+    await client.connect();
+  } catch (e) {
+    return { code: 1, out: "", err: `pgClient connect failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  try {
+    await client.query(`create schema if not exists supabase_migrations`);
+    await client.query(
+      `create table if not exists supabase_migrations.schema_migrations (version text primary key)`,
+    );
+    const { rows: colRows } = await client.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+       where table_schema='supabase_migrations' and table_name='schema_migrations'`,
+    );
+    const cols = new Set(colRows.map((r) => r.column_name));
+    const { rows: appliedRows } = await client.query<{ version: string }>(
+      `select version from supabase_migrations.schema_migrations`,
+    );
+    const applied = new Set(appliedRows.map((r) => r.version));
+    let n = 0;
+    for (const f of files) {
+      const version = f.slice(0, 14);
+      if (applied.has(version)) continue;
+      const name = f.slice(15).replace(/\.sql$/, "");
+      const sql = readFileSync(join(dir, f), "utf8");
+      try {
+        await client.query("begin");
+        await client.query(sql);
+        const insertCols: string[] = ["version"];
+        const insertVals: unknown[] = [version];
+        if (cols.has("name")) { insertCols.push("name"); insertVals.push(name); }
+        if (cols.has("statements")) { insertCols.push("statements"); insertVals.push([sql]); }
+        const placeholders = insertVals.map((_, i) => `$${i + 1}`).join(",");
+        await client.query(
+          `insert into supabase_migrations.schema_migrations (${insertCols.join(",")}) values (${placeholders}) on conflict do nothing`,
+          insertVals,
+        );
+        await client.query("commit");
+        // Phase 2 — verify the apply landed. A no-op apply (empty INSERT, IF NOT EXISTS against
+        // nothing, always-false WHERE) leaves the query "successful" but nothing materializes;
+        // probe each declared CREATE-* / ADD-COLUMN object and fail the action so the caller
+        // marks it failed with the missing-object list, not a silent pass.
+        try {
+          const probe = await probeMigrationDdl(client, sql);
+          if (!probe.ok) {
+            const msg = `post-apply DDL probe failed — expected but not present: ${probe.missing.join(", ")}`;
+            lines.push(`✗ ${f}: ${msg}`);
+            return { code: 1, out: lines.join("\n"), err: msg };
+          }
+          lines.push(probe.ran > 0 ? `✓ ${f} (probe: ${probe.ran} object(s))` : `✓ ${f} (data-only — no DDL probe)`);
+        } catch (e) {
+          const msg = `post-apply probe error: ${e instanceof Error ? e.message : String(e)}`;
+          lines.push(`✗ ${f}: ${msg}`);
+          return { code: 1, out: lines.join("\n"), err: msg };
+        }
+        n++;
+      } catch (e) {
+        try { await client.query("rollback"); } catch { /* connection may already be aborted */ }
+        const msg = e instanceof Error ? e.message : String(e);
+        lines.push(`✗ ${f}: ${msg}`);
+        return { code: 1, out: lines.join("\n"), err: msg };
+      }
+    }
+    lines.push(n === 0 ? "no pending migrations" : `applied ${n} migration(s) via pgClient`);
+    return { code: 0, out: lines.join("\n"), err: "" };
+  } finally {
+    try { await client.end(); } catch { /* best-effort teardown */ }
+  }
+}
+
+async function runApprovedAction(
+  a: PendingAction,
+  cwd: string,
+  timeout: number,
+): Promise<{ code: number; out: string; err: string }> {
+  const cmd = a.cmd || "";
+  if (a.type === "apply_migration" && isBrokenSupabaseDbPush(cmd)) {
+    return applyPendingSupabaseMigrationsViaPgClient(cwd);
+  }
+  return shAsync("bash", ["-lc", cmd], { timeout, cwd });
+}
+
 // Execute owner-approved gated actions in the build's worktree. The worker is the ONLY component
 // with prod creds; it runs exactly the command the owner approved (shown to them as the preview).
 async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions: PendingAction[]; summary: string }> {
@@ -7262,7 +7486,7 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
         a.status = r.ok ? "done" : "failed";
         a.result = r.ok ? "merged" : `merge failed ${r.status}`;
       } else if (a.cmd) {
-        const r = await shAsync("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd });
+        const r = await runApprovedAction(a, cwd, 10 * 60 * 1000);
         a.status = r.code === 0 ? "done" : "failed";
         a.result = (r.out + r.err).slice(-500);
       } else {
@@ -11474,8 +11698,10 @@ async function runDeveloperMessageJob(job: Job) {
             notes.push(`Spec ${slug} → authored${queued ? " + build queued" : ""}`);
           } else if (a.cmd) {
             // db_mutation (type 'run_prod_script'): the worker runs the captured self-contained command
-            // in the fresh worktree, holding prod creds. The model is NOT in the loop here.
-            const r = await shAsync("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd: wt });
+            // in the fresh worktree, holding prod creds. The model is NOT in the loop here. An
+            // `apply_migration` action that emitted the broken `supabase db push` form is rerouted
+            // to the pgClient apply-script path inside runApprovedAction — see the helper's header.
+            const r = await runApprovedAction(a, wt, 10 * 60 * 1000);
             a.status = r.code === 0 ? "done" : "failed";
             a.result = (r.out + r.err).slice(-500);
             notes.push(`${a.summary} → ${a.status}`);
@@ -12983,7 +13209,10 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
     let ok = false;
     let resultText = "";
     try {
-      const r = await shAsync("bash", ["-lc", a.cmd], { timeout: 10 * 60 * 1000, cwd: REPO_DIR });
+      // apply_migration cmds emitted as `supabase db push --db-url "$SUPABASE_POOLER_URL"` cannot
+      // connect on the builder (no SUPABASE_POOLER_URL in the systemd env); runApprovedAction routes
+      // them through the pgClient apply-script pattern so the migration actually lands.
+      const r = await runApprovedAction(a, REPO_DIR, 10 * 60 * 1000);
       ok = r.code === 0;
       resultText = (r.out + r.err).slice(-500);
     } catch (e) {
