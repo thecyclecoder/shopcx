@@ -143,6 +143,7 @@ import { buildOnEligible } from "@/lib/inngest/build-on-eligible";
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
 import { securityDiffBackstopCron } from "@/lib/inngest/security-diff-backstop-cron";
 import { refundSettlementReconcileCron } from "@/lib/inngest/refund-settlement-reconcile";
+import { playbookCompilerCron } from "@/lib/inngest/playbook-compiler";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
 export const registeredInngestFunctions = [
@@ -298,6 +299,7 @@ export const registeredInngestFunctions = [
   securityDepWatch,
   securityDiffBackstopCron,
   refundSettlementReconcileCron,
+  playbookCompilerCron,
 ];
 
 /** Our Inngest app id prefix (e.g. "shopcx-"), the form Inngest prepends to function ids across apps. */
