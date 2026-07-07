@@ -231,6 +231,7 @@ export default async function StorefrontProductPage({
   // when its paired storefront_experiments row is serving traffic.
   searchParams: Promise<{
     variant?: string;
+    name?: string;
     angle?: string;
     sx_preview?: string;
     _sxv?: string;
@@ -243,8 +244,10 @@ export default async function StorefrontProductPage({
   const variant: AdvertorialVariant | null =
     sp.variant === "advertorial" || sp.variant === "beforeafter" || sp.variant === "reasons" ? sp.variant : null;
   const blueprintVariant = !variant && sp.variant && BLUEPRINT_VARIANTS.has(sp.variant) ? sp.variant : null;
-  const preview = !variant && !blueprintVariant ? parsePreviewParam(sp.sx_preview) : null;
-  const isDynamic = Boolean(variant || blueprintVariant || preview);
+  // Bundle PDP: ?variant=bundle&name=starterkit — a full PDP with the bundle hero + trimmed chapters.
+  const bundleName = !variant && !blueprintVariant && sp.variant === "bundle" ? (sp.name || "starterkit") : null;
+  const preview = !variant && !blueprintVariant && !bundleName ? parsePreviewParam(sp.sx_preview) : null;
+  const isDynamic = Boolean(variant || blueprintVariant || bundleName || preview);
 
   // Bare PDP branch. Edge-served A/B (pdp-edge-served-experiments Phase 2):
   // assignment happens at the Vercel edge (middleware), NOT inline here — so the
@@ -377,6 +380,7 @@ export default async function StorefrontProductPage({
       reviewSlug={slug}
       advertorial={advertorial}
       blueprint={blueprint}
+      bundleName={bundleName}
       experimentExposures={experimentExposures}
     />
   );
