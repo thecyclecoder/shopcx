@@ -697,9 +697,16 @@ export default function PlaybooksSettingsPage() {
   }
 
   const isEditing = editing !== null;
+  // playbook-compiler-loop § Phase 2 — retired playbooks (is_active=false) live
+  // under the Retired subsection at the bottom of this page. They also fall out
+  // of the Sonnet handler catalog (matchPlaybook / matchPlaybookScored both
+  // filter by is_active=true) — retiring is the DB-side "no longer offered"
+  // invariant the spec-test checks.
+  const active_pbs = playbooks.filter((p) => p.is_active);
+  const retired_pbs = playbooks.filter((p) => !p.is_active);
   const pb_list = isEditing && draft && draft.id.startsWith("new_")
-    ? [...playbooks, draft]
-    : playbooks;
+    ? [...active_pbs, draft]
+    : active_pbs;
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
@@ -1327,6 +1334,59 @@ export default function PlaybooksSettingsPage() {
           </div>
         )}
       </div>
+
+      {/* Retired subsection — playbook-compiler-loop § Phase 2. Playbooks with
+          is_active=false live here after being Retired from the audit surface.
+          They are NOT offered in the Sonnet handler catalog (matchPlaybook
+          filters by is_active=true). Reactivate by toggling the switch. */}
+      {retired_pbs.length > 0 && !isEditing && (
+        <div className="mt-10">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+              Retired
+            </h2>
+            <span className="text-[10px] text-zinc-400">
+              Not offered in the Sonnet handler catalog. Reactivate to re-list.
+            </span>
+          </div>
+          <div className="space-y-2">
+            {retired_pbs.map((pb) => (
+              <div
+                key={pb.id}
+                className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900/50"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-medium text-zinc-600 dark:text-zinc-400 line-through">
+                      {pb.name || "(unnamed)"}
+                    </h3>
+                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-500">
+                      retired
+                    </span>
+                  </div>
+                  {pb.description && (
+                    <p className="mt-0.5 text-xs text-zinc-400 truncate">{pb.description}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => toggleActive(pb)}
+                    className="text-xs text-indigo-500 hover:text-indigo-700"
+                  >
+                    Reactivate
+                  </button>
+                  <button
+                    onClick={() => deletePlaybook(pb.id)}
+                    className="text-xs text-red-400 hover:text-red-600"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* How it works */}
       <div className="mt-6 rounded-lg border border-dashed border-zinc-300 bg-zinc-50/50 p-5 dark:border-zinc-700 dark:bg-zinc-900/50">

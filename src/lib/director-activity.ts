@@ -138,7 +138,13 @@ export type DirectorActionKind =
   // happened. One row per declined action so the audit history is symmetric with the approve path. metadata:
   // { thread_id, target_job_id, action_type, action_id, cmd, reversibility, irreversible,
   // authorized_by:'ceo', autonomous:false }.
-  | "ceo_declined_out_of_leash_request";
+  | "ceo_declined_out_of_leash_request"
+  // playbook-compiler-loop § Phase 2 — existing-playbook audit surface. Written by
+  // POST /api/workspaces/[id]/playbooks/retire when the Retire button on
+  // /dashboard/settings/playbooks/audit flips `playbooks.is_active=false`.
+  // Owned by the CS director (director_function='cs'), metadata: { playbook_id,
+  // playbook_name, retired_by, source }.
+  | "playbook_retired";
 
 export interface DirectorActivityInput {
   workspaceId: string;
