@@ -1,0 +1,1 @@
+- **The builder upserts a persona by key + auto-generates its avatar — no duplicate keys, no imageless agents** · verified 2026-07-07 · → [[libraries/agent-personas]]
