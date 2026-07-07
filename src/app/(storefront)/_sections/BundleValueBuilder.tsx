@@ -1,5 +1,6 @@
 import type { PageData } from "../_lib/page-data";
 import { ShopCTA } from "../_components/ShopCTA";
+import { resolveBundleCtaTargets } from "@/lib/bundle-cta";
 
 /**
  * The bundle PDP's value builder — sits in the hero between the subhead and the "As Seen On" row.
@@ -46,7 +47,14 @@ const CSS = `
 `;
 
 export function BundleValueBuilder({ data }: { data: PageData }) {
-  const variantId = data.base_variant?.id || null;
+  // Real Starter Kit variant + first-cycle coupon (products.bundle_variant_id / bundle_coupon_code),
+  // falling back to the base variant until the offer is seeded. The coupon rides as data-coupon-code
+  // so the storefront click handler forwards it to /api/cart as discount_code.
+  const { variantId, couponCode } = resolveBundleCtaTargets({
+    bundle_variant: data.bundle_variant,
+    base_variant: data.base_variant,
+    bundle_coupon_code: data.product.bundle_coupon_code,
+  });
   const freqs = data.pricing_rule?.available_frequencies || [];
   const freq = freqs.find((f) => f.default) || freqs[0] || null;
   return (
@@ -79,7 +87,7 @@ export function BundleValueBuilder({ data }: { data: PageData }) {
           showTrust={false}
           dataAttributes={
             variantId
-              ? { "variant-id": variantId, "tier-quantity": 1, mode: "subscribe", "frequency-days": freq?.interval_days ?? null }
+              ? { "variant-id": variantId, "tier-quantity": 1, mode: "subscribe", "frequency-days": freq?.interval_days ?? null, ...(couponCode ? { "coupon-code": couponCode } : {}) }
               : undefined
           }
         />
