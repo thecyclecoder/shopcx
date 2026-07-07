@@ -229,6 +229,13 @@ export interface DollarReplacementRefundArgs {
   reason: string;
   source?: string;
   eventProperties?: Record<string, unknown>;
+  /** Stable action-identity key threaded down to `refundOrder` so an
+   *  Inngest step retry / self-heal re-drive of the same
+   *  `dollar_replacement` action short-circuits at the pre-dispatch
+   *  guard instead of double-refunding. Handlers derive this from
+   *  their ticket_id via `hashActionRefundKey` — see
+   *  [[../refund]] Phase 2. */
+  requestKey?: string;
 }
 
 export interface DollarReplacementUpchargeArgs {
@@ -275,6 +282,7 @@ export interface DollarReplacementDeps {
       source?: string;
       customerId?: string | null;
       eventProperties?: Record<string, unknown>;
+      requestKey?: string;
     },
   ) => Promise<IssueRefundResult>;
   subscriptionOrderNow: (
@@ -440,6 +448,7 @@ export async function issueDollarReplacement(
         ...(args.refund.eventProperties ?? {}),
         replacement_id: rep.replacementId,
       },
+      requestKey: args.refund.requestKey,
     });
     if (!refund.success) {
       // Compensating rollback — delete the just-created replacements

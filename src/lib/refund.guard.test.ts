@@ -159,7 +159,7 @@ moduleAny._cache[require.resolve("@/lib/customer-events")] = {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { refundOrder, hashRefundRequestKey } = require("@/lib/refund") as typeof import("./refund");
+const { refundOrder, hashRefundRequestKey, hashActionRefundKey } = require("@/lib/refund") as typeof import("./refund");
 
 // ── Tests ─────────────────────────────────────────────────────────
 
@@ -229,4 +229,49 @@ test("guard: hashRefundRequestKey is deterministic over (order, amount, reason)"
   const k3 = hashRefundRequestKey(ORDER_ID, 750, "customer overcharged");
   assert.equal(k1, k2);
   assert.notEqual(k1, k3);
+});
+
+// ── Phase 2: stable action-identity keys threaded from the handlers ──
+
+test("guard: hashActionRefundKey is stable per action (same scope+actor → same key) but distinct across actors", () => {
+  const t1 = hashActionRefundKey("ticket", "tkt-A", ORDER_ID, 500, "reason");
+  const t1Repeat = hashActionRefundKey("ticket", "tkt-A", ORDER_ID, 500, "reason");
+  const t2 = hashActionRefundKey("ticket", "tkt-B", ORDER_ID, 500, "reason");
+  const ret = hashActionRefundKey("return", "tkt-A", ORDER_ID, 500, "reason");
+  assert.equal(t1, t1Repeat, "same action retry must produce identical key");
+  assert.notEqual(t1, t2, "different tickets must not collide");
+  assert.notEqual(t1, ret, "scope prefix must partition ticket-vs-return actions");
+});
+
+test("guard: Phase 2 handler pattern — ticket-scoped requestKey short-circuits retry for the SAME ticket", async () => {
+  resetWorld();
+  const TICKET = "tkt-1234";
+  const key = hashActionRefundKey("ticket", TICKET, ORDER_ID, 500, "price adjustment");
+  await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "price adjustment", { requestKey: key });
+  const retry = await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "price adjustment", { requestKey: key });
+  assert.equal(retry.success, true);
+  assert.equal(braintreeCalls, 1, "same ticket's retry must NOT re-fire the gateway");
+  assert.equal(ledger.length, 1);
+});
+
+test("guard: Phase 2 handler pattern — DIFFERENT tickets refunding the same shape DO both fire (no false-positive dedup)", async () => {
+  resetWorld();
+  const keyA = hashActionRefundKey("ticket", "tkt-A", ORDER_ID, 500, "price adjustment");
+  const keyB = hashActionRefundKey("ticket", "tkt-B", ORDER_ID, 500, "price adjustment");
+  await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "price adjustment", { requestKey: keyA });
+  await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "price adjustment", { requestKey: keyB });
+  assert.equal(braintreeCalls, 2, "two distinct tickets must not dedup on shared refund shape");
+  assert.equal(ledger.length, 2);
+});
+
+test("guard: Phase 2 returnsIssueRefund pattern — return-scoped requestKey dedups on Inngest step retry", async () => {
+  resetWorld();
+  const RETURN_ID = "ret-abc";
+  const reason = "Return SC000001 delivered";
+  const key = hashActionRefundKey("return", RETURN_ID, ORDER_ID, 1200, reason);
+  await refundOrder(WORKSPACE_ID, ORDER_ID, 1200, reason, { source: "inngest", requestKey: key });
+  const retry = await refundOrder(WORKSPACE_ID, ORDER_ID, 1200, reason, { source: "inngest", requestKey: key });
+  assert.equal(retry.success, true);
+  assert.equal(braintreeCalls, 1, "Inngest step retry must reuse the return-scoped key and short-circuit");
+  assert.equal(ledger.length, 1);
 });

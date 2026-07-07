@@ -136,6 +136,18 @@ test("issueRefund: dryRun=true passes through into RefundOrderOptions", async ()
   assert.equal(calls[0].opts.dryRun, true);
 });
 
+test("issueRefund: requestKey passes through into RefundOrderOptions (Phase 2 stable-identity threading)", async () => {
+  resetStub();
+  await issueRefund("ws-1", {
+    orderId: "ord-abc",
+    amountCents: 500,
+    reason: "dollar replacement",
+    requestKey: "ticket:tkt-9:order:ord-abc:cents:500",
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].opts.requestKey, "ticket:tkt-9:order:ord-abc:cents:500");
+});
+
 // ── Result shape pass-through ────────────────────────────────────
 
 test("issueRefund: propagates delegate success + method + refund_id", async () => {

@@ -53,6 +53,26 @@ export function hashRefundRequestKey(
     .slice(0, 32);
 }
 
+// Stable action-identity key — the Phase 2 key handlers thread down
+// from the caller side. Scopes the request to the ACTION that fired
+// (a ticket, a returns row, a replacement), not just the refund shape.
+// Two different tickets legitimately refunding the same (order, amount,
+// reason) get distinct keys and both fire; a retry of the SAME action
+// (Inngest step retry, self-heal re-drive) computes the same key and
+// short-circuits via the pre-dispatch guard.
+export function hashActionRefundKey(
+  actorScope: string,
+  actorId: string,
+  orderId: string,
+  amountCents: number,
+  reason: string,
+): string {
+  return createHash("sha256")
+    .update(`${actorScope}:${actorId}:${orderId}:${amountCents}:${reason || ""}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
 // Read-only branch preview — same rule as refundOrder() below, but
 // makes no external API calls. Used by scripts/_probe-refund-order.ts
 // (Phase 2 verification) and any audit tool that needs to answer
