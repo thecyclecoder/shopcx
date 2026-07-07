@@ -22,6 +22,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
 - **Handler-alias catalog for orchestrator action-type misses** · verified 2026-07-07 · → [[tables/action_handler_aliases]]
 - **Playbook compiler loop: mine resolution records → propose playbooks, audit existing, matcher-defers-on-uncertainty** · verified 2026-07-07 · → [[inngest/playbook-compiler]]
+- **Restore request-level refund idempotency at the refundOrder choke point** · verified 2026-07-07 · → [[../tables/order_refunds]]
 - **Refund integrity: order_refunds mirror + verify-by-refund-id + T+3d settlement reconcile** · verified 2026-07-07 · → [[tables/order_refunds]]
 - **Order-creating actions ship to the customer's CURRENT address, not a stale cited-order snapshot** · verified 2026-07-07 · → [[../lifecycles/ticket-lifecycle]] | [[../libraries/customer-shipping-address]] | [[../tables/customers]] | [[../tables/orders]] | [[../tables/subscriptions]] | [[../tables/replacements]]
 - **Retire skip_next_order (88% failure) — shadow-measured alias to change_next_date / bill_now** · verified 2026-07-07 · → [[libraries/action-executor]]
