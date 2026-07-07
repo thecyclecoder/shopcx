@@ -53,6 +53,26 @@ export function hashRefundRequestKey(
     .slice(0, 32);
 }
 
+// Stable action-identity key — the Phase 2 key handlers thread down
+// from the caller side. Scopes the request to the ACTION that fired
+// (a ticket, a returns row, a replacement), not just the refund shape.
+// Two different tickets legitimately refunding the same (order, amount,
+// reason) get distinct keys and both fire; a retry of the SAME action
+// (Inngest step retry, self-heal re-drive) computes the same key and
+// short-circuits via the pre-dispatch guard.
+export function hashActionRefundKey(
+  actorScope: string,
+  actorId: string,
+  orderId: string,
+  amountCents: number,
+  reason: string,
+): string {
+  return createHash("sha256")
+    .update(`${actorScope}:${actorId}:${orderId}:${amountCents}:${reason || ""}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
 // Read-only branch preview — same rule as refundOrder() below, but
 // makes no external API calls. Used by scripts/_probe-refund-order.ts
 // (Phase 2 verification) and any audit tool that needs to answer
@@ -184,6 +204,36 @@ export async function refundOrder(
   if (orderErr) return { success: false, error: `Order lookup failed: ${orderErr.message}` };
   if (!order) return { success: false, error: `Order ${orderId} not found in workspace` };
 
+  // ── Pre-dispatch idempotency guard ──
+  // Compute the stable request_key up front (opts.requestKey when the
+  // caller threads its own action id; otherwise the deterministic hash
+  // over order_id + amount_cents + reason). Look up the order_refunds
+  // ledger for an already-succeeded / already-settled row on the same
+  // (workspace, order, key) triple; if present, short-circuit BEFORE
+  // any gateway dispatch — the money already moved. This is the
+  // choke-point double-refund guard the spec is restoring; the
+  // post-success mirror write below plus the DB unique index are the
+  // second and third layers, and the open-return stamp handles the
+  // orthogonal return-vs-direct collision.
+  const requestKey = opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason);
+  if (!opts.dryRun) {
+    const { data: existing } = await admin
+      .from("order_refunds")
+      .select("id, vendor, vendor_refund_id")
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", order.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        method: (existing.vendor === "braintree" ? "braintree" : "shopify") as RefundMethod,
+        refund_id: existing.vendor_refund_id ?? undefined,
+      };
+    }
+  }
+
   // Mirror of returns.ts § Phase 4: absence of shopify_order_id is
   // the internal-order signal, not the presence of
   // braintree_transaction_id (a Shopify order paid via Braintree
@@ -258,7 +308,6 @@ export async function refundOrder(
   // refund back (the money already moved) — logged for the Phase 3
   // T+3d reconcile to catch.
   try {
-    const requestKey = opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason);
     await admin.from("order_refunds").insert({
       workspace_id: workspaceId,
       order_id: order.id,
