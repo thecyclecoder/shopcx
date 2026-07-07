@@ -23,7 +23,6 @@ import { kbEmbedDocument } from "@/lib/inngest/kb-embed";
 import { unifiedTicketHandler } from "@/lib/inngest/unified-ticket-handler";
 import { journeySessionCompleted, journeySessionAbandoned } from "@/lib/inngest/journey-outcomes";
 import { scrapeHelpCenter } from "@/lib/inngest/scrape-help-center";
-import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import { ticketAnalysisCron } from "@/lib/inngest/ticket-analysis-cron";
 import { dailyAnalysisReportCron } from "@/lib/inngest/daily-analysis-report-cron";
 import { directorRecapCron } from "@/lib/inngest/director-recap-cron";
@@ -164,7 +163,6 @@ export const registeredInngestFunctions = [
   journeySessionCompleted,
   journeySessionAbandoned,
   scrapeHelpCenter,
-  aiNightlyAnalysis,
   ticketAnalysisCron,
   dailyAnalysisReportCron,
   directorRecapCron,

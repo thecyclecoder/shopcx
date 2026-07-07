@@ -171,6 +171,16 @@ const MAX_TICKET_ANALYZE = 3;
 // One analyzer pass reads the ticket window + guidance + playbook context and emits ONE JSON
 // verdict. Minutes — same ballpark as a triage solver pass, not the seed ceiling.
 const TICKET_ANALYZE_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_PROMPT_REVIEW = 1;
+// Prompt-review jobs (prompt-auto-review-becomes-box-agent-under-june Phase 1) run in their OWN
+// concurrency-1 lane: enqueued daily by the sonnet-prompt-auto-review Inngest cron, ONE row per
+// proposed sonnet_prompt. Reads the proposal + similar approved prompts + relevant policies +
+// source-pattern tickets + voice docs (the same inputs `loadReviewInputs` used to hand to the
+// retired direct-Opus fetch) and emits ONE JSON verdict {decision, confidence, reasoning,
+// references, ...} that the deterministic runner applies via `applyDecision` — REJECT_FLOOR and
+// the never-queue-to-humans behavior are preserved verbatim. Serialized so a slow review never
+// starves the box lane.
+const PROMPT_REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
 // Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
 // lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
 // (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
@@ -536,7 +546,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "ticket-analyze";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "ticket-analyze" | "prompt-review";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -2357,7 +2367,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "prompt-review"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -11747,6 +11757,228 @@ async function runTicketAnalyzeJob(job: Job) {
   }
 }
 
+// ── Box-hosted prompt-review lane (prompt-auto-review-becomes-box-agent-under-june Phase 1) ────
+// A kind='prompt-review' job is ONE review of ONE proposed sonnet_prompt. The Inngest cron
+// (src/lib/inngest/sonnet-prompt-auto-review.ts) enqueues these daily — one row per proposal —
+// REPLACING the retired direct `fetch("https://api.anthropic.com/v1/messages")` that used to fire
+// straight from the cron (the anti-pattern the operational-rules § North star names: a raw-API
+// cron optimizing a proxy with no objective-owner). The reviewer is now a supervised box-session
+// agent under June (CS Director), same discipline as ticket-improve / triage-escalations /
+// cs-director-call.
+//
+// The runner reads the proposal (by spec_slug = the sonnet_prompts.id) + assembles the SAME
+// review inputs `loadReviewInputs` used to hand the direct-API path (similar approved prompts,
+// active policies, source-pattern tickets, voice docs), concatenates buildSystemPrompt +
+// buildUserPrompt into the box prompt, runs the Max session, parses the verdict via
+// parseDecision, then hands the typed verdict to applyDecision — which writes the SAME
+// auto_decision fields (status, auto_decision, auto_decision_reason, auto_decision_model,
+// auto_decision_confidence) with the SAME REJECT_FLOOR / ACCEPT_FLOOR / daily-cap safety guards
+// and NEVER queues to humans. No code path here touches api.anthropic.com.
+async function runPromptReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "prompt-review", sandbox: "max", timeout: PROMPT_REVIEW_TIMEOUT_MS });
+}
+
+async function runPromptReviewJob(job: Job) {
+  const tag = `[prompt-review:${job.id.slice(0, 8)}]`;
+  // spec_slug carries the sonnet_prompts.id (set by the cron's enqueue — matches spec-review's
+  // per-spec anchor shape). Missing → the enqueue drifted; fail the job with a clear reason
+  // rather than silently claiming a phantom proposal.
+  const proposalId = job.spec_slug;
+  if (!proposalId) {
+    await update(job.id, { status: "failed", error: "prompt-review job missing sonnet_prompts.id in spec_slug" });
+    return;
+  }
+
+  const {
+    loadReviewInputs,
+    buildSystemPrompt,
+    buildUserPrompt,
+    parseDecision,
+    applyDecision,
+    acceptsRemainingToday,
+    REVIEW_MODEL,
+    DEFAULT_DAILY_CAP,
+  } = await import("../src/lib/sonnet-prompt-auto-review");
+
+  try {
+    // ── Pre-flight: proposal still reviewable + workspace still opted in? ─────────
+    // A slow enqueue → dispatch gap could see the proposal already reviewed (via a
+    // manual override or a duplicate cron run), or the workspace toggled off. Bail
+    // cleanly with a completed status + no-op reason so the audit trail shows why
+    // — never re-review something that already has an auto_decision.
+    const { data: proposal, error: pErr } = await db
+      .from("sonnet_prompts")
+      .select("id, workspace_id, title, content, category, source_pattern_id, derived_from_ticket_id, status, auto_decision")
+      .eq("id", proposalId)
+      .eq("workspace_id", job.workspace_id)
+      .maybeSingle();
+    if (pErr) {
+      await update(job.id, { status: "failed", error: `proposal_load_failed: ${pErr.message}` });
+      return;
+    }
+    if (!proposal) {
+      await update(job.id, { status: "completed", log_tail: `no-op: proposal ${proposalId} not found (deleted / cross-workspace)` });
+      console.log(`${tag} no-op: proposal not found`);
+      return;
+    }
+    if (proposal.status !== "proposed" || proposal.auto_decision !== null) {
+      await update(job.id, { status: "completed", log_tail: `no-op: proposal already decided (status=${proposal.status}, auto_decision=${proposal.auto_decision ?? "null"})` });
+      console.log(`${tag} no-op: already decided`);
+      return;
+    }
+
+    const { data: ws, error: wsErr } = await db
+      .from("workspaces")
+      .select("sonnet_auto_review_enabled, sonnet_auto_review_daily_cap")
+      .eq("id", job.workspace_id)
+      .maybeSingle();
+    if (wsErr) {
+      await update(job.id, { status: "failed", error: `workspace_load_failed: ${wsErr.message}` });
+      return;
+    }
+    if (!ws?.sonnet_auto_review_enabled) {
+      await update(job.id, { status: "completed", log_tail: "no-op: sonnet_auto_review_enabled=false" });
+      console.log(`${tag} no-op: disabled`);
+      return;
+    }
+    const dailyCap = (ws.sonnet_auto_review_daily_cap as number | null) ?? DEFAULT_DAILY_CAP;
+
+    // ── Assemble the review inputs + the box prompt ─────────────────────────────
+    const inputs = await loadReviewInputs(db, job.workspace_id, proposal);
+    const prompt = [
+      buildSystemPrompt(),
+      "",
+      buildUserPrompt(inputs),
+      "",
+      // Belt-and-braces: buildSystemPrompt already says "Return only the JSON." — repeated here
+      // as the final line so the box session emits ONLY the JSON object as its final message
+      // (extractJson tolerates surrounding prose, but discipline keeps parse_failed to zero).
+      `Final message = ONLY the JSON object described in the schema above. No markdown fences, no commentary outside the object.`,
+    ].join("\n");
+
+    // ── Run the Max session (June's supervised agent) ───────────────────────────
+    const { session, resultText, isError, raw, usage, model, configDir: prDir } = await runBoxLane(
+      (cfg, sid) => runPromptReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, prDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: prDir });
+
+    // Parse the box's final message. parseDecision (from sonnet-prompt-auto-review.ts) is the
+    // same validator the retired direct-API path used — a shape it rejects gets no auto_decision
+    // write (never queue to humans; the proposal will resurface on the next cron tick).
+    const parsed = parseDecision(resultText);
+    console.log(`${tag} claude finished — decision: ${parsed?.decision ?? "(none)"} · isError=${isError}`);
+
+    // Phase 2 supervision surface — every path below (unparseable, guardrail downgrade, clean
+    // apply) writes ONE row to `director_activity` under the CS function (June's charge). She
+    // owns "conversation-rule quality"; the agent optimizes "review each proposal well" —
+    // hitting a rail escalates, never executes silently (operational-rules § North star).
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+    if (!parsed) {
+      // Rail hit: the agent's final message didn't parse as a verdict. Escalate to June via
+      // director_activity so a routinely-monitored surface (her activity feed) shows the miss,
+      // and park the job as failed so the CS lane doesn't silently drop it.
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "prompt_review_escalated",
+        specSlug: proposalId,
+        reason: "prompt-review agent produced no parseable verdict — escalated to June rather than silently rejecting",
+        metadata: {
+          job_id: job.id,
+          proposal_id: proposalId,
+          raw_tail: raw.slice(-1000),
+          reason_code: "unparseable_verdict",
+          autonomous: false,
+        },
+      });
+      await update(job.id, {
+        status: "failed",
+        error: "prompt-review returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — escalated to June`);
+      return;
+    }
+
+    // Daily-cap accounting — same query the retired reviewWorkspace ran per-proposal, so a
+    // sequence of prompt-review jobs across a single 24h window respects the workspace's
+    // accept ceiling (past the cap, an accept downgrades to reject via applyDecision).
+    const remaining = await acceptsRemainingToday(db, job.workspace_id, dailyCap);
+    const alreadyAcceptedToday = Math.max(0, dailyCap - remaining);
+
+    // ── applyDecision writes the auto_decision fields exactly as today ─────────
+    // status, auto_decision, auto_decision_reason, auto_decision_model,
+    // auto_decision_confidence — all written unchanged. REJECT_FLOOR /
+    // ACCEPT_FLOOR / daily-cap / supersede-not-delete / audit-first ordering
+    // are all inside applyDecision; this runner passes the parsed verdict
+    // through verbatim.
+    const applied = await applyDecision(
+      db,
+      job.workspace_id,
+      proposal,
+      parsed,
+      {
+        model: model || REVIEW_MODEL,
+        usage,
+        source: "cron",
+      },
+      { dailyCap, alreadyAcceptedToday },
+    );
+
+    // Phase 2 — record the verdict + safety outcome to `director_activity` under the CS function.
+    // A guardrail hit (`forcedToHumanReview === true`) is a rail-escalation to June (not silent
+    // execution): the action_kind + metadata.reason_code make the escalation legible on her feed
+    // + EOD recap. A clean apply lands as `prompt_review_applied` — same audit surface June
+    // supervises the rest of her workers on ([[../docs/brain/tables/director_activity.md]]).
+    const escalated = applied.forcedToHumanReview === true;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: "cs",
+      actionKind: escalated ? "prompt_review_escalated" : "prompt_review_applied",
+      specSlug: proposalId,
+      reason: parsed.reasoning
+        ? `${parsed.reasoning}${applied.reason ? `\n[SAFETY] ${applied.reason}` : ""}`.slice(0, 4000)
+        : (applied.reason || `prompt-review verdict=${applied.finalDecision}`).slice(0, 4000),
+      metadata: {
+        job_id: job.id,
+        proposal_id: proposalId,
+        raw_decision: parsed.decision,
+        final_decision: applied.finalDecision,
+        confidence: parsed.confidence,
+        applied: applied.applied,
+        forced_to_human_review: escalated,
+        safety_reason_code: applied.reason ?? null,
+        decision_row_id: applied.decisionRowId ?? null,
+        model: model || REVIEW_MODEL,
+        // supervised, not silent — June owns the objective, the agent runs within its rails.
+        autonomous: !escalated,
+      },
+    });
+
+    const summary = [
+      `proposal=${proposalId}`,
+      `raw_decision=${parsed.decision} · confidence=${parsed.confidence.toFixed(2)}`,
+      `applied=${applied.applied} · final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated to June)" : ""}`,
+      applied.reason ? `reason: ${applied.reason}` : "",
+      parsed.reasoning ? `reasoning: ${parsed.reasoning}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was applied. Complete with the
+      // error surfaced so a human can eyeball — same rule cs-director-call / deploy-review use.
+      await update(job.id, { status: "completed", error: "prompt-review session errored (verdict applied)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} final=${applied.finalDecision} (session errored — applied + logged)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`); {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Developer Message Center (developer-message-center) ──────────────────────
 // A kind='dev-ask' job is ONE turn of a founder-facing, read-only "ask the box anything" thread. Like
 // ticket-improve it runs a TOP-LEVEL `claude -p` on Max (ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
@@ -19044,6 +19276,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
   if (job.kind === "ticket-analyze") return runTicketAnalyzeJob(job);
+  if (job.kind === "prompt-review") return runPromptReviewJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "god-mode") return runGodModeJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
@@ -20207,6 +20440,7 @@ async function main() {
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
   const countTicketAnalyze = () => [...active.values()].filter((v) => v.kind === "ticket-analyze").length;
+  const countPromptReview = () => [...active.values()].filter((v) => v.kind === "prompt-review").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countGodMode = () => [...active.values()].filter((v) => v.kind === "god-mode").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
@@ -20508,6 +20742,16 @@ async function main() {
         console.log(`claimed ticket-analyze ${job.id.slice(0, 8)} → ${countTicketAnalyze() + 1}/${MAX_TICKET_ANALYZE} ticket-analyze lane`);
         launch(job);
       }
+            // Fill the prompt-review lane (prompt-auto-review-becomes-box-agent-under-june Phase 1): one
+      // Max `claude -p` per proposed sonnet_prompt the sonnet-prompt-auto-review Inngest cron
+      // enqueued. Concurrency-1 so a slow review never starves the CS lane. Gated on the Claude-down
+      // breaker — jobs park blocked_on_dependency + drain on recovery, matching the deploy-review /
+      // cs-director-call pattern.
+      while (!claudeDown && countPromptReview() < MAX_PROMPT_REVIEW) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["prompt-review"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed prompt-review ${job.id.slice(0, 8)} → ${countPromptReview() + 1}/${MAX_PROMPT_REVIEW} prompt-review lane`);
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
       while (countDevAsk() < MAX_DEV_ASK) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dev-ask"] });

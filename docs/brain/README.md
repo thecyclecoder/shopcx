@@ -284,7 +284,6 @@ Five seconds of probing beats an hour of "why is my filter empty."
 Every background job, webhook fan-out, and cron lives here. Each page lists trigger event/cron, retries + concurrency, downstream events sent, and tables read/written (wikilinked).
 
 - [[inngest/abandoned-cart]] — Sweeps `cart_drafts` past `expires_at` → flips to `abandoned`. Hourly.
-- [[inngest/ai-nightly-analysis]] — Nightly review of recent AI-handled tickets. Writes `daily_analysis_reports`. Paused 2026-04-28.
 - [[inngest/amazon-sync]] — Pulls Amazon SP-API order + ASIN data.
 - [[inngest/amplifier-webhooks]] — Amplifier (3PL) `order_received` / `order_shipped` → updates `orders.amplifier_*`.
 - [[inngest/auto-archive]] — Archives closed tickets older than threshold.
