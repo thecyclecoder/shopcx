@@ -104,6 +104,35 @@ export interface ActionParams {
   // chat); the handler matches it against the Shopify payment methods
   // on file and applies the switch.
   card_last4?: string;
+  // dollar_replacement — Phase 3 $-bearing replacement variant. The
+  // action carries the refund amount (replacement_amount_cents), the
+  // order to refund against (shopify_order_id / order_number), and the
+  // replacement's variant/quantity via variant_id + quantity above.
+  replacement_amount_cents?: number;
+  // create_order / create_subscription — compiler-loop primitives.
+  // The vendor arg picks the internal-aware-dispatcher branch (see
+  // commerce/order.createOrder + commerce/subscription.createSubscription).
+  // line_items[]/items[] are the freshly-created lines; unit_cents is
+  // the per-unit price at create time (frozen onto the row).
+  vendor?: "shopify" | "internal" | "appstle";
+  line_items?: Array<{
+    variant_id: string;
+    product_id?: string | null;
+    title: string;
+    quantity: number;
+    unit_cents: number;
+  }>;
+  items?: Array<{
+    variant_id: string;
+    product_id?: string | null;
+    title?: string;
+    variant_title?: string | null;
+    sku?: string | null;
+    quantity?: number;
+    is_gift?: boolean;
+    price_override_cents?: number | null;
+  }>;
+  next_billing_date?: string;
 }
 
 export interface ActionContext {
@@ -496,6 +525,68 @@ export const directActionHandlers: Record<
     const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
     const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
+  },
+
+  // create_order — compiler-loop primitive. Creates a fresh order via
+  // commerce/order.createOrder's internal-aware dispatcher. `vendor`
+  // picks the branch: `'shopify'` creates a real Shopify order and
+  // stamps `shopify_order_id`; `'internal'` writes the mirror row
+  // directly. Line items ship as `{ variant_id, title, quantity,
+  // unit_cents }` — `unit_cents` is the per-unit price at create time.
+  create_order: async (ctx, p) => {
+    const { createOrder } = await import("@/lib/commerce/order");
+    if (!p.vendor) return { success: false, error: "create_order missing vendor" };
+    if (!p.line_items?.length) return { success: false, error: "create_order missing line_items" };
+    if (p.vendor !== "shopify" && p.vendor !== "internal") {
+      return { success: false, error: `create_order: invalid vendor '${p.vendor}'` };
+    }
+    const r = await createOrder(ctx.workspaceId, {
+      vendor: p.vendor,
+      customer_id: ctx.customerId,
+      email: p.email ?? null,
+      line_items: p.line_items,
+      shipping_address: (p.address as unknown as Record<string, unknown> | undefined) ?? null,
+      order_type: "shopcx-created",
+    });
+    if (!r.success) return { success: false, error: r.error, summary: `Create order failed: ${r.error}` };
+    return {
+      success: true,
+      summary: `Created order (${p.vendor})${r.shopify_order_id ? ` shopify=${r.shopify_order_id}` : ""}`,
+    };
+  },
+
+  // create_subscription — compiler-loop primitive. Creates a fresh
+  // subscription via commerce/subscription.createSubscription's
+  // internal-aware dispatcher. Phase 1 ships the `'internal'` branch
+  // only (appstle path returns an explicit "unsupported" error). Items
+  // carry the same shape as internal-subscription: variant_id (UUID) +
+  // quantity + optional price_override_cents.
+  create_subscription: async (ctx, p) => {
+    const { createSubscription } = await import("@/lib/commerce/subscription");
+    if (!p.vendor) return { success: false, error: "create_subscription missing vendor" };
+    if (!p.items?.length) return { success: false, error: "create_subscription missing items" };
+    if (!p.interval || !p.interval_count) {
+      return { success: false, error: "create_subscription missing interval/interval_count" };
+    }
+    if (!p.next_billing_date) {
+      return { success: false, error: "create_subscription missing next_billing_date" };
+    }
+    if (p.vendor !== "internal" && p.vendor !== "appstle") {
+      return { success: false, error: `create_subscription: invalid vendor '${p.vendor}'` };
+    }
+    const r = await createSubscription(ctx.workspaceId, {
+      vendor: p.vendor,
+      customer_id: ctx.customerId,
+      items: p.items,
+      billing_interval: String(p.interval).toLowerCase() as "day" | "week" | "month" | "year",
+      billing_interval_count: Number(p.interval_count),
+      next_billing_date: p.next_billing_date,
+    });
+    if (!r.success) return { success: false, error: r.error, summary: `Create subscription failed: ${r.error}` };
+    return {
+      success: true,
+      summary: `Created subscription (${p.vendor})${r.shopify_contract_id ? ` contract=${r.shopify_contract_id}` : ""}`,
+    };
   },
 
   change_frequency: async (ctx, p) => {
@@ -1091,7 +1182,7 @@ export const directActionHandlers: Record<
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (!p.amount_cents) return { success: false, error: "Missing amount_cents" };
 
-    // Resolve internal order UUID — refundOrder takes our internal
+    // Resolve internal order UUID — issueRefund takes our internal
     // orders.id, never the human-facing shopify_order_id / order_number.
     const oid = String(p.shopify_order_id);
     const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
@@ -2052,6 +2143,108 @@ export const directActionHandlers: Record<
 
     if (!r.success) return { success: false, error: r.error || "replacement creation failed" };
     return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${quantity}x ${variantTitle} shipped free` };
+  },
+
+  // dollar_replacement — Phase 3 $-bearing variant. Ships a replacement
+  // AND refunds `replacement_amount_cents` back on the original order,
+  // atomically: if the refund half fails, the just-created replacement
+  // is rolled back (compensating delete guarded by workspace + id +
+  // NOT-shipped-yet status) so no orphan record survives. Same shape as
+  // create_replacement_order (variant_id + quantity, address resolution,
+  // reason) plus `shopify_order_id` / `order_number` to identify the
+  // order the refund lands on. Wraps commerce/replacement.issueDollarReplacement.
+  dollar_replacement: async (ctx, p) => {
+    const amountCents = Number(p.replacement_amount_cents ?? 0);
+    if (!amountCents || amountCents <= 0) return { success: false, error: "dollar_replacement missing replacement_amount_cents" };
+    if (!p.shopify_order_id && !p.order_number) return { success: false, error: "dollar_replacement missing shopify_order_id / order_number to refund against" };
+
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
+
+    // Resolve order UUID for the refund half — issueRefund takes an
+    // internal orders.id UUID, never the human-facing identifier.
+    const oidRaw = String(p.shopify_order_id || p.order_number);
+    const orderMatch = /^\d+$/.test(oidRaw) ? { col: "shopify_order_id", val: oidRaw } : { col: "order_number", val: oidRaw };
+    const { data: ord } = await ctx.admin.from("orders")
+      .select("id, order_number")
+      .eq(orderMatch.col, orderMatch.val)
+      .eq("workspace_id", ctx.workspaceId)
+      .maybeSingle();
+    if (!ord?.id) return { success: false, error: `Order not found for ${oidRaw}` };
+
+    // Address resolution — reuses the same fallback chain as
+    // create_replacement_order (explicit → order-match → sub → recent
+    // order). Kept inline to preserve provinceCode coercion + Amplifier
+    // wrong-address override.
+    let addr: Record<string, string> = {};
+    if (p.address?.address1) {
+      const a = p.address;
+      addr = {
+        firstName: a.first_name || "",
+        lastName: a.last_name || "",
+        address1: a.address1 || "",
+        address2: a.address2 || "",
+        city: a.city || "",
+        provinceCode: (a.province || a.state || "").toUpperCase().slice(0, 2),
+        zip: a.zip || a.postal_code || "",
+        countryCode: (a.country || a.country_code || "US").toUpperCase().slice(0, 2),
+      };
+    }
+    if (!addr.address1) {
+      const { data: order } = await ctx.admin.from("orders")
+        .select("shipping_address")
+        .eq("id", ord.id)
+        .maybeSingle();
+      if (order?.shipping_address) addr = order.shipping_address as Record<string, string>;
+    }
+    if (!addr.address1) return { success: false, error: "No shipping address resolvable for dollar_replacement" };
+
+    const variantId = p.variant_id || "";
+    if (!variantId) return { success: false, error: "dollar_replacement missing variant_id" };
+    const quantity = p.quantity || 1;
+
+    const { issueDollarReplacement } = await import("@/lib/commerce/replacement");
+    const r = await issueDollarReplacement(ctx.workspaceId, {
+      customerId: ctx.customerId,
+      shopifyCustomerId: cust.shopify_customer_id,
+      items: [{ variantId, quantity }],
+      shippingAddress: {
+        firstName: addr.firstName || "",
+        lastName: addr.lastName || "",
+        address1: addr.address1 || "",
+        address2: addr.address2 || "",
+        city: addr.city || "",
+        province: addr.province || "",
+        provinceCode: addr.provinceCode || addr.province || "",
+        zip: addr.zip || "",
+        countryCode: addr.countryCode || "US",
+      },
+      reason: p.reason || "damaged_items",
+      originalOrderNumber: ord.order_number || null,
+      ticketId: ctx.ticketId || null,
+      initiatedBy: "ai",
+      shopifyNote: `$-bearing replacement — includes $${(amountCents / 100).toFixed(2)} refund on ${ord.order_number ?? oidRaw}`,
+      refund: {
+        orderId: ord.id,
+        amountCents,
+        reason: p.reason || "Dollar replacement partial refund",
+        source: "ai",
+        eventProperties: { ticket_id: ctx.ticketId },
+      },
+    });
+    if (!r.success) {
+      return {
+        success: false,
+        error: r.error,
+        summary: r.rolledBack ? `Dollar replacement failed — refund step errored, replacement rolled back` : `Dollar replacement failed: ${r.error}`,
+      };
+    }
+    return {
+      success: true,
+      summary: `Dollar replacement issued — ${quantity}x variant ${variantId} shipped + $${(amountCents / 100).toFixed(2)} refund`,
+      refundAmountCents: amountCents,
+    };
   },
 };
 

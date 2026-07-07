@@ -51,6 +51,10 @@
     "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts",
     "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts",
     "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts",
+    "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
+    "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts",
+    "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
+    "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts",
     "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",
     "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts"
   },
