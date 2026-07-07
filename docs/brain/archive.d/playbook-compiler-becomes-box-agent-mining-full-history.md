@@ -1,0 +1,1 @@
+- **The playbook compiler becomes a supervised box-session agent that mines the full ticket history for data-grounded playbook seeds — no Fable** · verified 2026-07-07 · → [[../libraries/playbook-compiler]] · [[../inngest/playbook-compiler]] · [[../tables/compiled_trees]] · [[../tables/playbooks]] · [[../functions/cs]]
