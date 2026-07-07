@@ -252,6 +252,28 @@ The pre-merge spec-test found three failures in PIN handling (both setter + veri
 
 Fixed by raising scrypt maxmem from 32 MB to 64 MB (or lowering SCRYPT_N; the fix chose maxmem to preserve security parameters). All three PIN paths now work.
 
+## Autonomous executive-assistant — god-mode becomes CEO's agent (Phase 8)
+
+**Turns god-mode's event-driven cockpit into a first-class autonomous agent under the CEO seat** — the founder's own executive assistant (Eve) with a persona, rendering alongside the company goals, doing anything the founder asks within the existing PIN + risk-tier approvals.
+
+### Phase 1 — extend org model to support CEO-owned workers
+
+Extend [[../libraries/control-tower]] `OwnerFunction` enum to include `'ceo'` (previously only directors: platform|growth|cmo|retention|cs). Register the god-mode cockpit as a `reactive` MONITORED_LOOP with `owner="ceo"` and `personaKind="god-mode"`, so a founder-owned lane exists outside any director's roster. Add a God-mode persona to [[../libraries/agent-personas]] — 🌙 **Eve** (Executive Assistant), female pronouns, personality: "The CEO's right hand from the god-mode cockpit — does anything the founder asks within the PIN + risk-tier gates. Reads/diagnostics fly; every risky write surfaces the reasoning and asks. Autonomous within the founder's leash; escalates rather than silently mutating." Reuse the CEO's avatar (crown headshot) as a placeholder until a distinct Eve headshot is auto-generated.
+
+**Verification:** The god-mode agent has a CEO owner + a persona (female name, avatarUrl). It no longer resolves to the Platform orphan-default. The org-chart reader correctly renders it under the CEO seat, not under Ada. A MONITORED_LOOPS row exists with `owner="ceo"` and `personaKind="god-mode"`.
+
+### Phase 2 — render under CEO seat with cockpit-derived liveness
+
+In [[../libraries/agent-personas]] `org-chart.ts` `getOrgChart`, ensure CEO-owned workers (owner="ceo") are rendered as a `workers` array under the CEO seat, alongside the finite goals. Wire liveness to the cockpit's activity: a dormant `armed` [[../tables/god_mode_sessions]] row counts as active (the cockpit being on standby is healthy); pulling active `loop_heartbeats` for the `god-mode-cockpit` loop + checking recent `god_mode_approvals` rows (a pending approval holds liveness open). The founder's assistant does anything the founder asks within the existing approval tiers ([[../libraries/god-mode]] § CEO-grade approval model), surfacing reasoning inline.
+
+**Verification:** The org chart displays the CEO's executive assistant under the CEO seat (Eve name + amber avatar) with a live status. A founder request routes through the god-mode approval tiers (safe auto, destructive/decision gated). It is not shown under Ada. A glance at the Agents hub shows: CEO seat → goals + workers → Eve (the executive assistant).
+
+### Phase 3 Fix 1 — resolve avatar URL regression
+
+The pre-merge spec-test regression check 3122218882ab4f64 verified "the god-mode agent has a CEO owner + a persona (female name, real avatarUrl)." Eve shipped with `mascotId='ceo'` only (inline SVG fallback) and a null `avatarUrl`, so the bucket file `agent-avatars/eve-god-mode.jpg` did not exist. Fixed by reusing the CEO's existing headshot (`ceo-crown.jpg`) as a placeholder (same pattern CS Director alias used) until the companion spec `builder-persona-add-upserts-by-key-and-generates-avatar` auto-generates a distinct Nano Banana Pro headshot. [[../libraries/agent-personas]] `personas.ts` line 103 now sets `avatarUrl: ${AV}ceo-crown.jpg?v=4`, closing the "real avatarUrl" requirement.
+
+**Verification:** Re-running the spec-test: check 3122218882ab4f64 (CEO owner + real avatarUrl) now passes. Eve is not an inline mascot anymore — she shows the crown headshot + styling inherited from her CEO boss.
+
 ## Status / open work
 
 - Phase 1 (session model + arm/disarm + PIN): ✅ shipped.
@@ -261,3 +283,7 @@ Fixed by raising scrypt maxmem from 32 MB to 64 MB (or lowering SCRYPT_N; the fi
 - Phase 5 (SMS delivery + lifecycle reaper): ✅ shipped.
 - Phase 6 (Fix 1 — command injection + authz): ✅ shipped.
 - Phase 7 (Fix 2 — scrypt memory limit): ✅ shipped.
+- Phase 8 (Autonomous executive-assistant — god-mode becomes CEO's agent): ✅ shipped.
+  - Phase 1 (CEO owner support + Eve persona): ✅ shipped.
+  - Phase 2 (render under CEO seat + cockpit-derived liveness): ✅ shipped.
+  - Phase 3 Fix 1 (avatar URL regression fix): ✅ shipped.

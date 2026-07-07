@@ -13,11 +13,16 @@ Distinguished from the departmental functions (Growth/CMO/Retention/CS/Platform)
 
 ## Mandates (perpetual)
 
+### CEO's executive-assistant agent
+🌙 **Eve** — the founder's autonomous agent under the CEO seat (rendered in the Agents hub alongside company goals). She does anything the founder asks within the existing PIN + risk-tier approval gates ([[../lifecycles/god-mode#autonomous-executive-assistant--god-mode-becomes-ceos-agent-phase-8]] Phase 1 / Phase 2), surfacing her reasoning inline. Powered by the god-mode cockpit's live-gated approval model; the cockpit itself (an arm/disarm + SMS'd approval surface) remains a manual founder-only interface. Her liveness is derived from cockpit activity + loop heartbeats — a dormant armed session is healthy.
+- **Metric:** autonomous remediation speed (incidents resolved without waking a director's intervention flow); zero silent mutations (all risky actions surface reasoning + ask).
+- **Related:** [[../libraries/god-mode]] (session SDK) · [[../libraries/agent-personas]] (persona + org-chart reader) · [[../lifecycles/god-mode]] (full-power box lane + approval model).
+
 ### Founder incident cockpit
 A manual, full-power bridge from the founder's phone to the build box, so a production incident can be remediated from anywhere while the autonomous executive layer doesn't yet exist. Reads/diagnostics fly; every risky write gates on a one-tap live approval (destructive actions additionally require a PIN). Deliberately thin and disposable — a stopgap, not a permanent surface.
 - **Metric:** time-to-remediate an incident when the founder is away from the desk; God-Mode session safety (zero un-gated destructive writes).
 - **Sunset:** retired when the CEO/director agents can self-remediate ([[../goals/ceo-mode]]).
-- **Specs:** [[../specs/god-mode]] ⏳ — the armed, live-gated box session + SMS'd approval cockpit.
+- **Specs:** [[../specs/god-mode]] ✅ (shipped — phases 1–7 + Phase 8 Phase 1/2/Fix1 for Eve executive-assistant).
 
 ### Company objectives & the approval circuit-breaker
 Own the company's goals and be the final, human approval authority for anything a director's leash can't autonomously clear — the irreversible, the brand-new goal, the non-binary judgment call. Every out-of-leash escalation fails safe to this seat.
