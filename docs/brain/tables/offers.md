@@ -48,7 +48,7 @@ When `true`, the Phase 2 cart-build layer skips the [[pricing_rules]]`.free_gift
 ## Status / open work
 - ✅ **Phase 1** — table + SDK + admin UI (this page).
 - ✅ **Phase 2** — cart-build attaches offer items as `$0` lines, overriding pricing-rule free_gift per the flag. `ensureOfferItems` + `ensureCartAttachments` in [[../libraries/cart-gifts]] run at `/api/cart`, the checkout page, and the customize page; a digital include lands with `digital_good_id` (drives [[../inngest/digital-goods-delivery]]) and NO sku (Amplifier's sku filter drops it); a physical include lands with the anchor's variant sku (Amplifier fulfills). Verification test: `src/lib/cart-gifts.test.ts`.
-- ⏳ **Phase 3** — the renewal order-build path detects renewal vs first order and strips offer-sourced lines when `scope='checkout_only'`. The `offer_source_variant_id` field written by Phase 2 is the signal.
+- ✅ **Phase 3** — renewal-aware fulfillment. `stripCheckoutOnlyOfferItems` (in [[../libraries/offers]]) is called at the top of the internal-subscription renewal Inngest handler ([[../inngest/internal-subscription-renewals]]) BEFORE pricing runs. It reads each sub item's `offer_source_variant_id`, looks up the offer's current `scope`, and drops the item when `scope='checkout_only'` (or the offer has been deleted / deactivated — safety default). Items with `scope='checkout_and_renewals'` pass through and are priced as $0 gift lines. Checkout preserves the tag on sub.items so the strip has something to read. "Reference not baked": flipping the scope in admin takes effect at the next renewal, no row rewrite. Verification test: `src/lib/offers-renewal.test.ts`.
 - ⏳ **Phase 4** — wire the Superfoods Starter Kit variant + `$10` auto-coupon + offer (frother + mug + e-guide).
 
 ---

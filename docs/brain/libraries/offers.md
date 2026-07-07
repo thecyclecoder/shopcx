@@ -33,6 +33,8 @@ interface Offer {
 - `listOffersForWorkspace(workspaceId)` — admin list (created-at desc).
 - `getOffer(workspaceId, offerId)` — one offer.
 - `getActiveOfferForVariant(workspaceId, variantId)` — Phase 2 cart-build lookup: the newest active offer whose anchor matches this variant.
+- `getActiveOffersForVariants(workspaceId, variantIds[])` — bulk Phase 2 lookup: map of newest active offer per anchor variant.
+- `stripCheckoutOnlyOfferItems(workspaceId, items)` — Phase 3 renewal-time strip: drops sub items whose `offer_source_variant_id` points at an offer with current `scope='checkout_only'` (or a missing/inactive offer — safety default). `scope='checkout_and_renewals'` passes through.
 - `createOffer(workspaceId, input)` / `updateOffer(workspaceId, offerId, patch)` / `deleteOffer(workspaceId, offerId)` — admin mutations.
 - `normalizeIncluded(raw)` / `normalizeScope(raw)` — write-time shape validation (drops malformed rows so the DB's `offers_included_is_array` check never has to catch them).
 

@@ -136,6 +136,47 @@ export async function getActiveOffersForVariants(
   return byVariant;
 }
 
+/**
+ * Phase 3 of offer-creator — renewal-aware fulfillment.
+ *
+ * A subscription's `items` may include $0 offer-sourced entries (physical or
+ * digital) that were attached at checkout. This helper is called BEFORE
+ * pricing at renewal time; it drops those entries whose current offer
+ * `scope='checkout_only'` (or whose offer has been deleted / deactivated —
+ * treated as `checkout_only` for safety, since a renewal must not ship items
+ * that no longer have an active offer backing them).
+ *
+ * "Reference not baked" (same shape as pricing_rule_offers): the sub stores a
+ * link (`offer_source_variant_id`), the current scope is looked up at renewal
+ * time. Flipping an offer from `checkout_and_renewals` back to `checkout_only`
+ * in the admin causes the next renewal to stop shipping the extras — no row
+ * mutation needed.
+ *
+ * Non-offer items are passed through untouched. Items without an
+ * `offer_source_variant_id` are always kept (they're not this helper's
+ * concern).
+ */
+export async function stripCheckoutOnlyOfferItems<
+  T extends { variant_id?: unknown; offer_source_variant_id?: unknown; is_gift?: unknown },
+>(workspaceId: string, items: T[]): Promise<T[]> {
+  const anchorIds = new Set<string>();
+  for (const it of items) {
+    const anchor = typeof it.offer_source_variant_id === "string" ? it.offer_source_variant_id : "";
+    if (anchor) anchorIds.add(anchor);
+  }
+  if (anchorIds.size === 0) return items;
+
+  const offersByAnchor = await getActiveOffersForVariants(workspaceId, Array.from(anchorIds));
+
+  return items.filter((it) => {
+    const anchor = typeof it.offer_source_variant_id === "string" ? it.offer_source_variant_id : "";
+    if (!anchor) return true; // non-offer items pass through untouched
+    const offer = offersByAnchor.get(anchor);
+    if (!offer) return false; // offer deleted / inactive — treat as checkout_only, drop
+    return offer.scope === "checkout_and_renewals";
+  });
+}
+
 export async function createOffer(workspaceId: string, input: OfferInput): Promise<Offer> {
   const admin = createAdminClient();
   const { data, error } = await admin
