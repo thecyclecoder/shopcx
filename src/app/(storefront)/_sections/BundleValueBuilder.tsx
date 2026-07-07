@@ -16,7 +16,7 @@ const KIT_ITEMS: { img: string; label: string; free: boolean }[] = [
   { img: "kit-frother.jpg", label: "Electric Milk Frother", free: true },
   { img: "kit-mug.jpg", label: "Reusable Coffee Mug", free: true },
   { img: "kit-eguide.jpg", label: "Superfood Coffee E-Guide", free: true },
-  { img: "kit-box.jpg", label: "Shipping + Custom Kit Box", free: true },
+  { img: "kit-box.jpg", label: "Shipping", free: true },
 ];
 
 const CSS = `
