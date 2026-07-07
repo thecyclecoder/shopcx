@@ -3,6 +3,7 @@
 
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 
 export interface ReplacementLineItem {
   variantId: string; // Shopify variant ID (numeric, not GID)
@@ -180,7 +181,7 @@ export async function createReplacementDraftOrder(
         city: input.shippingAddress.city,
         provinceCode: input.shippingAddress.province,
         zip: input.shippingAddress.zip,
-        countryCode: ["PR", "GU", "VI", "AS", "MP"].includes(input.shippingAddress.country) ? "US" : input.shippingAddress.country,
+        countryCode: normalizeCountryToIso2(input.shippingAddress.country),
         phone: input.shippingAddress.phone || undefined,
       },
       email: input.customerEmail,
@@ -313,7 +314,7 @@ export async function createShopifyOrder(
         city: (addr.city as string) || "",
         provinceCode: (addr.province as string) || (addr.province_code as string) || "",
         zip: (addr.zip as string) || (addr.postal_code as string) || "",
-        countryCode: (addr.country as string) || (addr.country_code as string) || "US",
+        countryCode: normalizeCountryToIso2((addr.country_code as string) || (addr.country as string)),
         phone: (addr.phone as string) || undefined,
       }
     : undefined;

@@ -28,6 +28,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { loggedActionFetch } from "@/lib/appstle-call-log";
+import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 
 export interface CreateReplacementInput {
   workspaceId: string;
@@ -134,7 +135,7 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
           city: input.shippingAddress.city,
           provinceCode: input.shippingAddress.provinceCode || input.shippingAddress.province || "",
           zip: input.shippingAddress.zip,
-          countryCode: input.shippingAddress.countryCode || "US",
+          countryCode: normalizeCountryToIso2(input.shippingAddress.countryCode),
         },
         note: noteText,
         tags: ["replacement", input.reason],
