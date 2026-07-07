@@ -137,6 +137,40 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-violet-100 text-violet-800 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-900/40",
     dot: "bg-violet-500", ring: "bg-violet-50 dark:bg-violet-900/20", accent: "text-violet-600 dark:text-violet-400",
   },
+  // ── CS workers (agent_jobs kinds) — report to June/CS ────────────────────────
+  "ticket-handle": {
+    key: "ticket-handle", name: "Sol", role: "Ticket Handler", emoji: "🧭",
+    personality: "The first touch — dives into a new (or drifted) ticket, reads the whole thread + merged history, and SETS THE DIRECTION (which playbook, stateless, or needs-info). Sends the first message, the first message post-drift, and the first message post-frustration; cheap models run the calm stretches in between. The expensive, empathetic senior touch exactly at the moments that matter. Internal identity — customers see the Suzie/Julie signatures, never Sol.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}sol-ticket-handler.jpg?v=2`,
+    chip: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-900/40",
+    dot: "bg-blue-500", ring: "bg-blue-50 dark:bg-blue-900/20", accent: "text-blue-600 dark:text-blue-400",
+  },
+  "ticket-analyze": {
+    key: "ticket-analyze", name: "Cora", role: "Ticket Analyzer", emoji: "📊",
+    personality: "Grades every AI-handled ticket against the rubric — scores, tags issues, decides reopen/escalate. Discerning and precise; respects a human's explicit close/lock and never overrules the supervisor. Surfaces mis-escalations as analyzer-fix specs.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}cora-ticket-analyzer.jpg?v=1`,
+    chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
+    dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
+  },
+  "prompt-review": {
+    key: "prompt-review", name: "Wren", role: "Prompt Analyzer", emoji: "📝",
+    personality: "The editor of the conversation-rule library — reviews every proposed sonnet_prompt, approves the clear/actionable ones and rejects the vague/wrong, with a reasoned verdict. Precise and skeptical; keeps the rules that shape the AI's voice honest.",
+    pronouns: { subject: "they", object: "them", possessive: "their" },
+    mascotId: "default", avatarUrl: `${AV}wren-prompt-analyzer.jpg?v=1`,
+    chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
+    dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
+  },
+  "playbook-compile": {
+    key: "playbook-compile", name: "Piper", role: "Playbook Compiler", emoji: "🧩",
+    personality: "Mines the full ticket history for recurring problem-to-resolution trees and compiles them into data-grounded playbook seeds — proposes, never auto-activates. A box session that pays for the deep understanding once. No Fable.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
+    mascotId: "default", avatarUrl: `${AV}piper-playbook-compiler.jpg?v=1`,
+    chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
+    dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
+  },
+
   // ── Platform workers (agent_jobs kinds) — report to Ada/Platform ─────────────
   repair: {
     key: "repair", name: "Rafa", role: "Repair", emoji: "🟢",
@@ -411,6 +445,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Optimize predicted-LTV-per-visitor across every DB-driven surface — chapters (incl. chapter reorder), cart-recovery flow, lead popup, survey",
     "Stay within Max's leash — reversible levers auto-run within policy; offers + structural rewrites escalate for approval",
     "Draft a spec (never write code) when a test needs a capability that doesn't exist; hand it to Platform to build",
+  ],
+  "prompt-review": [
+    "Review every proposed sonnet_prompt against similar approved prompts, active policies, source-pattern tickets, and voice docs",
+    "Decide accept / reject / merge / supersede with calibrated confidence — decisive, never punt to a human-review queue",
+    "Preserve the safety rails: no delete-of-approved (supersede + archive); low-confidence proposals resurface with more evidence",
+    "Surface reasoning + safety-downgrades to June's activity feed; escalate an unparseable verdict rather than executing silently",
   ],
 };
 
