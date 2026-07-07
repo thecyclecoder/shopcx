@@ -686,11 +686,19 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // between the 30-min ticks hasn't been given a chance yet, so its updated_at must also be
             // older than the grace. Eliminates the between-ticks false positive; a genuinely-stuck
             // analyzer (ticket still null a whole cycle later) still counts and alerts.
+            // Human-veto mirror (ticket-analyzer-workprobe-exclude-analyzer-locked): analyzer_locked
+            // is EXCLUDED at the source, mirroring ticket-analysis-cron.ts:48-54 — a human has
+            // vetoed the analyzer on those rows (Phase 2 of human-directives-hard-gates-over-ticket-ai),
+            // so the cron will never process them by design. Counting them here manufactures a false
+            // idle_while_work on loop:ai:ticket-analyzer during otherwise-quiet windows. The probe and
+            // the cron have to see the same universe of work (standing pattern — siblings:
+            // ticket-decision-workprobe-exclude-positive-close, ticket-decision-workprobe-exclude-active-playbook).
             const graceCutoffIso = new Date(Date.now() - TICKET_ANALYSIS_FEEDER_GRACE_MS).toISOString();
             const { count } = await admin
               .from("tickets")
               .select("id", { count: "exact", head: true })
               .eq("status", "closed")
+              .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
               .is("last_analyzed_at", null)
               .gte("updated_at", sinceIso)
