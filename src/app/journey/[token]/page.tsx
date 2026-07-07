@@ -1655,7 +1655,7 @@ function PaymentMethodStep({
   config,
   primaryColor,
   submitting,
-  onSubmit,
+  onSubmit: _onSubmit,
 }: {
   token: string;
   config: JourneyConfig;
@@ -1668,7 +1668,12 @@ function PaymentMethodStep({
   const [clientToken, setClientToken] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<{ brand: string; last4: string; migratedCount: number } | null>(null);
   const hfRef = useRef<HostedFieldsCardHandle>(null);
+  void _onSubmit;   // Phase 3 will wire the completion signal; Phase 2 leaves
+                    // the session in_progress on success and shows a local
+                    // confirmation here so we never claim "done" before the
+                    // resume signal actually fires.
 
   useEffect(() => {
     let cancelled = false;
@@ -1695,13 +1700,42 @@ function PaymentMethodStep({
     setTokenError(null);
     try {
       const { nonce, deviceData } = await hfRef.current.tokenize();
-      const payload = JSON.stringify({ paymentMethodNonce: nonce, deviceData });
-      onSubmit(payload, "Card entered");
+      // Vault + save + migrate synchronously (Phase 2). Vault failure keeps the
+      // session in_progress on the server (fail closed) — we stay on the step
+      // and show retry, NO completion signal. Phase 3 wires the resume signal
+      // on success.
+      const res = await fetch(`/api/journey/${token}/submit-payment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        setTokenError(data?.message || data?.error || "Couldn't save the card. Please try again.");
+        return;
+      }
+      setSaved({
+        brand: data.card_brand || "card",
+        last4: data.last4 || "????",
+        migratedCount: Number(data.migrated_count || 0),
+      });
     } catch (e) {
       setTokenError(e instanceof Error ? e.message : "Please check the card details and try again.");
     } finally {
       setSaving(false);
     }
+  }
+
+  if (saved) {
+    return (
+      <div className="mt-5 rounded-xl border-2 border-emerald-200 bg-emerald-50 p-5 text-sm text-emerald-800">
+        <p className="font-semibold">Card saved.</p>
+        <p className="mt-1">
+          {saved.brand} ending {saved.last4}
+          {saved.migratedCount > 0 ? ` — moved ${saved.migratedCount} subscription${saved.migratedCount === 1 ? "" : "s"} to your new card.` : "."}
+        </p>
+      </div>
+    );
   }
 
   if (tokenError && !clientToken) {

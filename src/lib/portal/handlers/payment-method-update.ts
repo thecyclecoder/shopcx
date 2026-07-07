@@ -1,7 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { vaultPaymentMethod, savePaymentMethod } from "@/lib/integrations/braintree-customer";
+import { vaultAndMigratePaymentMethod } from "@/lib/vault-and-migrate-payment-method";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -10,7 +10,10 @@ function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
  * portal) as the customer's default, then sweep their Appstle subs onto our
  * internal rails (strangler migration — spec § 1c). The in-house portal
  * previously had no add/update card flow; failed-payment subs couldn't
- * self-serve a new card.
+ * self-serve a new card. The vault → save → migrate sequence lives in
+ * src/lib/vault-and-migrate-payment-method.ts and is shared with the
+ * add_payment_method mini-site journey (spec-add-payment-method-journey.md
+ * Phase 2) so the two flows never drift.
  */
 export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -27,33 +30,6 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   if (!customer) return jsonErr({ error: "customer_not_found" }, 404);
 
   const admin = createAdminClient();
-  // Resolve the Braintree customer id to vault against. Prefer an existing PM
-  // row; for the customer's FIRST card there's none, so resolve-or-create the
-  // Braintree customer (same helper the checkout client-token uses).
-  const { data: existingPm } = await admin
-    .from("customer_payment_methods")
-    .select("braintree_customer_id")
-    .eq("workspace_id", auth.workspaceId)
-    .eq("customer_id", customer.id)
-    .not("braintree_customer_id", "is", null)
-    .limit(1)
-    .maybeSingle();
-  let braintreeCustomerId = existingPm?.braintree_customer_id as string | undefined;
-  if (!braintreeCustomerId) {
-    try {
-      const { resolveBraintreeCustomerId } = await import("@/lib/integrations/braintree-customer");
-      braintreeCustomerId = (await resolveBraintreeCustomerId({
-        workspaceId: auth.workspaceId,
-        customerId: customer.id,
-        email: customer.email || "",
-        firstName: (customer.first_name as string | null) || undefined,
-        lastName: (customer.last_name as string | null) || undefined,
-      })) || undefined;
-    } catch (e) {
-      return jsonErr({ error: "no_braintree_customer", message: e instanceof Error ? e.message : String(e) }, 502);
-    }
-  }
-  if (!braintreeCustomerId) return jsonErr({ error: "no_braintree_customer" }, 400);
 
   // Flags: a plain "add a default card" makes it default + migrates the book;
   // "add a card for one subscription" passes makeDefault:false + migrate:false so
@@ -63,37 +39,29 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   const makeDefault = payload?.makeDefault !== false;
   const doMigrate = payload?.migrate !== false;
 
-  // Vault the new card.
   let vaulted;
-  try {
-    vaulted = await vaultPaymentMethod(auth.workspaceId, braintreeCustomerId, nonce, deviceData);
-  } catch (e) {
-    return jsonErr({ error: "vault_failed", message: e instanceof Error ? e.message : String(e) }, 502);
-  }
-  const saved = await savePaymentMethod({
-    workspaceId: auth.workspaceId,
-    customerId: customer.id,
-    braintreeCustomerId,
-    braintreePaymentMethodToken: vaulted.token,
-    paymentType: vaulted.paymentType,
-    cardBrand: vaulted.cardBrand,
-    last4: vaulted.last4,
-    expirationMonth: vaulted.expirationMonth,
-    expirationYear: vaulted.expirationYear,
-    makeDefault,
-  });
-
-  // Strangler migration: a fresh DEFAULT card → sweep Appstle subs to internal.
+  let saved;
   let migratedCount = 0;
-  if (doMigrate) {
-    try {
-      const { migrateCustomerAppstleSubsToInternal } = await import("@/lib/migrate-to-internal");
-      const mig = await migrateCustomerAppstleSubsToInternal(auth.workspaceId, customer.id, { isRecovery: recover });
-      migratedCount = mig.migrated.length;
-      if (mig.failed.length) console.error("[portal/payment] migration failures:", mig.failed);
-    } catch (e) {
-      console.error("[portal/payment] migration threw (non-fatal):", e instanceof Error ? e.message : e);
-    }
+  try {
+    const result = await vaultAndMigratePaymentMethod({
+      workspaceId: auth.workspaceId,
+      customerId: customer.id,
+      customerEmail: customer.email || "",
+      customerFirstName: (customer.first_name as string | null) || null,
+      customerLastName: (customer.last_name as string | null) || null,
+      paymentMethodNonce: nonce,
+      deviceData,
+      makeDefault,
+      migrate: doMigrate,
+      isRecovery: recover,
+    });
+    vaulted = result.vaulted;
+    saved = { id: result.paymentMethodId };
+    migratedCount = result.migratedCount;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "no_braintree_customer") return jsonErr({ error: "no_braintree_customer" }, 400);
+    return jsonErr({ error: "vault_failed", message: msg }, 502);
   }
 
   // Recovery flow: pin the new card to every active internal sub across the link
