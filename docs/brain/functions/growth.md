@@ -22,7 +22,8 @@ Continuously find, test, and scale **winning static creative**, and kill losers 
   - [[../specs/winning-static-creative-finder]] ⏳ — ingest winning static ads (competitor/library/our own top performers) into the ideas bin so we can make more killer statics.
   - [[../specs/killer-statics]] ✅ — cold-50+ static archetypes, both formats.
   - [[../specs/growth-adopt-creative-makers]] ✅ — Director-visible ready-to-test queue for creatives + Director-approved publish with PAUSED ads + outcome lineage (archived → [[../lifecycles/ad-publish]]).
-  - _(future: auto-pause underperformers; variant generator; creative-performance scoring)_
+  - [[../specs/media-buyer-test-winner-loop]] ⏳ — Media Buyer worker agent + weekly Test→Measure→Promote→Kill cadence: a controlled autonomous go-live into a capped test ad set (Phase 1 gate — [[../libraries/media-buyer-publish-gate]] + [[../tables/media_buyer_test_cohorts]]), a `media-buyer` lane in [[../libraries/builder-worker]] (Phase 2 — [[../libraries/media-buyer-agent]]) that promotes winners / kills losers / replenishes the test cohort under one conservative [[../tables/iteration_policies]] version, and Phase 3 fatigue-triggered replenish + grading. Owned by this function; the Growth Director supervises within its leash.
+  - _(future: variant generator; creative-performance scoring)_
 
 ### Ad-matched landing pages
 Every ad has a scent-matched lander (advertorial / before-after) so paid traffic converts.

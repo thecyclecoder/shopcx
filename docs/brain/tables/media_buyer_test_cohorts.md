@@ -30,6 +30,9 @@ The Phase 1 publish path ([[../inngest/ad-tool]] `adToolPublishToMeta` + the `PO
 | `test_meta_adset_id` | `text` | NOT NULL · bare Meta ad-set id (client adds no prefix) |
 | `daily_test_ceiling_cents` | `bigint` | NOT NULL · daily USD ceiling in CENTS applied to the test ad set · `> 0` |
 | `is_active` | `bool` | NOT NULL default `true` · `false` = dormant (gate treats as no active cohort) |
+| `default_meta_account_id` | `text?` | **Phase 2** — bare Meta ad-account id the Media Buyer runner uses when inserting replenish `ad_publish_jobs` rows. NULL = replenish deferred with `media_buyer_replenish_missing_config`. |
+| `default_meta_page_id` | `text?` | **Phase 2** — bare Meta page id used for the creative's `object_story_spec.page_id`. NULL = replenish deferred. |
+| `default_meta_instagram_user_id` | `text?` | **Phase 2** — the page's linked IG account id. NULL is fine (the publisher tolerates a null IG id). |
 | `notes` | `text?` | owner notes — surfaced on the editor |
 | `updated_by` | `uuid?` | → `auth.users.id` · ON DELETE SET NULL · `NULL` when a service-role script writes |
 | `created_at` | `timestamptz` | default `now()` |
@@ -59,7 +62,8 @@ The Phase 1 publish path ([[../inngest/ad-tool]] `adToolPublishToMeta` + the `PO
 
 ## Migration
 
-`supabase/migrations/20260707120000_media_buyer_test_cohorts.sql` — apply with `npx tsx scripts/apply-media-buyer-test-cohorts-migration.ts`. Idempotent (`create table if not exists`, `create or replace function`, policy guards, `add column if not exists` on `ad_publish_jobs.origin`). RLS: service-role full access + workspace-member SELECT (mirrors [[ad_spend_budgets]]).
+- **Phase 1:** `supabase/migrations/20260707120000_media_buyer_test_cohorts.sql` — apply with `npx tsx scripts/apply-media-buyer-test-cohorts-migration.ts`. Idempotent (`create table if not exists`, `create or replace function`, policy guards, `add column if not exists` on `ad_publish_jobs.origin`). RLS: service-role full access + workspace-member SELECT (mirrors [[ad_spend_budgets]]).
+- **Phase 2:** `supabase/migrations/20260707130000_media_buyer_test_cohorts_publish_targets.sql` — additive; adds `default_meta_account_id`, `default_meta_page_id`, `default_meta_instagram_user_id` (all NULLABLE) so the Media Buyer runner can insert replenish `ad_publish_jobs` rows. Apply with `npx tsx scripts/apply-media-buyer-test-cohorts-publish-targets-migration.ts`.
 
 ## Related
 

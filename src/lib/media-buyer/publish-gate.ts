@@ -46,6 +46,12 @@ export interface MediaBuyerTestCohort {
   updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Phase 2 default publish targets — the Media Buyer runner uses these when
+   * inserting replenish `ad_publish_jobs` rows (all NULLABLE; a null skips the
+   * replenish + records a `media_buyer_replenish_missing_config` audit row). */
+  defaultMetaAccountId: string | null;
+  defaultMetaPageId: string | null;
+  defaultMetaInstagramUserId: string | null;
 }
 
 interface MediaBuyerTestCohortRow {
@@ -59,6 +65,9 @@ interface MediaBuyerTestCohortRow {
   updated_by: string | null;
   created_at: string;
   updated_at: string;
+  default_meta_account_id?: string | null;
+  default_meta_page_id?: string | null;
+  default_meta_instagram_user_id?: string | null;
 }
 
 function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
@@ -74,6 +83,9 @@ function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
     updatedBy: row.updated_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    defaultMetaAccountId: row.default_meta_account_id ?? null,
+    defaultMetaPageId: row.default_meta_page_id ?? null,
+    defaultMetaInstagramUserId: row.default_meta_instagram_user_id ?? null,
   };
 }
 
