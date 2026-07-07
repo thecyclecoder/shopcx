@@ -7179,9 +7179,16 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     selfUpdateSkipReason = `self-update skipped: git fetch failed (${fetched.err.slice(0, 80).trim() || "unknown"})`;
     return;
   }
-  const local = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  // Anchor staleness to what the PROCESS is EXECUTING (boot-time RUNNING_SHA), not a fresh disk
+  // rev-parse HEAD. A prior self-update (or a manual redeploy) can leave the disk already reset
+  // to origin/main while THIS process is still on the older code it was launched from — a disk
+  // HEAD check would return `current` and the box would keep running stale compiled bits until
+  // something else restarted the worker. RUNNING_SHA is captured once at boot (a short sha);
+  // resolve it to a full sha so we can compare + rev-list against origin/main. Fall back to disk
+  // HEAD only if the boot capture failed (empty), preserving pre-existing availability.
+  const running = sh("git", ["rev-parse", RUNNING_SHA || "HEAD"]).out.trim();
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
-  if (!local || !remote || local === remote) {
+  if (!running || !remote || running === remote) {
     selfUpdateSkipReason = null; // fully current → no cause to surface
     return;
   }
@@ -7195,15 +7202,15 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   if (pin && shaMatches(remote, pin)) {
     const via = process.env.WORKER_PIN_SHA?.trim() ? "WORKER_PIN_SHA" : "watchdog";
     console.warn(
-      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${local.slice(0, 8)} (good); fix main to release`,
+      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${running.slice(0, 8)} (good); fix main to release`,
     );
-    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${local.slice(0, 8)}`;
+    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${running.slice(0, 8)}`;
     return;
   }
 
   // Idle → update on any drift. Busy → only when FAR behind (max-staleness override); a small lag waits for
   // the next idle window so in-flight builds aren't interrupted for one or two commits.
-  const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
+  const behind = parseInt(sh("git", ["rev-list", "--count", `${running}..${remote}`]).out.trim() || "0", 10);
 
   // SELF-RESTART ON IDLE (self-restart-on-idle): whenever the box is IDLE (no active build) and behind
   // origin/main, update to latest — regardless of WHAT changed or what is queued. There is no in-flight
@@ -7213,7 +7220,7 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // already gets fresh code via its own per-build worktree), UNLESS a box-impacting change (scripts/ or
   // src/lib/) is FAR behind — then take the max-staleness override rather than let a saturated box run stale.
   if (activeBuilds !== 0) {
-    const changed = sh("git", ["diff", "--name-only", local, remote]).out;
+    const changed = sh("git", ["diff", "--name-only", running, remote]).out;
     if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
       const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
       selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
@@ -7221,10 +7228,25 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     }
   }
 
-  const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
+  const fromTo = `${running.slice(0, 8)}→${remote.slice(0, 8)}`;
+
+  // Disk-ahead-of-process: RUNNING_SHA drifted from origin/main but the on-disk checkout is ALREADY at
+  // origin/main (a prior self-update landed the reset + npm ci, then the process failed to restart, or an
+  // operator hard-reset the checkout out-of-band). The reset is redundant — skip it and go straight to the
+  // restart (same process.exit → systemd relaunch) so the fresh on-disk code actually gets loaded. Nothing
+  // else changes: the quarantine guard above already refused any advance ONTO a quarantined tip, and the
+  // crash-loop guard on boot (CRASH_FILE / CRASH_LOOP_MAX) still catches a flap if the disk SHA is bad.
+  const diskHead = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  if (diskHead && diskHead === remote) {
+    console.log(`[self-update] disk already at ${remote.slice(0, 8)} but process on ${running.slice(0, 8)} — restarting without reset`);
+    selfUpdateSkipReason = null;
+    await writeHeartbeat(0, "updating", `self-update ${fromTo} (disk-ahead, restart only)`);
+    process.exit(0);
+  }
+
   console.log(`[self-update] idle + behind (${behind} behind, ${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
-  const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
+  const depsChanged = sh("git", ["diff", "--name-only", running, remote]).out.includes("package-lock.json");
 
   const reset = sh("git", ["reset", "--hard", "origin/main"]);
   if (reset.code !== 0) {
