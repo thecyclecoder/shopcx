@@ -14,6 +14,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]
+- **Verify billing-interval on Appstle upstream_timeout, mirroring the 504 branch** · verified 2026-07-07 · → [[../libraries/appstle]]
 - **Assisted-purchase playbook — gate create_order / create_subscription behind a vaulted PM, launching add_payment_method when missing** · verified 2026-07-07 · → [[lifecycles/subscription-billing]]
 - **Recalibrate the Meta ad-performance sensor (source-family + scent-match tagging)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
 - **Replace auth.users full-table scans on hot-path routes** · verified 2026-07-07 · → [[../libraries/access]]
