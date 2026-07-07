@@ -21,11 +21,17 @@ import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
-import { throwForAnthropicStatus, throwForAnthropicNetworkError } from "@/lib/anthropic-retry";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// The grader now runs as a supervised box-session agent under 💬 June (CS Director) — see
+// docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md § Phase 1. The direct Anthropic
+// fetch that used to live in analyzeTicketInner is gone; a `ticket-analyze` agent_jobs row is
+// enqueued instead and the box's runTicketAnalyzeJob runs the grader session on Max (flat-rate),
+// then hands the parsed verdict back to applyAnalyzerVerdict for the deterministic insert +
+// severity actions. GRADER_MODEL stays exported so ticket_analyses.model still carries the
+// canonical grader model tag (the box path also records the actual per-run model on the row via
+// applyAnalyzerVerdict when the box lane knows it).
 const GRADER_MODEL = SONNET_MODEL;
 
 // "Severe issue" types that force escalation regardless of overall score
@@ -295,6 +301,32 @@ interface AnalyzeResult {
 }
 
 /**
+ * Everything the box's ticket-analyze lane needs to run one grader turn — precomputed on the
+ * feeder side (skip gates, window resolution, msg pull, guidance + playbook context, prompt
+ * string) so the box session has zero DB judgment to make and can just emit a JSON verdict.
+ * See the runTicketAnalyzeJob runner in scripts/builder-worker.ts. Kept as a serializable shape
+ * on purpose — the runner rebuilds it from ticket_id via prepareAnalyzerRun, never over the
+ * wire; this interface is the returned handle it hands to applyAnalyzerVerdict.
+ */
+export interface PreparedAnalyzerRun {
+  workspaceId: string;
+  ticketId: string;
+  trigger: AnalyzeTrigger;
+  windowStart: string;
+  windowEnd: string;
+  msgs: MessageRow[];
+  guidanceBlock: string;
+  aiMessageCount: number;
+  customerId: string | null;
+  /** The grader system prompt (rubric + calibration rules + policies), built at prep time. */
+  system: string;
+  /** The formatted user turn (conversation + guidance + playbook context + window banner). */
+  userMsg: string;
+}
+
+export type AnalyzeTrigger = "auto_close" | "manual_close" | "reopen_close" | "manual";
+
+/**
  * Build a "playbook context" block for the grader. When a ticket has an
  * active playbook running, the grader needs to know that the AI's
  * behavior is constrained by the playbook's documented step sequence
@@ -402,34 +434,42 @@ async function buildPlaybookContextForGrader(
 }
 
 /**
- * Public entry — the inline QC-grader AI agent (`ai:ticket-analyzer` in the Control Tower
- * registry). Runs analyzeTicketInner and emits ONE loop_heartbeats beat at the END of the
- * run in a try/finally (control-tower-agent-coverage spec). ok:false ONLY on a real failure —
- * a thrown exception or a grader HTTP / parse error; an INTENTIONAL skip (no AI messages,
- * spam tag, merged, …) is a SUCCESSFUL run (the agent correctly decided not to grade) so it
- * never spuriously trips the error-rate alert. produced carries the analysis id + score.
+ * Public entry for callers that want to trigger a grade on a specific ticket — the analyzer no
+ * longer runs Anthropic in-process (Phase 1 of ticket-analyzer-becomes-box-agent-under-june).
+ * It enqueues a `ticket-analyze` agent_jobs row that the box (scripts/builder-worker.ts →
+ * runTicketAnalyzeJob) picks up as a supervised session under 💬 June (CS Director) on Max, and
+ * that session's parsed verdict runs through applyAnalyzerVerdict on the box, which does the
+ * deterministic insert + severity actions. The one loop_heartbeats beat this feeder emits
+ * (`ai:ticket-analyzer` in the Control Tower registry) still reports the enqueue result — the
+ * ACTUAL grade runs on `agent:ticket-analyze` (an agent-kind loop with its own liveness).
+ *
+ * Returns ok:false with a `reason` for every non-enqueue outcome (skip / already-in-flight /
+ * missing_ticket / enqueue_failed) so the cron's stamp-on-slip behavior (mark last_analyzed_at
+ * so we don't re-check the same row every 30 min) still works. The rescore action in
+ * improve-plan-executor.ts already handles a scoreless result string ("Re-analysis triggered").
  */
 export async function analyzeTicket(
   ticketId: string,
-  trigger: "auto_close" | "manual_close" | "reopen_close" | "manual" = "auto_close",
+  trigger: AnalyzeTrigger = "auto_close",
 ): Promise<AnalyzeResult> {
   const startedAt = Date.now();
   let result: AnalyzeResult | null = null;
   let threw: unknown = null;
   try {
-    result = await analyzeTicketInner(ticketId, trigger);
+    result = await enqueueTicketAnalyzeJob(ticketId, trigger);
     return result;
   } catch (e) {
     threw = e;
     throw e;
   } finally {
-    // A grader HTTP / parse error is a real failure; every other non-ok reason is an
-    // intentional skip (ok:true — the agent ran and correctly chose not to grade).
-    const isError = !!threw || (!!result && !result.ok && /^grader_http_|^parse_failed$/.test(result.reason || ""));
+    // The FEEDER beat: it reports whether the enqueue itself worked, not whether the grade
+    // succeeded (that beats on `agent:ticket-analyze` when the box runs it). ok:false only
+    // on an actual enqueue failure (thrown exception / enqueue_failed reason).
+    const isError = !!threw || (!!result && !result.ok && (result.reason || "").startsWith("enqueue_failed"));
     const produced = threw
       ? { error: "exception" }
-      : result?.ok
-      ? { analysis_id: result.analysis_id ?? null, score: result.analysis?.score ?? null, ai_messages: result.ai_message_count ?? null }
+      : result && result.ok
+      ? { queued: true }
       : { skipped: result?.reason ?? "unknown" };
     await emitInlineAgentHeartbeat(INLINE_AGENT_IDS.ticketAnalyzer, {
       ok: !isError,
@@ -441,16 +481,81 @@ export async function analyzeTicket(
 }
 
 /**
- * Analyze a single ticket. Returns ok=false with a reason when we
- * intentionally skip (no AI messages, spam tags, etc.) — caller should
- * still mark `last_analyzed_at` so we don't re-check.
+ * Enqueue a `ticket-analyze` box job for this ticket — deduped on an already-in-flight row for
+ * the SAME ticket (queued/queued_resume/claimed/building/needs_input) so the cron re-selecting
+ * the same ticket while a prior grade is still in flight doesn't stack duplicate work.
+ * Returns ok:false for the dedup miss so callers stamp `last_analyzed_at` and move on.
+ *
+ * Exported so tests + the cron can enqueue directly without going through analyzeTicket (the
+ * feeder heartbeat + wrapper only matters for the manual/rescore path).
  */
-async function analyzeTicketInner(
+export async function enqueueTicketAnalyzeJob(
   ticketId: string,
-  trigger: "auto_close" | "manual_close" | "reopen_close" | "manual" = "auto_close",
+  trigger: AnalyzeTrigger,
 ): Promise<AnalyzeResult> {
-  if (!ANTHROPIC_API_KEY) return { ok: false, reason: "no_api_key" };
+  const admin = createAdminClient();
+  // Resolve the ticket's workspace first — the agent_jobs row is workspace-scoped, so the
+  // ownerFunctionForKind('ticket-analyze')='cs' resolution + the box lane's per-workspace claim
+  // can pick it up. A missing ticket → skip (the same shape the prior gate emitted, so the
+  // cron's stamp-on-slip path still lands on it).
+  const { data: t } = await admin
+    .from("tickets")
+    .select("id, workspace_id, do_not_reply, ai_disabled, analyzer_locked, merged_into, tags")
+    .eq("id", ticketId)
+    .maybeSingle();
+  if (!t) return { ok: false, reason: "ticket_not_found" };
 
+  // Early skip gates — mirror the box's prepareAnalyzerRun gates so we never spend an enqueue on
+  // a ticket the runner would just refuse. The runner re-checks these (compare-and-set against
+  // the current row) so a race between enqueue and grade still fail-safes there.
+  if (t.merged_into) return { ok: false, reason: "merged_into_other" };
+  if ((t as { ai_disabled?: boolean }).ai_disabled) return { ok: false, reason: "ai_disabled" };
+  if ((t as { analyzer_locked?: boolean }).analyzer_locked) return { ok: false, reason: "analyzer_locked" };
+  if (t.do_not_reply) return { ok: false, reason: "do_not_reply" };
+  const tags = (t.tags as string[]) || [];
+  if (tags.some((tag) => SKIP_TAGS.has(tag))) return { ok: false, reason: "skip_tag" };
+
+  // One-in-flight dedup — same shape enqueueSpecReviewIfDue uses. spec_slug carries the ticket
+  // id so the box's per-slug queue view surfaces one row per ticket.
+  const { data: inflight } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", t.workspace_id)
+    .eq("kind", "ticket-analyze")
+    .eq("spec_slug", ticketId)
+    .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"])
+    .limit(1);
+  if (inflight && inflight.length) return { ok: false, reason: "already_in_flight" };
+
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: t.workspace_id,
+    spec_slug: ticketId,
+    kind: "ticket-analyze",
+    status: "queued",
+    instructions: JSON.stringify({ ticket_id: ticketId, trigger }),
+    created_by: null,
+  });
+  if (error) return { ok: false, reason: `enqueue_failed: ${error.message}` };
+  return { ok: true };
+}
+
+/**
+ * Feeder-side gates + context build for the box's ticket-analyze runner. Returns { ok:false,
+ * reason } for every skip (do_not_reply / ai_disabled / analyzer_locked / merged / skip_tag /
+ * no_messages / no_ai_messages / ticket_not_found) — same reason strings the prior
+ * analyzeTicketInner emitted, so the cron's stamp-on-slip behavior is unchanged. On ok:true the
+ * `prepared` bundle carries the exact prompt + system + windowed messages the box session runs
+ * against and applyAnalyzerVerdict consumes.
+ *
+ * This is the pure prep step — no Anthropic call, no side effects, no writes. The runner in
+ * scripts/builder-worker.ts calls this, hands `prepared.userMsg` + `prepared.system` to a Max
+ * `claude -p` session, then routes the parsed JSON verdict + prepared bundle into
+ * applyAnalyzerVerdict for the ticket_analyses insert + severity actions.
+ */
+export async function prepareAnalyzerRun(
+  ticketId: string,
+  trigger: AnalyzeTrigger = "auto_close",
+): Promise<{ ok: false; reason: string } | { ok: true; prepared: PreparedAnalyzerRun }> {
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
@@ -565,76 +670,60 @@ async function analyzeTicketInner(
 
   const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
 
-  // Call Sonnet. A grader failure must NOT be swallowed into a grade-skip
-  // (`return { ok:false, reason: grader_http_* }`) — that silently dropped the
-  // grade for good during a Claude outage. Throw instead: a retryable status /
-  // network failure → AnthropicDependencyError (the cron defers the ticket and
-  // the next */30 tick re-grades it on recovery — park-and-drain); a terminal
-  // status → NonRetriableError (fail fast). (agent-outage-resilience Phase 1.)
-  let res: Response;
-  try {
-    res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: GRADER_MODEL,
-        max_tokens: 1500,
-        system,
-        messages: [{ role: "user", content: userMsg }],
-      }),
-    });
-  } catch (err) {
-    throwForAnthropicNetworkError(err, "ticket-analyzer grader");
-  }
+  return {
+    ok: true,
+    prepared: {
+      workspaceId: ticket.workspace_id,
+      ticketId,
+      trigger,
+      windowStart,
+      windowEnd,
+      msgs,
+      guidanceBlock,
+      aiMessageCount,
+      customerId: ticket.customer_id,
+      system,
+      userMsg,
+    },
+  };
+}
 
-  if (!res.ok) {
-    throwForAnthropicStatus(res.status, "ticket-analyzer grader");
-  }
+/**
+ * Optional token-usage snapshot from the box lane's Max session (so the ticket_analyses row +
+ * ai_token_usage row still carry input/output token counts + a per-ticket cost estimate). The
+ * flat-rate box lane already meters at the fleet level via meterAgentJob; the per-ticket copy
+ * here keeps the historical analytics shape and per-ticket cost line still queryable.
+ */
+export interface AnalyzerBoxRunUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
+  model?: string | null;
+}
 
-  const data = await res.json();
-  const text = (data.content?.[0] as { text?: string })?.text?.trim() || "";
-  const usage = data.usage;
-
-  // Log token usage tagged to this ticket
-  const costCents = usage
-    ? usageCostCents(GRADER_MODEL, {
-        input_tokens: usage.input_tokens || 0,
-        output_tokens: usage.output_tokens || 0,
-        cache_creation_tokens: usage.cache_creation_input_tokens || 0,
-        cache_read_tokens: usage.cache_read_input_tokens || 0,
-      })
-    : 0;
-
-  await logAiUsage({
-    workspaceId: ticket.workspace_id,
-    model: GRADER_MODEL,
-    usage,
-    purpose: "ticket_analysis",
-    ticketId,
-  });
-
-  // Parse JSON response
-  let analysis: AnalysisResult | null = null;
-  try {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) analysis = JSON.parse(jsonMatch[0]) as AnalysisResult;
-  } catch { /* fall through */ }
-
-  if (!analysis || typeof analysis.score !== "number") {
-    return { ok: false, reason: "parse_failed" };
-  }
+/**
+ * Deterministic apply step for the box's ticket-analyze runner — post-grader cancel-claim
+ * detection, cap-and-annotate on hits, insert the ticket_analyses row, bump
+ * tickets.last_analyzed_at, and route through applySeverityActions (which still owns
+ * do_not_reply / ai_disabled / analyzer_locked / agent_intervened / active_playbook_id
+ * force-suppress gates via compare-and-set against the current row). Called on the box after
+ * the Max session returns a parsed AnalysisResult; kept in this file so the ONE place that
+ * knows how to insert a ticket_analyses row + fire severity actions stays authoritative.
+ */
+export async function applyAnalyzerVerdict(
+  prepared: PreparedAnalyzerRun,
+  analysis: AnalysisResult,
+  usage?: AnalyzerBoxRunUsage | null,
+): Promise<{ ok: true; analysis: AnalysisResult; analysis_id: string | undefined; cost_cents: number; ai_message_count: number }> {
+  const admin = createAdminClient();
 
   // ── Deterministic post-grader checks ──
-  // The AI grader sees the conversation transcript but can't query the
-  // DB. Some failures are only visible if you cross-reference what the
-  // AI claimed in the thread against current state. Run those here and
-  // inject findings into `analysis.issues` + cap the score so severity
-  // routing catches them.
-  const cancelCheck = await detectUnfulfilledCancelClaim(admin, ticket.id, ticket.customer_id, msgs);
+  // The AI grader sees the conversation transcript but can't query the DB. Some failures are
+  // only visible if you cross-reference what the AI claimed in the thread against current
+  // state. Run those here and inject findings into `analysis.issues` + cap the score so
+  // severity routing catches them.
+  const cancelCheck = await detectUnfulfilledCancelClaim(admin, prepared.ticketId, prepared.customerId, prepared.msgs);
   if (cancelCheck) {
     analysis.issues = [cancelCheck, ...(analysis.issues || [])];
     analysis.score = Math.min(analysis.score, 3); // catastrophic — broken cancel promise
@@ -645,36 +734,79 @@ async function analyzeTicketInner(
     }
   }
 
+  // Per-ticket cost snapshot — the box lane's Max session is flat-rate, but the historical
+  // per-ticket cost line + ai_token_usage row shape stays intact. Use the box's actual run
+  // model when known (usage.model) so ticket_analyses.model reflects reality; fall back to the
+  // canonical GRADER_MODEL constant. usageCostCents is only queried when we have tokens to bill.
+  const model = usage?.model ?? GRADER_MODEL;
+  const inputTokens = usage?.input_tokens ?? 0;
+  const outputTokens = usage?.output_tokens ?? 0;
+  const costCents = inputTokens || outputTokens
+    ? usageCostCents(model, {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_creation_tokens: usage?.cache_creation_tokens ?? 0,
+        cache_read_tokens: usage?.cache_read_tokens ?? 0,
+      })
+    : 0;
+
+  await logAiUsage({
+    workspaceId: prepared.workspaceId,
+    model,
+    usage: {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_creation_input_tokens: usage?.cache_creation_tokens ?? 0,
+      cache_read_input_tokens: usage?.cache_read_tokens ?? 0,
+    },
+    purpose: "ticket_analysis",
+    ticketId: prepared.ticketId,
+  });
+
   // Insert the analysis row
   const { data: inserted } = await admin.from("ticket_analyses").insert({
-    workspace_id: ticket.workspace_id,
-    ticket_id: ticketId,
-    window_start: windowStart,
-    window_end: windowEnd,
+    workspace_id: prepared.workspaceId,
+    ticket_id: prepared.ticketId,
+    window_start: prepared.windowStart,
+    window_end: prepared.windowEnd,
     score: analysis.score,
     issues: analysis.issues || [],
     action_items: analysis.action_items || [],
     summary: analysis.summary || null,
-    model: GRADER_MODEL,
-    input_tokens: usage?.input_tokens || 0,
-    output_tokens: usage?.output_tokens || 0,
+    model,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
     cost_cents: costCents,
-    trigger,
-    ai_message_count: aiMessageCount,
+    trigger: prepared.trigger,
+    ai_message_count: prepared.aiMessageCount,
   }).select("id").single();
 
   // Update ticket.last_analyzed_at
   await admin.from("tickets")
-    .update({ last_analyzed_at: windowEnd })
-    .eq("id", ticketId);
+    .update({ last_analyzed_at: prepared.windowEnd })
+    .eq("id", prepared.ticketId);
 
-  // Severity actions — pass guidanceBlock so an explicit human "do not
-  // escalate" directive can HARD-SUPPRESS force-escalation, even when a
-  // severe-issue type or a customer-threat keyword is present. Phase 3
-  // of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md.
-  await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, guidanceBlock, inserted?.id);
+  // Severity actions — pass guidanceBlock so an explicit human "do not escalate" directive can
+  // HARD-SUPPRESS force-escalation, even when a severe-issue type or a customer-threat keyword
+  // is present. Phase 3 of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md.
+  await applySeverityActions(
+    admin,
+    prepared.ticketId,
+    prepared.workspaceId,
+    prepared.customerId,
+    analysis,
+    prepared.msgs,
+    prepared.guidanceBlock,
+    inserted?.id,
+  );
 
-  return { ok: true, analysis, analysis_id: inserted?.id ?? undefined, cost_cents: costCents, ai_message_count: aiMessageCount };
+  return {
+    ok: true,
+    analysis,
+    analysis_id: inserted?.id ?? undefined,
+    cost_cents: costCents,
+    ai_message_count: prepared.aiMessageCount,
+  };
 }
 
 /**

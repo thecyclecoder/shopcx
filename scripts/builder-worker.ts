@@ -159,6 +159,18 @@ const MAX_CS_DIRECTOR_CALL = 1;
 // One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
 // investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
 const CS_DIRECTOR_CALL_TIMEOUT_MS = 15 * 60 * 1000;
+// Ticket-analyze jobs (ticket-analyzer-becomes-box-agent-under-june Phase 1) run in their OWN
+// concurrency-lane — a top-level Max `claude -p` session per ticket that produces the QC grade +
+// severity verdict. The feeder cron (ticket-analysis-cron) enqueues at most 100 per */30 tick; the
+// bounded parallelism here drains the queue without starving the shared build lane. Read-only via
+// the same DB creds the analyzer already needed, and the worker (deterministic Node) is the only
+// mutator (applyAnalyzerVerdict). Gated on the Claude-down breaker (below) — a grade needs Claude
+// to reason, so during an outage queued rows park `blocked_on_dependency` and drain on recovery
+// (mirrors the analyzer's prior park-and-drain, moved from the cron to the box lane).
+const MAX_TICKET_ANALYZE = 3;
+// One analyzer pass reads the ticket window + guidance + playbook context and emits ONE JSON
+// verdict. Minutes — same ballpark as a triage solver pass, not the seed ceiling.
+const TICKET_ANALYZE_TIMEOUT_MS = 10 * 60 * 1000;
 // Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
 // lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
 // (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
@@ -524,7 +536,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "ticket-analyze";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -1362,7 +1374,7 @@ async function requeueBlockedOnUsage() {
 // Scope = the autonomous agents the spec names (repair, optimizer, db-health, spec-test); interactive
 // (dev-ask/spec-chat/ticket-improve) + owner-driven build/plan jobs are left alone (their failure is the
 // owner's to see + retry). The customer-facing ticket path is covered by Phase 1's outage-spanning retry.
-const CLAUDE_OUTAGE_PARK_KINDS = ["repair", "storefront-optimizer", "db_health", "spec-test"] as const;
+const CLAUDE_OUTAGE_PARK_KINDS = ["repair", "storefront-optimizer", "db_health", "spec-test", "ticket-analyze"] as const;
 
 // Read the Claude-down breaker once per tick (best-effort; defaults to "up" so a breaker-read hiccup
 // never wrongly parks the box). The lib lives in src/lib — dynamic-import it like the other src helpers.
@@ -11523,6 +11535,188 @@ async function runCsDirectorCallJob(job: Job) {
   }
 }
 
+// ── Ticket analyzer (ticket-analyzer-becomes-box-agent-under-june Phase 1) ────
+// A kind='ticket-analyze' job is ONE Max `claude -p` session per ticket that grades the AI's
+// conversation window against the QC rubric, emits a JSON verdict { score, issues, action_items,
+// summary }, and the WORKER (deterministic Node) then runs applyAnalyzerVerdict — post-grader
+// cancel-claim detection, ticket_analyses insert, tickets.last_analyzed_at bump, and
+// applySeverityActions (all the do_not_reply / ai_disabled / analyzer_locked / agent_intervened /
+// active_playbook_id gates preserved). Replaces the prior inline `fetch('.../v1/messages', …)` in
+// src/lib/ticket-analyzer.ts — the analyzer is now a supervised agent under 💬 June (CS Director),
+// no direct Anthropic call anywhere in the analyzer code path (verifiable via
+// `grep api.anthropic.com src/lib/ticket-analyzer.ts` returning empty).
+async function runTicketAnalyzeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "ticket-analyze", sandbox: "max", timeout: TICKET_ANALYZE_TIMEOUT_MS });
+}
+
+interface TicketAnalyzeInstructions {
+  ticket_id?: string;
+  trigger?: "auto_close" | "manual_close" | "reopen_close" | "manual";
+}
+
+// The verdict shape the box session emits. Mirrors the AnalysisResult interface in
+// src/lib/ticket-analyzer.ts (kept loose here — normalizeAnalyzerVerdict below coerces the shape
+// applyAnalyzerVerdict expects, never trusting the raw parse). A missing/invalid score is a hard
+// fail (the runner marks the job needs_attention so a human eyeballs the transcript) — the runner
+// NEVER inserts a ticket_analyses row on a score it can't trust; same "silent 0-check approved row
+// is worse than an honest error" guardrail spec-test uses.
+interface TicketAnalyzeVerdict {
+  score: number;
+  issues: { type: string; description: string }[];
+  action_items: { priority: string; description: string }[];
+  summary: string;
+}
+
+function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const score = typeof r.score === "number" ? r.score : Number(r.score);
+  if (!Number.isFinite(score)) return null;
+  const clamped = Math.min(10, Math.max(1, Math.round(score)));
+  const issues = Array.isArray(r.issues)
+    ? (r.issues as unknown[])
+        .map((i) => {
+          const o = (i || {}) as Record<string, unknown>;
+          const type = typeof o.type === "string" ? o.type : "";
+          const description = typeof o.description === "string" ? o.description : "";
+          return type ? { type, description } : null;
+        })
+        .filter((x): x is { type: string; description: string } => !!x)
+    : [];
+  const action_items = Array.isArray(r.action_items)
+    ? (r.action_items as unknown[])
+        .map((i) => {
+          const o = (i || {}) as Record<string, unknown>;
+          const priority = typeof o.priority === "string" ? o.priority : "medium";
+          const description = typeof o.description === "string" ? o.description : "";
+          return description ? { priority, description } : null;
+        })
+        .filter((x): x is { priority: string; description: string } => !!x)
+    : [];
+  const summary = typeof r.summary === "string" ? r.summary : "";
+  return { score: clamped, issues, action_items, summary };
+}
+
+// The prompt the box session sees: the pre-built system rubric (calibration rules + policies +
+// current-date context) followed by the pre-built user turn (window + guidance + playbook context +
+// conversation) prepareAnalyzerRun already assembled. The session's ONLY job is to return the JSON
+// verdict — no investigation, no tool calls, no Read/Grep. Kept intentionally spare (mirrors the
+// prior inline Anthropic call's shape) so the box lane's grade is equivalent to the pre-conversion
+// scores (spec Phase 1 verification: "A replay of recent tickets yields equivalent scores/severity
+// actions").
+function ticketAnalyzePrompt(system: string, userMsg: string): string {
+  return [
+    `You are the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director), Phase 1 of docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md.`,
+    `Score the AI's behavior in the conversation window below against the QC rubric. Do NOT investigate — no Read/Grep/tool use is needed; grade only what the transcript shows. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `--- GRADER SYSTEM (rubric + calibration rules + active policies) ---`,
+    system,
+    ``,
+    `--- USER TURN ---`,
+    userMsg,
+    ``,
+    `Final message = ONLY one JSON object, no prose around it:`,
+    `{"score":<integer 1-10>,"issues":[{"type":"<one of the issue types above>","description":"..."}],"action_items":[{"priority":"high|medium|low","description":"..."}],"summary":"<1-2 sentences>"}`,
+  ].join("\n");
+}
+
+async function runTicketAnalyzeJob(job: Job) {
+  const tag = `[analyze:${job.id.slice(0, 8)}]`;
+  let inst: TicketAnalyzeInstructions = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as TicketAnalyzeInstructions) : {};
+  } catch {
+    /* fall through — the guard below fails the job if ticket_id is missing */
+  }
+  const ticketId = inst.ticket_id;
+  const trigger = inst.trigger ?? "auto_close";
+  if (!ticketId) {
+    await update(job.id, { status: "failed", error: "ticket-analyze job missing ticket_id in instructions" });
+    return;
+  }
+  console.log(`${tag} grading ticket ${ticketId.slice(0, 8)} · trigger=${trigger}`);
+
+  try {
+    // Feeder-side gates + prompt build. prepareAnalyzerRun handles do_not_reply / ai_disabled /
+    // analyzer_locked / merged_into / skip_tag / no_messages_in_window / no_ai_messages_in_window
+    // and returns { ok: false, reason } for each — the runner treats these as SUCCESSFUL skips
+    // (the agent correctly decided not to grade) and stamps last_analyzed_at so the same ticket
+    // isn't re-queued next cron tick.
+    const { prepareAnalyzerRun, applyAnalyzerVerdict } = await import("../src/lib/ticket-analyzer");
+    const prep = await prepareAnalyzerRun(ticketId, trigger);
+    if (!prep.ok) {
+      // Stamp last_analyzed_at on skip so the cron doesn't re-queue the same ticket next tick.
+      // Same behavior the old cron did after an inline analyzeTicket skip.
+      await db.from("tickets").update({ last_analyzed_at: new Date().toISOString() }).eq("id", ticketId);
+      await update(job.id, { status: "completed", log_tail: `skipped: ${prep.reason}` });
+      console.log(`${tag} skipped (${prep.reason})`);
+      return;
+    }
+
+    const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg), sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizeTicketAnalyzeVerdict(parsed);
+    console.log(`${tag} claude finished — score=${verdict?.score ?? "(none)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // No parseable verdict → needs_attention so a human eyeballs the transcript, and DO NOT
+      // write a ticket_analyses row (a made-up score in the audit trail is worse than a gap).
+      // Same guardrail cs-director-call + deploy-review use for unparseable verdicts.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "ticket-analyze returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    // Deterministic apply — post-grader cancel-claim detection, ticket_analyses insert,
+    // last_analyzed_at bump, applySeverityActions (with all the do_not_reply / ai_disabled /
+    // analyzer_locked / agent_intervened / active_playbook_id gates preserved via compare-and-
+    // set inside applySeverityActions).
+    const applied = await applyAnalyzerVerdict(
+      prep.prepared,
+      { score: verdict.score, issues: verdict.issues, action_items: verdict.action_items, summary: verdict.summary },
+      usage
+        ? {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_tokens: usage.cache_creation_input_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+            model,
+          }
+        : { model },
+    );
+
+    const summary = [
+      `score=${applied.analysis.score}/10`,
+      applied.analysis.summary ? applied.analysis.summary : "",
+      applied.analysis_id ? `analysis=${applied.analysis_id.slice(0, 8)}` : "",
+      applied.analysis.issues.length ? `issues: ${applied.analysis.issues.map((i) => i.type).join(", ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was applied. Complete with the
+      // error surfaced so a human can eyeball — the ticket_analyses row isn't silently rolled back.
+      // Same rule cs-director-call + deploy-review use for verdict-recorded-but-session-errored.
+      await update(job.id, { status: "completed", error: "ticket-analyze session errored (verdict applied)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} score=${applied.analysis.score} (session errored — verdict applied)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} score=${applied.analysis.score}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Developer Message Center (developer-message-center) ──────────────────────
 // A kind='dev-ask' job is ONE turn of a founder-facing, read-only "ask the box anything" thread. Like
 // ticket-improve it runs a TOP-LEVEL `claude -p` on Max (ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
@@ -18819,6 +19013,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
+  if (job.kind === "ticket-analyze") return runTicketAnalyzeJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "god-mode") return runGodModeJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
@@ -19928,7 +20123,7 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
     `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
@@ -19981,6 +20176,7 @@ async function main() {
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
+  const countTicketAnalyze = () => [...active.values()].filter((v) => v.kind === "ticket-analyze").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countGodMode = () => [...active.values()].filter((v) => v.kind === "god-mode").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
@@ -20267,6 +20463,19 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed cs-director-call ${job.id.slice(0, 8)} → ${countCsDirectorCall() + 1}/${MAX_CS_DIRECTOR_CALL} cs-director-call lane`);
+        launch(job);
+      }
+      // Fill the ticket-analyze lane (ticket-analyzer-becomes-box-agent-under-june Phase 1):
+      // one Max `claude -p` (ticket QC grader) per queued ticket, up to MAX_TICKET_ANALYZE in
+      // parallel. Gated on the Claude-down breaker (grader needs Claude to reason; parked queued
+      // rows drain on recovery) — matches the analyzer's prior park-and-drain but at the lane, not
+      // the cron. `already_in_flight` dedup on the enqueue side (enqueueTicketAnalyzeJob) means the
+      // claim never races the same ticket_id twice.
+      while (!claudeDown && countTicketAnalyze() < MAX_TICKET_ANALYZE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-analyze"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ticket-analyze ${job.id.slice(0, 8)} → ${countTicketAnalyze() + 1}/${MAX_TICKET_ANALYZE} ticket-analyze lane`);
         launch(job);
       }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
