@@ -11,7 +11,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
-import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
+import { SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
 import { currentDateContext } from "@/lib/ai-date-context";
 import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/product-intelligence/publish";
@@ -22,6 +22,11 @@ import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrown
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
   opus: OPUS_MODEL,
+  // Phase 3 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md — the
+  // model-picker's fresh-Direction route returns 'haiku' when the ticket has a
+  // fresh + high-confidence + stateless Direction, so the orchestrator must
+  // recognise the tier to actually route the call.
+  haiku: HAIKU_MODEL,
 } as const;
 export type OrchestratorModelKey = keyof typeof MODEL_IDS;
 
