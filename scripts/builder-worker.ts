@@ -20,6 +20,9 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
+// pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
+// member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
+import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
 
 const envPath = resolve(__dirname, "../.env.local");
@@ -159,6 +162,21 @@ const MAX_CS_DIRECTOR_CALL = 1;
 // One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
 // investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
 const CS_DIRECTOR_CALL_TIMEOUT_MS = 15 * 60 * 1000;
+// Playbook-compile jobs (playbook-compiler-becomes-box-agent-mining-full-history Phase 1) run in
+// their OWN concurrency-1 lane: enqueued by the Inngest cron (Mondays 12 UTC + manual
+// `playbook-compiler/run` event) — one Max `claude -p` (playbook-compile skill) per workspace. Reads
+// the FULL history (tickets + ticket_analyses over the whole workspace, NOT the old 30-day floor)
+// through the read-only DB creds the box already holds, and emits ONE JSON verdict {trees, reasoning}
+// which applyBoxPlaybookCompile upserts into `compiled_trees` (idempotent — UNIQUE (workspace_id,
+// tree_key), so a re-run over unchanged history is a no-op). Serialized so a Monday sweep never
+// overlaps a manually-triggered out-of-band run on the same workspace (the enqueuer also dedupes on
+// active-job-exists but concurrency-1 is the belt).
+const MAX_PLAYBOOK_COMPILE = 1;
+// One playbook-compile run: FULL-history read (typically thousands of rows) + one JSON verdict.
+// Generous ceiling — the read is larger than a CS-director call's brief, but still bounded (the
+// runner caps the cluster brief at 40 for size); Max session on a full-history workspace fits well
+// under 25 minutes in practice.
+const PLAYBOOK_COMPILE_TIMEOUT_MS = 25 * 60 * 1000;
 // Ticket-analyze jobs (ticket-analyzer-becomes-box-agent-under-june Phase 1) run in their OWN
 // concurrency-lane — a top-level Max `claude -p` session per ticket that produces the QC grade +
 // severity verdict. The feeder cron (ticket-analysis-cron) enqueues at most 100 per */30 tick; the
@@ -333,6 +351,14 @@ const RESEARCH_BATCH_CAP = 8;
 // generate/flag deterministically. 30 min mirrors the research lane cap.
 const DR_CONTENT_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
+// media-buyer-test-winner-loop Phase 2: concurrency-1 lane for the Media Buyer's
+// cadence pass. Deterministic-Node lane (no Max session), light on I/O — one
+// pass per workspace at a time is more than enough for the weekly cadence.
+const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
+// media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
+// grading pass. Deterministic-Node; scores media-buyer director_activity rows
+// against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
+const MAX_MEDIA_BUYER_GRADE = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER_GRADE || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -546,7 +572,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "ticket-analyze" | "prompt-review";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "ticket-analyze" | "prompt-review" | "playbook-compile";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -2367,7 +2393,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "prompt-review"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile", "prompt-review"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -7171,9 +7197,16 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     selfUpdateSkipReason = `self-update skipped: git fetch failed (${fetched.err.slice(0, 80).trim() || "unknown"})`;
     return;
   }
-  const local = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  // Anchor staleness to what the PROCESS is EXECUTING (boot-time RUNNING_SHA), not a fresh disk
+  // rev-parse HEAD. A prior self-update (or a manual redeploy) can leave the disk already reset
+  // to origin/main while THIS process is still on the older code it was launched from — a disk
+  // HEAD check would return `current` and the box would keep running stale compiled bits until
+  // something else restarted the worker. RUNNING_SHA is captured once at boot (a short sha);
+  // resolve it to a full sha so we can compare + rev-list against origin/main. Fall back to disk
+  // HEAD only if the boot capture failed (empty), preserving pre-existing availability.
+  const running = sh("git", ["rev-parse", RUNNING_SHA || "HEAD"]).out.trim();
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
-  if (!local || !remote || local === remote) {
+  if (!running || !remote || running === remote) {
     selfUpdateSkipReason = null; // fully current → no cause to surface
     return;
   }
@@ -7187,15 +7220,15 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   if (pin && shaMatches(remote, pin)) {
     const via = process.env.WORKER_PIN_SHA?.trim() ? "WORKER_PIN_SHA" : "watchdog";
     console.warn(
-      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${local.slice(0, 8)} (good); fix main to release`,
+      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${running.slice(0, 8)} (good); fix main to release`,
     );
-    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${local.slice(0, 8)}`;
+    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${running.slice(0, 8)}`;
     return;
   }
 
   // Idle → update on any drift. Busy → only when FAR behind (max-staleness override); a small lag waits for
   // the next idle window so in-flight builds aren't interrupted for one or two commits.
-  const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
+  const behind = parseInt(sh("git", ["rev-list", "--count", `${running}..${remote}`]).out.trim() || "0", 10);
 
   // SELF-RESTART ON IDLE (self-restart-on-idle): whenever the box is IDLE (no active build) and behind
   // origin/main, update to latest — regardless of WHAT changed or what is queued. There is no in-flight
@@ -7205,7 +7238,7 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // already gets fresh code via its own per-build worktree), UNLESS a box-impacting change (scripts/ or
   // src/lib/) is FAR behind — then take the max-staleness override rather than let a saturated box run stale.
   if (activeBuilds !== 0) {
-    const changed = sh("git", ["diff", "--name-only", local, remote]).out;
+    const changed = sh("git", ["diff", "--name-only", running, remote]).out;
     if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
       const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
       selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
@@ -7213,10 +7246,25 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     }
   }
 
-  const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
+  const fromTo = `${running.slice(0, 8)}→${remote.slice(0, 8)}`;
+
+  // Disk-ahead-of-process: RUNNING_SHA drifted from origin/main but the on-disk checkout is ALREADY at
+  // origin/main (a prior self-update landed the reset + npm ci, then the process failed to restart, or an
+  // operator hard-reset the checkout out-of-band). The reset is redundant — skip it and go straight to the
+  // restart (same process.exit → systemd relaunch) so the fresh on-disk code actually gets loaded. Nothing
+  // else changes: the quarantine guard above already refused any advance ONTO a quarantined tip, and the
+  // crash-loop guard on boot (CRASH_FILE / CRASH_LOOP_MAX) still catches a flap if the disk SHA is bad.
+  const diskHead = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  if (diskHead && diskHead === remote) {
+    console.log(`[self-update] disk already at ${remote.slice(0, 8)} but process on ${running.slice(0, 8)} — restarting without reset`);
+    selfUpdateSkipReason = null;
+    await writeHeartbeat(0, "updating", `self-update ${fromTo} (disk-ahead, restart only)`);
+    process.exit(0);
+  }
+
   console.log(`[self-update] idle + behind (${behind} behind, ${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
-  const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
+  const depsChanged = sh("git", ["diff", "--name-only", running, remote]).out.includes("package-lock.json");
 
   const reset = sh("git", ["reset", "--hard", "origin/main"]);
   if (reset.code !== 0) {
@@ -7636,10 +7684,16 @@ function parsePlannerSpecs(parsed: { status: string } | Record<string, unknown> 
         milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
         intent: String(sp.intent || a.preview || ""),
         gap: typeof sp.gap === "string" ? sp.gap : undefined,
-        // Prerequisite slugs (goal-decomposition-encodes-blockers). Keep only string slugs;
-        // a missing/malformed list → no declared blockers (the spec authors with no Blocked-by).
+        // Prerequisite slugs (goal-decomposition-encodes-blockers). Pia's decomposition sometimes emits
+        // namespaced `goalSlug:specSlug` (or wikilinked / anchored) entries — the build-gating
+        // (areSpecsGoalMates + Kahn sort in src/lib/agent-jobs.ts) resolves each blocker string in
+        // public.specs by exact slug and does NOT split on `:`, so a namespaced entry resolves to no
+        // spec and the gate silently treats it as an external blocker → the dependent builds out of
+        // order (2026-07-07 Sol-goal build shipped M2 before its declared M1 for this reason). Normalize
+        // to plain member slugs at THIS write-path so the DB row's blocked_by is what the gate expects.
+        // A missing/all-junk list → no declared blockers (the spec authors with no Blocked-by).
         blocked_by: Array.isArray(sp.blocked_by)
-          ? (sp.blocked_by as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+          ? normalizePlannerBlockedByList(sp.blocked_by, sp.slug)
           : undefined,
       },
     });
@@ -11050,6 +11104,26 @@ function deployReviewBrief(inst: DeployReviewInstructions): string {
   ].join("\n");
 }
 
+// Same-session JSON parse-repair re-prompt for Reva's verdict envelope. Mirrors the security-review
+// pattern at securityReviewRepairPrompt (iteration-ingest-async-reports-fix-tooling-69594a) and the
+// spec-test agent's parse-repair (builder-worker.ts:4649): when the first attempt completed real
+// investigative work but flubbed the final JSON shape, re-prompt on the SAME session for ONLY the
+// {decision, signals, reasoning} envelope. The model has all its findings in memory; it just needs to
+// re-emit them in the recognized shape. Re-investigation is explicitly forbidden. Fixes the parked
+// deploy-review job class where the origin's build ran cleanly, Reva investigated, but the terminal
+// envelope was prose/malformed and the runner fail-safed to needs_attention on the first miss.
+function deployReviewRepairPrompt(): string {
+  return [
+    `Your previous message could not be parsed as the deploy-review JSON verdict envelope.`,
+    `Return ONLY one valid JSON object — no prose before or after, no markdown, no commentary. If you must use a code fence the JSON must be the last thing in the message. Reuse the per-signal judgments + reasoning you ALREADY produced; do NOT re-investigate, do NOT re-read files, do NOT re-run git or any other tool.`,
+    ``,
+    `Exact envelope shape:`,
+    `  {"decision":"revert"|"keep"|"escalate","signals":[{"key":"<signature or loop_id>","surface":"<owning route/cron/lib>","caused":true|false,"evidence":"<cited file:line — the causal path or its absence>"}],"reasoning":"<2-4 sentences citing at least one real file:line>"}`,
+    ``,
+    `If you genuinely could not reach a verdict (session ran out of context, blocker, etc.), return ONLY {"decision":"escalate","signals":[],"reasoning":"<one line on why you could not reach a verdict>"} — never guess revert.`,
+  ].join("\n");
+}
+
 function deployReviewPrompt(brief: string): string {
   return [
     `Use the deploy-review skill (cwd is the repo root). You are Reva, the box's Deploy Guardian, on Max — web search on, no API key. You have full brain / \`src/\` / git powers and READ-ONLY prod DB. You NEVER mutate: you investigate, decide, and emit ONE JSON object. The worker (deterministic Node in src/lib/deploy-guardian.ts — applyBoxDeployReview) executes your typed verdict on your response — never re-run the cron, never call revertDeployMerge yourself, never touch deploy_watches.`,
@@ -11146,14 +11220,41 @@ async function runDeployReviewJob(job: Job) {
   try {
     const brief = deployReviewBrief(inst);
     const prompt = deployReviewPrompt(brief);
-    const { session, resultText, isError, raw, usage, model, configDir: drDir } = await runBoxLane(
+    const firstRun = await runBoxLane(
       (cfg, sid) => runDeployReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
+    let { session, resultText, isError, raw, usage, model } = firstRun;
+    const drDir = firstRun.configDir;
     await meterAgentJob(job, drDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: drDir });
 
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = normalizeDeployReviewVerdict(parsed);
+    let parsed = extractJson<Record<string, unknown>>(resultText);
+    let verdict = normalizeDeployReviewVerdict(parsed);
+
+    // Same-session JSON parse-repair (mirrors security-review at 18869 + spec-test at 4649). The prior
+    // Reva pass was a single shot: attempt 1 unparseable → straight to fail-safe (stamp 'unsure' + park
+    // needs_attention). That's the class of parked deploy-review that stalled the origin's build here:
+    // the model completed the causal read (session spent, tokens spent, SessionEnd hooks fired) but the
+    // terminal envelope was prose / a malformed brace, and re-running the whole investigation from
+    // scratch would waste the spend AND often produce the same shape (the model's tendency, not the
+    // input's). Instead, re-prompt on the SAME session for ONLY the JSON envelope — the model already
+    // has its per-signal judgments in context; it just needs to re-emit them in the recognized shape.
+    // Pinned to the same account (drDir) — a --resume can only land on the account that owns the session.
+    // Skipped when there is no session id (nothing to --resume against) or the first attempt landed a
+    // valid verdict. On repair success we ALSO re-persist the session/account (mirrors security-review's
+    // onRun) so the DB row stays coherent for any downstream re-drive.
+    if (!verdict && session) {
+      console.warn(`${tag} unparseable verdict — same-session parse-repair (attempt 2, JSON envelope only)`);
+      const repair = await runDeployReviewClaude(deployReviewRepairPrompt(), session, REPO_DIR, drDir ?? undefined, job.id);
+      await meterAgentJob(job, drDir ?? undefined, repair.usage, repair.model);
+      if (repair.session) await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: drDir });
+      session = repair.session ?? session;
+      resultText = repair.resultText;
+      raw = repair.raw;
+      isError = repair.isError; // if the repair errored but produced a verdict, we still apply it below (matches security-review semantics)
+      parsed = extractJson<Record<string, unknown>>(resultText);
+      verdict = normalizeDeployReviewVerdict(parsed);
+    }
     console.log(`${tag} claude finished — decision: ${verdict?.decision ?? "(none)"} · isError=${isError}`);
 
     // Import Phase-3 mutator + Phase-4 fail-safe once for every branch below.
@@ -11163,14 +11264,15 @@ async function runDeployReviewJob(job: Job) {
     if (!verdict) {
       // Phase 4 fail-safe (never revert without a judgment): stamp the watch 'unsure' + escalate. The
       // atomic pending-guard makes this idempotent — a concurrent apply/failsafe/redriven-job no-ops.
-      // Then the job parks needs_attention so the lane frees and a human sees the error.
-      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session" });
+      // Then the job parks needs_attention so the lane frees and a human sees the error. Only reached
+      // when the same-session parse-repair above ALSO failed (or no session existed to --resume).
+      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session (after parse-repair)" });
       await update(job.id, {
         status: "needs_attention",
         error: "deploy-review returned no parseable verdict",
         log_tail: `${fs.stamped ? "fail-safe: watch stamped 'unsure' + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`}\n\n${raw}`.slice(-2000),
       });
-      console.warn(`${tag} unparseable verdict — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
+      console.warn(`${tag} unparseable verdict (after parse-repair) — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
       return;
     }
 
@@ -11539,6 +11641,122 @@ async function runCsDirectorCallJob(job: Job) {
     }
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// ── Box-hosted playbook-compiler lane (playbook-compiler-becomes-box-agent-mining-full-history P1) ──
+// A kind='playbook-compile' job is ONE full-history sweep the CS-supervised compiler agent runs on
+// a workspace. Enqueued by the Inngest cron (`src/lib/inngest/playbook-compiler.ts`) OR the manual
+// `playbook-compiler/run` event. The runner reads the FULL history (tickets + ticket_analyses over
+// the whole workspace — NO 30-day floor) via `loadPlaybookCompileBrief`, dispatches a Max
+// `claude -p` (playbook-compile skill) that emits ONE JSON verdict {trees, reasoning}, and
+// upserts each tree into `compiled_trees` via `applyBoxPlaybookCompile` (idempotent — UNIQUE
+// (workspace_id, tree_key)). Phase 2 will read this store to propose data-grounded playbooks +
+// playbook_steps (is_active=false). The runner ALSO writes ONE `director_activity` row
+// (director_function='cs', action_kind='compiled_trees_extracted') carrying the agent's overall
+// reasoning + a metadata summary — the CEO/audit trail sees WHAT the compiler decided + WHY. Read-
+// only against everything except `compiled_trees` and `director_activity` (both mutated by the
+// deterministic worker, never by the agent — north star: CEO → role agent → tool).
+async function runPlaybookCompileClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "playbook-compile", sandbox: "max", timeout: PLAYBOOK_COMPILE_TIMEOUT_MS });
+}
+
+function playbookCompilePrompt(workspaceId: string, brief: string): string {
+  return [
+    `Use the playbook-compile skill (cwd is the repo root). You are the CS-supervised playbook-compiler agent on Max — no ANTHROPIC_API_KEY, no external model API. You investigate READ-ONLY and emit ONE JSON verdict; the WORKER (deterministic Node) upserts your trees into \`compiled_trees\` and writes ONE \`director_activity\` row summarizing.`,
+    ``,
+    `WORKSPACE: ${workspaceId}`,
+    ``,
+    brief,
+    ``,
+    `PROCEDURE:`,
+    `  1. For each precomputed cluster at-or-above support_min, judge whether it is a coherent "when X → do Y" TREE (support alone is not enough — an incoherent cluster is signal AGAINST proposing).`,
+    `  2. Derive the intent distribution per tree from the ticket_analyses issue tags on the cluster's sample tickets — this is what Phase 2 will use for playbook.trigger_intents, so ground it.`,
+    `  3. Derive the resolution_sequence per tree from the ordered action shapes the orchestrator returned — Phase 2 will materialize playbook_steps from this.`,
+    `  4. Emit ONE JSON verdict of shape {trees, reasoning}.`,
+    ``,
+    `Reuse each cluster's \`tree_key\` verbatim from the brief — the store's UNIQUE (workspace_id, tree_key) constraint anchors idempotency on this. The runner defensively normalizes, but a mis-typed key reads sloppy in the audit trail.`,
+    ``,
+    `Final message = ONLY one JSON object, no prose before or after:`,
+    `  {"trees":[{"tree_key":"...","problem":"...","action_types":["...","..."],"support":N,"sample_ticket_ids":["..."],"intent_distribution":{"intent":N},"resolution_sequence":[{"action_type":"...","notes":"..."}],"evidence":{"resolution_event_ids":["..."],"ticket_analyses_ids":["..."]},"reasoning":"..."}],"reasoning":"..."}`,
+    `Empty is a valid verdict: {"trees":[],"reasoning":"no tree at or above support_min=<N>"}.`,
+  ].join("\n");
+}
+
+async function runPlaybookCompileJob(job: Job) {
+  const tag = `[playbook-compile:${job.id.slice(0, 8)}]`;
+  try {
+    const { loadPlaybookCompileBrief, applyBoxPlaybookCompile, normalizePlaybookCompileVerdict } =
+      await import("../src/lib/playbook-compiler");
+    const brief = await loadPlaybookCompileBrief(db, job.workspace_id);
+    console.log(
+      `${tag} brief loaded — resolution_rows=${brief.resolutionRows.length} analyses=${brief.analysisRows.length} clusters=${brief.precomputedClusters.length} support_min=${brief.supportMin}`,
+    );
+
+    // Fast path: no mineable history at all → complete with a zero-trees director_activity trail.
+    // Same idempotency contract — a re-run in this state persists no rows, writes one activity row.
+    if (brief.resolutionRows.length === 0 && brief.analysisRows.length === 0) {
+      await applyBoxPlaybookCompile(db, {
+        workspaceId: job.workspace_id,
+        jobId: job.id,
+        verdict: { trees: [], reasoning: "no mineable history (0 confirmed resolution events, 0 ticket_analyses)" },
+      });
+      await update(job.id, { status: "completed", log_tail: "no mineable history — 0 trees" });
+      console.log(`${tag} no mineable history → 0 trees`);
+      return;
+    }
+
+    const prompt = playbookCompilePrompt(job.workspace_id, brief.headerText);
+    const { session, resultText, isError, raw, usage, model, configDir: pcDir } = await runBoxLane(
+      (cfg, sid) => runPlaybookCompileClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, pcDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: pcDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizePlaybookCompileVerdict(parsed);
+
+    if (!verdict) {
+      // No parseable verdict → surface as needs_attention so a human can eyeball; do NOT write a
+      // director_activity row (a lie in the audit trail is worse than a gap). Same guardrail
+      // cs-director-call uses for its unparseable-verdict fallback.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "playbook-compile returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    const applyResult = await applyBoxPlaybookCompile(db, {
+      workspaceId: job.workspace_id,
+      jobId: job.id,
+      verdict,
+    });
+
+    const summary = [
+      `trees_upserted=${applyResult.treesUpserted}/${verdict.trees.length}`,
+      verdict.reasoning ? verdict.reasoning : "",
+      applyResult.reasonSkipped.length ? `skipped: ${applyResult.reasonSkipped.slice(0, 3).join("; ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was persisted. Complete with the
+      // error surfaced so a human can eyeball — the persisted rows are the trail.
+      await update(job.id, {
+        status: "completed",
+        error: "playbook-compile session errored (verdict persisted)",
+        log_tail: summary.slice(-2000),
+      });
+      console.log(`${tag} ${summary.replace(/\n/g, " · ")} (session errored — recorded + persisted)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} ${summary.replace(/\n/g, " · ")}`);
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -11973,7 +12191,8 @@ async function runPromptReviewJob(job: Job) {
       return;
     }
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
-    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`); {
+    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`);
+  } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
@@ -16599,6 +16818,120 @@ interface CampaignGradeDecisionJson {
   reasoning: string;
 }
 
+/**
+ * media-buyer lane (media-buyer-test-winner-loop Phase 2). Deterministic-Node lane
+ * (no Max session) that runs the Media Buyer's Test→Measure→Promote→Kill cadence
+ * for each connected Meta ad account in the workspace. Reads winners + losers +
+ * ready-to-test, computes the plan via `computeMediaBuyerPlan`, and PERSISTS it —
+ * writes `iteration_actions` (status='decided') for promote/kill so the existing
+ * Phase-6a executor picks them up, `ad_publish_jobs` (origin='media-buyer-test',
+ * publish_active=true) for replenish so the Phase-1 gate does the ceiling check,
+ * and one `director_activity` row per action + a `media_buyer_pass_completed`
+ * heartbeat. The AGENT never writes Meta objects directly — the executor / the
+ * publisher do (spec verification: "The agent never writes Meta objects directly
+ * — the deterministic worker/executor does").
+ *
+ * Instructions JSON (optional): { meta_ad_account_id?, cohort_target_count? }.
+ * When meta_ad_account_id is omitted, the lane fans out over every meta_ad_accounts
+ * row for the workspace and reports each per-account result.
+ */
+async function runMediaBuyerJob(job: Job) {
+  const tag = `[media-buyer:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: { meta_ad_account_id?: string; cohort_target_count?: number } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+
+  // Resolve target accounts. Explicit id in instructions wins; else fan out over
+  // the workspace's connected Meta ad accounts (workspace-scoped SELECT).
+  let accountIds: string[];
+  if (instr.meta_ad_account_id) {
+    accountIds = [instr.meta_ad_account_id];
+  } else {
+    const { data: accts } = await a
+      .from("meta_ad_accounts")
+      .select("id")
+      .eq("workspace_id", job.workspace_id);
+    accountIds = ((accts || []) as Array<{ id: string }>).map((r) => r.id);
+  }
+  if (!accountIds.length) {
+    await update(job.id, {
+      status: "completed",
+      log_tail: "no connected meta_ad_accounts — media-buyer pass is a no-op",
+    });
+    console.log(`${tag} no accounts → no-op`);
+    return;
+  }
+
+  const { runMediaBuyerLoop } = await import("../src/lib/media-buyer/agent");
+  const perAccount: Array<{ account: string; plan: unknown; writes: unknown; error?: string }> = [];
+  for (const accountId of accountIds) {
+    try {
+      const result = await runMediaBuyerLoop(a, {
+        workspaceId: job.workspace_id,
+        metaAdAccountId: accountId,
+        cohortTargetCount: instr.cohort_target_count,
+      });
+      perAccount.push({ account: accountId, plan: result.plan, writes: result.writes });
+      console.log(
+        `${tag} account=${accountId.slice(0, 8)} → promote=${result.plan.promote.length} kill=${result.plan.kill.length} replenish=${result.plan.replenish.length} (policyActive=${result.plan.policyActive})`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      perAccount.push({ account: accountId, plan: null, writes: null, error: msg });
+      console.error(`${tag} account=${accountId} threw: ${msg}`);
+    }
+  }
+  const anySucceeded = perAccount.some((r) => !r.error);
+  await update(job.id, {
+    status: anySucceeded ? "completed" : "failed",
+    log_tail: JSON.stringify(perAccount).slice(-4000),
+  });
+}
+
+/**
+ * media-buyer-grade lane (media-buyer-test-winner-loop Phase 3). Deterministic-Node
+ * grading pass over concluded Media Buyer director_activity rows. Reads each row's
+ * decision-time signals (source_meta_ad_id, roas at decision time, policy version),
+ * resolves realized attribution from meta_attribution_daily ≥ 3d after the action's
+ * created_at, and scores decision_quality + outcome_quality separately per the
+ * spec's rubric ("a sound call that regressed on a later ROAS shift still grades
+ * well"). Writes to public.media_buyer_action_grades — one row per director_activity
+ * row (UNIQUE), idempotent-safe on re-runs. No Max session; scoring is straightforward
+ * math against the active policy thresholds.
+ *
+ * Instructions JSON (optional): { limit?: number } — cap per-pass row count. Default 50.
+ */
+async function runMediaBuyerGradeJob(job: Job) {
+  const tag = `[media-buyer-grade:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: { limit?: number } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  const limit = typeof instr.limit === "number" && instr.limit > 0 ? Math.floor(instr.limit) : 50;
+
+  const { gradeMediaBuyerActions } = await import("../src/lib/media-buyer/grader");
+  try {
+    const result = await gradeMediaBuyerActions(a, { workspaceId: job.workspace_id, limit });
+    const tail = `graded=${result.graded} skipped=${result.skipped} errors=${result.errors} · first=${result.grades[0]?.grade.overallGrade ?? "n/a"}`;
+    await update(job.id, {
+      status: "completed",
+      log_tail: `${tail}\n${JSON.stringify(result.grades.map((g) => ({ id: g.directorActivityId, overall: g.grade.overallGrade, decision: g.grade.decisionQuality, outcome: g.grade.outcomeQuality }))).slice(-3500)}`,
+    });
+    console.log(`${tag} ${tail}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await update(job.id, { status: "failed", error: `media-buyer-grade threw: ${msg.slice(0, 300)}` });
+    console.error(`${tag} threw: ${msg}`);
+  }
+}
+
 async function runCampaignGradeJob(job: Job) {
   const tag = `[campaign-grade:${job.id.slice(0, 8)}]`;
   let instr: { candidates?: unknown } = {};
@@ -19275,6 +19608,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
+  if (job.kind === "playbook-compile") return runPlaybookCompileJob(job);
   if (job.kind === "ticket-analyze") return runTicketAnalyzeJob(job);
   if (job.kind === "prompt-review") return runPromptReviewJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
@@ -19301,6 +19635,8 @@ async function dispatchJob(job: Job) {
   if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
   if (job.kind === "ceo-authorized-out-of-leash") return runCeoAuthorizedOutOfLeashJob(job);
+  if (job.kind === "media-buyer") return runMediaBuyerJob(job);
+  if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -20388,9 +20724,9 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -20441,6 +20777,7 @@ async function main() {
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
+  const countPlaybookCompile = () => [...active.values()].filter((v) => v.kind === "playbook-compile").length;
   const countTicketAnalyze = () => [...active.values()].filter((v) => v.kind === "ticket-analyze").length;
   const countPromptReview = () => [...active.values()].filter((v) => v.kind === "prompt-review").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
@@ -20456,6 +20793,8 @@ async function main() {
   const countGapGrade = () => [...active.values()].filter((v) => v.kind === "gap-grade").length;
   const countResearch = () => [...active.values()].filter((v) => v.kind === "research").length;
   const countDrContent = () => [...active.values()].filter((v) => v.kind === "dr-content").length;
+  const countMediaBuyer = () => [...active.values()].filter((v) => v.kind === "media-buyer").length;
+  const countMediaBuyerGrade = () => [...active.values()].filter((v) => v.kind === "media-buyer-grade").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -20468,7 +20807,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "playbook-compile" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -20731,6 +21070,20 @@ async function main() {
         console.log(`claimed cs-director-call ${job.id.slice(0, 8)} → ${countCsDirectorCall() + 1}/${MAX_CS_DIRECTOR_CALL} cs-director-call lane`);
         launch(job);
       }
+      // Fill the playbook-compile lane (playbook-compiler-becomes-box-agent-mining-full-history Phase 1):
+      // one Max `claude -p` (playbook-compile skill) per queued playbook-compile row (enqueued by the
+      // Inngest cron OR a manual `playbook-compiler/run` event). Reads the FULL history read-only and
+      // emits ONE JSON verdict {trees, reasoning} — the deterministic runner upserts trees into
+      // `compiled_trees`. Concurrency-1 so a Monday cron sweep never overlaps a manually-triggered
+      // out-of-band run on the same workspace. Gated on the Claude-down breaker — the compiler needs
+      // Claude to reason; parked jobs drain on recovery, matching the cs-director-call pattern.
+      while (!claudeDown && countPlaybookCompile() < MAX_PLAYBOOK_COMPILE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["playbook-compile"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed playbook-compile ${job.id.slice(0, 8)} → ${countPlaybookCompile() + 1}/${MAX_PLAYBOOK_COMPILE} playbook-compile lane`);
+        launch(job);
+      }
       // Fill the ticket-analyze lane (ticket-analyzer-becomes-box-agent-under-june Phase 1):
       // one Max `claude -p` (ticket QC grader) per queued ticket, up to MAX_TICKET_ANALYZE in
       // parallel. Gated on the Claude-down breaker (grader needs Claude to reason; parked queued
@@ -20744,7 +21097,7 @@ async function main() {
         console.log(`claimed ticket-analyze ${job.id.slice(0, 8)} → ${countTicketAnalyze() + 1}/${MAX_TICKET_ANALYZE} ticket-analyze lane`);
         launch(job);
       }
-            // Fill the prompt-review lane (prompt-auto-review-becomes-box-agent-under-june Phase 1): one
+      // Fill the prompt-review lane (prompt-auto-review-becomes-box-agent-under-june Phase 1): one
       // Max `claude -p` per proposed sonnet_prompt the sonnet-prompt-auto-review Inngest cron
       // enqueued. Concurrency-1 so a slow review never starves the CS lane. Gated on the Claude-down
       // breaker — jobs park blocked_on_dependency + drain on recovery, matching the deploy-review /
@@ -20754,6 +21107,8 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed prompt-review ${job.id.slice(0, 8)} → ${countPromptReview() + 1}/${MAX_PROMPT_REVIEW} prompt-review lane`);
+        launch(job);
+      }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
       while (countDevAsk() < MAX_DEV_ASK) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dev-ask"] });
@@ -20915,6 +21270,29 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed dr-content ${job.id.slice(0, 8)} → ${countDrContent() + 1}/${MAX_DR_CONTENT} dr-content lane`);
+        launch(job);
+      }
+      // Fill the media-buyer lane (media-buyer-test-winner-loop Phase 2): the
+      // deterministic-Node Test→Measure→Promote→Kill cadence pass. Reads winners
+      // + losers + ready-to-test, computes the typed plan, persists via
+      // iteration_actions + ad_publish_jobs + director_activity chokepoints —
+      // the agent NEVER writes Meta objects directly. Concurrency-1 mirrors
+      // dr-content — one pass per workspace at a time is plenty at weekly cadence.
+      while (countMediaBuyer() < MAX_MEDIA_BUYER) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed media-buyer ${job.id.slice(0, 8)} → ${countMediaBuyer() + 1}/${MAX_MEDIA_BUYER} media-buyer lane`);
+        launch(job);
+      }
+      // Fill the media-buyer-grade lane (media-buyer-test-winner-loop Phase 3):
+      // deterministic-Node grading pass — scores media-buyer director_activity rows
+      // against realized ROAS from meta_attribution_daily. Same concurrency shape.
+      while (countMediaBuyerGrade() < MAX_MEDIA_BUYER_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed media-buyer-grade ${job.id.slice(0, 8)} → ${countMediaBuyerGrade() + 1}/${MAX_MEDIA_BUYER_GRADE} media-buyer-grade lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

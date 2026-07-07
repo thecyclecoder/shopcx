@@ -449,6 +449,15 @@ export function isTransientSupabaseLogNoise(
     // host=... : dial error (dial tcp [::1]:5432: operation was canceled)`. Same class,
     // different phrase — allowlist `operation was canceled` and the general `dial ...
     // canceled` shape too.
+    //
+    // The TIMEOUT sibling of `dial ... canceled`: when GoTrue's dial timer fires before the
+    // TCP handshake completes (as opposed to the parent context dying mid-dial), Go emits
+    // `failed to connect to host=... : dial error (dial tcp <addr>: i/o timeout)`. Same
+    // self-healing class as `canceled` — the upstream reachability already recovered by the
+    // next beat, no user impact, just repair-loop churn on a healed blip
+    // ([[../specs/error-feed-scope-supabase-auth-dial-io-timeout-transient]]) — allowlist
+    // the `dial ... i/o timeout` shape too. Recur-window escalation still applies: a chronic
+    // dial-timeout spike (a real upstream outage) recurs inside the window and pages.
     const msg = String(ctx.message ?? "").toLowerCase();
     if (!msg.trim()) return false;
     return (
@@ -456,6 +465,7 @@ export function isTransientSupabaseLogNoise(
       msg.includes("context deadline exceeded") ||
       msg.includes("operation was canceled") ||
       /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
+      /\bdial\b[^\n]*i\/o timeout/.test(msg) ||
       // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
       // load: `504: Processing this request timed out, please retry after a moment.` Same
       // transient class as the context-deadline shape above (restore of the reverted
@@ -466,6 +476,40 @@ export function isTransientSupabaseLogNoise(
     );
   }
   return false;
+}
+
+/**
+ * Foreign-app noise — Supabase's own GoTrue user endpoint returning 504 Gateway Timeout
+ * on the edge_logs feed ([[../specs/error-feed-drop-supabase-gotrue-504-edge-noise]]).
+ *
+ * Supabase's GoTrue auth service intermittently 504s on its own `/auth/v1/user` under load
+ * — an upstream infra saturation blip on Supabase's side. We do not run GoTrue and cannot
+ * patch its gateway; we hold ZERO levers here. The prior fix scoped this into the transient
+ * class ([[isTransientSupabaseLogNoise]] `kind:'auth'` `processing this request timed out`
+ * branch — the AUTH log, not the API edge_log), but the same shape ALSO surfaces on
+ * `edge_logs` as a `/auth/v1/user` + `504` row, and because Supabase's gateway saturates on
+ * a cadence outside our control, the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS`
+ * and escalates on every cycle — a Platform owner paged in a loop they cannot fix.
+ *
+ * Same choice we already made for supabase-edge-ssl-handshake and undici-headers-timeout
+ * noise: when the surface is foreign-owned and we hold no levers, DROP AT CAPTURE — do not
+ * even record the row. Narrowly gated to the exact `/auth/v1/user` + `504` shape so a real
+ * GoTrue outage on other paths, a 5xx that isn't 504, or a non-auth endpoint blip is still
+ * captured normally.
+ *
+ * `true` iff `path === '/auth/v1/user'` AND `statusCode` coerces to 504. Consumed by the
+ * `api` LogQuery's `mapRow` in [[./supabase-log-poll]] — the mapRow contract treats `null`
+ * as `drop, do not record`, so returning null here fully suppresses the row (no error_event,
+ * no loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignGoTrueEdgeNoise(
+  path: string | null | undefined,
+  statusCode: unknown,
+): boolean {
+  if (path !== "/auth/v1/user") return false;
+  const raw = typeof statusCode === "string" ? statusCode.trim() : statusCode;
+  const status = Number(raw);
+  return Number.isFinite(status) && status === 504;
 }
 
 /**

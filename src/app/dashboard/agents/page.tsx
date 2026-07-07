@@ -41,7 +41,13 @@ interface DirectorNode {
   autonomous: boolean;
 }
 interface OrgChart {
-  ceo: { goals: { slug: string; title: string; pct: number }[] };
+  ceo: {
+    goals: { slug: string; title: string; pct: number }[];
+    // Phase 2 (god-mode-becomes-ceo-executive-assistant-agent): CEO-owned workers rendered under
+    // the CEO seat — Eve (the god-mode cockpit executive assistant) today. Populated server-side
+    // in `getOrgChart` from every MONITORED_LOOPS entry with owner="ceo".
+    workers: WorkerLane[];
+  };
   directors: DirectorNode[];
 }
 
@@ -67,6 +73,37 @@ function RoleNav({ org }: { org: OrgChart }) {
           </span>
         </span>
       </Link>
+      {/* god-mode-becomes-ceo-executive-assistant-agent Phase 2 — CEO-owned workers rendered under
+          the CEO seat with the SAME shape as a director's workers list, so Eve (the god-mode
+          executive assistant) reaches her profile + KPIs in one click and is NEVER shown under Ada. */}
+      {org.ceo.workers.length > 0 && (
+        <ul className="mt-0.5 ml-3 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+          {org.ceo.workers.map((w) => {
+            const wp = getPersona(w.kind, w.label);
+            return (
+              <li key={w.kind} className="flex items-center gap-1">
+                <Link
+                  href={`/dashboard/agents/${encodeURIComponent(w.kind)}`}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  title={w.description}
+                >
+                  <PersonaAvatar persona={wp} size={20} />
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-zinc-700 dark:text-zinc-300">
+                    {wp.name}
+                  </span>
+                </Link>
+                <Link
+                  href={`/dashboard/agents/${encodeURIComponent(w.kind)}/kpi`}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+                  title={`${wp.name}'s KPIs`}
+                >
+                  KPIs
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       <p className="px-1 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Directors + Agents</p>
       <div className="space-y-2">

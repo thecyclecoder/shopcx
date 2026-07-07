@@ -12,7 +12,7 @@ import { routedInboxHref } from "@/lib/agents/inbox";
 const REPO = "thecyclecoder/shopcx";
 
 type LoopColor = "green" | "amber" | "red";
-type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo";
+type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo" | "ceo";
 
 interface HistoryRow {
   ran_at: string;

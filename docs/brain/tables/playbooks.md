@@ -24,6 +24,8 @@ Customer-service playbooks (e.g. unwanted_charge_subscription_dispute). Discover
 | `stand_firm_between_tiers` | `int4` | — | default: `2` |
 | `exception_disqualifiers` | `jsonb` | — | default: `'[]'` |
 | `disqualifier_behavior` | `text` | — | default: `'silent'` |
+| `proposed_by` | `text` | ✓ | Provenance tag for AI-proposed playbooks awaiting human approval. `'playbook_compiler'` on a compiler seed ([[../libraries/playbook-compiler]] `applyBoxPlaybookCompile`, Phase 2 of [[../specs/playbook-compiler-becomes-box-agent-mining-full-history]]); cleared to null on approval by `approvePlaybookProposal`. `is_active=false AND proposed_by IS NOT NULL` = **Proposed**; `is_active=false AND proposed_by IS NULL` = **Retired** ([[../inngest/playbook-compiler]] retire path). |
+| `source_tree_key` | `text` | ✓ | Pointer to [[compiled_trees]].`tree_key` for a compiler-seeded row; null for a human-authored playbook. Anchors idempotency — the partial `UNIQUE (workspace_id, source_tree_key) WHERE source_tree_key IS NOT NULL` index means a re-run of the compiler upserts the same seed, never a duplicate. |
 
 ## Foreign keys
 
@@ -59,6 +61,9 @@ const { count } = await admin.from("playbooks")
 ## Gotchas
 
 - Discoverable by Sonnet via name OR any entry in `trigger_intents[]` (case-insensitive).
+- **Compiler seeds live in the Proposed lane.** [[../libraries/playbook-compiler]] `applyBoxPlaybookCompile` upserts one row per recurring [[compiled_trees]] tree with `is_active=false`, `proposed_by='playbook_compiler'`, and `source_tree_key=<tree_key>`. `matchPlaybook` / `matchPlaybookScored` filter by `is_active=true`, so a Proposed row is INVISIBLE to the runtime handler until a human approves via `approvePlaybookProposal` (which compare-and-sets on both `proposed_by` and `is_active` — a human-authored row can never be reflipped).
+- **Compiler must NEVER insert an active playbook directly.** Enforced at CI by `scripts/_check-playbook-compiler-no-active.ts` (verified in the `playbook-compiler-becomes-box-agent-mining-full-history` Phase 2 verification bullet). A regression that lands `is_active=true` in the compiler's insert path fails the check red.
+- **Sol reads approved compiler seeds as a distinct catalog** (Phase 3). [[../libraries/playbook-compiler]] `listApprovedCompiledPlaybooks` filters `is_active=true AND proposed_by IS NULL AND source_tree_key IS NOT NULL` — the DB-driven subset Sol's first-touch session flags as data-grounded in reasoning. Retiring (flipping `is_active=false`) removes the row from Sol's option set the next turn; no hardcoded list.
 
 ---
 

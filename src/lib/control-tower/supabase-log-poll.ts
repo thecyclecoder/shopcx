@@ -24,7 +24,13 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
-import { recordError, recordFeedDelivery, signatureFor, isTransientSupabaseLogNoise } from "@/lib/control-tower/error-feed";
+import {
+  recordError,
+  recordFeedDelivery,
+  signatureFor,
+  isTransientSupabaseLogNoise,
+  isForeignGoTrueEdgeNoise,
+} from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -189,6 +195,12 @@ const LOG_QUERIES: LogQuery[] = [
       const status = str(row.status_code) || "5xx";
       const method = str(row.method) || "GET";
       const path = str(row.path) || "/";
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/auth/v1/user` 504
+      // ([[../specs/error-feed-drop-supabase-gotrue-504-edge-noise]]). Foreign-owned surface,
+      // no lever from our side; the transient-recur window still escalated the chronic
+      // saturation. Narrow to that exact shape so a real GoTrue outage on other paths /
+      // a non-504 5xx still surfaces.
+      if (isForeignGoTrueEdgeNoise(path, row.status_code)) return null;
       return {
         keyParts: ["api", status, method, path],
         title: `api ${status} ${method} ${path}`,

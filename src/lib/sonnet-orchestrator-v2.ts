@@ -330,6 +330,7 @@ async function buildPreContext(
     { data: workflows },
     { data: dbPrompts },
     { data: policies },
+    compiledLibrarySection,
   ] = await Promise.all([
     admin.from("workspaces").select("name").eq("id", workspaceId).single(),
     customerId
@@ -374,6 +375,22 @@ async function buildPreContext(
       .eq("is_active", true)
       .is("superseded_by", null)
       .order("slug"),
+    // Phase 3 of playbook-compiler-becomes-box-agent-mining-full-history —
+    // Sol's first-touch direction-setting session reads the COMPILED LIBRARY
+    // (approved compiler-derived playbooks + persisted trees) as a durable,
+    // DB-driven input alongside the built-in catalog. Best-effort by
+    // construction (the reader swallows errors → empty string on hiccup);
+    // per-workspace, so it sits INSIDE the stable system prompt without
+    // invalidating the shared prefix. See [[../libraries/playbook-compiler]]
+    // `loadCompiledLibraryPromptSection`.
+    (async () => {
+      try {
+        const { loadCompiledLibraryPromptSection } = await import("@/lib/playbook-compiler");
+        return await loadCompiledLibraryPromptSection(admin, workspaceId, { treesLimit: 10 });
+      } catch {
+        return "";
+      }
+    })(),
   ]);
 
   const wsName = workspace?.name || "our store";
@@ -621,7 +638,7 @@ ${buildPoliciesSection(policies || [])}
 
 ${buildPromptSections(dbPrompts || [])}
 
-DISCOUNT-CLAIM VERIFICATION (hard rule — never agree-and-refund a discount claim):
+${compiledLibrarySection ? `${compiledLibrarySection}\n\n` : ""}DISCOUNT-CLAIM VERIFICATION (hard rule — never agree-and-refund a discount claim):
 When a customer claims they did NOT get a discount / promo / coupon, or that a discount "didn't apply," NEVER agree or compute a refund from their claim. Verify against the order data first:
 - The order's actual applied discount is in its "coupons" field (code + dollar amount) in RECENT ORDERS. If the order already shows a coupon and amount, the discount WAS applied — show the customer the code + the amount, do not refund it again.
 - Quantity-break discounts depend on the cart's total unit count (the storefront tiers are e.g. 0% / 8% / 12% for 1 / 2 / 3 units). A 1-unit order does NOT earn a multi-unit break — never invent a discount the cart never qualified for.

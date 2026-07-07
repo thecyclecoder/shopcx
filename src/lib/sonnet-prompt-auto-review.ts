@@ -22,6 +22,7 @@ import { resolve } from "path";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
+import { applyReviewDecision as applyReviewDecisionSdk, archiveSupersededPrompt } from "@/lib/sonnet-prompts-table";
 
 // ── Constants ──────────────────────────────────────────────────────
 // Below this confidence, we DROP (reject) the proposal — not bother
@@ -450,66 +451,44 @@ export async function applyDecision(
     };
   }
 
-  // ── Step 2: mutate the prompt row according to the decision.
-  const promptUpdates: Record<string, any> = {
-    auto_decision: finalDecision,
-    auto_decision_at: new Date().toISOString(),
-    auto_decision_reason: rawDecision.reasoning.slice(0, 2000),
-    auto_decision_model: modelMeta.model,
-    auto_decision_confidence: rawDecision.confidence,
-  };
-
-  switch (finalDecision) {
-    case "accept":
-      promptUpdates.status = "approved";
-      promptUpdates.reviewed_at = new Date().toISOString();
-      break;
-    case "reject":
-      promptUpdates.status = "rejected";
-      promptUpdates.reviewed_at = new Date().toISOString();
-      promptUpdates.enabled = false;
-      break;
-    case "merge":
-      // Missing-target case already downgraded to reject in the safety
-      // section above — by this point merge_target_id is guaranteed.
-      promptUpdates.merged_into_id = rawDecision.merge_target_id;
-      promptUpdates.status = "rejected";
-      promptUpdates.enabled = false;
-      break;
-    case "supersede":
-      // Missing-target case already downgraded to reject above.
-      promptUpdates.status = "approved";
-      promptUpdates.reviewed_at = new Date().toISOString();
-      // The new proposal supersedes the old one. Disable the old.
-      await admin
-        .from("sonnet_prompts")
-        .update({
-          superseded_by_id: proposal.id,
-          enabled: false,
-          status: "archived",
-        })
-        .eq("id", rawDecision.supersede_target_id)
-        .eq("workspace_id", workspaceId);
-      break;
-    case "revise":
-      // Stays as proposed; the suggested_revisions live on the audit row.
-      promptUpdates.status = "proposed";
-      break;
-  }
-
-  const { error: updErr } = await admin
-    .from("sonnet_prompts")
-    .update(promptUpdates)
-    .eq("id", proposal.id)
-    .eq("workspace_id", workspaceId);
-  if (updErr) {
+  // ── Step 2: mutate the prompt row through the sonnet-prompts SDK. The SDK owns the
+  //   decision→row mapping (status/enabled/reviewed_at + all five auto_decision columns) so no
+  //   two callers can drift on which combination each verdict writes. `applyReviewDecision`
+  //   compare-and-sets on (id, workspace_id) and asserts one row transitioned — a race with a
+  //   manual override lands here as `rows=0` rather than a silent double-write.
+  //   ([[sonnet-prompts-table]] · sonnet-prompts-sdk-for-review-agent-db-access Phase 1.)
+  const applied = await applyReviewDecisionSdk(admin, {
+    workspaceId,
+    promptId: proposal.id,
+    finalDecision,
+    reasoning: rawDecision.reasoning,
+    confidence: rawDecision.confidence,
+    model: modelMeta.model,
+    mergeTargetId: finalDecision === "merge" ? rawDecision.merge_target_id ?? null : null,
+    supersedeTargetId: finalDecision === "supersede" ? rawDecision.supersede_target_id ?? null : null,
+  });
+  if (!applied.ok) {
     return {
       applied: false,
       forcedToHumanReview: forcedDowngrade,
       decisionRowId: audit.id,
       finalDecision,
-      reason: `prompt_update_failed: ${updErr.message}`,
+      reason: `prompt_update_failed: ${applied.error ?? "unknown"}`,
     };
+  }
+  // On supersede, archive the OLD row (superseded_by_id + status='archived' + enabled=false).
+  // Never delete — a supersede is reversible ([[../tables/sonnet_prompts]]).
+  if (finalDecision === "supersede" && rawDecision.supersede_target_id) {
+    const archived = await archiveSupersededPrompt(admin, {
+      workspaceId,
+      oldPromptId: rawDecision.supersede_target_id,
+      newPromptId: proposal.id,
+    });
+    if (!archived.ok) {
+      // The NEW row already landed as approved; log the archive failure so a supervisor sees why
+      // the OLD row didn't archive, but don't roll back the accepted supersede.
+      console.warn(`[applyDecision] supersede archive failed: ${archived.error ?? "unknown"}`);
+    }
   }
 
   // Token usage accounting.

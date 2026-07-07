@@ -32,7 +32,15 @@ interface DirectorNode {
   status: "offline" | "live" | "autonomous";
 }
 export interface OrgChart {
-  ceo: { goals: { slug: string; title: string; pct: number }[] };
+  ceo: {
+    goals: { slug: string; title: string; pct: number }[];
+    /**
+     * CEO-owned workers rendered UNDER the CEO seat — the founder's own agents (Eve today,
+     * god-mode-becomes-ceo-executive-assistant-agent Phase 2). Same shape as a director's
+     * workers list so the tree can render them symmetrically without a second code path.
+     */
+    workers: WorkerLane[];
+  };
   directors: DirectorNode[];
 }
 
@@ -79,6 +87,7 @@ function Node({
 
 export function OrgTree({ org }: { org: OrgChart }) {
   const goalCount = org.ceo.goals.length;
+  const ceoWorkers = org.ceo.workers ?? [];
   return (
     <div className="overflow-x-auto pb-2">
       <div className="mx-auto flex min-w-max flex-col items-center px-2">
@@ -88,6 +97,39 @@ export function OrgTree({ org }: { org: OrgChart }) {
           size="ceo"
           subtitle={`${goalCount} active goal${goalCount === 1 ? "" : "s"}`}
         />
+
+        {/* CEO-owned workers rendered ALONGSIDE the goals under the CEO seat — Eve today
+            (god-mode-becomes-ceo-executive-assistant-agent Phase 2). Same layout as a
+            director's workers column so the tree is symmetric. Deliberately kept off Ada. */}
+        {ceoWorkers.length > 0 && (
+          <>
+            <div className="h-4 w-px bg-zinc-200 dark:bg-zinc-800" />
+            <div className="flex flex-col items-stretch gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              {ceoWorkers.map((w) => (
+                <div key={w.kind} className="flex flex-col items-stretch gap-0.5">
+                  <Node
+                    slug={w.kind}
+                    label={w.label}
+                    size="worker"
+                    subtitle={w.kind}
+                    badge={
+                      <span className="mt-0.5">
+                        <WorkerStatusBadge status={w.status} reason={w.statusReason} />
+                      </span>
+                    }
+                  />
+                  <Link
+                    href={`/dashboard/agents/${encodeURIComponent(w.kind)}/kpi`}
+                    className="rounded-md px-1 py-0.5 text-center text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+                    title={`${w.label}'s KPIs`}
+                  >
+                    KPIs →
+                  </Link>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         {/* Connector from CEO down to the directors rail */}
         <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800" />
