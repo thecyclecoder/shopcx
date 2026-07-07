@@ -668,8 +668,11 @@ async function analyzeTicketInner(
     .update({ last_analyzed_at: windowEnd })
     .eq("id", ticketId);
 
-  // Severity actions
-  await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, inserted?.id);
+  // Severity actions — pass guidanceBlock so an explicit human "do not
+  // escalate" directive can HARD-SUPPRESS force-escalation, even when a
+  // severe-issue type or a customer-threat keyword is present. Phase 3
+  // of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md.
+  await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, guidanceBlock, inserted?.id);
 
   return { ok: true, analysis, analysis_id: inserted?.id ?? undefined, cost_cents: costCents, ai_message_count: aiMessageCount };
 }
@@ -798,6 +801,20 @@ async function detectUnfulfilledCancelClaim(
  * is ≥7, and the ticket is cleanly positively closed, the inaccuracy
  * force-escalate is suppressed and logged as a non-actionable note instead.
  */
+// Detect an explicit no-escalate directive in the agent-pinned guidance
+// block. Phase 3 of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md
+// — a directive from a real human BEATS the severe-issue / customer-threat
+// force-escalate overrides. Deliberately strict: this must ONLY match a
+// clear operator command like "do not escalate" / "no reopen" / "don't
+// re-open this" — not a customer's threat text quoted into a note, and
+// not a passing mention like "the customer asked us not to escalate". A
+// false positive here would silently suppress a real severe-issue reopen.
+const NO_ESCALATE_DIRECTIVE = /\b(?:don'?t|do\s+not|never|no)\s+(?:re[-\s]?)?(?:escalat\w*|open\w*|reopen\w*)\b/i;
+function guidanceHasNoEscalateDirective(guidanceBlock: string): boolean {
+  if (!guidanceBlock) return false;
+  return NO_ESCALATE_DIRECTIVE.test(guidanceBlock);
+}
+
 async function applySeverityActions(
   admin: Admin,
   ticketId: string,
@@ -805,6 +822,7 @@ async function applySeverityActions(
   customerId: string | null,
   analysis: AnalysisResult,
   msgs: MessageRow[],
+  guidanceBlock: string,
   analysisId?: string,
 ): Promise<void> {
   const score = analysis.score;
@@ -869,7 +887,29 @@ async function applySeverityActions(
     suppressInaccuracyEscalation = await hasCleanPositiveClose(admin, ticketId);
   }
 
-  const forceEscalate = (hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat;
+  // ── Human directive beats the overrides ──
+  // A pinned agent guidance note containing an explicit "do not escalate"
+  // instruction hard-suppresses the force-escalate path, even when a
+  // severe-issue type or customer-threat keyword is present. Directives
+  // from a real human are the ground truth; the overrides exist to catch
+  // failures no one has weighed in on yet. Once someone HAS weighed in,
+  // their call wins. Audit-note the suppression so the trail is
+  // reviewable. Phase 3 of human-directives-hard-gates-over-ticket-ai.
+  const directiveSuppressesEscalation =
+    guidanceHasNoEscalateDirective(guidanceBlock) && (hasSevereIssue || customerThreat);
+  if (directiveSuppressesEscalation) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — a pinned agent guidance directive says "do not escalate"; force-escalate suppressed (would have fired from ${hasSevereIssue ? `severe-issue: ${[...severeTypes].join(", ")}` : ""}${hasSevereIssue && customerThreat ? " + " : ""}${customerThreat ? "customer-threat keyword" : ""}). Directive beats the override. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+  }
+
+  const forceEscalate =
+    !directiveSuppressesEscalation &&
+    ((hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat);
 
   // Decide tier
   // ≤5: escalate + customer message

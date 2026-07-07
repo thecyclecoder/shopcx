@@ -909,12 +909,15 @@ export const unifiedTicketHandler = inngest.createFunction(
           }
         });
 
-        // mergeTickets carries forward agent_intervened / assigned_to from
-        // the source onto this ticket. Re-read so the rest of the pipeline
-        // (Sonnet scope limiter, escalation handling) sees the inherited
-        // state — without this, every new email reply opens a fresh ticket
-        // that looks AI-clean and Sonnet keeps acting on a thread the agent
-        // is already handling.
+        // mergeTickets conditionally carries forward assigned_to (only when
+        // the source's agent_intervened=true, so a bare routine assignment
+        // doesn't flip ownership). agent_intervened itself NO LONGER
+        // propagates — Phase 3 of
+        // docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md
+        // (a merge conveys context, never control). Re-read so the rest of
+        // the pipeline sees whatever DID propagate; the inherited-intervened
+        // branch is now dead unless the target already carried it — kept for
+        // safe forward compatibility with future signals.
         const inherited = await step.run("re-read-agent-state", async () => {
           const { data: t } = await admin.from("tickets")
             .select("agent_intervened, assigned_to, escalated_to")

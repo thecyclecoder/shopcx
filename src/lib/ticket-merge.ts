@@ -210,19 +210,30 @@ export async function mergeTickets(
       }).eq("id", target.id);
     }
 
-    // Carry forward agent intervention + do_not_reply (see prior comments)
+    // Carry forward do_not_reply + (conditionally) assigned_to. See prior comments.
+    // agent_intervened is NO LONGER carried forward — Phase 3 of
+    // docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md:
+    // a merge conveys the customer's full CS journey (context), but
+    // NEVER control. If the target should be human-owned, that's what
+    // ai_disabled (Phase 1) + analyzer_locked (Phase 2) + assigned_to
+    // are for. The historical use of agent_intervened as a "hold, take
+    // no actions" gate on the surviving ticket was the empty-reassurance
+    // loop the AGENT CONTEXT half-mode reply produced; that has been
+    // retired at src/lib/sonnet-orchestrator-v2.ts. agent_intervened
+    // still stamps on the SOURCE the moment a human replied there, and
+    // stays on the source stub; it just doesn't propagate.
     const t = target as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null };
     const s = source as { agent_intervened?: boolean; assigned_to?: string | null; do_not_reply?: boolean; do_not_reply_at?: string | null };
     const updates: Record<string, unknown> = {};
-    if (!t.agent_intervened && s.agent_intervened) {
-      updates.agent_intervened = true; t.agent_intervened = true;
-    }
     // Only carry forward an assignment when a HUMAN actually worked the source
     // (agent_intervened). A bare routine/auto-assignment (e.g. assigned to the
     // agent-todo routine with agent_intervened=false) must NOT propagate — it
     // flips the merged ticket into "agent-handled / defer" mode and blocks the
     // standard playbooks (cancel/refund) even though no human is on it. (Ida
     // McDonald 2026-06-10: a merged routine-assignment killed her refund flow.)
+    // s.agent_intervened here is a QUALIFIER for propagating an assigned_to
+    // (control belongs to a HUMAN, not a routine) — not a gate that flips
+    // the target into a hold-mode. Compatible with Phase 3.
     if (!t.assigned_to && s.assigned_to && s.agent_intervened) {
       updates.assigned_to = s.assigned_to; t.assigned_to = s.assigned_to;
     }
