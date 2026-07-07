@@ -4,6 +4,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext, type RAGContext } from "@/lib/rag";
 import { getStoreCreditBalance } from "@/lib/store-credit";
+import type { TicketDirection } from "@/lib/ticket-directions";
 
 export interface ConversationMessage {
   role: "user" | "assistant";
@@ -464,5 +465,138 @@ export async function assembleTicketContext(
     confidenceThreshold: channelConfig?.confidence_threshold || 0.90,
     autoResolve: channelConfig?.auto_resolve ?? false,
     establishedProblem,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Direction-scoped per-turn context (M2 Phase 1)
+//
+// Once Sol's first-touch box session has written a live `ticket_directions` row,
+// calm turns can stop paying for full-history Sonnet: per-turn context becomes the
+// Direction (intent + context_summary + guardrails) + the newest inbound message
+// body_clean, plus — only when chosen_path='playbook' — the current playbook step.
+// Customer / order / subscription re-fetches are DELIBERATELY omitted: Sol's session
+// already summarized them into `context_summary` at first-touch, so re-fetching
+// wastes tokens on data the model would just re-summarize identically.
+//
+// See docs/brain/specs/sol-cheap-execution-over-ticket-direction.md § Phase 1 +
+// docs/brain/libraries/ai-context.md § Direction-scoped path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AssembledDirectionContext {
+  systemPrompt: string;
+  conversationHistory: ConversationMessage[];
+  direction: TicketDirection;
+  chosen_path: TicketDirection["chosen_path"];
+  // A playbook snapshot when chosen_path='playbook' AND an active playbook is set on
+  // the ticket; null otherwise. Callers wiring Phase 4's short-circuit read this to
+  // decide whether to call executePlaybookStep directly instead of the orchestrator.
+  playbook_snapshot: DirectionPlaybookSnapshot | null;
+}
+
+export interface DirectionPlaybookSnapshot {
+  playbook_id: string;
+  playbook_name: string | null;
+  step_index: number;
+  step: Record<string, unknown> | null;
+  playbook_context: Record<string, unknown>;
+}
+
+/**
+ * Pure system-prompt renderer for the Direction-scoped path. Extracted so unit tests
+ * can pin the exact shape Phase-1 verification asserts on ("suffix contains intent,
+ * context_summary, stringified guardrails; does NOT contain the customer name or
+ * order list assembleTicketContext would have injected"). No DB, no network.
+ */
+export function renderDirectionSystemPrompt(
+  direction: TicketDirection,
+  playbook?: DirectionPlaybookSnapshot | null,
+): string {
+  const parts: string[] = [];
+  parts.push("DIRECTION (locked in by Sol at first-touch — drive this turn off this, not full history):");
+  parts.push(`- intent: ${direction.intent}`);
+  parts.push(`- context_summary: ${direction.context_summary}`);
+  parts.push(`- guardrails: ${JSON.stringify(direction.guardrails ?? {})}`);
+  parts.push(`- chosen_path: ${direction.chosen_path}`);
+
+  if (direction.chosen_path === "playbook" && playbook) {
+    parts.push("");
+    parts.push("PLAYBOOK STEP:");
+    parts.push(`- playbook: ${playbook.playbook_name ?? playbook.playbook_id}`);
+    parts.push(`- step_index: ${playbook.step_index}`);
+    parts.push(`- step: ${JSON.stringify(playbook.step ?? {})}`);
+    parts.push(`- playbook_context: ${JSON.stringify(playbook.playbook_context ?? {})}`);
+  }
+
+  return parts.join("\n");
+}
+
+/**
+ * Build a Direction-scoped per-turn context. The caller has already loaded the live
+ * Direction (via loadLiveDirection in @/lib/ticket-directions) and the newest inbound
+ * message; this function only fetches the playbook snapshot when chosen_path='playbook'.
+ * Returns null when the caller passed a Direction whose superseded_at is non-null — the
+ * caller is expected to fall through to assembleTicketContext in that case.
+ */
+export async function assembleDirectionContext(
+  workspaceId: string,
+  ticketId: string,
+  input: {
+    live_direction: TicketDirection;
+    newest_inbound: { body_clean: string | null };
+  },
+): Promise<AssembledDirectionContext | null> {
+  const direction = input.live_direction;
+  if (direction.superseded_at) return null;
+
+  let playbookSnap: DirectionPlaybookSnapshot | null = null;
+  if (direction.chosen_path === "playbook") {
+    const admin = createAdminClient();
+    const { data: ticketRow } = await admin
+      .from("tickets")
+      .select("active_playbook_id, playbook_step, playbook_context")
+      .eq("workspace_id", workspaceId)
+      .eq("id", ticketId)
+      .single();
+
+    const activePlaybookId = ticketRow?.active_playbook_id as string | null;
+    if (activePlaybookId) {
+      const { data: playbookRow } = await admin
+        .from("playbooks")
+        .select("id, name")
+        .eq("id", activePlaybookId)
+        .single();
+
+      const { data: steps } = await admin
+        .from("playbook_steps")
+        .select("*")
+        .eq("playbook_id", activePlaybookId)
+        .order("step_order", { ascending: true });
+
+      const stepIndex = typeof ticketRow?.playbook_step === "number" ? ticketRow.playbook_step : 0;
+      const step = (steps ?? [])[stepIndex] ?? null;
+
+      playbookSnap = {
+        playbook_id: activePlaybookId,
+        playbook_name: (playbookRow?.name as string | null) ?? null,
+        step_index: stepIndex,
+        step: (step as Record<string, unknown> | null) ?? null,
+        playbook_context: (ticketRow?.playbook_context as Record<string, unknown> | null) ?? {},
+      };
+    }
+  }
+
+  const systemPrompt = renderDirectionSystemPrompt(direction, playbookSnap);
+  const inboundBody = (input.newest_inbound.body_clean ?? "").trim();
+  const conversationHistory: ConversationMessage[] = inboundBody
+    ? [{ role: "user", content: inboundBody }]
+    : [];
+
+  return {
+    systemPrompt,
+    conversationHistory,
+    direction,
+    chosen_path: direction.chosen_path,
+    playbook_snapshot: playbookSnap,
   };
 }
