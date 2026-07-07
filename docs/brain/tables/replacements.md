@@ -88,7 +88,7 @@ const { count } = await admin.from("replacements")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **Replacements ship to the customer's current address, not the original order's snapshot.** When creating a replacement, the system resolves the destination via [[../libraries/customer-shipping-address]] `resolveCustomerShippingAddress()` — it prefers `customers.default_address` (canonical current), then subscription address, then the original order's snapshot as last resort. This prevents stale address snapshots from silently shipping to the wrong location (ticket 49ddd6c4). The resolved address is validated and stored in `validated_address`; an operator can override via `address_override` on the action.
 
 ---
 

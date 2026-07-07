@@ -1,0 +1,1 @@
+- **Order-creating actions ship to the customer's CURRENT address, not a stale cited-order snapshot** · verified 2026-07-07 · → [[../lifecycles/ticket-lifecycle]] | [[../libraries/customer-shipping-address]] | [[../tables/customers]] | [[../tables/orders]] | [[../tables/subscriptions]] | [[../tables/replacements]]
