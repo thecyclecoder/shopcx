@@ -58,6 +58,7 @@
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
     "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts",
     "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",
+    "test:action-executor-vaulted-pm-guard": "tsx --test src/lib/action-executor.vaulted-pm-guard.test.ts",
     "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts"
   },
   "dependencies": {

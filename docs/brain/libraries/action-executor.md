@@ -37,6 +37,16 @@ const directActionHandlers: Record<
   (ctx: ActionContext, p: ActionParams)
 ```
 
+### `pickChargeableVaultedPm` — function
+
+```ts
+function pickChargeableVaultedPm(rows: CustomerPaymentMethodRow[] | null | undefined): CustomerPaymentMethodRow | null
+```
+
+Pure predicate wired into the `create_order` / `create_subscription` vaulted-PM guard (assisted-purchase-playbook spec Phase 1). Picks the customer's chargeable vaulted PM from a set of [[../tables/customer_payment_methods]] rows — prefers `is_default=true` among rows with `status='active'`, else any active row; returns null when no chargeable row exists. Exported so tests can pin the fail-closed branch without a live DB.
+
+### `CustomerPaymentMethodRow` — interface
+
 ### `SonnetDecision` — interface
 
 ### `ActionParams` — interface
@@ -63,6 +73,8 @@ const directActionHandlers: Record<
 - **On a resolver miss the executor records the hit for admin review.** [[proposed-action-aliases]] `recordUnknownActionType` upserts a `(workspace_id, source_type)` row in [[../tables/proposed_action_aliases]] with a bumped `occurrences` and refreshed `last_seen` + most-recent `ticket_id`. Once `occurrences >= 3` and the row is still `pending`, a small Haiku call proposes a target from the passed-in `Object.keys(directActionHandlers)` list — validated against that same list before write so a hallucinated handler name cannot make it into the queue. The admin approves/declines at `/dashboard/settings/ai/handler-aliases`; the approve route dual-writes an [[../tables/action_handler_aliases]] row (workspace-scoped, `active=true`) so the very next hit resolves cleanly.
 
 - **`direct_action` opens with the selective-clarify gate** ([[selective-clarify]] — Phase 2 of [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]). Before `handleDirectAction` runs, `shouldClarify(decision)` intersects the decision's `actions[].type` with a workspace-scoped IRREVERSIBLE_SET (default `{partial_refund, cancel, bill_now, subscriptionOrderNow}`; overridable via a `slug='irreversible_actions'` [[../tables/policies]] row) and its `confidence` against a threshold (default `0.7`). On a hit we send a scoped confirmation-turn (`buildClarificationMessage`), stamp [[../tables/ticket_resolution_events]] `verified_outcome='clarified'`, and skip execution entirely. Sandbox mode bypasses the gate (its stamped-note dry-run is already non-destructive). This is the ~6% intersection the parent goal picks up — the alternative is the 38% blanket-clarify regime it rejects.
+
+- **`create_order` / `create_subscription` open with an unconditional vaulted-PM guard** ([[../specs/assisted-purchase-playbook]] Phase 1). The guard reads [[../tables/customer_payment_methods]] for the customer (expanding [[../tables/customer_links]] siblings), keeps only `status='active'` rows via `pickChargeableVaultedPm`, and — on a miss — launches the [[../journeys/add-payment-method]] journey via [[journey-delivery]] `launchJourneyForTicket`, writes an internal `[System] {action} deferred — no vaulted payment method` note on the ticket, and returns `{ success: false, error: 'no_vaulted_payment_method', summary: '{action} deferred …' }` WITHOUT calling the commerce effector. Fail-closed and unconditional (no flag bypass) — a missing PM can never reach `createOrder` / `createSubscription`. Pinned by `action-executor.vaulted-pm-guard.test.ts`.
 
 - **`executeSonnetDecision` returns `{ messageSent, escalated, closed, statusManaged }`.** The `workflow` case returns `statusManaged: true` (via `handleWorkflow`, which returns `true` only when a workflow actually ran) because the workflow executor sets the authoritative final status itself in `sendReply` ([[workflow-executor]]: `account_login` → closed, `return_to_sender` → open). The post-execute block in [[../inngest/unified-ticket-handler]] (`postExecuteStatusAction`) must leave a status-managed ticket untouched — do NOT copy the journey case's `messageSent = true`, which routes through `setStatus` and always forces `closed`, wrongly closing an intentionally-open workflow. (Ticket `a89dcf76` Mindy Freeman: `account_login` magic-link close was being reopened as "no customer message sent".) See [[../lifecycles/ticket-lifecycle]] Phase 5.
 
