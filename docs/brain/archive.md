@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
+- **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]
 - **Assisted-purchase playbook — gate create_order / create_subscription behind a vaulted PM, launching add_payment_method when missing** · verified 2026-07-07 · → [[lifecycles/subscription-billing]]
 - **Recalibrate the Meta ad-performance sensor (source-family + scent-match tagging)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
 - **Replace auth.users full-table scans on hot-path routes** · verified 2026-07-07 · → [[../libraries/access]]
@@ -41,6 +42,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Retire skip_next_order (88% failure) — shadow-measured alias to change_next_date / bill_now** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Serialize goal-member spec builds to prevent hot-file merge collisions** · verified 2026-07-07 · → [[../lifecycles/spec-goal-branch-pm-flow]]
 - **The AI ticket analyzer becomes a supervised box-session agent under June** · verified 2026-07-07 · → [[../lifecycles/ai-analysis]]
+- **Ticket-analyzer workprobe must exclude analyzer_locked tickets (mirror cron source filter)** · verified 2026-07-07 · → [[libraries/control-tower]]
 - **Summarize once at merge, then stop re-sending the full history to Opus every turn** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **ticket_resolution_events write-ahead ledger + SonnetDecision schema extension** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]
 - **Extend verifyActionInDB coverage: returns, date/frequency, item ops, price** · verified 2026-07-07 · → [[libraries/action-executor]]
