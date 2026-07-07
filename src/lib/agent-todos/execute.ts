@@ -284,17 +284,20 @@ async function executeTicketClose(admin: Admin, todo: AgentTodo): Promise<Execut
 async function executeAnalysisRescore(admin: Admin, todo: AgentTodo): Promise<ExecutionResult> {
   const p = todo.payload as { ticket_analysis_id?: string; score?: number; summary?: string; issues?: unknown };
   if (!p.ticket_analysis_id) return { ok: false, error: "missing ticket_analysis_id" };
-  const { error } = await admin
-    .from("ticket_analyses")
-    .update({
-      admin_score: p.score,
-      admin_score_reason: "Rescored by escalation-triage (approved)",
-      admin_corrected_at: new Date().toISOString(),
-      summary: p.summary,
-      issues: p.issues ?? undefined,
-    })
-    .eq("id", p.ticket_analysis_id);
-  if (error) return { ok: false, error: error.message };
+  // Route through the ticket-analyses SDK (Phase 2 of ticket-analyzer-becomes-box-agent-under-
+  // june). applyAgentRescore is compare-and-set against (id, workspace_id) so a mismatched-
+  // workspace id can never overwrite another workspace's row. `todo.workspace_id` is the
+  // authenticated approver's scope.
+  const { applyAgentRescore } = await import("@/lib/ticket-analyses-table");
+  const r = await applyAgentRescore({
+    analysisId: p.ticket_analysis_id,
+    workspaceId: todo.workspace_id,
+    score: p.score,
+    summary: p.summary,
+    issues: p.issues,
+    source: "escalation-triage:approved",
+  });
+  if (!r.ok) return { ok: false, error: r.error ?? "applyAgentRescore failed" };
   return { ok: true, row_id: p.ticket_analysis_id };
 }
 

@@ -21,6 +21,7 @@ import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
+import { insertAnalysis, getLatestForTicket } from "@/lib/ticket-analyses-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -602,15 +603,11 @@ export async function prepareAnalyzerRun(
     return { ok: false, reason: "skip_tag" };
   }
 
-  // Latest analysis defines the start of the next window
-  const { data: prevAnalysis } = await admin.from("ticket_analyses")
-    .select("window_end")
-    .eq("ticket_id", ticketId)
-    .order("window_end", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  const windowStart = prevAnalysis?.window_end || ticket.created_at;
+  // Latest analysis defines the start of the next window — read via the SDK so the ONE place
+  // ticket_analyses gets touched from the analyzer is the SDK, not raw table access
+  // (Phase 2 of ticket-analyzer-becomes-box-agent-under-june).
+  const prevAnalysis = await getLatestForTicket(ticketId, { select: "window_end" });
+  const windowStart = (prevAnalysis?.window_end as string | undefined) || ticket.created_at;
   const windowEnd = new Date().toISOString();
 
   // Pull messages in the window
@@ -763,23 +760,29 @@ export async function applyAnalyzerVerdict(
     ticketId: prepared.ticketId,
   });
 
-  // Insert the analysis row
-  const { data: inserted } = await admin.from("ticket_analyses").insert({
-    workspace_id: prepared.workspaceId,
-    ticket_id: prepared.ticketId,
-    window_start: prepared.windowStart,
-    window_end: prepared.windowEnd,
+  // Insert the analysis row through the SDK. All writes to `ticket_analyses` route through
+  // insertAnalysis / applyAdminOverride / applyAgentRescore — the guard
+  // scripts/_check-ticket-analyses-sdk-compliance.ts CI-reds any raw `.from('ticket_analyses')
+  // .insert/.update` outside src/lib/ticket-analyses-table.ts.
+  const { id: insertedId, error: insertErr } = await insertAnalysis({
+    workspaceId: prepared.workspaceId,
+    ticketId: prepared.ticketId,
+    windowStart: prepared.windowStart,
+    windowEnd: prepared.windowEnd,
     score: analysis.score,
     issues: analysis.issues || [],
-    action_items: analysis.action_items || [],
+    actionItems: analysis.action_items || [],
     summary: analysis.summary || null,
     model,
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    cost_cents: costCents,
+    inputTokens: inputTokens,
+    outputTokens: outputTokens,
+    costCents: costCents,
     trigger: prepared.trigger,
-    ai_message_count: prepared.aiMessageCount,
-  }).select("id").single();
+    aiMessageCount: prepared.aiMessageCount,
+  });
+  if (insertErr) {
+    console.warn(`[ticket-analyzer] insertAnalysis failed (${prepared.ticketId}): ${insertErr}`);
+  }
 
   // Update ticket.last_analyzed_at
   await admin.from("tickets")
@@ -797,13 +800,13 @@ export async function applyAnalyzerVerdict(
     analysis,
     prepared.msgs,
     prepared.guidanceBlock,
-    inserted?.id,
+    insertedId ?? undefined,
   );
 
   return {
     ok: true,
     analysis,
-    analysis_id: inserted?.id ?? undefined,
+    analysis_id: insertedId ?? undefined,
     cost_cents: costCents,
     ai_message_count: prepared.aiMessageCount,
   };

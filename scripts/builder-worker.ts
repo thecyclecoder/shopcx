@@ -11694,6 +11694,36 @@ async function runTicketAnalyzeJob(job: Job) {
         : { model },
     );
 
+    // Phase 2 of ticket-analyzer-becomes-box-agent-under-june: record the verdict to
+    // `director_activity` (director_function='cs', action_kind='ticket_analyzed') so the CS
+    // Director's (💬 June) activity feed / EOD recap surfaces every analyze decision + its
+    // reasoning. Idempotent-safe on job_id via recordDirectorActivity's swallow-and-warn shape
+    // (a dynamic-import failure never rolls back the applied ticket_analyses row). autonomous:true
+    // — this is a supervised worker verdict, not a CEO-approved action.
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "ticket_analyzed",
+        specSlug: null,
+        reason: (applied.analysis.summary || `Score ${applied.analysis.score}/10`).slice(0, 4000),
+        metadata: {
+          job_id: job.id,
+          ticket_id: ticketId,
+          analysis_id: applied.analysis_id ?? null,
+          score: applied.analysis.score,
+          issues_types: applied.analysis.issues.map((i) => i.type),
+          ai_message_count: applied.ai_message_count,
+          trigger,
+          autonomous: true,
+          phase: 2,
+        },
+      });
+    } catch (e) {
+      console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
     const summary = [
       `score=${applied.analysis.score}/10`,
       applied.analysis.summary ? applied.analysis.summary : "",
