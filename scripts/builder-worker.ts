@@ -11104,6 +11104,26 @@ function deployReviewBrief(inst: DeployReviewInstructions): string {
   ].join("\n");
 }
 
+// Same-session JSON parse-repair re-prompt for Reva's verdict envelope. Mirrors the security-review
+// pattern at securityReviewRepairPrompt (iteration-ingest-async-reports-fix-tooling-69594a) and the
+// spec-test agent's parse-repair (builder-worker.ts:4649): when the first attempt completed real
+// investigative work but flubbed the final JSON shape, re-prompt on the SAME session for ONLY the
+// {decision, signals, reasoning} envelope. The model has all its findings in memory; it just needs to
+// re-emit them in the recognized shape. Re-investigation is explicitly forbidden. Fixes the parked
+// deploy-review job class where the origin's build ran cleanly, Reva investigated, but the terminal
+// envelope was prose/malformed and the runner fail-safed to needs_attention on the first miss.
+function deployReviewRepairPrompt(): string {
+  return [
+    `Your previous message could not be parsed as the deploy-review JSON verdict envelope.`,
+    `Return ONLY one valid JSON object — no prose before or after, no markdown, no commentary. If you must use a code fence the JSON must be the last thing in the message. Reuse the per-signal judgments + reasoning you ALREADY produced; do NOT re-investigate, do NOT re-read files, do NOT re-run git or any other tool.`,
+    ``,
+    `Exact envelope shape:`,
+    `  {"decision":"revert"|"keep"|"escalate","signals":[{"key":"<signature or loop_id>","surface":"<owning route/cron/lib>","caused":true|false,"evidence":"<cited file:line — the causal path or its absence>"}],"reasoning":"<2-4 sentences citing at least one real file:line>"}`,
+    ``,
+    `If you genuinely could not reach a verdict (session ran out of context, blocker, etc.), return ONLY {"decision":"escalate","signals":[],"reasoning":"<one line on why you could not reach a verdict>"} — never guess revert.`,
+  ].join("\n");
+}
+
 function deployReviewPrompt(brief: string): string {
   return [
     `Use the deploy-review skill (cwd is the repo root). You are Reva, the box's Deploy Guardian, on Max — web search on, no API key. You have full brain / \`src/\` / git powers and READ-ONLY prod DB. You NEVER mutate: you investigate, decide, and emit ONE JSON object. The worker (deterministic Node in src/lib/deploy-guardian.ts — applyBoxDeployReview) executes your typed verdict on your response — never re-run the cron, never call revertDeployMerge yourself, never touch deploy_watches.`,
@@ -11200,14 +11220,41 @@ async function runDeployReviewJob(job: Job) {
   try {
     const brief = deployReviewBrief(inst);
     const prompt = deployReviewPrompt(brief);
-    const { session, resultText, isError, raw, usage, model, configDir: drDir } = await runBoxLane(
+    const firstRun = await runBoxLane(
       (cfg, sid) => runDeployReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
+    let { session, resultText, isError, raw, usage, model } = firstRun;
+    const drDir = firstRun.configDir;
     await meterAgentJob(job, drDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: drDir });
 
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = normalizeDeployReviewVerdict(parsed);
+    let parsed = extractJson<Record<string, unknown>>(resultText);
+    let verdict = normalizeDeployReviewVerdict(parsed);
+
+    // Same-session JSON parse-repair (mirrors security-review at 18869 + spec-test at 4649). The prior
+    // Reva pass was a single shot: attempt 1 unparseable → straight to fail-safe (stamp 'unsure' + park
+    // needs_attention). That's the class of parked deploy-review that stalled the origin's build here:
+    // the model completed the causal read (session spent, tokens spent, SessionEnd hooks fired) but the
+    // terminal envelope was prose / a malformed brace, and re-running the whole investigation from
+    // scratch would waste the spend AND often produce the same shape (the model's tendency, not the
+    // input's). Instead, re-prompt on the SAME session for ONLY the JSON envelope — the model already
+    // has its per-signal judgments in context; it just needs to re-emit them in the recognized shape.
+    // Pinned to the same account (drDir) — a --resume can only land on the account that owns the session.
+    // Skipped when there is no session id (nothing to --resume against) or the first attempt landed a
+    // valid verdict. On repair success we ALSO re-persist the session/account (mirrors security-review's
+    // onRun) so the DB row stays coherent for any downstream re-drive.
+    if (!verdict && session) {
+      console.warn(`${tag} unparseable verdict — same-session parse-repair (attempt 2, JSON envelope only)`);
+      const repair = await runDeployReviewClaude(deployReviewRepairPrompt(), session, REPO_DIR, drDir ?? undefined, job.id);
+      await meterAgentJob(job, drDir ?? undefined, repair.usage, repair.model);
+      if (repair.session) await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: drDir });
+      session = repair.session ?? session;
+      resultText = repair.resultText;
+      raw = repair.raw;
+      isError = repair.isError; // if the repair errored but produced a verdict, we still apply it below (matches security-review semantics)
+      parsed = extractJson<Record<string, unknown>>(resultText);
+      verdict = normalizeDeployReviewVerdict(parsed);
+    }
     console.log(`${tag} claude finished — decision: ${verdict?.decision ?? "(none)"} · isError=${isError}`);
 
     // Import Phase-3 mutator + Phase-4 fail-safe once for every branch below.
@@ -11217,14 +11264,15 @@ async function runDeployReviewJob(job: Job) {
     if (!verdict) {
       // Phase 4 fail-safe (never revert without a judgment): stamp the watch 'unsure' + escalate. The
       // atomic pending-guard makes this idempotent — a concurrent apply/failsafe/redriven-job no-ops.
-      // Then the job parks needs_attention so the lane frees and a human sees the error.
-      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session" });
+      // Then the job parks needs_attention so the lane frees and a human sees the error. Only reached
+      // when the same-session parse-repair above ALSO failed (or no session existed to --resume).
+      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session (after parse-repair)" });
       await update(job.id, {
         status: "needs_attention",
         error: "deploy-review returned no parseable verdict",
         log_tail: `${fs.stamped ? "fail-safe: watch stamped 'unsure' + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`}\n\n${raw}`.slice(-2000),
       });
-      console.warn(`${tag} unparseable verdict — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
+      console.warn(`${tag} unparseable verdict (after parse-repair) — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
       return;
     }
 
