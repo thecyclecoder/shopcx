@@ -20,6 +20,9 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
+// pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
+// member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
+import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
 
 const envPath = resolve(__dirname, "../.env.local");
@@ -7636,10 +7639,16 @@ function parsePlannerSpecs(parsed: { status: string } | Record<string, unknown> 
         milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
         intent: String(sp.intent || a.preview || ""),
         gap: typeof sp.gap === "string" ? sp.gap : undefined,
-        // Prerequisite slugs (goal-decomposition-encodes-blockers). Keep only string slugs;
-        // a missing/malformed list → no declared blockers (the spec authors with no Blocked-by).
+        // Prerequisite slugs (goal-decomposition-encodes-blockers). Pia's decomposition sometimes emits
+        // namespaced `goalSlug:specSlug` (or wikilinked / anchored) entries — the build-gating
+        // (areSpecsGoalMates + Kahn sort in src/lib/agent-jobs.ts) resolves each blocker string in
+        // public.specs by exact slug and does NOT split on `:`, so a namespaced entry resolves to no
+        // spec and the gate silently treats it as an external blocker → the dependent builds out of
+        // order (2026-07-07 Sol-goal build shipped M2 before its declared M1 for this reason). Normalize
+        // to plain member slugs at THIS write-path so the DB row's blocked_by is what the gate expects.
+        // A missing/all-junk list → no declared blockers (the spec authors with no Blocked-by).
         blocked_by: Array.isArray(sp.blocked_by)
-          ? (sp.blocked_by as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+          ? normalizePlannerBlockedByList(sp.blocked_by, sp.slug)
           : undefined,
       },
     });

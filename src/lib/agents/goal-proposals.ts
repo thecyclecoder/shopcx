@@ -82,6 +82,63 @@ export function isValidGoalSlug(slug: string): boolean {
 }
 
 /**
+ * pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize ONE Pia-emitted `blocked_by` entry to
+ * a plain member spec slug (`kebab-case`, matches `isValidGoalSlug`) or return `null` when the entry is
+ * junk / unresolvable. The build-gating (`areSpecsGoalMates` + the Kahn sort in [[libraries/agent-jobs]])
+ * looks blockers up in `public.specs` by their exact slug and does NOT split on `:`, so a namespaced
+ * `goalSlug:specSlug` entry resolves to no spec ⇒ the gate silently treats it as an external blocker and
+ * lets the dependent build out of order (the 2026-07-07 Sol-goal build shipped its M2 spec before its
+ * declared M1 blocker for exactly this reason). Applied at the plan-goal write path in
+ * `parsePlannerSpecs` (scripts/builder-worker.ts) so the DB row stores plain slugs the gate can resolve.
+ *
+ * Accepts:
+ *   - a plain slug: `sol-ticket-direction-artifact` → unchanged
+ *   - a namespaced slug: `sol-agent-boot-goal:sol-ticket-direction-artifact` → last colon-segment
+ *   - a wikilink: `[[sol-ticket-direction-artifact]]` → inside the brackets
+ *   - a wikilink with a `../specs/` path prefix: `[[../specs/foo]]` → `foo`
+ *   - a wikilink with a `#phase-anchor` suffix: `[[../specs/foo#phase-2]]` → `foo`
+ * Rejects anything that after normalization isn't a lowercase-kebab slug (returns `null`).
+ */
+export function normalizePlannerBlockedBySlug(raw: string): string | null {
+  if (typeof raw !== "string") return null;
+  let s = raw.trim();
+  if (!s) return null;
+  const bracketMatch = s.match(/^\[\[(.+?)\]\]$/);
+  if (bracketMatch) s = bracketMatch[1].trim();
+  s = s.replace(/^(?:\.\.\/)+specs\//, "");
+  s = s.replace(/#.*$/, "");
+  if (s.includes(":")) {
+    const parts = s.split(":").map((p) => p.trim()).filter(Boolean);
+    if (!parts.length) return null;
+    s = parts[parts.length - 1];
+  }
+  s = s.trim();
+  if (!s || !isValidGoalSlug(s)) return null;
+  return s;
+}
+
+/**
+ * pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize a whole planner `blocked_by` LIST.
+ * Filters non-strings, runs each survivor through `normalizePlannerBlockedBySlug`, drops the spec's own
+ * slug (self-block), and dedupes while preserving first-seen order. A non-array input yields `[]` (the
+ * planner sometimes omits the field entirely — treat as "no declared prerequisites").
+ */
+export function normalizePlannerBlockedByList(raw: unknown, selfSlug: string): string[] {
+  if (!Array.isArray(raw)) return [];
+  const self = (selfSlug || "").trim().toLowerCase();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const norm = normalizePlannerBlockedBySlug(entry);
+    if (!norm || norm === self || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out;
+}
+
+/**
  * The self-function scope rail: a director proposes ONLY for its own function. Returns an error string when
  * the proposer and owner disagree (or either is missing/blank), else null. Enforced before any commit so a
  * director can never author a goal for another function.
