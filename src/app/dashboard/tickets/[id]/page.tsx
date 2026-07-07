@@ -2743,6 +2743,37 @@ export default function TicketDetailPage() {
                 </p>
               )}
             </div>
+            {/* AI hard gate — per-ticket "turn off AI" human directive.
+                Non-propagating on merge (see src/lib/ticket-merge.ts).
+                When on: the unified ticket handler + the ticket-analyzer
+                cron both short-circuit; no orchestrator, no playbook, no
+                auto-reopen. Phase 1 of
+                human-directives-hard-gates-over-ticket-ai. */}
+            {(() => {
+              const aiDisabled = !!(ticket as TicketDetail & { ai_disabled?: boolean }).ai_disabled;
+              return (
+                <div>
+                  <label className="block text-sm text-zinc-500">AI Handling</label>
+                  <button
+                    type="button"
+                    onClick={() => handlePatch({ ai_disabled: !aiDisabled })}
+                    disabled={ticket.status === "archived"}
+                    className={`mt-1 w-full rounded-md border px-2 py-1.5 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+                      aiDisabled
+                        ? "border-red-300 bg-red-50 text-red-800 hover:bg-red-100 dark:border-red-700 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900"
+                        : "border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700"
+                    }`}
+                  >
+                    {aiDisabled ? "🚫 AI is OFF · click to re-enable" : "Turn off AI on this ticket"}
+                  </button>
+                  {aiDisabled && (
+                    <p className="mt-1 text-sm text-red-600 dark:text-red-400">
+                      AI handler + auto-analysis will skip this ticket. Does not propagate on merge.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
             <div>
               <label className="block text-sm text-zinc-500">Channel</label>
               <p className="mt-1 text-sm capitalize text-zinc-700 dark:text-zinc-300">{ticket.channel.replace("_", " ")}</p>

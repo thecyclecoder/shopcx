@@ -75,6 +75,9 @@ Customer support tickets. status (open/pending/closed/archived), channel, handle
 | `detected_language` | `text` | ✓ |  |
 | `do_not_reply` | `bool` | — | default: `false` |
 | `do_not_reply_at` | `timestamptz` | ✓ |  |
+| `ai_disabled` | `bool` | — | default: `false` |
+| `ai_disabled_by` | `uuid` | ✓ | → `auth.users`.id |
+| `ai_disabled_at` | `timestamptz` | ✓ |  |
 
 ## Foreign keys
 
@@ -168,6 +171,7 @@ const { data } = await admin.from("tickets")
 - `agent_intervened` flips true the moment a real human sends an outbound — AI must read this before generating.
 - `merged_into` (self-FK): merged duplicates point at the surviving ticket. Filter with `merged_into IS NULL` to get canonical rows only.
 - `do_not_reply` blocks outbound — e.g. mailer-daemon. Set by inbound filters.
+- `ai_disabled` is an explicit **human directive** — a person clicks "Turn off AI on this ticket" in the dashboard. The [[../inngest/unified-ticket-handler]] hard-exits on inbound (mirrors the `do_not_reply` short-circuit) and [[../libraries/ticket-analyzer]] skips analysis + escalation. **Non-propagating on merge** — the surviving ticket keeps its own value (default `false`), because a merge conveys context, never control. Toggled via `PATCH /api/tickets/[id]` with `{ ai_disabled: true|false }`; the endpoint stamps `ai_disabled_by` + `ai_disabled_at` and writes an audit `ticket_messages` row. Phase 1 of `docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md`.
 
 ---
 

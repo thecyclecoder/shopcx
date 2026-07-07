@@ -231,6 +231,13 @@ export async function mergeTickets(
       updates.do_not_reply_at = s.do_not_reply_at || nowIso();
       t.do_not_reply = true;
     }
+    // ai_disabled is DELIBERATELY NOT propagated. It is a per-ticket
+    // human directive against a specific conversation; folding it onto
+    // the surviving ticket would silently disable the AI on unrelated
+    // customer threads the target already carries. The surviving ticket
+    // keeps its own value (default false). Phase 1 of
+    // docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md —
+    // "a merge conveys context, never control."
 
     // CARRY ESCALATION FORWARD. If the source was escalated and the target
     // isn't, the target inherits the escalation — otherwise the work

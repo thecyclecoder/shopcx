@@ -274,6 +274,18 @@ export async function PATCH(
 
   if ("assigned_to" in body) updates.assigned_to = body.assigned_to || null;
   if ("tags" in body) updates.tags = body.tags;
+  // Human directive — per-ticket "turn off AI" hard gate. Non-propagating on
+  // merge (see src/lib/ticket-merge.ts). Sets actor + timestamp on flip so the
+  // audit trail survives even if the toggle is later re-enabled; clearing
+  // wipes both. Phase 1 of human-directives-hard-gates-over-ticket-ai.
+  let aiDisabledAudit: { toDisabled: boolean } | null = null;
+  if ("ai_disabled" in body) {
+    const next = !!body.ai_disabled;
+    updates.ai_disabled = next;
+    updates.ai_disabled_by = next ? user.id : null;
+    updates.ai_disabled_at = next ? new Date().toISOString() : null;
+    aiDisabledAudit = { toDisabled: next };
+  }
   if ("csat_score" in body) updates.csat_score = body.csat_score;
   if ("auto_reply_at" in body) updates.auto_reply_at = body.auto_reply_at;
   // Escalate to the AI Routine: escalated_at set + escalated_to = null (the
@@ -302,6 +314,28 @@ export async function PATCH(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Audit note for the ai_disabled toggle — cite the actor so the trail
+  // survives a later re-enable. Only fires when the field was in the
+  // request, so a normal PATCH doesn't spam ticket_messages.
+  if (aiDisabledAudit) {
+    const { data: actor } = await admin
+      .from("workspace_members")
+      .select("display_name")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    const actorName = actor?.display_name || user.email || "A team member";
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: aiDisabledAudit.toDisabled
+        ? `[System] ${actorName} turned OFF the AI on this ticket. The handler + auto-analysis will skip it until AI is re-enabled.`
+        : `[System] ${actorName} re-enabled the AI on this ticket.`,
+    });
+  }
 
   // Evaluate rules on status change
   if ("status" in body && body.status !== existing.status) {

@@ -707,9 +707,20 @@ export const unifiedTicketHandler = inngest.createFunction(
     // ── 1. Resolve ──
     const st = await step.run("resolve", async () => {
       const { data: ticket } = await admin.from("tickets")
-        .select("customer_id, channel, ai_clarification_turn, agent_intervened, assigned_to, escalated_to, subject, do_not_reply")
+        .select("customer_id, channel, ai_clarification_turn, agent_intervened, assigned_to, escalated_to, subject, do_not_reply, ai_disabled")
         .eq("id", tid).single();
       if (!ticket) throw new Error("Ticket not found");
+      // ── ai_disabled hard gate ──
+      // Human directive — a real person clicked "Turn off AI" on this
+      // one ticket. Skip EVERY downstream step: orchestrator, playbook,
+      // journey, macro, ai-draft. This mirrors the do_not_reply
+      // short-circuit below (same sentinel + hard-exit shape) but is
+      // an explicit human decision, not a spam/wrong-recipient filter.
+      // Non-propagating on merge — see src/lib/ticket-merge.ts.
+      if ((ticket as unknown as { ai_disabled?: boolean }).ai_disabled) {
+        await sysNote(admin, tid, `[System] Skipped — AI is disabled on this ticket by human directive`);
+        return { _aiDisabled: true, hasCust: false, custId: null, custEmail: null, hasShopifyCustomer: false, ch: ticket.channel || ch, turn: 0, intervened: false, assignedTo: null, escalatedTo: null, subject: ticket.subject || "" };
+      }
       // ── do_not_reply short-circuit ──
       // Tickets flagged as do_not_reply (wrong_company, wrong_product,
       // spam, etc.) skip all AI processing on inbound messages. The
@@ -750,6 +761,13 @@ export const unifiedTicketHandler = inngest.createFunction(
       };
     });
 
+    // Hard exit if AI is disabled on this ticket by human directive.
+    // Same shape as the do_not_reply short-circuit — resolve() already
+    // logged the audit note; we bail before language detection /
+    // classification / orchestrator run.
+    if ((st as unknown as { _aiDisabled?: boolean })._aiDisabled) {
+      return { skipped: "ai_disabled" };
+    }
     // Hard exit if the ticket is flagged do_not_reply. The resolve
     // step already logged the system note; we just stop here and
     // skip everything downstream — language detection, classification,

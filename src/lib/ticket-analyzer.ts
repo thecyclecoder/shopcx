@@ -454,7 +454,7 @@ async function analyzeTicketInner(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
@@ -463,6 +463,14 @@ async function analyzeTicketInner(
   // empty shell. The target gets analyzed on its own close cycle.
   if (ticket.merged_into) {
     return { ok: false, reason: "merged_into_other" };
+  }
+
+  // Human directive — AI disabled on this ticket. Skip analysis AND
+  // escalation. Same reason as do_not_reply below: grading an absent
+  // reply always scores poorly and would re-escalate, which is the
+  // opposite of what the human directive asked for.
+  if ((ticket as unknown as { ai_disabled?: boolean }).ai_disabled) {
+    return { ok: false, reason: "ai_disabled" };
   }
 
   // do_not_reply tickets don't get analyzed — the AI intentionally
@@ -890,8 +898,22 @@ async function applySeverityActions(
   // truth — auto-reopening overrides their judgment, frustrates them,
   // and creates churn (close → analyze → reopen → close again loop).
   const { data: tBefore } = await admin.from("tickets")
-    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step")
+    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step, ai_disabled")
     .eq("id", ticketId).single();
+  // Re-check ai_disabled here — a human may have toggled it AFTER the
+  // analyzeTicketInner() row-read. Same hard rule as the early guard:
+  // an explicit human "off" beats any severe-issue / threat-keyword
+  // force-escalate below. Compare-and-set against the current row.
+  if ((tBefore as unknown as { ai_disabled?: boolean } | null)?.ai_disabled) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — would have ${action === "escalate_with_message" ? "re-opened + escalated" : "re-opened silently"}, but skipped because AI is disabled on this ticket by human directive. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
   if (tBefore?.agent_intervened) {
     // Log the would-be escalation as a system note but don't actually
     // re-open the ticket. The agent already weighed in; if there's a
