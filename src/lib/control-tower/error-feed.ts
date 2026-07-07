@@ -513,6 +513,41 @@ export function isForeignGoTrueEdgeNoise(
 }
 
 /**
+ * Foreign-app noise — Supabase's own GoTrue auth server timing out on its Postgres
+ * backend, arriving on the AUTH log feed
+ * ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]]).
+ *
+ * The auth-log sibling of `isForeignGoTrueEdgeNoise`. Supabase's GoTrue `/user` handler
+ * intermittently 504s waiting on its own Postgres backend after ~14.8s and emits a
+ * `level:'error'` row on `auth_logs` with `msg = 'Unhandled server error: context
+ * deadline exceeded'` — the handler-side deadline, upstream infra we hold zero levers on.
+ * The prior fix scoped generic `context deadline exceeded` into the transient class
+ * ([[isTransientSupabaseLogNoise]] `kind:'auth'` branch), but Supabase's GoTrue
+ * saturates on a cadence outside our control, so the signature recurs inside
+ * `TRANSIENT_RECUR_WINDOW_MS` and escalates on every cycle — a Platform owner paged in
+ * a loop they can't fix (Control Tower `supabase-logs:9f39fe11dd105b2a`, 39 occurrences
+ * across 6 days).
+ *
+ * Same choice we already made for `isForeignGoTrueEdgeNoise` / supabase-edge-ssl-handshake
+ * / undici-headers-timeout: DROP AT CAPTURE — no error_event / loop_alert / signature.
+ * Narrowly gated to the EXACT phrase 'Unhandled server error: context deadline exceeded'
+ * (case-insensitive, trimmed) so:
+ *   - `context canceled` (a real browser-abort — parent context died mid-request) stays
+ *     classified as transient by `isTransientSupabaseLogNoise`,
+ *   - `dial ... i/o timeout` / `dial ... canceled` (Postgres reachability failures) stay
+ *     transient,
+ *   - `invalid JWT`, rate limits, signature mismatches, and any actionable GoTrue error
+ *     class carry different message shapes and stay captured / paged on first sighting.
+ *
+ * Consumed by the `auth` LogQuery's `mapRow` in [[./supabase-log-poll]] — the mapRow
+ * contract treats `null` as `drop, do not record`, matching the `api` mapRow at line 203.
+ */
+export function isForeignGoTrueAuthLogNoise(msg: string | null | undefined): boolean {
+  const text = (msg ?? "").trim().toLowerCase();
+  return text === "unhandled server error: context deadline exceeded";
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
