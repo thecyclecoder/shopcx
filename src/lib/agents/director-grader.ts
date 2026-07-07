@@ -60,7 +60,30 @@ const BOX_DIRECTOR_GRADE_MODEL = "box-max-session";
  */
 const TERMINAL_JOB_STATUSES = new Set(["completed", "merged", "failed", "needs_attention"]);
 
-export type GradeDimension = "auto-approval" | "goal-escort";
+/**
+ * The gradeable director-call dimensions.
+ * - `auto-approval` / `goal-escort` — the Platform/Growth Director's calls (director-loop-grading Phase 3).
+ * - `cs_director_call` / `cs_storyline_precedent` — the CS Director (💬 June) branches added by the
+ *   cs-director-grade-with-antigoodhart-rubric-no-fewest-escalations spec (Phase 1). The rubric for
+ *   these two dimensions BAKES IN an anti-Goodhart guardrail: the CS Director is NEVER graded on
+ *   frequency of founder escalations — refund-everyone minimizes pages while destroying the objective.
+ *   The seed calibration rule lives in director_grader_prompts at status='approved' + sort_order=10
+ *   (supabase/migrations/20260919120000_cs_director_grader_anti_goodhart_clause.sql) so the deployed
+ *   grader prompt injects the clause without a per-workspace CEO approval step.
+ *
+ * Phase 1 adds the code-side dimensions + `gradeCsDirectorCall` + `gradeCsStorylinePrecedent`
+ * exported grader entrypoints. Phase 2 wires the box-lane picker + writer (extending
+ * `pickDirectorGradeBatch` + `applyBoxDirectorGrade` + the director_decision_grades CHECK
+ * constraint) — until Phase 2 lands, the Phase 1 grader entrypoints compute the grade + reasoning
+ * (calibrated by the anti-Goodhart clause) and RETURN them to the caller; they do not persist yet.
+ */
+export type GradeDimension = "auto-approval" | "goal-escort" | "cs_director_call" | "cs_storyline_precedent";
+
+/** Convenience — the CS-Director dimensions Phase 1 introduces. */
+const CS_DIRECTOR_DIMENSIONS: readonly GradeDimension[] = ["cs_director_call", "cs_storyline_precedent"] as const;
+export function isCsDirectorDimension(d: GradeDimension): boolean {
+  return CS_DIRECTOR_DIMENSIONS.includes(d);
+}
 
 export interface DirectorGradeResult {
   ok: boolean;
@@ -137,14 +160,38 @@ THE DEFINING RULE — GRADE SOUNDNESS SEPARATELY FROM OUTCOME:
   • soundness (1-10): was the call SOUND AT DECISION TIME? Did the director's stated reasoning actually confirm the cause + fix were correct, scoped, low-risk, reversible, and genuinely within the leash (no destructive/irreversible DDL, no goal-touching, no rubber-stamp)? A SOUND approval whose build later needed a rare, reversible tweak still scores HIGH — the reasoning was right. A careless, unconfirmed rubber-stamp that happened to be fine scores LOW.
   • outcome (1-10): did the approved work HOLD UP? The target build concluding clean (completed, no repeat-failure / rollback / re-escalation of the same spec afterward) is a good outcome; a target that failed, went needs_attention, or whose spec re-failed shortly after is a poor one.
   • grade (1-10): the overall call grade. Weight SOUNDNESS at least as heavily as outcome — we are training a director to make SOUND CALLS within its leash, not to get lucky. Do NOT reward a lucky rubber-stamp; do NOT punish a sound approval that hit a rare, reversible bump.`
-      : `You are grading ONE GOAL-ESCORT: the director escorted an ALREADY-APPROVED goal's milestone to landing — sequencing its unblocked specs through the build → merge → fold chain. The question is whether the milestone LANDED CLEAN under the director's escort.
+      : dimension === "goal-escort"
+      ? `You are grading ONE GOAL-ESCORT: the director escorted an ALREADY-APPROVED goal's milestone to landing — sequencing its unblocked specs through the build → merge → fold chain. The question is whether the milestone LANDED CLEAN under the director's escort.
 
 THE DEFINING RULE — GRADE SOUNDNESS SEPARATELY FROM OUTCOME:
   • soundness (1-10): did the director escort RESPONSIBLY — only sequencing unblocked, in-sequence specs of a goal the CEO already greenlit (never starting a new goal, never jumping a blocker), and surfacing/escalating rather than forcing anything outside the leash?
   • outcome (1-10): did the milestone LAND CLEAN — every linked spec shipped (merged, tsc/CI green), with no regression escalated against those specs afterward? A milestone that shipped fully and stayed green scores HIGH; one with a stranded/failed spec or a regression escalation scores lower.
-  • grade (1-10): the overall escort grade. Weight SOUNDNESS at least as heavily as outcome — a responsibly-sequenced escort that hit an unavoidable external snag is not a bad call.`;
+  • grade (1-10): the overall escort grade. Weight SOUNDNESS at least as heavily as outcome — a responsibly-sequenced escort that hit an unavoidable external snag is not a bad call.`
+      : dimension === "cs_director_call"
+      ? `You are grading ONE CS-DIRECTOR HARD CALL: the CS Director (💬 June — the THIRD rung of the escalation ladder, above box-escalation-triage's solver→skeptic quorum) picked ONE escalated ticket the triage quorum could not vote on and emitted ONE typed verdict — approve_remedy | author_spec | escalate_founder. The question is whether that hard call was the RIGHT one and whether it HELD UP.
 
-  return `You are the CEO of ShopCX grading the calls of your Platform/DevOps Director — an autonomous director you supervise (the CEO → Director → tool chain, operational-rules § supervisable autonomy). The director auto-approves low-risk platform requests within a leash and escorts already-approved goals to landing; you grade whether each of its calls was the RIGHT one, 1–10.
+ANTI-GOODHART GUARDRAIL — READ THIS BEFORE SCORING:
+  The CS Director is NEVER graded on frequency of founder escalations. A refund-everyone strategy that minimizes founder pages must NEVER score high — that proxy destroys the objective (customer trust + margin). Grade on SOUNDNESS of the hard call, OUTCOME TRUTHFULNESS verified against ticket_resolution_events, and whether storyline judgment calls held up as policy.
+
+THE DEFINING RULE — GRADE SOUNDNESS SEPARATELY FROM OUTCOME:
+  • soundness (1-10): was the diagnosis + verdict SOUND AT DECISION TIME? Did the CS Director's reasoning actually confirm the root cause from the ticket + ticket_resolution_events write-ahead ledger (every prior orchestrator turn) + linked customer/subscriptions/orders — not just the paraphrased triage summary? A remedy that recites the customer's grievance without cross-checking the ledger scores LOW even if the customer walked away happy. An escalate_founder call with a stated policy-gap rationale scores HIGH — surfacing an out-of-leash situation is the point of the third rung. An author_spec call that named a specific analyzer/rule gap scores HIGH.
+  • outcome (1-10): did the call HOLD UP over the T+7d follow-up window? For approve_remedy: the linked ticket_resolution_events.verified_outcome resolved to 'confirmed' (DB verify passed) and no re-open / re-escalation of the same customer surfaced within 7d. For author_spec: the seeded spec landed on the roadmap and either shipped or is progressing. For escalate_founder: the CEO's disposition confirmed the situation was truly out-of-leash (a false-alarm founder page is a poor outcome). Do NOT infer outcome from "did the customer refund" — a refund-everyone remedy that "resolved" the ticket while destroying margin is the exact Goodhart failure this rubric refuses to reward.
+  • grade (1-10): the overall hard-call grade. Weight SOUNDNESS at least as heavily as outcome. NEVER let escalation frequency itself drive the grade — a CS Director that escalates the RIGHT calls is doing its job; a CS Director that never escalates by refund-everyone is failing.`
+      : `You are grading ONE CS-STORYLINE PRECEDENT: the CS Director surfaced a precedent-judgment-call storyline (a novel pattern the escalation ladder had no rule for) and the CEO approved it INTO POLICY — a rule / macro / analyzer signal / remedy playbook now live in the CS system. The question is whether that judgment call HELD UP over the following 30d without new counter-evidence.
+
+ANTI-GOODHART GUARDRAIL — READ THIS BEFORE SCORING:
+  The CS Director is NEVER graded on frequency of founder escalations. A storyline that codified refund-everyone-for-this-pattern must NEVER score high on outcome — it minimizes friction while destroying margin and undermines the actual objective. Grade on soundness of the judgment call AT PRECEDENT TIME and on how the policy actually LANDED over the 30d holdup window (repeat customers, refund rate, agent-reversal rate — not "did founder pages go down").
+
+THE DEFINING RULE — GRADE SOUNDNESS SEPARATELY FROM OUTCOME:
+  • soundness (1-10): was the storyline / precedent SOUND at the moment the CEO approved it? Did the CS Director's stated reasoning name a specific pattern (customer segment × product × failure mode), tie it to real ticket_resolution_events evidence, and propose a targeted policy rather than a blanket refund? A precedent grounded in ledger-evidence scores HIGH. A precedent that generalizes from one loud customer scores LOW.
+  • outcome (1-10): did the policy HOLD UP over the 30d window? Positive signals: fewer repeat escalations on the same pattern; the agent-reversal rate against the new rule stayed low; no new counter-evidence surfaced (a second ticket where the rule fired but the RIGHT answer was different). Negative signals: the rule was reversed by a CEO override, or a new counter-example forced an emergency amendment. NEVER count "founder pages went down" as a positive outcome — that is the Goodhart trap.
+  • grade (1-10): the overall precedent grade. Weight SOUNDNESS at least as heavily as outcome. A policy that held up on truthfully verified signals scores HIGH; a policy that appeared to work only because it maximized refunds scores LOW.`;
+
+  const directorFraming = isCsDirectorDimension(dimension)
+    ? `You are the CEO of ShopCX grading the calls of your CS Director (💬 June) — an autonomous director you supervise (the CEO → Director → tool chain, operational-rules § supervisable autonomy). The CS Director sits at the THIRD RUNG of the escalation ladder, above the box-escalation-triage solver→skeptic quorum: when the quorum can't vote, June makes the hard call (approve_remedy | author_spec | escalate_founder) and — where a precedent survives — turns that judgment call into policy. You grade whether each of her calls was the RIGHT one, 1–10.`
+    : `You are the CEO of ShopCX grading the calls of your Platform/DevOps Director — an autonomous director you supervise (the CEO → Director → tool chain, operational-rules § supervisable autonomy). The director auto-approves low-risk platform requests within a leash and escorts already-approved goals to landing; you grade whether each of its calls was the RIGHT one, 1–10.`;
+
+  return `${directorFraming}
 
 ${dimensionBlock}
 
@@ -676,24 +723,209 @@ export async function gradeGoalEscort(opts: { context: MilestoneContext; workspa
   );
 }
 
+// ── CS-Director dimensions (cs-director-grade-with-antigoodhart-rubric-no-fewest-escalations Phase 1) ─
+
+/**
+ * Compact, gradeable context for ONE CS-Director hard call — the payload
+ * `gradeCsDirectorCall` renders into the user message. Phase 1 keeps the shape
+ * caller-authored (the caller builds it from `director_activity`, the ticket, and
+ * the ticket_resolution_events ledger) so we're not coupling the grader to a
+ * (still-scaffolded) storyline schema.
+ */
+export interface CsDirectorCallContext {
+  csDirectorCallId: string;
+  ticketId: string;
+  /** The typed verdict the CS Director emitted (`approve_remedy` | `author_spec` | `escalate_founder`). */
+  decision: string;
+  /** June's stated reasoning — the "why" the CEO grades. */
+  reasoning: string;
+  /** A one-line summary of the remedy (approve_remedy) or the seeded spec (author_spec), if any. */
+  actionSummary?: string;
+  /** The most recent ticket_resolution_events row for the ticket — the write-ahead-ledger snapshot the outcome is verified against. */
+  latestResolutionEvent?: {
+    turnIndex: number;
+    problem: string | null;
+    confidence: number | null;
+    verifiedOutcome: string | null;
+    stagedAt: string;
+    shippedAt: string | null;
+    verifiedAt: string | null;
+  } | null;
+  /** Count of re-escalations of the same ticket within the T+7d follow-up window — the "did it hold up" signal. */
+  reescalationsIn7d: number;
+  /** The CS-Director row's created_at — anchors the T+7d follow-up window. */
+  calledAt: string;
+}
+
+/** Compact, gradeable context for ONE CS-storyline precedent. Phase 1 keeps the shape caller-authored;
+ *  Phase 2 will build it from the storyline row + the 30d policy-holdup signal set. */
+export interface CsStorylinePrecedentContext {
+  storylineId: string;
+  workspaceId: string;
+  /** A short human-readable label for the precedent (customer segment × product × failure mode). */
+  precedentLabel: string;
+  /** The CS Director's original judgment-call reasoning — the "why this pattern deserves a policy". */
+  reasoning: string;
+  /** The CEO's disposition when the precedent was approved into policy (approved / approved_with_amendments). */
+  ceoDisposition: string;
+  /** A one-line summary of the policy the CEO approved (macro / rule / analyzer signal / playbook). */
+  policySummary: string;
+  /** Signals gathered over the 30d holdup window — none of these are "fewer founder pages". */
+  holdupSignals?: {
+    windowDays: number;
+    repeatEscalationsOnPattern: number;
+    agentReversalsAgainstPolicy: number;
+    counterEvidenceCases: number;
+    policyReversedByCeo: boolean;
+  } | null;
+  /** The precedent's approved_at — anchors the 30d policy-holdup window. */
+  approvedAt: string;
+}
+
+function formatCsDirectorCallForGrading(ctx: CsDirectorCallContext): string {
+  const rev = ctx.latestResolutionEvent;
+  return [
+    `CS-DIRECTOR HARD CALL — cs_director_call ${ctx.csDirectorCallId}`,
+    `  ticket: ${ctx.ticketId}`,
+    `  decision: ${ctx.decision}`,
+    ctx.actionSummary ? `  action summary: ${ctx.actionSummary}` : "",
+    ``,
+    `  THE CS DIRECTOR'S STATED REASONING (why the hard call was sound + within-scope):`,
+    `  ${ctx.reasoning || "(none recorded — a bare escalation with no reasoning is itself a red flag)"}`,
+    ``,
+    `  OUTCOME TRUTHFULNESS (verified against ticket_resolution_events, T+7d follow-up window):`,
+    rev
+      ? `  latest resolution event: turn ${rev.turnIndex} · problem="${rev.problem ?? "—"}" · confidence=${rev.confidence ?? "—"} · verified_outcome=${rev.verifiedOutcome ?? "(still open)"} · staged=${rev.stagedAt} · shipped=${rev.shippedAt ?? "—"} · verified=${rev.verifiedAt ?? "—"}`
+      : `  no ticket_resolution_events row found for this ticket — treat outcome as UNVERIFIED`,
+    `  re-escalations of the same ticket within 7d after the call: ${ctx.reescalationsIn7d}`,
+    `  call made at: ${ctx.calledAt}`,
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+}
+
+function formatCsStorylinePrecedentForGrading(ctx: CsStorylinePrecedentContext): string {
+  const s = ctx.holdupSignals;
+  return [
+    `CS-STORYLINE PRECEDENT — storyline ${ctx.storylineId}`,
+    `  precedent: ${ctx.precedentLabel}`,
+    `  CEO disposition: ${ctx.ceoDisposition}`,
+    `  policy landed: ${ctx.policySummary}`,
+    ``,
+    `  THE CS DIRECTOR'S STATED REASONING (why this precedent deserved a policy):`,
+    `  ${ctx.reasoning || "(none recorded)"}`,
+    ``,
+    `  30D POLICY HOLDUP SIGNALS (NOT founder-page frequency — anti-Goodhart guardrail):`,
+    s
+      ? `  window=${s.windowDays}d · repeat-escalations on pattern=${s.repeatEscalationsOnPattern} · agent-reversals against policy=${s.agentReversalsAgainstPolicy} · counter-evidence cases=${s.counterEvidenceCases} · policy reversed by CEO=${s.policyReversedByCeo}`
+      : `  no holdup signals gathered yet — treat outcome as UNVERIFIED`,
+    `  approved at: ${ctx.approvedAt}`,
+  ].join("\n");
+}
+
+/**
+ * Grade ONE CS-Director hard call (cs-director-grade-with-antigoodhart-rubric-no-fewest-escalations Phase 1).
+ *
+ * The rubric baked into `buildDirectorGraderSystemPrompt` for `dimension='cs_director_call'` explicitly
+ * REJECTS grading on "fewest founder escalations" (Goodhart); it grades on soundness of the hard call,
+ * outcome truthfulness verified against ticket_resolution_events, and how the call held up over T+7d.
+ * The seed calibration rule in director_grader_prompts (status='approved', sort_order=10 — migration
+ * 20260919120000_cs_director_grader_anti_goodhart_clause.sql) is auto-injected so the CEO's
+ * anti-Goodhart clause is always in the prompt without a per-workspace re-approval step.
+ *
+ * Phase 1 boundary — PERSISTENCE IS PHASE 2. This function computes { grade, soundness, outcome,
+ * reasoning } from the LLM and RETURNS them to the caller. Phase 2 extends `applyBoxDirectorGrade`
+ * to accept the CS dimensions + relaxes the director_decision_grades CHECK constraint + adds the
+ * `cs_director_call_id` / `cs_storyline_id` key columns, at which point the box lane's
+ * `runDirectorGradeJob` invokes this function then writes via `applyBoxDirectorGrade`. Until Phase 2
+ * lands, calling this from the deployed sweep is a no-op-safe read: it never touches
+ * director_decision_grades so it can't hit the CHECK constraint.
+ */
+export async function gradeCsDirectorCall(opts: {
+  context: CsDirectorCallContext;
+  workspaceId: string;
+  admin?: Admin;
+}): Promise<DirectorGradeResult> {
+  if (!ANTHROPIC_API_KEY) return { ok: false, reason: "no_api_key" };
+  const admin = opts.admin ?? createAdminClient();
+
+  const system = await buildDirectorGraderSystemPrompt(admin, opts.workspaceId, "cs_director_call");
+  const userMsg = `Grade this CS-Director hard call. Return the JSON only.\n\n${formatCsDirectorCallForGrading(opts.context)}`;
+
+  const graded = await runGrader(system, userMsg, opts.workspaceId);
+  if ("error" in graded) return { ok: false, reason: graded.error };
+  return {
+    ok: true,
+    dimension: "cs_director_call",
+    grade: clampGrade(graded.json.grade),
+    reason: graded.json.reasoning,
+  };
+}
+
+/**
+ * Grade ONE CS-storyline precedent — the 30d policy-holdup grader
+ * (cs-director-grade-with-antigoodhart-rubric-no-fewest-escalations Phase 1).
+ *
+ * Mirrors `gradeCsDirectorCall`: reads the caller-authored context, builds the prompt with the
+ * anti-Goodhart clause auto-injected from director_grader_prompts, calls the LLM, and returns
+ * the grade + reasoning. Persistence is Phase 2 (extend applyBoxDirectorGrade + relax the CHECK
+ * constraint + add `cs_storyline_id`). The rubric explicitly refuses to score "founder pages went
+ * down" as a positive outcome — the storyline is graded on soundness at precedent-time and on the
+ * REAL holdup signals (repeat escalations on the pattern, agent-reversals against the policy,
+ * counter-evidence cases, whether the CEO reversed the rule).
+ */
+export async function gradeCsStorylinePrecedent(opts: {
+  context: CsStorylinePrecedentContext;
+  workspaceId: string;
+  admin?: Admin;
+}): Promise<DirectorGradeResult> {
+  if (!ANTHROPIC_API_KEY) return { ok: false, reason: "no_api_key" };
+  const admin = opts.admin ?? createAdminClient();
+
+  const system = await buildDirectorGraderSystemPrompt(admin, opts.workspaceId, "cs_storyline_precedent");
+  const userMsg = `Grade this CS-storyline precedent. Return the JSON only.\n\n${formatCsStorylinePrecedentForGrading(opts.context)}`;
+
+  const graded = await runGrader(system, userMsg, opts.workspaceId);
+  if ("error" in graded) return { ok: false, reason: graded.error };
+  return {
+    ok: true,
+    dimension: "cs_storyline_precedent",
+    grade: clampGrade(graded.json.grade),
+    reason: graded.json.reasoning,
+  };
+}
+
 /**
  * The single per-call entrypoint the spec names — gradeDirectorCall(decision, dimension). Dispatches to
  * the dimension-specific grader. For 'auto-approval' pass `approvalDecisionId`; for 'goal-escort' pass a
- * resolved MilestoneContext. (The sweep below builds these; this is the unit the verification probes.)
+ * resolved MilestoneContext; for 'cs_director_call' / 'cs_storyline_precedent' pass the CS-dimension
+ * context (spec Phase 1). The sweep below builds the Platform/Growth contexts; the CS-Director contexts
+ * are built by the box lane in Phase 2.
  */
 export async function gradeDirectorCall(opts: {
   dimension: GradeDimension;
   workspaceId: string;
   approvalDecisionId?: string;
   context?: MilestoneContext;
+  csDirectorCallContext?: CsDirectorCallContext;
+  csStorylinePrecedentContext?: CsStorylinePrecedentContext;
   admin?: Admin;
 }): Promise<DirectorGradeResult> {
   if (opts.dimension === "auto-approval") {
     if (!opts.approvalDecisionId) return { ok: false, reason: "missing_approval_decision_id" };
     return gradeAutoApproval({ approvalDecisionId: opts.approvalDecisionId, admin: opts.admin });
   }
-  if (!opts.context) return { ok: false, reason: "missing_milestone_context" };
-  return gradeGoalEscort({ context: opts.context, workspaceId: opts.workspaceId, admin: opts.admin });
+  if (opts.dimension === "goal-escort") {
+    if (!opts.context) return { ok: false, reason: "missing_milestone_context" };
+    return gradeGoalEscort({ context: opts.context, workspaceId: opts.workspaceId, admin: opts.admin });
+  }
+  if (opts.dimension === "cs_director_call") {
+    if (!opts.csDirectorCallContext) return { ok: false, reason: "missing_cs_director_call_context" };
+    return gradeCsDirectorCall({ context: opts.csDirectorCallContext, workspaceId: opts.workspaceId, admin: opts.admin });
+  }
+  // dimension === "cs_storyline_precedent"
+  if (!opts.csStorylinePrecedentContext) return { ok: false, reason: "missing_cs_storyline_precedent_context" };
+  return gradeCsStorylinePrecedent({ context: opts.csStorylinePrecedentContext, workspaceId: opts.workspaceId, admin: opts.admin });
 }
 
 /**
