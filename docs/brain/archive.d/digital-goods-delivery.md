@@ -1,0 +1,1 @@
+- **Digital goods catalog + PDF delivery** · verified 2026-07-07 · → [[../inngest/digital-goods-delivery]]
