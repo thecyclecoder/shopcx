@@ -348,7 +348,9 @@ export async function getOrgChart(): Promise<OrgChart> {
     workersByFn.set(e.owner, arr);
   });
 
-  const directors: DirectorNode[] = functions.map((fn) => ({
+  // Exclude the `ceo` function card — Henry is rendered as the top CEO seat (below),
+  // so including it here duplicated him into the directors row.
+  const directors: DirectorNode[] = functions.filter((fn) => fn.slug !== "ceo").map((fn) => ({
     slug: fn.slug,
     title: fn.title,
     summary: fn.summary,
