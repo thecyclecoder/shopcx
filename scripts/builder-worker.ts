@@ -7536,20 +7536,32 @@ async function markNewSpecInReview(
     );
   }
   if (markdown && markdown.trim()) {
-    const { authorSpecRowFromMarkdown, MissingVerificationError, EmptyPhaseBodyError } = await import("../src/lib/author-spec");
-    try {
-      await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
-        intendedStatusSetBy: actor,
-      });
-    } catch (e) {
-      // A missing-Verification / empty-body authoring is NOT a best-effort warning — it's an untestable OR
-      // un-buildable spec and must fail loudly so the author surface (planner / spec-chat finalize / db-health
-      // Build resume) surfaces it instead of persisting a row that the builder will silently no-op on. Every
-      // other (genuine DB) failure stays best-effort (logged).
-      if (e instanceof MissingVerificationError || e instanceof EmptyPhaseBodyError) throw e;
-      console.warn(
-        `[author-spec] authorSpecRowFromMarkdown ${slug} failed:`,
-        e instanceof Error ? e.message : e,
+    const { authorSpecRowFromMarkdown, AuthorWriteFailedError } = await import("../src/lib/author-spec");
+    // repair-author-write-surface-real-error-not-swallow Phase 1 — CAPTURE the boolean return and
+    // PROPAGATE every author-write failure. Two prior swallow points closed here:
+    //   (1) `authorSpecRowFromMarkdown` wraps its DB write in a try/catch that returns `false` and
+    //       console.warn's on any raw upsert/DB error (author-spec.ts ~1214-1220). A bare `await` at
+    //       this call site threw that boolean away, so the caller (repair flow → groupOrAuthorRepair
+    //       Spec → runRepairJob) blindly enqueued a `repair_build` for a slug that had NEVER
+    //       persisted to public.specs — 16 phantom-completed repairs in the trailing 7 days.
+    //   (2) The old catch here re-threw only the two shape-gate throws (MissingVerificationError /
+    //       EmptyPhaseBodyError) and console.warn'd the rest — MissingIntentError, InvalidParentError,
+    //       and anything else propagated to `false` never made it out.
+    // Both routes now surface: `!ok` throws `AuthorWriteFailedError`; any thrown error re-throws
+    // unfiltered. `groupOrAuthorRepairSpec`'s catch (~14108) preserves the error name + message onto
+    // the parked repair job's `error` column so the operator (and Ada's supervision lane) reads
+    // exactly why the write was rejected. Callers that formerly relied on best-effort silence (e.g.
+    // the db-health / coverage-register lanes at markNewSpecInReview call sites in this file) fall
+    // through to the outer `runJob(job).catch(...)` handler that stamps the job `failed` with the
+    // real message — the whole point of this spec is to stop hiding the cause.
+    const ok = await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
+      intendedStatusSetBy: actor,
+    });
+    if (!ok) {
+      throw new AuthorWriteFailedError(
+        `authorSpecRowFromMarkdown ${slug} returned false — silent author-write fallout (the raw ` +
+          `DB/upsert error was swallowed inside the author chokepoint's inner try/catch; Phase 2 will ` +
+          `attach the concrete inner message).`,
       );
     }
   }
@@ -14455,12 +14467,14 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
     } catch (e) {
       // repair-verify-spec-persisted-before-build Phase 3 — SURFACE the throw's message on the
       // parked repair job instead of swallowing it into a generic "no valid fix spec proposed".
-      // `markNewSpecInReview` re-throws `MissingVerificationError` / `EmptyPhaseBodyError` (a spec
-      // authored with no verification / an empty phase body — the exact box-authoring gap Phase 3
-      // targets), and any other loud throw the write chokepoint may add later. Preserve the error
-      // class + message so the operator (and Ada's supervision lane) reads WHY authoring was
-      // rejected, and re-drives the box against the CORRECT structural constraint instead of
-      // guessing.
+      // repair-author-write-surface-real-error-not-swallow Phase 1 widened what `markNewSpecInReview`
+      // propagates: it now re-throws EVERY author-write failure — the shape-gate throws
+      // (`MissingVerificationError` / `EmptyPhaseBodyError` / `MissingIntentError` /
+      // `InvalidParentError`) AND `AuthorWriteFailedError` (which fires when `authorSpecRowFromMarkdown`
+      // returned `false` because its inner catch swallowed a raw DB/upsert error) — instead of only
+      // the two original shape-gate throws. Preserve the error class + message so the operator (and
+      // Ada's supervision lane) reads WHY authoring was rejected, and re-drives the box against the
+      // CORRECT structural constraint instead of guessing.
       const name = e instanceof Error ? e.name : "Error";
       const msg = e instanceof Error ? e.message : String(e);
       console.warn(`[repair] spec DB author failed for ${slug}: ${name} — ${msg}`);
