@@ -123,7 +123,7 @@ function isAccountRelated(intent: string): boolean {
 
 async function channelCfg(admin: Admin, wsId: string, ch: string) {
   const { data } = await admin.from("ai_channel_config")
-    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit")
+    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit, sol_first_touch_enabled")
     .eq("workspace_id", wsId).eq("channel", ch).single();
   return {
     enabled: data?.enabled ?? true,
@@ -135,6 +135,11 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
     // existed, fallback defaulted to sandbox=true).
     sandbox: data?.sandbox ?? false,
     personality_id: data?.personality_id || null,
+    // Sol first-touch opt-in (Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session).
+    // Defaults false — the migration set the column NOT NULL default false, so rollout is opt-in
+    // per workspace+channel. When true, an is_new_ticket event acks + enqueues Sol on Max instead
+    // of firing the inline Sonnet Step 2e path.
+    sol_first_touch_enabled: (data as unknown as { sol_first_touch_enabled?: boolean } | null)?.sol_first_touch_enabled ?? false,
   };
 }
 
@@ -416,6 +421,96 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
           await sysNote(admin, tid, `[System] Chat customer idle. Reply also sent via email to ${cust.email}.`);
         }
       }
+    }
+  }
+}
+
+/**
+ * sendFirstTouchAck — Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session.
+ *
+ * Ship a short per-channel placeholder body ("We got your note — one of the team will get back to
+ * you shortly.") through the SAME send() wrapper the orchestrator uses, so the outbound
+ * ticket_messages row lands with author_type='ai' + direction='outbound' + the SAME rendering the
+ * downstream Sol reply will use. Because Sol's real first reply is authored on a separate turn on
+ * Max, this ack is what tells the customer "we saw you" while Sol's session is running.
+ *
+ * Also inserts a ticket_resolution_events row for this ack turn + stamps shipped_at on it after
+ * the send returns, so the spec's Phase-3 verification bullet 1 ("expect a ticket_resolution_events
+ * row with shipped_at set (the ack)") holds. Mirrors action-executor.ts § stageResolutionEvent +
+ * stampResolutionShipped exactly — CAS on shipped_at IS NULL so a retry can't overwrite the first
+ * stamp (learning #1: re-assert the read-time invariant in the write itself). Best-effort — a
+ * ledger insert failure NEVER blocks the ack send (mirrors action-executor's swallow-on-ledger
+ * pattern; the ledger is diagnostic substrate, not a critical path).
+ */
+function firstTouchAckBody(channel: string, firstName: string | null): string {
+  const hi = firstName ? `Hi ${firstName},` : "Hi there,";
+  // Chat-style vs email-style: chat customers see it in a bubble, email customers see it as a body.
+  // Same content, slightly different framing so a chat "Thanks for reaching out — one of the team
+  // will be right with you." doesn't read like a formal email letter.
+  if (channel === "chat" || channel === "meta_dm" || channel === "sms" || channel === "social_comments") {
+    return `${hi} thanks for reaching out — one of the team will be right with you.`;
+  }
+  return `${hi}\n\nThanks for reaching out — we got your note and one of the team will get back to you shortly.`;
+}
+
+async function sendFirstTouchAck(admin: Admin, wsId: string, tid: string, ch: string, sandbox: boolean): Promise<void> {
+  // Load the customer's first name (best-effort) so the ack reads like the rest of the pipeline
+  // instead of a bare "Hi there,". Falls back cleanly when there's no linked customer.
+  const { data: t } = await admin
+    .from("tickets")
+    .select("customer_id")
+    .eq("id", tid)
+    .single();
+  let firstName: string | null = null;
+  if (t?.customer_id) {
+    const { data: c } = await admin.from("customers").select("first_name").eq("id", t.customer_id).single();
+    firstName = (c?.first_name as string | null) ?? null;
+  }
+  const body = firstTouchAckBody(ch, firstName);
+
+  // Stage a ticket_resolution_events row for THIS turn (the ack). Mirrors action-executor.ts
+  // stageResolutionEvent: turn_index = count(prior rows for ticket) + 1 (cheap under the
+  // (workspace_id, ticket_id, turn_index) index). Best-effort — never blocks the send.
+  let resolutionEventId: string | null = null;
+  try {
+    const { count } = await admin
+      .from("ticket_resolution_events")
+      .select("id", { count: "exact", head: true })
+      .eq("ticket_id", tid);
+    const turnIndex = (count ?? 0) + 1;
+    const { data: row } = await admin
+      .from("ticket_resolution_events")
+      .insert({
+        workspace_id: wsId,
+        ticket_id: tid,
+        turn_index: turnIndex,
+        reasoning: "sol_first_touch_ack",
+      })
+      .select("id")
+      .single();
+    resolutionEventId = (row as { id: string } | null)?.id ?? null;
+  } catch {
+    // Ledger is diagnostic substrate — a failed insert must NOT block the ack. Sol's real turn
+    // will insert its own ticket_resolution_events row when its send goes through executeSonnetDecision.
+  }
+
+  // Actually ship the ack. Uses the SAME send() wrapper the orchestrator uses so per-channel
+  // delivery (email/portal/chat idle-fallback) is identical to production.
+  await send(admin, wsId, tid, ch, body, sandbox);
+
+  // Compare-and-set shipped_at on the ack's ticket_resolution_events row (per learning #1 —
+  // re-assert the read-time precondition on the write itself). Compound key includes
+  // workspace_id + is-null so a racing stamp can't overwrite the first-ship timestamp.
+  if (resolutionEventId) {
+    try {
+      await admin
+        .from("ticket_resolution_events")
+        .update({ shipped_at: new Date().toISOString() })
+        .eq("id", resolutionEventId)
+        .eq("workspace_id", wsId)
+        .is("shipped_at", null);
+    } catch {
+      // Never fail the ack because the ledger stamp failed.
     }
   }
 }
@@ -1772,6 +1867,58 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           );
         }
       });
+    }
+
+    // ── 3.95 SOL FIRST-TOUCH DISPATCH ──
+    // Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session. When the workspace has
+    // opted the channel into Sol's first-touch box session AND this is a fresh ticket (is_new_ticket)
+    // AND no agent is already involved AND fraud didn't block above, we invert the cost curve:
+    // ship a short ack RIGHT NOW (so the customer sees a response within seconds), enqueue a
+    // top-level Max session for Sol to author the durable Direction + the real first customer-facing
+    // reply, then RETURN — the inline Sonnet Step 2e path below is skipped for this turn.
+    //
+    // Guards, in order (learning #2 — compare-and-set + narrow the enumeration source before
+    // mutating): (1) is_new_ticket must be true — a reply on an existing ticket falls through to
+    // the orchestrator; (2) cfg.sol_first_touch_enabled must be true — default false + opt-in per
+    // ai_channel_config row means an unconfigured channel takes the original path (verification
+    // bullet 3); (3) !agentAssigned — a human is already handling this ticket, don't step on their
+    // toes (agent_intervened / assigned_to / escalated_to all set agentAssigned above). Fraud is
+    // already handled — a fraud-blocked ticket returned above at line ~1730 (verification bullet 4).
+    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned) {
+      const acked = await step.run("sol-first-touch-ack", async () => {
+        if (await newerActivity(admin, tid, t0)) return false;
+        await sendFirstTouchAck(admin, wsId, tid, st.ch, cfg.sandbox);
+        await sysNote(admin, tid, `[System] Sol first-touch: ack sent — dispatching kind='ticket-handle' agent_jobs.`);
+        return true;
+      });
+
+      if (acked) {
+        // Enqueue Sol's box session. Learning #1: the enqueue is scoped to this workspace + this
+        // ticket + this turn's reason, and Sol's runTicketHandleJob re-guards on the required
+        // Direction fields before it calls writeDirection — so a mis-formed session never lands a
+        // partial-UNIQUE-violating row on ticket_directions. `turn_index` is not the ticket-messages
+        // turn — it's the resolution-events turn index (2 = the ack was turn 1, Sol's real reply
+        // will be turn 2), included for downstream observability.
+        await step.run("sol-first-touch-enqueue", async () => {
+          const turnIndex = 2; // ack = 1; Sol authors turn 2 via executeSonnetDecision → stageResolutionEvent
+          // No ticket_id column on agent_jobs — the shape is workspace_id + spec_slug + kind +
+          // instructions (JSON with the per-kind payload). runTicketHandleJob parses ticket_id +
+          // workspace_id from the instructions blob (mirrors ticket-improve's params-in-JSON pattern).
+          await admin.from("agent_jobs").insert({
+            workspace_id: wsId,
+            kind: "ticket-handle",
+            spec_slug: `ticket-handle-${tid.slice(0, 8)}`,
+            status: "queued",
+            instructions: JSON.stringify({
+              ticket_id: tid,
+              workspace_id: wsId,
+              turn_index: turnIndex,
+              reason: "first_touch",
+            }),
+          });
+        });
+        return { status: "sol_first_touch_dispatched", channel: st.ch };
+      }
     }
 
     // ── 4. SONNET ORCHESTRATOR ──

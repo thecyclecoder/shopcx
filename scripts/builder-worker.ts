@@ -78,6 +78,11 @@ const REAP_SWEEP_INTERVAL_MS = 60 * 1000;      // run the reaper sweep ~once a m
 // A ticket-improve turn is one Max `claude -p` investigation/proposal (read brain/src + web + the
 // read-only DB tools). Minutes, not the 90-min seed ceiling. See box-ticket-improve.
 const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
+// A ticket-handle turn is Sol's first-touch box session for ONE inbound ticket: one Max `claude -p`
+// investigation + Direction authoring + first-reply drafting (read brain/src + web + read-only DB
+// tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn. See
+// docs/brain/specs/sol-ticket-direction-artifact-and-first-touch-box-session.md.
+const TICKET_HANDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
@@ -96,6 +101,11 @@ const MAX_SPEC_CHAT = 1;
 // resumable Max `claude -p` session per ticket, one short job per turn. Serialized so a turn never
 // races the self-update reset of REPO_DIR (it reads brain/src in the main checkout, read-only).
 const MAX_TICKET_IMPROVE = 1;
+// Ticket-handle turns (sol-ticket-direction-artifact-and-first-touch-box-session) run in their OWN
+// concurrency-1 interactive lane: one Max `claude -p` Sol first-touch session per inbound ticket.
+// Serialized so a first-touch session never races the self-update reset of REPO_DIR (it reads
+// brain/src in the main checkout, read-only).
+const MAX_TICKET_HANDLE = 1;
 // Escalation-triage sweeps (box-escalation-triage) run in their OWN concurrency-1 lane: one hourly
 // agent_jobs row per workspace, processed as a batch of solver→skeptic→quorum loops (each loop is 2–4
 // separate top-level Max `claude -p` sessions). Serialized so a long sweep never races other lanes.
@@ -524,7 +534,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -9631,6 +9641,182 @@ async function runTicketImproveJob(job: Job) {
     await update(job.id, { status: "failed", error: "improve turn errored with no reply/plan", log_tail: raw.slice(-2000) });
   } catch (e) {
     await setSession({ turn_status: "error", last_error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// ── Box-hosted Sol first-touch session (sol-ticket-direction-artifact-and-first-touch-box-session) ──
+// A kind='ticket-handle' job is Sol's first-touch box session for ONE inbound ticket. Like ticket-improve
+// it runs a TOP-LEVEL `claude -p` on Max (web search on, ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
+// the DB/crypto secrets — because the `ticket-handle` skill reaches the prod DB READ-ONLY via the SAME
+// deterministic scripts/improve-box-tools.ts CLI. The box NEVER mutates: Sol returns a typed JSON
+// {direction, first_reply} and the worker (the only mutator) applies it — writeDirection() then a send
+// through the same production delivery sink (ticket-delivery.deliverTicketMessage), so shipped_at gets
+// stamped on the ticket_resolution_events row Phase 3's dispatcher will have already inserted for the
+// ack turn. No worktree / PR — this mutates the ticket_directions row + ticket_messages, not the repo,
+// so it runs in the main checkout (REPO_DIR).
+// Params on the job: instructions = JSON {ticket_id, workspace_id, turn_index?, reason?}.
+async function runTicketHandleClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "ticket-handle", sandbox: "max", timeout: TICKET_HANDLE_TIMEOUT_MS });
+}
+
+// Load the same read-only context brief the improve lane uses, so Sol's first turn sees the ticket +
+// customer + last analysis exactly the way the founder does. Best-effort — a missing customer or
+// analysis is fine; the brief still surfaces the messages.
+async function loadTicketHandleBrief(ticketId: string): Promise<string> {
+  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
+  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
+  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
+  return loadImproveBrief(ticketId);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseSolFinalJson(text: string): any | null {
+  const parsed = parseStatus(text);
+  return parsed;
+}
+
+async function runTicketHandleJob(job: Job) {
+  const tag = `[handle:${job.id.slice(0, 8)}]`;
+  let params: { ticket_id?: string; workspace_id?: string; turn_index?: number; reason?: string } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* fall through to the missing-params guard */
+  }
+  const ticketId = params.ticket_id;
+  // Prefer the job.workspace_id (the queue's canonical scope). Fall back to the params only when the
+  // job row hasn't been stamped with one — belt-and-braces so a mis-enqueued job still runs safely.
+  const workspaceId = job.workspace_id || params.workspace_id || null;
+  if (!ticketId || !workspaceId) {
+    await update(job.id, { status: "failed", error: "ticket-handle job missing ticket_id/workspace_id" });
+    return;
+  }
+
+  try {
+    const brief = await loadTicketHandleBrief(ticketId);
+    const prompt = [
+      `Use the ticket-handle skill (cwd is the repo root). You are Sol, June's Ticket Handler agent, running the FIRST-TOUCH box session on Max.`,
+      ``,
+      `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
+      brief,
+      ``,
+      `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
+      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis). You may also Read/Grep the brain + src/ and WebSearch.`,
+      `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
+      ``,
+      `Final message = ONLY one JSON object:`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>"}`,
+      `  {"status":"needs_human","reason":"<one line>"}`,
+      `See the ticket-handle skill for chosen_path + plan + guardrails shape.`,
+    ].join("\n");
+
+    const { resultText, isError, raw, usage, model, configDir: handleDir } = await runBoxLane(
+      (cfg, sid) => runTicketHandleClaude(prompt, sid, REPO_DIR, cfg, job.id),
+      { sessionId: null }, // Sol's first-touch is a fresh session per ticket — no resume, no session pin
+    );
+    await meterAgentJob(job, handleDir ?? undefined, usage, model);
+    const parsed = parseSolFinalJson(resultText);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+
+    if (parsed?.status === "needs_human") {
+      const reason = String(parsed.reason || "Sol punted to a human — no reason given.");
+      await update(job.id, {
+        status: "needs_attention",
+        needs_attention_class: "sol_needs_human",
+        error: reason,
+        log_tail: `Sol needs_human: ${reason}\n\n${raw.slice(-1800)}`.slice(-2000),
+      });
+      return;
+    }
+
+    if (parsed?.status === "completed" && parsed?.direction && typeof parsed.direction === "object") {
+      const d = parsed.direction as {
+        intent?: unknown;
+        context_summary?: unknown;
+        chosen_path?: unknown;
+        plan?: unknown;
+        guardrails?: unknown;
+      };
+      const intent = typeof d.intent === "string" ? d.intent.trim() : "";
+      const contextSummary = typeof d.context_summary === "string" ? d.context_summary.trim() : "";
+      const chosenPath = typeof d.chosen_path === "string" ? d.chosen_path : "";
+      const validPath = chosenPath === "playbook" || chosenPath === "stateless" || chosenPath === "needs_info";
+      // Re-assert the write-time invariant before mutating (learning #1): every required field must be
+      // present + chosen_path must be one of the three enum values. A missing/typo'd field fails the
+      // partial-UNIQUE insert downstream anyway, but bailing here gives a clearer error trail.
+      if (!intent || !contextSummary || !validPath) {
+        await update(job.id, {
+          status: "failed",
+          error: `Sol returned an incomplete direction (intent=${!!intent}, context_summary=${!!contextSummary}, chosen_path=${chosenPath || "(none)"})`,
+          log_tail: raw.slice(-2000),
+        });
+        return;
+      }
+      const plan = (d.plan && typeof d.plan === "object" ? d.plan : {}) as Record<string, unknown>;
+      const guardrails = (d.guardrails && typeof d.guardrails === "object" ? d.guardrails : {}) as Record<string, unknown>;
+
+      const { writeDirection } = await import("../src/lib/ticket-directions");
+      try {
+        await writeDirection(db, {
+          workspace_id: workspaceId,
+          ticket_id: ticketId,
+          intent,
+          context_summary: contextSummary,
+          chosen_path: chosenPath,
+          plan,
+          guardrails,
+          // authored_by default = 'sol_box_session' (the SDK default; matches the Phase 3 verification)
+        });
+      } catch (e) {
+        // The partial-UNIQUE on ticket_id WHERE superseded_at IS NULL enforces the one-live-row
+        // invariant — a re-dispatched job on the same ticket that already has a live Direction fails
+        // here (23505). Fail the job with the DB error so the CS director sees the collision instead
+        // of quietly forking two live rows.
+        const msg = e instanceof Error ? e.message : String(e);
+        await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
+        return;
+      }
+
+      // Ship the first customer-facing reply through the SAME production delivery sink the orchestrator
+      // uses (ticket-delivery.deliverTicketMessage). This stamps the ticket_resolution_events row's
+      // shipped_at (Phase 3 verification bullet 1) via the same wrapper stampedSend does — Phase 3's
+      // dispatcher will already have inserted the ack ticket_resolution_events row, so this send stamps
+      // the next-turn's row. Best-effort in the sense that a first_reply-less Direction (rare) still
+      // lands cleanly — the ticket just doesn't get a Sol reply here.
+      const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
+      if (firstReply) {
+        const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+        const channel = (t?.channel as string | null) || "email";
+        try {
+          const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+          await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+        } catch (e) {
+          // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+          // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+          // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
+      return;
+    }
+
+    // No recognizable verdict. If the agent actually produced output (prose, not a hard run error),
+    // it over-ran the single-turn envelope — surface a failure without a park so a human can look.
+    if (!isError) {
+      await update(job.id, {
+        status: "failed",
+        error: "Sol first-touch returned no completed direction JSON",
+        log_tail: raw.slice(-2000),
+      });
+      return;
+    }
+    await update(job.id, { status: "failed", error: "Sol first-touch errored with no direction", log_tail: raw.slice(-2000) });
+  } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
@@ -18813,6 +18999,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "product-seed") return runProductSeedJob(job);
   if (job.kind === "spec-chat") return runSpecChatJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
+  if (job.kind === "ticket-handle") return runTicketHandleJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "spec-review") return runSpecReviewJob(job);
@@ -19975,6 +20162,7 @@ async function main() {
   const countSeed = () => [...active.values()].filter((v) => v.kind === "product-seed").length;
   const countSpecChat = () => [...active.values()].filter((v) => v.kind === "spec-chat").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
+  const countTicketHandle = () => [...active.values()].filter((v) => v.kind === "ticket-handle").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countSpecReview = () => [...active.values()].filter((v) => v.kind === "spec-review").length;
@@ -20006,7 +20194,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "ticket-handle" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -20199,6 +20387,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed spec-chat ${job.id.slice(0, 8)} → ${countSpecChat() + 1}/${MAX_SPEC_CHAT} spec-chat lane`);
+        launch(job);
+      }
+      // Fill the ticket-handle lane (sol-ticket-direction-artifact-and-first-touch-box-session): Sol's
+      // first-touch box session per inbound ticket, concurrency-1 so a first-touch session never races
+      // the self-update reset of REPO_DIR (mirrors the ticket-improve lane's discipline).
+      while (countTicketHandle() < MAX_TICKET_HANDLE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-handle"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ticket-handle ${job.id.slice(0, 8)} → ${countTicketHandle() + 1}/${MAX_TICKET_HANDLE} ticket-handle lane`);
         launch(job);
       }
       // Fill the ticket-improve lane (box-ticket-improve): interactive Max turns, concurrency-1.
