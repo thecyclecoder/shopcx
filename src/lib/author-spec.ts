@@ -17,8 +17,12 @@
  * Both run the same Verification enforcement (`assertEveryPhaseHasVerification`) and the same `upsertSpec`.
  *
  * Verification enforcement is a HARD error (throws `MissingVerificationError`) — it runs before the DB write
- * so an untestable spec never reaches `public.spec_phases`. A genuine DB/upsert error is best-effort (logged,
- * returns false) per the historical defensive posture.
+ * so an untestable spec never reaches `public.spec_phases`. `repair-author-write-surface-real-error-not-
+ * swallow` Phase 2 aligned the DB/upsert failure path to also fail LOUD: the inner catch now re-throws the
+ * caught error (raw DB / MissingIntent / InvalidParent / …) rather than collapsing to `return false`, and a
+ * `getSpec` read-after-write throws `AuthorWriteFailedError` on a silent no-op upsert. Callers propagate
+ * the concrete message end-to-end to the parked repair job's `error` column instead of hitting a generic
+ * "silent author-write fallout" fallback.
  */
 import { parseAuthoredSpecMarkdown, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
@@ -1026,6 +1030,19 @@ export async function authorSpecRowStructured(
       },
       phases,
     );
+    // repair-author-write-surface-real-error-not-swallow Phase 2 — READ-AFTER-WRITE. Same guard as the
+    // markdown chokepoint: a resolved `upsertSpec` isn't proof the row landed (RLS drop / pool bounce
+    // / any silent no-op path). Re-assert the concrete post-condition (row visible via `getSpec`)
+    // right at the write point so the caller never enqueues a build for a slug that didn't persist.
+    // On miss, throw with the CONCRETE cause so the caller's catch preserves the real message end-to-end.
+    const persistedRow = await getSpec(workspaceId, slug);
+    if (!persistedRow) {
+      throw new AuthorWriteFailedError(
+        `authorSpecRowStructured ${slug}: row not visible after upsertSpec — silent no-op write ` +
+          `(RLS drop, pool bounce, or an upsert path that swallowed its own error). The spec was ` +
+          `never persisted to public.specs; do NOT proceed to enqueue a build for this slug.`,
+      );
+    }
     // re-author-re-opens-dismissed: if this was a content-changing re-author of an existing spec, re-open it
     // (reset review signals + status=in_review, clear the standing init/groom dismissal) so the corrected
     // content is re-evaluated, never carried under a stale verdict. No-op for a brand-new / no-op re-author.
@@ -1081,11 +1098,16 @@ export async function authorSpecRowStructured(
       .catch(() => {});
     return true;
   } catch (e) {
-    console.warn(
-      `[author-spec] authorSpecRowStructured ${slug} failed:`,
-      e instanceof Error ? e.message : e,
-    );
-    return false;
+    // repair-author-write-surface-real-error-not-swallow Phase 2 — RE-THROW the caught error rather
+    // than collapsing to `return false`. Every downstream `instanceof MissingVerificationError` /
+    // `instanceof MissingIntentError` / `instanceof InvalidParentError` discriminator (request-fix
+    // route, agent-grader, triage) survives because we re-throw as-is; only a non-Error is wrapped
+    // in `AuthorWriteFailedError` to still surface the message.
+    const name = e instanceof Error ? e.name : "Error";
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[author-spec] authorSpecRowStructured ${slug} failed: ${name}: ${msg}`);
+    if (e instanceof Error) throw e;
+    throw new AuthorWriteFailedError(`authorSpecRowStructured ${slug} failed: ${name}: ${msg}`);
   }
 }
 
@@ -1094,8 +1116,12 @@ export async function authorSpecRowStructured(
  * author surface calls. Idempotent: re-running with the same body produces no material change (UPSERT by
  * `(workspace_id, slug)`, phase replacement by `(spec_id, position)`).
  *
- * Best-effort on the DB write: a failure logs a warning and returns `false`. The Verification gate is a HARD
- * error (throws) before the write so an untestable spec never lands in `public.spec_phases`.
+ * `repair-author-write-surface-real-error-not-swallow` Phase 2: FAIL LOUD on every write error — the inner
+ * catch re-throws the caught error AS-IS (so downstream `instanceof MissingVerificationError` /
+ * `MissingIntentError` / `InvalidParentError` discriminators still work), and a `getSpec` read-after-write
+ * throws `AuthorWriteFailedError` when the row is not visible post-upsert (a silent no-op — RLS drop /
+ * pool bounce / upsert path that swallowed its own error). The `Promise<boolean>` return is retained for
+ * shape compatibility with existing callers but is now effectively `Promise<true>` — every failure THROWS.
  */
 export async function authorSpecRowFromMarkdown(
   workspaceId: string,
@@ -1105,12 +1131,13 @@ export async function authorSpecRowFromMarkdown(
   opts: AuthorSpecOpts = {},
 ): Promise<boolean> {
   // ENFORCEMENT (reject before the DB write): every phase must carry a non-empty Verification AND a
-  // non-empty body. This runs OUTSIDE the best-effort try/catch below so an untestable OR un-buildable
-  // authoring FAILS LOUDLY (throws) rather than being swallowed into a `false` return — a bad spec must
-  // never reach public.spec_phases. A genuine DB/upsert error stays best-effort (returns false, logged);
-  // only these structural defects are hard errors. ~13 specs shipped with empty verification columns
-  // because there was no verification gate; db-index-orders shipped a 0-byte body because there was no
-  // body gate — both gates now guard the write path.
+  // non-empty body. This runs OUTSIDE the try/catch below so an untestable OR un-buildable authoring
+  // FAILS LOUDLY (throws) rather than being swallowed. `repair-author-write-surface-real-error-not-
+  // swallow` Phase 2 aligned the INNER catch to also throw (rather than `return false`) so every
+  // author-write failure (structural + raw DB + read-after-write miss) surfaces with a concrete
+  // message end-to-end. ~13 specs shipped with empty verification columns because there was no
+  // verification gate; db-index-orders shipped a 0-byte body because there was no body gate — both
+  // gates now guard the write path.
   const phaseBodies = extractPhaseBodies(markdown);
   assertEveryPhaseHasVerification(slug, phaseBodies);
   // spec-body-never-silently-empty Phase 1 — reject a phase with an empty body (the db-index-orders class).
@@ -1210,6 +1237,27 @@ export async function authorSpecRowFromMarkdown(
       },
       phases,
     );
+    // repair-author-write-surface-real-error-not-swallow Phase 2 — READ-AFTER-WRITE. A "silent no-op"
+    // upsert (RLS drop, pooler bounce eating the DDL, a fire-and-forget insert that swallowed its own
+    // error, a race that no-op'd) resolves without throwing yet leaves `public.specs` empty for this
+    // slug. Before Phase 2 the caller (`markNewSpecInReview` → `groupOrAuthorRepairSpec`) would
+    // treat the resolved upsert as success, enqueue a `repair_build` for a slug that had NEVER
+    // persisted, and the parked-router at the build claim-gate would silently dismiss the missing
+    // row as noise — the "16 phantom-completed repairs in 7 days" trap. Confirming the row is
+    // actually visible after the write is the same guard shape the coaching mandate cites
+    // (compare-and-set / verify-after-mutate): don't trust the coarse `resolved without throwing`
+    // proxy; assert the concrete post-condition the caller depends on (row exists) at the write
+    // point. On miss, throw `AuthorWriteFailedError` with the CONCRETE cause so the caller surfaces
+    // "row not visible after write" onto the parked repair job's `error` column instead of the
+    // generic "silent author-write fallout" fallback.
+    const persisted = await getSpec(workspaceId, slug);
+    if (!persisted) {
+      throw new AuthorWriteFailedError(
+        `authorSpecRowFromMarkdown ${slug}: row not visible after upsertSpec — silent no-op write ` +
+          `(RLS drop, pool bounce, or an upsert path that swallowed its own error). The spec was ` +
+          `never persisted to public.specs; do NOT proceed to enqueue a build for this slug.`,
+      );
+    }
     // re-author-re-opens-dismissed: content-changing re-author of an existing spec → re-open (reset review
     // signals + status=in_review, clear standing init/groom dismissal). `phaseBodies` is the same
     // {title,body,verification} shape the structured path compares; map the parsed phase titles in.
@@ -1230,11 +1278,22 @@ export async function authorSpecRowFromMarkdown(
       .catch(() => {});
     return true;
   } catch (e) {
-    console.warn(
-      `[author-spec] authorSpecRowFromMarkdown ${slug} failed:`,
-      e instanceof Error ? e.message : e,
-    );
-    return false;
+    // repair-author-write-surface-real-error-not-swallow Phase 2 — RE-THROW the caught error rather
+    // than collapsing to `return false`. Before Phase 2 this catch swallowed a raw DB/upsert error
+    // (or an assertValidParent / MissingIntentError / any thrown-inside-the-try error) into a bare
+    // `false` return, which the caller (`markNewSpecInReview`) turned into a generic
+    // "silent author-write fallout" AuthorWriteFailedError with no diagnosis. Now the concrete
+    // error class + message survives to the caller (→ repair-agent → parked job.error), so an
+    // operator (and Ada's supervision lane) reads the REAL cause instead of the fallback string.
+    // console.warn stays for the box operator's tail; the throw is the load-bearing signal.
+    const name = e instanceof Error ? e.name : "Error";
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[author-spec] authorSpecRowFromMarkdown ${slug} failed: ${name}: ${msg}`);
+    // If it was already an Error, re-throw AS-IS so downstream `instanceof MissingVerificationError`
+    // / `instanceof MissingIntentError` etc. checks (e.g. request-fix/route.ts) still discriminate.
+    // Only wrap when we caught a non-Error (very rare).
+    if (e instanceof Error) throw e;
+    throw new AuthorWriteFailedError(`authorSpecRowFromMarkdown ${slug} failed: ${name}: ${msg}`);
   }
 }
 
