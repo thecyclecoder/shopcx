@@ -49,6 +49,7 @@ Every journey defines `jo:positive` / `jo:negative` / `jo:neutral` outcome tags.
 | Journey | Trigger intent | Channels | Outcome positive |
 |---|---|---|---|
 | [[account-linking]] | `account_linking` (prepend only) | email, chat, help_center, sms, meta_dm | Customer linked accounts |
+| [[add-payment-method]] | `add_payment_method` | email, chat, sms | Card vaulted + book migrated to internal |
 | [[discount-signup]] | `discount_signup` | email, chat, help_center, meta_dm, sms | Marketing signup + coupon delivered |
 | [[cancel]] | `cancel_subscription` | email, chat, sms, meta_dm | Customer saved (accepted remedy) |
 | [[crisis-tier1-flavor-swap]] | `crisis_tier1` | email | Customer accepted swap |
