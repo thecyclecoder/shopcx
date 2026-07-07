@@ -90,6 +90,17 @@ export interface OrgChart {
      * `proposedByLabel` is the proposer function's display name (computed server-side; the hub is a client component).
      */
     goals: { slug: string; title: string; pct: number; status: GoalStatus; proposedBy?: string; proposedByLabel?: string }[];
+    /**
+     * CEO-owned workers rendered UNDER the CEO seat — the founder's own agents that answer directly to
+     * her, not to a director (god-mode-becomes-ceo-executive-assistant-agent Phase 2). Today: Eve (the
+     * god-mode cockpit executive assistant). Populated from every MONITORED_LOOPS entry with owner="ceo"
+     * (via `buildRoster` Step 2's persona-backed reactive branch), with liveness derived from
+     * `loop_heartbeats` + the god-mode cockpit's own activity (armed `god_mode_sessions`). Deliberately
+     * kept off Ada's roster — the founder's assistant reports to the founder, not to Platform. Every risky
+     * action she takes goes through the existing god-mode PIN + risk-tier approvals ([[../god-mode]]),
+     * so she does anything the founder asks within his leash + surfaces reasoning inline.
+     */
+    workers: WorkerLane[];
   };
   directors: DirectorNode[];
 }
@@ -179,11 +190,14 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
     });
   }
 
-  // 2. persona-backed crons (a `personaKind`) — merged by persona key so the two db-health
-  //    crons render as ONE Devi worker (loopIds carries both).
+  // 2. persona-backed crons + reactive lanes (a `personaKind`) — merged by persona key so the
+  //    two db-health crons render as ONE Devi worker (loopIds carries both). Reactive lanes with
+  //    a personaKind (god-mode-cockpit → Eve, Phase 2 of god-mode-becomes-ceo-executive-assistant-
+  //    agent) go through the same branch: the founder's cockpit is event-driven, but it still
+  //    surfaces a live persona under the CEO seat with beats-based liveness.
   const byPersona = new Map<string, MonitoredLoop[]>();
   for (const l of MONITORED_LOOPS) {
-    if (l.kind === "cron" && l.personaKind) {
+    if ((l.kind === "cron" || l.kind === "reactive") && l.personaKind) {
       const arr = byPersona.get(l.personaKind) ?? [];
       arr.push(l);
       byPersona.set(l.personaKind, arr);
@@ -272,6 +286,30 @@ export async function computeWorkerStatus(
   sinceIso: string,
   nowMs: number,
 ): Promise<{ status: WorkerStatus; reason: string }> {
+  // Phase 2 (god-mode-becomes-ceo-executive-assistant-agent): Eve's liveness is derived from
+  // the god-mode cockpit's own activity — an ARMED god_mode_sessions row means she's live
+  // right now, even before any explicit `agent:god-mode`-style heartbeat has landed. This runs
+  // BEFORE the generic beats/jobs check because god-mode is a founder cockpit (not an
+  // `agent_jobs` queue lane), so the standard signals would otherwise register her as always
+  // idle. Defensive read (try/catch, no throw) — an unreadable god_mode_sessions table falls
+  // through to the normal signals so the roster can never break the dashboard.
+  if (entry.kind === "god-mode") {
+    try {
+      const { data } = await admin
+        .from("god_mode_sessions")
+        .select("status,last_activity_at")
+        .order("last_activity_at", { ascending: false })
+        .limit(1);
+      const row = (data ?? [])[0] as { status: string | null; last_activity_at: string | null } | undefined;
+      if (row?.status === "armed") return { status: "active", reason: "cockpit armed" };
+      if (row?.last_activity_at && row.last_activity_at >= sinceIso) {
+        return { status: "active", reason: "recent cockpit session" };
+      }
+      if (row) return { status: "idle-healthy", reason: "cockpit disarmed — awaiting founder" };
+    } catch {
+      // fall through to the normal signals below
+    }
+  }
   const [recentBeat, everJob, recentJob] = await Promise.all([
     entry.loopIds.length
       ? headCount(
@@ -372,6 +410,12 @@ export async function getOrgChart(): Promise<OrgChart> {
         proposedBy: g.proposedBy,
         proposedByLabel: g.proposedBy ? functionLabel(g.proposedBy) : undefined,
       })),
+      // Phase 2: CEO-owned workers rendered under the CEO seat alongside the goals — the
+      // founder's own agents (Eve today, via god-mode-cockpit). Pulled from the SAME roster
+      // the directors' workers came from, so a lane can never be double-rendered (a worker
+      // is placed under EXACTLY ONE seat — under the CEO if owner="ceo", else under its
+      // owning director). This is why she is not shown under Ada.
+      workers: workersByFn.get("ceo") ?? [],
     },
     directors,
   };
