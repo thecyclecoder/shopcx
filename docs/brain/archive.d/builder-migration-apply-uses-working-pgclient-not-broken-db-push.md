@@ -1,0 +1,1 @@
+- **Builder applies migrations via the working pgClient apply-script, not the broken db push lane** · verified 2026-07-07 · → [[../recipes/write-a-migration-apply-script]]
