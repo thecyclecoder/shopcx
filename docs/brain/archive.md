@@ -29,6 +29,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **CS Director: third rung of the escalation ladder — hard calls above the triage quorum** · verified 2026-07-07 · → [[libraries/cs-director]]
 - **Digital goods catalog + PDF delivery** · verified 2026-07-07 · → [[../inngest/digital-goods-delivery]]
 - **Drop Supabase GoTrue 504 /auth/v1/user edge noise at the error-feed capture layer** · verified 2026-07-07 · → [[libraries/control-tower]]
+- **Scope Supabase auth `dial tcp <addr>: i/o timeout` as transient in the log poller** · verified 2026-07-07 · → [[../libraries/control-tower]]
 - **Human directives are hard gates over the ticket AI — turn-off, don't-escalate, reviewed-lock; merges carry context, never control** · verified 2026-07-07 · → [[lifecycles/ai-analysis]]
 - **Media Buyer agent + the Test→Promote-to-winner cadence (fix ad fatigue)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
 - **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
