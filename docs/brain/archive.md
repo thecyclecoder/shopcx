@@ -55,6 +55,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Extend verifyActionInDB coverage: returns, date/frequency, item ops, price** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Verify+escalate on the inline (journey/playbook-alongside) send path** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Box self-update: anchor staleness to boot-time RUNNING_SHA, not a fresh disk HEAD** · verified 2026-07-07 · → [[recipes/build-box-setup]]
+- **Box self-update: force override when the queue contains a job kind the running worker doesn't know** · verified 2026-07-07 · → [[../libraries/builder-worker]]
 - **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]
 - **Goal promotion: stop fold/promotion doc collisions + surface a HELD promotion** · verified 2026-07-06 · → [[lifecycles/spec-goal-branch-pm-flow]]
 - **Portal: fix the first-delivery gate + true read-only + honest order status (slice 1)** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
