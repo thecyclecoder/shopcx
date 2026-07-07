@@ -1760,6 +1760,22 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
       const { executeSonnetDecision } = await import("@/lib/action-executor");
       const { pickOrchestratorModel } = await import("@/lib/model-picker");
+      const { applyNoProgressCircuit } = await import("@/lib/no-progress-guard");
+
+      // ── No-progress circuit (Phase 3 of ticket-merge-summary-and-context-cap) ──
+      // Before paying for another Sonnet/Opus turn, check whether the
+      // ticket is stuck in a loop: M consecutive inbound customer
+      // messages with no outbound reply or action executed. If so,
+      // surface it for human review instead of firing the orchestrator.
+      // Kept above the model-picker + orchestrator call so a stuck loop
+      // never reaches the paid Opus escalation (`ai_turn_count >= 1 →
+      // Opus` per model-picker.ts).
+      const noProgress = await step.run("no-progress-guard", async () =>
+        applyNoProgressCircuit(admin, wsId, tid),
+      );
+      if (noProgress.tripped) {
+        return { status: "no_progress_circuit_tripped", streak: noProgress.streak };
+      }
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
         const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null });

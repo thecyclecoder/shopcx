@@ -68,10 +68,42 @@ Migration status (spec [[../specs/commerce-sdk-migrate-dashboard-agent-ai]] Phas
 
 ## Prompt caching (cost-critical)
 
-`buildPreContext` returns **`{ system, userBlock }`** — a deliberate split for prompt caching (the orchestrator is ~98% of all AI spend, and input context dwarfs output ~184:1):
+`buildPreContext` returns **`{ system, userBlockPrefix, userBlock }`** — a deliberate three-way split for prompt caching (the orchestrator is ~98% of all AI spend, and input context dwarfs output ~184:1):
 
 - **`system`** — the heavy, **workspace-stable** payload (role line, tool-usage note, AVAILABLE HANDLERS, PERSONALITY, POLICIES, prompt RULES, output schema). Sent as a `system` block with a **1-hour cache breakpoint** (`cache_control: {type:"ephemeral", ttl:"1h"}`, beta header `extended-cache-ttl-2025-04-11`). The last tool also carries a 1h breakpoint (tools render before system). Byte-identical across every ticket in the workspace (modulo channel/personality), so the first ticket each hour writes it and **every subsequent ticket / AI turn / tool-use round reads it at 0.1×**.
-- **`userBlock`** — **volatile** per-ticket/per-turn content (`currentDateContext()`, CUSTOMER, language, TICKET subject/tags/playbook/page/agent, AGENT GUIDANCE, CONVERSATION). Sent **uncached** in `messages[0]`. Keeping the date + conversation here is what lets the system prefix stay stable.
+- **`userBlockPrefix`** — **per-ticket stable** durable-state prefix (`renderMergeSummaryPrefix` output). Present ONLY on merged tickets — the `merge_summary` + `merge_summary_at` block from [[../tables/tickets]] locked in by [[ticket-merge]] at merge time. Rendered as the first `text` content on the user turn with its own `cache_control: {type:"ephemeral", ttl:"1h"}` breakpoint, so it's written once and read at 0.1× on every subsequent turn until a tail rollup advances `merge_summary_at`. Non-merged tickets → `userBlockPrefix = null` and no per-ticket cache block is emitted. See [[../specs/ticket-merge-summary-and-context-cap]] Phase 2.
+- **`userBlock`** — **volatile** per-ticket/per-turn content (`currentDateContext()`, CUSTOMER, language, TICKET subject/tags/playbook/page/agent, AGENT GUIDANCE, CONVERSATION). Sent **uncached** in `messages[0]`. Keeping the date + conversation here is what lets the system + per-ticket prefixes stay stable.
+
+### Merged-ticket context: summary + since-window + rolling tail
+
+On a merged ticket buildPreContext replaces the default "latest 12 messages" fetch with:
+
+1. Read the ticket's `merge_summary` + `merge_summary_at` alongside the other fields.
+2. Fetch `ticket_messages` with `created_at > merge_summary_at` (ascending, capped at 60 as a safety ceiling — the rollup threshold fires long before this).
+3. Render the summary via `renderMergeSummaryPrefix(summary, mergeSummaryAt)` and return it as `userBlockPrefix`. The convo header changes to `CONVERSATION SINCE MERGE SUMMARY (locked …):` to make the boundary explicit for the model.
+4. If the accumulated tail crosses `MERGE_TAIL_ROLLUP_K_MESSAGES` (20) OR `MERGE_TAIL_ROLLUP_T_CHARS` (8000) — checked via `shouldRollupTail` — fire `rollupMergeSummaryTail` **fire-and-forget** (`void`). The current turn still sends the tail (bounded by the fetch cap); the next turn reads a fresh summary + an empty tail. Adding synchronous latency to every threshold-crossing turn would hurt UX; the tail is already bounded so the extra turn of "too-large" tail is worth it.
+
+`rollupMergeSummaryTail` reuses `buildMergeSummaryPrompt` from [[ticket-merge]] (same "prior state + newly-arrived → updated summary" shape used at merge time), calls Sonnet with an 800-token cap, and persists the new summary with `merge_summary_at` advanced to the latest tail message's `created_at`. The write is guarded (`.eq("id", ticketId).eq("workspace_id", workspaceId).select("id")`) so a stale target can't scribble across another workspace. AI usage is logged with `purpose: "merge_summary_tail_rollup"` on [[../tables/ai_token_usage]] for cost attribution.
+
+**Pinned guidance still reaches the model.** The out-of-window `is_ai_guidance` fetch at line ~294 is untouched — it always fetches every pinned guidance note regardless of window, so a long merged thread cannot push agent-pinned guidance out of context.
+
+**Cost accounting.** Per [[ai-usage]] `usageCostCents`, cache_read is billed at 10% of input while cache_creation is billed at 125% of input. Sending the summary block once as cache_creation and reading it back on every subsequent turn as cache_read is the whole optimization — it eliminates the recost measured on ticket 49ddd6c4 ($8.92: `input 93k / output 7k / cache_create 216k / cache_read 2,058k`, dominated by re-writing merged history as fresh input each turn).
+
+### Hard context cap + no-progress guard (Phase 3)
+
+`buildPreContext` also enforces a **hard `HARD_CONTEXT_CAP_N_MESSAGES = 25` tail cap** via `applyRawWindowCap`. Applied after the fetch and after the rollup-fire-and-forget, so a bursty merged ticket whose rollup fell behind still sends a bounded raw window; older-than-N messages are covered by the `merge_summary` prefix (no information loss). Non-merged tickets fetch `limit:12` upstream and never exceed N — the cap is de-facto a merged-ticket safeguard. Truncations are surfaced through a structured `console.info({event:"orchestrator_raw_window_capped", ...})` log so the cap is never silent — picked up by the Vercel log drain for post-deploy cost audit. Pure, unit-tested in [[../../../src/lib/sonnet-orchestrator-v2-merge-summary.test.ts]].
+
+The complementary **no-progress circuit** lives in [[no-progress-guard]] and runs in `unified-ticket-handler.ts` **before** `pickOrchestratorModel` — a stuck ticket never reaches the paid Opus escalation ([[model-picker]]'s `ai_turn_count >= 1 → opus` route). When `M = NO_PROGRESS_M = 3` consecutive inbound customer messages sit at the tail with no outbound reply and no executed-action system note between them, `applyNoProgressCircuit` writes `escalated_at = now(), escalation_reason = "no_progress_context_cap"` via a compare-and-set (`.eq("id", tid).eq("workspace_id", ws).is("escalated_at", null).select("id")`) and drops a one-off `[System]` note, then returns `{tripped: true}` — the handler short-circuits before `callSonnetOrchestratorV2` fires.
+
+Reproducing the cost delta against the ticket 49ddd6c4 baseline (spec Phase-3 verification):
+
+```
+npx tsx scripts/measure-merge-summary-cost-delta.ts \
+  --ticket 49ddd6c4-... \
+  --cutoff 2026-07-07T00:00:00Z
+```
+
+Read-only probe — queries `ai_token_usage` rows tagged `purpose LIKE 'orchestrator-decision:%'`, splits by cutoff, and reports per-turn + total cost via `usageCostCents`. The spec's $8.92 baseline is the sum across the ticket's full pre-deploy history; the post-deploy total should show cache_read dominating cache_creation on every turn after the first.
 
 **Hard rule: never move per-ticket, per-turn, or per-call content into `system`.** Caching is a prefix match — one volatile byte in the system block invalidates the shared prefix for the whole workspace. That was the pre-2026-06 leak: the entire prompt was one user block with the customer + conversation *ahead* of the rules, so the ~60K stable payload re-billed at full freight on every ticket (`cache_creation ≈ cache_read`, only ~36% reads). The split + 1h TTL converts the bulk of cache-creation tokens into reads. Handler queries (`journey_definitions`/`playbooks`/`workflows`) carry `.order("name")` so the rendered list is byte-stable. **Verify after deploy:** `cache_read_input_tokens` share in [[ai-usage]] / [[../tables/ai_token_usage]] should climb well above the prior ~36%.
 

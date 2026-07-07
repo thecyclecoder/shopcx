@@ -75,6 +75,8 @@ Customer support tickets. status (open/pending/closed/archived), channel, handle
 | `detected_language` | `text` | ✓ |  |
 | `do_not_reply` | `bool` | — | default: `false` |
 | `do_not_reply_at` | `timestamptz` | ✓ |  |
+| `merge_summary` | `text` | ✓ | Compact plain-text state summary (issue, confirmed facts, actions, open items) written at merge time by [[../libraries/ticket-merge]] → Sonnet. Downstream Opus turns read this instead of re-costing the full pre-merge history. Feeds Phase 2 stable-prefix context assembly in [[../libraries/sonnet-orchestrator-v2]]. |
+| `merge_summary_at` | `timestamptz` | ✓ | Timestamp of the `merge_summary` write. Doubles as the "since window" boundary Phase 2 uses to slice messages after the summary. |
 
 ## Foreign keys
 

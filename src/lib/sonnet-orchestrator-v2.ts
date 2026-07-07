@@ -252,6 +252,62 @@ function buildPromptSections(prompts: { category: string; title: string; content
   return sections.join("\n\n");
 }
 
+/**
+ * Tail-rollup trigger for a merged ticket's "since window" (Phase 2 of
+ * ticket-merge-summary-and-context-cap). When the messages accumulated
+ * after `merge_summary_at` cross a threshold — K messages OR T characters
+ * — the tail is folded back into the summary and `merge_summary_at`
+ * advances so the "since" window stays small and the cached prefix stays
+ * stable. Pure predicate — no I/O — kept exported for the unit test.
+ */
+export const MERGE_TAIL_ROLLUP_K_MESSAGES = 20;
+export const MERGE_TAIL_ROLLUP_T_CHARS = 8000;
+export function shouldRollupTail(tailMessageCount: number, tailCharCount: number): boolean {
+  return tailMessageCount >= MERGE_TAIL_ROLLUP_K_MESSAGES
+    || tailCharCount >= MERGE_TAIL_ROLLUP_T_CHARS;
+}
+
+/**
+ * Hard cap on the raw-message window fed to the model per turn (Phase 3
+ * of ticket-merge-summary-and-context-cap). N > K by design, so under
+ * normal operation the rollup fires first and the cap never bites. The
+ * cap is a safety belt for edge cases: rollup fell behind because of a
+ * Sonnet outage, or a burst of customer messages arrived after the
+ * rollup triggered but before it landed. Beyond N, the merge_summary
+ * carries prior state — no information is lost from the model's view.
+ *
+ * Kept slightly above K so a normal K-triggered rollup on a bursty
+ * ticket leaves headroom before the cap kicks in and truncates.
+ */
+export const HARD_CONTEXT_CAP_N_MESSAGES = 25;
+export function applyRawWindowCap<T>(
+  messages: T[],
+  cap: number = HARD_CONTEXT_CAP_N_MESSAGES,
+): { tail: T[]; truncatedCount: number } {
+  if (messages.length <= cap) return { tail: messages, truncatedCount: 0 };
+  // Keep the NEWEST N (drop the oldest). The merge_summary carries the
+  // dropped-from-view state; the newest messages are what the model needs
+  // to reason about the current turn.
+  return {
+    tail: messages.slice(messages.length - cap),
+    truncatedCount: messages.length - cap,
+  };
+}
+
+/**
+ * Render the per-ticket merge-summary cache prefix — the block that
+ * downstream Opus turns read INSTEAD of re-deriving state from the full
+ * merged history. Pure — used by buildPreContext to construct the
+ * cache-controlled content block on the user turn.
+ */
+export function renderMergeSummaryPrefix(summary: string, summaryAt: string): string {
+  return `MERGE SUMMARY (locked in at ${summaryAt} — the durable state of this ticket as of that time; downstream turns read this instead of re-deriving state from the full merged history).
+
+${summary}
+
+Everything below is the conversation SINCE that lock-in — the tail. Rely on this summary for prior state; only the tail changes turn-to-turn.`;
+}
+
 async function buildPreContext(
   workspaceId: string,
   ticketId: string,
@@ -260,7 +316,7 @@ async function buildPreContext(
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
-): Promise<{ system: string; userBlock: string }> {
+): Promise<{ system: string; userBlockPrefix: string | null; userBlock: string }> {
   const admin = createAdminClient();
 
   const [
@@ -279,7 +335,7 @@ async function buildPreContext(
     customerId
       ? admin.from("customers").select("first_name, last_name, email").eq("id", customerId).single()
       : Promise.resolve({ data: null }),
-    admin.from("tickets").select("tags, active_playbook_id, page_context, subject, detected_language").eq("id", ticketId).single(),
+    admin.from("tickets").select("tags, active_playbook_id, page_context, subject, detected_language, merge_summary, merge_summary_at").eq("id", ticketId).single(),
     admin.from("ticket_messages")
       .select("direction, body_clean, body, visibility, author_type, is_ai_guidance, created_at")
       .eq("ticket_id", ticketId)
@@ -331,6 +387,57 @@ async function buildPreContext(
   const ticketSubject = (ticket?.subject as string | null) || "";
   const activePlaybookId = ticket?.active_playbook_id || null;
 
+  // ── Phase 2: durable merge summary as a stable per-ticket cache prefix ──
+  // When a ticket has a merge_summary, we no longer feed the last-12 slice of
+  // the full merged history to the model — we feed the frozen summary block
+  // (as a cache-controlled prefix on the user turn — see api-call
+  // construction ~line 1730) plus ONLY the tail: messages created after
+  // merge_summary_at. This kills the cache-recost failure mode measured on
+  // ticket 49ddd6c4 ($8.92 via ai-usage.ts usageCostCents, where
+  // cache-creation was billed at 1.25x input on the re-sent history every
+  // turn) — the summary is now a cache_read after the first turn.
+  const mergeSummary = (ticket as { merge_summary?: string | null } | null)?.merge_summary || null;
+  const mergeSummaryAt = (ticket as { merge_summary_at?: string | null } | null)?.merge_summary_at || null;
+  type SinceMsg = {
+    direction: string;
+    body_clean?: string;
+    body?: string;
+    visibility: string;
+    author_type: string;
+    is_ai_guidance?: boolean;
+    created_at: string;
+  };
+  let sinceMessages: SinceMsg[] | null = null;
+  if (mergeSummary && mergeSummaryAt) {
+    const { data: since } = await admin.from("ticket_messages")
+      .select("direction, body_clean, body, visibility, author_type, is_ai_guidance, created_at")
+      .eq("ticket_id", ticketId)
+      .gt("created_at", mergeSummaryAt)
+      .order("created_at", { ascending: true })
+      // Safety cap. The rollup threshold (K messages / T chars) fires the
+      // tail back into the summary long before this — this ceiling only
+      // matters if the rollup fell behind on a burst.
+      .limit(60);
+    sinceMessages = (since || []) as SinceMsg[];
+
+    // Fire-and-forget tail rollup. When the accumulated tail crosses K
+    // messages or T chars, kick off a Sonnet call to fold the tail into
+    // the summary and advance merge_summary_at. The CURRENT turn still
+    // sends the tail (bounded by the fetch cap above); the NEXT turn
+    // reads the fresh summary + a small tail. Awaiting here would add
+    // Sonnet-call latency to every threshold-crossing turn — void the
+    // promise instead.
+    const tailChars = sinceMessages.reduce(
+      (n, m) => n + ((m.body_clean || m.body || "").length),
+      0,
+    );
+    if (shouldRollupTail(sinceMessages.length, tailChars)) {
+      void rollupMergeSummaryTail(admin, workspaceId, ticketId, mergeSummary, sinceMessages).catch((err) => {
+        console.warn("[sonnet-orchestrator] merge-summary tail rollup failed (non-fatal):", err);
+      });
+    }
+  }
+
   // If active playbook, get its name
   let activePlaybookNote = "";
   if (activePlaybookId) {
@@ -338,10 +445,44 @@ async function buildPreContext(
     activePlaybookNote = `\nACTIVE PLAYBOOK: "${pb?.name || "Unknown"}" is in progress on this ticket. If the customer's message is responding to the playbook's question, route to playbook. If they're asking about something else (conversation drift), answer their question instead.`;
   }
 
-  // Conversation history — external messages + action completion notes
+  // Conversation history — external messages + action completion notes.
+  // When merge_summary is set, we render the SINCE-window (ascending) that
+  // was fetched above; the summary carries prior state. Otherwise we render
+  // the latest-12 slice (fetched desc → reverse to ascending).
   let convoBlock = "";
-  if (messages?.length) {
-    const ordered = [...messages].reverse();
+  const rawConvoSource: SinceMsg[] | null = sinceMessages
+    ? sinceMessages
+    : (messages ? [...messages].reverse() as SinceMsg[] : null);
+  // ── Phase 3: hard context cap ──
+  // Applied AFTER the rollup fire-and-forget above and BEFORE render, so
+  // even a bursty merged ticket whose rollup fell behind still sends a
+  // bounded raw-message window. Non-merged tickets fetch limit:12 upstream
+  // and can never exceed N=25 — the cap is de-facto a merged-ticket
+  // safeguard. `applyRawWindowCap` is a pure slice; the merge_summary in
+  // userBlockPrefix preserves the dropped state so nothing is lost from
+  // the model's view (see docs/brain/specs/ticket-merge-summary-and-context-cap.md
+  // Phase 3 verification).
+  const capped = rawConvoSource
+    ? applyRawWindowCap(rawConvoSource, HARD_CONTEXT_CAP_N_MESSAGES)
+    : { tail: null as SinceMsg[] | null, truncatedCount: 0 };
+  if (capped.truncatedCount > 0) {
+    // Structured log so the cap is never silent — picked up by the Vercel
+    // log drain and surfaced on the [[ai-usage]] cost-audit pass. Not a
+    // sysNote (would clutter every capped turn); one log line per turn
+    // makes the truncation observable without noise on the ticket itself.
+    console.info(JSON.stringify({
+      event: "orchestrator_raw_window_capped",
+      ticketId,
+      workspaceId,
+      cap: HARD_CONTEXT_CAP_N_MESSAGES,
+      raw_count: rawConvoSource?.length ?? 0,
+      truncated: capped.truncatedCount,
+      relied_on_summary: Boolean(mergeSummary),
+    }));
+  }
+  const convoSource: SinceMsg[] | null = capped.tail;
+  if (convoSource?.length) {
+    const ordered = convoSource;
     convoBlock = ordered
       .filter((m: { visibility: string; author_type: string; body?: string }) => {
         if (m.visibility === "external") return true;
@@ -506,9 +647,24 @@ RESOLUTION-RECORD FIELDS (problem / confidence / options / chosen) — a per-tur
 These do NOT change what you execute — action_type + actions + response_message are still the authoritative plan. The four fields let downstream verification catch responses that don't actually address the diagnosed problem, and let calibration mine your reasoning over time. Always include them on a real decision.
 Note: "type" on any actions[] entry must NEVER be "skip_next_order" (retired — see above).`;
 
+  // ── PER-TICKET STABLE PREFIX — the durable merge_summary block. Marked
+  // with cache_control by the caller so it's written on the first turn after
+  // a merge and read at 10% of input on every subsequent turn (up to the
+  // next tail-rollup). This is the whole point of Phase 2 — the ~$8.92 recost
+  // measured on ticket 49ddd6c4 was the full merged history being re-sent as
+  // uncached input on every Opus turn; the summary block sits in front of
+  // the volatile tail and stops that recost loop. See ai-usage.ts
+  // usageCostCents cache accounting.
+  const userBlockPrefix = mergeSummary && mergeSummaryAt
+    ? renderMergeSummaryPrefix(mergeSummary, mergeSummaryAt)
+    : null;
+
   // ── VOLATILE per-ticket / per-turn content — NOT cached (it changes every
   // turn as the conversation grows). currentDateContext() lives here too so
   // the daily date rollover never invalidates the shared system prefix.
+  const convoHeader = mergeSummary && mergeSummaryAt
+    ? `CONVERSATION SINCE MERGE SUMMARY (locked ${mergeSummaryAt}):`
+    : "CONVERSATION:";
   const userBlock = `${currentDateContext()}
 
 CUSTOMER: ${cName} (${cEmail})${langDirective}
@@ -518,10 +674,103 @@ TICKET TAGS: ${tags}${activePlaybookNote}${pageContextNote}${agentContextNote}
 ${guidanceBlock ? `AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
 ${guidanceBlock}
 
-` : ""}CONVERSATION:
+` : ""}${convoHeader}
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}`;
 
-  return { system, userBlock };
+  return { system, userBlockPrefix, userBlock };
+}
+
+/**
+ * Fold the accumulated "since window" tail back into the ticket's
+ * merge_summary and advance merge_summary_at so the next turn's cache
+ * prefix stays small and stable. Called fire-and-forget from
+ * buildPreContext when shouldRollupTail() fires. Never throws — a rollup
+ * failure just means the next turn keeps sending the current (still
+ * bounded) tail; no customer-facing behavior degrades.
+ *
+ * Reuses buildMergeSummaryPrompt from ticket-merge so the summarizer shape
+ * (prior state + newly-arrived messages → updated summary) is the same in
+ * both the merge-time write and the tail-rollup path.
+ */
+async function rollupMergeSummaryTail(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  priorSummary: string,
+  tail: Array<{ direction: string; body_clean?: string; body?: string; visibility: string; author_type: string; created_at: string }>,
+): Promise<void> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || tail.length === 0) return;
+
+  const { buildMergeSummaryPrompt } = await import("@/lib/ticket-merge");
+  const prompt = buildMergeSummaryPrompt(
+    priorSummary,
+    tail.map((m) => ({
+      direction: m.direction,
+      author_type: m.author_type,
+      visibility: m.visibility,
+      body: m.body_clean || m.body || "",
+      created_at: m.created_at,
+    })),
+  );
+
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: SONNET_MODEL,
+        max_tokens: 800,
+        system: prompt.system,
+        messages: [{ role: "user", content: prompt.user }],
+      }),
+    });
+  } catch (err) {
+    console.warn("[sonnet-orchestrator] merge-summary rollup Sonnet fetch failed:", err);
+    return;
+  }
+  if (!res.ok) {
+    console.warn("[sonnet-orchestrator] merge-summary rollup HTTP", res.status);
+    return;
+  }
+  const data = (await res.json()) as {
+    content?: Array<{ text?: string }>;
+    usage?: ClaudeUsage;
+  };
+  const updatedSummary = (data.content?.[0]?.text || "").trim();
+  if (!updatedSummary) return;
+
+  // Advance merge_summary_at to the LATEST tail message's created_at so the
+  // next "since window" query starts after everything we just folded in.
+  // Guarded update: eq(id, workspace_id) + select("id") so we assert exactly
+  // one row transitioned and can't scribble across another workspace.
+  const latestTailAt = tail[tail.length - 1]?.created_at || new Date().toISOString();
+  const { data: written } = await admin
+    .from("tickets")
+    .update({
+      merge_summary: updatedSummary,
+      merge_summary_at: latestTailAt,
+    })
+    .eq("id", ticketId)
+    .eq("workspace_id", workspaceId)
+    .select("id");
+  if (!written || written.length !== 1) {
+    console.warn("[sonnet-orchestrator] merge-summary rollup update matched", written?.length ?? 0, "rows");
+    return;
+  }
+
+  void logAiUsage({
+    workspaceId,
+    model: SONNET_MODEL,
+    usage: data.usage,
+    purpose: "merge_summary_tail_rollup",
+    ticketId,
+  });
 }
 
 // ── Tool Execution ──
@@ -1688,7 +1937,7 @@ async function runOrchestratorDecision(
   };
 
   try {
-    const { system, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
+    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
     // Cache-control breakpoints, 1-hour TTL. The heavy, shared payload
     // (tools + system rules/policies/handlers, ~40-50K tokens) is now
     // byte-identical for every ticket in the workspace, so the first
@@ -1715,13 +1964,27 @@ async function runOrchestratorDecision(
       ? { ...t, cache_control: { type: "ephemeral", ttl: "1h" } }
       : t) as any[];
 
+    // Per-ticket cache breakpoint (Phase 2 of ticket-merge-summary-and-context-cap):
+    // when a merged ticket has a durable merge_summary, that summary is a
+    // stable prefix within the ticket's lifetime. Marking it as an ephemeral
+    // cache block lets it be cache_created once and cache_read on every
+    // subsequent turn — the tail after it stays uncached and small. Kills the
+    // full-history recost loop measured on ticket 49ddd6c4 ($8.92). Non-merged
+    // tickets keep the single-block user turn (no per-ticket prefix worth caching).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const userContent: any[] = userBlockPrefix
+      ? [
+          { type: "text", text: userBlockPrefix, cache_control: { type: "ephemeral", ttl: "1h" } },
+          { type: "text", text: userBlock },
+        ]
+      : [
+          { type: "text", text: userBlock },
+        ];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let messages: any[] = [
       {
         role: "user",
-        content: [
-          { type: "text", text: userBlock },
-        ],
+        content: userContent,
       },
     ];
 
