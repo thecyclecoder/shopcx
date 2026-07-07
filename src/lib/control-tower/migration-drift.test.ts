@@ -14,7 +14,13 @@ import {
   extractRenamedTables,
   foldMigrations,
   computeDrift,
+  computeMergedButUnapplied,
+  extractMigrationVersion,
+  runMigrationDriftCheck,
 } from "./migration-drift";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("extractRenamedTables captures ALTER TABLE … RENAME TO (if exists, public., quoted)", () => {
   const sql = `
@@ -112,4 +118,153 @@ test("drop-awareness still holds alongside renames (create→rename→drop = net
   ]);
   assert.equal(expected.has("temp_old"), false);
   assert.equal(expected.has("temp_new"), false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ci-guard-migrations-applied-not-just-merged spec Phase 1 — applied-set reconcile.
+// Regression pin: 20260918120000_order_refunds_mirror.sql merged 2026-07-06 but never applied,
+// so order_refunds did not exist in prod until a manual apply. The reconcile is the guard.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("extractMigrationVersion parses the 14-digit prefix (and returns null for off-format files)", () => {
+  assert.equal(
+    extractMigrationVersion("20260918120000_order_refunds_mirror.sql"),
+    "20260918120000",
+  );
+  assert.equal(
+    extractMigrationVersion("20260101000000_create_worker_tables.sql"),
+    "20260101000000",
+  );
+  // Off-format (the write-migration recipe's scratch pattern) → skipped by the reconcile.
+  assert.equal(extractMigrationVersion("_PENDING_meta_comments_retire_channel.sql"), null);
+  assert.equal(extractMigrationVersion("misc.sql"), null);
+});
+
+test("computeMergedButUnapplied FLAGS a file on main whose version isn't in the applied set (order_refunds_mirror regression pin)", () => {
+  // The exact 2026-07-06 incident: 20260918120000_order_refunds_mirror merged but never applied.
+  const files = [
+    "20260917120000_create_order_refunds.sql", // applied
+    "20260918120000_order_refunds_mirror.sql", // MERGED-BUT-UNAPPLIED
+    "20260919120000_cs_director_grader_anti_goodhart_clause.sql", // applied
+  ];
+  const applied = ["20260917120000", "20260919120000"];
+  const { mergedButUnapplied, appliedNotOnMain } = computeMergedButUnapplied(files, applied);
+  assert.deepEqual(mergedButUnapplied, [
+    { version: "20260918120000", file: "20260918120000_order_refunds_mirror.sql" },
+  ]);
+  // No false reverse alarm: every applied version has a file.
+  assert.deepEqual(appliedNotOnMain, []);
+});
+
+test("computeMergedButUnapplied — a fully-applied repo reports ZERO merged-but-unapplied", () => {
+  const files = [
+    "20260917120000_create_order_refunds.sql",
+    "20260918120000_order_refunds_mirror.sql",
+    "20260919120000_cs_director_grader_anti_goodhart_clause.sql",
+  ];
+  const applied = ["20260917120000", "20260918120000", "20260919120000"];
+  const { mergedButUnapplied, appliedNotOnMain } = computeMergedButUnapplied(files, applied);
+  assert.deepEqual(mergedButUnapplied, []);
+  assert.deepEqual(appliedNotOnMain, []);
+});
+
+test("computeMergedButUnapplied — the reverse (applied version with no file on main) does NOT raise a merged-but-unapplied alarm", () => {
+  // A renamed/deleted migration that was applied long ago. This is BENIGN — informational only.
+  const files = [
+    "20260917120000_create_order_refunds.sql",
+    "20260918120000_order_refunds_mirror.sql",
+  ];
+  const applied = [
+    "20260101000000", // an old apply whose file was renamed/deleted from main.
+    "20260917120000",
+    "20260918120000",
+  ];
+  const { mergedButUnapplied, appliedNotOnMain } = computeMergedButUnapplied(files, applied);
+  assert.deepEqual(mergedButUnapplied, []); // NOT flagged as merged-but-unapplied.
+  assert.deepEqual(appliedNotOnMain, ["20260101000000"]); // recorded informationally.
+});
+
+test("computeMergedButUnapplied — off-format files (e.g. _PENDING_*.sql) are neither flagged nor counted against the applied set", () => {
+  const files = [
+    "20260917120000_create_order_refunds.sql",
+    "_PENDING_meta_comments_retire_channel.sql", // no version prefix — skipped.
+  ];
+  const applied = ["20260917120000"];
+  const { mergedButUnapplied, appliedNotOnMain } = computeMergedButUnapplied(files, applied);
+  assert.deepEqual(mergedButUnapplied, []); // _PENDING_ file not flagged.
+  assert.deepEqual(appliedNotOnMain, []);
+});
+
+test("runMigrationDriftCheck surfaces mergedButUnapplied on the drift result (both axes on one tile)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20260917120000_create_order_refunds.sql"),
+      `create table public.order_refunds (id uuid primary key);`,
+    );
+    writeFileSync(
+      join(dir, "20260918120000_order_refunds_mirror.sql"),
+      `create table public.order_refunds_mirror (id uuid primary key);`,
+    );
+    // Live schema HAS both tables (nothing missing on the table-presence axis) but the applied set
+    // is missing 20260918120000 → merged-but-unapplied alone should still flip status to 'drift'.
+    const result = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["order_refunds", "order_refunds_mirror"],
+      fetchAppliedVersions: async () => ["20260917120000"],
+    });
+    assert.equal(result.status, "drift");
+    assert.deepEqual(result.missing, []); // table-presence axis says fine.
+    assert.deepEqual(result.mergedButUnapplied, [
+      { version: "20260918120000", file: "20260918120000_order_refunds_mirror.sql" },
+    ]);
+    assert.equal(result.appliedCheckSkipped, false);
+    assert.equal(result.appliedCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runMigrationDriftCheck honestly SKIPS the applied-set axis when no fetchAppliedVersions callback is supplied", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20260917120000_create_order_refunds.sql"),
+      `create table public.order_refunds (id uuid primary key);`,
+    );
+    const result = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["order_refunds"],
+      // no fetchAppliedVersions — the tile's table-presence axis still runs.
+    });
+    assert.equal(result.status, "ok"); // table-presence axis is clean; no applied-set false-fire.
+    assert.deepEqual(result.mergedButUnapplied, []);
+    assert.equal(result.appliedCheckSkipped, true);
+    assert.equal(result.appliedCount, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runMigrationDriftCheck — applied-set slice fetch that throws is captured (skipped, not a false clean)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20260917120000_create_order_refunds.sql"),
+      `create table public.order_refunds (id uuid primary key);`,
+    );
+    const result = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["order_refunds"],
+      fetchAppliedVersions: async () => {
+        throw new Error("pg unreachable");
+      },
+    });
+    // Table-presence axis is fine (status ok), applied-set axis is honestly marked skipped.
+    assert.equal(result.status, "ok");
+    assert.equal(result.appliedCheckSkipped, true);
+    assert.match(result.reason ?? "", /applied-versions read failed.*pg unreachable/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

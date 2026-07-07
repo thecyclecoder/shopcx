@@ -89,13 +89,20 @@ export const OWNER_FUNCTIONS: { id: OwnerFunction; label: string; healthLabel: s
  *                          next_retry_at — the retry engine ran but isn't advancing it to
  *                          recovered/exhausted. A sub correctly mid-dunning (within schedule)
  *                          is NOT flagged. On the dunning payday-retry cron.
- *   - migration-drift    — a table a migration CREATES is absent from the live public schema
- *                          (a silently-skipped migration: the code references the table, every
- *                          upsert hits PGRST205). Detected on the BOX (where the .sql files +
- *                          DB coexist) and carried in the loop's heartbeat `produced.missing`;
- *                          the assertion reads that list and flips the tile red. On the
- *                          box-emitted migration-drift-check loop.
- *                          (control-tower-migration-drift-check P1.)
+ *   - migration-drift    — TWO axes on the same tile:
+ *                          (a) a table a migration CREATES is absent from the live public schema
+ *                              (a silently-skipped migration: the code references the table, every
+ *                              upsert hits PGRST205), carried in `produced.missing`;
+ *                          (b) a migration FILE on main whose 14-digit version isn't in the DB's
+ *                              applied set (supabase_migrations.schema_migrations) — the
+ *                              merged-but-unapplied case that leaves dependent code silently inert
+ *                              (regression pin: 20260918120000_order_refunds_mirror merged 2026-07-06
+ *                              but never applied). Carried in `produced.mergedButUnapplied`.
+ *                          Detected on the BOX (where the .sql files + DB coexist) — the assertion
+ *                          reads both lists and flips red on either. Box-emitted
+ *                          migration-drift-check loop.
+ *                          (control-tower-migration-drift-check P1;
+ *                           ci-guard-migrations-applied-not-just-merged P1 added axis (b).)
  *   - segment-coverage   — the refresh-customer-segments cron RAN (fresh beat, green on P1) but
  *                          didn't actually refresh the whole book: <95% of SMS-subscribed rows have
  *                          segments_refreshed_at within 26h, OR any subscribed row's
@@ -432,12 +439,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     // BOX-EMITTED cron (not an Inngest fn): the deployed runtime can't read the .sql files, so the
     // parse-migrations → diff-live-schema check runs on the box and beats here (control-tower-
     // migration-drift-check P1). Freshness keeps a DEAD check visible; the migration-drift output
-    // assertion reads the beat's produced.missing and flips red when a created table is absent.
+    // assertion reads the beat's `produced.missing` (an expected-but-absent table) and
+    // `produced.mergedButUnapplied` (a migration file on main whose version isn't in the DB's
+    // applied set — ci-guard-migrations-applied-not-just-merged P1) and flips red on either.
     id: MIGRATION_DRIFT_LOOP_ID,
     kind: "cron",
     owner: "platform",
     label: "Migration drift check",
-    description: "Box job: diffs every migration-created table against the live public schema — a missing one = a silently-skipped migration.",
+    description: "Box job: (a) diffs every migration-created table against the live public schema — a missing one = a silently-skipped migration; (b) reconciles supabase/migrations/*.sql versions against supabase_migrations.schema_migrations — a merged-but-unapplied file = dependent code silently inert.",
     expectedCadence: "every ~30 min (box job)",
     livenessWindowMs: 90 * MIN,
     outputAssertion: "migration-drift",

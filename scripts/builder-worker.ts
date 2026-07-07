@@ -2922,10 +2922,37 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   }
 }
 
-// The periodic migration-drift job: parse supabase/migrations/*.sql → diff the live schema → write
-// the result into the migration-drift-check loop's heartbeat. The Control Tower monitor's
-// migration-drift output assertion reads produced.missing and flips the tile red on drift; freshness
-// keeps a DEAD check visible. NEVER throws (guarded) — a check failure must not break the poll loop.
+// Read the applied migration versions from supabase_migrations.schema_migrations (the Supabase
+// system table that records every migration the apply pipeline has run). Returns null when the host
+// has no DB password (→ the applied-set reconcile is skipped honestly — never a false "no drift").
+// ci-guard-migrations-applied-not-just-merged spec Phase 1.
+async function fetchAppliedMigrationVersions(): Promise<string[] | null> {
+  let connectionString: string;
+  try {
+    const { poolerConnectionString } = await import("./_bootstrap");
+    connectionString = poolerConnectionString();
+  } catch {
+    return null; // no SUPABASE_DB_PASSWORD / SUPABASE_DB_URL on this host — skip honestly.
+  }
+  const { Client } = await import("pg");
+  const c = new Client({ connectionString });
+  await c.connect();
+  try {
+    const res = await c.query(
+      "select version from supabase_migrations.schema_migrations",
+    );
+    return (res.rows as Array<{ version: string }>).map((r) => r.version);
+  } finally {
+    await c.end();
+  }
+}
+
+// The periodic migration-drift job: runs BOTH drift axes (table-presence + applied-set reconcile)
+// and rides both on the same migration-drift-check loop heartbeat. The Control Tower monitor's
+// migration-drift output assertion reads produced.missing + produced.mergedButUnapplied and flips
+// the tile red on either; freshness keeps a DEAD check visible. NEVER throws (guarded) — a check
+// failure must not break the poll loop.
+// ci-guard-migrations-applied-not-just-merged spec Phase 1 added the second axis.
 async function runMigrationDriftJob(): Promise<void> {
   const startedAt = Date.now();
   try {
@@ -2935,6 +2962,7 @@ async function runMigrationDriftJob(): Promise<void> {
     const result = await runMigrationDriftCheck({
       migrationsDir: resolve(REPO_DIR, "supabase/migrations"),
       fetchLiveTables: fetchLivePublicTables,
+      fetchAppliedVersions: fetchAppliedMigrationVersions,
     });
     const summary = driftSummary(result);
     await writeCronHeartbeat(
@@ -2944,9 +2972,13 @@ async function runMigrationDriftJob(): Promise<void> {
         status: result.status,
         missing: result.missing,
         allowlistedMissing: result.allowlistedMissing,
+        mergedButUnapplied: result.mergedButUnapplied,
+        appliedNotOnMain: result.appliedNotOnMain,
         expectedCount: result.expectedCount,
         liveCount: result.liveCount,
         parsedFiles: result.parsedFiles,
+        appliedCount: result.appliedCount,
+        appliedCheckSkipped: result.appliedCheckSkipped,
         reason: result.reason,
       },
       Date.now() - startedAt,
