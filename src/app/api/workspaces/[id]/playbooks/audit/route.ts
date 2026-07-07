@@ -50,6 +50,24 @@ export async function GET(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
+
+  // Explicit workspace-membership authz gate — the audit surface reads
+  // per-playbook analytics (customer-ticket derived, potentially sensitive),
+  // so the endpoint MUST reject a caller who is authenticated but not a
+  // member of THIS workspace. Mirrors the pattern in
+  // src/app/api/workspaces/[id]/journeys/route.ts POST. Without this guard an
+  // authenticated cross-workspace caller could read another tenant's ticket-
+  // resolution rollups (authz_rls regression class).
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (!member) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const windowStart = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
   // Only surface ACTIVE playbooks in the audit — retired ones live under the

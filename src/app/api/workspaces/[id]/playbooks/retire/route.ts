@@ -41,6 +41,23 @@ export async function POST(
 
   const admin = createAdminClient();
 
+  // Explicit workspace-membership authz gate — a retire is destructive (flips
+  // `is_active=false` on a customer-facing playbook + writes an audit row), so
+  // the endpoint MUST reject a caller who is authenticated but not an
+  // owner/admin of THIS workspace. Mirrors the pattern in
+  // src/app/api/workspaces/[id]/journeys/route.ts POST. Without this guard an
+  // authenticated cross-workspace caller could retire another tenant's
+  // playbooks (authz_rls regression class).
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (!member || !["owner", "admin"].includes(String(member.role))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   // Compare-and-set: only flip playbooks that are currently active in THIS
   // workspace. `.select('id')` lets us assert one-row-transitioned before we
   // emit the audit row — an already-retired row silently returns [] and we
