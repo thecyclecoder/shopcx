@@ -1,0 +1,1 @@
+- **Assisted-purchase playbook — gate create_order / create_subscription behind a vaulted PM, launching add_payment_method when missing** · verified 2026-07-07 · → [[lifecycles/subscription-billing]]

@@ -734,3 +734,41 @@ export async function advertorialLanderUrl(workspaceId: string, campaignId: stri
   if (ws?.storefront_slug) return `https://shopcx.ai/store/${ws.storefront_slug}/${product.handle}${qs}`;
   return null;
 }
+
+/**
+ * Scent-match invariant helper (attribution-sensor-recalibration Phase 2).
+ *
+ * Given an operator-supplied destination URL and the campaign's
+ * `advertorialLanderUrl` result, ensure the final URL carries BOTH `?angle=`
+ * and `?variant=` — the params the Phase-2 attribution sensor uses to resolve
+ * a click → lander → variant. Missing params on the destination are copied
+ * from the lander (source of truth for scent-match); params already present
+ * on the destination win.
+ *
+ * Pure — no I/O. Returns the destination unchanged when either URL is
+ * malformed (URL constructor throws), or when the lander doesn't carry the
+ * expected params (nothing to derive from).
+ */
+export function appendScentMatchParams(destinationUrl: string, landerUrl: string | null): string {
+  if (!destinationUrl || !landerUrl) return destinationUrl;
+  let dest: URL;
+  let src: URL;
+  try { dest = new URL(destinationUrl); } catch { return destinationUrl; }
+  try { src = new URL(landerUrl); } catch { return destinationUrl; }
+  const angle = src.searchParams.get("angle");
+  const variant = src.searchParams.get("variant");
+  if (!dest.searchParams.has("angle") && angle) dest.searchParams.set("angle", angle);
+  if (!dest.searchParams.has("variant") && variant) dest.searchParams.set("variant", variant);
+  return dest.toString();
+}
+
+/** True when a destination URL carries BOTH the `angle` and `variant` scent-match params. */
+export function hasScentMatchParams(destinationUrl: string): boolean {
+  if (!destinationUrl) return false;
+  try {
+    const u = new URL(destinationUrl);
+    return u.searchParams.has("angle") && u.searchParams.has("variant");
+  } catch {
+    return false;
+  }
+}

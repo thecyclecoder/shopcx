@@ -9,7 +9,7 @@ Auto-recovery for tickets the AI analysis flagged as suspicious. When the AI cla
 - Probes: `src/lib/research/probes/*.ts` (shared deterministic state checks).
 - Registry: `src/lib/research/index.ts` (`runRecipe(slug, ticketId, args)`).
 - State: [[../tables/ticket_research_runs]] + [[../tables/ticket_heal_attempts]].
-- Trigger: [[../inngest/ai-nightly-analysis]] emits `research_requests: [{recipe_slug, args}]` on low-score tickets.
+- Trigger: [[../libraries/ticket-analyzer]] (run by [[../inngest/ticket-analysis-cron]]) emits `ticket/research.requested` on low-score tickets — the old [[../inngest/ai-nightly-analysis]] trigger was removed 2026-07-07.
 
 ## Why it exists
 
@@ -149,7 +149,6 @@ Catches Nancy-style and Sheryl-style drift.
 | `src/lib/research/types.ts` | TS types for `ResearchRecipe` + `ResearchResult` |
 | `src/lib/inngest/ticket-research.ts` | `ticket/research.requested` Inngest function |
 | `src/lib/inngest/ticket-heal.ts` | `ticket/heal.requested` Inngest function |
-| `src/lib/inngest/ai-nightly-analysis.ts` | Triggers research_requests |
 | `src/app/api/workspaces/[id]/tickets/[tid]/heal/route.ts` | Manual heal-button endpoint |
 | `src/app/dashboard/tickets/[id]/ResearchPanel.tsx` | Ticket detail surface |
 | `src/lib/action-executor.ts` | Heal action dispatch |
@@ -173,4 +172,4 @@ Catches Nancy-style and Sheryl-style drift.
 
 ## Related
 
-[[ai-multi-turn]] · [[ticket-lifecycle]] · [[../tables/ticket_research_runs]] · [[../tables/ticket_heal_attempts]] · [[../tables/ticket_analyses]] · [[../inngest/ai-nightly-analysis]] · [[../inngest/ticket-research]] · [[../libraries/research_index]] · [[../libraries/action-executor]]
+[[ai-multi-turn]] · [[ticket-lifecycle]] · [[../tables/ticket_research_runs]] · [[../tables/ticket_heal_attempts]] · [[../tables/ticket_analyses]] · [[../inngest/ticket-research]] · [[../libraries/research_index]] · [[../libraries/action-executor]]

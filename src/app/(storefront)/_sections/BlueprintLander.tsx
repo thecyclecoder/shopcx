@@ -40,12 +40,13 @@ export function BlueprintLander({
   const bundleHref = `/store/${data.workspace.storefront_slug}/${data.product.handle}?variant=bundle&name=starterkit`;
   return (
     <>
-      {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} />}
+      {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} ctaHref={bundleHref} />}
       {content.intro && <BlueprintIntro data={data} intro={content.intro} />}
       {content.reasons && content.reasons.length > 0 && (
         <BlueprintReasons
           reasons={content.reasons}
           ctaLabel={content.hero?.ctaLabel || "Feel the Difference, 65% Off Now"}
+          ctaHref={bundleHref}
           reassurance="Feel the difference in 30 days or your money back"
           lowestPriceCents={price}
         />

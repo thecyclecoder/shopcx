@@ -212,10 +212,13 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
   if (input.taxCents != null) body.tax_amount = (input.taxCents / 100).toFixed(2);
   if (input.discountCents != null) body.discount_amount = (input.discountCents / 100).toFixed(2);
   if (input.packingSlipMessage) {
-    // Strip Unicode (same as line descriptions) + cap at 2000 chars.
-    // Amplifier rejects emoji / accents at validation, so we keep the
-    // pipeline clean here rather than failing the whole order.
-    body.packing_slip_message = stripUnicode(input.packingSlipMessage).slice(0, 2000);
+    // Strip Unicode (same as line descriptions) + cap at 225 chars.
+    // Amplifier rejects emoji / accents at validation AND silently
+    // truncates the packing-slip note past ~225-250 chars, so we keep
+    // the pipeline clean here rather than shipping a cut-off note.
+    // buildPackingSlipMessage already enforces this ceiling; this is a
+    // backstop for any other caller.
+    body.packing_slip_message = stripUnicode(input.packingSlipMessage).slice(0, 225);
   }
 
   // Auth via query string keeps the header surface small; HTTP Basic

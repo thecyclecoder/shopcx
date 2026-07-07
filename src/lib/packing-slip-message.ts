@@ -12,13 +12,18 @@
  * same warmth, same length, just a fresh phrasing so the box doesn't
  * become a copy-paste experience over 12 cycles.
  *
- * Amplifier rejects Unicode + caps the field at 2000 chars; we strip
- * non-ASCII and hard-cap at 1800 to leave headroom.
+ * Amplifier rejects Unicode + silently truncates the packing-slip
+ * field somewhere around 225-250 chars; we strip non-ASCII and
+ * hard-cap at 225 so the note is never cut mid-sentence on the box.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
 
-const MAX_CHARS = 1800;
+// Amplifier's packing-slip field truncates around 225-250 chars.
+// Cap at 225 to stay safely inside their limit. The templates below
+// already land under this for any realistic name; the Haiku rewrite
+// is constrained + rejected if it overflows (see haikuParaphrase).
+const MAX_CHARS = 225;
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 const HAIKU_TIMEOUT_MS = 4000;
 
@@ -49,6 +54,19 @@ function titleCaseName(raw: string): string {
 
 function pluralize(productCount: number, single: string, plural: string): string {
   return productCount > 1 ? plural : single;
+}
+
+/**
+ * Cap a note at MAX_CHARS without cutting a word in half. If the note
+ * is already short (the normal case), returns it unchanged. Only fires
+ * for pathological inputs (a 30+ char first name) that push a template
+ * over the Amplifier limit.
+ */
+function capToLimit(s: string): string {
+  if (s.length <= MAX_CHARS) return s;
+  const clipped = s.slice(0, MAX_CHARS);
+  const lastSpace = clipped.lastIndexOf(" ");
+  return (lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped).trim();
 }
 
 function founderTemplate(firstName: string, productCount: number, priorOrders: number): string {
@@ -142,7 +160,7 @@ async function haikuParaphrase(opts: { template: string; firstName: string; orde
           `- Warm, sincere tone — no marketing-speak.\n` +
           `- Genuine thanks for their loyalty.\n` +
           `- A wish that the product(s) help them reach their goals.\n` +
-          `- Length 180-320 characters.\n` +
+          `- Length 150-210 characters. This is a HARD ceiling — Amplifier truncates the note past ~225 characters, so a longer rewrite gets discarded.\n` +
           `- ASCII only. NO emoji, NO em-dashes, NO curly quotes, NO accents. Use a comma or period where you might have reached for an em-dash.\n\n` +
           `Output ONLY the rewritten note. No quotation marks, no preface, no explanation.`,
         messages: [{
@@ -170,6 +188,13 @@ async function haikuParaphrase(opts: { template: string; firstName: string; orde
     }
     // Same check for order count — must appear verbatim.
     if (!text.includes(String(opts.orderCount))) {
+      return null;
+    }
+    // Length guard — if Haiku ignored the ceiling, discard the rewrite
+    // and let the (already-short) template win rather than truncate a
+    // paraphrase mid-sentence. Measure post-ASCII-strip, same as the
+    // string that actually ships.
+    if (asciiOnly(text).length > MAX_CHARS) {
       return null;
     }
     return text;
@@ -213,5 +238,5 @@ export async function buildPackingSlipMessage(input: BuildPackingSlipInput): Pro
     });
     if (rewritten) message = rewritten;
   }
-  return asciiOnly(message).slice(0, MAX_CHARS);
+  return capToLimit(asciiOnly(message));
 }

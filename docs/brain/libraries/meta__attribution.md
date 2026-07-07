@@ -10,7 +10,11 @@ spend + revenue into [[../tables/meta_attribution_daily]], reporting the named
 ## The chain (v1, deterministic)
 
 - **Ad grain off the order:** [[../tables/orders]]`.attributed_utm_content` ≈ `meta_ad_id`,
-  `attributed_utm_source='meta'` (first-touch, backfilled since 2026-06-14).
+  `attributed_utm_source ∈ Meta family` (first-touch, backfilled since 2026-06-14).
+  Filtered via [[utm]] `metaFamilyOr('attributed_utm_source')` — a case-insensitive
+  `.or()` over `meta` / `facebook` / `instagram` / `fb` / `ig` (Meta stamps `facebook`
+  or `fb` or `ig` on many click destinations; a bare `.eq('attributed_utm_source','meta')`
+  silently dropped those orders).
 - **Variant per order (Phase 2b — persisted-id preferred):** prefer the persisted
   [[../tables/orders]]`.advertorial_page_id` (set at checkout) and
   [[../tables/storefront_sessions]]`.advertorial_page_id` (set at pixel time) → look the id
@@ -54,6 +58,7 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 ## Callers
 
 - `src/lib/inngest/meta-performance.ts` (`meta-attribution-refresh`, fired after each performance sync)
+- `scripts/backfill-meta-attribution-90d.ts` — one-shot 90-day forced-recompute per active `meta_ad_accounts` row (attribution-sensor-recalibration Phase 3). Idempotent (upsert on the composite key); pass `incrementalDays: 90` to force the wide window even when rows exist. Follows each recompute with two read-only verification probes: (1) `meta_attribution_daily` last-30d asserts ≥1 row with `variant != '(unresolved)'` AND `roas > 0`; (2) `detectWinners()` returns without throwing and finds ≥1 `(meta_ad_id, variant)` cell with `revenue_cents > 0` (kills the degenerate roas=0 universe).
 
 ## Gotchas
 
@@ -72,6 +77,11 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 - **No swallowed writes (meta-insights-ingest-empty-fix).** The `meta_attribution_daily`
   upsert now checks `{ error }`, reports it via `reportDbError`, and throws; `rows` is the
   count **persisted**, not `records.length`.
+- **Meta source family, not literal `meta` (attribution-sensor-recalibration Phase 1).**
+  All three source filters (sessions weight, orders, first-touch session) route through
+  [[utm]] `metaFamilyOr(column)` so `facebook` / `fb` / `ig` / `instagram` orders
+  contribute alongside `meta`. Read-side widening only — the stored raw source value is
+  untouched, spend is still conserved through `(unresolved)`.
 
 ---
 

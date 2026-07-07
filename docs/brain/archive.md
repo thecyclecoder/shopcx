@@ -13,6 +13,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
+- **Assisted-purchase playbook — gate create_order / create_subscription behind a vaulted PM, launching add_payment_method when missing** · verified 2026-07-07 · → [[lifecycles/subscription-billing]]
+- **Recalibrate the Meta ad-performance sensor (source-family + scent-match tagging)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
+- **Backfill the order_refunds ledger from historical refunds so past refunds are auditable too** · verified 2026-07-07 · → [[tables/order_refunds]]
 - **Builder applies migrations via the working pgClient apply-script, not the broken db push lane** · verified 2026-07-07 · → [[../recipes/write-a-migration-apply-script]]
 - **Guard against merged-but-unapplied migrations (applied-state drift), not just missing ones** · verified 2026-07-07 · → [[../libraries/control-tower]]
 - **CI guard: every table a code path queries must have a migration that creates it** · verified 2026-07-07 · → [[../operational-rules#Every code path must have a migration for every table it queries]]
@@ -23,6 +26,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **CS Director persona + org-placement (new-agent scaffold)** · verified 2026-07-07 · → [[libraries/cs-director]]
 - **CS Director storyline digests to founder + bidirectional reply steers leash + policy** · verified 2026-07-07 · → [[tables/cs_director_digests]]
 - **CS Director: third rung of the escalation ladder — hard calls above the triage quorum** · verified 2026-07-07 · → [[libraries/cs-director]]
+- **Digital goods catalog + PDF delivery** · verified 2026-07-07 · → [[../inngest/digital-goods-delivery]]
 - **Human directives are hard gates over the ticket AI — turn-off, don't-escalate, reviewed-lock; merges carry context, never control** · verified 2026-07-07 · → [[lifecycles/ai-analysis]]
 - **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
 - **Handler-alias catalog for orchestrator action-type misses** · verified 2026-07-07 · → [[tables/action_handler_aliases]]

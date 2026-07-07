@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 257 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 256 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 97 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 376 |
@@ -284,7 +284,6 @@ Five seconds of probing beats an hour of "why is my filter empty."
 Every background job, webhook fan-out, and cron lives here. Each page lists trigger event/cron, retries + concurrency, downstream events sent, and tables read/written (wikilinked).
 
 - [[inngest/abandoned-cart]] — Sweeps `cart_drafts` past `expires_at` → flips to `abandoned`. Hourly.
-- [[inngest/ai-nightly-analysis]] — Nightly review of recent AI-handled tickets. Writes `daily_analysis_reports`. Paused 2026-04-28.
 - [[inngest/amazon-sync]] — Pulls Amazon SP-API order + ASIN data.
 - [[inngest/amplifier-webhooks]] — Amplifier (3PL) `order_received` / `order_shipped` → updates `orders.amplifier_*`.
 - [[inngest/auto-archive]] — Archives closed tickets older than threshold.

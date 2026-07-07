@@ -33,6 +33,10 @@ interface Props {
   /** Storefront-experiment exposures resolved server-side (sticky assignment).
    *  Each fires one `experiment_exposure` event on mount. */
   experimentExposures?: ExperimentExposureMeta[];
+  /** Bundle PDP only. When set, a click on any `#pricing` CTA (chapter mid-CTAs, final CTA — which
+   *  have no price table to scroll to on this page) is treated as the bundle add-to-cart, exactly
+   *  like the hero's Add to Cart. Null on every other page. */
+  bundleBuy?: { variantId: string; mode: "subscribe" | "onetime"; frequencyDays: number | null } | null;
 }
 
 interface CtaPayload {
@@ -55,6 +59,7 @@ export function StorefrontPixelInit({
   metaPixelId,
   skipCustomize,
   experimentExposures = [],
+  bundleBuy = null,
 }: Props) {
   useEffect(() => {
     initPixel({ workspaceId, customerId: customerId || null, metaPixelId: metaPixelId || null });
@@ -170,13 +175,22 @@ export function StorefrontPixelInit({
     const onPriceCtaClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (!target) return;
-      const anchor = target.closest("a[href^='#buy-'], a[href^='#buy-bundle-']") as HTMLAnchorElement | null;
+      const anchor = target.closest(
+        bundleBuy
+          ? "a[href^='#buy-'], a[href^='#buy-bundle-'], a[href^='#pricing']"
+          : "a[href^='#buy-'], a[href^='#buy-bundle-']",
+      ) as HTMLAnchorElement | null;
       if (!anchor) return;
 
       const ds = anchor.dataset;
-      const isBundle = anchor.getAttribute("href")?.startsWith("#buy-bundle-");
-      const mode = (ds.mode === "onetime" ? "onetime" : "subscribe") as "subscribe" | "onetime";
-      const freqDays = ds.frequencyDays ? Number(ds.frequencyDays) : null;
+      const hrefAttr = anchor.getAttribute("href") || "";
+      // Bundle PDP: a #pricing CTA has no price table to scroll to — it IS the bundle add-to-cart.
+      const isPricingBundle = !!bundleBuy && hrefAttr.startsWith("#pricing");
+      const isBundle = hrefAttr.startsWith("#buy-bundle-");
+      const mode = isPricingBundle
+        ? bundleBuy!.mode
+        : ((ds.mode === "onetime" ? "onetime" : "subscribe") as "subscribe" | "onetime");
+      const freqDays = isPricingBundle ? bundleBuy!.frequencyDays : ds.frequencyDays ? Number(ds.frequencyDays) : null;
 
       const cta: CtaPayload = {
         bundle: !!isBundle,
@@ -189,7 +203,9 @@ export function StorefrontPixelInit({
         discount_code: ds.couponCode || null,
       };
 
-      if (isBundle) {
+      if (isPricingBundle) {
+        cta.line_items.push({ variant_id: bundleBuy!.variantId, quantity: 1 });
+      } else if (isBundle) {
         if (ds.primaryVariantId && ds.primaryQuantity) {
           cta.line_items.push({
             variant_id: ds.primaryVariantId,
