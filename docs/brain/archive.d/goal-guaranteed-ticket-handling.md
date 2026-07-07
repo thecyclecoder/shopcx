@@ -1,0 +1,1 @@
+- **Ticket handling — guaranteed, observable, self-running** · folded 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
