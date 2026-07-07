@@ -323,7 +323,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
     key: "sms-marketing", name: "Margo", role: "SMS Marketing", emoji: "📣",
     personality: "Runs owned-channel SMS promos under Iris — picks the sale theme (VIP / Weekend), tailors the copy per segment, and schedules the cadence to grow attributed revenue-per-send. Autonomous within Iris's leash (weekly cap + segment scope + send windows); blocks + escalates on a stale audience or a missing coupon rather than blasting a bad send.",
     pronouns: { subject: "she", object: "her", possessive: "her" },
-    mascotId: "default",
+    mascotId: "default", avatarUrl: `${AV}margo-sms-marketing.jpg?v=1`,
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
