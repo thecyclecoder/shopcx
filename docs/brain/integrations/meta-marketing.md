@@ -57,6 +57,17 @@ System User token (long-lived, no expiry) preferred over admin user token for CA
 
 No longer read-only: the ad tool **publishes ads to Meta** via `src/lib/meta-ads.ts` (Graph v21.0, form-encoded POSTs, `ads_management` token from `meta_connections`). Flow: `act_{id}/advideos` (upload video by `file_url`) → poll `GET /{video_id}?fields=status` → `act_{id}/adcreatives` (`asset_feed_spec` copy variants + `object_story_spec`) → `act_{id}/ads` (default **PAUSED**). Targets listed via `/me/adaccounts`, `act_{id}/campaigns`, `act_{id}/adsets`, `/me/accounts` (pages). See [[../lifecycles/ad-publish]] + [[../libraries/meta-ads]] + [[../tables/ad_publish_jobs]].
 
+## Campaign + ad-set creation (WRITE — 2026-07-07, media-buyer loop)
+
+The media-buyer loop stands up its own PAUSED test ad set per creative concept (no human hand-building):
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/act_{id}/campaigns` | POST | Create a PAUSED ABO `OUTCOME_SALES` campaign. Requires `is_adset_budget_sharing_enabled=false` when NO campaign budget is set (2026-07-07). CBO branch sets `daily_budget`/`lifetime_budget` in minor units. |
+| `/act_{id}/adsets` | POST | Create a PAUSED purchase-optimized ad set: `optimization_goal=OFFSITE_CONVERSIONS`, `billing_event=IMPRESSIONS`, `bid_strategy=LOWEST_COST_WITHOUT_CAP`, `promoted_object={pixel_id,custom_event_type:"PURCHASE"}`, Advantage+ placements (omit `publisher_platforms`/`*_positions`), ad-set-level `daily_budget`. |
+
+Wired via `createCampaign` + `createAdSet` + `getOrCreateTestingCampaign` in [[../libraries/meta-ads]]. The loop reuses one shared `"MB — Testing (ABO)"` campaign per account (idempotent find-or-create by name), then creates one PAUSED ad set per concept under it — going-live is a separate governed step in `src/lib/meta/recommendation-execute.ts`, never automatic.
+
 ## Files
 
 - `src/lib/meta-ads.ts` — **ad publishing** (advideos → adcreatives → ads) + listing
