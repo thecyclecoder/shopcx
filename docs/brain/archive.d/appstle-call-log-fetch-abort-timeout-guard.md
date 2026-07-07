@@ -1,0 +1,1 @@
+- **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]
