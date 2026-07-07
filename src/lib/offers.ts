@@ -109,6 +109,33 @@ export async function getActiveOfferForVariant(
   return data ? hydrateOffer(data) : null;
 }
 
+/**
+ * Bulk lookup — active offers for a set of anchor variants (the Phase 2
+ * cart-build entry point). Returns the newest-active offer per anchor variant
+ * (dedupe key = `variant_id`); ties broken by `updated_at desc`.
+ */
+export async function getActiveOffersForVariants(
+  workspaceId: string,
+  variantIds: string[],
+): Promise<Map<string, Offer>> {
+  if (variantIds.length === 0) return new Map();
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("offers")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true)
+    .in("variant_id", variantIds)
+    .order("updated_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  const byVariant = new Map<string, Offer>();
+  for (const row of data || []) {
+    const offer = hydrateOffer(row);
+    if (!byVariant.has(offer.variant_id)) byVariant.set(offer.variant_id, offer);
+  }
+  return byVariant;
+}
+
 export async function createOffer(workspaceId: string, input: OfferInput): Promise<Offer> {
   const admin = createAdminClient();
   const { data, error } = await admin

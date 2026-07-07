@@ -32,7 +32,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { findVariant } from "@/lib/product-variants";
-import { ensureFreeGifts } from "@/lib/cart-gifts";
+import { ensureCartAttachments } from "@/lib/cart-gifts";
 import crypto from "crypto";
 
 const COOKIE_NAME = "cart";
@@ -238,8 +238,10 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // Inject qualifying free gifts as $0 lines (server is the authority).
-  const linesWithGifts = await ensureFreeGifts(body.workspace_id, resolvedLines);
+  // Inject offer-attached items + qualifying free gifts as $0 lines
+  // (server is the authority; offers may override the rule free_gift
+  // for that variant per the offer's flag).
+  const linesWithGifts = await ensureCartAttachments(body.workspace_id, resolvedLines);
 
   const subtotalCents = linesWithGifts.reduce((sum, l) => sum + l.line_total_cents, 0);
 

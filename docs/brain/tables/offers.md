@@ -47,8 +47,8 @@ When `true`, the Phase 2 cart-build layer skips the [[pricing_rules]]`.free_gift
 
 ## Status / open work
 - ✅ **Phase 1** — table + SDK + admin UI (this page).
-- ⏳ **Phase 2** — cart-build attaches offer items as `$0` lines, overriding pricing-rule free_gift per the flag. Reuses the `ensureFreeGifts` `$0`-line pattern in `src/lib/cart-gifts.ts`.
-- ⏳ **Phase 3** — the renewal order-build path detects renewal vs first order and strips offer-sourced lines when `scope='checkout_only'`.
+- ✅ **Phase 2** — cart-build attaches offer items as `$0` lines, overriding pricing-rule free_gift per the flag. `ensureOfferItems` + `ensureCartAttachments` in [[../libraries/cart-gifts]] run at `/api/cart`, the checkout page, and the customize page; a digital include lands with `digital_good_id` (drives [[../inngest/digital-goods-delivery]]) and NO sku (Amplifier's sku filter drops it); a physical include lands with the anchor's variant sku (Amplifier fulfills). Verification test: `src/lib/cart-gifts.test.ts`.
+- ⏳ **Phase 3** — the renewal order-build path detects renewal vs first order and strips offer-sourced lines when `scope='checkout_only'`. The `offer_source_variant_id` field written by Phase 2 is the signal.
 - ⏳ **Phase 4** — wire the Superfoods Starter Kit variant + `$10` auto-coupon + offer (frother + mug + e-guide).
 
 ---
