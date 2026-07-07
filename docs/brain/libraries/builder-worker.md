@@ -84,6 +84,22 @@ The Growth-owned lane that fills a queued [[../tables/lander_blueprints]] row's 
 - **Write chokepoint** — every [[../tables/lander_blueprints]] / [[../tables/lander_content_gaps]] mutation + every DR column on [[../tables/product_media]] (`category` / `source` / `caption`) flows through [[lander-blueprints]]. The worker never touches those tables directly.
 - **Approval routing** — a [[../tables/lander_content_gaps]] row is surfaced to Max via [[approval-inbox]] (`ownerFunctionForKind('dr-content') = 'growth'` — Control Tower registry entry `agent:dr-content`).
 
+## The build-claim gate — five-leg `evaluateClaimTimeBuildGate`
+
+A `kind='build'` job's **claim** (the moment Bo attempts to dispatch it from the queue) is guarded by a **five-leg gate** that runs LAST before dispatch. Goal-member serialization (Phase 1) + goal-mate blocker clearance fit here (post-blocked_by resolution, pre-Vale):
+
+1. **Goal-bound validation** — one-off specs (no goal) pass; a goal-bound spec must have a valid `milestone_id` FK.
+2. **Blocked-by clearance** — all `blocked_by` specs must be cleared (shipped for external specs / on goal-branch for goal-mates via `resolveGoalSlugForSpec` / `areSpecsGoalMates`).
+3. **Vale review pass** — the spec must carry `vale_pass=true`.
+4. **Goal-member serialization** ([[agent-jobs]] `evaluateGoalMemberBuildDispatch`) — goal-bound specs **serialize** (one at a time per goal, in `blocked_by` topological order). A non-claimable goal-member is **requeued** (never parked) so the standing pass re-releases it as the prior sibling merges.
+5. **One-off fallback** — if the above passed, claim the job.
+
+Any gate leg failure returns a bounded reason (`blocked-by-unshipped`, `vale-not-passed`, `goal-member-waiting-for-prior-sibling`, etc.) and returns `queued` status (a re-claim on the next standing pass). The guard keeps a `kind='build'` job from dispatching until it's actually ready — preventing "work locked up waiting for approval" scenarios.
+
+## Phase 2 goal-member PR integration
+
+When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.
+
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[agent-jobs]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
+[[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]

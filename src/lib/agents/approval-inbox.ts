@@ -624,9 +624,12 @@ interface ParkCardRow {
   metadata: Record<string, unknown> | null;
 }
 
-/** Live GitHub PR state as observed by `getPr` — `{ok:false}` folded in as the read-failure case. */
+/** Live GitHub PR state as observed by `getPr` — `{ok:false}` folded in as the read-failure case.
+ *  serialize-goal-member-spec-builds Phase 2 widened the ok shape with `mergeableState` + `baseRef`; the
+ *  park-outcome predicate below still only reads `merged` + `state`, but the widened shape is what
+ *  `getPr` returns everywhere. */
 type PrReadOutcome =
-  | { ok: true; merged: boolean; state: string; closedAt: string | null }
+  | { ok: true; merged: boolean; state: string; closedAt: string | null; mergeableState: string | null; baseRef: string | null }
   | { ok: false };
 
 /**

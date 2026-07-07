@@ -1,0 +1,1 @@
+- **Serialize goal-member spec builds to prevent hot-file merge collisions** · verified 2026-07-07 · → [[../lifecycles/spec-goal-branch-pm-flow]]

@@ -4332,6 +4332,24 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing dirty-pr backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // GOAL-MEMBER DIRTY re-drive (serialize-goal-member-spec-builds Phase 2). The MIRROR of the
+    // dirty-PR backstop above, scoped to GOAL-MEMBER PRs: those PRs base on `goal/{slug}` (not main),
+    // so `mergeable === false` isn't the only signal — `mergeable_state === "behind"` (base advanced
+    // as a goal-mate merged) is the RECURRING case that pre-fix parked the PR waiting for a human.
+    // Reads GitHub `mergeable_state` via getPr — on `dirty` OR `behind`, enqueue a deduped pr-resolve
+    // job so the PR self-heals back to MERGEABLE. Fails CLOSED on any getPr read failure / null /
+    // "unknown" (per Phase 2 verification: "a PR whose GitHub state can't be read is left untouched").
+    // Idempotent (enqueuePrResolveJob dedupes per PR + is retry-capped).
+    const { reconcileDirtyGoalMemberPrs } = await import("../src/lib/agent-jobs");
+    const gm = await reconcileDirtyGoalMemberPrs(db);
+    if (gm.redriven || gm.readFailed) {
+      notes.push(`goal-member re-drive → ${gm.redriven} pr-resolve enqueued, ${gm.readFailed} read-failed (of ${gm.checked} goal-member PR(s) checked)`);
+    }
+  } catch (e) {
+    notes.push(`goal-member re-drive failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing goal-member re-drive failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // MERGED-PHASE reconcile (ship-all-phases-on-squash-merge / post-merge-ships-only-one-phase fix). A
     // squash-merge ships the WHOLE accumulated spec atomically, but the merge hook only runs on the
     // completed→merged transition — a spec that ALREADY merged under the old one-phase-only hook stays stuck
@@ -4963,6 +4981,24 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     const { phaseEmoji } = await import("../src/lib/brain-roadmap");
     const list = uncleared.map((b) => `${b.slug} (${phaseEmoji(b.status)}; ${b.why})`).join(", ");
     return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not cleared: ${list}; left queued for the escort to re-release` };
+  }
+
+  // ── 4) SERIALIZE WITHIN GOAL (serialize-goal-member-spec-builds Phase 1) ──
+  // Individual blocked_by clearance (leg 3 above) said nothing about goal-MATES that ALSO cleared this
+  // tick — so N goal-mates could all pass the gate and race, colliding on hot files shared across the
+  // goal (the 2026-07-06 guaranteed-ticket-handling jam: #1245/#1246/#1248 all collided on
+  // action-executor.ts + refund handlers). This leg makes the dispatch SERIAL within a goal:
+  //   (b) no other build for this goal is currently in-flight (claimed/building/…), AND
+  //   (c) this spec is the earliest not-yet-built goal-member in blocked_by-topological order.
+  // Cross-GOAL parallelism is preserved (one-off + members of different goals are unaffected — the
+  // helper no-ops for one-off specs). Ordered AFTER blocked_by clearance so a genuinely-blocked spec
+  // still holds on the semantic reason; BEFORE the Vale leg so a still-in-review out-of-order spec is
+  // caught here before Vale's cooldown extends. Requeue (never park) — the next tick re-evaluates as
+  // soon as the sibling merges onto the goal branch.
+  const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
+  const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, slug);
+  if (!serial.ok) {
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${serial.reason}; held until the goal serializer releases` };
   }
 
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
@@ -13390,7 +13426,7 @@ async function runPrResolveJob(job: Job) {
   // can be null (GitHub still computing) → re-check briefly; if still unknown, attempt anyway (the
   // webhook flagged it CONFLICTING). already mergeable / merged / closed → no-op completed.
   const prResp = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
-  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; head?: { ref?: string } };
+  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; head?: { ref?: string }; base?: { ref?: string } };
   const prUrl = pr.html_url || `https://github.com/${REPO}/pull/${prNumber}`;
   if (!prResp.ok || pr.state !== "open" || pr.merged) {
     await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, log_tail: `PR #${prNumber} no longer open (state=${pr.state} merged=${pr.merged}) — nothing to resolve` });
@@ -13527,27 +13563,39 @@ async function runPrResolveJob(job: Job) {
     console.error(`${tag} supersede check failed (continuing to resolve):`, e instanceof Error ? e.message : e);
   }
 
+  // serialize-goal-member-spec-builds Phase 2 — merge target is `pr.base.ref` (from the GitHub PR
+  // object), not a hardcoded `main`. A one-off spec's PR bases on `main` → identical behavior. A
+  // goal-member spec's PR bases on `goal/{slug}` → the resolver merges THAT branch so it picks up the
+  // OTHER goal-mate's already-merged code (the whole point of Phase 2 — the goal branch advanced under
+  // this PR, and merging main wouldn't bring those goal-mate commits in). Fail-safe: an unrecognized /
+  // missing base falls back to `main` so pre-Phase-2 behavior is preserved. The ancestry hard gate
+  // below is checked against THIS ref (not main) so a goal-branch resolve doesn't require main to be a
+  // direct ancestor — main IS in the goal branch's ancestry by construction (goal branches seeded from
+  // main), but the semantic invariant is "base MUST be an ancestor of HEAD after resolve".
+  const baseRefRaw = pr.base?.ref ?? "";
+  const baseRef = baseRefRaw === "main" || baseRefRaw.startsWith("goal/") ? baseRefRaw : "main";
+
   try {
     const prompt = [
-      `You are the box's dirty-PR resolver, on Max. You are in a git worktree at the repo root, checked out on branch \`${branch}\` — a build PR (#${prNumber}). \`origin/main\` has moved ahead and this PR is CONFLICTING. Resolve it so the PR compiles and goes green — OR decide it can't be safely auto-resolved and say so. Do NOT guess.`,
+      `You are the box's dirty-PR resolver, on Max. You are in a git worktree at the repo root, checked out on branch \`${branch}\` — a build PR (#${prNumber}). Its base is \`${baseRef}\`, which has moved ahead of this PR (\`mergeable_state\` is dirty or behind). Resolve the branch against its base so the PR compiles and goes green — OR decide it can't be safely auto-resolved and say so. Do NOT guess.`,
       ``,
       `⭐ DURABLE MANDATE (baked from pr-resolve coaching — always applies) ⭐`,
-      `  A) SUPERSEDE CHECK first. The worker already ran a static pre-flight over your added exported symbols; if any were duplicated on main it CLOSED this PR before you got here. Still, for any conflict that resists a clean additive union — or for any tsc error of the form "Duplicate identifier" / "Duplicate function implementation" — treat it as SUPERSEDED (a fix-of-fix landed on main while this PR sat in the queue). Do NOT try to unify: \`git merge --abort\` and \`status: "escalate"\` with \`reason: "superseded: <symbol/type> already on main; recommend closing this PR"\`. NEVER commit a merge that produces two identical exported declarations.`,
-      `  B) ANCESTRY hard gate. NEVER conclude \`"resolved"\` while \`git merge-base --is-ancestor origin/main HEAD\` returns non-zero — that is a FAILED merge (the worker will reject it and escalate). If you can't get main into the branch's ancestry, escalate with a plain one-line reason instead of forcing a wrong commit.`,
+      `  A) SUPERSEDE CHECK first. The worker already ran a static pre-flight over your added exported symbols; if any were duplicated on \`${baseRef}\` it CLOSED this PR before you got here. Still, for any conflict that resists a clean additive union — or for any tsc error of the form "Duplicate identifier" / "Duplicate function implementation" — treat it as SUPERSEDED (a fix-of-fix landed on \`${baseRef}\` while this PR sat in the queue). Do NOT try to unify: \`git merge --abort\` and \`status: "escalate"\` with \`reason: "superseded: <symbol/type> already on ${baseRef}; recommend closing this PR"\`. NEVER commit a merge that produces two identical exported declarations.`,
+      `  B) ANCESTRY hard gate. NEVER conclude \`"resolved"\` while \`git merge-base --is-ancestor origin/${baseRef} HEAD\` returns non-zero — that is a FAILED merge (the worker will reject it and escalate). If you can't get \`${baseRef}\` into the branch's ancestry, escalate with a plain one-line reason instead of forcing a wrong commit.`,
       `  C) NO leftover conflict markers, NO retry-until-cap. Never leave \`<<<<<<<\` / \`=======\` / \`>>>>>>>\` in a tracked file. After 2 failed tsc attempts, STOP and diagnose: is the divergence a parallel rewrite? a supersede? a stale rebase foundation? Escalate with a one-line diagnosis rather than retrying blindly.`,
       `  D) ADDITIVE UNION preferred, NEVER delete to "win". The vast majority of conflicts here are two builds appending to the same registry / enum / import list / doc section — KEEP BOTH. Deleting the other build's code to make the conflict go away is the recurring-mistake pattern that dropped the pr-resolve rolling grade; do not do it.`,
       ``,
       `Steps:`,
-      `1. Run \`git merge origin/main\`. If it merges with NO conflicts, skip to step 4.`,
-      `2. Resolve EVERY conflict. The vast majority are ADDITIVE — both sides appended a registry entry / enum case / list item / import / doc section → KEEP BOTH (the union of the two additions). For a doc add/add on the same heading, keep the SHIPPED (origin/main) side. NEVER resolve a conflict by deleting code to "win" — that destroys the other build's work.`,
+      `1. Run \`git fetch origin ${baseRef}\` then \`git merge origin/${baseRef}\`. If it merges with NO conflicts, skip to step 4.`,
+      `2. Resolve EVERY conflict. The vast majority are ADDITIVE — both sides appended a registry entry / enum case / list item / import / doc section → KEEP BOTH (the union of the two additions). For a doc add/add on the same heading, keep the SHIPPED (origin/${baseRef}) side. NEVER resolve a conflict by deleting code to "win" — that destroys the other build's work.`,
       `3. \`git add\` each resolved file.`,
       `4. Commit the merge: \`git commit --no-edit\` (only if a merge is in progress; a clean merge auto-commits).`,
       `5. Run \`npx tsc --noEmit\`. Fix ONLY errors the merge introduced and re-run — at most 2 attempts total. The merge MUST compile. A "Duplicate identifier" / "Duplicate function implementation" error means SUPERSEDED — abort and escalate per mandate (A); do NOT try to reconcile two copies of the same declaration.`,
       `6. Do NOT \`git push\` and do NOT open/modify any PR — the worker re-verifies and pushes. Leave the merge committed on \`${branch}\`.`,
       ``,
       `DECISION — never force a semantically-wrong merge:`,
-      `  • Simple/additive union that compiles AND \`git merge-base --is-ancestor origin/main HEAD\` passes → status "resolved".`,
-      `  • SUPERSEDED (a duplicate exported symbol/type surfaces during resolve or tsc, or the branch's feature already appears on main) → \`git merge --abort\` + status "escalate" with reason "superseded: <what already exists on main>; recommend closing this PR".`,
+      `  • Simple/additive union that compiles AND \`git merge-base --is-ancestor origin/${baseRef} HEAD\` passes → status "resolved".`,
+      `  • SUPERSEDED (a duplicate exported symbol/type surfaces during resolve or tsc, or the branch's feature already appears on \`${baseRef}\`) → \`git merge --abort\` + status "escalate" with reason "superseded: <what already exists on ${baseRef}>; recommend closing this PR".`,
       `  • The two sides are heavily-diverged PARALLEL REWRITES of the same logic (not a clean union), OR tsc still fails after 2 attempts, OR ancestry is not achievable → do NOT guess: run \`git merge --abort\` to leave the branch clean, then status "escalate" with a one-line \`reason\` (what diverged / why it can't compile / why ancestry fails).`,
       ``,
       `Final message = ONLY one JSON object:`,
@@ -13636,9 +13684,13 @@ async function runPrResolveJob(job: Job) {
     }
 
     // ── Worker-enforced GATE (never trust the LLM to have pushed a compiling, complete merge) ──
-    // 1) origin/main must actually be merged in (deterministic proof the merge happened).
-    if (sh("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd: wt }).code !== 0) {
-      await escalate("merge incomplete — origin/main is not an ancestor of the resolved HEAD");
+    // 1) origin/<baseRef> must actually be merged in (deterministic proof the merge happened). For a
+    //    one-off spec baseRef==="main"; for a goal-member baseRef==="goal/{slug}" (Phase 2). Fetch the
+    //    base first so `origin/<baseRef>` is a valid local ref even if this worktree hasn't seen it
+    //    yet (goal branch created after last fetch).
+    sh("git", ["fetch", "origin", baseRef], { cwd: wt });
+    if (sh("git", ["merge-base", "--is-ancestor", `origin/${baseRef}`, "HEAD"], { cwd: wt }).code !== 0) {
+      await escalate(`merge incomplete — origin/${baseRef} is not an ancestor of the resolved HEAD`);
       return;
     }
     // 2) no unmerged paths left behind.
