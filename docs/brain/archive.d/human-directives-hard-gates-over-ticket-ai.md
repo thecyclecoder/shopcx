@@ -1,0 +1,1 @@
+- **Human directives are hard gates over the ticket AI — turn-off, don't-escalate, reviewed-lock; merges carry context, never control** · verified 2026-07-07 · → [[lifecycles/ai-analysis]]
