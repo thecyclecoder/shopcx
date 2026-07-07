@@ -26,6 +26,7 @@ _None._
 
 - [[../tables/dashboard_notifications]]
 - [[../tables/returns]]
+- [[../tables/order_refunds]] (via refundOrder — Phase 2 idempotency mirror)
 
 ## Tables read (not written)
 
@@ -55,8 +56,15 @@ Design notes:
     type). The pipeline never re-derives it — if it's missing or
     zero, that's a creation-time bug, surfaced as a dashboard
     notification.
+  - Refund idempotency (Phase 2): Inngest step retries (this function
+    has retries: 2) compute a stable request_key from the return_id
+    and pass it to refundOrder, so a retried refund reuses the same
+    key and short-circuits at the pre-dispatch guard — the money can
+    only move once. The order_refunds mirror ensures every refund has
+    an audit row and catches double-fires across all caller sites.
+    See [[../tables/order_refunds]], [[../libraries/refund]].
 ```
 
 ---
 
-[[../README]] · [[../integrations/inngest]] · [[../../CLAUDE]]
+[[../README]] · [[../integrations/inngest]] · [[../tables/order_refunds]] · [[../libraries/refund]] · [[../../CLAUDE]]
