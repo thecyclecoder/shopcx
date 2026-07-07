@@ -14526,11 +14526,21 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
 // fresh diagnosis. Returns the addressing spec slug if so (→ resolve "fixed by [[slug]], pending
 // deploy", author nothing). The enqueue dedup only blocks LIVE same-signature jobs, so a re-fire
 // after the prior repair COMPLETED slips through to here.
-async function findAlreadyAddressing(signature: string, selfJobId: string): Promise<{ slug: string } | null> {
+async function findAlreadyAddressing(signature: string, selfJobId: string, workspaceId: string): Promise<{ slug: string } | null> {
   const { REPAIR_RECENT_FIX_WINDOW_MS } = await import("../src/lib/repair-agent");
+  const { getSpec } = await import("../src/lib/specs-table");
   const ledger = await repairLedger(REPAIR_RECENT_FIX_WINDOW_MS);
-  const prior = ledger.find((e) => e.jobId !== selfJobId && e.signature === signature && e.authoredSlug);
-  if (prior?.authoredSlug) return { slug: prior.authoredSlug };
+  // verify-authored-spec-persisted (repair-author-write follow-up): a prior job's `authored_slug` is only
+  // proof of a fix if the spec ACTUALLY landed in public.specs. Pre-#1290 phantom author-writes recorded
+  // `authored_slug` while the spec write was swallowed — those poison this dedup into a FALSE "already-fixed"
+  // skip (resolve "pending deploy" for a spec that never existed → the real bug is silently never fixed).
+  // Same verify-the-post-condition rail as #1290's read-after-write: trust the ROW, not the claim. Check
+  // every matching prior (not just the first) so a real fix still short-circuits; a ghost slug is ignored.
+  const priors = ledger.filter((e) => e.jobId !== selfJobId && e.signature === signature && e.authoredSlug);
+  for (const p of priors) {
+    const spec = await getSpec(workspaceId, p.authoredSlug!);
+    if (spec) return { slug: p.authoredSlug! };
+  }
   return null;
 }
 
@@ -14614,7 +14624,7 @@ async function runRepairJob(job: Job) {
   // enqueue dedup only blocks LIVE same-signature jobs, so a re-fire after the prior COMPLETED lands
   // here. Resolve "fixed by [[spec]], pending deploy" + author nothing. (Skip for the cluster job.) ──
   if (instr.source !== "cluster") {
-    const addressed = await findAlreadyAddressing(signature, job.id);
+    const addressed = await findAlreadyAddressing(signature, job.id, job.workspace_id);
     if (addressed) {
       await resolveRepairErrorRow(instr, `fixed by [[${addressed.slug}]], pending deploy`);
       await update(job.id, {
