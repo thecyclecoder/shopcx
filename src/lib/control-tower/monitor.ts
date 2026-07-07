@@ -1191,7 +1191,18 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .order("escalated_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
-    admin.from("agent_jobs").select("created_at").eq("kind", "triage-escalations").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    // june-review-replaces-solver-skeptic-quorum-triage Phase 1: the triage-escalations cron now
+    // enqueues cs-director-call jobs (one per eligible escalated ticket) as the primary triage
+    // instead of the legacy per-workspace triage-escalations sweep. Consider BOTH kinds so the
+    // "no triage job since it escalated" check keeps working during rollout AND after — the newest
+    // create_at across the two is what "the last time the cron picked work up" means.
+    admin
+      .from("agent_jobs")
+      .select("created_at")
+      .in("kind", ["cs-director-call", "triage-escalations"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
     admin.from("agent_jobs").select("created_at").eq("kind", "spec-test").order("created_at", { ascending: false }).limit(1).maybeSingle(),
     // Overdue = strictly before today 00:00 UTC ⇒ a full renewal window has passed
     // (no false positive on a sub merely due today that the async attempt hasn't processed yet).

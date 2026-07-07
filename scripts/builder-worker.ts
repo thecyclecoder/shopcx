@@ -11373,7 +11373,7 @@ async function loadCsDirectorCallBrief(workspaceId: string, ticketId: string, tr
 
 function csDirectorCallPrompt(brief: string): string {
   return [
-    `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the THIRD RUNG of the escalation ladder: box-escalation-triage's solver→skeptic quorum could not vote on this ticket, so it landed with you INSTEAD of routing straight to the founder. You investigate READ-ONLY and emit ONE JSON object — a typed verdict — and the WORKER (deterministic Node) materializes it in Phase 2 of this spec. You NEVER mutate anything from here.`,
+    `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`,
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor will fire through executeSonnetDecision.`,
@@ -11465,6 +11465,41 @@ async function runCsDirectorCallJob(job: Job) {
       // recordDirectorActivity is best-effort + never-throws, so this only catches a dynamic-import
       // failure. The verdict still lands on the log_tail so an operator can recover it.
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
+    // june-review-replaces-solver-skeptic-quorum-triage Phase 1 — also record the verdict to
+    // `triage_runs` so the escalation-triage audit slice reflects the leaner June-review path (no
+    // solver-skeptic-quorum sweep produced this call; June's review IS the triage). `verdict` is
+    // the sentinel string `june_review` so a reader can distinguish June-review rows from the
+    // legacy `agree|revise|reject|no_quorum` quorum-verdict rows. `solver_transcript` carries
+    // June's structured verdict verbatim (the "reviewer" transcript); `skeptic_transcript` stays
+    // null (no adversarial pass). `materialized=true` reflects that the audit landed AND the
+    // existing worker path (director_activity + digest / dashboard_notifications on
+    // escalate_founder) fires against it. Best-effort — the audit row on `director_activity` is
+    // already the primary trail; a triage_runs write failure never rolls back the completed job.
+    try {
+      const { error: trErr } = await db.from("triage_runs").insert({
+        id: triageRunId ?? undefined,
+        workspace_id: job.workspace_id,
+        job_id: job.id,
+        ticket_id: ticketId,
+        decision: verdict.decision,
+        verdict: "june_review",
+        materialized: true,
+        outcome: verdict.reasoning.slice(0, 2000),
+        solver_transcript: {
+          reviewer: "cs_director",
+          decision: verdict.decision,
+          reasoning: verdict.reasoning,
+          remedy: verdict.remedy ?? null,
+          spec_seed: verdict.spec_seed ?? null,
+        },
+        skeptic_transcript: null,
+        group_id: null,
+      });
+      if (trErr) console.warn(`${tag} triage_runs insert failed: ${trErr.message}`);
+    } catch (e) {
+      console.warn(`${tag} triage_runs insert threw:`, e instanceof Error ? e.message : e);
     }
 
     // Phase 2 of cs-director-storyline-digests-to-founder-with-bidirectional-reply — route
