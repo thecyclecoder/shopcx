@@ -39,7 +39,13 @@ export interface ImprovePlanAction {
   decision?: SonnetDecision; // orchestrator_action: the full {action_type, handler_name?, actions?, response_message?, reasoning}
   prompt?: { title: string; content: string; category?: string }; // sonnet_prompt
   rule?: { title: string; content: string }; // grader_rule
-  spec?: { slug: string; title: string; intent: string; problem: string }; // ticket_spec
+  /** ticket_spec — the payload the box's Improve agent hands back for a code-change spec.
+   *  `mandate` (optional): improve-tab-spec-author-auto-anchors Phase 3 — the CS-function mandate the
+   *  LLM picked at write time (a kebab slug on `docs/brain/functions/cs.md`; e.g.
+   *  `ticket-derived-product-fixes`, `escalation-triage-quality`, or
+   *  `fix-weird-tickets-fast-calibrate-so-they-don-t-recur`). Omitted / unknown ⇒ the executor lets the
+   *  [[author-spec]] chokepoint's Phase 2 auto-anchor pick the best fit deterministically. */
+  spec?: { slug: string; title: string; intent: string; problem: string; mandate?: string }; // ticket_spec
   resolve?: { internal_notes?: string[]; close?: boolean; unassign?: boolean; unescalate?: boolean }; // resolve_sequence
   status: "pending" | "approved" | "declined" | "done" | "failed";
   result?: string;

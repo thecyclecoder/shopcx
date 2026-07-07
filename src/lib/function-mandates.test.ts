@@ -7,6 +7,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { promises as fs } from "fs";
+import path from "path";
 import { parseFunctionMandates, resolveFunctionMandates } from "./function-mandates";
 
 test("resolveFunctionMandates('platform') returns exactly the three platform mandates with the expected slugs", async () => {
@@ -72,6 +74,41 @@ test("parseFunctionMandates honors an explicit {#slug} anchor over the kebab fal
   assert.equal(ms[0].slug, "build");
   assert.equal(ms[0].heading, "Autonomous build platform"); // annotation stripped
   assert.equal(ms[1].slug, "store-tech-shopify");
+});
+
+// ── improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 3 ──────────────────
+// The Improve-tab skill surfaces the CS mandate slugs to the box LLM so it can pick up front (Phase
+// 3 makes the Phase 2 fallback rare rather than routine). Pin the skill's advertised slugs to the
+// resolver's canonical output — if the CS charter is edited (heading text or {#slug} annotation) the
+// SKILL.md must move with it. Same class as the [[../operational-rules]] "brain = spec" invariant.
+
+test("ticket-improve skill's advertised CS mandate slugs match resolveFunctionMandates('cs') exactly", async () => {
+  const skillPath = path.join(process.cwd(), ".claude", "skills", "ticket-improve", "SKILL.md");
+  const skillMd = await fs.readFile(skillPath, "utf8");
+  // The skill's `mandate` list is rendered as `` - `slug` `` bullet lines in the ticket_spec section.
+  const advertised = new Set<string>();
+  for (const line of skillMd.split("\n")) {
+    const m = line.match(/^\s*-\s+`([a-z0-9][a-z0-9-]*)`\s+—/);
+    if (m) advertised.add(m[1]);
+  }
+  const csMandates = await resolveFunctionMandates("cs");
+  const actualSlugs = new Set(csMandates.map((m) => m.slug));
+  // Every advertised slug must resolve to a real mandate — the executor validates the LLM's pick
+  // against this set, and a stale doc would silently drop back to auto-anchor for the LLM's choice.
+  for (const slug of advertised) {
+    assert.ok(
+      actualSlugs.has(slug),
+      `SKILL.md advertises CS mandate slug "${slug}" but resolveFunctionMandates('cs') returned only [${[...actualSlugs].join(", ")}]`,
+    );
+  }
+  // And every real CS mandate MUST be advertised — a new charter mandate the LLM doesn't know about
+  // is the exact "fallback becomes routine" gap Phase 3 is closing.
+  for (const slug of actualSlugs) {
+    assert.ok(
+      advertised.has(slug),
+      `CS charter has mandate "${slug}" but the ticket-improve SKILL.md doesn't advertise it (add a - \`${slug}\` — … line under "Valid slugs on cs")`,
+    );
+  }
 });
 
 test("parseFunctionMandates stops at the next `## ` section — subsequent H3s are NOT captured", () => {
