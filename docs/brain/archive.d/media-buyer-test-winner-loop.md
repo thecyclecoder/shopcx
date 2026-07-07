@@ -1,0 +1,1 @@
+- **Media Buyer agent + the Test→Promote-to-winner cadence (fix ad fatigue)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
