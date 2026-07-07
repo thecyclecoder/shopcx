@@ -36,7 +36,7 @@ interface Props {
   /** Bundle PDP only. When set, a click on any `#pricing` CTA (chapter mid-CTAs, final CTA — which
    *  have no price table to scroll to on this page) is treated as the bundle add-to-cart, exactly
    *  like the hero's Add to Cart. Null on every other page. */
-  bundleBuy?: { variantId: string; mode: "subscribe" | "onetime"; frequencyDays: number | null } | null;
+  bundleBuy?: { variantId: string; mode: "subscribe" | "onetime"; frequencyDays: number | null; couponCode?: string | null } | null;
 }
 
 interface CtaPayload {
@@ -197,10 +197,10 @@ export function StorefrontPixelInit({
         mode,
         frequency_days: freqDays,
         line_items: [],
-        // Phase 4 of offer-creator: forward the CTA's data-coupon-code
-        // (products.bundle_coupon_code, wired via HeroSection) to
-        // /api/cart so the coupon lands on the first order.
-        discount_code: ds.couponCode || null,
+        // Phase 4 of offer-creator: forward the bundle coupon to /api/cart so it lands on the first
+        // order. The #buy CTAs (hero, value builder) carry it as data-coupon-code; the #pricing
+        // chapter CTAs have no data attr, so the coupon rides on bundleBuy instead.
+        discount_code: isPricingBundle ? bundleBuy!.couponCode ?? null : ds.couponCode || null,
       };
 
       if (isPricingBundle) {
