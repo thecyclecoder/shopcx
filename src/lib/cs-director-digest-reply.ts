@@ -20,6 +20,7 @@
 
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { CsStoryline } from "./cs-director-digest";
+import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -197,23 +198,19 @@ export async function addRuleFromStoryline(
         input.storyline.evidence ??
         "",
     );
-    const { data, error } = await admin
-      .from("sonnet_prompts")
-      .insert({
-        workspace_id: input.workspaceId,
-        category: "rule",
-        title: input.storyline.title || "Draft rule from CS digest",
-        content: draft,
-        enabled: false, // NOT enabled — admin approves at /dashboard/settings/ai/prompts.
-        status: "proposed",
-        proposed_at: new Date().toISOString(),
-      })
-      .select("id")
-      .single();
-    if (error || !data) {
-      return { ok: false, reason: `sonnet_prompts insert failed: ${error?.message ?? "no row"}` };
+    // sonnet-prompts-sdk-for-review-agent-db-access Phase 1 — proposal inserts route through the
+    // sonnet-prompts SDK ([[sonnet-prompts-table]]). NOT enabled — admin approves at
+    // /dashboard/settings/ai/prompts.
+    const { id, error } = await proposePrompt(admin, {
+      workspaceId: input.workspaceId,
+      category: "rule",
+      title: input.storyline.title || "Draft rule from CS digest",
+      content: draft,
+    });
+    if (error || !id) {
+      return { ok: false, reason: `sonnet_prompts insert failed: ${error ?? "no row"}` };
     }
-    return { ok: true, sonnet_prompt_id: String(data.id) };
+    return { ok: true, sonnet_prompt_id: id };
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
