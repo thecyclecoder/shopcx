@@ -248,6 +248,33 @@ export function classifyFusedSecurityEnvelope(envelope: unknown): SecurityEnvelo
  */
 export type SecurityAppliedVerdict = "clean" | "false-positive" | "needs-human" | "real-vuln";
 
+/**
+ * Fix 1 of confidence-gated-problem-lockin-and-selective-clarify — Phase 3.
+ *
+ * Compose a fallback stub envelope when the fused session emits parseable JSON without a security
+ * envelope AND the one-shot envelope-repair retry ALSO misses. Before this helper the code path
+ * (scripts/builder-worker.ts) silently kept the original envelope-less `parsed`, and downstream
+ * classifyFusedSecurityEnvelope(undefined) returned the opaque reason "no security envelope on the
+ * fused spec-test result" — an unactionable park (the specific failure job a869f697 hit on this
+ * build). The stub gives the classifier a STRUCTURED `needs_human` verdict per required check with
+ * evidence that names the failure mode, so the parked row's log_tail carries a legible reason a
+ * human (or an auto-router) can act on, without ever bypassing a real security review.
+ *
+ * Pure — safe to import from either runtime. NEVER classify a real diff as clean via this stub.
+ */
+export function synthesizeMissingEnvelopeStub(reason: string): FusedSecurityEnvelope {
+  const trimmedReason = String(reason || "session did not emit a security envelope").trim().slice(0, 400);
+  return {
+    status: "needs-human",
+    review: `Fused session did not emit a security envelope: ${trimmedReason}. Held for a human review (no auto-clean bypass).`,
+    checks: REQUIRED_SECURITY_CHECKS.map((check) => ({
+      check,
+      verdict: "needs_human",
+      evidence: `session did not emit a security envelope; per-check verdict for '${check}' unknown — ${trimmedReason}`.slice(0, 500),
+    })),
+  };
+}
+
 export function mapFusedSecurityToVerdict(
   classification: SecurityEnvelopeClassification,
   declaredStatus: string,

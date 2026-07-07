@@ -9722,6 +9722,26 @@ async function runSpecTestJob(job: Job) {
           parsed = reparsed;
         }
       }
+
+      // Fix 1 of confidence-gated-problem-lockin-and-selective-clarify (Phase 3) — when the retry ALSO
+      // failed to land an envelope AND the session did not self-declare error, synthesize a structured
+      // `needs_human` stub envelope so downstream classifyFusedSecurityEnvelope reads STRUCTURED
+      // per-check evidence ("session could not classify a check") instead of the OPAQUE bare-fall-through
+      // reason ("no security envelope on the fused spec-test result") the parked job a869f697 tripped on.
+      // The synthesized envelope NEVER classifies clean — every per-check entry is needs_human — so we
+      // strand the branch for a human exactly as we would have anyway, but with an actionable log_tail.
+      if (
+        parsed &&
+        parsed.status !== "error" &&
+        (!parsed.security || typeof parsed.security !== "object" || Array.isArray(parsed.security))
+      ) {
+        const { synthesizeMissingEnvelopeStub } = await import("../src/lib/security-envelope");
+        parsed = {
+          ...parsed,
+          security: synthesizeMissingEnvelopeStub("fused session did not emit a security envelope after one repair retry"),
+        };
+        console.log(`${tag} fused envelope still missing after retry — synthesized needs_human stub so parked reason is structured, not opaque`);
+      }
     }
 
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
