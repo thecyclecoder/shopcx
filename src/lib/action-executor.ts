@@ -8,6 +8,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
+import { unbackedEffectClaim } from "@/lib/claim-guard";
 import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 
@@ -31,6 +32,21 @@ export interface SonnetDecision {
   response_message?: string;
   needs_clarification?: boolean;
   clarification_question?: string;
+  // ── Resolution-record fields (Phase 2 of ticket-resolution-events
+  // -writeahead-ledger-and-decision-schema-extension) ──
+  // Mirror the shape declared on src/lib/sonnet-orchestrator-v2.ts's
+  // SonnetDecision. All optional so a fallback / straggler decision
+  // still executes; stageResolutionEvent range-guards + coerces before
+  // insert (respects the DB CHECK constraints — confidence ∈ [0,1];
+  // verified_outcome enum). See docs/brain/tables/ticket_resolution_events.md.
+  problem?: string;
+  confidence?: number;
+  options?: Array<{
+    label: string;
+    action_shape?: unknown;
+    expected_effect?: string;
+  }>;
+  chosen?: { option_index: number; why: string };
 }
 
 export interface ActionParams {
@@ -113,6 +129,12 @@ export interface ActionContext {
   // without this flag the "no message sent → reopen" branch would flip
   // the just-closed ticket back to open.
   _closedThisRun?: boolean;
+  // Internal: the ticket_resolution_events row id inserted at the top of
+  // executeSonnetDecision. Downstream stampers (shipped_at from the send
+  // path, verified_at + verified_outcome from verifyActionInDB) update
+  // this row so every branch shares one write-ahead ledger row per turn.
+  // See docs/brain/tables/ticket_resolution_events.md.
+  _resolutionEventId?: string;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -2057,9 +2079,25 @@ export async function executeSonnetDecision(
   send: SendFn,
   sysNote: SysNoteFn,
 ): Promise<{ messageSent: boolean; escalated: boolean; closed: boolean; statusManaged: boolean }> {
+  // ── WRITE-AHEAD LEDGER ──
+  // Insert a ticket_resolution_events row BEFORE any customer-facing claim
+  // ships, so every branch (direct_action/journey/playbook/workflow/macro/
+  // kb_response/ai_response/clarification) shares the same row. shipped_at
+  // gets stamped from the send wrappers below; verified_at + verified_outcome
+  // get stamped from verifyActionInDB (direct_action) or the executor's
+  // return-time verdict (message-only branches). Phase 2 populates
+  // problem/confidence/options/chosen from the extended SonnetDecision —
+  // Phase 1 lands the substrate with those columns NULL.
+  // Spec: docs/brain/specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension.md
+  await stageResolutionEvent(ctx, decision);
+  const stampedSend: SendFn = async (m, sb) => {
+    await send(m, sb);
+    await stampResolutionShipped(ctx);
+  };
+
   // Handle clarification first — applies regardless of action_type
   if (decision.needs_clarification && decision.clarification_question) {
-    await send(decision.clarification_question, ctx.sandbox);
+    await stampedSend(decision.clarification_question, ctx.sandbox);
     return { messageSent: true, escalated: false, closed: false, statusManaged: false };
   }
 
@@ -2070,7 +2108,7 @@ export async function executeSonnetDecision(
   // leaves return_to_sender open). When true the post-execute status
   // block in unified-ticket-handler must NOT override it.
   let statusManaged = false;
-  const trackedSend: SendFn = async (m, sb) => { messageSent = true; await send(m, sb); };
+  const trackedSend: SendFn = async (m, sb) => { messageSent = true; await stampedSend(m, sb); };
 
   switch (decision.action_type) {
     case "direct_action":
@@ -2094,7 +2132,10 @@ export async function executeSonnetDecision(
       // Signal statusManaged so the post-execute block doesn't reopen a
       // legitimately-closed ticket (Mindy Freeman a89dcf76: magic-link
       // sent + closed, then orchestrator reopened it as "no message sent").
-      statusManaged = await handleWorkflow(ctx, decision, send, sysNote);
+      // Pass stampedSend (not raw send) so the workflow's own sendReply
+      // path stamps ticket_resolution_events.shipped_at like every other
+      // branch — see the write-ahead ledger comment at the top of this fn.
+      statusManaged = await handleWorkflow(ctx, decision, stampedSend, sysNote);
       break;
 
     case "macro":
@@ -2102,7 +2143,18 @@ export async function executeSonnetDecision(
       break;
 
     case "kb_response":
-    case "ai_response":
+    case "ai_response": {
+      // Claim↔action binding guard (Phase 0). This path attaches NO actions, so
+      // a first-person completed-effect assertion in the reply ("I've refunded
+      // you", "your subscription has been cancelled") is by definition unbacked
+      // — the #1 false-promise mechanism. Block it and escalate to a human
+      // rather than ship a lie. Fail-safe + deterministic (no model).
+      const unbackedClaim = unbackedEffectClaim(decision.response_message, new Set<string>());
+      if (unbackedClaim) {
+        await sysNote(`[Guard] Blocked unbacked "${unbackedClaim}" claim in ${decision.action_type} — no action was attached. Escalating instead of sending a false promise.`);
+        await escalateTicket(ctx, `blocked_unbacked_claim:${unbackedClaim}`);
+        break;
+      }
       if (decision.response_message) {
         await trackedSend(decision.response_message, ctx.sandbox);
       }
@@ -2121,6 +2173,7 @@ export async function executeSonnetDecision(
         await escalateTicket(ctx, "ai_holding_promise");
       }
       break;
+    }
 
     case "escalate":
       await handleEscalate(ctx, decision, trackedSend, sysNote);
@@ -2130,12 +2183,130 @@ export async function executeSonnetDecision(
       await sysNote(`Unknown action_type: ${decision.action_type}`);
   }
 
+  // Stamp the write-ahead ledger row's verified_at + verified_outcome now
+  // that the branch has resolved. handleDirectAction stamps its own
+  // 'confirmed'/'drifted' verdict from verifyActionInDB (its outcome is
+  // more specific — a per-action DB check). For message-only branches
+  // (journey/playbook/macro/kb_response/ai_response/workflow) the verdict
+  // is derived from whether a customer-facing message actually shipped.
+  // Escalate paths leave verified_outcome NULL — the agent takes over and
+  // the row stays open until the outcome is known (M4 closes it out).
+  if (ctx._escalatedThisRun !== true) {
+    if (messageSent || statusManaged || ctx._closedThisRun === true) {
+      await stampResolutionVerified(ctx, "confirmed");
+    }
+  }
+
   return {
     messageSent,
     escalated: ctx._escalatedThisRun === true,
     closed: ctx._closedThisRun === true,
     statusManaged,
   };
+}
+
+// ── Ticket resolution write-ahead ledger ──
+//
+// One row per executeSonnetDecision() call, inserted at the top of the
+// function so every branch shares the same substrate. See
+// docs/brain/tables/ticket_resolution_events.md.
+
+async function stageResolutionEvent(
+  ctx: ActionContext,
+  decision: SonnetDecision,
+): Promise<void> {
+  try {
+    // turn_index = count of prior rows for this ticket + 1. Cheap: the
+    // (workspace_id, ticket_id, turn_index) index covers it.
+    const { count } = await ctx.admin
+      .from("ticket_resolution_events")
+      .select("id", { count: "exact", head: true })
+      .eq("ticket_id", ctx.ticketId);
+    const turnIndex = (count ?? 0) + 1;
+
+    // Phase 2 populates problem/confidence/options/chosen on SonnetDecision;
+    // the interface (src/lib/sonnet-orchestrator-v2.ts:32) declares them
+    // optional so a fallback / straggler prompt still executes. We coerce
+    // + range-guard here so the row respects the DB CHECK constraints
+    // (confidence ∈ [0,1]; options must be an array) — the model can and
+    // does return out-of-range floats and object-shaped options during
+    // the buildSystemPrompt rollout.
+    const problem = typeof decision.problem === "string" && decision.problem.length > 0
+      ? decision.problem
+      : null;
+    const confidence = typeof decision.confidence === "number"
+      && Number.isFinite(decision.confidence)
+      && decision.confidence >= 0
+      && decision.confidence <= 1
+      ? decision.confidence
+      : null;
+    const options = Array.isArray(decision.options) ? decision.options : null;
+    const chosen = decision.chosen && typeof decision.chosen === "object"
+      && typeof decision.chosen.option_index === "number"
+      ? decision.chosen
+      : null;
+
+    const { data: row, error } = await ctx.admin
+      .from("ticket_resolution_events")
+      .insert({
+        workspace_id: ctx.workspaceId,
+        ticket_id: ctx.ticketId,
+        turn_index: turnIndex,
+        problem,
+        confidence,
+        options,
+        chosen,
+        reasoning: decision.reasoning ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (!error && row?.id) ctx._resolutionEventId = row.id;
+  } catch {
+    // Never fail the executor because the ledger insert failed. The row
+    // is a diagnostic + optimizer substrate, not a critical path.
+  }
+}
+
+async function stampResolutionShipped(ctx: ActionContext): Promise<void> {
+  if (!ctx._resolutionEventId) return;
+  try {
+    // Idempotent: only stamp shipped_at once per row. Compare-and-set on
+    // workspace_id + shipped_at IS NULL so a re-send in the same turn
+    // doesn't overwrite the first-ship timestamp.
+    await ctx.admin
+      .from("ticket_resolution_events")
+      .update({ shipped_at: new Date().toISOString() })
+      .eq("id", ctx._resolutionEventId)
+      .eq("workspace_id", ctx.workspaceId)
+      .is("shipped_at", null);
+  } catch {
+    // Never fail the send path because the ledger stamp failed.
+  }
+}
+
+async function stampResolutionVerified(
+  ctx: ActionContext,
+  outcome: "confirmed" | "unbacked" | "drifted",
+): Promise<void> {
+  if (!ctx._resolutionEventId) return;
+  try {
+    // Idempotent: only stamp verified_at once per row (compare-and-set on
+    // verified_at IS NULL). A more specific verdict from handleDirectAction
+    // (e.g. 'drifted' after verifyActionInDB) wins over the return-time
+    // 'confirmed' because the direct-action stamp fires FIRST.
+    await ctx.admin
+      .from("ticket_resolution_events")
+      .update({
+        verified_at: new Date().toISOString(),
+        verified_outcome: outcome,
+      })
+      .eq("id", ctx._resolutionEventId)
+      .eq("workspace_id", ctx.workspaceId)
+      .is("verified_at", null);
+  } catch {
+    // Never fail the executor because the ledger stamp failed.
+  }
 }
 
 // ── Handler: Direct Actions ──
@@ -2311,6 +2482,17 @@ async function handleDirectAction(
           verifyFailures.push(`${s.action.type}: verification failed, no handler for retry`);
         }
       }
+    }
+
+    // Stamp the resolution-events verified_outcome from the verifyActionInDB
+    // outcome — 'confirmed' when every action verified (or self-heal
+    // retried cleanly), 'drifted' when a claim couldn't be backed by a DB
+    // read. Runs BEFORE the return-time stamp so this more-specific
+    // verdict wins the idempotent-once compare-and-set.
+    if (verifyFailures.length === 0) {
+      await stampResolutionVerified(ctx, "confirmed");
+    } else {
+      await stampResolutionVerified(ctx, "drifted");
     }
 
     // Send the customer-facing confirmation only AFTER verify+retry have
