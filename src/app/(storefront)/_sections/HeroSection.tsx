@@ -6,6 +6,7 @@ import { useActiveMember } from "../_lib/active-member-context";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShopCTA } from "../_components/ShopCTA";
+import { BundleValueBuilder } from "./BundleValueBuilder";
 import { PressLogos } from "../_components/PressLogos";
 import { HeroGallery } from "../_components/HeroGallery";
 import { HeroFeaturedReviews } from "../_components/HeroFeaturedReviews";
@@ -209,6 +210,10 @@ export function HeroSection({ data, bundle = false }: { data: PageData; bundle?:
             </p>
           )}
 
+          {/* Bundle PDP: value builder (price + FREE starter-kit grid + Add to Cart + risk block)
+              sits between the subhead and the "As Seen On" row; replaces the plain Select Bundle CTA. */}
+          {bundle && <BundleValueBuilder data={data} />}
+
           {/* "As Seen On" press row — placed high (right under the headline)
               so the trust signal lands before the fold on mobile and desktop. */}
           <div className="mt-5">
@@ -299,7 +304,9 @@ export function HeroSection({ data, bundle = false }: { data: PageData; bundle?:
             </div>
           )}
 
-          <div className="mt-6">
+          {/* Standard hero CTA. Hidden in bundle mode — the value builder above carries the
+              Add to Cart, so there's no separate Select Bundle button lower in the hero. */}
+          <div className="mt-6" hidden={bundle}>
             <ShopCTA
               href={ctaHref}
               label={bundle ? "Select Bundle" : !isViewingCurrent && activeMember ? `Shop ${activeMember.value}` : undefined}
