@@ -60,6 +60,24 @@ If any of these fire, Sonnet doesn't run. Otherwise the orchestrator gets the me
 
 This packet gets prompt-cached at the boundary so multi-turn conversations reuse the same prefix.
 
+### Confidence-gated problem lock-in
+
+At the top of `assembleTicketContext` (`src/lib/ai-context.ts`), after the channel config loads, we query the latest [[../tables/ticket_resolution_events]] row for this ticket whose `confidence` is `>=` the channel's `problem_lockin_threshold` (default `0.7` on [[../tables/ai_channel_config]]; DB-driven per channel). When a locked-in row is present, we inject one line into the Sonnet system prompt BEFORE `CUSTOMER CONTEXT`:
+
+```
+ESTABLISHED PROBLEM (locked in at T{turn}): {problem}. Any pivot MUST be justified explicitly in reasoning.
+```
+
+Rationale — an early, high-confidence diagnosis (e.g. `refund_request` at T1 with `confidence=0.85`) is the ticket's real state. On T2+ Sonnet was silently pivoting off it whenever a later customer message added noise; the lock-in makes that pivot loud (it has to explain itself in `reasoning`) instead of silent. The line is prompt-cached along with the rest of the prefix because the row it reads from is only refreshed once per turn on insert.
+
+Below the threshold → no line is injected and Sonnet stays free to redirect the ticket. Empty/absent `problem` → no line. Only the LATEST above-threshold row wins, so a sequence of confirmed turns keeps the lock-in anchored to the most recent diagnosis (which the orchestrator's own reasoning would have refined).
+
+The pre-loaded packet also carries `establishedProblem` on `AssembledContext` so downstream callers (`unified-ticket-handler.ts` + the Improve tab's `/api/tickets/[id]/resolution-context` route) can render the same lock-in state a human sees on `/dashboard/tickets/[id]` → Improve tab, alongside the current turn's `reasoning`.
+
+Threshold tuning lives in Settings → AI → Channels (per-channel row on [[../tables/ai_channel_config]]).
+
+Related: [[../tables/ticket_resolution_events]] (the source ledger) · [[../specs/confidence-gated-problem-lockin-and-selective-clarify]] (Phase 1 spec).
+
 ## Phase 3 — generate
 
 `src/lib/model-picker.ts` decides the model:
@@ -103,7 +121,7 @@ Validation: `safeJSONParse()` parses + schema-checks. Bad JSON → fall back to 
 
 `src/lib/action-executor.ts` dispatches on `action_type`:
 
-- `direct_action` — execute the action(s):
+- `direct_action` — the selective-clarify gate ([[../libraries/selective-clarify]] — Phase 2 of [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]) fires FIRST: on a low-confidence × irreversible plan (`partial_refund` / `cancel` / `bill_now` / `subscriptionOrderNow`, DB-configurable via a `slug='irreversible_actions'` [[../tables/policies]] row) it sends a scoped confirmation-turn instead of running any action and stamps [[../tables/ticket_resolution_events]] `verified_outcome='clarified'`. Otherwise: execute the action(s):
   - Subscription mutations via [[../integrations/appstle]] (`appstleSubscriptionAction`, `appstleSkipNextOrder`, etc.).
   - Order refunds via [[../integrations/shopify]] `refundCreate` + [[../integrations/braintree]] `transaction.refund` when applicable.
   - Loyalty redemptions via `src/lib/loyalty.ts`.
@@ -179,6 +197,7 @@ The orchestrator's behavior is *not* hardcoded. [[../tables/sonnet_prompts]] hol
 | `src/lib/inngest/deliver-pending-send.ts` | Outbound delivery |
 | `src/lib/inngest/ticket-analysis-cron.ts` | Nightly analysis cron |
 | `src/lib/inngest/ai-nightly-analysis.ts` | Daily AI quality review |
+| `src/lib/selective-clarify.ts` | Phase-2 low-confidence × irreversible gate for `direct_action` |
 
 ## Status / open work
 

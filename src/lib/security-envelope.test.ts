@@ -21,6 +21,7 @@ import {
   classifyFusedSecurityEnvelope,
   mapFusedSecurityToVerdict,
   REQUIRED_SECURITY_CHECKS,
+  synthesizeMissingEnvelopeStub,
   type FusedSecurityEnvelope,
 } from "./security-envelope";
 
@@ -238,6 +239,44 @@ test("Fix 1 end-to-end: envelope with a high-severity structured finding + decla
   assert.notEqual(applied, "false-positive"); // ← the regression: cannot map to completed-green
   assert.notEqual(applied, "clean");
   assert.equal(applied, "needs-human"); // ← surfaces for a human, branch NOT green
+});
+
+// ── Fix 1 (Phase 3 of confidence-gated-problem-lockin-and-selective-clarify) ──
+//
+// When the fused session emits parseable JSON that lacks the required `security` envelope, the box
+// worker's envelope-repair re-prompt gets one retry. If the retry ALSO misses (session is confused
+// or fixated), the prior code silently fell through with `parsed.security = undefined`, which the
+// classifier flagged as "no security envelope on the fused spec-test result" — a bare/opaque
+// needs_human that surfaces on the parked security-review row as an unactionable log_tail (the
+// specific park reason a869f697 tripped on this build). synthesizeMissingEnvelopeStub composes a
+// structured stub envelope with per-check `needs_human` entries whose evidence names the failure
+// mode, so the downstream verdict still parks (correctly — we could not review), but with a
+// STRUCTURED reason ("session could not classify a check") instead of the opaque "no envelope"
+// path, and per-check evidence a human can act on.
+test("synthesizeMissingEnvelopeStub: composes a structured needs_human envelope with all 5 required per-check entries + the failure reason as evidence", () => {
+  const stub = synthesizeMissingEnvelopeStub("session did not emit a security envelope after one repair retry");
+  // Envelope shape the downstream classifier requires: `checks` array covering every required key.
+  assert.equal(Array.isArray(stub.checks), true);
+  assert.equal(stub.checks?.length, REQUIRED_SECURITY_CHECKS.length);
+  const seenKeys = new Set(stub.checks?.map((c) => c.check));
+  for (const k of REQUIRED_SECURITY_CHECKS) assert.equal(seenKeys.has(k), true, `stub must cover ${k}`);
+  // Every entry is needs_human — we could not classify anything, so no bare/rubber-stamp clean escapes.
+  for (const entry of stub.checks ?? []) {
+    assert.equal(entry.verdict, "needs_human");
+    assert.match(entry.evidence, /session did not emit a security envelope/);
+  }
+  // Top-level status conveys the same reason so activityMetadata + review render cleanly.
+  assert.equal(stub.status, "needs-human");
+  assert.match(String(stub.review), /session did not emit a security envelope/);
+});
+
+test("synthesizeMissingEnvelopeStub: fed through classifyFusedSecurityEnvelope → 'needs_human' via the `needs_human per-check entry` path (NOT the opaque `no envelope` path)", () => {
+  const stub = synthesizeMissingEnvelopeStub("session did not emit a security envelope after one repair retry");
+  const v = classifyFusedSecurityEnvelope(stub);
+  assert.equal(v.classification, "needs_human");
+  // The whole point of the stub: STRUCTURED evidence replaces the opaque "no security envelope" reason.
+  assert.match(v.reason, /needs_human/i);
+  assert.doesNotMatch(v.reason, /no security envelope/i);
 });
 
 test("mapFusedSecurityToVerdict + classifier: end-to-end mapping matches the Phase-2 verification bullets", () => {

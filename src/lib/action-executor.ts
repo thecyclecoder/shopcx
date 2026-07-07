@@ -11,6 +11,7 @@ import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
 import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
+import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
 
 // ── Types ──
 
@@ -2304,9 +2305,34 @@ export async function executeSonnetDecision(
   const trackedSend: SendFn = async (m, sb) => { messageSent = true; await stampedSend(m, sb); };
 
   switch (decision.action_type) {
-    case "direct_action":
+    case "direct_action": {
+      // ── Selective-clarify gate ──
+      // Phase 2 of confidence-gated-problem-lockin-and-selective-clarify. Low
+      // confidence × irreversible action → send a scoped confirmation-turn instead
+      // of firing the action. Sandbox stays out of this path (its stamped-note
+      // dry-run flow is already non-destructive).
+      // See src/lib/selective-clarify.ts + docs/brain/libraries/selective-clarify.md.
+      if (!ctx.sandbox) {
+        const irreversibleSet = await loadIrreversibleSet(ctx.admin, ctx.workspaceId);
+        if (shouldClarify(
+          { confidence: decision.confidence, actions: decision.actions },
+          { irreversibleSet },
+        )) {
+          const clarifyMsg = buildClarificationMessage(decision.actions || []);
+          await trackedSend(clarifyMsg, ctx.sandbox);
+          await stampResolutionVerified(ctx, "clarified");
+          // Prevent the return-time 'confirmed' stamp — the direct_action stamp
+          // already wins via idempotent compare-and-set on verified_at IS NULL,
+          // but we mark _escalatedThisRun-adjacent state by returning through the
+          // usual break; the outer post-switch block re-checks messageSent and
+          // would double-stamp 'confirmed' otherwise. The verified_at guard on
+          // stampResolutionVerified holds, so this is defense-in-depth.
+          break;
+        }
+      }
       await handleDirectAction(ctx, decision, trackedSend, sysNote);
       break;
+    }
 
     case "journey":
       await handleJourney(ctx, decision, trackedSend, sysNote);
@@ -2480,7 +2506,7 @@ async function stampResolutionShipped(ctx: ActionContext): Promise<void> {
 
 async function stampResolutionVerified(
   ctx: ActionContext,
-  outcome: "confirmed" | "unbacked" | "drifted",
+  outcome: "confirmed" | "unbacked" | "drifted" | "clarified",
 ): Promise<void> {
   if (!ctx._resolutionEventId) return;
   try {
