@@ -794,6 +794,12 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:product-seed", kind: "agent-kind", owner: "cmo", agentKind: "product-seed", label: "Agent — product seed", description: "Product none → published pipeline.", expectedCadence: "on demand", stuckThresholdMs: 90 * MIN },
   { id: "agent:spec-chat", kind: "agent-kind", owner: "platform", agentKind: "spec-chat", label: "Agent — spec chat", description: "Roadmap authoring-chat turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
   { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", label: "Agent — ticket improve", description: "CX ticket-improve turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  // Per-ticket QC-grader box lane (ticket-analyzer-becomes-box-agent-under-june Phase 1) — the
+  // supervised agent under 💬 June (CS Director) that replaced the analyzer's direct fetch to
+  // api.anthropic.com. Enqueued by ticket-analysis-cron; drained by scripts/builder-worker.ts →
+  // runTicketAnalyzeJob as top-level Max `claude -p` sessions. Idle = green (on demand); alerted
+  // only on a stuck job past the threshold. Same owner=cs as the feeder cron.
+  { id: "agent:ticket-analyze", kind: "agent-kind", owner: "cs", agentKind: "ticket-analyze", label: "Agent — ticket analyze", description: "Per-ticket QC grader (box-session under 💬 June).", expectedCadence: "when a closed AI-handled ticket is enqueued", stuckThresholdMs: 30 * MIN, registeredAt: "2026-07-07T14:00:00Z" },
   { id: "agent:triage-escalations", kind: "agent-kind", owner: "cs", agentKind: "triage-escalations", label: "Agent — triage sweep", description: "Solver→skeptic→quorum escalation sweep.", expectedCadence: "hourly when work exists", stuckThresholdMs: 90 * MIN },
   { id: "agent:prompt-review", kind: "agent-kind", owner: "cs", agentKind: "prompt-review", label: "Agent — prompt review", description: "Per-proposal sonnet_prompt auto-review — a supervised box-session agent under June (CS Director), replacing the retired direct-Opus fetch. Emits one JSON verdict; the deterministic runner applies it via applyDecision (REJECT_FLOOR + never-queue-to-humans preserved).", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:spec-test", kind: "agent-kind", owner: "platform", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },

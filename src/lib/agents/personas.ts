@@ -154,15 +154,6 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
-  "prompt-review": {
-    key: "prompt-review", name: "Wren", role: "Prompt Analyzer", emoji: "📝",
-    personality: "The editor of the conversation-rule library — reviews every proposed sonnet_prompt, approves the clear/actionable ones and rejects the vague/wrong, with a reasoned verdict. Precise and skeptical; keeps the rules that shape the AI's voice honest.",
-    pronouns: { subject: "they", object: "them", possessive: "their" },
-    mascotId: "default", avatarUrl: `${AV}wren-prompt-analyzer.jpg?v=1`,
-    chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
-    dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
-  },
-
   // ── Platform workers (agent_jobs kinds) — report to Ada/Platform ─────────────
   repair: {
     key: "repair", name: "Rafa", role: "Repair", emoji: "🟢",

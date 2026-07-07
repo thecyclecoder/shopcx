@@ -208,6 +208,11 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   "security-review": { name: "Vault", criteria: "real vulnerabilities caught (not noise) · correct severity · no false-positives on safe diffs · a sound, actionable fix when flagged · produced a parseable verdict" },
   "triage-escalations": { name: "Triage", criteria: "correct disposition per escalation (route vs dismiss vs needs-human) · no real blocker missed · no false escalations · sound rationale" },
   "ticket-improve": { name: "Tilly", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
+  // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the per-ticket QC grader box lane
+  // (kind='ticket-analyze', owner='cs'). ownerFunctionForKind('ticket-analyze')='cs' via the
+  // Control Tower registry, so gradeableKindsForFunction('cs') picks this up and the CS Director's
+  // sweep grades every concluded verdict against this rubric.
+  "ticket-analyze": { name: "Anya", criteria: "score matched the AI's real conversation quality · issues are concrete + type-correct · severity actions fired only on real severe issues (no false-escalate on positive close) · no analyzer_locked/do_not_reply/ai_disabled/agent_intervened violations · reasoning cites the transcript" },
   // prompt-auto-review-becomes-box-agent-under-june Phase 2 — Prue reviews proposed sonnet_prompts as a
   // supervised box-session agent under June (CS Director). ownerFunctionForKind('prompt-review')==='cs'
   // (Control Tower registry `agent:prompt-review`), so gradeableKindsForFunction('cs') picks this up

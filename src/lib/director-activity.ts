@@ -144,7 +144,14 @@ export type DirectorActionKind =
   // /dashboard/settings/playbooks/audit flips `playbooks.is_active=false`.
   // Owned by the CS director (director_function='cs'), metadata: { playbook_id,
   // playbook_name, retired_by, source }.
-  | "playbook_retired";
+  | "playbook_retired"
+  // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the CS Director (💬 June) supervision
+  // ledger for the per-ticket QC grader. One row per box-session verdict (applyAnalyzerVerdict
+  // completed on the box lane, kind='ticket-analyze'), so June's activity feed / EOD recap /
+  // rollup surfaces every analyze decision + its reasoning. Owned by CS (director_function='cs').
+  // metadata: { job_id, ticket_id, analysis_id, score, issues_types, ai_message_count,
+  // trigger, autonomous:true }.
+  | "ticket_analyzed";
 
 export interface DirectorActivityInput {
   workspaceId: string;
