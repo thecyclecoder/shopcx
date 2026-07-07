@@ -9732,6 +9732,29 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
 async function runEscalationTriageJob(job: Job) {
   const tag = `[triage:${job.id.slice(0, 8)}]`;
   const wsId = job.workspace_id;
+
+  // june-review-replaces-solver-skeptic-quorum-triage Phase 2 — the solver→skeptic→quorum sweep is
+  // RETIRED as the default escalation triage (June's cs-director-call is the primary; see Phase 1).
+  // The code path is kept so a supervisor can invoke it as an EXPLICIT on-demand exception (an audit
+  // dive on a batch of escalated tickets), but the hourly cron no longer enqueues it. Fail-safe if a
+  // job of this kind is enqueued WITHOUT `on_demand:true` in instructions — never let a stale
+  // enqueue path silently resurrect the routine quorum sweep.
+  let inst: { on_demand?: boolean } = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as { on_demand?: boolean }) : {};
+  } catch {
+    /* fall through — on_demand stays false */
+  }
+  if (!inst.on_demand) {
+    await update(job.id, {
+      status: "failed",
+      error:
+        "triage-escalations quorum sweep is retired as of Phase 2 of june-review-replaces-solver-skeptic-quorum-triage. The hourly cron now enqueues cs-director-call (June-review) per ticket. To run the legacy solver→skeptic→quorum sweep as an on-demand exception, insert an agent_jobs row with instructions={\"on_demand\":true}.",
+    });
+    console.warn(`${tag} refused — quorum sweep retired (no on_demand flag)`);
+    return;
+  }
+
   const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun, handUpExhaustedTriage, postTriageNote } = await import(
     "../src/lib/agent-todos/triage"
   );
@@ -11272,6 +11295,13 @@ interface CsDirectorCallInstructions {
   // even if the run row was deleted between enqueue and claim (defensive; the same guard the
   // deploy-review runner uses for `watch_id`).
   ticket_id?: string;
+  // june-review-replaces-solver-skeptic-quorum-triage Phase 2 — the id of the FIRST June-review
+  // triage_runs row (verdict='june_review') that this call is second-opining. Set only when the
+  // job was enqueued via `enqueueJuneSecondOpinion` (src/lib/cs-director-second-opinion.ts) as an
+  // on-demand exception. Present ⇒ the runner loads the first review into the brief, frames the
+  // prompt as a fresh-eyes SECOND opinion (not the primary triage), and records the resulting
+  // triage_runs row with `verdict='second_opinion'`.
+  second_opinion_of?: string;
 }
 
 type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
@@ -11310,10 +11340,45 @@ function normalizeCsDirectorVerdict(raw: unknown): CsDirectorVerdict | null {
 // + why quorum missed), and the customer/subs/orders slice loadTriageBrief already builds. Kept inline
 // here (mirroring runDeployReviewJob) so Phase 1 doesn't introduce a src/lib/cs-director.ts module the
 // Phase 2 mutator will otherwise design around.
-async function loadCsDirectorCallBrief(workspaceId: string, ticketId: string, triageRunId: string | null): Promise<string> {
+async function loadCsDirectorCallBrief(
+  workspaceId: string,
+  ticketId: string,
+  triageRunId: string | null,
+  secondOpinionOfRunId: string | null = null,
+): Promise<string> {
   const { loadTriageBrief } = await import("../src/lib/agent-todos/triage");
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
+
+  // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
+  // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
+  // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
+  // first had. This is the on-demand exception per june-review-replaces-solver-skeptic-quorum-
+  // triage Phase 2 — never a routine second run.
+  if (secondOpinionOfRunId) {
+    try {
+      const { data: first } = await db
+        .from("triage_runs")
+        .select("id, decision, verdict, outcome, solver_transcript, created_at")
+        .eq("id", secondOpinionOfRunId)
+        .maybeSingle();
+      parts.push("");
+      if (first) {
+        parts.push(
+          `FIRST JUNE REVIEW (id ${first.id}, ${String(first.created_at ?? "").slice(0, 19)}) — you are second-opining THIS verdict:`,
+        );
+        parts.push(`  verdict: ${first.verdict ?? "(none)"} · decision: ${first.decision ?? "(none)"}`);
+        parts.push(`  outcome/reasoning: ${String(first.outcome ?? "").slice(0, 1200)}`);
+        if (first.solver_transcript) {
+          parts.push(`  first-review transcript: ${JSON.stringify(first.solver_transcript).slice(0, 1600)}`);
+        }
+      } else {
+        parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: not found (may have been deleted).`);
+      }
+    } catch (e) {
+      parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: read failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // Resolution-events ledger — the M1/M2 write-ahead history for every prior orchestrator turn on
   // this ticket. Cited so the CS Director sees what confidence + problem + verified_outcome each turn
@@ -11371,9 +11436,12 @@ async function loadCsDirectorCallBrief(workspaceId: string, ticketId: string, tr
   return parts.join("\n");
 }
 
-function csDirectorCallPrompt(brief: string): string {
+function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): string {
+  const roleLine = secondOpinion
+    ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`
+    : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`;
   return [
-    `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`,
+    roleLine,
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor will fire through executeSonnetDecision.`,
@@ -11402,15 +11470,22 @@ async function runCsDirectorCallJob(job: Job) {
   // deploy-review runner uses for its watch_id anchor.
   const ticketId = inst.ticket_id;
   const triageRunId = inst.triage_run_id ?? null;
+  // Phase 2 of june-review-replaces-solver-skeptic-quorum-triage — when present, this call is an
+  // on-demand second-opinion review of the named first `triage_runs` row (verdict='june_review').
+  // The brief includes the first review, the prompt frames the call as fresh-eyes second opinion,
+  // and the triage_runs row we write below carries verdict='second_opinion'.
+  const secondOpinionOfRunId = inst.second_opinion_of ?? null;
   if (!ticketId) {
     await update(job.id, { status: "failed", error: "cs-director-call job missing ticket_id in instructions" });
     return;
   }
-  console.log(`${tag} judging ticket ${ticketId.slice(0, 8)}${triageRunId ? ` · triage_run=${triageRunId.slice(0, 8)}` : ""}`);
+  console.log(
+    `${tag} judging ticket ${ticketId.slice(0, 8)}${triageRunId ? ` · triage_run=${triageRunId.slice(0, 8)}` : ""}${secondOpinionOfRunId ? ` · second_opinion_of=${secondOpinionOfRunId.slice(0, 8)}` : ""}`,
+  );
 
   try {
-    const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId);
-    const prompt = csDirectorCallPrompt(brief);
+    const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId, secondOpinionOfRunId);
+    const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId);
     const { session, resultText, isError, raw, usage, model, configDir: csDir } = await runBoxLane(
       (cfg, sid) => runCsDirectorCallClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
@@ -11455,6 +11530,10 @@ async function runCsDirectorCallJob(job: Job) {
           decision: verdict.decision,
           remedy: verdict.remedy ?? null,
           spec_seed: verdict.spec_seed ?? null,
+          // On-demand second-opinion runs (june-review-replaces-solver-skeptic-quorum-triage
+          // Phase 2) carry the first review's id so the audit feed can pair the two verdicts.
+          // Null on the default primary June review.
+          second_opinion_of: secondOpinionOfRunId,
           // autonomous:false — Phase 1 records only; Phase 2 flips true when the executor fires the
           // in-leash remedy without asking the CEO. The audit shape stays consistent across the phases.
           autonomous: false,
@@ -11478,13 +11557,18 @@ async function runCsDirectorCallJob(job: Job) {
     // escalate_founder) fires against it. Best-effort — the audit row on `director_activity` is
     // already the primary trail; a triage_runs write failure never rolls back the completed job.
     try {
+      // Phase 2 — verdict is 'second_opinion' when the call was routed through
+      // `enqueueJuneSecondOpinion` (instructions carry `second_opinion_of`); otherwise it's the
+      // primary June review from Phase 1. `solver_transcript` carries a `second_opinion_of` back-
+      // pointer to the first run so a reader can trace the pair.
+      const runVerdict = secondOpinionOfRunId ? "second_opinion" : "june_review";
       const { error: trErr } = await db.from("triage_runs").insert({
         id: triageRunId ?? undefined,
         workspace_id: job.workspace_id,
         job_id: job.id,
         ticket_id: ticketId,
         decision: verdict.decision,
-        verdict: "june_review",
+        verdict: runVerdict,
         materialized: true,
         outcome: verdict.reasoning.slice(0, 2000),
         solver_transcript: {
@@ -11493,6 +11577,7 @@ async function runCsDirectorCallJob(job: Job) {
           reasoning: verdict.reasoning,
           remedy: verdict.remedy ?? null,
           spec_seed: verdict.spec_seed ?? null,
+          second_opinion_of: secondOpinionOfRunId,
         },
         skeptic_transcript: null,
         group_id: null,
