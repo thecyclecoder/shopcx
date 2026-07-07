@@ -32,9 +32,13 @@
  *   scripts/_check-table-refs-have-migrations.allowlist.txt with a one-line
  *   reason.
  *
- * Wired into `npm run check:table-refs-have-migrations`. Phase 2 chains it into
- * the predeploy chain + the box's build/spec-test lane so the box marks the
- * build failed rather than merging green.
+ * Wired into `npm run check:table-refs-have-migrations` + chained into `predeploy`
+ * (Phase 2 — alongside check:rls-on-new-tables + check:no-hard-destructive-migrations)
+ * + invoked in the box's build lane right after `tsc --noEmit` succeeds
+ * (scripts/builder-worker.ts's completed-path gate) so a build that introduces
+ * a `.from('newtable')` with no creating migration is marked FAILED by the box —
+ * closing the "spec-test mocks the DB so a missing table passes" hole named in
+ * the incident.
  *
  * Read-only; never mutates state.
  */

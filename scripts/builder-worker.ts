@@ -19260,6 +19260,32 @@ async function dispatchJob(job: Job) {
       return;
     }
 
+    // ⭐ ci-guard-table-refs-have-migrations Phase 2: run the static rail in the build lane
+    // (not just human predeploy). Grounded in PR #1265 — the spec-test mocked the admin client so
+    // a `.from('order_refunds')` with no creating migration passed spec-test green and shipped
+    // inert. This rail parses supabase/migrations for `create table [+ rename to]` and scans src/
+    // for literal `.from("<t>")` refs; a ref with no creating migration fails the check with the
+    // table named. Wiring it HERE (right after tsc, same gate shape as check-worker-lanes and the
+    // rest of the predeploy chain the human runs — see package.json's `predeploy` script) means
+    // the box marks the build FAILED before the dirty/commit/PR/merge path — closing the
+    // spec-test-mocks-the-DB hole named in the spec's Phase 2. Cheap: parses the migrations dir
+    // once + globs src/. Read-only.
+    const refsCheck = await shAsync(
+      "npx",
+      ["tsx", "scripts/_check-table-refs-have-migrations.ts"],
+      { timeout: 2 * 60 * 1000, cwd: wt },
+    );
+    if (refsCheck.code !== 0) {
+      const out = `${refsCheck.out}\n${refsCheck.err}`;
+      await update(job.id, {
+        status: "failed",
+        error: "check:table-refs-have-migrations failed — a .from(\"<t>\") ref has no creating migration",
+        log_tail: out.slice(-2000),
+      });
+      console.error(`${tag} build-lane refs-check FAIL — see log_tail`);
+      return;
+    }
+
     const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
     if (!dirty) {
       // No NEW changes — typically because the build committed everything during a needs_approval/needs_input

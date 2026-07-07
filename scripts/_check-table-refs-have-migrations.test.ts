@@ -269,6 +269,43 @@ test("findViolations: an allowlisted ref passes even without a migration", () =>
   }
 });
 
+// --- Phase 2 wiring pins ---------------------------------------------------
+// These pin the two chain-in sites so a future refactor can't silently strip
+// the check out of the predeploy chain or the box build lane. Verification:
+// "The check appears in the predeploy chain" (spec Phase 2).
+
+test("phase 2: predeploy chain includes check:table-refs-have-migrations", () => {
+  const pkgPath = join(__dirname, "..", "package.json");
+  const pkg = JSON.parse(require("fs").readFileSync(pkgPath, "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  assert.match(
+    pkg.scripts.predeploy,
+    /npm run check:table-refs-have-migrations\b/,
+    "predeploy chain must invoke check:table-refs-have-migrations",
+  );
+  // Verify it sits alongside the two sibling rails the spec cites.
+  assert.match(pkg.scripts.predeploy, /check:rls-on-new-tables/);
+  assert.match(pkg.scripts.predeploy, /check:no-hard-destructive-migrations/);
+});
+
+test("phase 2: box build lane invokes the check after tsc, before the commit path", () => {
+  const workerPath = join(__dirname, "builder-worker.ts");
+  const worker = require("fs").readFileSync(workerPath, "utf8");
+  // The build-lane call site — the spawn of the check script with an explicit
+  // failed-status update. Pinning both parts catches a strip of either half.
+  assert.match(
+    worker,
+    /scripts\/_check-table-refs-have-migrations\.ts/,
+    "builder-worker.ts must spawn the check in the build lane",
+  );
+  assert.match(
+    worker,
+    /check:table-refs-have-migrations failed/,
+    "builder-worker.ts must fail the job with a specific reason on refs-check exit != 0",
+  );
+});
+
 test("findViolations: real repo scan passes (no false positives on current main)", () => {
   const migrationsDir = join(__dirname, "..", "supabase", "migrations");
   const srcDir = join(__dirname, "..", "src");
