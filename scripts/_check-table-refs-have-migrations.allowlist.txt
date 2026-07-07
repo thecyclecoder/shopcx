@@ -1,0 +1,13 @@
+# Allowlist of `.from("<name>")` refs that DO NOT need a `create table` in
+# supabase/migrations. One name per line; blank lines and `#` comments ignored.
+#
+# Legitimate reasons to allowlist a ref:
+#   - Views / materialized views (created outside migrations, or on the storefront)
+#   - RPC-backed table names (Supabase Storage buckets are already excluded by the
+#     scanner's `.storage.from(...)` filter — allowlist only the exotic escapes)
+#   - Fixture / example / doc-comment table names inside jsdoc-in-string-literal
+#     traps the comment-stripper couldn't catch
+#
+# Every entry MUST carry a one-line reason so a future reader knows why it's here.
+# Deleting an entry is a fine sanity check — the CI will loudly re-flag it if the
+# ref really is missing a migration.
