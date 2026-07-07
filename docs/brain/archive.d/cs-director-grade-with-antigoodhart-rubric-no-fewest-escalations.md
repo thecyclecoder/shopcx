@@ -1,0 +1,1 @@
+- **CS Director grading — director-grader for CS with anti-Goodhart rubric** · verified 2026-07-07 · → [[libraries/director-grader]]

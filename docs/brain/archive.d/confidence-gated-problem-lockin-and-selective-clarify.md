@@ -1,0 +1,1 @@
+- **Confidence-gated problem lock-in + selective clarification turn** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]

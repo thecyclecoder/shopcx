@@ -1,0 +1,1 @@
+- **ticket_resolution_events write-ahead ledger + SonnetDecision schema extension** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]

@@ -1,0 +1,1 @@
+- **Retire skip_next_order (88% failure) — shadow-measured alias to change_next_date / bill_now** · verified 2026-07-07 · → [[libraries/action-executor]]

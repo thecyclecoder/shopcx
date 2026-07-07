@@ -12,7 +12,21 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Commerce SDK: create_order, create_subscription, commerce/refund.ts, $-bearing replacement** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
+- **Confidence-gated problem lock-in + selective clarification turn** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]
+- **CS Director grading — director-grader for CS with anti-Goodhart rubric** · verified 2026-07-07 · → [[libraries/director-grader]]
+- **CS Director persona + org-placement (new-agent scaffold)** · verified 2026-07-07 · → [[libraries/cs-director]]
+- **CS Director storyline digests to founder + bidirectional reply steers leash + policy** · verified 2026-07-07 · → [[tables/cs_director_digests]]
+- **CS Director: third rung of the escalation ladder — hard calls above the triage quorum** · verified 2026-07-07 · → [[libraries/cs-director]]
+- **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
+- **Handler-alias catalog for orchestrator action-type misses** · verified 2026-07-07 · → [[tables/action_handler_aliases]]
+- **Playbook compiler loop: mine resolution records → propose playbooks, audit existing, matcher-defers-on-uncertainty** · verified 2026-07-07 · → [[inngest/playbook-compiler]]
+- **Refund integrity: order_refunds mirror + verify-by-refund-id + T+3d settlement reconcile** · verified 2026-07-07 · → [[tables/order_refunds]]
+- **Retire skip_next_order (88% failure) — shadow-measured alias to change_next_date / bill_now** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Serialize goal-member spec builds to prevent hot-file merge collisions** · verified 2026-07-07 · → [[../lifecycles/spec-goal-branch-pm-flow]]
+- **ticket_resolution_events write-ahead ledger + SonnetDecision schema extension** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]
+- **Extend verifyActionInDB coverage: returns, date/frequency, item ops, price** · verified 2026-07-07 · → [[libraries/action-executor]]
+- **Verify+escalate on the inline (journey/playbook-alongside) send path** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]
 - **Goal promotion: stop fold/promotion doc collisions + surface a HELD promotion** · verified 2026-07-06 · → [[lifecycles/spec-goal-branch-pm-flow]]
 - **Portal: fix the first-delivery gate + true read-only + honest order status (slice 1)** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]

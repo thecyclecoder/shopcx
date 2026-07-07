@@ -1,0 +1,1 @@
+- **Playbook compiler loop: mine resolution records → propose playbooks, audit existing, matcher-defers-on-uncertainty** · verified 2026-07-07 · → [[inngest/playbook-compiler]]

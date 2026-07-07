@@ -1,0 +1,1 @@
+- **Extend verifyActionInDB coverage: returns, date/frequency, item ops, price** · verified 2026-07-07 · → [[libraries/action-executor]]

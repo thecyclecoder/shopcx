@@ -1,0 +1,1 @@
+- **CS Director persona + org-placement (new-agent scaffold)** · verified 2026-07-07 · → [[libraries/cs-director]]
