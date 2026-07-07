@@ -35,6 +35,10 @@ If the customer is unmatched (anonymous chat, mailer-daemon, etc.), the handler 
 
 Read `tickets.agent_intervened`. If true, the AI's behavior shifts permanently — no auto-resolve, deferential tone, never claim authority over decisions a human made. See feedback_ai_response_quality. We do NOT bail on the orchestrator just because an agent intervened — Sonnet still drafts in sandbox mode for the agent's "Approve & Send" button.
 
+### Phase 2b — Sol first-touch dispatch
+
+Phase 3 of [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]]. When the event is `is_new_ticket=true` AND [[../tables/ai_channel_config]] has `sol_first_touch_enabled=true` for the ticket's channel AND no agent is involved (`agent_intervened` / `assigned_to` / `escalated_to` all null) AND fraud didn't block (Step 2c below still runs first), the handler **inverts the cost curve**: it ships a short per-channel ack via the standard `send()` wrapper right now — so the customer sees a response within seconds and `ticket_resolution_events.shipped_at` is stamped on turn 1 — then enqueues an `agent_jobs` row (`kind='ticket-handle'`, `instructions` = `{ticket_id, workspace_id, turn_index, reason:'first_touch'}`) that runs [[../functions/cs|Sol]]'s box session on Max via the box worker's `runTicketHandleJob` (see [[../libraries/ticket-directions]] for the `writeDirection` SDK Sol calls). The inline Sonnet Step 2e path below is **skipped for this turn**. Every subsequent cheap-execution turn reads the durable [[../tables/ticket_directions]] row Sol authored instead of re-running full-context reasoning — the M1 spine of [[../goals/sol-ticket-direction-then-cheap-execution]]. Default is **off** (`sol_first_touch_enabled=false`); rollout is opt-in per workspace+channel.
+
 ### Step 2c — fraud short-circuit
 
 Before Sonnet runs, `getCustomerFraudStatus()` checks [[../tables/fraud_cases]] across the customer's link group. If any case is `confirmed_fraud` or any rule is `amazon_reseller`, the orchestrator is bypassed entirely:
