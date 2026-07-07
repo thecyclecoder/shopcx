@@ -22,6 +22,7 @@
     "test:cleo-blueprint": "tsx --test src/lib/cleo-blueprint.test.ts",
     "test:usage-snapshots": "tsx --test src/lib/usage-snapshots.test.ts",
     "test:box-failed-supersede": "tsx --test src/lib/box-failed-supersede.test.ts",
+    "test:sonnet-orchestrator": "tsx --test src/lib/sonnet-orchestrator-v2.test.ts",
     "test:spec-drift": "tsx --test src/lib/spec-drift.test.ts",
     "test:security-envelope": "tsx --test src/lib/security-envelope.test.ts",
     "test:premerge-security-retirement": "tsx --test src/lib/premerge-security-retirement.test.ts",
@@ -53,7 +54,9 @@
     "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
     "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts",
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
-    "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts"
+    "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts",
+    "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",
+    "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

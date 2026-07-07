@@ -27,6 +27,7 @@ CS owns the **hourly box-hosted solver → skeptic → quorum sweep** of the esc
 
 ## Roles + approval
 
+- **CS Director agent** ([[../libraries/cs-director]] — persona 💬 **June**) — supervises the ticket-improve loop + the escalation-triage quorum, sits above the quorum in the escalation ladder, auto-approves within the CS leash and escalates the rest to the CEO. Identity + placement scaffolded by [[../specs/cs-director-persona-and-org-placement]]; dormant until [[../tables/function_autonomy]] `('cs','cs-director')` is flipped `live + autonomous` in the M5 activation. Operates + authors, never builds (Ada builds — see the CEO directive above).
 - **`cs_manager`** drives Improve + approves **customer-action** plans. **Prompt/grader-rule** approval stays at `admin` (Zach). High-blast-radius rule/code changes can require founder co-sign (flag at build).
 - Shares the box-agent substrate ([[../recipes/build-box-setup]]) + the session/quorum primitive with [[../functions/platform]]'s [[../specs/box-spec-chat]].
 
