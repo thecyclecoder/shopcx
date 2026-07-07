@@ -128,6 +128,12 @@ A `kind='build'` job's **claim** (the moment Bo attempts to dispatch it from the
 
 Any gate leg failure returns a bounded reason (`blocked-by-unshipped`, `vale-not-passed`, `goal-member-waiting-for-prior-sibling`, etc.) and returns `queued` status (a re-claim on the next standing pass). The guard keeps a `kind='build'` job from dispatching until it's actually ready — preventing "work locked up waiting for approval" scenarios.
 
+## Self-update: force override on an unknown-kind queued job
+
+`maybeSelfUpdate` normally defers under the busy/behind<25 rule so an in-flight sacrosanct lane finishes on its own SHA. That defer is a coarse proxy for "safe to wait" and misses one specific failure: a NEW `agent_jobs.kind` shipped after this worker booted (e.g. `agent:ticket-analyze` from PR #1305). A continuously-busy older worker can't claim the new kind and can't self-update while it's under 25 commits behind, so the new lane sits queued indefinitely.
+
+The `KNOWN_JOB_KINDS` constant next to the `Job.kind` union enumerates every kind the dispatch table serves at boot. Each poll tick, the worker runs a cheap `select kind from agent_jobs where status in ('queued','queued_resume')` probe and passes the first kind NOT in `KNOWN_JOB_KINDS` as `maybeSelfUpdate(sacrosanctActive, forceForUnknownKind)`. When set, that flag skips the busy/behind<25 defer branch and proceeds straight to reset + `process.exit(0)` — the systemd restart onto the shipped code is the ONLY way the box can serve the new lane. Zero effect on the steady state (every shipped kind is in the mirror); the override only fires when the queue proves the running SHA is missing a lane. When adding a new `Job.kind`, add it to `KNOWN_JOB_KINDS` in the same edit — missing an entry there only means the coarse busy-defer holds for that kind, never a wrong claim.
+
 ## Phase 2 goal-member PR integration
 
 When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.

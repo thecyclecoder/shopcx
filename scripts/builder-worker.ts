@@ -595,6 +595,56 @@ interface Job {
   preview_url?: string | null;
 }
 
+// worker-self-update-force-on-unknown-queued-kind Phase 1: mirror of the `Job['kind']` union above,
+// enumerated at runtime so the poll loop can detect a queued `agent_jobs.kind` the running binary
+// does not know how to dispatch. Placed next to the union so a new kind is added in BOTH spots —
+// missing an entry here has one visible failure mode (the coarse busy/behind<25 self-update defer
+// no longer force-overrides for that kind), never a wrong claim, so the mirror is safe.
+const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
+  "build",
+  "plan",
+  "fold",
+  "goal-fold",
+  "product-seed",
+  "ticket-improve",
+  "spec-chat",
+  "triage-escalations",
+  "spec-test",
+  "spec-review",
+  "migration-fix",
+  "dev-ask",
+  "god-mode",
+  "director-coach",
+  "pr-resolve",
+  "repair",
+  "regression",
+  "storefront-optimizer",
+  "db_health",
+  "coverage-register",
+  "platform-director",
+  "director-bounce-back",
+  "growth-director",
+  "proposed-goal",
+  "security-review",
+  "proposed-model-tier",
+  "audit-spec-shipped-state",
+  "agent-grade",
+  "agent-coach",
+  "director-grade",
+  "campaign-grade",
+  "gap-grade",
+  "research",
+  "ceo-authorized-out-of-leash",
+  "dr-content",
+  "deploy-review",
+  "cs-director-call",
+  "media-buyer",
+  "media-buyer-grade",
+  "ticket-analyze",
+  "prompt-review",
+  "playbook-compile",
+]);
+
 async function admin() {
   const { createAdminClient } = await import("../src/lib/supabase/admin");
   return createAdminClient();
@@ -7185,7 +7235,7 @@ function shaMatches(full: string, marker: string): boolean {
 // sibling dir, so this never touches a running build), npm ci if deps changed, then exit(0) — systemd
 // Restart=always relaunches the worker on the fresh builder-worker.ts. A clean exit + restart is the
 // safe re-exec; never hot-reload in-process. Returns true when it has triggered an exit path.
-async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
+async function maybeSelfUpdate(activeBuilds: number, forceForUnknownKind: string | null = null): Promise<void> {
   const now = Date.now();
   if (now - lastSelfUpdateCheck < SELF_UPDATE_MIN_INTERVAL_MS) return; // don't thrash
   lastSelfUpdateCheck = now;
@@ -7238,11 +7288,25 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // already gets fresh code via its own per-build worktree), UNLESS a box-impacting change (scripts/ or
   // src/lib/) is FAR behind — then take the max-staleness override rather than let a saturated box run stale.
   if (activeBuilds !== 0) {
-    const changed = sh("git", ["diff", "--name-only", running, remote]).out;
-    if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
-      const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
-      selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
-      return; // busy + (non-box OR small lag) → wait for idle
+    // worker-self-update-force-on-unknown-queued-kind Phase 1: an unambiguous, false-positive-free signal
+    // that the running binary has fallen off the shipped lane surface — a queued `agent_jobs.kind` this
+    // process doesn't know how to dispatch. Override the busy/behind<25 defer here: waiting for idle would
+    // strand that lane indefinitely on a continuously busy box (sacrosanct build/fold jobs keep the box
+    // saturated + the small-lag defer keeps re-firing), which is exactly how the running_sha 3b614c316 box
+    // stranded `agent:ticket-analyze` after PR #1305 shipped. Zero effect on today's steady state (all
+    // shipped kinds are in KNOWN_JOB_KINDS); the override only fires when the queue proves otherwise.
+    if (forceForUnknownKind) {
+      console.warn(
+        `[self-update] forced: queued kind ${forceForUnknownKind} not in running worker's known lanes (${KNOWN_JOB_KINDS.size})`,
+      );
+      // fall through — skip the busy-defer, proceed with reset+exit so the fresh binary can claim it
+    } else {
+      const changed = sh("git", ["diff", "--name-only", running, remote]).out;
+      if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
+        const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
+        selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
+        return; // busy + (non-box OR small lag) → wait for idle
+      }
     }
   }
 
@@ -21511,7 +21575,28 @@ async function main() {
       // do NOT: a restart just re-claims them from the queue. Otherwise a long re-test sweep (e.g. the
       // human→machine reclassification backfill) keeps a lane busy indefinitely and the box never updates.
       const sacrosanctActive = [...active.values()].filter((v) => !RERUNNABLE_KINDS.has(v.kind)).length;
-      await maybeSelfUpdate(sacrosanctActive); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running
+      // worker-self-update-force-on-unknown-queued-kind Phase 1: cheap distinct-kind probe over queued rows —
+      // if any queued job's kind is outside KNOWN_JOB_KINDS, the running binary can't claim it and the
+      // ordinary busy/behind<25 defer would strand it. Naming the first offender lets maybeSelfUpdate skip
+      // the defer and reset+exit for a systemd restart onto the shipped code. Best-effort: a DB hiccup here
+      // must never break the poll loop (self-update just runs its usual paths on the next tick).
+      let forceForUnknownKind: string | null = null;
+      try {
+        const { data: queuedKindRows } = await db
+          .from("agent_jobs")
+          .select("kind")
+          .in("status", ["queued", "queued_resume"]);
+        for (const r of ((queuedKindRows as { kind: string | null }[] | null) ?? [])) {
+          const k = r?.kind;
+          if (k && !KNOWN_JOB_KINDS.has(k as Job["kind"])) {
+            forceForUnknownKind = k;
+            break;
+          }
+        }
+      } catch (e) {
+        console.error("[self-update] queued-kind probe failed:", e instanceof Error ? e.message : e);
+      }
+      await maybeSelfUpdate(sacrosanctActive, forceForUnknownKind); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running (or a queued unknown-kind forces it)
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
     }

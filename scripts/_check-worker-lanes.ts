@@ -80,6 +80,18 @@ function extractDispatchedKinds(src: string): Set<string> {
   return out;
 }
 
+// worker-self-update-force-on-unknown-queued-kind Phase 1: `KNOWN_JOB_KINDS` must mirror the union
+// so the poll-loop probe can name a truly-unknown kind. A missing entry here would silently break
+// the force-override for the new kind (busy/behind<25 defer would keep re-firing and the new lane
+// would stay non-drainable). Parses the Set literal in builder-worker.ts.
+function extractKnownJobKinds(src: string): Set<string> {
+  const m = /const\s+KNOWN_JOB_KINDS:[^=]*=\s*new\s+Set<Job\["kind"\]>\(\[([^\]]+)\]\)/.exec(src);
+  if (!m) fail("could not locate `const KNOWN_JOB_KINDS: ... = new Set<Job[\"kind\"]>([...])` in builder-worker.ts");
+  const literals = [...m[1].matchAll(/"([a-z0-9_-]+)"/gi)].map((x) => x[1]);
+  if (literals.length === 0) fail("KNOWN_JOB_KINDS parsed but had no literals");
+  return new Set(literals);
+}
+
 function summary(label: string, kinds: Iterable<string>): string {
   const arr = [...kinds].sort();
   return `${label} (${arr.length}): ${arr.join(", ")}`;
@@ -90,6 +102,7 @@ function main() {
   const union = extractKindUnion(src);
   const claimed = extractClaimedKinds(src);
   const dispatched = extractDispatchedKinds(src);
+  const known = extractKnownJobKinds(src);
 
   const errors: string[] = [];
 
@@ -144,6 +157,24 @@ function main() {
     }
   }
 
+  // 5. KNOWN_JOB_KINDS mirrors the union (worker-self-update-force-on-unknown-queued-kind Phase 1).
+  //    A missing entry silently breaks the force-override: a queued job of the missing kind would be
+  //    treated as "known" and the busy/behind<25 defer would keep stranding the new lane.
+  for (const kind of union) {
+    if (!known.has(kind)) {
+      errors.push(
+        `kind "${kind}" is in the Job.kind union but NOT in KNOWN_JOB_KINDS in builder-worker.ts. ` +
+        `Add it there so the poll-loop unknown-queued-kind probe can force a self-update when this ` +
+        `kind is queued on an older running worker.`,
+      );
+    }
+  }
+  for (const kind of known) {
+    if (!union.has(kind)) {
+      errors.push(`KNOWN_JOB_KINDS lists "${kind}" but it is NOT in the Job.kind union — stale entry, remove it.`);
+    }
+  }
+
   if (errors.length > 0) {
     console.error(`\n❌ check-worker-lanes — ${errors.length} issue(s) detected:\n`);
     for (const e of errors) console.error(`  • ${e}\n`);
@@ -151,6 +182,7 @@ function main() {
     console.error(`  ${summary("union    ", union)}`);
     console.error(`  ${summary("claimed  ", claimed)}`);
     console.error(`  ${summary("dispatched", dispatched)}`);
+    console.error(`  ${summary("known    ", known)}`);
     process.exit(1);
   }
 
