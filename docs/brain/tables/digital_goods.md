@@ -61,13 +61,13 @@ const { data } = await admin
 ## Callers
 
 - **[[../libraries/integrations__amplifier]] `createAmplifierOrder`** — does **not** read this table. A digital-good line has no `sku` on its cart/order row, and both the checkout caller (`src/app/api/checkout/route.ts:988`) and the amplifier filter (`src/lib/integrations/amplifier.ts:183`) drop sku-less lines before the payload is built. Zero rows for a digital good in the Amplifier payload is Phase 1's verification statement.
-- **Phase 2 (planned)** — the order-created Inngest function will read `(id, asset_path, delivery)` per digital-good line and send exactly one attachment email via Resend, idempotent per `(order, digital_good)`.
-- **Phase 3 (planned)** — the customer portal resend action.
+- **[[../inngest/digital-goods-delivery]] `deliverDigitalGoodOnce`** — reads `(id, name, type, asset_path, delivery)` per digital-good line on `orders/created` and sends exactly one attachment email via Resend, idempotent per `(order, digital_good)` via [[digital_good_deliveries]]. Phase 2.
+- **Phase 3 (planned)** — the customer portal resend action re-invokes `deliverDigitalGoodOnce`, which short-circuits on the existing [[digital_good_deliveries]] ledger row (ownership proof) and re-fires the attachment for a good the customer already owns.
 
 ## Status / open work
 
 - ✅ Phase 1 — catalog table
-- ⏳ Phase 2 — post-purchase attachment delivery (Inngest on order-created)
+- ✅ Phase 2 — post-purchase attachment delivery ([[../inngest/digital-goods-delivery]] + [[digital_good_deliveries]] ledger)
 - ⏳ Phase 3 — portal resend action
 
 ---
