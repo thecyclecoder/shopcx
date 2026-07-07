@@ -14,6 +14,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **CI guard: every table a code path queries must have a migration that creates it** · verified 2026-07-07 · → [[../operational-rules#Every code path must have a migration for every table it queries]]
+- **A clarification turn sends the model's full message, not a context-stripped bare question** · verified 2026-07-07 · → [[lifecycles/ai-multi-turn]]
 - **Commerce SDK: create_order, create_subscription, commerce/refund.ts, $-bearing replacement** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **Confidence-gated problem lock-in + selective clarification turn** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]
 - **CS Director grading — director-grader for CS with anti-Goodhart rubric** · verified 2026-07-07 · → [[libraries/director-grader]]

@@ -1,0 +1,1 @@
+- **A clarification turn sends the model's full message, not a context-stripped bare question** · verified 2026-07-07 · → [[lifecycles/ai-multi-turn]]
