@@ -12143,7 +12143,8 @@ async function runPromptReviewJob(job: Job) {
       return;
     }
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
-    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`); {
+    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`);
+  } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
