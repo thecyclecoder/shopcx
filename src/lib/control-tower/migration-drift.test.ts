@@ -17,6 +17,10 @@ import {
   computeMergedButUnapplied,
   extractMigrationVersion,
   runMigrationDriftCheck,
+  applyMergedMigrations,
+  anyApplied,
+  driftSummary,
+  type MergedUnappliedMigration,
 } from "./migration-drift";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -268,3 +272,202 @@ test("runMigrationDriftCheck — applied-set slice fetch that throws is captured
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ci-guard-migrations-applied-not-just-merged spec Phase 2 — close the loop:
+// alert + apply, never leave it inert. applyMergedMigrations classifies each merged-but-unapplied
+// via the sanctioned classifyMigrationSql gate; additive → auto-apply, destructive → approval-needed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ADDITIVE_ORDER_REFUNDS: MergedUnappliedMigration = {
+  version: "20260918120000",
+  file: "20260918120000_order_refunds_mirror.sql",
+};
+const ADDITIVE_INDEX: MergedUnappliedMigration = {
+  version: "20260920120000",
+  file: "20260920120000_add_index.sql",
+};
+const DESTRUCTIVE_DROP: MergedUnappliedMigration = {
+  version: "20260921120000",
+  file: "20260921120000_drop_stale_ledger.sql",
+};
+const DESTRUCTIVE_TRUNCATE: MergedUnappliedMigration = {
+  version: "20260922120000",
+  file: "20260922120000_truncate_stale.sql",
+};
+
+test("applyMergedMigrations — an ADDITIVE merged-but-unapplied migration is auto-applied (verification bullet 1)", async () => {
+  const applied: string[] = [];
+  const approvalCalls: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create table public.order_refunds_mirror (id uuid primary key);`,
+    applyMigration: async ({ version }) => {
+      applied.push(version);
+    },
+    onApprovalNeeded: async ({ version }) => {
+      approvalCalls.push(version);
+    },
+  });
+  assert.deepEqual(applied, ["20260918120000"]);
+  assert.deepEqual(approvalCalls, []); // additive DOES NOT reach the approval hook.
+  assert.equal(out[0]?.outcome, "applied");
+  assert.equal(out[0]?.severity, "additive");
+  assert.equal(anyApplied(out), true);
+});
+
+test("applyMergedMigrations — a DESTRUCTIVE merged-but-unapplied migration is GATED (approval-needed, NEVER auto-applied — verification bullet 2)", async () => {
+  const applied: string[] = [];
+  const approvalCalls: Array<{ version: string; severity: string; matches: string[] }> = [];
+  const out = await applyMergedMigrations([DESTRUCTIVE_DROP, DESTRUCTIVE_TRUNCATE], {
+    readSql: (file) =>
+      file.includes("truncate")
+        ? `truncate table public.stale;`
+        : `drop table public.stale_ledger;`,
+    applyMigration: async ({ version }) => {
+      applied.push(version); // MUST NOT fire for destructive
+    },
+    onApprovalNeeded: async ({ version, severity, matches }) => {
+      approvalCalls.push({ version, severity, matches });
+    },
+  });
+  assert.deepEqual(applied, []); // Critical invariant: NEVER auto-applied.
+  assert.equal(approvalCalls.length, 2);
+  assert.equal(out[0]?.outcome, "approval-needed");
+  assert.equal(out[0]?.severity, "irreversible_destructive");
+  assert.ok(out[0]?.matches?.includes("DROP TABLE"));
+  assert.equal(out[1]?.outcome, "approval-needed");
+  assert.ok(out[1]?.matches?.includes("TRUNCATE"));
+  assert.equal(anyApplied(out), false); // no re-check needed when nothing applied.
+});
+
+test("applyMergedMigrations — a mixed batch applies the additive one and gates the destructive one in the SAME pass", async () => {
+  const applied: string[] = [];
+  const approvalCalls: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_INDEX, DESTRUCTIVE_DROP, ADDITIVE_ORDER_REFUNDS], {
+    readSql: (file) => {
+      if (file.includes("drop")) return `drop table public.stale_ledger;`;
+      if (file.includes("index")) return `create index idx_foo on public.foo (bar);`;
+      return `create table public.order_refunds_mirror (id uuid primary key);`;
+    },
+    applyMigration: async ({ version }) => {
+      applied.push(version);
+    },
+    onApprovalNeeded: async ({ version }) => {
+      approvalCalls.push(version);
+    },
+  });
+  assert.deepEqual(applied.sort(), ["20260918120000", "20260920120000"]);
+  assert.deepEqual(approvalCalls, ["20260921120000"]);
+  assert.equal(out.map((m) => m.outcome).join(","), "applied,approval-needed,applied");
+  assert.equal(anyApplied(out), true); // triggers a re-check by the caller.
+});
+
+test("applyMergedMigrations — an additive migration whose applyMigration THROWS is captured as apply-failed (never crashes the batch)", async () => {
+  const applied: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS, ADDITIVE_INDEX], {
+    readSql: () => `create table public.foo (id uuid primary key);`,
+    applyMigration: async ({ version }) => {
+      if (version === "20260918120000") throw new Error("pg: constraint violation");
+      applied.push(version);
+    },
+  });
+  assert.equal(out[0]?.outcome, "apply-failed");
+  assert.match(out[0]?.error ?? "", /constraint violation/);
+  // The next migration in the batch still runs — a bad one in the middle never blocks the tail.
+  assert.equal(out[1]?.outcome, "applied");
+  assert.deepEqual(applied, ["20260920120000"]);
+  assert.equal(anyApplied(out), true); // one still applied → re-check should fire.
+});
+
+test("applyMergedMigrations — onApprovalNeeded hook that throws does NOT downgrade the routing (destructive stays approval-needed)", async () => {
+  const applied: string[] = [];
+  const out = await applyMergedMigrations([DESTRUCTIVE_DROP], {
+    readSql: () => `drop table public.stale_ledger;`,
+    applyMigration: async ({ version }) => {
+      applied.push(version); // MUST NOT fire.
+    },
+    onApprovalNeeded: async () => {
+      throw new Error("dashboard write failed");
+    },
+  });
+  assert.deepEqual(applied, []); // The hook failing does NOT open the auto-apply path.
+  assert.equal(out[0]?.outcome, "approval-needed");
+});
+
+test("applyMergedMigrations — a readSql that throws yields apply-failed with the read error (never auto-applies uninspected SQL)", async () => {
+  const applied: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => {
+      throw new Error("ENOENT: file not found");
+    },
+    applyMigration: async ({ version }) => {
+      applied.push(version); // MUST NOT fire when we couldn't read the SQL.
+    },
+  });
+  assert.deepEqual(applied, []);
+  assert.equal(out[0]?.outcome, "apply-failed");
+  assert.match(out[0]?.error ?? "", /read failed.*ENOENT/);
+});
+
+test("box control loop — after a successful auto-apply the reconciler reports zero drift on the applied-set axis (verification bullet 3)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20260918120000_order_refunds_mirror.sql"),
+      `create table public.order_refunds_mirror (id uuid primary key);`,
+    );
+    // Simulate the box's applied-versions store — a Set the applyMigration callback mutates.
+    const appliedStore = new Set<string>();
+    const first = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["order_refunds_mirror"],
+      fetchAppliedVersions: async () => [...appliedStore],
+    });
+    assert.equal(first.status, "drift");
+    assert.equal(first.mergedButUnapplied.length, 1);
+    const processed = await applyMergedMigrations(first.mergedButUnapplied, {
+      readSql: (file) => readFileSyncSync(dir, file),
+      applyMigration: async ({ version }) => {
+        appliedStore.add(version);
+      },
+    });
+    assert.equal(processed[0]?.outcome, "applied");
+    // Re-check: applied-set now contains the version → merged-but-unapplied clears.
+    const second = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["order_refunds_mirror"],
+      fetchAppliedVersions: async () => [...appliedStore],
+    });
+    assert.equal(second.status, "ok");
+    assert.deepEqual(second.mergedButUnapplied, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("driftSummary — with Phase 2 outcomes populated, the summary tail names the outcome mix", () => {
+  const summary = driftSummary({
+    status: "drift",
+    missing: [],
+    allowlistedMissing: [],
+    mergedButUnapplied: [
+      { ...ADDITIVE_ORDER_REFUNDS, outcome: "applied", severity: "additive", matches: [] },
+      { ...DESTRUCTIVE_DROP, outcome: "approval-needed", severity: "irreversible_destructive", matches: ["DROP TABLE"] },
+    ],
+    appliedNotOnMain: [],
+    expectedCount: 0,
+    liveCount: 0,
+    parsedFiles: 0,
+    appliedCount: 0,
+    appliedCheckSkipped: false,
+  });
+  assert.match(summary, /1 applied/);
+  assert.match(summary, /1 approval-needed/);
+});
+
+// Helper for the tmpdir-fixture reconcile test — the tests use writeFileSync so a sync read is fine.
+function readFileSyncSync(dir: string, file: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { readFileSync } = require("node:fs");
+  return readFileSync(join(dir, file), "utf8");
+}

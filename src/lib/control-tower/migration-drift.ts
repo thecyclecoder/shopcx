@@ -38,6 +38,7 @@
 import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { MIGRATION_DRIFT_LOOP_ID } from "@/lib/control-tower/registry";
+import { classifyMigrationSql, type MigrationSeverity } from "@/lib/migration-safety";
 
 export { MIGRATION_DRIFT_LOOP_ID };
 
@@ -53,12 +54,30 @@ export interface MissingTable {
  * (supabase_migrations.schema_migrations) — the merged-but-unapplied case that leaves dependent code
  * silently inert (regression pin for 20260918120000_order_refunds_mirror).
  * ci-guard-migrations-applied-not-just-merged spec Phase 1.
+ *
+ * Fields populated by Phase 2's applyMergedMigrations() control loop:
+ *  - severity/matches: what classifyMigrationSql returned for this file.
+ *  - outcome: the auto-apply / approval-gate decision.
+ *  - error: populated only when outcome='apply-failed'.
  */
 export interface MergedUnappliedMigration {
   /** The 14-digit YYYYMMDDNNNNNN prefix — matches supabase_migrations.schema_migrations.version. */
   version: string;
   /** The .sql filename on main. */
   file: string;
+  /** Destructive classifier severity, set by applyMergedMigrations (Phase 2). */
+  severity?: MigrationSeverity;
+  /** classifyMigrationSql matches (empty for additive), set by applyMergedMigrations (Phase 2). */
+  matches?: string[];
+  /**
+   * Apply outcome (Phase 2):
+   *  - 'applied':          additive/idempotent DDL, auto-applied on the pooler, schema_migrations row inserted.
+   *  - 'approval-needed':  classifier flagged destructive — NOT auto-applied; the tile alert names the version.
+   *  - 'apply-failed':     additive but the pooler apply threw (e.g. a semantic error the classifier missed).
+   */
+  outcome?: "applied" | "approval-needed" | "apply-failed";
+  /** Populated only when outcome === 'apply-failed'. */
+  error?: string;
 }
 
 export interface DriftResult {
@@ -419,8 +438,139 @@ export function driftSummary(r: DriftResult): string {
     parts.push(`${r.missing.length} table${r.missing.length === 1 ? "" : "s"} missing: ${list}${r.missing.length > 5 ? `, +${r.missing.length - 5} more` : ""}`);
   }
   if (r.mergedButUnapplied.length > 0) {
+    const outcomes = summarizeOutcomes(r.mergedButUnapplied);
     const list = r.mergedButUnapplied.slice(0, 5).map((m) => `${m.version} (${m.file})`).join(", ");
-    parts.push(`${r.mergedButUnapplied.length} merged-but-unapplied: ${list}${r.mergedButUnapplied.length > 5 ? `, +${r.mergedButUnapplied.length - 5} more` : ""}`);
+    const tail = outcomes ? ` [${outcomes}]` : "";
+    parts.push(`${r.mergedButUnapplied.length} merged-but-unapplied: ${list}${r.mergedButUnapplied.length > 5 ? `, +${r.mergedButUnapplied.length - 5} more` : ""}${tail}`);
   }
   return `migration drift — ${parts.join("; ")}`;
+}
+
+/** Compact "K applied · K approval-needed · K apply-failed" outcome tail, or "" when nothing tagged. */
+function summarizeOutcomes(items: MergedUnappliedMigration[]): string {
+  let applied = 0;
+  let approvalNeeded = 0;
+  let applyFailed = 0;
+  for (const m of items) {
+    if (m.outcome === "applied") applied++;
+    else if (m.outcome === "approval-needed") approvalNeeded++;
+    else if (m.outcome === "apply-failed") applyFailed++;
+  }
+  const bits: string[] = [];
+  if (applied) bits.push(`${applied} applied`);
+  if (approvalNeeded) bits.push(`${approvalNeeded} approval-needed`);
+  if (applyFailed) bits.push(`${applyFailed} apply-failed`);
+  return bits.join(" · ");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2 — close the loop: alert + apply, never leave it inert
+// (ci-guard-migrations-applied-not-just-merged spec Phase 2).
+//
+// The Phase-1 reconciler surfaces every merged-but-unapplied version on the tile detail (the alert
+// names the version). Phase 2 closes the loop: classify each unapplied file's SQL via the sanctioned
+// destructive-migration classifier (classifyMigrationSql from [[../libraries/migration-safety]]);
+// additive/idempotent DDL is auto-applied via the write-a-migration-apply-script sanctioned pattern
+// (pg Client on the pooler + insert into supabase_migrations.schema_migrations), destructive DDL is
+// gated for approval (NOT auto-applied — the tile alert stays until a human runs the sanctioned
+// script). The box re-runs the reconciler after any auto-apply so a resolved drift clears the tile.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ApplyMergedOpts {
+  /** Reads a migration file's SQL body. Injected so the pure loop is fs-free + testable. */
+  readSql: (file: string) => Promise<string> | string;
+  /**
+   * Applies an additive migration on the pooler AND records the version in
+   * supabase_migrations.schema_migrations. Called ONLY when classifyMigrationSql returns 'additive'
+   * (destructive migrations never reach this — they take the approval-needed branch). Best-effort:
+   * a throw is captured as outcome='apply-failed' with the error message; the loop continues so a
+   * bad migration in the middle of the batch never blocks the ones after it.
+   */
+  applyMigration: (input: { version: string; file: string; sql: string }) => Promise<void>;
+  /**
+   * Called for each destructive migration BEFORE marking it approval-needed. The tile alert already
+   * names the version (Phase 1); this hook lets the caller add an extra surfacing (dashboard notice,
+   * log line, PagerDuty). Best-effort: a throw is swallowed with a console.error — the routing
+   * decision (do NOT auto-apply) is independent of the hook's success.
+   */
+  onApprovalNeeded?: (input: {
+    version: string;
+    file: string;
+    severity: MigrationSeverity;
+    matches: string[];
+  }) => Promise<void> | void;
+}
+
+/**
+ * Route each merged-but-unapplied migration through the classifyMigrationSql gate:
+ *  - 'additive'                → applyMigration() → outcome 'applied' (or 'apply-failed' on throw)
+ *  - 'reversible_destructive' /
+ *    'irreversible_destructive' → onApprovalNeeded() → outcome 'approval-needed' (NEVER auto-apply)
+ *
+ * PURE apart from the injected callbacks — readable/testable without fs/pg. Preserves input order.
+ * Returns a NEW array (never mutates input) with severity/matches/outcome/error populated.
+ * ci-guard-migrations-applied-not-just-merged spec Phase 2.
+ */
+export async function applyMergedMigrations(
+  migrations: MergedUnappliedMigration[],
+  opts: ApplyMergedOpts,
+): Promise<MergedUnappliedMigration[]> {
+  const out: MergedUnappliedMigration[] = [];
+  for (const m of migrations) {
+    let sql: string;
+    try {
+      sql = await opts.readSql(m.file);
+    } catch (e) {
+      out.push({
+        ...m,
+        outcome: "apply-failed",
+        error: `read failed: ${(e as Error)?.message ?? String(e)}`,
+      });
+      continue;
+    }
+    const cls = classifyMigrationSql(sql);
+    if (cls.severity === "additive") {
+      try {
+        await opts.applyMigration({ version: m.version, file: m.file, sql });
+        out.push({ ...m, severity: cls.severity, matches: cls.matches, outcome: "applied" });
+      } catch (e) {
+        out.push({
+          ...m,
+          severity: cls.severity,
+          matches: cls.matches,
+          outcome: "apply-failed",
+          error: (e as Error)?.message ?? String(e),
+        });
+      }
+      continue;
+    }
+    // Destructive branch — gate for approval; NEVER auto-apply.
+    if (opts.onApprovalNeeded) {
+      try {
+        await opts.onApprovalNeeded({
+          version: m.version,
+          file: m.file,
+          severity: cls.severity,
+          matches: cls.matches,
+        });
+      } catch (e) {
+        console.error(
+          `[migration-drift] onApprovalNeeded hook threw for ${m.file}:`,
+          (e as Error)?.message ?? String(e),
+        );
+      }
+    }
+    out.push({
+      ...m,
+      severity: cls.severity,
+      matches: cls.matches,
+      outcome: "approval-needed",
+    });
+  }
+  return out;
+}
+
+/** True iff any item in the batch was actually applied — signals the caller should re-run the reconciler. */
+export function anyApplied(items: MergedUnappliedMigration[]): boolean {
+  return items.some((m) => m.outcome === "applied");
 }

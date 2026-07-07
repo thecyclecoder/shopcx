@@ -887,18 +887,34 @@ function readMissingTables(produced: unknown): Array<{ table: string; migration:
  * Read the migration-drift check's merged-but-unapplied list out of its heartbeat `produced` jsonb
  * (ci-guard-migrations-applied-not-just-merged spec Phase 1). Detection happens on the box (it
  * enumerates supabase/migrations/*.sql on main and reads supabase_migrations.schema_migrations);
- * the monitor only reads the conveyed result. Defensive against any shape — an unparseable blob ⇒ [].
+ * the monitor only reads the conveyed result. Phase 2 additionally attaches `severity` +
+ * `outcome` per item — the tile detail distinguishes 'applied'/'approval-needed'/'apply-failed'.
+ * Defensive against any shape — an unparseable blob ⇒ [].
  */
-function readMergedButUnapplied(produced: unknown): Array<{ version: string; file: string }> {
+function readMergedButUnapplied(produced: unknown): Array<{
+  version: string;
+  file: string;
+  severity?: string;
+  outcome?: string;
+}> {
   if (!produced || typeof produced !== "object" || Array.isArray(produced)) return [];
   const raw = (produced as Record<string, unknown>).mergedButUnapplied;
   if (!Array.isArray(raw)) return [];
-  const out: Array<{ version: string; file: string }> = [];
+  const out: Array<{ version: string; file: string; severity?: string; outcome?: string }> = [];
   for (const item of raw) {
     if (item && typeof item === "object") {
       const v = (item as Record<string, unknown>).version;
       const f = (item as Record<string, unknown>).file;
-      if (typeof v === "string" && v) out.push({ version: v, file: typeof f === "string" ? f : "unknown" });
+      const sev = (item as Record<string, unknown>).severity;
+      const oc = (item as Record<string, unknown>).outcome;
+      if (typeof v === "string" && v) {
+        out.push({
+          version: v,
+          file: typeof f === "string" ? f : "unknown",
+          severity: typeof sev === "string" ? sev : undefined,
+          outcome: typeof oc === "string" ? oc : undefined,
+        });
+      }
     }
   }
   return out;
@@ -1099,13 +1115,31 @@ function evalOutputAssertion(
       }
       if (mergedButUnapplied.length > 0) {
         const n = mergedButUnapplied.length;
+        // Phase 2 (ci-guard-migrations-applied-not-just-merged): outcomes let the tile detail split
+        // applied / approval-needed / apply-failed so the CEO reads what's actionable (destructive
+        // migrations waiting for a human run) vs what auto-cleared (additive) vs what threw.
+        const approvalNeeded = mergedButUnapplied.filter((m) => m.outcome === "approval-needed");
+        const applyFailed = mergedButUnapplied.filter((m) => m.outcome === "apply-failed");
         const list = mergedButUnapplied
           .slice(0, 5)
-          .map((m) => `${m.version} (${m.file})`)
+          .map((m) => {
+            const oc = m.outcome === "approval-needed"
+              ? ` — needs approval${m.severity ? `, ${m.severity}` : ""}`
+              : m.outcome === "apply-failed"
+                ? " — apply-failed"
+                : m.outcome === "applied"
+                  ? " — applied"
+                  : "";
+            return `${m.version} (${m.file})${oc}`;
+          })
           .join(", ");
-        statusParts.push(`${n} merged-but-unapplied migration${n === 1 ? "" : "s"}`);
+        const gateNote: string[] = [];
+        if (approvalNeeded.length) gateNote.push(`${approvalNeeded.length} destructive await${approvalNeeded.length === 1 ? "s" : ""} approval`);
+        if (applyFailed.length) gateNote.push(`${applyFailed.length} apply-failed`);
+        const gateTail = gateNote.length ? ` — ${gateNote.join(", ")}` : "";
+        statusParts.push(`${n} merged-but-unapplied migration${n === 1 ? "" : "s"}${gateTail}`);
         detailParts.push(
-          `${n} migration file${n === 1 ? "" : "s"} on main whose version${n === 1 ? " is" : "s are"} not in the DB's applied set (supabase_migrations.schema_migrations) — ${list}${n > 5 ? `, +${n - 5} more` : ""}. The PR merged but the apply pipeline never ran ${n === 1 ? "it" : "them"} — dependent code silently no-ops until applied.`,
+          `${n} migration file${n === 1 ? "" : "s"} on main whose version${n === 1 ? " is" : "s are"} not in the DB's applied set (supabase_migrations.schema_migrations) — ${list}${n > 5 ? `, +${n - 5} more` : ""}. The PR merged but the apply pipeline never ran ${n === 1 ? "it" : "them"} — dependent code silently no-ops until applied. Additive DDL is auto-applied by the box; destructive DDL is gated for approval (classify via classifyMigrationSql — run the sanctioned apply script manually).`,
         );
       }
       return {
