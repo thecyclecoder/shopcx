@@ -24,6 +24,14 @@ Fully DB-driven (the per-goal markdown was retired in [[../specs/goal-readers-fr
 - **`buildProposedGoalMarkdown(input)`** → `string` — render the goal narrative (`**Status:** proposed` + `**Proposed-by:**` + `**Owner:**`, both the proposer's function) stored as the `goals.body` column. Not committed anywhere — it's the DB row's body.
 - **`extractDecompositionMilestones(artifact)`** → `GoalMilestoneInput[]` — pure slicer that pulls top-level `- ` bullets from the body's `## Decomposition` block into milestone seeds (position + title + body). Returns `[]` for the default placeholder body so Pia owns decomposition.
 - **`isValidGoalSlug(slug)`** → `boolean` — lowercase-kebab guard.
+
+### Phase 1 blocked_by normalization ([[../specs/pia-decomposition-emits-plain-slug-blocked-by]] Phase 1)
+
+The build-gating in [[agent-jobs]] (`areSpecsGoalMates` + `sequencePromoteCandidates` Kahn sort) looks each `blocked_by` entry up in [[../tables/specs]] by **exact slug match** and does **NOT split on `:`**. A namespaced entry like `goalSlug:specSlug` resolves to no spec — the gate silently treats it as an external blocker and lets the dependent build out of order (observed 2026-07-07: Sol-goal shipped `sol-cheap-execution-over-ticket-direction` before its declared blocker `sol-ticket-direction-artifact`). Phase 1 normalizes Pia's decomposition write-path (`parsePlannerSpecs` in `scripts/builder-worker.ts`) to emit plain member slugs; Phase 2 ([[goal-member-blocked-by]]) validates/repairs existing drift.
+
+- **`normalizePlannerBlockedBySlug(raw)`** → `string | null` — normalize ONE `blocked_by` entry to a plain kebab slug or `null` when junk/unresolvable. Accepts plain slugs, namespaced entries (last colon-segment), wikilinks (`[[slug]]`), wikilink paths (`[[../specs/foo]]`), and anchors (`[[foo#phase-2]]`). Rejects anything that doesn't normalize to a lowercase-kebab slug (via `isValidGoalSlug`). Used at the Pia decomposition write-path.
+- **`normalizePlannerBlockedByList(raw, selfSlug)`** → `string[]` — normalize a whole `blocked_by` LIST via the above per-entry. Filters non-strings, drops the spec's own slug (self-block), and dedupes while preserving first-seen order. Non-array input yields `[]` (Pia sometimes omits the field entirely — treat as "no prerequisites").
+
 - Const **`GOAL_PROPOSAL_KIND`** (`"proposed-goal"`), **`GREENLIGHT_GOAL_ACTION_TYPE`** (`"greenlight_goal"`); types **`GoalProposalInstructions`**, **`ProposeGoalInput`**.
 
 The pure helpers are unit-tested (`npm run test:goal-proposals`).
