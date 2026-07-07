@@ -19,8 +19,15 @@
 -- behavior, per the spec's DB-driven verification).
 
 -- ── 1. Extend the playbook_steps.type CHECK constraint ─────────────────
--- Additive: retain every existing type so live playbooks don't fail
--- validation; add check_vaulted_pm + create_order + create_subscription.
+-- Additive: enumerate EVERY step type the playbook-executor switch
+-- currently handles (src/lib/playbook-executor.ts executeStep()) plus
+-- the three new Phase-2 types (check_vaulted_pm, create_order,
+-- create_subscription). Four types (ask_return_reason,
+-- save_with_review, confirm_return, process_return) exist in the code
+-- switch but never made it into an earlier constraint migration — a
+-- prior drop-without-recreate is the only shape that lets those rows
+-- live in prod today. Retaining them here keeps the new constraint
+-- from rejecting live rows on ADD.
 ALTER TABLE playbook_steps DROP CONSTRAINT IF EXISTS playbook_steps_type_check;
 ALTER TABLE playbook_steps ADD CONSTRAINT playbook_steps_type_check CHECK (
   type IN (
@@ -29,6 +36,7 @@ ALTER TABLE playbook_steps ADD CONSTRAINT playbook_steps_type_check CHECK (
     'issue_store_credit', 'stand_firm', 'explain', 'custom',
     'clarify_issue', 'check_tracking', 'classify_issue', 'select_missing_items',
     'confirm_shipping_address', 'create_replacement', 'adjust_subscription',
+    'ask_return_reason', 'save_with_review', 'confirm_return', 'process_return',
     'check_vaulted_pm', 'create_order', 'create_subscription'
   )
 );
