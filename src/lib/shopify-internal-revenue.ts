@@ -14,6 +14,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { bucketOrder } from "@/lib/order-bucketing";
+import { isMetaUtm } from "@/lib/utm";
 
 // bucketOrder values that count as new-customer acquisition (renewals + drafts excluded).
 export const ONSITE_NON_RENEWAL_BUCKETS = ["new_sub", "one_time"] as const;
@@ -37,13 +38,6 @@ interface OrderRow {
   subscription_id: string | null;
   attributed_utm_source: string | null;
   line_items: OrderLine[] | null;
-}
-
-// utm_source values we treat as Meta-derivative when `metaOnlyUtm` is on (assumption (b) inverse).
-function isMetaUtm(src: string | null): boolean {
-  if (!src) return false;
-  const s = src.toLowerCase();
-  return s.includes("meta") || s.includes("facebook") || s === "fb" || s === "ig" || s.includes("instagram");
 }
 
 // Sum on-site non-renewal line-item revenue for the given product_ids over [startDate, endDate]

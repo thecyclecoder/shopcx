@@ -10,7 +10,11 @@ spend + revenue into [[../tables/meta_attribution_daily]], reporting the named
 ## The chain (v1, deterministic)
 
 - **Ad grain off the order:** [[../tables/orders]]`.attributed_utm_content` ≈ `meta_ad_id`,
-  `attributed_utm_source='meta'` (first-touch, backfilled since 2026-06-14).
+  `attributed_utm_source ∈ Meta family` (first-touch, backfilled since 2026-06-14).
+  Filtered via [[utm]] `metaFamilyOr('attributed_utm_source')` — a case-insensitive
+  `.or()` over `meta` / `facebook` / `instagram` / `fb` / `ig` (Meta stamps `facebook`
+  or `fb` or `ig` on many click destinations; a bare `.eq('attributed_utm_source','meta')`
+  silently dropped those orders).
 - **Variant per order (Phase 2b — persisted-id preferred):** prefer the persisted
   [[../tables/orders]]`.advertorial_page_id` (set at checkout) and
   [[../tables/storefront_sessions]]`.advertorial_page_id` (set at pixel time) → look the id
@@ -72,6 +76,11 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 - **No swallowed writes (meta-insights-ingest-empty-fix).** The `meta_attribution_daily`
   upsert now checks `{ error }`, reports it via `reportDbError`, and throws; `rows` is the
   count **persisted**, not `records.length`.
+- **Meta source family, not literal `meta` (attribution-sensor-recalibration Phase 1).**
+  All three source filters (sessions weight, orders, first-touch session) route through
+  [[utm]] `metaFamilyOr(column)` so `facebook` / `fb` / `ig` / `instagram` orders
+  contribute alongside `meta`. Read-side widening only — the stored raw source value is
+  untouched, spend is still conserved through `(unresolved)`.
 
 ---
 
