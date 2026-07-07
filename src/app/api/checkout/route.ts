@@ -48,6 +48,7 @@ import {
   savePaymentMethod,
 } from "@/lib/integrations/braintree-customer";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
+import { inngest } from "@/lib/inngest/client";
 import { generateOrderNumber } from "@/lib/order-number";
 import { logCheckoutError } from "@/lib/checkout-error-log";
 import { toE164US } from "@/lib/phone";
@@ -1228,6 +1229,20 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     console.warn(`[checkout] order confirmation email threw for ${orderNumber}:`, err);
+  }
+
+  // Fire the order-created event so the digital-goods-delivery Inngest
+  // function (Phase 2 of digital-goods-delivery) can deliver any
+  // downloadable attachments asynchronously. Best-effort — a fire failure
+  // must never break the checkout response since the customer's card has
+  // already been charged and the order is written.
+  try {
+    await inngest.send({
+      name: "orders/created",
+      data: { orderId: order.id, workspaceId: cart.workspace_id },
+    });
+  } catch (err) {
+    console.warn(`[checkout] orders/created event send failed for ${orderNumber}:`, err);
   }
 
   return NextResponse.json({

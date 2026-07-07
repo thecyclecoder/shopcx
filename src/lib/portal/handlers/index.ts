@@ -78,6 +78,8 @@ import { setSubscriptionPaymentMethod } from "./set-subscription-payment-method"
 export { setSubscriptionPaymentMethod } from "./set-subscription-payment-method";
 import { sso } from "./sso";
 export { sso } from "./sso";
+import { digitalGoodResend } from "./digital-good-resend";
+export { digitalGoodResend } from "./digital-good-resend";
 
 export const routeMap: Record<string, RouteHandler> = {
   bootstrap,
@@ -171,4 +173,7 @@ export const routeMap: Record<string, RouteHandler> = {
   setsubscriptionpaymentmethod: setSubscriptionPaymentMethod,
   set_subscription_payment_method: setSubscriptionPaymentMethod,
   sso,
+  digitalGoodResend,
+  digitalgoodresend: digitalGoodResend,
+  digital_good_resend: digitalGoodResend,
 };
