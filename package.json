@@ -60,6 +60,7 @@
     "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",
     "test:action-executor-vaulted-pm-guard": "tsx --test src/lib/action-executor.vaulted-pm-guard.test.ts",
     "test:playbook-executor-check-vaulted-pm": "tsx --test src/lib/playbook-executor.check-vaulted-pm.test.ts",
+    "test:playbook-executor-assisted-purchase-routing": "tsx --test src/lib/playbook-executor.assisted-purchase-routing.test.ts",
     "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts"
   },
   "dependencies": {
