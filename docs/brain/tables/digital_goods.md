@@ -62,13 +62,13 @@ const { data } = await admin
 
 - **[[../libraries/integrations__amplifier]] `createAmplifierOrder`** — does **not** read this table. A digital-good line has no `sku` on its cart/order row, and both the checkout caller (`src/app/api/checkout/route.ts:988`) and the amplifier filter (`src/lib/integrations/amplifier.ts:183`) drop sku-less lines before the payload is built. Zero rows for a digital good in the Amplifier payload is Phase 1's verification statement.
 - **[[../inngest/digital-goods-delivery]] `deliverDigitalGoodOnce`** — reads `(id, name, type, asset_path, delivery)` per digital-good line on `orders/created` and sends exactly one attachment email via Resend, idempotent per `(order, digital_good)` via [[digital_good_deliveries]]. Phase 2.
-- **Phase 3 (planned)** — the customer portal resend action re-invokes `deliverDigitalGoodOnce`, which short-circuits on the existing [[digital_good_deliveries]] ledger row (ownership proof) and re-fires the attachment for a good the customer already owns.
+- **[[../inngest/digital-goods-delivery]] `resendDigitalGoodForOwner`** — the customer-portal resend chokepoint. Reads `(id, name, type, asset_path, delivery)` after a two-part OWNERSHIP guard (order.customer_id ∈ caller's link group AND order.line_items references the good). Does not touch [[digital_good_deliveries]] — the Phase-2 "at most one row per (order, good)" invariant holds. Phase 3.
 
 ## Status / open work
 
 - ✅ Phase 1 — catalog table
 - ✅ Phase 2 — post-purchase attachment delivery ([[../inngest/digital-goods-delivery]] + [[digital_good_deliveries]] ledger)
-- ⏳ Phase 3 — portal resend action
+- ✅ Phase 3 — portal resend (`resendDigitalGoodForOwner` + `digitalGoodResend` portal handler routed at `route=digitalGoodResend`)
 
 ---
 

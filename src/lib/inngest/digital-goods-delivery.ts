@@ -27,6 +27,12 @@
  *
  * Same shape as [[../libraries/refund]] `refundOrder` — check ledger, act on
  * external side-effect, write mirror. See docs/brain/inngest/digital-goods-delivery.md.
+ *
+ * Phase 3 of the spec adds `resendDigitalGoodForOwner` at the bottom of this
+ * file — the portal-triggered resend action. It reuses the Resend send helper
+ * behind an OWNERSHIP guard (order belongs to the caller's link group AND its
+ * line_items reference the good) and never touches the ledger, so the
+ * "at most one delivery ledger row per (order, good)" Phase-2 invariant holds.
  */
 
 import { inngest } from "@/lib/inngest/client";
@@ -63,11 +69,71 @@ interface DeliverDigitalGoodOnceInput {
   bucket?: string;
 }
 
+interface ResolvedGood {
+  name: string;
+  asset_path: string;
+}
+
+type SendAttachmentResult =
+  | { ok: true; resendEmailId: string | null }
+  | { ok: false; status: "skipped_resend_unavailable" | "failed"; error?: string };
+
+/**
+ * Send ONE attachment email for a resolved downloadable good. Internal helper
+ * shared by Phase 2's `deliverDigitalGoodOnce` and Phase 3's
+ * `resendDigitalGoodForOwner` — same subject, from-line, attachment shape,
+ * and Resend/Sandbox handling. Callers own their own idempotency + ownership
+ * guards; this function has no side effects other than the Resend call.
+ */
+async function sendAttachmentForGood(
+  workspaceId: string,
+  customerEmail: string,
+  orderNumber: string | null,
+  good: ResolvedGood,
+  buf: Buffer,
+): Promise<SendAttachmentResult> {
+  const client = await getResendClient(workspaceId, customerEmail);
+  if (!client) return { ok: false, status: "skipped_resend_unavailable" };
+
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("transactional_from_name, name")
+    .eq("id", workspaceId)
+    .single();
+  const brandName =
+    ((ws as { transactional_from_name?: string | null } | null)?.transactional_from_name) ||
+    ((ws as { name?: string | null } | null)?.name) ||
+    "Superfoods Company";
+
+  const filename = ((good.asset_path.split("/").pop() || `${good.name}.pdf`).replace(/[^A-Za-z0-9._-]/g, "_"));
+  const orderRef = orderNumber ? ` for order ${orderNumber}` : "";
+  const subject = `Your download: ${good.name}`;
+  const html =
+    `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; ` +
+    `max-width: 480px; margin: 0 auto; padding: 32px 20px; color:#18181b;">` +
+    `<h2 style="font-size: 20px; margin-bottom: 8px;">Your ${escapeHtml(good.name)}</h2>` +
+    `<p style="color:#52525b; font-size: 14px; line-height: 1.6;">Thanks for your purchase${escapeHtml(orderRef)}. ` +
+    `Your download is attached to this email.</p>` +
+    `<p style="color:#a1a1aa; font-size: 12px; margin-top: 24px;">If you have any trouble opening the file, reply to this email and we'll get it to you.</p>` +
+    `</div>`;
+
+  const send = await client.resend.emails.send({
+    from: `${brandName} <orders@${client.domain}>`,
+    to: customerEmail,
+    subject,
+    html,
+    attachments: [{ filename, content: buf }],
+  });
+  if (send.error) return { ok: false, status: "failed", error: send.error.message };
+  return { ok: true, resendEmailId: (send.data as { id?: string } | null)?.id ?? null };
+}
+
 /**
  * Deliver ONE downloadable digital good on an order, idempotent per
  * (order, digital_good). Extracted from the Inngest handler so Phase 3's
- * portal-resend action can reuse it AND so Phase 2's idempotency invariant
- * has a testable unit boundary.
+ * portal-resend action can reuse `sendAttachmentForGood` AND so Phase 2's
+ * idempotency invariant has a testable unit boundary.
  */
 export async function deliverDigitalGoodOnce(
   input: DeliverDigitalGoodOnceInput,
@@ -131,57 +197,27 @@ export async function deliverDigitalGoodOnce(
     };
   }
   const buf = Buffer.from(await dl.data.arrayBuffer());
-  const filename = ((g.asset_path.split("/").pop() || `${g.name}.pdf`).replace(/[^A-Za-z0-9._-]/g, "_"));
 
-  // 4. Send the Resend email with the file attached. getResendClient also
-  //    enforces sandbox_mode — a non-workspace-member recipient in sandbox is
-  //    dropped before send. That's fine: the ledger is only written on
-  //    Resend success so a skip won't record a phantom delivery.
-  const client = await getResendClient(input.workspaceId, input.customerEmail);
-  if (!client) {
+  // 4. Send the Resend email with the file attached. getResendClient (inside
+  //    sendAttachmentForGood) enforces sandbox_mode — a non-workspace-member
+  //    recipient in sandbox is dropped. That's fine: the ledger is only
+  //    written on Resend success so a skip won't record a phantom delivery.
+  const send = await sendAttachmentForGood(
+    input.workspaceId,
+    input.customerEmail,
+    input.orderNumber,
+    { name: g.name, asset_path: g.asset_path },
+    buf,
+  );
+  if (!send.ok) {
     return {
       order_id: input.orderId,
       digital_good_id: input.digitalGoodId,
-      status: "skipped_resend_unavailable",
+      status: send.status,
+      error: send.error,
     };
   }
-  const admin2 = createAdminClient();
-  const { data: ws } = await admin2
-    .from("workspaces")
-    .select("transactional_from_name, name")
-    .eq("id", input.workspaceId)
-    .single();
-  const brandName =
-    ((ws as { transactional_from_name?: string | null } | null)?.transactional_from_name) ||
-    ((ws as { name?: string | null } | null)?.name) ||
-    "Superfoods Company";
-  const orderRef = input.orderNumber ? ` for order ${input.orderNumber}` : "";
-  const subject = `Your download: ${g.name}`;
-  const html =
-    `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; ` +
-    `max-width: 480px; margin: 0 auto; padding: 32px 20px; color:#18181b;">` +
-    `<h2 style="font-size: 20px; margin-bottom: 8px;">Your ${escapeHtml(g.name)}</h2>` +
-    `<p style="color:#52525b; font-size: 14px; line-height: 1.6;">Thanks for your purchase${escapeHtml(orderRef)}. ` +
-    `Your download is attached to this email.</p>` +
-    `<p style="color:#a1a1aa; font-size: 12px; margin-top: 24px;">If you have any trouble opening the file, reply to this email and we'll get it to you.</p>` +
-    `</div>`;
-
-  const send = await client.resend.emails.send({
-    from: `${brandName} <orders@${client.domain}>`,
-    to: input.customerEmail,
-    subject,
-    html,
-    attachments: [{ filename, content: buf }],
-  });
-  if (send.error) {
-    return {
-      order_id: input.orderId,
-      digital_good_id: input.digitalGoodId,
-      status: "failed",
-      error: send.error.message,
-    };
-  }
-  const resendEmailId = (send.data as { id?: string } | null)?.id ?? null;
+  const resendEmailId = send.resendEmailId;
 
   // 5. Write the ledger row. The unique (order_id, digital_good_id) index is
   //    the DB backstop — a concurrent invocation that raced past the guard
@@ -286,3 +322,118 @@ export const digitalGoodsDelivery = inngest.createFunction(
     return { deliveries: results };
   },
 );
+
+// ────────────────────────────────────────────────────────────────────
+// Phase 3 — portal resend
+// ────────────────────────────────────────────────────────────────────
+
+export type ResendDigitalGoodStatus =
+  | "sent"
+  | "not_owned"
+  | "not_a_downloadable"
+  | "skipped_missing_asset"
+  | "skipped_resend_unavailable"
+  | "failed";
+
+export interface ResendDigitalGoodResult {
+  status: ResendDigitalGoodStatus;
+  resend_email_id?: string | null;
+  error?: string;
+}
+
+export interface ResendDigitalGoodForOwnerInput {
+  workspaceId: string;
+  orderId: string;
+  /** The set of customer_ids that "own" this request — the caller's link-group
+   *  ids (portal handler expands this via customer_links). MUST be non-empty. */
+  ownerCustomerIds: string[];
+  digitalGoodId: string;
+  /** Test seam. */
+  bucket?: string;
+}
+
+/**
+ * Portal-triggered resend of a downloadable digital good the customer already
+ * owns. The ownership guard is TWO-PART and both parts MUST hold:
+ *
+ *   (a) The order.customer_id is in the caller's link group (`ownerCustomerIds`).
+ *       Prevents a stranger from asking to resend someone else's order.
+ *   (b) The order.line_items references `digital_good_id`.
+ *       Prevents a linked-account holder from asking for a good they never
+ *       actually ordered on THIS order.
+ *
+ * A miss on either returns `status:"not_owned"` — same shape whether the
+ * order didn't exist, wasn't the caller's, or didn't reference this good, so
+ * the API surface never leaks "which of the three failed" to a probing caller.
+ *
+ * On a pass, the function downloads the asset + sends a fresh Resend email
+ * with the file attached (same shape as Phase 2). It does NOT touch the
+ * `digital_good_deliveries` ledger — the Phase 2 invariant "at most one row
+ * per (order, good)" holds, and the customer just receives the same
+ * attachment email again in their inbox. See Phase 3 of
+ * docs/brain/specs/digital-goods-delivery.md.
+ */
+export async function resendDigitalGoodForOwner(
+  input: ResendDigitalGoodForOwnerInput,
+): Promise<ResendDigitalGoodResult> {
+  const admin = createAdminClient();
+  const bucket = input.bucket || DIGITAL_GOODS_BUCKET;
+
+  if (!input.ownerCustomerIds.length) return { status: "not_owned" };
+
+  // (a) Load the order — workspace-scoped, must exist.
+  const { data: order } = await admin
+    .from("orders")
+    .select("id, order_number, email, customer_id, line_items")
+    .eq("workspace_id", input.workspaceId)
+    .eq("id", input.orderId)
+    .maybeSingle();
+  if (!order) return { status: "not_owned" };
+
+  // (a) cont — order.customer_id must be in the caller's link group.
+  const ownerIds = new Set(input.ownerCustomerIds);
+  const orderRow = order as { customer_id: string | null; order_number: string | null; email: string | null; line_items: unknown };
+  if (!orderRow.customer_id || !ownerIds.has(orderRow.customer_id)) return { status: "not_owned" };
+
+  // (b) line_items must reference the digital_good_id. Same reader as Phase 2.
+  const referenced = extractDigitalGoodIds(orderRow.line_items);
+  if (!referenced.includes(input.digitalGoodId)) return { status: "not_owned" };
+
+  // Resolve the good and defensively re-check the two-legal-shapes invariant
+  // (Phase 1 CHECK constraints pin this at the DB).
+  const { data: good } = await admin
+    .from("digital_goods")
+    .select("id, name, type, asset_path, delivery")
+    .eq("workspace_id", input.workspaceId)
+    .eq("id", input.digitalGoodId)
+    .maybeSingle();
+  if (!good) return { status: "not_owned" };
+  const g = good as { name: string; type: string; asset_path: string | null; delivery: string };
+  if (g.type !== "downloadable" || g.delivery !== "attachment" || !g.asset_path) {
+    return { status: "not_a_downloadable" };
+  }
+
+  const customerEmail = String(orderRow.email || "");
+  if (!customerEmail) return { status: "failed", error: "order_email_missing" };
+
+  const dl = await admin.storage.from(bucket).download(g.asset_path);
+  if (dl.error || !dl.data) {
+    return { status: "skipped_missing_asset", error: dl.error?.message || "asset_download_failed" };
+  }
+  const buf = Buffer.from(await dl.data.arrayBuffer());
+
+  const send = await sendAttachmentForGood(
+    input.workspaceId,
+    customerEmail,
+    orderRow.order_number,
+    { name: g.name, asset_path: g.asset_path },
+    buf,
+  );
+  if (!send.ok) return { status: send.status, error: send.error };
+
+  // NOTE: no ledger write. The Phase-2 ledger's "at most one row per (order,
+  // good)" invariant is preserved; portal resends are logged via customer_events
+  // at the handler layer (logPortalAction), which is the audit trail for
+  // user-initiated actions.
+  return { status: "sent", resend_email_id: send.resendEmailId };
+}

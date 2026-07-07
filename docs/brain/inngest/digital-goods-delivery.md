@@ -55,6 +55,28 @@ _None._ (This function is a leaf — it emails and writes the ledger; it does no
 2. **Pre-dispatch ledger guard** — a fresh run consults [[../tables/digital_good_deliveries]] before sending, and short-circuits on hit.
 3. **DB unique index** `(order_id, digital_good_id)` — the race-safe backstop when two concurrent runs both pass the ledger read; the second `.insert()` fails and lands in the try/catch. At most one row ever exists per (order, good).
 
+## `resendDigitalGoodForOwner(input)` — the Phase 3 portal chokepoint
+
+Portal-triggered resend of a downloadable digital good the customer already owns. Reused Resend send code path as `deliverDigitalGoodOnce` (shared internal `sendAttachmentForGood`), but the guard is OWNERSHIP not idempotency:
+
+1. **`ownerCustomerIds` must be non-empty** — the portal handler passes the caller's `customer_links.group_id` expansion (self + linked profiles). Empty short-circuits to `not_owned` before any DB read.
+2. **Load the order** by `(workspace_id, id)`. Missing → `not_owned` (leak-free: same status whether it doesn't exist, wasn't yours, or didn't reference the good).
+3. **AND ownership** — BOTH parts required, no proxy substitutes:
+   - `order.customer_id` must be in `ownerCustomerIds` (prevents a stranger from asking to resend someone else's order).
+   - `extractDigitalGoodIds(order.line_items)` must include the `digital_good_id` (prevents a linked-account holder from requesting a good they never actually ordered on THIS order).
+4. **Resolve the good** + defensively re-check `type='downloadable'`, `delivery='attachment'`, `asset_path is not null` — a `coverage` good returns `not_a_downloadable`.
+5. **Download the asset + Resend send** via the shared `sendAttachmentForGood` helper — same subject, from-line, filename sanitization, and attachment shape as Phase 2.
+6. **NO ledger write.** The Phase-2 invariant "at most one `digital_good_deliveries` row per (order, good)" is intentionally preserved. Portal resends are audited via [[../tables/customer_events]] `portal.digital_good_resend` at the handler layer instead — that is the user-initiated action trail.
+
+The portal handler at `src/lib/portal/handlers/digital-good-resend.ts` (registered as `route=digitalGoodResend` in `src/lib/portal/handlers/index.ts`) wraps this function: it resolves the caller → `findCustomer` → link-group expansion via `customer_links`, calls `resendDigitalGoodForOwner`, and maps the status to HTTP (`not_owned` → 404 so we don't leak, `not_a_downloadable` → 400, storage/email skips → 502, failure → 500).
+
+## Portal handler wiring
+
+- `src/lib/portal/handlers/digital-good-resend.ts` · export `digitalGoodResend: RouteHandler`
+- Registered in `src/lib/portal/handlers/index.ts` under `routeMap.digitalGoodResend` (+ lowercase + snake_case aliases)
+- Reached at `/api/portal?route=digitalGoodResend` via POST `{ orderId, digitalGoodId }`
+- Auth: portal session cookie OR Shopify App Proxy HMAC (same as every other handler)
+
 ---
 
 [[../README]] · [[../integrations/inngest]] · [[../tables/digital_good_deliveries]] · [[../tables/digital_goods]] · [[../tables/orders]] · [[../libraries/email]] · [[../specs/digital-goods-delivery]] · [[../../CLAUDE]]
