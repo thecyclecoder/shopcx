@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
+- **Assisted-purchase playbook — gate create_order / create_subscription behind a vaulted PM, launching add_payment_method when missing** · verified 2026-07-07 · → [[lifecycles/subscription-billing]]
 - **Builder applies migrations via the working pgClient apply-script, not the broken db push lane** · verified 2026-07-07 · → [[../recipes/write-a-migration-apply-script]]
 - **Guard against merged-but-unapplied migrations (applied-state drift), not just missing ones** · verified 2026-07-07 · → [[../libraries/control-tower]]
 - **CI guard: every table a code path queries must have a migration that creates it** · verified 2026-07-07 · → [[../operational-rules#Every code path must have a migration for every table it queries]]
