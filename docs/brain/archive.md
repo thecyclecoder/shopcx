@@ -43,6 +43,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Order-creating actions ship to the customer's CURRENT address, not a stale cited-order snapshot** · verified 2026-07-07 · → [[../lifecycles/ticket-lifecycle]] | [[../libraries/customer-shipping-address]] | [[../tables/customers]] | [[../tables/orders]] | [[../tables/subscriptions]] | [[../tables/replacements]]
 - **Retire skip_next_order (88% failure) — shadow-measured alias to change_next_date / bill_now** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Serialize goal-member spec builds to prevent hot-file merge collisions** · verified 2026-07-07 · → [[../lifecycles/spec-goal-branch-pm-flow]]
+- **A typed sonnet_prompts SDK so the prompt-review agent's DB reads/writes go through one auditable layer** · verified 2026-07-07 · → [[libraries/sonnet-prompts-table]]
 - **The AI ticket analyzer becomes a supervised box-session agent under June** · verified 2026-07-07 · → [[../lifecycles/ai-analysis]]
 - **Ticket-analyzer workprobe must exclude analyzer_locked tickets (mirror cron source filter)** · verified 2026-07-07 · → [[libraries/control-tower]]
 - **Summarize once at merge, then stop re-sending the full history to Opus every turn** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
