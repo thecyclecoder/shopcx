@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Serialize goal-member spec builds to prevent hot-file merge collisions** · verified 2026-07-07 · → [[../lifecycles/spec-goal-branch-pm-flow]]
 - **Migrate the customer portal onto the Commerce SDK (LAST, diff-verified)** · verified 2026-07-06 · → [[lifecycles/customer-portal]]
 - **Goal promotion: stop fold/promotion doc collisions + surface a HELD promotion** · verified 2026-07-06 · → [[lifecycles/spec-goal-branch-pm-flow]]
 - **Portal: fix the first-delivery gate + true read-only + honest order status (slice 1)** · verified 2026-07-06 · → [[../lifecycles/customer-portal]]
