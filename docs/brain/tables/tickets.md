@@ -75,6 +75,12 @@ Customer support tickets. status (open/pending/closed/archived), channel, handle
 | `detected_language` | `text` | ✓ |  |
 | `do_not_reply` | `bool` | — | default: `false` |
 | `do_not_reply_at` | `timestamptz` | ✓ |  |
+| `ai_disabled` | `bool` | — | default: `false` |
+| `ai_disabled_by` | `uuid` | ✓ | → `auth.users`.id |
+| `ai_disabled_at` | `timestamptz` | ✓ |  |
+| `analyzer_locked` | `bool` | — | default: `false` |
+| `locked_by` | `uuid` | ✓ | → `auth.users`.id |
+| `locked_at` | `timestamptz` | ✓ |  |
 | `merge_summary` | `text` | ✓ | Compact plain-text state summary (issue, confirmed facts, actions, open items) written at merge time by [[../libraries/ticket-merge]] → Sonnet. Downstream Opus turns read this instead of re-costing the full pre-merge history. Feeds Phase 2 stable-prefix context assembly in [[../libraries/sonnet-orchestrator-v2]]. |
 | `merge_summary_at` | `timestamptz` | ✓ | Timestamp of the `merge_summary` write. Doubles as the "since window" boundary Phase 2 uses to slice messages after the summary. |
 
@@ -170,6 +176,8 @@ const { data } = await admin.from("tickets")
 - `agent_intervened` flips true the moment a real human sends an outbound — AI must read this before generating.
 - `merged_into` (self-FK): merged duplicates point at the surviving ticket. Filter with `merged_into IS NULL` to get canonical rows only.
 - `do_not_reply` blocks outbound — e.g. mailer-daemon. Set by inbound filters.
+- `ai_disabled` is an explicit **human directive** — a person clicks "Turn off AI on this ticket" in the dashboard. The [[../inngest/unified-ticket-handler]] hard-exits on inbound (mirrors the `do_not_reply` short-circuit) and [[../libraries/ticket-analyzer]] skips analysis + escalation. **Non-propagating on merge** — the surviving ticket keeps its own value (default `false`), because a merge conveys context, never control. Toggled via `PATCH /api/tickets/[id]` with `{ ai_disabled: true|false }`; the endpoint stamps `ai_disabled_by` + `ai_disabled_at` and writes an audit `ticket_messages` row. Phase 1 of `docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md`.
+- `analyzer_locked` is the human's **veto over the ticket-analysis cron**. Distinct from `ai_disabled`: the inbound handler still runs (a customer reply still gets an AI response), but [[../inngest/ticket-analysis-cron]] refuses to select the row (`.eq("analyzer_locked", false)` at the source) and [[../libraries/ticket-analyzer]]'s `applySeverityActions` hard-returns BEFORE the `forceEscalate` math — so a severe-issue type or a customer-threat keyword can't punch through the veto. **Set automatically** when a human closes AND unescalates a previously-escalated ticket in one `PATCH /api/tickets/[id]` (that's the veto: "I reviewed this, do not re-open it"); **also toggleable explicitly** via the "Lock from analyzer / Approve handling" button. Non-propagating on merge (surviving ticket keeps its own value). Phase 2 of the same spec.
 
 ---
 

@@ -11,6 +11,15 @@
 - **Retries:** `OUTAGE_SPANNING_RETRIES` (20) — outage-spanning. A Claude/dependency failure throws (see below), so the run retries with exponential backoff out to hours; a 1-hour Anthropic outage parks here and completes on recovery instead of failing-and-dropping. Terminal logic errors throw `NonRetriableError` → still fail fast. ([[../specs/agent-outage-resilience]] Phase 1.)
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.ticket_id" }]`
 
+## Hard gates before the orchestrator
+
+Inside the `resolve` step (right after the ticket row load) the handler short-circuits on two per-ticket flags — both bail before language detection / classification / Sonnet:
+
+- **`ai_disabled`** — an explicit **human directive** ("Turn off AI on this ticket" button on the ticket detail view). Logs `[System] Skipped — AI is disabled on this ticket by human directive`, returns the `_aiDisabled` sentinel, and the outer function returns `{ skipped: "ai_disabled" }`. Non-propagating on merge — see [[../libraries/ticket-merge]]. Phase 1 of `docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md`.
+- **`do_not_reply`** — filter-set (mailer-daemon, wrong company, spam). Logs the do-not-reply skip note and returns `{ skipped: "do_not_reply" }`.
+
+The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
+
 ## Outage resilience — no silent Claude swallows
 
 The local `claude()` helper (Haiku/Sonnet quick turns) **throws** on a failed call instead of the old `if (!r.ok) return ""` (which let callers proceed on empty data): retryable status / network → `AnthropicDependencyError` (run retries), terminal status / missing key → `NonRetriableError` (fail fast). See [[../libraries/anthropic-retry]]. The main Sonnet decision ([[../libraries/sonnet-orchestrator-v2]]) likewise throws on a retryable failure rather than degrading every ticket to "escalate". The one explicit exception is `personalizeMacroText` (`{ optional: true }`) — the macro body is already a valid reply, so it degrades gracefully.

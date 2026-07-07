@@ -454,7 +454,7 @@ async function analyzeTicketInner(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled, analyzer_locked")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
@@ -463,6 +463,24 @@ async function analyzeTicketInner(
   // empty shell. The target gets analyzed on its own close cycle.
   if (ticket.merged_into) {
     return { ok: false, reason: "merged_into_other" };
+  }
+
+  // Human directive — AI disabled on this ticket. Skip analysis AND
+  // escalation. Same reason as do_not_reply below: grading an absent
+  // reply always scores poorly and would re-escalate, which is the
+  // opposite of what the human directive asked for.
+  if ((ticket as unknown as { ai_disabled?: boolean }).ai_disabled) {
+    return { ok: false, reason: "ai_disabled" };
+  }
+
+  // Human veto — analyzer_locked. The cron's find-tickets already
+  // excludes these at the source, but a race is possible: a human
+  // toggles the lock AFTER the tick's SELECT ran. Bail here too so the
+  // caller's skip branch stamps last_analyzed_at and a later
+  // updated_at bump can't re-select the row (Phase 2 of
+  // human-directives-hard-gates-over-ticket-ai).
+  if ((ticket as unknown as { analyzer_locked?: boolean }).analyzer_locked) {
+    return { ok: false, reason: "analyzer_locked" };
   }
 
   // do_not_reply tickets don't get analyzed — the AI intentionally
@@ -650,8 +668,11 @@ async function analyzeTicketInner(
     .update({ last_analyzed_at: windowEnd })
     .eq("id", ticketId);
 
-  // Severity actions
-  await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, inserted?.id);
+  // Severity actions — pass guidanceBlock so an explicit human "do not
+  // escalate" directive can HARD-SUPPRESS force-escalation, even when a
+  // severe-issue type or a customer-threat keyword is present. Phase 3
+  // of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md.
+  await applySeverityActions(admin, ticket.id, ticket.workspace_id, ticket.customer_id, analysis, msgs, guidanceBlock, inserted?.id);
 
   return { ok: true, analysis, analysis_id: inserted?.id ?? undefined, cost_cents: costCents, ai_message_count: aiMessageCount };
 }
@@ -780,6 +801,20 @@ async function detectUnfulfilledCancelClaim(
  * is ≥7, and the ticket is cleanly positively closed, the inaccuracy
  * force-escalate is suppressed and logged as a non-actionable note instead.
  */
+// Detect an explicit no-escalate directive in the agent-pinned guidance
+// block. Phase 3 of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md
+// — a directive from a real human BEATS the severe-issue / customer-threat
+// force-escalate overrides. Deliberately strict: this must ONLY match a
+// clear operator command like "do not escalate" / "no reopen" / "don't
+// re-open this" — not a customer's threat text quoted into a note, and
+// not a passing mention like "the customer asked us not to escalate". A
+// false positive here would silently suppress a real severe-issue reopen.
+const NO_ESCALATE_DIRECTIVE = /\b(?:don'?t|do\s+not|never|no)\s+(?:re[-\s]?)?(?:escalat\w*|open\w*|reopen\w*)\b/i;
+function guidanceHasNoEscalateDirective(guidanceBlock: string): boolean {
+  if (!guidanceBlock) return false;
+  return NO_ESCALATE_DIRECTIVE.test(guidanceBlock);
+}
+
 async function applySeverityActions(
   admin: Admin,
   ticketId: string,
@@ -787,10 +822,34 @@ async function applySeverityActions(
   customerId: string | null,
   analysis: AnalysisResult,
   msgs: MessageRow[],
+  guidanceBlock: string,
   analysisId?: string,
 ): Promise<void> {
   const score = analysis.score;
   const issues = analysis.issues || [];
+
+  // ── Human veto: analyzer_locked ──
+  // Checked BEFORE the forceEscalate math (below) so a severe-issue
+  // type or a customer-threat keyword can't punch through the veto.
+  // Compare-and-set against a fresh row read — a human may have
+  // toggled the lock AFTER analyzeTicketInner's initial select. On hit
+  // we log a non-actionable audit note and return; NO tickets update,
+  // NO reopen, NO escalate. Phase 2 of
+  // human-directives-hard-gates-over-ticket-ai. Companion: the cron's
+  // find-tickets .eq("analyzer_locked", false) filter.
+  const { data: lockCheck } = await admin.from("tickets")
+    .select("analyzer_locked")
+    .eq("id", ticketId).maybeSingle();
+  if ((lockCheck as unknown as { analyzer_locked?: boolean } | null)?.analyzer_locked) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — analyzer is LOCKED on this ticket by human directive; skipping any reopen/escalate (severe-type + customer-threat overrides all suppressed). ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
 
   const severeTypes = new Set(issues.map(i => i.type).filter(t => SEVERE_ISSUE_TYPES.has(t)));
   const hasSevereIssue = severeTypes.size > 0;
@@ -828,7 +887,29 @@ async function applySeverityActions(
     suppressInaccuracyEscalation = await hasCleanPositiveClose(admin, ticketId);
   }
 
-  const forceEscalate = (hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat;
+  // ── Human directive beats the overrides ──
+  // A pinned agent guidance note containing an explicit "do not escalate"
+  // instruction hard-suppresses the force-escalate path, even when a
+  // severe-issue type or customer-threat keyword is present. Directives
+  // from a real human are the ground truth; the overrides exist to catch
+  // failures no one has weighed in on yet. Once someone HAS weighed in,
+  // their call wins. Audit-note the suppression so the trail is
+  // reviewable. Phase 3 of human-directives-hard-gates-over-ticket-ai.
+  const directiveSuppressesEscalation =
+    guidanceHasNoEscalateDirective(guidanceBlock) && (hasSevereIssue || customerThreat);
+  if (directiveSuppressesEscalation) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — a pinned agent guidance directive says "do not escalate"; force-escalate suppressed (would have fired from ${hasSevereIssue ? `severe-issue: ${[...severeTypes].join(", ")}` : ""}${hasSevereIssue && customerThreat ? " + " : ""}${customerThreat ? "customer-threat keyword" : ""}). Directive beats the override. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+  }
+
+  const forceEscalate =
+    !directiveSuppressesEscalation &&
+    ((hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat);
 
   // Decide tier
   // ≤5: escalate + customer message
@@ -890,8 +971,22 @@ async function applySeverityActions(
   // truth — auto-reopening overrides their judgment, frustrates them,
   // and creates churn (close → analyze → reopen → close again loop).
   const { data: tBefore } = await admin.from("tickets")
-    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step")
+    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step, ai_disabled")
     .eq("id", ticketId).single();
+  // Re-check ai_disabled here — a human may have toggled it AFTER the
+  // analyzeTicketInner() row-read. Same hard rule as the early guard:
+  // an explicit human "off" beats any severe-issue / threat-keyword
+  // force-escalate below. Compare-and-set against the current row.
+  if ((tBefore as unknown as { ai_disabled?: boolean } | null)?.ai_disabled) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — would have ${action === "escalate_with_message" ? "re-opened + escalated" : "re-opened silently"}, but skipped because AI is disabled on this ticket by human directive. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
   if (tBefore?.agent_intervened) {
     // Log the would-be escalation as a system note but don't actually
     // re-open the ticket. The agent already weighed in; if there's a

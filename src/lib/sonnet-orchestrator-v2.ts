@@ -571,8 +571,25 @@ async function buildPreContext(
       : "";
   })();
 
-  const agentContextNote = agentContext?.assigned ? `
-AGENT CONTEXT: This ticket has been handled by a human agent. You should still respond to the customer, but limit your scope: handle positive closures (thank you, goodbye → close ticket with warm response). For any new request or follow-up, do NOT take direct actions and do NOT provide detailed information — acknowledge and hold for the human agent. When acknowledging, briefly mirror back the specific concerns the customer just raised (e.g. name the charge amount, the wrong product, the delivery issue — whatever they actually said) in one short sentence, then say an agent will be back with them shortly. A bare "we're reviewing your ticket" with no mirroring reads as robotic and increases frustration when the customer has just listed concrete grievances.` : "";
+  // ── AGENT CONTEXT: informational only ──
+  // Phase 3 of docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md
+  // RETIRED the "respond but hold, take no actions / an agent will be back
+  // shortly" half-mode that used to sit here. That half-mode was the
+  // empty-reassurance loop the spec calls out: it emitted an
+  // acknowledge-and-defer reply on every follow-up, produced no real
+  // resolution, and doubled as a de-facto off-switch for the AI on any
+  // human-touched ticket. The REAL off-switches are now ai_disabled
+  // (Phase 1, full handler skip) and analyzer_locked (Phase 2, cron
+  // veto). If a human wants the AI off on THIS ticket, they set
+  // ai_disabled — the handler never reaches this file. If they want the
+  // analyzer to leave it alone, they set analyzer_locked. Absent those,
+  // a ticket is fully AI-handled — playbooks run, actions execute,
+  // positive closes are honored — regardless of agent_intervened. The
+  // agentContext argument is kept for API compatibility with existing
+  // callers (unified-ticket-handler + tests) but no longer inserts a
+  // behavior-limiting directive into the prompt.
+  void agentContext;
+  const agentContextNote = "";
 
   // ── STABLE system prompt — byte-identical for every ticket in the
   // workspace (modulo channel/personality). It carries the heavy, shared
