@@ -9,6 +9,8 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
+import { resolveAlias } from "@/lib/action-handler-aliases";
+import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 
 // ── Types ──
 
@@ -251,10 +253,27 @@ async function executeActionsInline(
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   for (const action of actions) {
-    const handler = directActionHandlers[action.type];
+    let handler = directActionHandlers[action.type];
     if (!handler) {
-      results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
-      continue;
+      const aliased = await resolveAlias(ctx.admin, ctx.workspaceId, action.type);
+      if (aliased && directActionHandlers[aliased]) {
+        await sysNote(`alias resolved: ${action.type}→${aliased}`);
+        action.type = aliased;
+        handler = directActionHandlers[aliased];
+      } else {
+        // Record the miss on the review queue so an admin can approve it
+        // into a permanent alias (Phase 2). Fire-and-forget — a telemetry
+        // failure must not change customer-facing behavior.
+        await recordUnknownActionType({
+          admin: ctx.admin,
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          sourceType: action.type,
+          handlerKeys: Object.keys(directActionHandlers),
+        });
+        results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
+        continue;
+      }
     }
     const substituted = substituteActionParams(action, results);
     try {
@@ -462,6 +481,18 @@ export const directActionHandlers: Record<
   },
 
   skip_next_order: async (ctx, p) => {
+    // skip_next_order is RETIRED — the orchestrator's system prompt + the
+    // seeded sonnet_prompts routing rule now alias skip intents to
+    // change_next_date / bill_now (spec:
+    // retire-skip-next-order-action-type-with-shadow-measured-alias Phase 2).
+    // This handler stays wired for two weeks as an idempotency net for
+    // any in-flight retries (Sonnet caches / older workflow queues); a hit
+    // here is a signal the retirement didn't fully land, so the WARN lets
+    // on-call investigate. Handler + subscriptionSkipNextOrder wrapper are
+    // deleted in a follow-up PR after the soft window closes.
+    console.warn(
+      `skip_next_order fired post-retire — investigate (workspace=${ctx.workspaceId}, ticket=${ctx.ticketId}, contract=${p.contract_id ?? "?"})`,
+    );
     const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
     const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
@@ -1053,7 +1084,7 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { refundOrder } = await import("@/lib/refund");
+    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
@@ -1067,6 +1098,33 @@ export const directActionHandlers: Record<
     const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
 
+    // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
+    // Compute the request_key up-front and check the order_refunds mirror
+    // BEFORE calling the vendor. If a succeeded/settled row already exists
+    // for this (order_id, request_key), a prior attempt succeeded and this
+    // is a retry (self-heal or otherwise) — short-circuit to success
+    // without touching Braintree/Shopify. Scoped by workspace so a
+    // cross-tenant row can never authorize a short-circuit.
+    // Passing the same requestKey down to refundOrder keeps the write-side
+    // hash consistent with this lookup, so the mirror insert Phase 1 does
+    // hits the exact same UNIQUE-index row Phase 2 checked here.
+    const requestKey = hashRefundRequestKey(ord.id, p.amount_cents, reason);
+    const { data: existing } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", ord.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        summary: `Partial refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
+        refundAmountCents: existing.amount_cents ?? (p.amount_cents || 0),
+      };
+    }
+
     // refundOrder dispatches on the order's gateway (Braintree /
     // Shopify), preserves the double-refund guard (stamps refunded_at
     // on open returns), and logs the customer_events row.
@@ -1074,6 +1132,7 @@ export const directActionHandlers: Record<
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId },
+      requestKey,
     });
     if (r.success) await notifySlack(ctx, p, amountDecimal);
 
@@ -1098,7 +1157,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { refundOrder } = await import("@/lib/refund");
+    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1128,10 +1187,33 @@ export const directActionHandlers: Record<
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
 
+    // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
+    // Compute request_key up-front and check the mirror. If a prior
+    // attempt already fired for this (order_id, request_key), do NOT
+    // call refundOrder AND do NOT spend points again — the earlier
+    // attempt already burned them. Matches the partial_refund pattern.
+    const requestKey = hashRefundRequestKey(order.id, amountCents, reason);
+    const { data: existingRedemption } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", order.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existingRedemption) {
+      return {
+        success: true,
+        summary: `${tier.points_cost}-point redemption for $${tier.discount_value} refund on order #${order.order_number} already fired${existingRedemption.vendor_refund_id ? ` — txn ${existingRedemption.vendor_refund_id}` : ""}`,
+        refundAmountCents: existingRedemption.amount_cents ?? amountCents,
+      };
+    }
+
     const refund = await refundOrder(ctx.workspaceId, order.id, amountCents, reason, {
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId, loyalty_tier: tier.label, points_spent: tier.points_cost },
+      requestKey,
     });
     if (!refund.success) return { success: false, error: refund.error };
 
@@ -2281,13 +2363,30 @@ async function handleDirectAction(
   const { withActionContext } = await import("@/lib/commerce/call-log");
 
   for (const action of actions) {
-    const handler = directActionHandlers[action.type];
+    let handler = directActionHandlers[action.type];
     if (!handler) {
-      results.push({
-        action,
-        result: { success: false, error: `Unknown action type: ${action.type}` },
-      });
-      continue;
+      const aliased = await resolveAlias(ctx.admin, ctx.workspaceId, action.type);
+      if (aliased && directActionHandlers[aliased]) {
+        await sysNote(`alias resolved: ${action.type}→${aliased}`);
+        action.type = aliased;
+        handler = directActionHandlers[aliased];
+      } else {
+        // Record the miss on the review queue so an admin can approve it
+        // into a permanent alias (Phase 2). Fire-and-forget — a telemetry
+        // failure must not change customer-facing behavior.
+        await recordUnknownActionType({
+          admin: ctx.admin,
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          sourceType: action.type,
+          handlerKeys: Object.keys(directActionHandlers),
+        });
+        results.push({
+          action,
+          result: { success: false, error: `Unknown action type: ${action.type}` },
+        });
+        continue;
+      }
     }
 
     // Substitute placeholders in this action's string params using
@@ -2337,14 +2436,26 @@ async function handleDirectAction(
     await new Promise(resolve => setTimeout(resolve, 3000));
     const verifyFailures: string[] = [];
 
-    // Refunds are NOT idempotent — re-running one double-refunds the customer.
-    // They're also confirmed by their own handler (Braintree refund id / polled
-    // Shopify gateway status), and their DB verification (Shopify financial_status)
-    // is unreliable for Braintree-direct refunds, which never flip it. So never
-    // self-heal-retry a refund. (Sonia Stevens: a settled $179.88 Braintree refund
-    // couldn't be confirmed via financial_status, the retry tried to refund AGAIN,
-    // hit "amount too large", and falsely escalated a refund that had succeeded.)
-    const NO_SELF_HEAL_RETRY = new Set(["partial_refund", "redeem_points_as_refund"]);
+    // Verify-and-retry safety.
+    //
+    // Refunds used to be excluded from self-heal retry because a retry
+    // could double-refund (Sonia Stevens SC132396: the vendor refund
+    // succeeded, financial_status verification couldn't confirm it, the
+    // retry re-fired against Braintree, hit "amount too large", and
+    // falsely escalated).
+    //
+    // Refund-integrity Phase 2 makes verify+retry safe for refunds. The
+    // partial_refund + redeem_points_as_refund handlers now do a
+    // pre-flight lookup against order_refunds on the (order_id,
+    // request_key) pair; a retry sees the Phase-1 mirror row from the
+    // first successful attempt and short-circuits without touching the
+    // vendor. If the mirror row is genuinely missing (rare — mirror
+    // insert failure), a retry re-fires and re-inserts, which is the
+    // intended safety net for the Sonia Stevens exact failure mode
+    // (vendor succeeded, we couldn't confirm). The NO_SELF_HEAL_RETRY
+    // set is retained as the extension point for any FUTURE action
+    // whose handler doesn't carry its own idempotency guard.
+    const NO_SELF_HEAL_RETRY = new Set<string>([]);
 
     for (const s of successes) {
       if (NO_SELF_HEAL_RETRY.has(s.action.type)) continue;
@@ -2421,9 +2532,14 @@ async function handleDirectAction(
 /**
  * Verify that a direct action's expected state change is reflected in the DB.
  * Returns true if verified, false if the expected state wasn't found.
+ *
+ * Exported for unit tests (see action-executor.verify-in-db.test.ts). The
+ * production caller passes the executor's ActionContext; tests pass a
+ * minimal object that carries { admin, ticketId } — the only fields this
+ * switch reads.
  */
-async function verifyActionInDB(
-  ctx: ActionContext,
+export async function verifyActionInDB(
+  ctx: Pick<ActionContext, "admin" | "ticketId">,
   action: ActionParams,
 ): Promise<boolean> {
   const admin = ctx.admin;
@@ -2471,8 +2587,162 @@ async function verifyActionInDB(
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
     }
+    case "create_return":
+    case "create_replacement": {
+      // Both action types write a `returns` row scoped to this ticket
+      // (create_return via createFullReturn; create_replacement is a
+      // routing alias that lands in the same table). The create_return
+      // handler enforces at-most-one non-cancelled return per ticket
+      // (HARD INVARIANT — see the create_return case above), so we
+      // read by ticket_id and expect a non-cancelled row.
+      //
+      // The initial Phase-1 landing gated on status IN ('pending','approved') —
+      // strings NO code path writes. The real `returns.status` enum that
+      // createFullReturn writes is 'open' (shopify-returns.ts:210,781) at
+      // creation and 'label_created' (line 327,944) once EasyPost issues the
+      // label, transitioning to 'in_transit' / 'delivered' / 'refunded' /
+      // 'restocked' / 'closed' downstream. Only 'cancelled' means "not a
+      // real return" — so the confirming predicate is: a row exists for
+      // this ticket AND status ≠ 'cancelled'. That mirrors the HARD
+      // invariant used at the create_return case (~line 972) and keeps
+      // the verify semantic stable as the enum grows. Per CLAUDE.md:
+      // "the database is the spec" — the switch reads the live shape.
+      if (!ctx.ticketId) return true;
+      const { data } = await admin.from("returns")
+        .select("status")
+        .eq("ticket_id", ctx.ticketId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!data?.status) return false;
+      return data.status !== "cancelled";
+    }
+    case "skip_next_order": {
+      // After a skip, `subscriptions.next_billing_date` must be strictly
+      // in the future — the whole point of the skip is to move the next
+      // charge past the currently-scheduled cycle. A next_billing_date
+      // that's still today/past means the mutation didn't stick.
+      // (skip_next_order is retired by the sibling M3 spec, so this
+      // case exists just for the transition window.)
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      return new Date(String(nbd)).getTime() > Date.now();
+    }
+    case "change_next_date": {
+      // Expect subscriptions.next_billing_date's calendar day equals
+      // action.date's calendar day (YYYY-MM-DD). Edge case: the
+      // change_next_date handler fires order-now instead when action.date
+      // is ≤ today (customer said "ship now"), in which case
+      // next_billing_date isn't touched and instead advances on the
+      // next successful renewal. For that path we accept any future
+      // next_billing_date as verified — the customer's intent (get
+      // product ASAP) was satisfied by the order-now dispatch.
+      if (!action.contract_id || !action.date) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      const requested = String(action.date).slice(0, 10);
+      const actualDay = String(nbd).slice(0, 10);
+      if (actualDay === requested) return true;
+      const today = new Date().toISOString().slice(0, 10);
+      if (requested <= today) {
+        return new Date(String(nbd)).getTime() > Date.now();
+      }
+      return false;
+    }
+    case "change_frequency": {
+      // Read the mirror columns billing_interval + billing_interval_count
+      // — those are the ACTUAL DB column names (docs/brain/tables/subscriptions.md).
+      // The spec calls them `billing_policy_interval` / `billing_policy_interval_count`;
+      // per CLAUDE.md "the database is the spec" — we use the live shape.
+      if (!action.contract_id || !action.interval) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("billing_interval, billing_interval_count")
+        .eq("shopify_contract_id", action.contract_id).single();
+      if (!data) return false;
+      const wantInterval = String(action.interval).toUpperCase();
+      const gotInterval = String(data.billing_interval || "").toUpperCase();
+      if (gotInterval !== wantInterval) return false;
+      if (action.interval_count != null) {
+        return Number(data.billing_interval_count) === Number(action.interval_count);
+      }
+      return true;
+    }
+    case "swap_variant":
+    case "add_item":
+    case "remove_item":
+    case "change_quantity":
+    case "change_item_quantity":
+    case "update_line_item_price": {
+      // Item-op / base-price cases all read the subscription's `items` jsonb
+      // (there is no standalone subscription_items table — the mirror lives
+      // as an array on subscriptions.items; see docs/brain/tables/subscriptions.md
+      // and src/lib/subscription-items.ts). Each entry carries { variant_id,
+      // quantity, price_cents } — the columns the spec's phase-2 bullets
+      // name. Verify against that array.
+      if (!action.contract_id) return true;
+      const { data: sub } = await admin.from("subscriptions")
+        .select("items")
+        .eq("shopify_contract_id", action.contract_id).single();
+      type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
+      const items = (sub?.items || []) as Line[];
+
+      if (action.type === "swap_variant") {
+        // Post-swap: the target line's variant_id should equal
+        // action.new_variant_id; the pre-swap variant_id should be gone
+        // (unless the customer had it on multiple lines — we only assert
+        // the invariant the spec names: NEW is present).
+        const newVid = action.new_variant_id || (action as { new_id?: string }).new_id;
+        if (!newVid) return true;
+        return items.some(i => String(i.variant_id) === String(newVid));
+      }
+
+      if (action.type === "add_item") {
+        if (!action.variant_id) return true;
+        return items.some(i => String(i.variant_id) === String(action.variant_id));
+      }
+
+      if (action.type === "remove_item") {
+        const vid = action.variant_id || (action as { variantId?: string }).variantId;
+        if (!vid) return true;
+        return !items.some(i => String(i.variant_id) === String(vid));
+      }
+
+      if (action.type === "change_quantity" || action.type === "change_item_quantity") {
+        if (!action.variant_id || action.quantity == null) return true;
+        const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+        if (!line) return false;
+        return Number(line.quantity) === Number(action.quantity);
+      }
+
+      // update_line_item_price — base-price restore. Compare price_cents
+      // on the target line. Handler resolves candidate variants when
+      // action.variant_id is stale (crisis-swap history); here we verify
+      // ONLY the explicit variant_id the caller declared, since that's
+      // the invariant the spec's bullet names ("subscription_items.price_cents
+      // matches action.base_price_cents"). If a self-healed swap-target
+      // ended up carrying the new price on a different variant, that
+      // still passes the handler's own success flag; verifyActionInDB
+      // stays conservative and reads only what the action declared.
+      if (action.variant_id == null || action.base_price_cents == null) return true;
+      const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+      if (!line) return false;
+      return Number(line.price_cents) === Number(action.base_price_cents);
+    }
     default:
-      // No verification logic for this action type — assume OK
+      // Fail-safe: no verification wired for this action type yet —
+      // return true so we don't wrongly escalate, but WARN so coverage
+      // gaps are OBSERVABLE (grep server logs for "[verifyActionInDB]").
+      // Spec Phase-2 bullet: "unknown/still-uncovered action types fall
+      // through to 'return true' with a WARN-level console log naming
+      // the uncovered type so we can watch coverage grow".
+      console.warn(`[verifyActionInDB] uncovered action type — assuming OK: ${action.type}`);
       return true;
   }
 }

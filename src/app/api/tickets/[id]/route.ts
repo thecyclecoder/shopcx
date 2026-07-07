@@ -85,6 +85,40 @@ export async function GET(
         .order("created_at", { ascending: false })
         .limit(10);
 
+      // Attach the order_refunds mirror rows per order. The tickets
+      // detail view renders these refund lines as the authoritative
+      // "what was refunded, when, via which vendor" — the raw
+      // orders.financial_status badge no longer stands alone
+      // (refund-integrity Phase 1). Scoped by workspace so a linked
+      // cross-workspace order can't leak refund data.
+      const orderIds = (orders || []).map((o) => o.id);
+      const refundsByOrder = new Map<string, { id: string; vendor: string; vendor_refund_id: string | null; amount_cents: number; status: string; requested_at: string; settled_at: string | null }[]>();
+      if (orderIds.length) {
+        const { data: refundRows } = await admin
+          .from("order_refunds")
+          .select("id, order_id, vendor, vendor_refund_id, amount_cents, status, requested_at, settled_at")
+          .eq("workspace_id", workspaceId)
+          .in("order_id", orderIds)
+          .order("requested_at", { ascending: false });
+        for (const r of refundRows || []) {
+          const list = refundsByOrder.get(r.order_id) || [];
+          list.push({
+            id: r.id,
+            vendor: r.vendor,
+            vendor_refund_id: r.vendor_refund_id,
+            amount_cents: r.amount_cents,
+            status: r.status,
+            requested_at: r.requested_at,
+            settled_at: r.settled_at,
+          });
+          refundsByOrder.set(r.order_id, list);
+        }
+      }
+      const ordersWithRefunds = (orders || []).map((o) => ({
+        ...o,
+        order_refunds: refundsByOrder.get(o.id) || [],
+      }));
+
       const { data: subscriptionsRaw } = await admin
         .from("subscriptions")
         .select("id, status, billing_interval, billing_interval_count, next_billing_date, last_payment_status, items, applied_discounts, is_internal, delivery_price_cents")
@@ -134,7 +168,7 @@ export async function GET(
         total_orders: stats.total_orders,
         ltv_cents: stats.ltv_cents,
         retention_score: realRetention,
-        recent_orders: orders || [],
+        recent_orders: ordersWithRefunds,
         subscriptions: subscriptions || [],
         linked_identities: linkedIdentities,
       };

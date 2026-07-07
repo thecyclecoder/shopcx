@@ -31,12 +31,27 @@
 // Customer event: on success, write one `order.refunded` row into
 // customer_events so the timeline shows the refund + method + reason.
 
+import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { refundBraintreeTransaction } from "@/lib/integrations/braintree";
 import { partialRefundByAmount, recordManualRefund } from "@/lib/shopify-order-actions";
 import { logCustomerEvent } from "@/lib/customer-events";
 
 export type RefundMethod = "shopify" | "braintree";
+
+// Stable idempotency key when the caller doesn't thread its own
+// action.request_key through. Same shape → same key → the UNIQUE
+// index on (order_id, request_key) short-circuits a retry.
+export function hashRefundRequestKey(
+  orderId: string,
+  amountCents: number,
+  reason: string,
+): string {
+  return createHash("sha256")
+    .update(`${orderId}:${amountCents}:${reason || ""}`)
+    .digest("hex")
+    .slice(0, 32);
+}
 
 // Read-only branch preview — same rule as refundOrder() below, but
 // makes no external API calls. Used by scripts/_probe-refund-order.ts
@@ -114,6 +129,16 @@ export interface RefundOrderOptions {
   // gateway. In dryRun the `amountCents` positional is ignored (0 is
   // legal — the probe never spends money).
   dryRun?: boolean;
+  // Idempotency key for the order_refunds mirror. Callers that carry
+  // an action-side request id (Sonnet direct_action, playbook step,
+  // etc.) should thread it in so a retry can be short-circuited by
+  // the Phase 2 verify-by-refund-id lookup. When omitted, the wrapper
+  // falls back to a stable hash of (order_id + amount_cents + reason)
+  // per the spec — enough for the retry-with-same-shape case but not
+  // enough to distinguish two legitimate refunds of the same amount +
+  // reason on the same order (the caller MUST pass an explicit key in
+  // that case).
+  requestKey?: string;
 }
 
 export interface RefundOrderResult {
@@ -220,6 +245,32 @@ export async function refundOrder(
   }
 
   if (!result.success) return result;
+
+  // ── order_refunds mirror (write-on-fire) ──
+  // Refund-integrity Phase 1: after the vendor call succeeds, insert
+  // one row into public.order_refunds keyed on
+  // request_key = coalesce(opts.requestKey, hash(order_id + amount_cents + reason)).
+  // The UNIQUE index on (order_id, request_key) is the DB-level
+  // backstop: a duplicate insert (same-shape retry, or the racing
+  // second attempt Phase 2's verify-by-refund-id will short-circuit
+  // once it lands) fails the unique constraint and lands in this
+  // try/catch. Best-effort: a mirror insert failure never rolls the
+  // refund back (the money already moved) — logged for the Phase 3
+  // T+3d reconcile to catch.
+  try {
+    const requestKey = opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason);
+    await admin.from("order_refunds").insert({
+      workspace_id: workspaceId,
+      order_id: order.id,
+      request_key: requestKey,
+      vendor: result.method === "braintree" ? "braintree" : "shopify",
+      vendor_refund_id: result.refund_id ?? null,
+      amount_cents: amountCents,
+      status: "succeeded",
+    });
+  } catch (e) {
+    console.error("[refundOrder] failed to write order_refunds mirror row:", e);
+  }
 
   // ── Double-refund guard ──
   // Stamp any open return on this order as already-refunded so the

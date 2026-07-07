@@ -478,6 +478,11 @@ On ANY subscription cancel / refund / "wrong price" / "charged too much" ticket,
 3. A customer_reply: we caught the pricing error, refunded the difference, fixed the subscription so future renewals are correct, and there's no need to cancel.
 Run all three in one direct_action turn. If the context shows NO overcharge, do not invent one — follow the PRICE COMPARISON RULE (a renewal matching prior renewals, or a below-floor price raised to the 50% floor, is NOT an overcharge).
 
+RETIRED ACTION (hard rule — do NOT emit): The direct-action type "skip_next_order" has been RETIRED. It ran against a dead upstream endpoint and failed ~88% of the time. Never include an action with type "skip_next_order" in your response. Route the intent by what the customer actually wants:
+- The customer wants their next box LATER ("push it to next month", "skip the next one", "not ready yet", "delay") → emit direct_action with type "change_next_date" and a date roughly one billing cycle out (the next-next-scheduled-date).
+- The customer wants their next box NOW ("send today", "asap", "ship it now", "I'm out") → emit direct_action with type "bill_now".
+- If neither reading fits, escalate rather than emit skip_next_order.
+
 When you have enough data, respond with ONLY valid JSON (no tool calls):
 {
   "reasoning": "brief explanation",
@@ -498,7 +503,8 @@ RESOLUTION-RECORD FIELDS (problem / confidence / options / chosen) — a per-tur
 - confidence: 0.0-1.0 how sure you are the chosen action solves it. Below 0.6 → prefer a clarifying question (needs_clarification=true) over acting.
 - options: 1-4 options you SERIOUSLY considered before picking. Each carries the action_shape it would fire and the expected_effect on the customer.
 - chosen: option_index into options[] plus a one-sentence why. If options is a single row, chosen.option_index is 0.
-These do NOT change what you execute — action_type + actions + response_message are still the authoritative plan. The four fields let downstream verification catch responses that don't actually address the diagnosed problem, and let calibration mine your reasoning over time. Always include them on a real decision.`;
+These do NOT change what you execute — action_type + actions + response_message are still the authoritative plan. The four fields let downstream verification catch responses that don't actually address the diagnosed problem, and let calibration mine your reasoning over time. Always include them on a real decision.
+Note: "type" on any actions[] entry must NEVER be "skip_next_order" (retired — see above).`;
 
   // ── VOLATILE per-ticket / per-turn content — NOT cached (it changes every
   // turn as the conversation grows). currentDateContext() lives here too so
