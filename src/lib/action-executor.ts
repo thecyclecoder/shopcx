@@ -1208,7 +1208,7 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
+    const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
@@ -1231,8 +1231,11 @@ export const directActionHandlers: Record<
     // cross-tenant row can never authorize a short-circuit.
     // Passing the same requestKey down to refundOrder keeps the write-side
     // hash consistent with this lookup, so the mirror insert Phase 1 does
-    // hits the exact same UNIQUE-index row Phase 2 checked here.
-    const requestKey = hashRefundRequestKey(ord.id, p.amount_cents, reason);
+    // hits the exact same UNIQUE-index row Phase 2 checked here. Scoped
+    // by ticket_id — two different tickets legitimately refunding the
+    // same (order, amount, reason) get distinct keys and both fire; a
+    // retry of the same ticket's action reuses the key.
+    const requestKey = hashActionRefundKey("ticket", ctx.ticketId, ord.id, p.amount_cents, reason);
     const { data: existing } = await ctx.admin
       .from("order_refunds")
       .select("id, vendor_refund_id, status, amount_cents")
@@ -1281,7 +1284,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
+    const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1315,8 +1318,10 @@ export const directActionHandlers: Record<
     // Compute request_key up-front and check the mirror. If a prior
     // attempt already fired for this (order_id, request_key), do NOT
     // call refundOrder AND do NOT spend points again — the earlier
-    // attempt already burned them. Matches the partial_refund pattern.
-    const requestKey = hashRefundRequestKey(order.id, amountCents, reason);
+    // attempt already burned them. Matches the partial_refund pattern:
+    // ticket-scoped so two different tickets don't collide on the same
+    // (order, tier) shape.
+    const requestKey = hashActionRefundKey("ticket", ctx.ticketId, order.id, amountCents, reason);
     const { data: existingRedemption } = await ctx.admin
       .from("order_refunds")
       .select("id, vendor_refund_id, status, amount_cents")
@@ -2210,6 +2215,12 @@ export const directActionHandlers: Record<
     if (!variantId) return { success: false, error: "dollar_replacement missing variant_id" };
     const quantity = p.quantity || 1;
 
+    const refundReason = p.reason || "Dollar replacement partial refund";
+    const { hashActionRefundKey } = await import("@/lib/refund");
+    // Ticket-scoped so an Inngest step retry / self-heal re-drive of the
+    // same dollar_replacement action short-circuits at refundOrder's
+    // pre-dispatch guard instead of double-refunding the customer.
+    const refundRequestKey = hashActionRefundKey("ticket", ctx.ticketId, ord.id, amountCents, refundReason);
     const { issueDollarReplacement } = await import("@/lib/commerce/replacement");
     const r = await issueDollarReplacement(ctx.workspaceId, {
       customerId: ctx.customerId,
@@ -2234,9 +2245,10 @@ export const directActionHandlers: Record<
       refund: {
         orderId: ord.id,
         amountCents,
-        reason: p.reason || "Dollar replacement partial refund",
+        reason: refundReason,
         source: "ai",
         eventProperties: { ticket_id: ctx.ticketId },
+        requestKey: refundRequestKey,
       },
     });
     if (!r.success) {

@@ -63,6 +63,14 @@ export interface IssueRefundArgs {
    *  Runs the order lookup + method resolution, returns `{ success: true,
    *  method, dryRun: true }` with ZERO SDK calls. amountCents may be 0. */
   dryRun?: boolean;
+  /** Stable action-identity key threaded down to `RefundOrderOptions.requestKey`.
+   *  The Phase 2 handlers derive this from their own action identity
+   *  (ticket_id / return_id / replacement_id + order_id + amount + reason)
+   *  via [[../refund]] `hashActionRefundKey`, so an Inngest step retry or
+   *  self-heal re-drive computes the same key and short-circuits via the
+   *  pre-dispatch guard. Omit to let `refundOrder` fall back to the
+   *  shape-only `hashRefundRequestKey(order, amount, reason)` default. */
+  requestKey?: string;
 }
 
 export interface IssueRefundResult {
@@ -105,6 +113,7 @@ export async function issueRefund(
     customerId: args.customerId,
     eventProperties: args.eventProperties,
     dryRun: args.dryRun,
+    requestKey: args.requestKey,
   };
   const r: RefundOrderResult = await refundOrder(
     workspaceId,

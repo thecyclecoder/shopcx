@@ -189,10 +189,17 @@ export const returnsIssueRefund = inngest.createFunction(
         // delegates to the shared `refundOrder` in `src/lib/refund.ts`
         // so nothing outside that file, shopify-order-actions.ts, and
         // integrations/braintree.ts touches a refund mutation.
-        const { refundOrder } = await import("@/lib/refund");
-        return refundOrder(workspace_id, ret.order_id, amountCents, `Return ${ret.order_number} delivered`, {
+        // The requestKey is derived from the return_id so an Inngest
+        // step retry (this function is `retries: 2` above) reuses the
+        // same key and short-circuits at refundOrder's pre-dispatch
+        // guard — the money can only move once even under retry.
+        const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
+        const refundReason = `Return ${ret.order_number} delivered`;
+        const requestKey = hashActionRefundKey("return", return_id, ret.order_id, amountCents, refundReason);
+        return refundOrder(workspace_id, ret.order_id, amountCents, refundReason, {
           source: "inngest",
           eventProperties: { return_id, resolution_type: ret.resolution_type },
+          requestKey,
         });
       });
       if (refundResult.success) {
