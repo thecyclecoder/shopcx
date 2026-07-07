@@ -43,6 +43,25 @@ An array of `CsStoryline`:
   - `escalate_founder` → `add_policy` (the CS Director hit her leash — the founder codifies the judgment)
   - `author_spec` → `add_rule` (a specific analyzer/rule gap — a `sonnet_prompts` seed until the spec ships)
   - `approve_remedy` → `null` (informational only — the CS Director acted in leash)
+- `per_ticket_escalation` (Phase 2) — one row per non-black-swan `escalate_founder` verdict routed here at emit time by `runCsDirectorCallJob` (via [[../libraries/cs-director-digest]] `appendPerTicketEscalation`) INSTEAD of firing a `dashboard_notifications` real-time page. Batched into the current digest so the founder reads the tail on Monday instead of getting paged per ticket. Black-swan verdicts ([[../libraries/cs-director-black-swan]]) STILL page in real time and never land here.
+
+### `ceo_reply_action` shape (Phase 2)
+
+When the founder clicks a storyline action on the /dashboard/agents/cs-director/digests surface, the reply route ([[../libraries/cs-director-digest-reply]] `stampDigestReply`) sets `ceo_replied_at=now()` + `ceo_reply_action`:
+
+```jsonc
+{
+  "storyline_index": 2,                              // which storyline in the array
+  "action_type": "widen_leash" | "tighten_leash" | "add_policy" | "add_rule",
+  "actor": "workspace_members.display_name",         // audit trail
+  "autonomy":       { "live": true, "autonomous": true },  // for widen_leash / tighten_leash
+  "policy_id":      "…",                             // for add_policy — the inserted policies.id
+  "sonnet_prompt_id": "…",                           // for add_rule — the inserted sonnet_prompts.id
+  "applied_at": "2026-…"
+}
+```
+
+Only the field(s) relevant to the action_type are present. The stamp is a COMPARE-AND-SET on `ceo_replied_at IS NULL` — a second click / a replay of the same request short-circuits with "digest already actioned" so the leash / policy / rule mutations do NOT fire twice.
 
 CHECK constraints keep the shape stable:
 - `cs_director_digests_period_ordered` — `digest_period_end > digest_period_start`

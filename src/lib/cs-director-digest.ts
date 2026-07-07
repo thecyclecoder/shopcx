@@ -38,7 +38,11 @@ const MAX_EVIDENCE_LEN = 800;
 
 export type CsStorylineKind =
   | "early_warning" // a recurring problem pattern surfaced across tickets — systemic signal.
-  | "precedent_call"; // a cs-director-call verdict worth remembering as a precedent for the CEO.
+  | "precedent_call" // a cs-director-call verdict worth remembering as a precedent for the CEO.
+  // Phase 2 — a per-ticket founder-escalation appended to the current digest INSTEAD of firing a
+  // dashboard_notifications page. Only fires for `escalate_founder` verdicts classified as non-black-swan
+  // ([[cs-director-black-swan]]). Black-swan verdicts still page in real time.
+  | "per_ticket_escalation";
 
 export type CsStorylineProposedActionType =
   | "widen_leash"
@@ -328,5 +332,127 @@ export async function composeCsDirectorDigest(
   } catch (err) {
     console.warn("[cs-director-digest] insert threw:", err instanceof Error ? err.message : err);
     return { inserted: false, row: null, storylineCount: storylines.length };
+  }
+}
+
+/**
+ * Phase 2 — one week of a rolling digest window. Used by [[appendPerTicketEscalation]] to compute
+ * the CURRENT digest window when it needs to (a) find the open digest to append to, or (b) create a
+ * new one lazily when no digest row exists for this workspace's current week.
+ */
+const CURRENT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Phase 2 — append ONE `per_ticket_escalation` storyline to the CURRENT digest row for the
+ * workspace, INSTEAD of firing a `dashboard_notifications` real-time page. Called from
+ * `runCsDirectorCallJob` when [[cs-director-black-swan]] `classifyBlackSwan` returns `isBlackSwan:false`
+ * on an `escalate_founder` verdict — the non-black-swan tail that would otherwise flood the founder.
+ *
+ * "Current" = the LATEST `cs_director_digests` row for the workspace. If none exists (the composer
+ * cron hasn't fired yet this week, or this is the workspace's very first CS escalation), the helper
+ * LAZILY creates a digest row for the current week's window with `storylines=[]` and appends into
+ * that. This keeps the invariant: EVERY per-ticket escalation lands on a durable digest row the
+ * founder can act on — never a silent drop.
+ *
+ * The append is not a compare-and-set on `storylines` (Postgres jsonb concat is a single
+ * atomic UPDATE): we read-modify-write on the row's `storylines` array with an `id`-scoped WHERE.
+ * A concurrent second call in the same tick could clobber — that risk is tiny for a per-ticket
+ * escalation (the CS Director's Max session serializes calls), and the eventual weekly digest
+ * still surfaces the missed row through the composer's own read.
+ *
+ * Best-effort + never throws — a failed append still returns `{ appended:false }` so the caller
+ * can decide to fall through to `dashboard_notifications`.
+ */
+export async function appendPerTicketEscalation(
+  admin: Admin,
+  input: {
+    workspaceId: string;
+    ticketId: string;
+    reasoning: string;
+    verdictMetadata: Record<string, unknown> | null;
+  },
+): Promise<{ appended: boolean; digest_id: string | null; storyline_index: number }> {
+  if (!input.workspaceId || !input.ticketId) return { appended: false, digest_id: null, storyline_index: -1 };
+
+  try {
+    // 1) Find the LATEST digest row for the workspace — that is the "current" one to append to.
+    const { data: existing, error: readErr } = await admin
+      .from("cs_director_digests")
+      .select("id, storylines")
+      .eq("workspace_id", input.workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (readErr) {
+      console.warn("[cs-director-digest] appendPerTicketEscalation read failed:", readErr.message);
+      return { appended: false, digest_id: null, storyline_index: -1 };
+    }
+    let digestId: string | null = null;
+    let currentStorylines: CsStoryline[] = [];
+    if (Array.isArray(existing) && existing.length > 0) {
+      digestId = String(existing[0].id);
+      currentStorylines = Array.isArray(existing[0].storylines) ? (existing[0].storylines as CsStoryline[]) : [];
+    } else {
+      // 2) No digest exists yet — LAZILY create one for the current week so the escalation has a home.
+      const nowIso = new Date().toISOString();
+      const since = new Date(new Date(nowIso).getTime() - CURRENT_WEEK_MS).toISOString();
+      const { data: created, error: createErr } = await admin
+        .from("cs_director_digests")
+        .insert({
+          workspace_id: input.workspaceId,
+          digest_period_start: since,
+          digest_period_end: nowIso,
+          storylines: [],
+        })
+        .select("id")
+        .single();
+      if (createErr || !created) {
+        console.warn("[cs-director-digest] lazy-create digest for append failed:", createErr?.message ?? "no row");
+        return { appended: false, digest_id: null, storyline_index: -1 };
+      }
+      digestId = String(created.id);
+      currentStorylines = [];
+    }
+
+    const storyline: CsStoryline = {
+      kind: "per_ticket_escalation",
+      title: `Ticket ${input.ticketId.slice(0, 8)} — CS Director escalated`,
+      evidence: trim(input.reasoning || "(no reasoning captured)"),
+      proposed_action: {
+        // A per-ticket escalation typically wants a policy write-up so the SAME class of judgment
+        // doesn't need to escalate again next time. The founder can still click Widen/Tighten Leash.
+        type: "add_policy",
+        payload: {
+          policy_draft: trim(input.reasoning || ""),
+          ticket_id: input.ticketId,
+          verdict_metadata: input.verdictMetadata ?? null,
+        },
+      },
+    };
+
+    // 3) Append to the digest's storylines array — id-scoped + workspace-scoped WHERE so a
+    //    misfire on a different workspace's row is impossible (guard-before-mutation: the write
+    //    only fires when both id AND workspace_id match, and we `.select("id")` to confirm exactly
+    //    one row transitioned).
+    const nextStorylines = [...currentStorylines, storyline];
+    const { data: updated, error: updateErr } = await admin
+      .from("cs_director_digests")
+      .update({ storylines: nextStorylines })
+      .eq("id", digestId)
+      .eq("workspace_id", input.workspaceId)
+      .select("id");
+    if (updateErr) {
+      console.warn("[cs-director-digest] appendPerTicketEscalation update failed:", updateErr.message);
+      return { appended: false, digest_id: digestId, storyline_index: -1 };
+    }
+    if (!Array.isArray(updated) || updated.length !== 1) {
+      console.warn(
+        `[cs-director-digest] appendPerTicketEscalation transitioned ${Array.isArray(updated) ? updated.length : 0} rows (expected 1)`,
+      );
+      return { appended: false, digest_id: digestId, storyline_index: -1 };
+    }
+    return { appended: true, digest_id: digestId, storyline_index: nextStorylines.length - 1 };
+  } catch (err) {
+    console.warn("[cs-director-digest] appendPerTicketEscalation threw:", err instanceof Error ? err.message : err);
+    return { appended: false, digest_id: null, storyline_index: -1 };
   }
 }

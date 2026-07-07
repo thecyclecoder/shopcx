@@ -11037,6 +11037,69 @@ async function runCsDirectorCallJob(job: Job) {
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
     }
 
+    // Phase 2 of cs-director-storyline-digests-to-founder-with-bidirectional-reply — route
+    // decision='escalate_founder' verdicts into the CURRENT digest as a `per_ticket_escalation`
+    // storyline instead of firing a real-time dashboard_notifications page. EXCEPT: a black-swan
+    // verdict (fraud alert · chargeback storm · systemic outage — see cs-director-black-swan) still
+    // pages the CEO in real time, because its harm compounds during the weekly batching lag.
+    if (verdict.decision === "escalate_founder") {
+      try {
+        const { classifyBlackSwan } = await import("../src/lib/cs-director-black-swan");
+        const cls = classifyBlackSwan({
+          decision: verdict.decision,
+          reasoning: verdict.reasoning,
+          metadata: verdict as unknown as Record<string, unknown>,
+        });
+        if (cls.isBlackSwan) {
+          // Real-time page — dashboard_notifications, mirroring the escalation.ts shape. Best-effort;
+          // a failed insert still lets the job complete so the audit row (already recorded above) is
+          // the trail. The metadata carries the classifier's source so an audit can distinguish an
+          // explicit verdict tag from a keyword-default hit.
+          const { error: notifErr } = await db.from("dashboard_notifications").insert({
+            workspace_id: job.workspace_id,
+            type: "system",
+            title: `CS Director — black-swan escalation (${cls.class_key ?? "unspecified"})`,
+            body: (verdict.reasoning || "").slice(0, 500),
+            link: `/dashboard/tickets/${ticketId}`,
+            metadata: {
+              ticket_id: ticketId,
+              triage_run_id: triageRunId,
+              cs_director_call_job_id: job.id,
+              black_swan_class: cls.class_key ?? null,
+              black_swan_source: cls.source ?? null,
+            },
+          });
+          if (notifErr) {
+            console.warn(`${tag} black-swan dashboard_notifications insert failed: ${notifErr.message}`);
+          } else {
+            console.log(`${tag} black-swan page fired (class=${cls.class_key ?? "unspecified"} · source=${cls.source})`);
+          }
+        } else {
+          // Non-black-swan — append to the current digest. The lazy-create branch inside
+          // appendPerTicketEscalation guarantees a digest exists even if the composer hasn't run yet.
+          const { appendPerTicketEscalation } = await import("../src/lib/cs-director-digest");
+          const r = await appendPerTicketEscalation(db, {
+            workspaceId: job.workspace_id,
+            ticketId,
+            reasoning: verdict.reasoning,
+            verdictMetadata: {
+              cs_director_call_job_id: job.id,
+              triage_run_id: triageRunId,
+              remedy: verdict.remedy ?? null,
+              spec_seed: verdict.spec_seed ?? null,
+            },
+          });
+          if (r.appended) {
+            console.log(`${tag} escalate_founder appended to digest ${r.digest_id?.slice(0, 8)} @ idx ${r.storyline_index}`);
+          } else {
+            console.warn(`${tag} escalate_founder append failed — verdict still on the audit trail`);
+          }
+        }
+      } catch (e) {
+        console.warn(`${tag} escalate_founder routing threw:`, e instanceof Error ? e.message : e);
+      }
+    }
+
     const summary = [
       `decision=${verdict.decision}`,
       verdict.reasoning ? verdict.reasoning : "",
