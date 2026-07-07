@@ -46,7 +46,11 @@ export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent" | "reac
  * dunning / portal crons → retention; the meta + social loops → growth/cmo; the ticket handler +
  * triage → cs; the build/spec-test/migration-fix agents + the data-infra/monitoring crons → platform).
  */
-export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo";
+export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo" | "ceo";
+// `ceo` is the founder-owned lane — reserved for tools that answer DIRECTLY to the CEO seat,
+// not to a director. Today: the god-mode cockpit's executive-assistant agent (Eve). Deliberately
+// NOT in `OWNER_FUNCTIONS` — the CEO isn't a department that gets a rollup Health tile; she owns
+// her own lane. (god-mode-becomes-ceo-executive-assistant-agent Phase 1.)
 
 /**
  * The departments in CEO-glance order, with the rollup-tile health label the dashboard shows
@@ -665,6 +669,27 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
   // ─ Yearly cron (window ~370 days) ─
+
+  // ── CEO's executive-assistant agent (owner=ceo) ─────────────────────────────
+  // god-mode-becomes-ceo-executive-assistant-agent Phase 1: registers Eve's lane so the
+  // god-mode cockpit's activity has a home in the loop registry with a NON-Platform owner.
+  // She reports to the founder (Henry), not to a director, so `owner: "ceo"` — the reason
+  // OwnerFunction was widened. Phase 2 will render her under the CEO seat (workers alongside
+  // the goals) with liveness derived from god_mode_sessions activity, and wire her actions
+  // to the existing god-mode PIN + risk-tier approvals ([[../../docs/brain/libraries/god-mode]]).
+  {
+    id: "god-mode-cockpit",
+    kind: "reactive",
+    owner: "ceo",
+    personaKind: "god-mode", // Eve — the founder's phone-to-box executive assistant
+    label: "God-mode cockpit",
+    description: "The CEO's executive assistant — the founder's phone-to-box cockpit for reads/diagnostics + risky writes gated on live approval + PIN. Deliberately loose window (a dormant cockpit is healthy — the founder isn't always mid-incident).",
+    expectedCadence: "per founder cockpit session",
+    livenessWindowMs: 30 * DAY,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+    registeredAt: "2026-07-07T18:00:00Z",
+  },
 
   // ── Reactive event-driven Inngest agents (loop_heartbeats, loop_id = inngest fn id) ──
   // Event-driven (not crons, not the box queue). Idle = green; alerted on

@@ -82,6 +82,22 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
+  // ── CEO's executive-assistant agent — reports to the founder (Henry) ─────────
+  // god-mode-becomes-ceo-executive-assistant-agent Phase 1: gives the god-mode cockpit
+  // its own identity (a female name + persona) so it no longer resolves to the Platform
+  // orphan-default. Owner=ceo (see [[../control-tower/registry]] `OwnerFunction`), rendered
+  // under the CEO seat in Phase 2. Shipped imageless per the house builder-persona pattern
+  // (see the Prue commit c2a19dc8a "builder shipped it imageless") — the auto-avatar path
+  // (companion spec: builder-persona-add-upserts-by-key-and-generates-avatar) fills in the
+  // real Nano Banana Pro headshot into `agent-avatars/eve-god-mode.jpg`.
+  "god-mode": {
+    key: "god-mode", name: "Eve", role: "Executive Assistant", emoji: "🌙",
+    personality: "The CEO's right hand from the god-mode cockpit — does anything the founder asks within the PIN + risk-tier gates. Reads/diagnostics fly; every risky write surfaces the reasoning and asks. Autonomous within the founder's leash; escalates rather than silently mutating.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default",
+    chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
+    dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
+  },
   // ── Directors (function slugs) ──────────────────────────────────────────────
   platform: {
     key: "platform", name: "Ada", role: "Platform", emoji: "🛠️",
@@ -447,6 +463,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Decide accept / reject / merge / supersede with calibrated confidence — decisive, never punt to a human-review queue",
     "Preserve the safety rails: no delete-of-approved (supersede + archive); low-confidence proposals resurface with more evidence",
     "Surface reasoning + safety-downgrades to June's activity feed; escalate an unparseable verdict rather than executing silently",
+  ],
+  "god-mode": [
+    "Act as the founder's remote hands from the god-mode cockpit — reads, diagnostics, and risky writes on demand",
+    "Run reads + non-destructive diagnostics autonomously; surface reasoning inline so the founder can steer",
+    "Gate every risky write on a one-tap live approval (destructive additionally requires a PIN) — never mutate silently",
+    "Escalate anything ambiguous back to the founder rather than guessing; hit the rail, don't route around it",
   ],
 };
 
