@@ -21,6 +21,7 @@ Per-(workspace, channel) AI agent settings — personality, confidence threshold
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
 | `ai_turn_limit` | `int4` | — | default: `4` |
+| `problem_lockin_threshold` | `numeric` | — | default: `0.7` · CHECK ∈ [0,1] · read by [[../lifecycles/ai-multi-turn]] § Confidence-gated problem lock-in — when the latest [[ticket_resolution_events]] row on a ticket has `confidence >=` this value, its `problem` is injected as `ESTABLISHED PROBLEM (locked in at T{N})` into the Sonnet system prompt. See [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]. |
 
 ## Foreign keys
 

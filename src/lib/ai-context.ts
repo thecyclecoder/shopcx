@@ -20,6 +20,19 @@ export interface AssembledContext {
   sandbox: boolean;
   confidenceThreshold: number;
   autoResolve: boolean;
+  // Confidence-gated problem lock-in — the latest ticket_resolution_events row on
+  // this ticket whose confidence >= problem_lockin_threshold. When set, the system
+  // prompt carries an ESTABLISHED PROBLEM line so Sonnet stops silently pivoting off
+  // a high-confidence early diagnosis on later turns. See
+  // docs/brain/lifecycles/ai-multi-turn.md § Problem lock-in.
+  establishedProblem: { turn: number; problem: string } | null;
+}
+
+// Composes the ESTABLISHED PROBLEM prompt line. Extracted so unit tests can pin the
+// exact string the Phase-1 verification asserts on — the injection into promptParts is
+// still inline in assembleTicketContext, but the line format is the invariant.
+export function establishedProblemPromptLine(locked: { turn: number; problem: string }): string {
+  return `ESTABLISHED PROBLEM (locked in at T${locked.turn}): ${locked.problem}. Any pivot MUST be justified explicitly in reasoning.`;
 }
 
 export async function assembleTicketContext(
@@ -49,10 +62,37 @@ export async function assembleTicketContext(
   // 2. Fetch channel config + personality
   const { data: channelConfig } = await admin
     .from("ai_channel_config")
-    .select("personality_id, enabled, sandbox, instructions, max_response_length, confidence_threshold, auto_resolve, ai_turn_limit")
+    .select("personality_id, enabled, sandbox, instructions, max_response_length, confidence_threshold, auto_resolve, ai_turn_limit, problem_lockin_threshold")
     .eq("workspace_id", workspaceId)
     .eq("channel", channel)
     .single();
+
+  // Confidence-gated problem lock-in — read the latest ticket_resolution_events row on
+  // this ticket whose confidence >= problem_lockin_threshold. When present we inject an
+  // ESTABLISHED PROBLEM line into the system prompt below so Sonnet stops silently
+  // pivoting off a high-confidence early diagnosis on later turns.
+  // See docs/brain/tables/ticket_resolution_events.md +
+  // docs/brain/lifecycles/ai-multi-turn.md § Problem lock-in.
+  const problemLockinThreshold: number =
+    typeof channelConfig?.problem_lockin_threshold === "number"
+      ? channelConfig.problem_lockin_threshold
+      : 0.7;
+  let establishedProblem: { turn: number; problem: string } | null = null;
+  {
+    const { data: lockedRow } = await admin
+      .from("ticket_resolution_events")
+      .select("turn_index, problem, confidence")
+      .eq("workspace_id", workspaceId)
+      .eq("ticket_id", ticketId)
+      .not("problem", "is", null)
+      .gte("confidence", problemLockinThreshold)
+      .order("turn_index", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (lockedRow && typeof lockedRow.problem === "string" && lockedRow.problem.trim().length > 0) {
+      establishedProblem = { turn: lockedRow.turn_index, problem: lockedRow.problem };
+    }
+  }
 
   let personality: { name: string; tone: string; style_instructions: string; sign_off: string | null; greeting: string | null; emoji_usage: string } | null = null;
   if (channelConfig?.personality_id) {
@@ -287,6 +327,13 @@ export async function assembleTicketContext(
     promptParts.push("You are a friendly, professional customer support agent.");
   }
 
+  // Confidence-gated problem lock-in — inject BEFORE customer context so the model
+  // reads the locked diagnosis while it's still forming its plan for this turn.
+  if (establishedProblem) {
+    promptParts.push("");
+    promptParts.push(establishedProblemPromptLine(establishedProblem));
+  }
+
   // Customer context
   if (customerParts.length > 0) {
     promptParts.push("\nCUSTOMER CONTEXT:");
@@ -416,5 +463,6 @@ export async function assembleTicketContext(
     sandbox: channelConfig?.sandbox ?? true,
     confidenceThreshold: channelConfig?.confidence_threshold || 0.90,
     autoResolve: channelConfig?.auto_resolve ?? false,
+    establishedProblem,
   };
 }

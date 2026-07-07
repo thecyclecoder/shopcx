@@ -36,6 +36,10 @@ Written by [[../libraries/action-executor]] `executeSonnetDecision` (insert) + `
 
 **In:** none yet — future M1 (inline verify block) will bounce `verified_outcome='unbacked'` verdicts back onto this row; future M4 (compiler loop) will mine the row-set for prompt calibration but write only through [[sonnet_prompts]].
 
+## Read paths
+
+- **Confidence-gated problem lock-in** ([[../lifecycles/ai-multi-turn]] § Confidence-gated problem lock-in) — `assembleTicketContext()` reads the LATEST row on this ticket where `confidence >= ai_channel_config.problem_lockin_threshold` (default `0.7`) and injects an `ESTABLISHED PROBLEM (locked in at T{turn}): {problem}. Any pivot MUST be justified explicitly in reasoning.` line into Sonnet's system prompt. The Improve tab's `/api/tickets/[id]/resolution-context` route renders the same lock-in + the latest turn's `reasoning` as a context tile.
+
 ## Row lifecycle
 
 Every orchestrator turn walks the same three stamps:
