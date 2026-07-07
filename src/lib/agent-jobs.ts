@@ -1534,6 +1534,158 @@ export async function evaluateGoalMemberBuildDispatch(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// serialize-goal-member-spec-builds Phase 2 — auto-re-drive a DIRTY goal-member PR.
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 serialized within-goal dispatch (only one goal-mate builds at a time). Phase 2 handles the
+// EXISTING PR that goes DIRTY after the fact: another goal-mate merged onto the goal branch, so this
+// PR is now `mergeable_state ∈ {"dirty","behind"}` against its base. Pre-fix, the PR sat parked on the
+// board waiting for a human. Post-fix, the reconciler detects it via `getPr(prNumber).mergeableState`
+// and enqueues a `pr-resolve` job (the existing rebase-or-rebuild executor — [[github-pr-resolve]]),
+// so the PR self-heals back to MERGEABLE without a human touch.
+//
+// SAFETY (Phase 2 verification — "a PR whose GitHub state can't be read is left untouched"):
+//   • FAIL CLOSED on a getPr read failure — never guess DIRTY without a positive read.
+//   • FAIL CLOSED on `mergeableState === null` — GitHub is still computing merge state.
+//   • FAIL CLOSED on `mergeableState === "unknown"` — GitHub returned the uncertain enum, treat as no-op.
+//   • Only re-drives goal-member PRs (one-off / non-goal-bound specs are handled by the existing
+//     [[detectAndEnqueueDirtyPrs]] against origin/main).
+//
+// SCOPE: matches the existing dirty-PR resolver's contract — the enqueue is IDEMPOTENT
+// (enqueuePrResolveJob dedupes per PR + is retry-capped), so a repeat detection across ticks is a no-op.
+
+/** The subset of `getPr`'s ok-shape the Phase 2 predicate reads — kept independent of the caller's
+ *  full read so the predicate is unit-testable without a fetch stub. */
+export interface GoalMemberPrGithubState {
+  ok: boolean;
+  state?: string;
+  merged?: boolean;
+  mergeableState?: string | null;
+}
+
+/** Which mergeable_state values indicate a goal-member PR needs re-drive. `dirty` = literal conflict;
+ *  `behind` = base advanced (a goal-mate merged, no conflict yet but the PR isn't fast-forwardable).
+ *  `unstable` is deliberately NOT included — the PR is mergeable, just has a red check; the auto-merge
+ *  gate handles that (no rebase needed). `unknown` / `blocked` / null all abstain (fail closed). */
+export const GOAL_MEMBER_REDRIVE_MERGEABLE_STATES = new Set(["dirty", "behind"]);
+
+/** PURE Phase 2 predicate — "should this goal-member PR be re-driven?" Given the getPr outcome, decide
+ *  `redrive` vs `skip` with a reason. Fail closed on any uncertain / read-failed input. Split out so the
+ *  named failing state ("a PR whose GitHub state can't be read is left untouched") is testable end-to-
+ *  end without a fetch stub. */
+export function decideGoalMemberPrRedrive(pr: GoalMemberPrGithubState): {
+  action: "redrive" | "skip";
+  reason: string;
+} {
+  if (!pr.ok) return { action: "skip", reason: "github read failed — fail closed (no false re-drive)" };
+  if (pr.merged) return { action: "skip", reason: "PR already merged — nothing to re-drive" };
+  if (pr.state !== "open") return { action: "skip", reason: `PR state=${pr.state ?? "(missing)"} — only open PRs are re-drivable` };
+  const state = pr.mergeableState;
+  if (!state) return { action: "skip", reason: "mergeable_state absent — fail closed (GitHub still computing)" };
+  if (state === "unknown") return { action: "skip", reason: "mergeable_state=unknown — fail closed until GitHub settles" };
+  if (!GOAL_MEMBER_REDRIVE_MERGEABLE_STATES.has(state)) {
+    return { action: "skip", reason: `mergeable_state=${state} — not a re-drive state (clean/unstable/blocked are handled elsewhere)` };
+  }
+  return { action: "redrive", reason: `mergeable_state=${state} — enqueuing pr-resolve to merge the goal branch into the PR branch` };
+}
+
+export interface DirtyGoalMemberReconcileResult {
+  checked: number;
+  redriven: number;
+  skipped: number;
+  readFailed: number;
+  prs: Array<{ prNumber: number; slug: string; mergeableState: string | null; action: "redrive" | "skip"; reason: string; enqueued: boolean }>;
+}
+
+/**
+ * serialize-goal-member-spec-builds Phase 2 — the reconciler: enumerate open goal-member build PRs,
+ * read each via `getPr`, and enqueue a `pr-resolve` job for every one whose live mergeable_state says
+ * it needs re-drive (`dirty` / `behind`). Runs alongside the existing dirty-PR standing pass but scoped
+ * to GOAL-MEMBER PRs — Phase 1 stopped these from being CREATED concurrently; Phase 2 makes existing
+ * ones self-heal when the goal branch advances beneath them.
+ *
+ * Enumeration source: `agent_jobs` rows with kind='build' + pr_number != null + status ∈
+ * (completed / merged / needs_attention — the terminal-ish states that carry an open PR that may have
+ * gone stale). We RE-ASSERT the PR is actually open + goal-bound before enqueueing — the row's
+ * `pr_number` is a proxy for "a PR exists"; the confirming predicate is the live `getPr` read + the
+ * `resolveGoalSlugForSpec` result (per Bo's mutation-gating coaching: never let a row proxy stand in
+ * for the live condition at the action point). Best-effort per PR; never throws.
+ */
+export async function reconcileDirtyGoalMemberPrs(
+  adminClient?: Admin,
+): Promise<DirtyGoalMemberReconcileResult> {
+  const result: DirtyGoalMemberReconcileResult = { checked: 0, redriven: 0, skipped: 0, readFailed: 0, prs: [] };
+  const admin = adminClient || createAdminClient();
+  const { getPr, enqueuePrResolveJob } = await import("@/lib/github-pr-resolve");
+
+  // Candidate rows — build jobs carrying a PR number. Filter to plausibly-open PRs (completed +
+  // needs_attention are the two states a still-open goal-member PR realistically sits in after its
+  // build finished; merged/failed we skip via the .in filter). Order newest-first so the most-recent
+  // job per spec is checked first — the older duplicate rows dedupe naturally on getPr's `merged`/
+  // `state !== open` skip.
+  const { data: rows } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, spec_slug, spec_branch, pr_number, status")
+    .eq("kind", "build")
+    .not("pr_number", "is", null)
+    .in("status", ["completed", "needs_attention"])
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  const seen = new Set<string>(); // dedupe per (workspace_id:pr_number) — one check per PR per pass
+  for (const row of (rows ?? []) as Array<{ workspace_id: string; spec_slug: string | null; spec_branch: string | null; pr_number: number | null }>) {
+    const prNumber = row.pr_number;
+    const workspaceId = row.workspace_id;
+    const branch = row.spec_branch ?? "";
+    const slug = row.spec_slug ?? "";
+    if (!prNumber || !branch || !slug || !branch.startsWith("claude/")) continue;
+    const key = `${workspaceId}:${prNumber}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    // GOAL-BOUND filter — Phase 2 is the goal-member lane. A one-off spec whose PR is dirty is handled
+    // by the existing detectAndEnqueueDirtyPrs (which runs against origin/main). Fail closed on the
+    // goal-resolve — an unknown goal-membership is treated as non-goal-bound (leaves the PR to the
+    // main-based dirty-PR lane, never to a wrong-branch resolver).
+    let goalSlug: string | null = null;
+    try {
+      goalSlug = await resolveGoalSlugForSpec(workspaceId, slug);
+    } catch {
+      goalSlug = null;
+    }
+    if (!goalSlug) continue;
+
+    result.checked++;
+    const pr = await getPr(prNumber);
+    if (!pr.ok) {
+      result.readFailed++;
+      result.prs.push({ prNumber, slug, mergeableState: null, action: "skip", reason: "github read failed", enqueued: false });
+      continue;
+    }
+    const state = pr.mergeableState;
+    const decision = decideGoalMemberPrRedrive({ ok: true, state: pr.state, merged: pr.merged, mergeableState: state });
+    if (decision.action !== "redrive") {
+      result.skipped++;
+      result.prs.push({ prNumber, slug, mergeableState: state, action: "skip", reason: decision.reason, enqueued: false });
+      continue;
+    }
+
+    // Enqueue — enqueuePrResolveJob dedupes per PR + is retry-capped, so a repeat detection across
+    // ticks is inert. Best-effort: an insert failure leaves the row for the next tick.
+    let enqueued = false;
+    try {
+      const r = await enqueuePrResolveJob(admin, { workspaceId, prNumber, branch });
+      enqueued = r.enqueued === true;
+    } catch (e) {
+      console.warn(`[goal-member-redrive] pr-resolve enqueue failed for PR #${prNumber}:`, e instanceof Error ? e.message : e);
+    }
+    if (enqueued) result.redriven++;
+    else result.skipped++;
+    result.prs.push({ prNumber, slug, mergeableState: state, action: "redrive", reason: decision.reason, enqueued });
+  }
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // spec-goal-branch-pm-flow M5 — the ATOMIC promotion (goal branch → main + the shipped stamp).
 //
 // M1–M4 built: per-spec branch accumulation (build_sha) → per-spec promote-eligibility (accumulation ∧

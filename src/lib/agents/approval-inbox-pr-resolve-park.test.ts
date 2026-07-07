@@ -12,17 +12,17 @@ import assert from "node:assert/strict";
 import { prResolveParkOutcome } from "./approval-inbox";
 
 test("PR merged ⇒ clear with outcome='merged' (the pr-1010 case)", () => {
-  const r = prResolveParkOutcome({ ok: true, merged: true, state: "closed", closedAt: "2026-07-02T19:42:00Z" });
+  const r = prResolveParkOutcome({ ok: true, merged: true, state: "closed", closedAt: "2026-07-02T19:42:00Z", mergeableState: null, baseRef: null });
   assert.deepEqual(r, { action: "clear", outcome: "merged" });
 });
 
 test("PR closed without merging (human closed the branch) ⇒ clear with outcome='closed'", () => {
-  const r = prResolveParkOutcome({ ok: true, merged: false, state: "closed", closedAt: "2026-07-02T19:42:00Z" });
+  const r = prResolveParkOutcome({ ok: true, merged: false, state: "closed", closedAt: "2026-07-02T19:42:00Z", mergeableState: null, baseRef: null });
   assert.deepEqual(r, { action: "clear", outcome: "closed" });
 });
 
 test("PR still open+dirty (state='open', not merged) ⇒ KEEP the card", () => {
-  const r = prResolveParkOutcome({ ok: true, merged: false, state: "open", closedAt: null });
+  const r = prResolveParkOutcome({ ok: true, merged: false, state: "open", closedAt: null, mergeableState: null, baseRef: null });
   assert.deepEqual(r, { action: "keep", reason: "still_open" });
 });
 
@@ -34,6 +34,6 @@ test("GitHub read failure (`{ok:false}`) ⇒ KEEP (CONSERVATIVE: never clear on 
 test("merged flag WINS even if state somehow reports 'open' (defensive — merged is the ground truth)", () => {
   // Real GitHub payloads flip state='closed' when merged=true, but the guard should not depend on
   // that invariant: a merged PR is done, full stop.
-  const r = prResolveParkOutcome({ ok: true, merged: true, state: "open", closedAt: null });
+  const r = prResolveParkOutcome({ ok: true, merged: true, state: "open", closedAt: null, mergeableState: null, baseRef: null });
   assert.deepEqual(r, { action: "clear", outcome: "merged" });
 });

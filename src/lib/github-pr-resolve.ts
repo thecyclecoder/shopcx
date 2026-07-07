@@ -380,15 +380,27 @@ async function surfaceExhaustedPrResolve(
 
 /**
  * pr-resolve-park-clears-on-pr-merged — one-shot PR-state read for the approval-inbox stale-park
- * reconciler. Returns `{ ok:true, merged, state, closedAt }` on a positive read; `{ ok:false }` on ANY
- * failure (no token, non-2xx, malformed body, network throw) so the caller fails CLOSED — a null read
- * never clears a live park card. Not a poll (unlike `fetchMergeable`); the reconciler doesn't need
- * `mergeable` to settle — it only asks "is this PR still open, or did a human merge/close it?" per
- * `pr.merged || pr.state !== 'open'`. See [[../../docs/brain/libraries/approval-inbox.md]].
+ * reconciler + serialize-goal-member-spec-builds Phase 2's goal-member DIRTY detector. Returns
+ * `{ ok:true, merged, state, closedAt, mergeableState, baseRef }` on a positive read; `{ ok:false }`
+ * on ANY failure (no token, non-2xx, malformed body, network throw) so callers fail CLOSED — a null
+ * read never clears a live park card and (Phase 2) never re-drives a PR whose GitHub state is unknown.
+ *
+ * `mergeableState` mirrors the REST API's `mergeable_state` field (values: `clean` / `unstable` /
+ * `dirty` / `behind` / `blocked` / `unknown`). `dirty` = literal merge conflict; `behind` = base branch
+ * has advanced past this PR's merge base (the "goal branch advanced under a member PR" case). Phase 2's
+ * reconciler acts on either as "needs re-drive". `baseRef` carries `pr.base.ref` so the reconciler /
+ * pr-resolver can merge THAT branch (a goal-member's base is `goal/{slug}`, not main).
+ *
+ * Not a poll (unlike `fetchMergeable`); the caller doesn't need `mergeable` to settle — it only asks
+ * "is this PR still open, and if so what's its current merge state." See
+ * [[../../docs/brain/libraries/approval-inbox.md]].
  */
 export async function getPr(
   prNumber: number,
-): Promise<{ ok: true; merged: boolean; state: string; closedAt: string | null } | { ok: false }> {
+): Promise<
+  | { ok: true; merged: boolean; state: string; closedAt: string | null; mergeableState: string | null; baseRef: string | null }
+  | { ok: false }
+> {
   if (!ghToken()) return { ok: false };
   try {
     const r = await gh("GET", `/repos/${GH_REPO}/pulls/${prNumber}`);
@@ -397,8 +409,10 @@ export async function getPr(
     const state = typeof body.state === "string" ? body.state : "";
     const merged = body.merged === true;
     const closedAt = typeof body.closed_at === "string" ? body.closed_at : null;
+    const mergeableState = typeof body.mergeable_state === "string" ? body.mergeable_state : null;
+    const baseRef = typeof (body.base as { ref?: string } | undefined)?.ref === "string" ? (body.base as { ref: string }).ref : null;
     if (!state) return { ok: false };
-    return { ok: true, merged, state, closedAt };
+    return { ok: true, merged, state, closedAt, mergeableState, baseRef };
   } catch {
     return { ok: false };
   }
