@@ -236,6 +236,28 @@ export async function appstleUpdateBillingInterval(
     return { success: true };
   } catch (err) {
     console.error("Appstle frequency update failed:", err);
+    // Appstle sometimes accepts the change but the response never arrives
+    // within the loggedAppstleFetch 20s deadline — the abort surfaces here
+    // as Error('upstream_timeout'). Same recovery as the res.status === 504
+    // branch above: verify the contract, and if the interval matches, treat
+    // the timeout as a successful apply. This closes the "false failure"
+    // path signature vercel:c0c26aa990d22744 was catching.
+    if (err instanceof Error && err.message === "upstream_timeout") {
+      const verified = await verifyBillingInterval(creds.apiKey, contractId, normalizedInterval, intervalCount);
+      if (!verified) {
+        return { success: false, error: "Request timed out and change could not be verified" };
+      }
+      await admin
+        .from("subscriptions")
+        .update({
+          billing_interval: normalizedInterval.toLowerCase(),
+          billing_interval_count: intervalCount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_contract_id", contractId);
+      return { success: true };
+    }
     return { success: false, error: String(err) };
   }
 }
