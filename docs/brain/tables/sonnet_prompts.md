@@ -107,8 +107,9 @@ const { count } = await admin.from("sonnet_prompts")
 
 ## Gotchas
 
-- category: `rule` / `approach` / `knowledge` / `tool_hint`.
+- category: `rule` / `approach` / `knowledge` / `tool_hint` / `personality`.
 - Loaded at orchestrator init. Edits via Settings → AI → Prompts take effect on next message.
+- **Assisted-purchase routing (`Assisted purchase (prefer playbook over bare create)`, category='rule', sort_order 31)** — steers Sonnet to route purchase intents (buy / reorder / create_order / create_subscription / add_subscription / subscribe) through the assisted-purchase playbook rather than emitting a bare create direct_action. Belt-and-suspenders companion to the Phase-1 fail-closed guard on the direct create handlers. See [[playbook-executor]] Gotchas + [[../specs/assisted-purchase-playbook]] Phase 3.
 
 ---
 

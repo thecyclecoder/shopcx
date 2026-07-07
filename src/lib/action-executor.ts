@@ -407,6 +407,141 @@ function substituteActionPlaceholders(
   return out;
 }
 
+// ── Assisted-purchase vaulted-PM guard ──
+//
+// docs/brain/specs/assisted-purchase-playbook.md Phase 1 — deterministic
+// safety net. create_order / create_subscription must never reach the
+// commerce effector for a customer with no vaulted payment method; the
+// guard hands the customer off to the add_payment_method journey instead,
+// so a missing PM cannot silently produce a failed charge. Unconditional
+// (no flag bypass) — the fail-closed invariant is what the spec pins.
+
+export interface CustomerPaymentMethodRow {
+  id: string;
+  status: string | null;
+  is_default: boolean | null;
+  provider?: string | null;
+}
+
+/**
+ * Pure predicate — pick the customer's chargeable vaulted PM from a set of
+ * customer_payment_methods rows. A "chargeable" row is one whose `status`
+ * is `'active'`; among those we prefer `is_default=true`, else the first
+ * active row. Non-active rows (revoked/removed) can never satisfy the
+ * guard. Exported so tests can pin the failing state without a DB.
+ */
+export function pickChargeableVaultedPm(
+  rows: CustomerPaymentMethodRow[] | null | undefined,
+): CustomerPaymentMethodRow | null {
+  const active = (rows || []).filter((r) => r?.status === "active");
+  if (active.length === 0) return null;
+  return active.find((r) => r.is_default === true) ?? active[0];
+}
+
+/**
+ * DB roundtrip — resolve the customer's chargeable vaulted PM. Expands
+ * linked customer ids (mirrors resolveLinkedCustomerIds in sonnet-
+ * orchestrator-v2) so a linked account's vault is honored. Returns null
+ * when the customer has no chargeable PM on file — the guard's fail-closed
+ * branch.
+ */
+async function resolveVaultedPm(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+): Promise<CustomerPaymentMethodRow | null> {
+  const { data: linkData } = await admin
+    .from("customer_links")
+    .select("group_id")
+    .eq("customer_id", customerId)
+    .maybeSingle();
+  let ids: string[] = [customerId];
+  if (linkData?.group_id) {
+    const { data: grp } = await admin
+      .from("customer_links")
+      .select("customer_id")
+      .eq("group_id", linkData.group_id);
+    const linked = (grp || [])
+      .map((g: { customer_id: string }) => g.customer_id)
+      .filter((v): v is string => !!v);
+    if (linked.length) ids = linked;
+  }
+  const { data: rows } = await admin
+    .from("customer_payment_methods")
+    .select("id, status, is_default, provider")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", ids);
+  return pickChargeableVaultedPm(rows as CustomerPaymentMethodRow[] | null);
+}
+
+/**
+ * Fail-closed handoff for create_order / create_subscription when the
+ * customer has no vaulted PM. Launches the add_payment_method journey
+ * (the assisted-purchase path) so the customer gets a card-entry link,
+ * writes an internal note recording the deferral, and returns an
+ * ActionResult that keeps the create effector from firing. The launch is
+ * best-effort — a delivery failure still returns the deferred result so
+ * the create never runs.
+ */
+async function deferCreateToAssistedPurchase(
+  ctx: ActionContext,
+  actionName: "create_order" | "create_subscription",
+): Promise<ActionResult> {
+  const { data: journeyDef } = await ctx.admin
+    .from("journey_definitions")
+    .select("id, name")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("trigger_intent", "add_payment_method")
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+
+  let launched = false;
+  if (journeyDef) {
+    try {
+      const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+      launched = await launchJourneyForTicket({
+        workspaceId: ctx.workspaceId,
+        ticketId: ctx.ticketId,
+        customerId: ctx.customerId,
+        journeyId: journeyDef.id,
+        journeyName: journeyDef.name,
+        triggerIntent: "add_payment_method",
+        channel: ctx.channel || "email",
+        leadIn:
+          "Before I can finish this, I need a payment method on file. I've sent you a secure link to add one.",
+        ctaText: "Add Payment Method",
+      });
+    } catch (err) {
+      console.error(`[${actionName}] deferCreateToAssistedPurchase — journey launch failed:`, err);
+    }
+  }
+
+  try {
+    await ctx.admin.from("ticket_messages").insert({
+      ticket_id: ctx.ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body:
+        `[System] ${actionName} deferred — no vaulted payment method on file. ` +
+        (launched
+          ? `Launched add_payment_method journey (${journeyDef?.name ?? "add-payment-method"}).`
+          : `add_payment_method journey NOT delivered (no active definition or delivery failure).`),
+    });
+  } catch (err) {
+    console.error(`[${actionName}] deferCreateToAssistedPurchase — internal note failed:`, err);
+  }
+
+  return {
+    success: false,
+    error: "no_vaulted_payment_method",
+    summary: launched
+      ? `${actionName} deferred — no vaulted PM; launched add_payment_method journey`
+      : `${actionName} deferred — no vaulted PM; add_payment_method journey NOT delivered`,
+  };
+}
+
 // ── Direct Action Handler Registry ──
 
 export const directActionHandlers: Record<
@@ -535,6 +670,12 @@ export const directActionHandlers: Record<
   // directly. Line items ship as `{ variant_id, title, quantity,
   // unit_cents }` — `unit_cents` is the per-unit price at create time.
   create_order: async (ctx, p) => {
+    // ── assisted-purchase vaulted-PM guard (spec Phase 1, fail-closed) ──
+    // A missing PM must never reach the commerce effector — hand off to the
+    // add_payment_method journey instead. Runs BEFORE param validation so
+    // no shape mismatch can smuggle the create past the guard.
+    const pm = await resolveVaultedPm(ctx.admin, ctx.workspaceId, ctx.customerId);
+    if (!pm) return deferCreateToAssistedPurchase(ctx, "create_order");
     const { createOrder } = await import("@/lib/commerce/order");
     if (!p.vendor) return { success: false, error: "create_order missing vendor" };
     if (!p.line_items?.length) return { success: false, error: "create_order missing line_items" };
@@ -595,6 +736,12 @@ export const directActionHandlers: Record<
   // carry the same shape as internal-subscription: variant_id (UUID) +
   // quantity + optional price_override_cents.
   create_subscription: async (ctx, p) => {
+    // ── assisted-purchase vaulted-PM guard (spec Phase 1, fail-closed) ──
+    // A missing PM must never reach the commerce effector — hand off to the
+    // add_payment_method journey instead. Runs BEFORE param validation so
+    // no shape mismatch can smuggle the create past the guard.
+    const pm = await resolveVaultedPm(ctx.admin, ctx.workspaceId, ctx.customerId);
+    if (!pm) return deferCreateToAssistedPurchase(ctx, "create_subscription");
     const { createSubscription } = await import("@/lib/commerce/subscription");
     if (!p.vendor) return { success: false, error: "create_subscription missing vendor" };
     if (!p.items?.length) return { success: false, error: "create_subscription missing items" };

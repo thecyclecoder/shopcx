@@ -37,6 +37,16 @@ const directActionHandlers: Record<
   (ctx: ActionContext, p: ActionParams)
 ```
 
+### `pickChargeableVaultedPm` — function
+
+```ts
+function pickChargeableVaultedPm(rows: CustomerPaymentMethodRow[] | null | undefined): CustomerPaymentMethodRow | null
+```
+
+Pure predicate wired into the `create_order` / `create_subscription` vaulted-PM guard (assisted-purchase-playbook spec Phase 1). Picks the customer's chargeable vaulted PM from a set of [[../tables/customer_payment_methods]] rows — prefers `is_default=true` among rows with `status='active'`, else any active row; returns null when no chargeable row exists. Exported so tests can pin the fail-closed branch without a live DB.
+
+### `CustomerPaymentMethodRow` — interface
+
 ### `SonnetDecision` — interface
 
 ### `ActionParams` — interface
@@ -65,6 +75,8 @@ const directActionHandlers: Record<
 - **Order-creating actions route through the address resolver.** `create_replacement_order`, `create_order`, and all [[../libraries/commerce__order]] handlers ship to the customer's current canonical address via [[../libraries/customer-shipping-address]] `resolveCustomerShippingAddress()`—not a stale cited-order snapshot (ticket 49ddd6c4). Priority: override > `customers.default_address` > active subscription address > cited order address > most-recent order. When the cited order's address differs from the canonical current one chosen, a divergence note is logged so the move is never silent.
 
 - **`direct_action` opens with the selective-clarify gate** ([[selective-clarify]] — Phase 2 of [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]). Before `handleDirectAction` runs, `shouldClarify(decision)` intersects the decision's `actions[].type` with a workspace-scoped IRREVERSIBLE_SET (default `{partial_refund, cancel, bill_now, subscriptionOrderNow}`; overridable via a `slug='irreversible_actions'` [[../tables/policies]] row) and its `confidence` against a threshold (default `0.7`). On a hit we send a scoped confirmation-turn (`buildClarificationMessage`), stamp [[../tables/ticket_resolution_events]] `verified_outcome='clarified'`, and skip execution entirely. Sandbox mode bypasses the gate (its stamped-note dry-run is already non-destructive). This is the ~6% intersection the parent goal picks up — the alternative is the 38% blanket-clarify regime it rejects.
+
+- **`create_order` / `create_subscription` open with an unconditional vaulted-PM guard** ([[../specs/assisted-purchase-playbook]] Phase 1). The guard reads [[../tables/customer_payment_methods]] for the customer (expanding [[../tables/customer_links]] siblings), keeps only `status='active'` rows via `pickChargeableVaultedPm`, and — on a miss — launches the [[../journeys/add-payment-method]] journey via [[journey-delivery]] `launchJourneyForTicket`, writes an internal `[System] {action} deferred — no vaulted payment method` note on the ticket, and returns `{ success: false, error: 'no_vaulted_payment_method', summary: '{action} deferred …' }` WITHOUT calling the commerce effector. Fail-closed and unconditional (no flag bypass) — a missing PM can never reach `createOrder` / `createSubscription`. Pinned by `action-executor.vaulted-pm-guard.test.ts`.
 
 - **`executeSonnetDecision` returns `{ messageSent, escalated, closed, statusManaged }`.** The `workflow` case returns `statusManaged: true` (via `handleWorkflow`, which returns `true` only when a workflow actually ran) because the workflow executor sets the authoritative final status itself in `sendReply` ([[workflow-executor]]: `account_login` → closed, `return_to_sender` → open). The post-execute block in [[../inngest/unified-ticket-handler]] (`postExecuteStatusAction`) must leave a status-managed ticket untouched — do NOT copy the journey case's `messageSent = true`, which routes through `setStatus` and always forces `closed`, wrongly closing an intentionally-open workflow. (Ticket `a89dcf76` Mindy Freeman: `account_login` magic-link close was being reopened as "no customer message sent".) See [[../lifecycles/ticket-lifecycle]] Phase 5.
 
