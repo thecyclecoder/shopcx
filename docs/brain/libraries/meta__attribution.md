@@ -58,6 +58,7 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 ## Callers
 
 - `src/lib/inngest/meta-performance.ts` (`meta-attribution-refresh`, fired after each performance sync)
+- `scripts/backfill-meta-attribution-90d.ts` — one-shot 90-day forced-recompute per active `meta_ad_accounts` row (attribution-sensor-recalibration Phase 3). Idempotent (upsert on the composite key); pass `incrementalDays: 90` to force the wide window even when rows exist. Follows each recompute with two read-only verification probes: (1) `meta_attribution_daily` last-30d asserts ≥1 row with `variant != '(unresolved)'` AND `roas > 0`; (2) `detectWinners()` returns without throwing and finds ≥1 `(meta_ad_id, variant)` cell with `revenue_cents > 0` (kills the degenerate roas=0 universe).
 
 ## Gotchas
 
