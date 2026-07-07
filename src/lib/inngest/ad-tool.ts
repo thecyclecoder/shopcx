@@ -880,7 +880,10 @@ export const adToolPublishToMeta = inngest.createFunction(
           description: j.description,
           ctaType: j.cta_type,
           destinationUrl: j.destination_url,
-          urlTags: `utm_source=meta&utm_medium=paid_social&utm_campaign=${encodeURIComponent(ctx.adName)}`,
+          // utm_content={{ad.id}} is Meta's dynamic-URL token — Meta substitutes the
+          // real ad id per click at delivery time, so orders.attributed_utm_content
+          // resolves to meta_ad_id (attribution-sensor-recalibration Phase 2).
+          urlTags: `utm_source=meta&utm_medium=paid_social&utm_campaign=${encodeURIComponent(ctx.adName)}&utm_content={{ad.id}}`,
         };
 
         let creativeId: string;

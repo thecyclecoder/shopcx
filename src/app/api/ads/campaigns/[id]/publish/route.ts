@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { META_CTA_TYPES } from "@/lib/ad-meta-copy";
-import { advertorialLanderUrl } from "@/lib/advertorial-pages";
+import { advertorialLanderUrl, appendScentMatchParams, hasScentMatchParams } from "@/lib/advertorial-pages";
 
 async function authorize(workspaceId: string | null) {
   const supabase = await createClient();
@@ -66,6 +66,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   let destinationUrl = typeof body.destination_url === "string" ? body.destination_url.trim() : "";
   if (!destinationUrl) destinationUrl = ((campaign as { landing_url?: string | null }).landing_url || "").trim();
   if (!destinationUrl) destinationUrl = (await advertorialLanderUrl(workspaceId as string, id)) || "";
+
+  // Scent-match invariant (attribution-sensor-recalibration Phase 2): every
+  // published ad's final destination must carry ?angle=&variant= so the
+  // attribution sensor can resolve click → lander → variant. When the operator
+  // (or the seeded campaign.landing_url) supplied a bare URL, derive the
+  // missing params from advertorialLanderUrl() and append rather than silently
+  // publishing an untrackable PDP.
+  if (destinationUrl && !hasScentMatchParams(destinationUrl)) {
+    const lander = await advertorialLanderUrl(workspaceId as string, id);
+    if (lander) destinationUrl = appendScentMatchParams(destinationUrl, lander);
+  }
   const required: Record<string, unknown> = { meta_account_id: body.meta_account_id, meta_adset_id: body.meta_adset_id, meta_page_id: body.meta_page_id };
   for (const [k, v] of Object.entries(required)) if (!v) return NextResponse.json({ error: `${k} required` }, { status: 400 });
   if (!headlines.length || !primaryTexts.length) return NextResponse.json({ error: "headlines + primary_texts required" }, { status: 400 });
