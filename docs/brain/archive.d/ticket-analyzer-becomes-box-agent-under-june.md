@@ -1,0 +1,1 @@
+- **The AI ticket analyzer becomes a supervised box-session agent under June** · verified 2026-07-07 · → [[../lifecycles/ai-analysis]]

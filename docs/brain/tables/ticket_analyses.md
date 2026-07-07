@@ -1,8 +1,12 @@
 # ticket_analyses
 
-Per-ticket AI analysis output — sentiment, intent, summary, suggested action.
+Per-ticket AI analysis output — sentiment, intent, summary, suggested action. Writes only through the typed SDK ([[../libraries/ticket-analyses]]), not raw `.from('ticket_analyses')` mutations. Enforced by compliance check [scripts/_check-pm-sdk-compliance.ts](https://github.com/thecyclecoder/shopcx/blob/main/scripts/_check-pm-sdk-compliance.ts).
 
 **Primary key:** `id`
+
+## SDK
+
+[[../libraries/ticket-analyses]] — typed `TicketAnalysis` shape + `getAnalysis(ticketId)`, `insertAnalysis(data)`, `listForTicket(ticketId)`, `updateAnalysis(id, data)`. Every read/write flows through this SDK.
 
 ## Columns
 
