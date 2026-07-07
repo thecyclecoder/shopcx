@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildPreExecContext } from "./execute";
 import type { AgentTodoActionType, AgentTodoUrgency } from "./constants";
+import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -464,26 +465,20 @@ export async function materializeTriageOutcome(
   }
 
   // 2. Proposed sonnet_prompt rule (admin/Zach approves) — mirrors improve-actions propose_sonnet_prompt.
+  //    sonnet-prompts-sdk-for-review-agent-db-access Phase 1 — routed through the SDK
+  //    ([[../sonnet-prompts-table]]).
   if (proposal.sonnet_prompt?.title && proposal.sonnet_prompt.content) {
     const sp = proposal.sonnet_prompt;
-    const { data: ins, error } = await admin
-      .from("sonnet_prompts")
-      .insert({
-        workspace_id: workspaceId,
-        title: sp.title,
-        content: sp.content,
-        category: sp.category || "rule",
-        enabled: false,
-        status: "proposed",
-        derived_from_ticket_id: ticketId,
-        proposed_at: new Date().toISOString(),
-        sort_order: 200,
-      })
-      .select("id")
-      .single();
-    if (error) parts.push(`sonnet_prompt propose failed: ${error.message}`);
+    const { id, error } = await proposePrompt(admin, {
+      workspaceId,
+      title: sp.title,
+      content: sp.content,
+      category: sp.category || "rule",
+      derivedFromTicketId: ticketId,
+    });
+    if (error) parts.push(`sonnet_prompt propose failed: ${error}`);
     else {
-      out.promptId = ins.id as string;
+      out.promptId = id as string;
       parts.push(`proposed sonnet_prompt "${sp.title}" (admin-approvable)`);
     }
   }

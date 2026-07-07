@@ -46,6 +46,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
+import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const DRAFT_MODEL = SONNET_MODEL;
@@ -442,26 +443,20 @@ export async function compileForWorkspaceWithClient(
       console.log(`[playbook-compiler] drafted "${cluster.key}" support=${cluster.support} cost=${costCents.toFixed(4)}c`);
     }
 
-    const { data: ins, error } = await admin
-      .from("sonnet_prompts")
-      .insert({
-        workspace_id: workspaceId,
-        title: draftTitle(cluster),
-        content: draft.body,
-        category: "rule",
-        enabled: false,
-        status: "proposed",
-        proposed_at: new Date().toISOString(),
-        sort_order: 200,
-      })
-      .select("id")
-      .single();
+    // sonnet-prompts-sdk-for-review-agent-db-access Phase 1 — proposal inserts route through the
+    // sonnet-prompts SDK ([[sonnet-prompts-table]]).
+    const { id, error } = await proposePrompt(admin, {
+      workspaceId,
+      title: draftTitle(cluster),
+      content: draft.body,
+      category: "rule",
+    });
     if (error) {
-      console.warn("[playbook-compiler] sonnet_prompts insert failed:", error.message);
+      console.warn("[playbook-compiler] sonnet_prompts insert failed:", error);
       continue;
     }
-    if (ins?.id) {
-      proposedSonnetIds.push(ins.id as string);
+    if (id) {
+      proposedSonnetIds.push(id);
       drafted++;
     }
   }

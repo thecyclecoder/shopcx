@@ -19,6 +19,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { OPUS_MODEL } from "@/lib/ai-models";
+import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const REPORT_MODEL = OPUS_MODEL;
@@ -165,21 +166,18 @@ export async function generateDailyReport(
     cache_read_tokens: usage.cache_read_input_tokens || 0,
   });
 
-  // Insert proposed rules
+  // Insert proposed rules through the sonnet-prompts SDK
+  // ([[../lib/sonnet-prompts-table]] · sonnet-prompts-sdk-for-review-agent-db-access Phase 1).
   const proposedSonnetIds: string[] = [];
   for (const p of parsed.proposed_sonnet_prompts || []) {
-    const { data: ins, error } = await admin.from("sonnet_prompts").insert({
-      workspace_id: workspaceId,
+    const { id, error } = await proposePrompt(admin, {
+      workspaceId,
       title: p.title,
       content: p.content,
       category: p.category || "rule",
-      enabled: false,
-      status: "proposed",
-      proposed_at: new Date().toISOString(),
-      sort_order: 200,
-    }).select("id").single();
-    if (error) { console.warn("[daily-report] sonnet_prompts insert failed:", error.message); continue; }
-    if (ins?.id) proposedSonnetIds.push(ins.id);
+    });
+    if (error) { console.warn("[daily-report] sonnet_prompts insert failed:", error); continue; }
+    if (id) proposedSonnetIds.push(id);
   }
 
   const proposedGraderIds: string[] = [];
