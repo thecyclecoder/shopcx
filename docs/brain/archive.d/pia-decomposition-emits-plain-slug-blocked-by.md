@@ -1,0 +1,1 @@
+- **Pia's goal decomposition emits plain-slug blocked_by, not a namespaced goalSlug:specSlug the gating can't parse** · verified 2026-07-07 · → [[../libraries/goal-proposals]] · [[../libraries/goal-member-blocked-by]] · [[../libraries/agent-jobs]]
