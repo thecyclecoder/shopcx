@@ -7130,6 +7130,115 @@ function isBrokenSupabaseDbPush(cmd: string): boolean {
   return /supabase\s+db\s+push/i.test(cmd);
 }
 
+// builder-migration-apply-uses-working-pgclient — Phase 2 verification probe. After the migration
+// SQL committed, confirm the DDL objects the migration DECLARED actually resolve in pg_catalog —
+// mirroring the "select 1 from pg_indexes where indexname in (…)" verify tail that
+// scripts/apply-*.ts scripts already print (see apply-account-matching-indexes-migration.ts).
+// Guards the exact ambiguity Phase 2 calls out: a no-op apply (empty INSERT list, IF NOT EXISTS
+// guard against nothing, a WHERE that always yields zero) leaves the SQL "succeeded" but nothing
+// landed — the probe fails the action so the caller marks it failed with the missing-object list
+// surfaced. Pure DML (seed) migrations that declare no CREATE-* / ADD-COLUMN objects skip the
+// probe (an INSERT that no-ops raises no per-row error we can catch here — write a per-migration
+// scripts/apply-*.ts if you need per-row verification, per the recipe).
+type MigrationProbe = {
+  kind: "table" | "column" | "index" | "schema" | "policy";
+  label: string;
+  sql: string;
+  params: unknown[];
+};
+
+function extractMigrationProbes(sql: string): MigrationProbe[] {
+  const stripped = sql.replace(/--[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const probes: MigrationProbe[] = [];
+  const seen = new Set<string>();
+  const push = (p: MigrationProbe) => {
+    const k = `${p.kind}:${p.label}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    probes.push(p);
+  };
+  // CREATE TABLE [IF NOT EXISTS] [schema.]name
+  for (const m of stripped.matchAll(
+    /\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?(?:"?(\w+)"?\.)?"?(\w+)"?/gi,
+  )) {
+    const schema = (m[1] || "public").toLowerCase();
+    const name = m[2].toLowerCase();
+    push({
+      kind: "table",
+      label: `${schema}.${name}`,
+      sql: `select 1 from information_schema.tables where table_schema=$1 and table_name=$2 limit 1`,
+      params: [schema, name],
+    });
+  }
+  // CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name
+  for (const m of stripped.matchAll(
+    /\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?"?(\w+)"?/gi,
+  )) {
+    const name = m[1].toLowerCase();
+    push({
+      kind: "index",
+      label: name,
+      sql: `select 1 from pg_indexes where indexname=$1 limit 1`,
+      params: [name],
+    });
+  }
+  // ALTER TABLE [ONLY] [schema.]tbl ADD COLUMN [IF NOT EXISTS] col
+  for (const m of stripped.matchAll(
+    /\balter\s+table\s+(?:only\s+)?(?:"?(\w+)"?\.)?"?(\w+)"?\s+add\s+column(?:\s+if\s+not\s+exists)?\s+"?(\w+)"?/gi,
+  )) {
+    const schema = (m[1] || "public").toLowerCase();
+    const table = m[2].toLowerCase();
+    const col = m[3].toLowerCase();
+    push({
+      kind: "column",
+      label: `${schema}.${table}.${col}`,
+      sql: `select 1 from information_schema.columns where table_schema=$1 and table_name=$2 and column_name=$3 limit 1`,
+      params: [schema, table, col],
+    });
+  }
+  // CREATE SCHEMA [IF NOT EXISTS] name
+  for (const m of stripped.matchAll(
+    /\bcreate\s+schema\s+(?:if\s+not\s+exists\s+)?"?(\w+)"?/gi,
+  )) {
+    const name = m[1].toLowerCase();
+    push({
+      kind: "schema",
+      label: name,
+      sql: `select 1 from information_schema.schemata where schema_name=$1 limit 1`,
+      params: [name],
+    });
+  }
+  // CREATE POLICY name ON [schema.]tbl
+  for (const m of stripped.matchAll(
+    /\bcreate\s+policy\s+"?(\w+)"?\s+on\s+(?:"?(\w+)"?\.)?"?(\w+)"?/gi,
+  )) {
+    const name = m[1].toLowerCase();
+    const schema = (m[2] || "public").toLowerCase();
+    const table = m[3].toLowerCase();
+    push({
+      kind: "policy",
+      label: `${schema}.${table}.${name}`,
+      sql: `select 1 from pg_policies where policyname=$1 and schemaname=$2 and tablename=$3 limit 1`,
+      params: [name, schema, table],
+    });
+  }
+  return probes;
+}
+
+async function probeMigrationDdl(
+  client: import("pg").Client,
+  sql: string,
+): Promise<{ ok: boolean; ran: number; missing: string[] }> {
+  const probes = extractMigrationProbes(sql);
+  if (probes.length === 0) return { ok: true, ran: 0, missing: [] };
+  const missing: string[] = [];
+  for (const p of probes) {
+    const { rowCount } = await client.query(p.sql, p.params);
+    if (!rowCount) missing.push(`${p.kind} ${p.label}`);
+  }
+  return { ok: missing.length === 0, ran: probes.length, missing };
+}
+
 async function applyPendingSupabaseMigrationsViaPgClient(
   cwd: string,
 ): Promise<{ code: number; out: string; err: string }> {
@@ -7187,7 +7296,23 @@ async function applyPendingSupabaseMigrationsViaPgClient(
           insertVals,
         );
         await client.query("commit");
-        lines.push(`✓ ${f}`);
+        // Phase 2 — verify the apply landed. A no-op apply (empty INSERT, IF NOT EXISTS against
+        // nothing, always-false WHERE) leaves the query "successful" but nothing materializes;
+        // probe each declared CREATE-* / ADD-COLUMN object and fail the action so the caller
+        // marks it failed with the missing-object list, not a silent pass.
+        try {
+          const probe = await probeMigrationDdl(client, sql);
+          if (!probe.ok) {
+            const msg = `post-apply DDL probe failed — expected but not present: ${probe.missing.join(", ")}`;
+            lines.push(`✗ ${f}: ${msg}`);
+            return { code: 1, out: lines.join("\n"), err: msg };
+          }
+          lines.push(probe.ran > 0 ? `✓ ${f} (probe: ${probe.ran} object(s))` : `✓ ${f} (data-only — no DDL probe)`);
+        } catch (e) {
+          const msg = `post-apply probe error: ${e instanceof Error ? e.message : String(e)}`;
+          lines.push(`✗ ${f}: ${msg}`);
+          return { code: 1, out: lines.join("\n"), err: msg };
+        }
         n++;
       } catch (e) {
         try { await client.query("rollback"); } catch { /* connection may already be aborted */ }
