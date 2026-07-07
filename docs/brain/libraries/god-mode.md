@@ -68,3 +68,13 @@ New SDK surface for the CEO-grade approval model ([[../lifecycles/god-mode]] § 
 - `openApproval` gained an optional `category`; `GodModeApprovalRow` gained `category`; `GodModeMessage.role` gained `checklist`; `GodModeApprovalRisk` gained `decision`.
 
 The box escalates decisions via `scripts/god-mode-plan.ts decide "<category>" "<question>"` (checks the standing grant, else raises + polls a decision card). The double-print fix lives in the worker (`runGodModeJob` no longer re-appends the founder message — the message route already did).
+
+## God-mode becomes CEO's executive-assistant agent (Phase 8)
+
+[[../lifecycles/god-mode#autonomous-executive-assistant--god-mode-becomes-ceos-agent-phase-8]] phases the cockpit into a **first-class autonomous agent** under the CEO seat with its own identity — 🌙 **Eve** (the founder's executive assistant). The SDK stays unchanged; the org model + liveness wiring changed:
+
+**Phase 1:** Extended `OwnerFunction` enum to include `'ceo'` (previously directors only). Registered `god-mode-cockpit` as a MONITORED_LOOPS `reactive` lane with `owner="ceo"` + `personaKind="god-mode"` (see [[../libraries/control-tower]] registry), giving the cockpit a CEO owner instead of Platform-defaulting. Added Eve to [[../libraries/agent-personas]] personas.ts — name: "Eve", role: "Executive Assistant", pronouns she/her/her, personality describing a phone-to-box assistant that does anything within the founder's gates.
+
+**Phase 2:** [[../libraries/agent-personas]] `org-chart.ts` now renders CEO-owned workers under the CEO seat alongside goals (lines 413–418) — filtered from the same roster that fills directors' workers, so a lane renders in exactly one place. Liveness for Eve derives from cockpit `armed` [[../tables/god_mode_sessions]] rows (healthy when armed, even idle) + `loop_heartbeats` for the `god-mode-cockpit` loop + recent `god_mode_approvals` (a pending approval holds liveness open). The cockpit is event-driven, but liveness is beats-based so the roster dashboard never breaks.
+
+**Phase 3 Fix 1:** Pre-merge spec-test regression (check 3122218882ab4f64) required Eve to have a "real avatarUrl" (not null). Fixed by reusing the CEO's headshot placeholder (`ceo-crown.jpg`) until the companion spec `builder-persona-add-upserts-by-key-and-generates-avatar` auto-generates a Nano Banana Pro headshot.
