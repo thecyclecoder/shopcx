@@ -1,6 +1,6 @@
 /**
  * Approval-gated execution adapters — Storefront Iteration Engine Phase 6b +
- * media-buyer loop (meta-campaign-adset-creation-primitive Phase 2).
+ * media-buyer loop (meta-campaign-adset-creation-primitive Phase 2 + Phase 3).
  *
  * When Dylan approves an `iteration_recommendations` row (status pending →
  * approved), this dispatcher turns it into a real but DRAFT/PAUSED Meta object —
@@ -16,10 +16,14 @@
  *     would push the account's rolling window past the `ad_spend_budgets`
  *     ceiling ESCALATES to a growth `director_activity` row and marks the
  *     recommendation `deferred` — it does NOT create a live object. Every
- *     successful create stamps `director_activity` for Max's audit. If the
- *     recommendation also carries `ad_campaign_id` (a built ad_campaigns row),
- *     the adapter chains straight into the publish path so the concept's ad
- *     lands PAUSED inside the newly-created ad set.
+ *     successful create stamps `director_activity` for Max's audit AND
+ *     reconciles the new campaign + ad set into the local mirror
+ *     (`meta_campaigns` + `meta_adsets`) so the attribution engine and
+ *     winner-detector see the object immediately, without waiting for the
+ *     next `syncMetaStructure` cycle (Phase 3). If the recommendation also
+ *     carries `ad_campaign_id` (a built ad_campaigns row), the adapter chains
+ *     straight into the publish path so the concept's ad lands PAUSED inside
+ *     the newly-created ad set.
  *
  * A deferred type is left `status='approved'` with `external_result.deferred` set
  * (a reason), so nothing is lost and the rollout is legible.
@@ -79,6 +83,112 @@ interface RecommendationRow {
   title: string | null;
   params: Record<string, unknown> | null;
   external_result: Record<string, unknown> | null;
+}
+
+/**
+ * meta-campaign-adset-creation-primitive Phase 3 — mirror reconcile after
+ * create. Seeds the local `meta_campaigns` + `meta_adsets` mirror with the
+ * campaign + ad set we JUST created so the attribution engine
+ * ([[meta_attribution_daily]]) and the winner-detector see the new object
+ * within the same cycle — no wait for the next `syncMetaStructure` GET.
+ *
+ * We upsert on the same natural keys `syncMetaStructure` uses
+ * (`workspace_id,meta_campaign_id` / `workspace_id,meta_adset_id`), so when
+ * that later cron runs and hydrates the effective_status / meta_created_time
+ * from Meta, it overwrites cleanly on top of what we seeded here.
+ *
+ * A supabase error is THROWN — a swallowed upsert would leave the mirror
+ * silently stale (the failure mode called out in performance.ts's own
+ * `upsertOrThrow` comment). The caller decides whether to retry or fail
+ * the recommendation; either way, no silent drift.
+ */
+export interface ReconcileCreatedAdSetInput {
+  workspaceId: string;
+  /** Our DB uuid for the ad account (meta_ad_accounts.id). */
+  metaAdAccountId: string;
+  metaCampaignId: string;
+  campaignName: string;
+  campaignObjective: string;
+  metaAdsetId: string;
+  adsetName: string;
+  optimizationGoal: string;
+  /** Ad-set-level daily budget in minor units (ABO). Null when the ad set uses a lifetime budget or CBO. */
+  dailyBudgetCents: number | null;
+  /** Ad-set + campaign status. Always `PAUSED` for engine-created objects. */
+  status: string;
+  /** ISO timestamp — the moment of creation (used for `synced_at`/`updated_at`/`meta_created_time`). */
+  syncedAt: string;
+}
+
+/**
+ * Minimal admin surface this helper touches — the tests inject a fake with
+ * exactly this shape (see recommendation-execute.test.ts). Kept intentionally
+ * narrow so the reconcile can't grow a hidden dependency on the full client.
+ */
+type MirrorAdmin = {
+  from(table: string): {
+    upsert(
+      rows: Record<string, unknown>[],
+      opts?: { onConflict?: string },
+    ): PromiseLike<{ error: { message: string; code?: string } | null }>;
+  };
+};
+
+export async function reconcileCreatedAdSetToMirror(
+  admin: MirrorAdmin,
+  input: ReconcileCreatedAdSetInput,
+): Promise<void> {
+  const campaignRow: Record<string, unknown> = {
+    workspace_id: input.workspaceId,
+    meta_ad_account_id: input.metaAdAccountId,
+    meta_campaign_id: input.metaCampaignId,
+    name: input.campaignName,
+    status: input.status,
+    // The next real sync will overwrite these two with Meta's computed values.
+    effective_status: input.status,
+    objective: input.campaignObjective,
+    // ABO campaigns carry no campaign-level budget — the ad set carries it.
+    daily_budget_cents: null,
+    lifetime_budget_cents: null,
+    meta_created_time: input.syncedAt,
+    meta_updated_time: input.syncedAt,
+    synced_at: input.syncedAt,
+    updated_at: input.syncedAt,
+  };
+  const { error: campaignError } = await admin
+    .from("meta_campaigns")
+    .upsert([campaignRow], { onConflict: "workspace_id,meta_campaign_id" });
+  if (campaignError) {
+    throw new Error(
+      `meta_campaigns upsert failed (mirror reconcile): ${campaignError.code ?? "?"} ${campaignError.message}`,
+    );
+  }
+
+  const adsetRow: Record<string, unknown> = {
+    workspace_id: input.workspaceId,
+    meta_ad_account_id: input.metaAdAccountId,
+    meta_adset_id: input.metaAdsetId,
+    // Parent-link is the campaign's Meta id (text natural key — meta_adsets.md).
+    meta_campaign_id: input.metaCampaignId,
+    name: input.adsetName,
+    status: input.status,
+    effective_status: input.status,
+    optimization_goal: input.optimizationGoal,
+    daily_budget_cents: input.dailyBudgetCents,
+    lifetime_budget_cents: null,
+    meta_created_time: input.syncedAt,
+    meta_updated_time: input.syncedAt,
+    synced_at: input.syncedAt,
+    updated_at: input.syncedAt,
+  };
+  const { error: adsetError } = await admin
+    .from("meta_adsets")
+    .upsert([adsetRow], { onConflict: "workspace_id,meta_adset_id" });
+  if (adsetError) {
+    throw new Error(
+      `meta_adsets upsert failed (mirror reconcile): ${adsetError.code ?? "?"} ${adsetError.message}`,
+    );
+  }
 }
 
 /**
@@ -404,17 +514,38 @@ async function executeNewCampaignAdapter(rec: RecommendationRow): Promise<Execut
 
   // One ad set per creative concept — PAUSED, purchase-optimized, Advantage+ placements.
   const adsetName = `${ENGINE_NAME_TAG} ${rec.title || "test adset"}`.slice(0, 250);
+  const optimizationGoal = typeof params.optimization_goal === "string" ? params.optimization_goal : "OFFSITE_CONVERSIONS";
   const metaAdsetId = await createAdSet(token, metaAccountId, {
     name: adsetName,
     campaignId: metaCampaignId,
     dailyBudgetCents,
     pixelId,
     targeting,
-    ...(typeof params.optimization_goal === "string" ? { optimizationGoal: params.optimization_goal } : {}),
+    optimizationGoal,
     ...(typeof params.billing_event === "string" ? { billingEvent: params.billing_event } : {}),
     ...(typeof params.bid_strategy === "string" ? { bidStrategy: params.bid_strategy } : {}),
     ...(typeof params.custom_event_type === "string" ? { customEventType: params.custom_event_type } : {}),
     // status omitted → createAdSet defaults to PAUSED (the invariant).
+  });
+
+  // Phase 3 — mirror reconcile. Seed `meta_campaigns` + `meta_adsets` with the
+  // objects we just created so the attribution engine and winner-detector
+  // resolve the ad set id from the local mirror without waiting for the next
+  // `syncMetaStructure` cycle. A supabase error THROWS — the outer try/catch
+  // marks the recommendation `failed` with the message so a silent stale
+  // mirror can never mask a broken create.
+  await reconcileCreatedAdSetToMirror(admin, {
+    workspaceId: rec.workspace_id,
+    metaAdAccountId: rec.meta_ad_account_id,
+    metaCampaignId,
+    campaignName: explicitCampaign ? (rec.title || metaCampaignId) : "MB — Testing (ABO)",
+    campaignObjective: "OUTCOME_SALES",
+    metaAdsetId,
+    adsetName,
+    optimizationGoal,
+    dailyBudgetCents,
+    status: "PAUSED",
+    syncedAt: new Date().toISOString(),
   });
 
   // Growth-owned audit trail — Max's "who created what and why" lineage row.
