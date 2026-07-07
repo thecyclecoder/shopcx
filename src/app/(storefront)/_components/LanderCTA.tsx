@@ -20,11 +20,31 @@ const CSS = `
 @media (prefers-reduced-motion:reduce){.lander-cta{transition:none}}
 `;
 
-export function LanderCTA({ label, href = "#pricing" }: { label: string; href?: string }) {
+/** A real add-to-cart target. When set, the CTA renders a `#buy-{variantId}` anchor with the
+ *  data-* attributes the storefront's global click handler ([[StorefrontPixelInit]]) reads to
+ *  POST /api/cart and move the shopper to checkout — identical to the price-table "Select" CTA.
+ *  Without it, the CTA is a plain in-page scroll (default `#pricing`, i.e. the offer card). */
+export interface LanderBuy {
+  variantId: string;
+  quantity?: number;
+  mode: "subscribe" | "onetime";
+  frequencyDays?: number | null;
+}
+
+export function LanderCTA({ label, href = "#pricing", buy }: { label: string; href?: string; buy?: LanderBuy }) {
+  const anchorProps: Record<string, string> = buy
+    ? {
+        href: `#buy-${buy.variantId}`,
+        "data-variant-id": buy.variantId,
+        "data-tier-quantity": String(buy.quantity ?? 1),
+        "data-mode": buy.mode,
+        ...(buy.mode === "subscribe" && buy.frequencyDays != null ? { "data-frequency-days": String(buy.frequencyDays) } : {}),
+      }
+    : { href };
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
-      <a className="lander-cta" href={href}>
+      <a className="lander-cta" {...anchorProps}>
         <span>{label}</span>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M8 5l7 7-7 7" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
