@@ -479,6 +479,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Storefront MVP — Amazing Coffee subscription funnel (internal subs · instrumentation · Meta CAPI · smart popup · checkout hardening)** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
 - **Storefront: survey chapter + converter-first PDP reorder** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
 - **Centralized Commerce SDK — one internal-aware layer for every customer-facing read & write** · folded 2026-07-05 · → [[lifecycles/commerce-sdk]]
+- **Ticket handling — guaranteed, observable, self-running** · folded 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 
 ## Related
