@@ -36,6 +36,8 @@ export function BlueprintLander({
   content: BlueprintRenderContent;
 }) {
   const price = lowestPriceCents(data);
+  // Funnel: reasons lander → bundle PDP → checkout. The offer CTA drives to the bundle PDP.
+  const bundleHref = `/store/${data.workspace.storefront_slug}/${data.product.handle}?variant=bundle&name=starterkit`;
   return (
     <>
       {content.hero && <BlueprintHero {...content.hero} lowestPriceCents={price} />}
@@ -50,7 +52,7 @@ export function BlueprintLander({
       )}
       {content.reviews && <BlueprintReviews reviews={content.reviews} />}
       {content.featured && <BlueprintFeaturedReview featured={content.featured} />}
-      {content.offer && <BlueprintOffer offer={content.offer} />}
+      {content.offer && <BlueprintOffer offer={content.offer} ctaHref={bundleHref} />}
       {content.faq && content.faq.length > 0 && <BlueprintFaq faq={content.faq} />}
       {content.socialProofHeading && <BlueprintSocialProof data={data} heading={content.socialProofHeading} />}
       {content.footer && <BlueprintFooter footer={content.footer} />}

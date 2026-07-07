@@ -41,6 +41,7 @@ import { ReasonsListicle } from "../_sections/ReasonsListicle";
 import { BeforeAfterHero } from "../_sections/BeforeAfterHero";
 import { WeightLossTestimonialWall } from "../_sections/WeightLossTestimonialWall";
 import { BlueprintLander } from "../_sections/BlueprintLander";
+import { BundleHero } from "../_sections/BundleHero";
 import { StickyJumpNav } from "../_components/StickyJumpNav";
 import type { AdvertorialContent } from "@/lib/advertorial-pages";
 import type { BlueprintRenderContent } from "@/lib/blueprint-render";
@@ -89,11 +90,17 @@ export function StorefrontPage({
   reviewSlug,
   advertorial = null,
   blueprint = null,
+  bundleName = null,
   experimentExposures = [],
 }: {
   data: PageData;
   canonicalPath: string;
   reviewSlug: string;
+  /** When set (via ?variant=bundle&name=…), renders the bundle PDP: the hero carries the
+   *  composed bundle image + "Select Bundle" buy control, and the addons / pricing-columns /
+   *  bundle-pricing-columns / survey chapters are dropped. Still a full PDP (chrome + checkout),
+   *  not a distraction-free lander — the funnel is reasons lander → bundle PDP → checkout. */
+  bundleName?: string | null;
   /** When set, renders an ad-matched lander layout (advertorial / before-after)
    *  instead of the standard PDP. The custom top swaps; everything below the
    *  custom top (ingredients, pricing, reviews, checkout) is reused unchanged. */
@@ -279,7 +286,7 @@ export function StorefrontPage({
             ) : (
             <>
             <CompleteOrderBanner guaranteeCopy={data.page_content?.guarantee_copy ?? null} />
-            <HeroSection data={data} />
+            {bundleName ? <BundleHero data={data} /> : <HeroSection data={data} />}
             {/* Survey chapter — interactive lead-capture quiz placed right
                 after the hero to rescue the ~70% hero→ch1 drop-off, capture
                 zero-party data, and gate the signup code behind email/phone.
@@ -288,10 +295,11 @@ export function StorefrontPage({
                 renders for products with show_survey=true (the coffee products)
                 — non-coffee products would show a nonsensical survey otherwise.
                 (Lander refinements round 3.) */}
-            {data.page_content?.show_survey && <SurveyChapter data={data} />}
+            {/* Bundle PDP drops the survey (and the addons/pricing chapters below). */}
+            {!bundleName && data.page_content?.show_survey && <SurveyChapter data={data} />}
             {/* Shared content body — the full chapter set, identical across
                 the standard PDP and the ad variants (see StandardChapters). */}
-            <StandardChapters data={data} reviewSlug={reviewSlug} />
+            <StandardChapters data={data} reviewSlug={reviewSlug} bundle={!!bundleName} />
             </>
             )}
           </main>
@@ -319,7 +327,7 @@ export function StorefrontPage({
  * while attention is highest), then the "learn more" zone below the price
  * table for shoppers who scroll past pricing wanting more.
  */
-function StandardChapters({ data, reviewSlug }: { data: PageData; reviewSlug: string }) {
+function StandardChapters({ data, reviewSlug, bundle = false }: { data: PageData; reviewSlug: string; bundle?: boolean }) {
   const wsSlug = data.workspace.storefront_slug || "";
   const wsName = data.workspace.name || "Superfoods Company";
   return (
@@ -329,12 +337,16 @@ function StandardChapters({ data, reviewSlug }: { data: PageData; reviewSlug: st
       {/* Expert endorsement sits right under ingredients — credentials
           reinforce the ingredient story before the customer reaches pricing. */}
       <NutritionistEndorsementSection data={data} />
-      {/* Upsell complementarity chapter — only renders when the primary has
-          an upsell partner + saved copy. Sits before pricing so the bundle
-          pitch is set up first. */}
-      <UpsellChapter data={data} />
-      <PriceTableSection data={data} />
-      <BundlePriceTableSection data={data} />
+      {/* Bundle PDP moves selection into the hero, so the addons (UpsellChapter) +
+          pricing-columns (PriceTableSection) + bundle-pricing-columns (BundlePriceTableSection)
+          chapters are dropped; every CTA scrolls back to the hero instead. */}
+      {!bundle && (
+        <>
+          <UpsellChapter data={data} />
+          <PriceTableSection data={data} />
+          <BundlePriceTableSection data={data} />
+        </>
+      )}
       {/* "Learn more" zone — detail / social-proof chapters for shoppers who
           scroll past pricing. Kept, not cut. */}
       <UGCSection data={data} slug={reviewSlug} workspaceSlug={wsSlug} />
