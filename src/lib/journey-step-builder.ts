@@ -12,7 +12,7 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 export interface JourneyStep {
   key: string;
-  type: "checklist" | "confirm" | "text" | "select" | "single_choice" | "phone" | "info" | "item_accounting" | "address_form";
+  type: "checklist" | "confirm" | "text" | "select" | "single_choice" | "phone" | "info" | "item_accounting" | "address_form" | "payment_method";
   question: string;
   subtitle?: string;
   options?: { value: string; label: string }[];
@@ -57,6 +57,10 @@ export async function buildJourneySteps(
     case "address_change": {
       const { buildShippingAddressSteps } = await import("@/lib/shipping-address-journey-builder");
       return buildShippingAddressSteps(admin, workspaceId, customerId, ticketId);
+    }
+    case "add_payment_method": {
+      const { buildAddPaymentMethodSteps } = await import("@/lib/add-payment-method-journey-builder");
+      return buildAddPaymentMethodSteps(admin, workspaceId, customerId, ticketId);
     }
     case "missing_items": {
       const { buildMissingItemsSteps } = await import("@/lib/missing-items-journey-builder");

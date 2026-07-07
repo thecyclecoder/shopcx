@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, type Dispatch, type SetStateAction } from "react";
 import { useParams } from "next/navigation";
+import { HostedFieldsCard, type HostedFieldsCardHandle } from "@/app/(storefront)/checkout/_components/HostedFieldsCard";
 
 interface JourneyOption {
   value: string;
@@ -1219,6 +1220,16 @@ function CodeDrivenJourney({
               selectedItemIndices={responses.select_items?.value?.split(",").map(s => parseInt(s.trim())).filter(n => !isNaN(n))}
             />
           )}
+
+          {form.type === "payment_method" && (
+            <PaymentMethodStep
+              token={token}
+              config={config}
+              primaryColor={primaryColor}
+              submitting={submitting}
+              onSubmit={(value, label) => handleSubmit(value, label)}
+            />
+          )}
         </div>
       )}
 
@@ -1629,5 +1640,103 @@ function AddressForm({
         {submitting ? "Verifying..." : "Confirm Address"}
       </button>
     </form>
+  );
+}
+
+// ── Payment Method (Braintree Hosted Fields) Step ──
+// Mounts HostedFieldsCard fed a client token from
+// /api/journey/[token]/client-token. On save we tokenize + hand the nonce +
+// deviceData to the caller's onSubmit; Phase 2 wires the vault + migrate
+// path on the server side (extracted from portal/handlers/payment-method-
+// update.ts so the two callers share one code path).
+
+function PaymentMethodStep({
+  token,
+  config,
+  primaryColor,
+  submitting,
+  onSubmit,
+}: {
+  token: string;
+  config: JourneyConfig;
+  primaryColor: string;
+  submitting: boolean;
+  onSubmit: (value: string, label: string) => void;
+}) {
+  const meta = (config as { metadata?: Record<string, unknown> })?.metadata || {};
+  const cardholderName = (meta.cardholderName as string | undefined) || "";
+  const [clientToken, setClientToken] = useState<string | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const hfRef = useRef<HostedFieldsCardHandle>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/journey/${token}/client-token`);
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok || !data?.client_token) {
+          setTokenError(data?.message || data?.error || "Couldn't start card entry.");
+          return;
+        }
+        setClientToken(data.client_token);
+      } catch {
+        if (!cancelled) setTokenError("Couldn't start card entry.");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  async function handleSave() {
+    if (!hfRef.current || saving || submitting) return;
+    setSaving(true);
+    setTokenError(null);
+    try {
+      const { nonce, deviceData } = await hfRef.current.tokenize();
+      const payload = JSON.stringify({ paymentMethodNonce: nonce, deviceData });
+      onSubmit(payload, "Card entered");
+    } catch (e) {
+      setTokenError(e instanceof Error ? e.message : "Please check the card details and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (tokenError && !clientToken) {
+    return (
+      <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+        {tokenError}
+      </div>
+    );
+  }
+
+  if (!clientToken) {
+    return (
+      <div className="mt-5 flex items-center justify-center py-8">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-5">
+      <HostedFieldsCard
+        clientToken={clientToken}
+        primaryColor={primaryColor}
+        cardholderName={cardholderName}
+        onError={(msg) => setTokenError(msg)}
+      />
+      {tokenError && <p className="mt-2 text-sm text-rose-600">{tokenError}</p>}
+      <button
+        onClick={handleSave}
+        disabled={saving || submitting}
+        className="mt-4 w-full rounded-xl px-4 py-3 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+        style={{ backgroundColor: primaryColor }}
+      >
+        {saving || submitting ? "Saving..." : "Save card"}
+      </button>
+    </div>
   );
 }
