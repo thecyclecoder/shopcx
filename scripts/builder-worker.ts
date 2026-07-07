@@ -11645,13 +11645,36 @@ async function runPromptReviewJob(job: Job) {
     const parsed = parseDecision(resultText);
     console.log(`${tag} claude finished — decision: ${parsed?.decision ?? "(none)"} · isError=${isError}`);
 
+    // Phase 2 supervision surface — every path below (unparseable, guardrail downgrade, clean
+    // apply) writes ONE row to `director_activity` under the CS function (June's charge). She
+    // owns "conversation-rule quality"; the agent optimizes "review each proposal well" —
+    // hitting a rail escalates, never executes silently (operational-rules § North star).
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
     if (!parsed) {
+      // Rail hit: the agent's final message didn't parse as a verdict. Escalate to June via
+      // director_activity so a routinely-monitored surface (her activity feed) shows the miss,
+      // and park the job as failed so the CS lane doesn't silently drop it.
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "prompt_review_escalated",
+        specSlug: proposalId,
+        reason: "prompt-review agent produced no parseable verdict — escalated to June rather than silently rejecting",
+        metadata: {
+          job_id: job.id,
+          proposal_id: proposalId,
+          raw_tail: raw.slice(-1000),
+          reason_code: "unparseable_verdict",
+          autonomous: false,
+        },
+      });
       await update(job.id, {
         status: "failed",
         error: "prompt-review returned no parseable verdict",
         log_tail: raw.slice(-2000),
       });
-      console.warn(`${tag} unparseable verdict`);
+      console.warn(`${tag} unparseable verdict — escalated to June`);
       return;
     }
 
@@ -11680,10 +11703,40 @@ async function runPromptReviewJob(job: Job) {
       { dailyCap, alreadyAcceptedToday },
     );
 
+    // Phase 2 — record the verdict + safety outcome to `director_activity` under the CS function.
+    // A guardrail hit (`forcedToHumanReview === true`) is a rail-escalation to June (not silent
+    // execution): the action_kind + metadata.reason_code make the escalation legible on her feed
+    // + EOD recap. A clean apply lands as `prompt_review_applied` — same audit surface June
+    // supervises the rest of her workers on ([[../docs/brain/tables/director_activity.md]]).
+    const escalated = applied.forcedToHumanReview === true;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: "cs",
+      actionKind: escalated ? "prompt_review_escalated" : "prompt_review_applied",
+      specSlug: proposalId,
+      reason: parsed.reasoning
+        ? `${parsed.reasoning}${applied.reason ? `\n[SAFETY] ${applied.reason}` : ""}`.slice(0, 4000)
+        : (applied.reason || `prompt-review verdict=${applied.finalDecision}`).slice(0, 4000),
+      metadata: {
+        job_id: job.id,
+        proposal_id: proposalId,
+        raw_decision: parsed.decision,
+        final_decision: applied.finalDecision,
+        confidence: parsed.confidence,
+        applied: applied.applied,
+        forced_to_human_review: escalated,
+        safety_reason_code: applied.reason ?? null,
+        decision_row_id: applied.decisionRowId ?? null,
+        model: model || REVIEW_MODEL,
+        // supervised, not silent — June owns the objective, the agent runs within its rails.
+        autonomous: !escalated,
+      },
+    });
+
     const summary = [
       `proposal=${proposalId}`,
       `raw_decision=${parsed.decision} · confidence=${parsed.confidence.toFixed(2)}`,
-      `applied=${applied.applied} · final=${applied.finalDecision}${applied.forcedToHumanReview ? " (safety downgrade)" : ""}`,
+      `applied=${applied.applied} · final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated to June)" : ""}`,
       applied.reason ? `reason: ${applied.reason}` : "",
       parsed.reasoning ? `reasoning: ${parsed.reasoning}` : "",
     ].filter(Boolean).join("\n");
@@ -11696,7 +11749,7 @@ async function runPromptReviewJob(job: Job) {
       return;
     }
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
-    console.log(`${tag} final=${applied.finalDecision}${applied.forcedToHumanReview ? " (safety downgrade)" : ""}`);
+    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`);
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
