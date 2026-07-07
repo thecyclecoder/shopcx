@@ -1,0 +1,1 @@
+- **Refund integrity: order_refunds mirror + verify-by-refund-id + T+3d settlement reconcile** · verified 2026-07-07 · → [[tables/order_refunds]]
