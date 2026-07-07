@@ -24,6 +24,26 @@ Two-gate pattern shared with [[platform-director]] + [[growth-director]]: a **st
 - **Runtime guard.** Until [[../tables/function_autonomy]] `('cs','cs-director')` is `live + autonomous`, the CS Director is **dormant**: the router never enqueues a `cs-director` job and every downstream surface no-ops. Phase 2 of this spec seeds the `function_autonomy` row at the **safest available leash** ("dormant" / the enum's `off` label) so the seat exists but nothing acts autonomously until the CEO flips it live.
 - **Always escalates** (never auto-approves): destructive/irreversible actions, a non-binary multi-CHOICE decision, a customer-refund action that exceeds the CS refund ceiling, a proposed `sonnet_prompts` / `grader_prompts` change with high blast radius, or anything the read-only investigation cannot confirm sound. Escalations route to the CEO via `escalateApprovalRequestToCeo` (the same plumbing Ada + Max use).
 
+### Phase 1 — the `cs-director-call` box lane (third rung of the escalation ladder)
+
+[[../specs/cs-director-third-rung-hard-calls-above-triage-quorum]] Phase 1 wires the runtime seat for the escalation-ladder placement above. A `kind='cs-director-call'` `agent_jobs` row is claimed by the box worker's `cs-director-call` lane (`scripts/builder-worker.ts` `runCsDirectorCallJob`, concurrency-1, gated on the Claude-down breaker), which runs a top-level Max `claude -p` (the `cs-director-call` skill) against the ticket. The session's brief bakes in:
+
+1. The **ticket** — subject / channel / status / escalation reason + full conversation (via `loadTriageBrief`).
+2. The **customer, subscriptions, and last 5 orders** — the same commerce/* slice the triage lane uses.
+3. The **[[../tables/ticket_resolution_events]] ledger** — every prior orchestrator turn's `problem` / `confidence` / `verified_outcome` / `reasoning`. A repeated `drifted` / `unbacked` outcome is the signal that a rule / analyzer / product gap is underneath (→ `author_spec`), not a customer-side patch (→ `approve_remedy`).
+4. The **[[../tables/triage_runs]] row** that dispatched the call — solver decision + skeptic verdict + no-quorum reasoning (why the box quorum missed).
+5. **Live `sonnet_prompts`** — the rules the orchestrator reads every turn (so June sees what the system already tried to enforce).
+
+The session emits ONE JSON object — the **verdict**:
+
+- **`decision: 'approve_remedy'`** — the right customer-facing fix is clear AND in leash (reversible OR trivially bounded — a coupon / a partial refund inside the CS refund ceiling / a sub pause / a resend). Payload: `remedy: RemedyPlan` (action_type / summary / payload / confidence). Phase 2's `applyBoxCsDirectorCall` fires it through `executeSonnetDecision` (the same real executor prod uses; see [[../recipes/run-orchestrator-action]]) and stamps `verified_outcome='confirmed'` on the resulting `ticket_resolution_events` row.
+- **`decision: 'author_spec'`** — the ledger shows a recurring `drifted` / `unbacked` outcome the code / rules keep failing on; the right fix is code, not a customer-side patch. Payload: `spec_seed: SpecSeed` (`slug` / `title` / `intent` / `problem` / `target?`). Phase 2 hands it to the [[specs-table]] SDK with `owner_function_slug='cs'` and a Derived-from-ticket ref ([[../functions/cs]] § Ticket-derived product fixes); the BUILD is always Ada's ([[../functions/platform]] — the CEO directive 2026-06-29).
+- **`decision: 'escalate_founder'`** — a real judgment the CEO must make: destructive / irreversible / out-of-leash / non-binary / storyline-shaped / the read-only investigation could not confirm sound. Payload: only `reasoning`. Phase 2 creates a CEO `dashboard_notifications` row with the ticket link + June's reasoning.
+
+The runner is **read-only against everything except one write**: it records the verdict to [[../tables/director_activity]] as `{ director_function:'cs', action_kind:'cs_director_call', spec_slug: verdict.spec_seed.slug ?? null, reason: verdict.reasoning, metadata:{ job_id, ticket_id, triage_run_id, decision, remedy, spec_seed, autonomous:false, phase:1 } }`. That row is the audit trail — the CEO / recap / #directors board sees WHAT the CS Director decided and WHY, BEFORE Phase 2's mutator wires up. `autonomous:false` at Phase 1 flips to `true` in Phase 2 when the executor fires an in-leash remedy without asking the CEO.
+
+An unparseable verdict from the session parks the job `needs_attention` (a human eyeballs `log_tail`) and does NOT write an audit row — a lie in the ledger is worse than a gap. A `decision` field missing / not one of the three literals falls back to `escalate_founder` in `normalizeCsDirectorVerdict` — the shape-safe conservative default (never silently upgrade to auto-approve / auto-author).
+
 ## Where it's wired (org placement)
 
 - **Function:** `cs` ([[../functions/cs]] § Roles + approval names the CS Director seat alongside `cs_manager` + `admin`).
