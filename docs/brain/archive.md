@@ -36,6 +36,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
 - **Offer Creator (starter-kit offers over pricing rules)** · verified 2026-07-07 · → [[../lifecycles/storefront-checkout]]
 - **Handler-alias catalog for orchestrator action-type misses** · verified 2026-07-07 · → [[tables/action_handler_aliases]]
+- **Pia's goal decomposition emits plain-slug blocked_by, not a namespaced goalSlug:specSlug the gating can't parse** · verified 2026-07-07 · → [[../libraries/goal-proposals]] · [[../libraries/goal-member-blocked-by]] · [[../libraries/agent-jobs]]
 - **Playbook compiler loop: mine resolution records → propose playbooks, audit existing, matcher-defers-on-uncertainty** · verified 2026-07-07 · → [[inngest/playbook-compiler]]
 - **Prompt auto-review becomes a supervised box-session agent under June** · verified 2026-07-07 · → [[../lifecycles/ai-learning]]
 - **Restore request-level refund idempotency at the refundOrder choke point** · verified 2026-07-07 · → [[../tables/order_refunds]]
