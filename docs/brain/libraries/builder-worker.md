@@ -30,6 +30,7 @@ CI static check `scripts/_check-worker-lanes.ts` enforces that every kind in the
 | `research` | [[../functions/growth]] | Rhea's URL sensor — see below |
 | `dr-content` | [[../functions/growth]] | Carrie's DR-content lane — see below |
 | `media-buyer` | [[../functions/growth]] | Media Buyer's Test→Measure→Promote→Kill loop — see below |
+| `media-buyer-grade` | [[../functions/growth]] | Grades Media Buyer actions vs realized ROAS — see below |
 | `security-review` | [[../functions/platform]] | [[security-agent]] |
 | `ticket-improve` | (CS) | [[ticket-improve-chats]] |
 | `triage-escalations` | (CS) | [[../lifecycles/agent-todo-system]] |
@@ -101,6 +102,19 @@ The Growth-owned lane that runs the Media Buyer agent's cadence pass. DETERMINIS
 - **Policy contract** — no active [[../tables/iteration_policies]] row → the loop is DORMANT; only the `media_buyer_no_active_policy` audit row lands. Seed a conservative policy via `scripts/seed-media-buyer-iteration-policy.ts`.
 - **Test-cohort defaults** — the replenish path reads `default_meta_account_id` / `default_meta_page_id` from [[../tables/media_buyer_test_cohorts]]; missing → replenish deferred with `media_buyer_replenish_missing_config`.
 - **North-star discipline** — the AGENT never writes Meta objects directly. Every mutating call routes through `iteration_actions` (executor picks up) OR `ad_publish_jobs` (publisher + Phase-1 gate). See [[../operational-rules]] § North star and [[media-buyer-agent]] Gotchas.
+
+## The `media-buyer-grade` lane (Media Buyer action grader, [[../specs/media-buyer-test-winner-loop]] Phase 3)
+
+The Growth-owned lane that scores each concluded Media Buyer action against realized ROAS. DETERMINISTIC-Node lane — no Max session — that reads [[../tables/director_activity]] rows emitted by the [[media-buyer-agent]] cadence pass and UPSERTs one grade row per action to [[../tables/media_buyer_action_grades]].
+
+- **Enqueue** — external cron (weekly cadence per workspace, ideally offset from the media-buyer pass) inserts a `kind='media-buyer-grade'` [[../tables/agent_jobs]] row. Optional `instructions` JSON: `{ limit?: number }` (default 50).
+- **`runMediaBuyerGradeJob(job)`** (the runner, in `scripts/builder-worker.ts`):
+  1. Call [[media-buyer-grader]] `gradeMediaBuyerActions(admin, { workspaceId, limit })`.
+  2. The grader reads UNGRADED [[../tables/director_activity]] rows of kind in `GRADEABLE_ACTION_KINDS` older than `REALIZED_WINDOW_MIN_DAYS` (3d), rolls up realized attribution from [[../tables/meta_attribution_daily]] over `[action + 3d, action + 10d]` per source `meta_ad_id`, calls the pure scorer `scoreMediaBuyerAction`, and UPSERTs `media_buyer_action_grades` keyed on `director_activity_id`.
+  3. Log tail carries `{ graded, skipped, errors, first overall grade }` + a compact per-grade summary.
+- **The rubric's discipline** — `decision_quality` scores the CALL against decision-time ROAS + the active policy's thresholds; `outcome_quality` scores the REALIZED ROAS at grading time. A sound call that regressed still grades well on decision_quality. See [[media-buyer-grader]] for the per-kind bands.
+- **Idempotency guards** — the `.upsert(onConflict='director_activity_id')` + `.select('id')` write pattern collapses re-runs and compare-and-sets so a concurrent grader can't silently no-op. No active policy → grader is a no-op (grading a null-policy action is a category error).
+- **Write chokepoint** — [[media-buyer-grader]] `gradeMediaBuyerActions` is the ONLY writer to [[../tables/media_buyer_action_grades]]. The lane never touches the table directly.
 
 ## The build-claim gate — five-leg `evaluateClaimTimeBuildGate`
 

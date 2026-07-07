@@ -315,6 +315,10 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // cadence pass. Deterministic-Node lane (no Max session), light on I/O — one
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
+// media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
+// grading pass. Deterministic-Node; scores media-buyer director_activity rows
+// against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
+const MAX_MEDIA_BUYER_GRADE = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER_GRADE || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -528,7 +532,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -16211,6 +16215,46 @@ async function runMediaBuyerJob(job: Job) {
   });
 }
 
+/**
+ * media-buyer-grade lane (media-buyer-test-winner-loop Phase 3). Deterministic-Node
+ * grading pass over concluded Media Buyer director_activity rows. Reads each row's
+ * decision-time signals (source_meta_ad_id, roas at decision time, policy version),
+ * resolves realized attribution from meta_attribution_daily ≥ 3d after the action's
+ * created_at, and scores decision_quality + outcome_quality separately per the
+ * spec's rubric ("a sound call that regressed on a later ROAS shift still grades
+ * well"). Writes to public.media_buyer_action_grades — one row per director_activity
+ * row (UNIQUE), idempotent-safe on re-runs. No Max session; scoring is straightforward
+ * math against the active policy thresholds.
+ *
+ * Instructions JSON (optional): { limit?: number } — cap per-pass row count. Default 50.
+ */
+async function runMediaBuyerGradeJob(job: Job) {
+  const tag = `[media-buyer-grade:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: { limit?: number } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  const limit = typeof instr.limit === "number" && instr.limit > 0 ? Math.floor(instr.limit) : 50;
+
+  const { gradeMediaBuyerActions } = await import("../src/lib/media-buyer/grader");
+  try {
+    const result = await gradeMediaBuyerActions(a, { workspaceId: job.workspace_id, limit });
+    const tail = `graded=${result.graded} skipped=${result.skipped} errors=${result.errors} · first=${result.grades[0]?.grade.overallGrade ?? "n/a"}`;
+    await update(job.id, {
+      status: "completed",
+      log_tail: `${tail}\n${JSON.stringify(result.grades.map((g) => ({ id: g.directorActivityId, overall: g.grade.overallGrade, decision: g.grade.decisionQuality, outcome: g.grade.outcomeQuality }))).slice(-3500)}`,
+    });
+    console.log(`${tag} ${tail}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await update(job.id, { status: "failed", error: `media-buyer-grade threw: ${msg.slice(0, 300)}` });
+    console.error(`${tag} threw: ${msg}`);
+  }
+}
+
 async function runCampaignGradeJob(job: Job) {
   const tag = `[campaign-grade:${job.id.slice(0, 8)}]`;
   let instr: { candidates?: unknown } = {};
@@ -18912,6 +18956,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
   if (job.kind === "ceo-authorized-out-of-leash") return runCeoAuthorizedOutOfLeashJob(job);
   if (job.kind === "media-buyer") return runMediaBuyerJob(job);
+  if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -19999,7 +20044,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -20064,6 +20109,7 @@ async function main() {
   const countResearch = () => [...active.values()].filter((v) => v.kind === "research").length;
   const countDrContent = () => [...active.values()].filter((v) => v.kind === "dr-content").length;
   const countMediaBuyer = () => [...active.values()].filter((v) => v.kind === "media-buyer").length;
+  const countMediaBuyerGrade = () => [...active.values()].filter((v) => v.kind === "media-buyer-grade").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -20513,6 +20559,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed media-buyer ${job.id.slice(0, 8)} → ${countMediaBuyer() + 1}/${MAX_MEDIA_BUYER} media-buyer lane`);
+        launch(job);
+      }
+      // Fill the media-buyer-grade lane (media-buyer-test-winner-loop Phase 3):
+      // deterministic-Node grading pass — scores media-buyer director_activity rows
+      // against realized ROAS from meta_attribution_daily. Same concurrency shape.
+      while (countMediaBuyerGrade() < MAX_MEDIA_BUYER_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed media-buyer-grade ${job.id.slice(0, 8)} → ${countMediaBuyerGrade() + 1}/${MAX_MEDIA_BUYER_GRADE} media-buyer-grade lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

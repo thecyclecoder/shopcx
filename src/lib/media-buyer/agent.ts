@@ -37,7 +37,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { recordDirectorActivity } from "@/lib/director-activity";
-import { detectWinners, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
+import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
@@ -90,6 +90,25 @@ export interface MediaBuyerReplenishAction {
   rationale: string;
 }
 
+/**
+ * Phase 3 fatigue-triggered replenish — spawn N fresh variants of a WINNING angle
+ * when its parent adset's fatigue signal crosses the threshold. Enqueues via
+ * [[../ads/winning-creative-detect]] `amplifyWinner`, respecting its per-day cap.
+ * The variants land as `ad_campaigns` at `status='ready'` — the standard replenish
+ * path picks them up on the next pass and publishes them live into the test cohort.
+ */
+export interface MediaBuyerFatigueReplenishAction {
+  kind: "fatigue_replenish";
+  sourceMetaAdId: string;
+  roas: number;
+  fatigueScore: number;
+  /** How many variants the plan wants (clamped by `MAX_VARIANTS_PER_WINNER` inside amplifyWinner). */
+  variantCount: number;
+  rationale: string;
+  policyVersionId: string;
+  sourceAdCampaignId: string | null;
+}
+
 /** The typed plan the runner emits — one pass, one workspace. */
 export interface MediaBuyerPlan {
   /** True iff an active iteration_policies row was found. */
@@ -102,6 +121,8 @@ export interface MediaBuyerPlan {
   promote: MediaBuyerPromoteAction[];
   kill: MediaBuyerKillAction[];
   replenish: MediaBuyerReplenishAction[];
+  /** Phase 3 — winners flagged as fatiguing that need their angle amplified. */
+  fatigueReplenish: MediaBuyerFatigueReplenishAction[];
   summary: string;
 }
 
@@ -127,11 +148,33 @@ export interface MediaBuyerPlanInputs {
   metaAdIdToAdsetId: Map<string, string>;
   /** meta_object_id → current daily_budget_cents (from `meta_adsets`/`meta_campaigns`). */
   budgets: Map<string, number | null>;
+  /**
+   * Phase 3 — meta_object_id → fatigue_score for each winner's parent adset (from
+   * `iteration_scorecards_daily.fatigue_score`). A winner whose fatigue score is
+   * past {@link FATIGUE_REPLENISH_THRESHOLD} triggers a `fatigue_replenish` action.
+   * A missing entry = "no scorecard for this adset" = never flags fatigued.
+   */
+  fatigueByAdsetId?: Map<string, number>;
   readyToTest: ReadyToTestRow[];
   /** How many test-cohort live ads currently exist (published via origin='media-buyer-test'). */
   currentTestCohortSize: number;
   cohortTargetCount?: number;
 }
+
+/**
+ * The fatigue score at/above which a winner triggers a `fatigue_replenish` action.
+ * Mirrors [[../meta/decision-engine]]'s `fatigue_score >= 0.5` threshold — same
+ * signal, same cutoff, so a winner that scoring calls "fatigued" for scale-up
+ * suppression ALSO triggers Phase 3's variant spawn.
+ */
+export const FATIGUE_REPLENISH_THRESHOLD = 0.5;
+
+/**
+ * Default number of fresh variants the fatigue-replenish requests per fatiguing winner.
+ * `amplifyWinner` clamps this at `MAX_VARIANTS_PER_WINNER` (4) and enforces its per-day
+ * `MAX_AMPLIFICATIONS_PER_DAY` cap, so this is a soft request; the enforced ceiling wins.
+ */
+export const DEFAULT_FATIGUE_REPLENISH_VARIANTS = 2;
 
 /**
  * Compute the Media Buyer plan for one pass. Pure — no DB, no Meta, no Inngest.
@@ -154,6 +197,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       promote: [],
       kill: [],
       replenish: [],
+      fatigueReplenish: [],
       summary:
         "Dormant: no active iteration_policies row — Media Buyer never scales/kills without a supervised policy. Author + activate a conservative policy to activate the loop.",
     };
@@ -202,6 +246,33 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     });
   }
 
+  // ── Fatigue replenish (Phase 3) ────────────────────────────────────────────
+  // When a WINNING ad's parent adset is fatiguing (fatigue_score past threshold),
+  // trigger amplifyWinner to spawn N fresh variants of the winning angle. Guarded
+  // on the SAME fatigue cutoff decision-engine uses to suppress a scale-up so the
+  // two signals stay coherent — a "too fatigued to scale further" winner IS the
+  // "time to spawn fresh variants" winner.
+  const fatigueReplenish: MediaBuyerFatigueReplenishAction[] = [];
+  const fatigueMap = input.fatigueByAdsetId ?? new Map<string, number>();
+  for (const w of input.winners) {
+    if (w.roas < policy.scale_up_roas_trigger) continue; // only real winners qualify
+    const adsetId = input.metaAdIdToAdsetId.get(w.metaAdId);
+    if (!adsetId) continue;
+    const fatigue = fatigueMap.get(adsetId);
+    if (fatigue == null) continue; // no scorecard = no fatigue signal, don't fire
+    if (fatigue < FATIGUE_REPLENISH_THRESHOLD) continue;
+    fatigueReplenish.push({
+      kind: "fatigue_replenish",
+      sourceMetaAdId: w.metaAdId,
+      roas: w.roas,
+      fatigueScore: fatigue,
+      variantCount: DEFAULT_FATIGUE_REPLENISH_VARIANTS,
+      rationale: `Fatigue replenish: winner ad ${w.metaAdId} ROAS ${w.roas.toFixed(2)} on adset ${adsetId} with fatigue_score ${fatigue.toFixed(2)} ≥ threshold ${FATIGUE_REPLENISH_THRESHOLD.toFixed(2)} — spawn ${DEFAULT_FATIGUE_REPLENISH_VARIANTS} fresh variants of the winning angle via amplifyWinner (per-day cap enforced downstream).`,
+      policyVersionId: policy.id,
+      sourceAdCampaignId: w.campaign?.id ?? null,
+    });
+  }
+
   // ── Replenish ──────────────────────────────────────────────────────────────
   const replenish: MediaBuyerReplenishAction[] = [];
   if (input.cohort && input.cohort.isActive) {
@@ -224,7 +295,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   }
 
   summaryParts.unshift(
-    `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} (policy v${policy.version})`,
+    `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} fatigue_replenish=${fatigueReplenish.length} (policy v${policy.version})`,
   );
 
   return {
@@ -236,6 +307,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     promote,
     kill,
     replenish,
+    fatigueReplenish,
     summary: summaryParts.join(" · "),
   };
 }
@@ -257,6 +329,8 @@ export interface RunMediaBuyerResult {
     iterationActionsInserted: number;
     directorActivityRows: number;
     publishJobsInserted: number;
+    /** Phase 3 — new `ad_campaigns` rows spawned by fatigue-triggered amplifyWinner calls. */
+    amplifiedAdCampaignIds: string[];
   };
 }
 
@@ -309,7 +383,7 @@ export async function runMediaBuyerLoop(
       currentTestCohortSize: 0,
       cohortTargetCount: opts.cohortTargetCount,
     });
-    return { plan: emptyPlan, writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0 } };
+    return { plan: emptyPlan, writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] } };
   }
 
   const winners = await detectWinners(admin, {
@@ -386,6 +460,26 @@ export async function runMediaBuyerLoop(
     }
   }
 
+  // Phase 3 — fatigue signal on the winner's parent adsets. Reads the SAME
+  // iteration_scorecards_daily.fatigue_score field the decision engine reads,
+  // so a winner suppressed from scale-up on fatigue is the SAME winner that
+  // triggers fatigue-replenish (coherent signal, one source of truth).
+  const fatigueByAdsetId = new Map<string, number>();
+  if (promoteAdsetIds.length) {
+    const { data: fatigueRows } = await admin
+      .from("iteration_scorecards_daily")
+      .select("object_id, fatigue_score")
+      .eq("workspace_id", opts.workspaceId)
+      .eq("meta_ad_account_id", opts.metaAdAccountId)
+      .eq("snapshot_date", snapshotDate)
+      .eq("level", "adset")
+      .in("object_id", promoteAdsetIds);
+    for (const f of (fatigueRows || []) as Array<{ object_id: string; fatigue_score: number | string | null }>) {
+      const n = Number(f.fatigue_score ?? 0);
+      if (Number.isFinite(n)) fatigueByAdsetId.set(f.object_id, n);
+    }
+  }
+
   // Ready-to-test bin + current cohort size (count of ACTIVE origin='media-buyer-test' jobs).
   const { readyToTest } = await listReadyToTest(admin, { workspaceId: opts.workspaceId });
   const { data: liveTestAds } = await admin
@@ -405,13 +499,14 @@ export async function runMediaBuyerLoop(
     losers,
     metaAdIdToAdsetId,
     budgets,
+    fatigueByAdsetId,
     readyToTest,
     currentTestCohortSize,
     cohortTargetCount: opts.cohortTargetCount,
   });
 
   // ── Persist: iteration_actions + director_activity + ad_publish_jobs ──────
-  const writes = { iterationActionsInserted: 0, directorActivityRows: 0, publishJobsInserted: 0 };
+  const writes = { iterationActionsInserted: 0, directorActivityRows: 0, publishJobsInserted: 0, amplifiedAdCampaignIds: [] as string[] };
   const nowIso = new Date(nowMs).toISOString();
 
   // iteration_actions rows for promote (scale_up) + kill (pause). Same shape the
@@ -501,6 +596,47 @@ export async function runMediaBuyerLoop(
     });
     if (r.recorded) writes.directorActivityRows += 1;
   }
+  // Phase 3 — fatigue-triggered variant spawn. For each fatigue_replenish action,
+  // call amplifyWinner (respects MAX_VARIANTS_PER_WINNER + MAX_AMPLIFICATIONS_PER_DAY
+  // caps internally + writes its OWN `amplified_winner` director_activity row). We
+  // also stamp a `media_buyer_fatigue_replenish_triggered` row so the audit trail
+  // records that the Media Buyer's fatigue signal (not a manual amplify) fired.
+  const winnersByAdId = new Map(winners.map((w) => [w.metaAdId, w]));
+  for (const a of plan.fatigueReplenish) {
+    const winner = winnersByAdId.get(a.sourceMetaAdId);
+    if (!winner) continue; // shouldn't happen — plan-computer builds from winners[]
+    const result = await amplifyWinner(admin, {
+      workspaceId: opts.workspaceId,
+      winner,
+      n: a.variantCount,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      specSlug: "media-buyer-test-winner-loop",
+      nowMs,
+    });
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_fatigue_replenish_triggered",
+      specSlug: null,
+      reason: a.rationale,
+      metadata: {
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        fatigue_score: a.fatigueScore,
+        source_ad_campaign_id: a.sourceAdCampaignId,
+        policy_version_id: a.policyVersionId,
+        variant_count_requested: a.variantCount,
+        variants_spawned: result.variants_spawned,
+        new_ad_campaign_ids: result.new_ad_campaign_ids,
+        amplify_reason: result.reason ?? null,
+        day_count_before: result.day_count_before,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+    writes.amplifiedAdCampaignIds.push(...result.new_ad_campaign_ids);
+  }
+
   for (const a of plan.replenish) {
     const jobInsert = await enqueueReplenishPublish(admin, opts.workspaceId, cohort, a);
     if (jobInsert.inserted) {
@@ -551,6 +687,8 @@ export async function runMediaBuyerLoop(
       promote_count: plan.promote.length,
       kill_count: plan.kill.length,
       replenish_count: plan.replenish.length,
+      fatigue_replenish_count: plan.fatigueReplenish.length,
+      amplified_ad_campaign_ids: writes.amplifiedAdCampaignIds,
       cohort_configured: plan.cohortConfigured,
       current_test_cohort_size: plan.currentTestCohortSize,
       cohort_target_count: plan.cohortTargetCount,

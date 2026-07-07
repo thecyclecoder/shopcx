@@ -10,13 +10,14 @@ The Media Buyer is the FIRST autonomous static-ad optimizer in this repo — the
 - **Live publishes into the test cohort** — the agent inserts [[../tables/ad_publish_jobs]] rows with `origin='media-buyer-test'` + `publish_active=true` and fires `ad-tool/publish-to-meta`. [[media-buyer-publish-gate]] (Phase 1) then decides whether the ad actually ships ACTIVE — a wrong ad set or over-ceiling projection DOWNGRADES + escalates.
 - **Every action** stamps one [[../tables/director_activity]] row (`director_function='growth'`) citing the source `meta_ad_id` + realized ROAS + policy version, so the audit trail names the concrete creative, not the wrapper adset.
 
-## The four verbs
+## The five verbs
 
-Every pass emits at most four kinds of typed action:
+Every pass emits at most five kinds of typed action:
 
 - `promote` — a detected winner (via [[winning-creative-detect]] `detectWinners`) whose ROAS ≥ policy `scale_up_roas_trigger` triggers a `scale_up` on the winner's parent Meta adset (via `iteration_actions`). The step is bounded by the policy's `scale_up_step_pct` / `scale_up_cap_pct`. Each action carries the source `meta_ad_id` + its ROAS + the parent `adset_id`.
 - `kill` — a scorecard adset ([[../tables/iteration_scorecards_daily]]) below the policy's `roas_floor` with spend ≥ `pause_min_spend_cents` triggers a `pause` (via `iteration_actions`). The action cites the highest-spend child ad's `meta_ad_id` as the "source of the decline" so the audit trail names a creative, not just the wrapper.
 - `replenish` — when the test cohort ([[../tables/media_buyer_test_cohorts]]) has fewer than `cohortTargetCount` live ads, the agent picks from [[ready-to-test]] (top-of-bin, in ready order) and publishes each via the Phase 1 rail (`origin='media-buyer-test'`, `publish_active=true`). The cohort ceiling is enforced by [[media-buyer-publish-gate]].
+- `fatigue_replenish` — **(Phase 3)** — a WINNING ad whose parent adset's `iteration_scorecards_daily.fatigue_score` crosses `FATIGUE_REPLENISH_THRESHOLD = 0.5` (the same cutoff decision-engine uses to suppress a scale-up on fatigue) triggers a call to [[winning-creative-detect]] `amplifyWinner` — spawns N fresh variants of the winning angle at `status='ready'`, respecting the per-day `MAX_AMPLIFICATIONS_PER_DAY` cap. The variants land in [[ready-to-test]] and the standard `replenish` verb picks them up on the next pass to publish into the test cohort. The action cites the source `meta_ad_id` + its ROAS + fatigue score + the resulting `new_ad_campaign_ids` so the lineage is traceable.
 - (implicit) `dormant` — no active [[../tables/iteration_policies]] row → NO actions; the pass records `media_buyer_no_active_policy` and returns. Never silent.
 
 ## Exports
@@ -37,6 +38,14 @@ The typed plan a pass emits. `policyActive`, `policyVersionId`, `cohortConfigure
 
 `{ kind: 'replenish', adCampaignId, testMetaAdsetId, dailyTestCeilingCents, rationale }`.
 
+### `MediaBuyerFatigueReplenishAction` — interface
+
+**(Phase 3)** — `{ kind: 'fatigue_replenish', sourceMetaAdId, roas, fatigueScore, variantCount, rationale, policyVersionId, sourceAdCampaignId }`. The runner calls `amplifyWinner` for each and stamps a `media_buyer_fatigue_replenish_triggered` [[../tables/director_activity]] row carrying `{source_meta_ad_id, roas, fatigue_score, variants_spawned, new_ad_campaign_ids}` — the fatigue signal is CITED, not narrated.
+
+### `FATIGUE_REPLENISH_THRESHOLD` / `DEFAULT_FATIGUE_REPLENISH_VARIANTS` — const
+
+`0.5` / `2`. The fatigue cutoff (mirrors decision-engine's `fatigue_score >= 0.5` scale-up suppression) and the default variant count per fatiguing winner. `amplifyWinner` clamps the variant count at `MAX_VARIANTS_PER_WINNER = 4` and enforces the per-day `MAX_AMPLIFICATIONS_PER_DAY = 8` cap.
+
 ### `MediaBuyerLoser` — interface
 
 Input row for the plan-computer. `{ sourceMetaAdId, targetLevel, targetObjectId, roas, spendCents, triggeringScorecardId }`. The runner builds this from a scorecard `SELECT` + a `meta_ads` lookup that picks the highest-spend child ad per adset (the source of the decline).
@@ -52,8 +61,9 @@ The orchestrator. Reads all inputs, computes the plan, persists the writes:
 1. `iteration_actions` upsert for promote (scale_up) + kill (pause). Same shape [[../meta/execution]] reads — the executor picks them up next pass.
 2. `director_activity` row per plan action + `media_buyer_pass_completed` heartbeat.
 3. `ad_publish_jobs` insert per replenish (via the local `enqueueReplenishPublish` helper) + `ad-tool/publish-to-meta` event. Skipped with `media_buyer_replenish_missing_config` if the cohort lacks `default_meta_account_id` / `default_meta_page_id`.
+4. **(Phase 3)** — [[winning-creative-detect]] `amplifyWinner` call per fatigue-replenish action (which fires `ad-tool/generate-full` / `ad-tool/static-requested` for each variant and writes its own `amplified_winner` audit row). The runner also stamps a `media_buyer_fatigue_replenish_triggered` audit row so the FATIGUE-DRIVEN reason (not a manual amplify) is preserved.
 
-Returns `{ plan, writes: { iterationActionsInserted, directorActivityRows, publishJobsInserted } }`.
+Returns `{ plan, writes: { iterationActionsInserted, directorActivityRows, publishJobsInserted, amplifiedAdCampaignIds } }`.
 
 ## Policy contract — dormant without it
 

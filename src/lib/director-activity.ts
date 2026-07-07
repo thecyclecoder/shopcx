@@ -163,7 +163,15 @@ export type DirectorActionKind =
   | "media_buyer_replenished_test_cohort"
   | "media_buyer_replenish_missing_config"
   | "media_buyer_no_active_policy"
-  | "media_buyer_pass_completed";
+  | "media_buyer_pass_completed"
+  // media-buyer-test-winner-loop Phase 3 — the Media Buyer's fatigue-triggered variant
+  // spawn. When a WINNING ad's parent adset crosses the fatigue threshold
+  // (`iteration_scorecards_daily.fatigue_score >= 0.5` — same signal decision-engine
+  // reads), the runner calls `amplifyWinner` to spawn N fresh variants of the winning
+  // angle at `status='ready'`; the standard replenish path then publishes them live
+  // into the test cohort. Metadata carries source_meta_ad_id + roas + fatigue_score
+  // + new_ad_campaign_ids so the audit trail cites the concrete winner in decline.
+  | "media_buyer_fatigue_replenish_triggered";
 
 export interface DirectorActivityInput {
   workspaceId: string;

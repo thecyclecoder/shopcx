@@ -19,7 +19,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   computeMediaBuyerPlan,
+  DEFAULT_FATIGUE_REPLENISH_VARIANTS,
   DEFAULT_TEST_COHORT_TARGET,
+  FATIGUE_REPLENISH_THRESHOLD,
   type MediaBuyerLoser,
   type MediaBuyerPlanInputs,
 } from "./agent";
@@ -297,4 +299,67 @@ test("computeMediaBuyerPlan — cohort at target → 0 replenish", () => {
     }),
   );
   assert.equal(plan.replenish.length, 0);
+});
+
+// ── Phase 3 — fatigue-triggered replenish ────────────────────────────────────
+
+test("computeMediaBuyerPlan — fatiguing WINNER (fatigue past threshold) → fatigue_replenish action citing meta_ad_id + fatigue_score", () => {
+  const w = winner(); // ROAS 4.0, above trigger 3.0
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      // Fatigue score above the FATIGUE_REPLENISH_THRESHOLD → fires.
+      fatigueByAdsetId: new Map([["adset-parent-1", FATIGUE_REPLENISH_THRESHOLD + 0.1]]),
+    }),
+  );
+  assert.equal(plan.fatigueReplenish.length, 1);
+  const f = plan.fatigueReplenish[0];
+  assert.equal(f.sourceMetaAdId, w.metaAdId);
+  assert.equal(f.roas, w.roas);
+  assert.equal(f.fatigueScore, FATIGUE_REPLENISH_THRESHOLD + 0.1);
+  assert.equal(f.variantCount, DEFAULT_FATIGUE_REPLENISH_VARIANTS);
+  assert.ok(f.rationale.includes(w.metaAdId));
+  assert.ok(f.rationale.includes("fatigue_score"));
+});
+
+test("computeMediaBuyerPlan — non-fatiguing winner → NO fatigue_replenish action", () => {
+  const w = winner();
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      fatigueByAdsetId: new Map([["adset-parent-1", FATIGUE_REPLENISH_THRESHOLD - 0.1]]), // just below
+    }),
+  );
+  assert.equal(plan.fatigueReplenish.length, 0);
+});
+
+test("computeMediaBuyerPlan — winner missing fatigue signal (no scorecard row) → NO fatigue_replenish", () => {
+  const w = winner();
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      // fatigueByAdsetId omitted entirely — signal missing → don't fire.
+    }),
+  );
+  assert.equal(plan.fatigueReplenish.length, 0);
+});
+
+test("computeMediaBuyerPlan — sub-trigger winner is NEVER fatigue-replenished even at high fatigue", () => {
+  const w = winner({ roas: 2.0 }); // below scale_up_roas_trigger=3.0
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      fatigueByAdsetId: new Map([["adset-parent-1", 0.95]]), // very high fatigue
+    }),
+  );
+  // Only REAL winners qualify — fatigue-replenish assumes a winning angle worth cloning.
+  assert.equal(plan.fatigueReplenish.length, 0);
 });
