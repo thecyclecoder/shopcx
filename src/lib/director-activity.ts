@@ -144,7 +144,16 @@ export type DirectorActionKind =
   // /dashboard/settings/playbooks/audit flips `playbooks.is_active=false`.
   // Owned by the CS director (director_function='cs'), metadata: { playbook_id,
   // playbook_name, retired_by, source }.
-  | "playbook_retired";
+  | "playbook_retired"
+  // playbook-compiler-becomes-box-agent-mining-full-history Phase 1 — the CS
+  // director's compiler-agent (supervised box session, kind='playbook-compile')
+  // extracted recurring problem-to-resolution trees from the FULL history
+  // (tickets + ticket_analyses) and persisted them to `compiled_trees`. One row
+  // per box-agent run, written by applyBoxPlaybookCompile
+  // ([[../libraries/playbook-compiler]]) under director_function='cs'. metadata:
+  // { job_id, trees_upserted, trees_proposed, skipped_reasons, autonomous:true,
+  // phase:1 }.
+  | "compiled_trees_extracted";
 
 export interface DirectorActivityInput {
   workspaceId: string;

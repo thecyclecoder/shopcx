@@ -159,6 +159,21 @@ const MAX_CS_DIRECTOR_CALL = 1;
 // One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
 // investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
 const CS_DIRECTOR_CALL_TIMEOUT_MS = 15 * 60 * 1000;
+// Playbook-compile jobs (playbook-compiler-becomes-box-agent-mining-full-history Phase 1) run in
+// their OWN concurrency-1 lane: enqueued by the Inngest cron (Mondays 12 UTC + manual
+// `playbook-compiler/run` event) — one Max `claude -p` (playbook-compile skill) per workspace. Reads
+// the FULL history (tickets + ticket_analyses over the whole workspace, NOT the old 30-day floor)
+// through the read-only DB creds the box already holds, and emits ONE JSON verdict {trees, reasoning}
+// which applyBoxPlaybookCompile upserts into `compiled_trees` (idempotent — UNIQUE (workspace_id,
+// tree_key), so a re-run over unchanged history is a no-op). Serialized so a Monday sweep never
+// overlaps a manually-triggered out-of-band run on the same workspace (the enqueuer also dedupes on
+// active-job-exists but concurrency-1 is the belt).
+const MAX_PLAYBOOK_COMPILE = 1;
+// One playbook-compile run: FULL-history read (typically thousands of rows) + one JSON verdict.
+// Generous ceiling — the read is larger than a CS-director call's brief, but still bounded (the
+// runner caps the cluster brief at 40 for size); Max session on a full-history workspace fits well
+// under 25 minutes in practice.
+const PLAYBOOK_COMPILE_TIMEOUT_MS = 25 * 60 * 1000;
 // Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
 // lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
 // (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
@@ -524,7 +539,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "playbook-compile";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -2345,7 +2360,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -11523,6 +11538,122 @@ async function runCsDirectorCallJob(job: Job) {
   }
 }
 
+// ── Box-hosted playbook-compiler lane (playbook-compiler-becomes-box-agent-mining-full-history P1) ──
+// A kind='playbook-compile' job is ONE full-history sweep the CS-supervised compiler agent runs on
+// a workspace. Enqueued by the Inngest cron (`src/lib/inngest/playbook-compiler.ts`) OR the manual
+// `playbook-compiler/run` event. The runner reads the FULL history (tickets + ticket_analyses over
+// the whole workspace — NO 30-day floor) via `loadPlaybookCompileBrief`, dispatches a Max
+// `claude -p` (playbook-compile skill) that emits ONE JSON verdict {trees, reasoning}, and
+// upserts each tree into `compiled_trees` via `applyBoxPlaybookCompile` (idempotent — UNIQUE
+// (workspace_id, tree_key)). Phase 2 will read this store to propose data-grounded playbooks +
+// playbook_steps (is_active=false). The runner ALSO writes ONE `director_activity` row
+// (director_function='cs', action_kind='compiled_trees_extracted') carrying the agent's overall
+// reasoning + a metadata summary — the CEO/audit trail sees WHAT the compiler decided + WHY. Read-
+// only against everything except `compiled_trees` and `director_activity` (both mutated by the
+// deterministic worker, never by the agent — north star: CEO → role agent → tool).
+async function runPlaybookCompileClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "playbook-compile", sandbox: "max", timeout: PLAYBOOK_COMPILE_TIMEOUT_MS });
+}
+
+function playbookCompilePrompt(workspaceId: string, brief: string): string {
+  return [
+    `Use the playbook-compile skill (cwd is the repo root). You are the CS-supervised playbook-compiler agent on Max — no ANTHROPIC_API_KEY, no external model API. You investigate READ-ONLY and emit ONE JSON verdict; the WORKER (deterministic Node) upserts your trees into \`compiled_trees\` and writes ONE \`director_activity\` row summarizing.`,
+    ``,
+    `WORKSPACE: ${workspaceId}`,
+    ``,
+    brief,
+    ``,
+    `PROCEDURE:`,
+    `  1. For each precomputed cluster at-or-above support_min, judge whether it is a coherent "when X → do Y" TREE (support alone is not enough — an incoherent cluster is signal AGAINST proposing).`,
+    `  2. Derive the intent distribution per tree from the ticket_analyses issue tags on the cluster's sample tickets — this is what Phase 2 will use for playbook.trigger_intents, so ground it.`,
+    `  3. Derive the resolution_sequence per tree from the ordered action shapes the orchestrator returned — Phase 2 will materialize playbook_steps from this.`,
+    `  4. Emit ONE JSON verdict of shape {trees, reasoning}.`,
+    ``,
+    `Reuse each cluster's \`tree_key\` verbatim from the brief — the store's UNIQUE (workspace_id, tree_key) constraint anchors idempotency on this. The runner defensively normalizes, but a mis-typed key reads sloppy in the audit trail.`,
+    ``,
+    `Final message = ONLY one JSON object, no prose before or after:`,
+    `  {"trees":[{"tree_key":"...","problem":"...","action_types":["...","..."],"support":N,"sample_ticket_ids":["..."],"intent_distribution":{"intent":N},"resolution_sequence":[{"action_type":"...","notes":"..."}],"evidence":{"resolution_event_ids":["..."],"ticket_analyses_ids":["..."]},"reasoning":"..."}],"reasoning":"..."}`,
+    `Empty is a valid verdict: {"trees":[],"reasoning":"no tree at or above support_min=<N>"}.`,
+  ].join("\n");
+}
+
+async function runPlaybookCompileJob(job: Job) {
+  const tag = `[playbook-compile:${job.id.slice(0, 8)}]`;
+  try {
+    const { loadPlaybookCompileBrief, applyBoxPlaybookCompile, normalizePlaybookCompileVerdict } =
+      await import("../src/lib/playbook-compiler");
+    const brief = await loadPlaybookCompileBrief(db, job.workspace_id);
+    console.log(
+      `${tag} brief loaded — resolution_rows=${brief.resolutionRows.length} analyses=${brief.analysisRows.length} clusters=${brief.precomputedClusters.length} support_min=${brief.supportMin}`,
+    );
+
+    // Fast path: no mineable history at all → complete with a zero-trees director_activity trail.
+    // Same idempotency contract — a re-run in this state persists no rows, writes one activity row.
+    if (brief.resolutionRows.length === 0 && brief.analysisRows.length === 0) {
+      await applyBoxPlaybookCompile(db, {
+        workspaceId: job.workspace_id,
+        jobId: job.id,
+        verdict: { trees: [], reasoning: "no mineable history (0 confirmed resolution events, 0 ticket_analyses)" },
+      });
+      await update(job.id, { status: "completed", log_tail: "no mineable history — 0 trees" });
+      console.log(`${tag} no mineable history → 0 trees`);
+      return;
+    }
+
+    const prompt = playbookCompilePrompt(job.workspace_id, brief.headerText);
+    const { session, resultText, isError, raw, usage, model, configDir: pcDir } = await runBoxLane(
+      (cfg, sid) => runPlaybookCompileClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, pcDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: pcDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizePlaybookCompileVerdict(parsed);
+
+    if (!verdict) {
+      // No parseable verdict → surface as needs_attention so a human can eyeball; do NOT write a
+      // director_activity row (a lie in the audit trail is worse than a gap). Same guardrail
+      // cs-director-call uses for its unparseable-verdict fallback.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "playbook-compile returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    const applyResult = await applyBoxPlaybookCompile(db, {
+      workspaceId: job.workspace_id,
+      jobId: job.id,
+      verdict,
+    });
+
+    const summary = [
+      `trees_upserted=${applyResult.treesUpserted}/${verdict.trees.length}`,
+      verdict.reasoning ? verdict.reasoning : "",
+      applyResult.reasonSkipped.length ? `skipped: ${applyResult.reasonSkipped.slice(0, 3).join("; ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was persisted. Complete with the
+      // error surfaced so a human can eyeball — the persisted rows are the trail.
+      await update(job.id, {
+        status: "completed",
+        error: "playbook-compile session errored (verdict persisted)",
+        log_tail: summary.slice(-2000),
+      });
+      console.log(`${tag} ${summary.replace(/\n/g, " · ")} (session errored — recorded + persisted)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} ${summary.replace(/\n/g, " · ")}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Developer Message Center (developer-message-center) ──────────────────────
 // A kind='dev-ask' job is ONE turn of a founder-facing, read-only "ask the box anything" thread. Like
 // ticket-improve it runs a TOP-LEVEL `claude -p` on Max (ANTHROPIC_API_KEY unset → $0 marginal) and KEEPS
@@ -18819,6 +18950,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
+  if (job.kind === "playbook-compile") return runPlaybookCompileJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "god-mode") return runGodModeJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
@@ -19928,7 +20060,7 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
     `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
@@ -19981,6 +20113,7 @@ async function main() {
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
+  const countPlaybookCompile = () => [...active.values()].filter((v) => v.kind === "playbook-compile").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countGodMode = () => [...active.values()].filter((v) => v.kind === "god-mode").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
@@ -20006,7 +20139,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "playbook-compile" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -20267,6 +20400,20 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed cs-director-call ${job.id.slice(0, 8)} → ${countCsDirectorCall() + 1}/${MAX_CS_DIRECTOR_CALL} cs-director-call lane`);
+        launch(job);
+      }
+      // Fill the playbook-compile lane (playbook-compiler-becomes-box-agent-mining-full-history Phase 1):
+      // one Max `claude -p` (playbook-compile skill) per queued playbook-compile row (enqueued by the
+      // Inngest cron OR a manual `playbook-compiler/run` event). Reads the FULL history read-only and
+      // emits ONE JSON verdict {trees, reasoning} — the deterministic runner upserts trees into
+      // `compiled_trees`. Concurrency-1 so a Monday cron sweep never overlaps a manually-triggered
+      // out-of-band run on the same workspace. Gated on the Claude-down breaker — the compiler needs
+      // Claude to reason; parked jobs drain on recovery, matching the cs-director-call pattern.
+      while (!claudeDown && countPlaybookCompile() < MAX_PLAYBOOK_COMPILE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["playbook-compile"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed playbook-compile ${job.id.slice(0, 8)} → ${countPlaybookCompile() + 1}/${MAX_PLAYBOOK_COMPILE} playbook-compile lane`);
         launch(job);
       }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.

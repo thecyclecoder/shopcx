@@ -1,59 +1,50 @@
 /**
- * Playbook compiler — mines ticket_resolution_events for recurring
- * problem × resolution patterns and proposes new playbook-shaped rules
- * via the existing sonnet_prompts approval queue.
+ * Playbook compiler — mines the FULL ticket history (tickets + ticket_analyses,
+ * no 30-day floor) for recurring problem × resolution "trees" and persists them
+ * to [[compiled_trees]] as the durable substrate Phase 2 will read to propose
+ * data-grounded playbooks + playbook_steps (is_active=false).
  *
- * Phase 1 of the playbook-compiler loop (M4 of the guaranteed-ticket-
- * handling goal). Runs weekly via
- * src/lib/inngest/playbook-compiler.ts; extracted here so the cron
- * stays a thin wrapper and the mining/drafting logic is testable in
- * isolation.
+ * Phase 1 of playbook-compiler-becomes-box-agent-mining-full-history:
+ * this file used to be a raw-Anthropic-API cron drafting sonnet_prompts rows.
+ * That path is GONE — no raw external model API call is made from ShopCX
+ * ([[../operational-rules]] § No-Fable-no-raw-API). The compilation is now a
+ * supervised **box agent** kind (`playbook-compile` in scripts/builder-worker.ts
+ * → `runPlaybookCompileJob`) that reads the brief this module builds, emits a
+ * JSON verdict listing trees, and lets the deterministic worker persist them
+ * here via `applyBoxPlaybookCompile`. The runner ALSO writes one
+ * `director_activity` row (director_function='cs', action_kind=
+ * 'compiled_trees_extracted') carrying the agent's reasoning — the CEO/audit
+ * trail sees WHAT the compiler decided + WHY.
  *
- * Loop:
- *   1. Read ticket_resolution_events over the last 30 days where
- *      verified_outcome='confirmed' (the turns the orchestrator
- *      actually got right).
- *   2. Bucket by (problem, resolution shape). The resolution shape is
- *      the action_shape.type on options[chosen.option_index] — the
- *      handler the model actually chose, canonicalized so
- *      `refund` + `refund` cluster together even when the amount /
- *      order_id fields differ. When the model returned multiple
- *      actions on the shape (e.g. `replacement + partial_refund`), we
- *      key the cluster on the sorted action-type tuple so both
- *      actions surface together in the proposed rule.
- *   3. Pattern clusters with support >= SUPPORT_MIN (default 15,
- *      overridable per-workspace on
- *      `workspaces.playbook_compiler_support_min`) are eligible for
- *      drafting.
- *   4. Skip clusters whose problem already anchors an approved / open
- *      sonnet_prompts rule (title match — same dedupe as the
- *      daily-analysis-report loop uses).
- *   5. For each remaining cluster, call Sonnet to draft a playbook-
- *      shaped natural-language rule (`when X → do Y`).
- *   6. Insert one `sonnet_prompts` row per draft, mirroring the
- *      daily-analysis-report insert shape
- *      (src/lib/daily-analysis-report.ts:170) — `category='rule'`,
- *      `status='proposed'`, `enabled=false`,
- *      `proposed_at=now()`, `sort_order=200`. The row surfaces on
- *      /dashboard/settings/ai/prompts with Approve/Decline buttons
- *      (the existing queue); on approval it flips
- *      `status='approved', enabled=true` and the next
- *      unified-ticket-handler run picks it up in the concatenated
- *      system prompt.
+ * The pure helpers `extractActionTypes`, `bucketClusters`, `treeKeyFor` stay
+ * exported so:
+ *   (a) the box agent's runner can seed a deterministic tree_key namespace
+ *       matching the store's UNIQUE (workspace_id, tree_key) — the agent's
+ *       proposed key MUST equal the pure helper's output so re-runs upsert the
+ *       same row (idempotent by construction);
+ *   (b) the existing unit tests around the clustering shape keep running.
+ *
+ * Model tier: the box agent is dispatched under the model-tier registry
+ * (agent_model_tiers.agent_kind='playbook-compile'). Unset → the Max default;
+ * pinned → the registered tier ([[../libraries/agent-model-tiers]]).
+ *
+ * Idempotency: re-running the box agent over unchanged history returns the same
+ * tree_keys → the upsert replaces each row in place, no fan-out. This is the
+ * spec's Phase-1 verification bullet ("Re-running over unchanged history is
+ * idempotent").
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
-import { SONNET_MODEL } from "@/lib/ai-models";
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const DRAFT_MODEL = SONNET_MODEL;
-
-/** Default support threshold — cluster needs >= this many confirmed turns to draft. */
+/** Default support threshold — cluster needs >= this many distinct tickets to
+ * qualify for Phase-2 playbook proposal. Kept exported so the box agent's
+ * runner can bake the threshold into its brief. */
 export const DEFAULT_SUPPORT_MIN = 15;
 
-/** Mining window in days — matches spec Phase 1. */
+/** LEGACY export retained for Phase-3-of-the-original-loop test compatibility.
+ * The full-history box agent no longer uses a rolling window — it mines every
+ * confirmed row + every analysis for the workspace. */
 export const MINING_WINDOW_DAYS = 30;
 
 interface ResolutionRow {
@@ -71,29 +62,12 @@ export interface Cluster {
   problem: string;
   /** Sorted action-shape type tuple, e.g. ["partial_refund","replacement"]. */
   actionTypes: string[];
-  /** Human-readable cluster key `problem :: type_a+type_b` — used for dedupe / logging. */
+  /** Deterministic per-workspace key `problem :: type_a+type_b` — the store's UNIQUE constraint column. */
   key: string;
   /** Distinct ticket_id count — the "support" of the pattern. */
   support: number;
-  /** Sample ticket ids (up to 5) — passed to Sonnet as evidence. */
+  /** Sample ticket ids (up to 5) — passed to the agent as evidence. */
   sampleTicketIds: string[];
-}
-
-export interface CompileResult {
-  /** Number of confirmed rows read for this workspace. */
-  rowsRead: number;
-  /** All clusters (any support). */
-  clusters: number;
-  /** Clusters meeting the support threshold. */
-  eligible: number;
-  /** Clusters already covered by an existing sonnet_prompts title. */
-  dedupedAgainstExisting: number;
-  /** sonnet_prompts rows inserted. */
-  drafted: number;
-  /** The inserted sonnet_prompts.id values. */
-  proposedSonnetIds: string[];
-  /** Why we bailed early (if applicable). */
-  reason?: string;
 }
 
 /**
@@ -136,7 +110,7 @@ export function extractActionTypes(options: unknown, chosen: unknown): string[] 
  * Bucket confirmed resolution rows into (problem, actionTypes) clusters.
  *
  * Rows missing problem or with no derivable actionTypes are dropped —
- * they can't participate in a "when X → do Y" rule.
+ * they can't participate in a "when X → do Y" tree.
  *
  * Support is counted per-ticket (a two-turn ticket with the same
  * problem×action doesn't double-count) — the pattern is "N distinct
@@ -155,7 +129,7 @@ export function bucketClusters(rows: ResolutionRow[]): Cluster[] {
     if (!problem) continue;
     const actionTypes = extractActionTypes(row.options, row.chosen);
     if (actionTypes.length === 0) continue;
-    const key = `${problem} :: ${actionTypes.join("+")}`;
+    const key = treeKeyFor(problem, actionTypes);
     let bucket = map.get(key);
     if (!bucket) {
       bucket = { problem, actionTypes, tickets: new Set(), samples: [] };
@@ -177,131 +151,28 @@ export function bucketClusters(rows: ResolutionRow[]): Cluster[] {
       sampleTicketIds: bucket.samples,
     });
   }
-  // Highest-support first — makes cron logs easier to read + gives Sonnet the
-  // hottest patterns first when we cap the per-run draft count.
+  // Highest-support first — the box agent reads the brief top-down, so the
+  // hottest patterns anchor its reasoning.
   out.sort((a, b) => b.support - a.support);
   return out;
 }
 
 /**
- * Build the title we insert into sonnet_prompts + the dedupe key we
- * compare against existing rules. Kept deterministic so a re-run
- * against unchanged data doesn't propose a second copy.
+ * Deterministic tree_key builder — the string the box agent must emit as
+ * `tree_key` on each verdict tree so the runner's upsert into
+ * `compiled_trees` lands on the SAME row as the pure helper's cluster key.
+ *
+ * Idempotency depends on this: re-running the agent over unchanged history
+ * produces the same key → the upsert replaces the row in place, no fan-out.
  */
-export function draftTitle(cluster: Cluster): string {
-  const actions = cluster.actionTypes.join(" + ");
-  return `Playbook rule — ${cluster.problem} → ${actions}`;
+export function treeKeyFor(problem: string, actionTypes: string[]): string {
+  return `${problem.trim().toLowerCase()} :: ${[...actionTypes].sort().join("+")}`;
 }
 
-function buildDraftSystemPrompt(): string {
-  return `You are drafting a customer-service rule for a Sonnet orchestrator.
-
-Return ONE JSON object of the shape:
-{
-  "title": "one-line title, e.g. 'When customer reports melted_in_transit → replacement + partial_refund'",
-  "body": "3-6 sentence rule in the orchestrator's voice — when the described customer situation matches, do the described action(s). Name every action explicitly. Reference no ticket ids. No markdown."
-}
-
-Ground rules:
-- The body is injected into the orchestrator's system prompt at runtime, so it must read as an INSTRUCTION, not a description.
-- Prefer imperative voice ("If the customer reports X, offer Y and Z.").
-- Name every action in the actionTypes list — do NOT collapse "replacement + partial_refund" to just "replacement".
-- Do not invent a policy the actions don't already imply.
-- No greetings, no signatures, no code fences.`;
-}
-
-function buildDraftUserMessage(cluster: Cluster): string {
-  return `A pattern surfaced across ${cluster.support} confirmed ticket resolutions in the last ${MINING_WINDOW_DAYS} days:
-
-problem: ${cluster.problem}
-resolution actions taken (in the order the orchestrator returned them): ${cluster.actionTypes.join(", ")}
-sample ticket ids (evidence, do not cite): ${cluster.sampleTicketIds.join(", ")}
-
-Draft the playbook-shaped rule.`;
-}
-
-interface DraftOutput {
-  title: string;
-  body: string;
-}
-
-function parseDraftOutput(text: string): DraftOutput | null {
-  // Sonnet occasionally wraps the object in fences or trailing prose — extract
-  // the first {...} block and JSON.parse it.
-  const first = text.indexOf("{");
-  const last = text.lastIndexOf("}");
-  if (first < 0 || last <= first) return null;
-  const slice = text.slice(first, last + 1);
-  try {
-    const parsed = JSON.parse(slice);
-    if (typeof parsed?.title !== "string" || typeof parsed?.body !== "string") return null;
-    const title = parsed.title.trim();
-    const body = parsed.body.trim();
-    if (!title || !body) return null;
-    return { title, body };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Call Sonnet to draft a rule for one cluster. Isolated so the
- * cron can page through many clusters without one bad response
- * killing the batch. Returns null on any API / parse failure —
- * caller logs + moves on.
- */
-export async function draftRule(
-  workspaceId: string,
-  cluster: Cluster,
-): Promise<{ draft: DraftOutput | null; usage: Record<string, unknown> | null }> {
-  if (!ANTHROPIC_API_KEY) return { draft: null, usage: null };
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: DRAFT_MODEL,
-      max_tokens: 800,
-      system: buildDraftSystemPrompt(),
-      messages: [{ role: "user", content: buildDraftUserMessage(cluster) }],
-    }),
-  });
-
-  if (!res.ok) {
-    console.warn("[playbook-compiler] sonnet call failed:", res.status);
-    return { draft: null, usage: null };
-  }
-
-  const data = await res.json();
-  const usage = data?.usage || null;
-
-  await logAiUsage({
-    workspaceId,
-    model: DRAFT_MODEL,
-    usage,
-    purpose: "playbook_compiler_draft",
-    ticketId: null,
-  });
-
-  const text = (data?.content?.[0]?.text || "").trim();
-  const draft = parseDraftOutput(text);
-  if (!draft) {
-    console.warn("[playbook-compiler] parse failed for cluster", cluster.key, text.slice(0, 200));
-    return { draft: null, usage };
-  }
-  return { draft, usage };
-}
-
-/**
- * Read the per-workspace support threshold if the workspace pinned
- * one (workspaces.playbook_compiler_support_min), else the default.
- * Missing column or missing row → default.
- */
-async function loadSupportMin(admin: SupabaseClient, workspaceId: string): Promise<number> {
+/** Read the per-workspace support threshold if pinned, else the default.
+ *  Missing column or missing row → default. Best-effort — a read failure
+ *  falls back to the default so the compiler always runs. */
+export async function loadSupportMin(admin: SupabaseClient, workspaceId: string): Promise<number> {
   try {
     const { data } = await admin
       .from("workspaces")
@@ -311,167 +182,355 @@ async function loadSupportMin(admin: SupabaseClient, workspaceId: string): Promi
     const raw = (data as { playbook_compiler_support_min?: unknown } | null)?.playbook_compiler_support_min;
     if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return Math.floor(raw);
   } catch {
-    // column may not exist yet — the compiler falls back to the default.
+    // column may not exist yet — fall through to default.
   }
   return DEFAULT_SUPPORT_MIN;
 }
 
-/**
- * Mine + draft + insert for one workspace.
- *
- * Never throws — a failure at any stage returns `ok=false` with a
- * reason so the cron can keep sweeping siblings.
- */
-export async function compileForWorkspace(workspaceId: string): Promise<CompileResult> {
-  const admin = createAdminClient();
-  return compileForWorkspaceWithClient(admin, workspaceId);
+/** One entry in the intent-distribution the agent surfaces per tree. */
+export interface IntentDistributionEntry {
+  intent: string;
+  ticket_count: number;
 }
 
-export async function compileForWorkspaceWithClient(
+/** One tree the box agent emits in its verdict, upserted verbatim into `compiled_trees`. */
+export interface CompiledTreeVerdict {
+  /** MUST equal `treeKeyFor(problem, action_types)` — the store's UNIQUE
+   *  constraint anchors idempotency on this. */
+  tree_key: string;
+  problem: string;
+  action_types: string[];
+  support: number;
+  sample_ticket_ids: string[];
+  /** { intent_name: distinct_ticket_count, ... } — Phase 2 will derive
+   *  playbook.trigger_intents from the top entries here. */
+  intent_distribution: Record<string, number>;
+  /** Ordered action shapes the tree resolves via — Phase 2 will materialize
+   *  playbook_steps from this. Shape: [{action_type, notes?}, ...]. */
+  resolution_sequence: Array<Record<string, unknown>>;
+  /** Structured evidence pointers so the compiled row is auditable back to
+   *  its source rows (ticket_analyses ids, resolution_event ids, window). */
+  evidence: Record<string, unknown>;
+  /** 1-2 sentence "why this tree" the runner copies into director_activity. */
+  reasoning: string;
+}
+
+/** The full verdict the box agent emits — the deterministic runner upserts each
+ *  tree into `compiled_trees` and writes ONE director_activity row summarizing. */
+export interface PlaybookCompileVerdict {
+  trees: CompiledTreeVerdict[];
+  /** Overall run reasoning — one paragraph, the CEO/audit trail reads this. */
+  reasoning: string;
+}
+
+/** Shape guards — the runner defensively normalizes an agent verdict before
+ *  writing anything. A malformed verdict lands as `needs_attention` on the job. */
+export function normalizePlaybookCompileVerdict(raw: unknown): PlaybookCompileVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const trees: CompiledTreeVerdict[] = [];
+  if (Array.isArray(r.trees)) {
+    for (const item of r.trees) {
+      if (!item || typeof item !== "object") continue;
+      const t = item as Record<string, unknown>;
+      const problem = typeof t.problem === "string" ? t.problem.trim().toLowerCase() : "";
+      const actionTypesRaw = Array.isArray(t.action_types) ? t.action_types : [];
+      const actionTypes = actionTypesRaw
+        .filter((x): x is string => typeof x === "string" && !!x.trim())
+        .map((x) => x.trim());
+      if (!problem || actionTypes.length === 0) continue;
+      const supportRaw = t.support;
+      const support = typeof supportRaw === "number" && Number.isFinite(supportRaw) && supportRaw >= 0 ? Math.floor(supportRaw) : 0;
+      const sampleTicketIds = Array.isArray(t.sample_ticket_ids)
+        ? (t.sample_ticket_ids as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 20)
+        : [];
+      const intent_distribution: Record<string, number> = {};
+      if (t.intent_distribution && typeof t.intent_distribution === "object" && !Array.isArray(t.intent_distribution)) {
+        for (const [k, v] of Object.entries(t.intent_distribution)) {
+          if (typeof v === "number" && Number.isFinite(v) && v >= 0) intent_distribution[k] = Math.floor(v);
+        }
+      }
+      const resolution_sequence: Array<Record<string, unknown>> = [];
+      if (Array.isArray(t.resolution_sequence)) {
+        for (const step of t.resolution_sequence) {
+          if (step && typeof step === "object" && !Array.isArray(step)) {
+            resolution_sequence.push(step as Record<string, unknown>);
+          }
+        }
+      }
+      const evidence: Record<string, unknown> = t.evidence && typeof t.evidence === "object" && !Array.isArray(t.evidence) ? (t.evidence as Record<string, unknown>) : {};
+      const reasoning = typeof t.reasoning === "string" ? t.reasoning.slice(0, 2000) : "";
+      // The store's UNIQUE constraint anchors on the deterministic key derived
+      // from (problem, actionTypes) — the runner recomputes it here so a
+      // mis-typed key from the agent never fans a duplicate row.
+      const tree_key = treeKeyFor(problem, actionTypes);
+      trees.push({
+        tree_key,
+        problem,
+        action_types: actionTypes,
+        support,
+        sample_ticket_ids: sampleTicketIds,
+        intent_distribution,
+        resolution_sequence,
+        evidence,
+        reasoning,
+      });
+    }
+  }
+  const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
+  return { trees, reasoning };
+}
+
+/** Result of `applyBoxPlaybookCompile` — the runner's summary of what it wrote. */
+export interface ApplyPlaybookCompileResult {
+  treesUpserted: number;
+  reasonSkipped: string[];
+}
+
+/**
+ * Persist a box-agent verdict — one upsert per tree into `compiled_trees` +
+ * ONE `director_activity` row (director_function='cs',
+ * action_kind='compiled_trees_extracted') carrying the reasoning.
+ *
+ * Idempotent: the UNIQUE (workspace_id, tree_key) constraint means re-running
+ * over unchanged history no-ops (the upsert replaces the same row).
+ *
+ * Best-effort: an upsert error on one tree logs + skips it — the sweep never
+ * fails because of one bad row. director_activity write is best-effort by
+ * design ([[director-activity]] `recordDirectorActivity`).
+ */
+export async function applyBoxPlaybookCompile(
+  admin: SupabaseClient,
+  input: {
+    workspaceId: string;
+    jobId: string | null;
+    verdict: PlaybookCompileVerdict;
+  },
+): Promise<ApplyPlaybookCompileResult> {
+  const skipped: string[] = [];
+  let upserted = 0;
+  for (const tree of input.verdict.trees) {
+    const { error } = await admin.from("compiled_trees").upsert(
+      {
+        workspace_id: input.workspaceId,
+        tree_key: tree.tree_key,
+        problem: tree.problem,
+        action_types: tree.action_types,
+        support: tree.support,
+        sample_ticket_ids: tree.sample_ticket_ids,
+        intent_distribution: tree.intent_distribution,
+        resolution_sequence: tree.resolution_sequence,
+        evidence: tree.evidence,
+        reasoning: tree.reasoning,
+        compiled_by_job_id: input.jobId,
+        compiled_at: new Date().toISOString(),
+      },
+      { onConflict: "workspace_id,tree_key" },
+    );
+    if (error) {
+      console.warn(`[playbook-compiler] compiled_trees upsert failed (${tree.tree_key}):`, error.message);
+      skipped.push(`${tree.tree_key}: ${error.message}`);
+      continue;
+    }
+    upserted++;
+  }
+
+  try {
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+    await recordDirectorActivity(admin, {
+      workspaceId: input.workspaceId,
+      directorFunction: "cs",
+      actionKind: "compiled_trees_extracted",
+      specSlug: null,
+      reason: (input.verdict.reasoning || "").slice(0, 4000),
+      metadata: {
+        job_id: input.jobId,
+        trees_upserted: upserted,
+        trees_proposed: input.verdict.trees.length,
+        skipped_reasons: skipped.slice(0, 20),
+        autonomous: true,
+        phase: 1,
+      },
+    });
+  } catch (e) {
+    console.warn("[playbook-compiler] director_activity write failed:", e instanceof Error ? e.message : e);
+  }
+
+  return { treesUpserted: upserted, reasonSkipped: skipped };
+}
+
+/** One workspace's stats — enough for the cron to skip a workspace with no
+ *  mineable history without spawning an agent session. */
+export interface PlaybookCompileScope {
+  workspaceId: string;
+  ticketAnalysisCount: number;
+  confirmedResolutionCount: number;
+}
+
+/**
+ * List workspaces with any mineable ticket_analyses OR confirmed
+ * ticket_resolution_events. The Inngest cron uses this to decide which
+ * workspaces get a `playbook-compile` agent_job enqueued this pass.
+ * Best-effort — an error returns an empty list so the cron no-ops rather
+ * than fanning out on partial data.
+ */
+export async function listCompilableWorkspaces(admin: SupabaseClient): Promise<PlaybookCompileScope[]> {
+  const out = new Map<string, PlaybookCompileScope>();
+  const bump = (workspaceId: string, key: "ticketAnalysisCount" | "confirmedResolutionCount") => {
+    const row = out.get(workspaceId);
+    if (row) row[key] += 1;
+    else out.set(workspaceId, {
+      workspaceId,
+      ticketAnalysisCount: key === "ticketAnalysisCount" ? 1 : 0,
+      confirmedResolutionCount: key === "confirmedResolutionCount" ? 1 : 0,
+    });
+  };
+  try {
+    const { data } = await admin
+      .from("ticket_analyses")
+      .select("workspace_id")
+      .limit(50000);
+    for (const r of (data || []) as Array<{ workspace_id: string }>) bump(r.workspace_id, "ticketAnalysisCount");
+  } catch { /* best-effort */ }
+  try {
+    const { data } = await admin
+      .from("ticket_resolution_events")
+      .select("workspace_id")
+      .eq("verified_outcome", "confirmed")
+      .limit(50000);
+    for (const r of (data || []) as Array<{ workspace_id: string }>) bump(r.workspace_id, "confirmedResolutionCount");
+  } catch { /* best-effort */ }
+  return Array.from(out.values());
+}
+
+/** One resolution-event row the brief-builder loads per workspace. */
+export interface FullHistoryResolutionRow {
+  id: string;
+  ticket_id: string;
+  problem: string | null;
+  options: unknown;
+  chosen: unknown;
+  verified_outcome: string | null;
+  staged_at: string | null;
+}
+
+/** One ticket_analyses row the brief-builder loads per workspace. */
+export interface FullHistoryAnalysisRow {
+  id: string;
+  ticket_id: string;
+  score: number | null;
+  summary: string | null;
+  issues: unknown;
+  action_items: unknown;
+  created_at: string | null;
+}
+
+/** The full-history snapshot the box agent's runner passes into the session. */
+export interface PlaybookCompileBrief {
+  supportMin: number;
+  resolutionRows: FullHistoryResolutionRow[];
+  analysisRows: FullHistoryAnalysisRow[];
+  precomputedClusters: Cluster[];
+  headerText: string;
+}
+
+/**
+ * Build the FULL-history brief the box agent reasons over — the read replaces
+ * the old 30-day-only ticket_resolution_events fetch: we now ALSO pull
+ * ticket_analyses (the analyzer's own signal) so the agent can cluster on
+ * outcome-verified turns AND on high-priority pattern hints the analyzer has
+ * already surfaced. No 30-day floor: the spec's Phase-1 verification is
+ * "trees derived from the FULL history".
+ *
+ * The runner pre-computes the deterministic (problem × action_types) cluster
+ * shape via `bucketClusters` and hands it to the agent as ground truth — the
+ * agent's job is to name each tree (intent distribution, resolution sequence,
+ * reasoning), not to re-derive the deterministic clustering.
+ */
+export async function loadPlaybookCompileBrief(
   admin: SupabaseClient,
   workspaceId: string,
-): Promise<CompileResult> {
+): Promise<PlaybookCompileBrief> {
   const supportMin = await loadSupportMin(admin, workspaceId);
-  const windowStart = new Date(Date.now() - MINING_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-  const { data: rowsRaw, error: rowsErr } = await admin
+  // Read the FULL history — no staged_at filter (the whole point of Phase 1 is
+  // the 30-day-floor going away). We still scope to verified_outcome=confirmed
+  // because unbacked/drifted/clarified rows are compiler signal AGAINST the
+  // tree, not evidence FOR it (same rule the old cron used, kept here so the
+  // clustering stays trust-worthy).
+  const { data: resRows } = await admin
     .from("ticket_resolution_events")
     .select("id, ticket_id, problem, options, chosen, verified_outcome, staged_at")
     .eq("workspace_id", workspaceId)
-    .eq("verified_outcome", "confirmed")
-    .gte("staged_at", windowStart);
+    .eq("verified_outcome", "confirmed");
+  const resolutionRows = (resRows || []) as FullHistoryResolutionRow[];
 
-  if (rowsErr) {
-    console.error("[playbook-compiler] rows read failed:", rowsErr.message);
-    return {
-      rowsRead: 0,
-      clusters: 0,
-      eligible: 0,
-      dedupedAgainstExisting: 0,
-      drafted: 0,
-      proposedSonnetIds: [],
-      reason: `rows_read_failed_${rowsErr.code || "unknown"}`,
-    };
+  // ticket_analyses is the analyzer's per-ticket signal — score + summary +
+  // issues array + action_items array. The full sweep is intentional: even a
+  // low-support cluster surfaces here as evidence for the agent's reasoning.
+  const { data: anRows } = await admin
+    .from("ticket_analyses")
+    .select("id, ticket_id, score, summary, issues, action_items, created_at")
+    .eq("workspace_id", workspaceId);
+  const analysisRows = (anRows || []) as FullHistoryAnalysisRow[];
+
+  const precomputedClusters = bucketClusters(
+    resolutionRows.map((r) => ({
+      id: r.id,
+      ticket_id: r.ticket_id,
+      problem: r.problem,
+      options: r.options,
+      chosen: r.chosen,
+      verified_outcome: r.verified_outcome,
+      staged_at: r.staged_at ?? "",
+    })),
+  );
+
+  const eligibleCount = precomputedClusters.filter((c) => c.support >= supportMin).length;
+
+  const parts: string[] = [];
+  parts.push(`PLAYBOOK-COMPILER BRIEF — workspace ${workspaceId}`);
+  parts.push(`support_min=${supportMin} · ticket_analyses=${analysisRows.length} · confirmed_resolution_events=${resolutionRows.length}`);
+  parts.push(`precomputed clusters=${precomputedClusters.length} · at-or-above support_min=${eligibleCount}`);
+  parts.push("");
+  parts.push("PRECOMPUTED CLUSTERS (deterministic; you MUST reuse each tree_key verbatim):");
+  const CLUSTER_CAP = 40;
+  const clusterSlice = precomputedClusters.slice(0, CLUSTER_CAP);
+  for (const c of clusterSlice) {
+    parts.push(`  · tree_key=${c.key}`);
+    parts.push(`    problem=${c.problem} · action_types=${c.actionTypes.join("+")} · support=${c.support}`);
+    parts.push(`    samples=${c.sampleTicketIds.slice(0, 5).join(", ")}`);
   }
-
-  const rows = (rowsRaw || []) as ResolutionRow[];
-  if (rows.length === 0) {
-    return {
-      rowsRead: 0,
-      clusters: 0,
-      eligible: 0,
-      dedupedAgainstExisting: 0,
-      drafted: 0,
-      proposedSonnetIds: [],
-      reason: "no_confirmed_rows",
-    };
+  if (precomputedClusters.length > clusterSlice.length) {
+    parts.push(`  · … + ${precomputedClusters.length - clusterSlice.length} more (truncated for brief size — every mineable pattern is in the DB)`);
   }
-
-  const allClusters = bucketClusters(rows);
-  const eligible = allClusters.filter((c) => c.support >= supportMin);
-
-  if (eligible.length === 0) {
-    return {
-      rowsRead: rows.length,
-      clusters: allClusters.length,
-      eligible: 0,
-      dedupedAgainstExisting: 0,
-      drafted: 0,
-      proposedSonnetIds: [],
-      reason: `no_cluster_over_support_min_${supportMin}`,
-    };
-  }
-
-  // Dedupe against existing sonnet_prompts titles the compiler previously
-  // proposed / an admin already approved — matches the daily-analysis-report
-  // dedupe pattern (src/lib/daily-analysis-report.ts § "Pull existing rules
-  // so Opus doesn't propose duplicates").
-  const { data: existing } = await admin
-    .from("sonnet_prompts")
-    .select("title")
-    .eq("workspace_id", workspaceId)
-    .in("status", ["approved", "proposed"]);
-  const existingTitles = new Set<string>();
-  for (const r of existing || []) {
-    if (typeof (r as { title?: unknown }).title === "string") {
-      existingTitles.add((r as { title: string }).title.toLowerCase());
+  parts.push("");
+  parts.push("ANALYSIS SIGNAL — issue-tag distribution across ticket_analyses (recurring tags first):");
+  const issueCounts = new Map<string, number>();
+  for (const a of analysisRows) {
+    if (Array.isArray(a.issues)) {
+      for (const it of a.issues) {
+        const tag = typeof it === "string" ? it : typeof (it as { tag?: unknown })?.tag === "string" ? (it as { tag: string }).tag : null;
+        if (!tag) continue;
+        issueCounts.set(tag, (issueCounts.get(tag) ?? 0) + 1);
+      }
     }
   }
-
-  const toDraft: Cluster[] = [];
-  let deduped = 0;
-  for (const cluster of eligible) {
-    if (existingTitles.has(draftTitle(cluster).toLowerCase())) {
-      deduped++;
-      continue;
-    }
-    toDraft.push(cluster);
-  }
-
-  if (!ANTHROPIC_API_KEY) {
-    return {
-      rowsRead: rows.length,
-      clusters: allClusters.length,
-      eligible: eligible.length,
-      dedupedAgainstExisting: deduped,
-      drafted: 0,
-      proposedSonnetIds: [],
-      reason: "no_api_key",
-    };
-  }
-
-  const proposedSonnetIds: string[] = [];
-  let drafted = 0;
-
-  for (const cluster of toDraft) {
-    const { draft, usage } = await draftRule(workspaceId, cluster);
-    if (!draft) continue;
-
-    if (usage) {
-      const inputTokens = (usage.input_tokens as number) || 0;
-      const outputTokens = (usage.output_tokens as number) || 0;
-      const costCents = usageCostCents(DRAFT_MODEL, {
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        cache_creation_tokens: (usage.cache_creation_input_tokens as number) || 0,
-        cache_read_tokens: (usage.cache_read_input_tokens as number) || 0,
-      });
-      // Cost logged into ai_token_usage already via logAiUsage — this
-      // trace line is diagnostic so a cron sweep can be triaged from
-      // the logs alone.
-      console.log(`[playbook-compiler] drafted "${cluster.key}" support=${cluster.support} cost=${costCents.toFixed(4)}c`);
-    }
-
-    const { data: ins, error } = await admin
-      .from("sonnet_prompts")
-      .insert({
-        workspace_id: workspaceId,
-        title: draftTitle(cluster),
-        content: draft.body,
-        category: "rule",
-        enabled: false,
-        status: "proposed",
-        proposed_at: new Date().toISOString(),
-        sort_order: 200,
-      })
-      .select("id")
-      .single();
-    if (error) {
-      console.warn("[playbook-compiler] sonnet_prompts insert failed:", error.message);
-      continue;
-    }
-    if (ins?.id) {
-      proposedSonnetIds.push(ins.id as string);
-      drafted++;
-    }
-  }
+  const topIssues = [...issueCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25);
+  for (const [tag, n] of topIssues) parts.push(`  · ${tag}: ${n} analyses`);
+  if (topIssues.length === 0) parts.push("  (no issue tags surfaced across ticket_analyses)");
 
   return {
-    rowsRead: rows.length,
-    clusters: allClusters.length,
-    eligible: eligible.length,
-    dedupedAgainstExisting: deduped,
-    drafted,
-    proposedSonnetIds,
+    supportMin,
+    resolutionRows,
+    analysisRows,
+    precomputedClusters,
+    headerText: parts.join("\n"),
   };
+}
+
+/** Convenience — cron-side callers can drop the admin plumbing. */
+export async function loadPlaybookCompileBriefFromWorkspaceId(workspaceId: string): Promise<PlaybookCompileBrief> {
+  const admin = createAdminClient();
+  return loadPlaybookCompileBrief(admin, workspaceId);
 }
