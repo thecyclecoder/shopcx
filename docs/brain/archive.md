@@ -29,6 +29,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **CS Director: third rung of the escalation ladder — hard calls above the triage quorum** · verified 2026-07-07 · → [[libraries/cs-director]]
 - **Digital goods catalog + PDF delivery** · verified 2026-07-07 · → [[../inngest/digital-goods-delivery]]
 - **Human directives are hard gates over the ticket AI — turn-off, don't-escalate, reviewed-lock; merges carry context, never control** · verified 2026-07-07 · → [[lifecycles/ai-analysis]]
+- **Media Buyer agent + the Test→Promote-to-winner cadence (fix ad fatigue)** · verified 2026-07-07 · → [[lifecycles/ad-publish]]
 - **model-picker: route on typed state, not tags — LTV alone stops buying Opus** · verified 2026-07-07 · → [[libraries/model-picker]]
 - **Offer Creator (starter-kit offers over pricing rules)** · verified 2026-07-07 · → [[../lifecycles/storefront-checkout]]
 - **Handler-alias catalog for orchestrator action-type misses** · verified 2026-07-07 · → [[tables/action_handler_aliases]]
