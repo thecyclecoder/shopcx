@@ -129,6 +129,19 @@ export function StorefrontPage({
   // it reads more natural than the workspace display face (Montserrat) on an editorial listicle,
   // and referencing no webfont means the lander makes zero Google-font fetches.
   const isLanderView = !!(advertorial || blueprint);
+  // Bundle PDP: the add-to-cart target so `#pricing` CTAs (which have no price table to scroll to)
+  // fire the bundle buy. Base variant on subscribe at the rule's default frequency (placeholder for
+  // the Starter Kit variant, per the offer-creator spec).
+  const bundleBuy = bundleName && data.base_variant?.id
+    ? {
+        variantId: data.base_variant.id,
+        mode: (data.pricing_tiers.some((t) => t.subscribe_price_cents != null) ? "subscribe" : "onetime") as "subscribe" | "onetime",
+        frequencyDays:
+          (data.pricing_rule?.available_frequencies || []).find((f) => f.default)?.interval_days ??
+          (data.pricing_rule?.available_frequencies || [])[0]?.interval_days ??
+          null,
+      }
+    : null;
   const themeStyle = {
     "--storefront-heading-font": isLanderView ? SYSTEM_BODY_STACK : font.stack,
     "--storefront-body-font": SYSTEM_BODY_STACK,
@@ -175,6 +188,7 @@ export function StorefrontPage({
         metaPixelId={data.workspace.meta_pixel_id}
         skipCustomize={data.workspace.storefront_skip_customize}
         experimentExposures={experimentExposures}
+        bundleBuy={bundleBuy}
       />
       {/* Phase 2 instrumentation — observes [data-section] nodes for
           chapter_view/dwell, tracks scroll_depth + cta_click. No UI. */}
