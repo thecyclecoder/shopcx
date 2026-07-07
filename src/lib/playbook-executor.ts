@@ -8,6 +8,10 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import {
+  pickChargeableVaultedPm,
+  type CustomerPaymentMethodRow,
+} from "@/lib/action-executor";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -583,6 +587,17 @@ async function executeStep(
     case "check_other_subscriptions":
       return handleCheckOtherSubs(subs, ctx, step, dataContext, pers);
 
+    case "check_vaulted_pm":
+      return handleCheckVaultedPm(admin, wsId, tid, customer, ctx, step);
+
+    case "create_order":
+    case "create_subscription":
+      return handleAssistedCreate(
+        admin, wsId, tid, customer, ctx, step,
+        step.type as "create_order" | "create_subscription",
+        pers,
+      );
+
     case "apply_policy": {
       if (!policy) return { action: "advance", newStep: step.step_order + 1, systemNote: "No policy configured." };
       return handleApplyPolicy(admin, wsId, tid, policy, orders, subs, ctx, step, dataContext, pers, policyRules, msg);
@@ -1109,6 +1124,253 @@ async function handleCheckOtherSubs(
     action: "advance", newStep: step.step_order + 1,
     context: { other_active_subs: otherActive.map(s => s.shopify_contract_id), other_active_count: otherActive.length },
     systemNote: `[Playbook] ${otherActive.length} other active subscription(s) found.`,
+  };
+}
+
+// ── check_vaulted_pm — assisted-purchase gate step ─────────────────────
+//
+// docs/brain/specs/assisted-purchase-playbook.md Phase 2. Models
+// check_other_subscriptions / check_tracking (informational step that
+// branches on live customer state) and reuses the launch-journey +
+// resume-after-journey-completion pattern the cancel step uses (see
+// paused_for_cancel above). The pure decider is exported so the step's
+// four states (advance / launch / wait / resume) can be pinned by unit
+// tests without a live DB.
+
+export interface CheckVaultedPmDeciderInput {
+  rows: CustomerPaymentMethodRow[] | null | undefined;
+  parked: boolean;
+  journey: { status?: string | null; outcome?: string | null } | null;
+}
+
+export type CheckVaultedPmDecision =
+  | { kind: "advance"; vaultedPmId: string }
+  | { kind: "launch" }
+  | { kind: "wait" }
+  | { kind: "resume_still_missing" };
+
+/**
+ * Pure state machine for the check_vaulted_pm playbook step. The step
+ * has four discrete transitions; each is what the outer step handler
+ * turns into a side effect + a `PlaybookExecResult`.
+ *
+ *   - advance             — customer already has a chargeable vaulted PM
+ *                           on file (with or without a prior journey);
+ *                           advance to the terminal create step.
+ *   - launch              — no chargeable PM AND the playbook has not
+ *                           parked yet; launch the add_payment_method
+ *                           journey + park.
+ *   - wait                — parked; the launched journey is still open
+ *                           (status !== 'completed'). Do nothing.
+ *   - resume_still_missing — parked; journey completed but the customer
+ *                           left without adding a PM (they may have
+ *                           closed the mini-site). Re-launch or
+ *                           escalate — the outer handler chooses.
+ *
+ * The decider prefers the vault over any journey signal — a customer who
+ * already has an active PM should NEVER be sent through
+ * add_payment_method redundantly (mirrors the sonnet-orchestrator-v2
+ * "already has methods" branch).
+ */
+export function decideCheckVaultedPmStep(
+  input: CheckVaultedPmDeciderInput,
+): CheckVaultedPmDecision {
+  const pm = pickChargeableVaultedPm(input.rows);
+  if (pm) return { kind: "advance", vaultedPmId: pm.id };
+  if (!input.parked) return { kind: "launch" };
+  if (input.journey?.status === "completed") return { kind: "resume_still_missing" };
+  return { kind: "wait" };
+}
+
+async function handleCheckVaultedPm(
+  admin: Admin, wsId: string, tid: string,
+  customer: CustomerData, ctx: Record<string, unknown>, step: PlaybookStep,
+): Promise<PlaybookExecResult> {
+  // 1. Read customer_payment_methods across linked ids (mirrors
+  //    resolveVaultedPm in action-executor.ts).
+  const linkedIds = [customer.id];
+  const { data: link } = await admin.from("customer_links")
+    .select("group_id").eq("customer_id", customer.id).maybeSingle();
+  if (link?.group_id) {
+    const { data: grp } = await admin.from("customer_links")
+      .select("customer_id").eq("group_id", link.group_id);
+    for (const g of (grp || [])) {
+      if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
+    }
+  }
+  const { data: rows } = await admin.from("customer_payment_methods")
+    .select("id, status, is_default, provider")
+    .eq("workspace_id", wsId)
+    .in("customer_id", linkedIds);
+
+  // 2. Read the latest add_payment_method journey session (if any) so
+  //    the parked branch knows whether to resume.
+  const parked = ctx.paused_for_add_pm === true;
+  let journey: { status?: string | null; outcome?: string | null } | null = null;
+  if (parked) {
+    const { data: sessions } = await admin.from("journey_sessions")
+      .select("status, outcome")
+      .eq("ticket_id", tid)
+      .eq("workspace_id", wsId)
+      .eq("trigger_intent", "add_payment_method")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    journey = (sessions?.[0] ?? null) as { status?: string | null; outcome?: string | null } | null;
+  }
+
+  const decision = decideCheckVaultedPmStep({
+    rows: rows as CustomerPaymentMethodRow[] | null,
+    parked,
+    journey,
+  });
+
+  switch (decision.kind) {
+    case "advance": {
+      // Clear parked flags on the way out — the playbook has a
+      // chargeable PM and moves to the terminal create step.
+      return {
+        action: "advance", newStep: step.step_order + 1,
+        context: {
+          vaulted_payment_method_id: decision.vaultedPmId,
+          paused_for_add_pm: false,
+          add_payment_method_journey_completed: parked ? true : undefined,
+        },
+        systemNote: parked
+          ? `[Playbook] add_payment_method journey completed — vaulted PM ${decision.vaultedPmId} now on file. Advancing to create.`
+          : `[Playbook] Chargeable vaulted PM ${decision.vaultedPmId} already on file — skipping add_payment_method. Advancing to create.`,
+      };
+    }
+    case "launch": {
+      // No vaulted PM; launch add_payment_method + park.
+      const { data: journeyDef } = await admin.from("journey_definitions")
+        .select("id, name")
+        .eq("workspace_id", wsId)
+        .eq("trigger_intent", "add_payment_method")
+        .eq("is_active", true)
+        .limit(1).maybeSingle();
+      if (!journeyDef) {
+        return {
+          action: "respond",
+          response: "I need a payment method on file before I can finish this. I've asked the team to follow up with a secure link.",
+          systemNote: "[Playbook] check_vaulted_pm — no active add_payment_method journey definition; escalating.",
+        };
+      }
+      try {
+        const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+        await launchJourneyForTicket({
+          workspaceId: wsId, ticketId: tid, customerId: customer.id,
+          journeyId: journeyDef.id, journeyName: journeyDef.name,
+          triggerIntent: "add_payment_method",
+          channel: (ctx._channel as string) || "email",
+          leadIn: "Before I can finish this, I need a payment method on file. I've sent you a secure link to add one.",
+          ctaText: "Add Payment Method",
+        });
+      } catch (err) {
+        console.error("[Playbook] check_vaulted_pm — launch failed:", err);
+      }
+      return {
+        action: "respond",
+        context: {
+          paused_for_add_pm: true,
+          add_payment_method_journey_launched: true,
+        },
+        systemNote: "[Playbook] check_vaulted_pm — no vaulted PM; launched add_payment_method journey. Playbook parked at check_vaulted_pm.",
+      };
+    }
+    case "wait": {
+      // Parked; journey still open. Suppress an immediate re-send by
+      // returning respond (not advance) with no response body — the
+      // action-executor loop tolerates this exact shape (see cancel).
+      return {
+        action: "respond",
+        systemNote: "[Playbook] check_vaulted_pm — waiting for add_payment_method journey completion. No message sent.",
+      };
+    }
+    case "resume_still_missing": {
+      // Journey completed but STILL no vaulted PM — the customer bounced
+      // out. Clear the parked flag and surface for human touch.
+      return {
+        action: "respond",
+        response: "I still don't see a payment method on file. Would you like me to send the secure link again, or is there another way you'd like to handle this?",
+        context: { paused_for_add_pm: false, add_payment_method_journey_completed: true },
+        systemNote: "[Playbook] check_vaulted_pm — add_payment_method journey completed but customer left no PM. Cleared parked flag; awaiting customer direction.",
+      };
+    }
+  }
+}
+
+// ── Terminal create step handlers ─────────────────────────────────────
+//
+// docs/brain/specs/assisted-purchase-playbook.md Phase 2. The playbook's
+// final step dispatches the create action via the SAME
+// directActionHandlers registry the executor uses for a stateless
+// create — the playbook path and the direct-create path share exactly
+// one effector. Reuse is the point.
+//
+// Params come from the orchestrator's populated
+// `ctx.assisted_purchase_params` (Phase 3 wiring populates this from
+// the customer's intent + product picks); the step's `config` supplies
+// defaults (e.g. vendor='internal').
+async function handleAssistedCreate(
+  admin: Admin, wsId: string, tid: string, customer: CustomerData,
+  ctx: Record<string, unknown>, step: PlaybookStep,
+  actionType: "create_order" | "create_subscription",
+  pers: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<PlaybookExecResult> {
+  const paramsRaw = (ctx.assisted_purchase_params as Record<string, unknown> | undefined) || {};
+  const defaults = (step.config || {}) as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...defaults, ...paramsRaw };
+
+  // Guard: the terminal step never fires unless the check_vaulted_pm
+  // predecessor stashed a vaulted PM id — the fail-closed invariant
+  // Phase 1 pins carried through to the playbook's terminal effector.
+  const vaultedPmId = ctx.vaulted_payment_method_id as string | undefined;
+  if (!vaultedPmId) {
+    return {
+      action: "respond",
+      response: "I need a payment method on file before I can finish this. Let me get that set up first.",
+      systemNote: `[Playbook] ${actionType} — no vaulted_payment_method_id in context; refusing to dispatch (Phase-1 invariant).`,
+    };
+  }
+
+  const { directActionHandlers } = await import("@/lib/action-executor");
+  const handler = directActionHandlers[actionType];
+  if (!handler) {
+    return {
+      action: "respond",
+      response: "Something went wrong finishing this order. The team has been notified.",
+      systemNote: `[Playbook] ${actionType} — handler not found in directActionHandlers. Escalating.`,
+    };
+  }
+  const actionCtx = {
+    admin, workspaceId: wsId, ticketId: tid, customerId: customer.id,
+    channel: (ctx._channel as string) || "email", sandbox: false,
+  };
+  const result = await handler(actionCtx, { type: actionType, ...merged });
+  const okName = pers?.name ? pers.name : "our team";
+  if (result.success) {
+    return {
+      action: "complete",
+      response:
+        actionType === "create_order"
+          ? "Your order is placed and on its way. You'll get a confirmation shortly."
+          : "Your subscription is set up. You'll get a confirmation shortly.",
+      context: {
+        assisted_purchase_completed: true,
+        assisted_purchase_result_summary: result.summary,
+      },
+      systemNote: `[Playbook] ${actionType} — dispatched via directActionHandlers. ${result.summary || ""}`.trim(),
+      // Post-completion truthful confirmation — tell the claim-guard
+      // this specific action_type is backed so the response isn't
+      // false-positive escalated.
+      backedActions: [actionType],
+    };
+  }
+  return {
+    action: "respond",
+    response: `${okName} ran into an issue finishing this. I've flagged it for a quick review.`,
+    context: { assisted_purchase_last_error: result.error || null },
+    systemNote: `[Playbook] ${actionType} — handler failed: ${result.error || "unknown error"}`,
   };
 }
 

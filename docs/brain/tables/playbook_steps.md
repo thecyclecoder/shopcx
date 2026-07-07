@@ -51,7 +51,9 @@ const { count } = await admin.from("playbook_steps")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **`type` is bounded by a CHECK constraint** — the current allow-set (as of migration `20260707150000_seed_assisted_purchase_playbook.sql`) is: `identify_order`, `identify_subscription`, `check_other_subscriptions`, `apply_policy`, `offer_exception`, `initiate_return`, `cancel_subscription`, `issue_store_credit`, `stand_firm`, `explain`, `custom`, `clarify_issue`, `check_tracking`, `classify_issue`, `select_missing_items`, `confirm_shipping_address`, `create_replacement`, `adjust_subscription`, `check_vaulted_pm`, `create_order`, `create_subscription`. Adding a new step type requires an additive migration that drops+recreates the constraint (retain existing entries so live playbooks keep validating).
+
+- **`check_vaulted_pm` + terminal `create_order` / `create_subscription` are the [[../specs/assisted-purchase-playbook]] Phase-2 step pair.** Seeded per workspace into the "Assisted Order Purchase" / "Assisted Subscription Purchase" playbooks; see [[playbook-executor]] Gotchas.
 
 ---
 
