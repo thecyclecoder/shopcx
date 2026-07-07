@@ -4951,6 +4951,24 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not cleared: ${list}; left queued for the escort to re-release` };
   }
 
+  // ── 4) SERIALIZE WITHIN GOAL (serialize-goal-member-spec-builds Phase 1) ──
+  // Individual blocked_by clearance (leg 3 above) said nothing about goal-MATES that ALSO cleared this
+  // tick — so N goal-mates could all pass the gate and race, colliding on hot files shared across the
+  // goal (the 2026-07-06 guaranteed-ticket-handling jam: #1245/#1246/#1248 all collided on
+  // action-executor.ts + refund handlers). This leg makes the dispatch SERIAL within a goal:
+  //   (b) no other build for this goal is currently in-flight (claimed/building/…), AND
+  //   (c) this spec is the earliest not-yet-built goal-member in blocked_by-topological order.
+  // Cross-GOAL parallelism is preserved (one-off + members of different goals are unaffected — the
+  // helper no-ops for one-off specs). Ordered AFTER blocked_by clearance so a genuinely-blocked spec
+  // still holds on the semantic reason; BEFORE the Vale leg so a still-in-review out-of-order spec is
+  // caught here before Vale's cooldown extends. Requeue (never park) — the next tick re-evaluates as
+  // soon as the sibling merges onto the goal branch.
+  const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
+  const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, slug);
+  if (!serial.ok) {
+    return { ok: false, disposition: "requeue", reason: `claim-gate: ${serial.reason}; held until the goal serializer releases` };
+  }
+
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
   // (phases present + each with verification, coherent, real Owner/Parent, not malformed) BEFORE its build.
   //

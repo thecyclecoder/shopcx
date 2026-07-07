@@ -22,6 +22,7 @@
     "test:cleo-blueprint": "tsx --test src/lib/cleo-blueprint.test.ts",
     "test:usage-snapshots": "tsx --test src/lib/usage-snapshots.test.ts",
     "test:box-failed-supersede": "tsx --test src/lib/box-failed-supersede.test.ts",
+    "test:serialize-goal-member-build-dispatch": "tsx --test src/lib/serialize-goal-member-build-dispatch.test.ts",
     "test:spec-drift": "tsx --test src/lib/spec-drift.test.ts",
     "test:security-envelope": "tsx --test src/lib/security-envelope.test.ts",
     "test:premerge-security-retirement": "tsx --test src/lib/premerge-security-retirement.test.ts",

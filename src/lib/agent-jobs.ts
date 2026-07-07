@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, type SpecStatus } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -1386,6 +1386,151 @@ async function sequencePromoteCandidates(
     }
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// serialize-goal-member-spec-builds Phase 1 — the DISPATCH-TIME serializer.
+// ─────────────────────────────────────────────────────────────────────────────
+// A goal's member spec builds MUST NOT run concurrently. Grounded in the 2026-07-06 jam: 8 kind='build'
+// jobs for guaranteed-ticket-handling member specs all cleared their individual blocked_by leg at once
+// and ran concurrently off origin/goal/guaranteed-ticket-handling; #1245/#1246/#1248 collided on
+// action-executor.ts imports + the refund handlers and parked DIRTY / needs_attention. The existing
+// claim-time blocked_by leg gates each spec individually against ITS OWN blockers, but says nothing
+// about goal-mates that ALSO happen to be dispatch-ready this tick — so N goal-mates all pass and race.
+//
+// This helper is the missing check: for a goal-bound spec, refuse the claim unless (b) NO other build
+// job for the same goal is in-flight, AND (c) this spec is the earliest not-yet-built goal-member in
+// blocked_by-topological order. Cross-goal parallelism is preserved (two DIFFERENT goals with ready
+// specs both dispatch — the check no-ops for one-off specs and for members of other goals).
+//
+// The "earliest" is a Kahn head: a candidate whose goal-mate blockers are ALL already on the goal
+// branch (or shipped) — the same clearance the existing gate + [[sequencePromoteCandidates]] use. Ties
+// break by slug so the choice is deterministic across ticks. Read-only against public.specs + goals-
+// table SDK + agent_jobs (no raw PM writes). Best-effort per read; a resolver failure fails CLOSED (we
+// return { ok: false } and hold — never falsely release a serialized dispatch).
+export type GoalMemberBuildDispatchResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/** The state one goal-member spec presents to the serializer — extracted so the decision is a pure
+ *  predicate (unit-testable) and only the reader below has any DB dependency. */
+export interface GoalMemberDispatchState {
+  slug: string;
+  onGoalBranch: boolean;
+  status: SpecStatus | null;
+  blockedBy: string[];
+}
+
+/** An in-flight sibling build row surfaced to the serializer — one active agent_jobs row per goal-mate. */
+export interface GoalMemberInflightRow {
+  slug: string;
+  status: string;
+}
+
+/** The PURE core of `evaluateGoalMemberBuildDispatch`. Given the goal + this spec's slug + the full
+ *  member state + the in-flight sibling rows, decide whether this spec may dispatch. Kept pure so the
+ *  named failing state — "given a goal with 2+ ready member specs, exactly one is claimable at a time"
+ *  — is testable without a Supabase seam. Ties break by slug so the decision is deterministic. */
+export function decideGoalMemberBuildDispatch(input: {
+  slug: string;
+  goalSlug: string;
+  members: GoalMemberDispatchState[];
+  inflight: GoalMemberInflightRow[];
+}): GoalMemberBuildDispatchResult {
+  const { slug, goalSlug, members, inflight } = input;
+  if (members.length === 0) return { ok: true };
+
+  // (b) In-flight — any OTHER active build for a goal-mate wins the goal's serial slot.
+  const other = inflight.find((r) => r.slug !== slug);
+  if (other) {
+    return {
+      ok: false,
+      reason: `another goal-member build is in-flight for goal ${goalSlug} (${other.slug} status=${other.status}); serialized to prevent hot-file collisions`,
+    };
+  }
+
+  // (c) Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
+  //     A ready head has every goal-mate blocker already on the goal branch (external blockers are the
+  //     existing gate's concern). Sort by slug so the choice is deterministic across ticks.
+  const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
+  const unbuilt = members.filter(
+    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
+  );
+  if (unbuilt.length === 0) return { ok: true };
+
+  const readyHeads: string[] = [];
+  for (const c of unbuilt) {
+    let ready = true;
+    for (const b of c.blockedBy) {
+      if (b === c.slug) continue;
+      const bMember = memberBySlug.get(b);
+      if (!bMember) continue; // external / cross-goal blocker — not our concern here
+      if (!bMember.onGoalBranch) {
+        ready = false;
+        break;
+      }
+    }
+    if (ready) readyHeads.push(c.slug);
+  }
+  if (readyHeads.length === 0) {
+    return {
+      ok: false,
+      reason: `no goal-member of ${goalSlug} has all goal-mate blockers on the goal branch this tick — held; escort re-releases next tick`,
+    };
+  }
+  readyHeads.sort();
+  const earliest = readyHeads[0];
+  if (earliest !== slug) {
+    return {
+      ok: false,
+      reason: `${slug} is not the earliest ready goal-member of ${goalSlug} (${earliest} is next); serialized within the goal`,
+    };
+  }
+  return { ok: true };
+}
+
+export async function evaluateGoalMemberBuildDispatch(
+  workspaceId: string,
+  slug: string,
+): Promise<GoalMemberBuildDispatchResult> {
+  const goalSlug = await resolveGoalSlugForSpec(workspaceId, slug);
+  if (!goalSlug) return { ok: true }; // one-off — no serialization
+
+  const { goalBranchState } = await import("@/lib/specs-table");
+  const state = await goalBranchState(workspaceId, goalSlug);
+  if (state.specs.length === 0) return { ok: true }; // race: goal resolved but has no members
+
+  const memberSlugs = state.specs.map((s) => s.slug);
+  // In-flight seam — any OTHER goal-mate build with an active status. Same ACTIVE_STATUSES seam used by
+  // [[enqueueBuildIfDue]] + fold-guard (queued/queued_resume are pre-claim; claimed/building/…
+  // /blocked_on_usage all hold a live session).
+  const admin = createAdminClient();
+  const { data: inflightRows } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "build")
+    .in("spec_slug", memberSlugs)
+    .in("status", ["claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"])
+    .neq("spec_slug", slug);
+  const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
+    slug: (r as { spec_slug: string }).spec_slug,
+    status: (r as { status: string }).status,
+  }));
+
+  // Read each member's blocked_by via getSpecFromDb (the SDK — no raw PM SQL).
+  const members: GoalMemberDispatchState[] = [];
+  for (const m of state.specs) {
+    const spec = await getSpecFromDb(workspaceId, m.slug);
+    members.push({
+      slug: m.slug,
+      onGoalBranch: m.onGoalBranch,
+      status: m.status,
+      blockedBy: spec?.blocked_by ?? [],
+    });
+  }
+
+  return decideGoalMemberBuildDispatch({ slug, goalSlug, members, inflight });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
