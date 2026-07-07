@@ -27,6 +27,7 @@ import { aiNightlyAnalysis } from "@/lib/inngest/ai-nightly-analysis";
 import { ticketAnalysisCron } from "@/lib/inngest/ticket-analysis-cron";
 import { dailyAnalysisReportCron } from "@/lib/inngest/daily-analysis-report-cron";
 import { directorRecapCron } from "@/lib/inngest/director-recap-cron";
+import { csDirectorDigestComposerCron } from "@/lib/inngest/cs-director-digest-composer";
 import { sonnetPromptAutoReviewCron } from "@/lib/inngest/sonnet-prompt-auto-review";
 import {
   fraudNightlyScan,
@@ -165,6 +166,7 @@ export const registeredInngestFunctions = [
   ticketAnalysisCron,
   dailyAnalysisReportCron,
   directorRecapCron,
+  csDirectorDigestComposerCron,
   sonnetPromptAutoReviewCron,
   fraudNightlyScan,
   fraudGenerateSummary,

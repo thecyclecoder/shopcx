@@ -596,6 +596,10 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "demographics-enrich-batch", kind: "cron", owner: "growth", label: "Demographics enrich batch", description: "Daily customer-demographics enrichment batch.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "daily-analysis-report-cron", kind: "cron", owner: "platform", label: "Daily analysis report", description: "Builds the daily AI ops/analysis report.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "director-recap-cron", kind: "cron", owner: "platform", label: "Director EOD recap", description: "Posts the end-of-day director standup recap to the #directors board + Daily Summaries.", expectedCadence: "daily (0 23 * * *)", livenessWindowMs: 26 * HOUR },
+  // cs-director-storyline-digests-to-founder-with-bidirectional-reply Phase 1 — weekly composer that
+  // rolls the CS Director's cs-director-call verdicts + recurring resolution-event problem patterns
+  // into ONE cs_director_digests row per (workspace, week) instead of paging on every escalation.
+  { id: "cs-director-digest-composer", kind: "cron", owner: "cs", label: "CS Director storyline digest composer", description: "Weekly: composes a cs_director_digests row per workspace from recent cs-director-call verdicts + recurring ticket_resolution_events problem patterns.", expectedCadence: "weekly (0 14 * * 1)", livenessWindowMs: 8 * DAY, registeredAt: "2026-07-07T12:00:00Z" },
   { id: "daily-order-snapshot", kind: "cron", owner: "platform", label: "Daily order snapshot", description: "Pre-computes the prior day's order snapshot.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "daily-order-snapshot-self-heal", kind: "cron", owner: "platform", label: "Order snapshot self-heal", description: "Back-fills any missing daily order snapshots.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "delivery-nightly-audit", kind: "cron", owner: "retention", label: "Delivery nightly audit", description: "Audits shipment delivery state nightly.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
