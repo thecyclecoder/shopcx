@@ -42,6 +42,11 @@ import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthor
 import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic, type KillerArchetype } from "@/lib/ad-statics";
 import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createAd } from "@/lib/meta-ads";
 import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
+import {
+  MEDIA_BUYER_TEST_ORIGIN,
+  evaluateMediaBuyerTestPublish,
+  escalateMediaBuyerTestPublishRefusal,
+} from "@/lib/media-buyer/publish-gate";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -942,11 +947,46 @@ export const adToolPublishToMeta = inngest.createFunction(
         }
         await admin.from("ad_publish_jobs").update({ meta_creative_id: creativeId }).eq("id", job_id);
 
+        // Media-Buyer test-cohort gate — belt-and-suspenders re-check
+        // (media-buyer-test-winner-loop Phase 1). The publish route runs the same
+        // gate BEFORE inserting the job, but a script/enqueue path may bypass the
+        // route entirely, and the cohort could have been retired between insert
+        // and publisher execution. Re-verify here: on refusal we DOWNGRADE the
+        // ad to PAUSED (never silently spend) and escalate to the CEO. The refusal
+        // is idempotent-safe — escalateDiagnosisToCeo dedupes on the same key the
+        // route used, so a route-caught refusal doesn't fan out a duplicate.
+        let effectivePublishActive = !!j.publish_active;
+        if (effectivePublishActive && j.origin === MEDIA_BUYER_TEST_ORIGIN) {
+          const gate = await evaluateMediaBuyerTestPublish(admin, {
+            workspaceId: workspace_id,
+            metaAdAccountId: (j.meta_ad_account_row_id as string | null) ?? null,
+            metaAdsetId: String(j.meta_adset_id),
+            projectedDailyCents: Number.isFinite(Number(j.projected_daily_cents))
+              ? Math.round(Number(j.projected_daily_cents))
+              : 0,
+          });
+          if (!gate.allowed) {
+            effectivePublishActive = false;
+            await escalateMediaBuyerTestPublishRefusal(admin, {
+              workspaceId: workspace_id,
+              metaAdsetId: String(j.meta_adset_id),
+              metaAdAccountId: (j.meta_ad_account_row_id as string | null) ?? null,
+              projectedDailyCents: gate.projectedDailyCents,
+              reason: gate.reason,
+              diagnosis: gate.diagnosis,
+              ceilingCents: gate.ceilingCents,
+              jobId: job_id,
+              campaignId: (j.campaign_id as string) ?? null,
+            });
+            await admin.from("ad_publish_jobs").update({ publish_active: false }).eq("id", job_id);
+          }
+        }
+
         const adId = await createAd(ctx.token!, j.meta_account_id, {
           name: ctx.adName,
           adsetId: j.meta_adset_id,
           creativeId,
-          status: j.publish_active ? "ACTIVE" : "PAUSED",
+          status: effectivePublishActive ? "ACTIVE" : "PAUSED",
         });
         await setStatus("published", { meta_video_id: videoId, meta_creative_id: creativeId, meta_ad_id: adId, error: null });
         // Phase 6b write-back: if this job fulfills an iteration_recommendation,
