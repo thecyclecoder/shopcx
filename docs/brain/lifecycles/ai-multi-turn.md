@@ -121,7 +121,7 @@ Validation: `safeJSONParse()` parses + schema-checks. Bad JSON → fall back to 
 
 `src/lib/action-executor.ts` dispatches on `action_type`:
 
-- `direct_action` — execute the action(s):
+- `direct_action` — the selective-clarify gate ([[../libraries/selective-clarify]] — Phase 2 of [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]) fires FIRST: on a low-confidence × irreversible plan (`partial_refund` / `cancel` / `bill_now` / `subscriptionOrderNow`, DB-configurable via a `slug='irreversible_actions'` [[../tables/policies]] row) it sends a scoped confirmation-turn instead of running any action and stamps [[../tables/ticket_resolution_events]] `verified_outcome='clarified'`. Otherwise: execute the action(s):
   - Subscription mutations via [[../integrations/appstle]] (`appstleSubscriptionAction`, `appstleSkipNextOrder`, etc.).
   - Order refunds via [[../integrations/shopify]] `refundCreate` + [[../integrations/braintree]] `transaction.refund` when applicable.
   - Loyalty redemptions via `src/lib/loyalty.ts`.
@@ -197,6 +197,7 @@ The orchestrator's behavior is *not* hardcoded. [[../tables/sonnet_prompts]] hol
 | `src/lib/inngest/deliver-pending-send.ts` | Outbound delivery |
 | `src/lib/inngest/ticket-analysis-cron.ts` | Nightly analysis cron |
 | `src/lib/inngest/ai-nightly-analysis.ts` | Daily AI quality review |
+| `src/lib/selective-clarify.ts` | Phase-2 low-confidence × irreversible gate for `direct_action` |
 
 ## Status / open work
 
