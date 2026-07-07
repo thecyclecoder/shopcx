@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, type SpecStatus } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -1386,6 +1386,303 @@ async function sequencePromoteCandidates(
     }
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// serialize-goal-member-spec-builds Phase 1 — the DISPATCH-TIME serializer.
+// ─────────────────────────────────────────────────────────────────────────────
+// A goal's member spec builds MUST NOT run concurrently. Grounded in the 2026-07-06 jam: 8 kind='build'
+// jobs for guaranteed-ticket-handling member specs all cleared their individual blocked_by leg at once
+// and ran concurrently off origin/goal/guaranteed-ticket-handling; #1245/#1246/#1248 collided on
+// action-executor.ts imports + the refund handlers and parked DIRTY / needs_attention. The existing
+// claim-time blocked_by leg gates each spec individually against ITS OWN blockers, but says nothing
+// about goal-mates that ALSO happen to be dispatch-ready this tick — so N goal-mates all pass and race.
+//
+// This helper is the missing check: for a goal-bound spec, refuse the claim unless (b) NO other build
+// job for the same goal is in-flight, AND (c) this spec is the earliest not-yet-built goal-member in
+// blocked_by-topological order. Cross-goal parallelism is preserved (two DIFFERENT goals with ready
+// specs both dispatch — the check no-ops for one-off specs and for members of other goals).
+//
+// The "earliest" is a Kahn head: a candidate whose goal-mate blockers are ALL already on the goal
+// branch (or shipped) — the same clearance the existing gate + [[sequencePromoteCandidates]] use. Ties
+// break by slug so the choice is deterministic across ticks. Read-only against public.specs + goals-
+// table SDK + agent_jobs (no raw PM writes). Best-effort per read; a resolver failure fails CLOSED (we
+// return { ok: false } and hold — never falsely release a serialized dispatch).
+export type GoalMemberBuildDispatchResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/** The state one goal-member spec presents to the serializer — extracted so the decision is a pure
+ *  predicate (unit-testable) and only the reader below has any DB dependency. */
+export interface GoalMemberDispatchState {
+  slug: string;
+  onGoalBranch: boolean;
+  status: SpecStatus | null;
+  blockedBy: string[];
+}
+
+/** An in-flight sibling build row surfaced to the serializer — one active agent_jobs row per goal-mate. */
+export interface GoalMemberInflightRow {
+  slug: string;
+  status: string;
+}
+
+/** The PURE core of `evaluateGoalMemberBuildDispatch`. Given the goal + this spec's slug + the full
+ *  member state + the in-flight sibling rows, decide whether this spec may dispatch. Kept pure so the
+ *  named failing state — "given a goal with 2+ ready member specs, exactly one is claimable at a time"
+ *  — is testable without a Supabase seam. Ties break by slug so the decision is deterministic. */
+export function decideGoalMemberBuildDispatch(input: {
+  slug: string;
+  goalSlug: string;
+  members: GoalMemberDispatchState[];
+  inflight: GoalMemberInflightRow[];
+}): GoalMemberBuildDispatchResult {
+  const { slug, goalSlug, members, inflight } = input;
+  if (members.length === 0) return { ok: true };
+
+  // (b) In-flight — any OTHER active build for a goal-mate wins the goal's serial slot.
+  const other = inflight.find((r) => r.slug !== slug);
+  if (other) {
+    return {
+      ok: false,
+      reason: `another goal-member build is in-flight for goal ${goalSlug} (${other.slug} status=${other.status}); serialized to prevent hot-file collisions`,
+    };
+  }
+
+  // (c) Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
+  //     A ready head has every goal-mate blocker already on the goal branch (external blockers are the
+  //     existing gate's concern). Sort by slug so the choice is deterministic across ticks.
+  const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
+  const unbuilt = members.filter(
+    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
+  );
+  if (unbuilt.length === 0) return { ok: true };
+
+  const readyHeads: string[] = [];
+  for (const c of unbuilt) {
+    let ready = true;
+    for (const b of c.blockedBy) {
+      if (b === c.slug) continue;
+      const bMember = memberBySlug.get(b);
+      if (!bMember) continue; // external / cross-goal blocker — not our concern here
+      if (!bMember.onGoalBranch) {
+        ready = false;
+        break;
+      }
+    }
+    if (ready) readyHeads.push(c.slug);
+  }
+  if (readyHeads.length === 0) {
+    return {
+      ok: false,
+      reason: `no goal-member of ${goalSlug} has all goal-mate blockers on the goal branch this tick — held; escort re-releases next tick`,
+    };
+  }
+  readyHeads.sort();
+  const earliest = readyHeads[0];
+  if (earliest !== slug) {
+    return {
+      ok: false,
+      reason: `${slug} is not the earliest ready goal-member of ${goalSlug} (${earliest} is next); serialized within the goal`,
+    };
+  }
+  return { ok: true };
+}
+
+export async function evaluateGoalMemberBuildDispatch(
+  workspaceId: string,
+  slug: string,
+): Promise<GoalMemberBuildDispatchResult> {
+  const goalSlug = await resolveGoalSlugForSpec(workspaceId, slug);
+  if (!goalSlug) return { ok: true }; // one-off — no serialization
+
+  const { goalBranchState } = await import("@/lib/specs-table");
+  const state = await goalBranchState(workspaceId, goalSlug);
+  if (state.specs.length === 0) return { ok: true }; // race: goal resolved but has no members
+
+  const memberSlugs = state.specs.map((s) => s.slug);
+  // In-flight seam — any OTHER goal-mate build with an active status. Same ACTIVE_STATUSES seam used by
+  // [[enqueueBuildIfDue]] + fold-guard (queued/queued_resume are pre-claim; claimed/building/…
+  // /blocked_on_usage all hold a live session).
+  const admin = createAdminClient();
+  const { data: inflightRows } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "build")
+    .in("spec_slug", memberSlugs)
+    .in("status", ["claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"])
+    .neq("spec_slug", slug);
+  const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
+    slug: (r as { spec_slug: string }).spec_slug,
+    status: (r as { status: string }).status,
+  }));
+
+  // Read each member's blocked_by via getSpecFromDb (the SDK — no raw PM SQL).
+  const members: GoalMemberDispatchState[] = [];
+  for (const m of state.specs) {
+    const spec = await getSpecFromDb(workspaceId, m.slug);
+    members.push({
+      slug: m.slug,
+      onGoalBranch: m.onGoalBranch,
+      status: m.status,
+      blockedBy: spec?.blocked_by ?? [],
+    });
+  }
+
+  return decideGoalMemberBuildDispatch({ slug, goalSlug, members, inflight });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// serialize-goal-member-spec-builds Phase 2 — auto-re-drive a DIRTY goal-member PR.
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 serialized within-goal dispatch (only one goal-mate builds at a time). Phase 2 handles the
+// EXISTING PR that goes DIRTY after the fact: another goal-mate merged onto the goal branch, so this
+// PR is now `mergeable_state ∈ {"dirty","behind"}` against its base. Pre-fix, the PR sat parked on the
+// board waiting for a human. Post-fix, the reconciler detects it via `getPr(prNumber).mergeableState`
+// and enqueues a `pr-resolve` job (the existing rebase-or-rebuild executor — [[github-pr-resolve]]),
+// so the PR self-heals back to MERGEABLE without a human touch.
+//
+// SAFETY (Phase 2 verification — "a PR whose GitHub state can't be read is left untouched"):
+//   • FAIL CLOSED on a getPr read failure — never guess DIRTY without a positive read.
+//   • FAIL CLOSED on `mergeableState === null` — GitHub is still computing merge state.
+//   • FAIL CLOSED on `mergeableState === "unknown"` — GitHub returned the uncertain enum, treat as no-op.
+//   • Only re-drives goal-member PRs (one-off / non-goal-bound specs are handled by the existing
+//     [[detectAndEnqueueDirtyPrs]] against origin/main).
+//
+// SCOPE: matches the existing dirty-PR resolver's contract — the enqueue is IDEMPOTENT
+// (enqueuePrResolveJob dedupes per PR + is retry-capped), so a repeat detection across ticks is a no-op.
+
+/** The subset of `getPr`'s ok-shape the Phase 2 predicate reads — kept independent of the caller's
+ *  full read so the predicate is unit-testable without a fetch stub. */
+export interface GoalMemberPrGithubState {
+  ok: boolean;
+  state?: string;
+  merged?: boolean;
+  mergeableState?: string | null;
+}
+
+/** Which mergeable_state values indicate a goal-member PR needs re-drive. `dirty` = literal conflict;
+ *  `behind` = base advanced (a goal-mate merged, no conflict yet but the PR isn't fast-forwardable).
+ *  `unstable` is deliberately NOT included — the PR is mergeable, just has a red check; the auto-merge
+ *  gate handles that (no rebase needed). `unknown` / `blocked` / null all abstain (fail closed). */
+export const GOAL_MEMBER_REDRIVE_MERGEABLE_STATES = new Set(["dirty", "behind"]);
+
+/** PURE Phase 2 predicate — "should this goal-member PR be re-driven?" Given the getPr outcome, decide
+ *  `redrive` vs `skip` with a reason. Fail closed on any uncertain / read-failed input. Split out so the
+ *  named failing state ("a PR whose GitHub state can't be read is left untouched") is testable end-to-
+ *  end without a fetch stub. */
+export function decideGoalMemberPrRedrive(pr: GoalMemberPrGithubState): {
+  action: "redrive" | "skip";
+  reason: string;
+} {
+  if (!pr.ok) return { action: "skip", reason: "github read failed — fail closed (no false re-drive)" };
+  if (pr.merged) return { action: "skip", reason: "PR already merged — nothing to re-drive" };
+  if (pr.state !== "open") return { action: "skip", reason: `PR state=${pr.state ?? "(missing)"} — only open PRs are re-drivable` };
+  const state = pr.mergeableState;
+  if (!state) return { action: "skip", reason: "mergeable_state absent — fail closed (GitHub still computing)" };
+  if (state === "unknown") return { action: "skip", reason: "mergeable_state=unknown — fail closed until GitHub settles" };
+  if (!GOAL_MEMBER_REDRIVE_MERGEABLE_STATES.has(state)) {
+    return { action: "skip", reason: `mergeable_state=${state} — not a re-drive state (clean/unstable/blocked are handled elsewhere)` };
+  }
+  return { action: "redrive", reason: `mergeable_state=${state} — enqueuing pr-resolve to merge the goal branch into the PR branch` };
+}
+
+export interface DirtyGoalMemberReconcileResult {
+  checked: number;
+  redriven: number;
+  skipped: number;
+  readFailed: number;
+  prs: Array<{ prNumber: number; slug: string; mergeableState: string | null; action: "redrive" | "skip"; reason: string; enqueued: boolean }>;
+}
+
+/**
+ * serialize-goal-member-spec-builds Phase 2 — the reconciler: enumerate open goal-member build PRs,
+ * read each via `getPr`, and enqueue a `pr-resolve` job for every one whose live mergeable_state says
+ * it needs re-drive (`dirty` / `behind`). Runs alongside the existing dirty-PR standing pass but scoped
+ * to GOAL-MEMBER PRs — Phase 1 stopped these from being CREATED concurrently; Phase 2 makes existing
+ * ones self-heal when the goal branch advances beneath them.
+ *
+ * Enumeration source: `agent_jobs` rows with kind='build' + pr_number != null + status ∈
+ * (completed / merged / needs_attention — the terminal-ish states that carry an open PR that may have
+ * gone stale). We RE-ASSERT the PR is actually open + goal-bound before enqueueing — the row's
+ * `pr_number` is a proxy for "a PR exists"; the confirming predicate is the live `getPr` read + the
+ * `resolveGoalSlugForSpec` result (per Bo's mutation-gating coaching: never let a row proxy stand in
+ * for the live condition at the action point). Best-effort per PR; never throws.
+ */
+export async function reconcileDirtyGoalMemberPrs(
+  adminClient?: Admin,
+): Promise<DirtyGoalMemberReconcileResult> {
+  const result: DirtyGoalMemberReconcileResult = { checked: 0, redriven: 0, skipped: 0, readFailed: 0, prs: [] };
+  const admin = adminClient || createAdminClient();
+  const { getPr, enqueuePrResolveJob } = await import("@/lib/github-pr-resolve");
+
+  // Candidate rows — build jobs carrying a PR number. Filter to plausibly-open PRs (completed +
+  // needs_attention are the two states a still-open goal-member PR realistically sits in after its
+  // build finished; merged/failed we skip via the .in filter). Order newest-first so the most-recent
+  // job per spec is checked first — the older duplicate rows dedupe naturally on getPr's `merged`/
+  // `state !== open` skip.
+  const { data: rows } = await admin
+    .from("agent_jobs")
+    .select("id, workspace_id, spec_slug, spec_branch, pr_number, status")
+    .eq("kind", "build")
+    .not("pr_number", "is", null)
+    .in("status", ["completed", "needs_attention"])
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  const seen = new Set<string>(); // dedupe per (workspace_id:pr_number) — one check per PR per pass
+  for (const row of (rows ?? []) as Array<{ workspace_id: string; spec_slug: string | null; spec_branch: string | null; pr_number: number | null }>) {
+    const prNumber = row.pr_number;
+    const workspaceId = row.workspace_id;
+    const branch = row.spec_branch ?? "";
+    const slug = row.spec_slug ?? "";
+    if (!prNumber || !branch || !slug || !branch.startsWith("claude/")) continue;
+    const key = `${workspaceId}:${prNumber}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    // GOAL-BOUND filter — Phase 2 is the goal-member lane. A one-off spec whose PR is dirty is handled
+    // by the existing detectAndEnqueueDirtyPrs (which runs against origin/main). Fail closed on the
+    // goal-resolve — an unknown goal-membership is treated as non-goal-bound (leaves the PR to the
+    // main-based dirty-PR lane, never to a wrong-branch resolver).
+    let goalSlug: string | null = null;
+    try {
+      goalSlug = await resolveGoalSlugForSpec(workspaceId, slug);
+    } catch {
+      goalSlug = null;
+    }
+    if (!goalSlug) continue;
+
+    result.checked++;
+    const pr = await getPr(prNumber);
+    if (!pr.ok) {
+      result.readFailed++;
+      result.prs.push({ prNumber, slug, mergeableState: null, action: "skip", reason: "github read failed", enqueued: false });
+      continue;
+    }
+    const state = pr.mergeableState;
+    const decision = decideGoalMemberPrRedrive({ ok: true, state: pr.state, merged: pr.merged, mergeableState: state });
+    if (decision.action !== "redrive") {
+      result.skipped++;
+      result.prs.push({ prNumber, slug, mergeableState: state, action: "skip", reason: decision.reason, enqueued: false });
+      continue;
+    }
+
+    // Enqueue — enqueuePrResolveJob dedupes per PR + is retry-capped, so a repeat detection across
+    // ticks is inert. Best-effort: an insert failure leaves the row for the next tick.
+    let enqueued = false;
+    try {
+      const r = await enqueuePrResolveJob(admin, { workspaceId, prNumber, branch });
+      enqueued = r.enqueued === true;
+    } catch (e) {
+      console.warn(`[goal-member-redrive] pr-resolve enqueue failed for PR #${prNumber}:`, e instanceof Error ? e.message : e);
+    }
+    if (enqueued) result.redriven++;
+    else result.skipped++;
+    result.prs.push({ prNumber, slug, mergeableState: state, action: "redrive", reason: decision.reason, enqueued });
+  }
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
