@@ -22,6 +22,10 @@ const REASONS_CSS = `
 .bp-reason__h{font-weight:800;font-size:1.6rem;line-height:1.12;letter-spacing:-.02em;text-wrap:balance;margin:0}
 .bp-reason__p{font-size:1.08rem;line-height:1.6;color:#3a2c22;margin:0}
 .bp-reason__p+.bp-reason__p{margin-top:.7rem}
+.bp-reason__quote{margin:.2rem 0 0;padding:.9rem 1.1rem;background:#f2ebdf;border-left:3px solid ${AMBER};border-radius:0 12px 12px 0}
+.bp-reason__quote p{margin:0;font-size:1.06rem;line-height:1.5;font-style:italic;color:#2c2118}
+.bp-reason__quote cite{display:block;margin-top:.5rem;font-style:normal;font-weight:700;font-size:.82rem;color:#7a6455}
+.bp-reason__quote cite .v{color:#2e7d5b;font-weight:800}
 .bp-reason__reassure{text-align:center;font-weight:700;font-size:.86rem;color:#7a6455;text-transform:uppercase;letter-spacing:.03em}
 @media (min-width:900px){
   .bp-reason{flex-direction:row;align-items:center;gap:2.6rem;padding:2.8rem 0}
@@ -63,6 +67,12 @@ export function BlueprintReasons({
               {r.copy.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean).map((p, i) => (
                 <p className="bp-reason__p" key={i}>{p}</p>
               ))}
+              {r.quote && (
+                <blockquote className="bp-reason__quote">
+                  <p>&ldquo;{r.quote.text}&rdquo;</p>
+                  <cite>{r.quote.author} <span className="v">✓ Verified</span></cite>
+                </blockquote>
+              )}
               <div>
                 <LanderCTA label={ctaLabel} href={ctaHref} />
               </div>

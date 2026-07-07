@@ -60,6 +60,8 @@ export interface ReasonItem {
   copy: string;
   imageUrl: string | null;
   imageAlt: string | null;
+  /** A real, attributed customer quote for this reason (never floated unattributed). */
+  quote?: { text: string; author: string } | null;
 }
 
 /** The intro/proof band's lander-specific bits (mechanism image + product description). The
@@ -69,6 +71,47 @@ export interface IntroData {
   imageAlt: string | null;
   description: string;
 }
+
+/** A single FB-comment-style review card in the post-reasons reviews section. */
+export interface ReviewCard {
+  name: string;
+  avatarUrl: string | null;
+  body: string;
+  imageUrl?: string | null; // optional photo below the comment (e.g. a before/after)
+}
+
+/** The reviews section (Erth-style: header + verified-review count + FB-comment cards). */
+export interface ReviewsData {
+  header: string;
+  ratingText: string; // e.g. "16,000+ Verified Reviews"
+  beforeAfter?: { imageUrl: string; caption: string } | null;
+  cards: ReviewCard[];
+}
+
+/** The single lifechanging featured review (lifestyle image + big quote + attributed body). */
+export interface FeaturedReviewData {
+  imageUrl: string | null;
+  quote: string;
+  body: string;
+  author: string;
+}
+
+/** The offer card (bundle image + discount + checklist + CTA + live countdown). */
+export interface OfferData {
+  badge: string; // "Last Chance Offer"
+  headline: string; // "65% Off + Free Starter Kit"
+  imageUrl: string | null; // composed bundle shot
+  title: string;
+  checklist: string[];
+  ctaLabel: string;
+  ratingText: string; // "★★★★★ (16,568)"
+  countdownSeconds: number; // initial countdown duration
+}
+
+export interface FaqItem { q: string; a: string }
+
+/** Simple lander footer: logo + a single guarantee tagline. */
+export interface FooterData { logoUrl: string | null; tagline: string }
 
 /** Everything the storefront blueprint-lander section needs to render. */
 export interface BlueprintRenderContent {
@@ -81,6 +124,18 @@ export interface BlueprintRenderContent {
   intro: IntroData | null;
   /** The 8 discrete reason rows, when the blueprint carries a structured `content.reasons`. */
   reasons: ReasonItem[] | null;
+  /** Post-reasons FB-comment reviews section. */
+  reviews: ReviewsData | null;
+  /** The single lifechanging featured review. */
+  featured: FeaturedReviewData | null;
+  /** The offer card. */
+  offer: OfferData | null;
+  /** FAQ rows. */
+  faq: FaqItem[] | null;
+  /** "700,000 lives transformed" social-proof heading (reviews widget reused from PageData). */
+  socialProofHeading: string | null;
+  /** Simple footer. */
+  footer: FooterData | null;
   blocks: BlueprintRenderBlock[];
   /** Overall CTA copy authored by Carrie on `content.cta`. */
   cta: string | null;
@@ -230,6 +285,12 @@ export async function loadBlueprintRenderContent(
     hero: (content as { hero?: BlueprintHeroData }).hero ?? null,
     intro: (content as { intro?: IntroData }).intro ?? null,
     reasons: (content as { reasons?: ReasonItem[] }).reasons ?? null,
+    reviews: (content as { reviews?: ReviewsData }).reviews ?? null,
+    featured: (content as { featured?: FeaturedReviewData }).featured ?? null,
+    offer: (content as { offer?: OfferData }).offer ?? null,
+    faq: (content as { faq?: FaqItem[] }).faq ?? null,
+    socialProofHeading: (content as { socialProofHeading?: string }).socialProofHeading ?? null,
+    footer: (content as { footer?: FooterData }).footer ?? null,
     blocks,
     cta: content.cta ?? null,
   };

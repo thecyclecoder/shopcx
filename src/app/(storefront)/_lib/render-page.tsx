@@ -119,8 +119,12 @@ export function StorefrontPage({
   // `.storefront-root` rules that key off these two CSS vars.
   const SYSTEM_BODY_STACK =
     "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif";
+  // Advertorial/blueprint landers use the OS system font for HEADINGS too (not just body) —
+  // it reads more natural than the workspace display face (Montserrat) on an editorial listicle,
+  // and referencing no webfont means the lander makes zero Google-font fetches.
+  const isLanderView = !!(advertorial || blueprint);
   const themeStyle = {
-    "--storefront-heading-font": font.stack,
+    "--storefront-heading-font": isLanderView ? SYSTEM_BODY_STACK : font.stack,
     "--storefront-body-font": SYSTEM_BODY_STACK,
     "--storefront-primary": design.primary_color || "#18181b",
     "--storefront-accent": design.accent_color || "#10b981",
