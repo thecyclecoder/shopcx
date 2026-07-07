@@ -136,6 +136,33 @@ async function areSpecsGoalMates(workspaceId, slugA, slugB): Promise<boolean>
 
 `resolveGoalSlugForSpec` resolves the GOAL a spec belongs to via `specs.milestone_id → goal_milestones.goal_id → goals.slug` (null = one-off / not goal-bound). `areSpecsGoalMates` = both resolve to the SAME non-null goal slug. The claim-time blocked_by gate ([[../recipes/build-box-setup|builder-worker]] `evaluateClaimTimeBuildGate`) uses these to pick the right blocker-clearance: a **goal-mate** blocker is cleared when ON THE GOAL BRANCH ([[specs-table]] `isSpecOnGoalBranch` — a goal-mate never ships to main until M5's atomic promotion), an **external** blocker (one-off / different goal) is cleared when SHIPPED. This is the load-bearing fix that stops a goal-mate dependent deadlocking forever (its blocker can't ship until the whole goal promotes). The spec-branch base in `runBuildJob` also calls `resolveGoalSlugForSpec` to base a goal-bound fresh spec branch on `origin/goal/{goal-slug}` when that branch exists.
 
+### `evaluateGoalMemberBuildDispatch` / `decideGoalMemberBuildDispatch` — functions  *(serialize-goal-member-spec-builds Phase 1)*
+
+```ts
+async function evaluateGoalMemberBuildDispatch(workspaceId: string, slug: string): Promise<GoalMemberBuildDispatchVerdict>
+function decideGoalMemberBuildDispatch(thisSpec: Spec, goalSpec: Spec[], inFlightBuildForGoal: AgentJob | null): 'claimable' | 'queued' | 'ineligible'
+```
+
+Goal-bound specs of the SAME goal must serialize on build (concurrent builds collide on hot files like `action-executor.ts`). `decideGoalMemberBuildDispatch` is a **pure predicate** that returns the dispatch verdict for a spec being claimed:
+- **`'claimable'`** — this spec is eligible to build NOW. TRUE when: (a) no other goal-mate build is in-flight (claimed/building), AND (b) this spec is the EARLIEST ready goal-member in `blocked_by`-topological order (Kahn-sorted, slug tiebreak for determinism).
+- **`'queued'`** — this spec must wait. Return when a goal-mate build blocks it. The spec stays `queued` (requeue disposition) so the next platform-director standing pass re-evaluates it as the prior sibling merges onto the goal branch.
+- **`'ineligible'`** — one-off spec (no goal) or resolution failed — no-op (falsy goal slug = falsy gate).
+
+`evaluateGoalMemberBuildDispatch` is the **DB reader** — calls `resolveGoalSlugForSpec` (get the goal), `getGoalSpecMembersInOrder` (list goal-mates in blocked_by order), `listAgentJobs` (check for in-flight builds), and invokes the pure predicate. Wired into `scripts/builder-worker.ts` `evaluateClaimTimeBuildGate` **leg 4** (the 4-leg claim gate: 1-goal-bound-validation, 2-blocked_by-clear, 3-vale-pass, **4-goal-member-serialize**, 5-one-off-fallback) — after blocked_by clearance, before Vale check. Never throws; fails OPEN (a read error → treat as `'ineligible'` → no-op gate, the downstream tests still protect).
+
+### `reconcileDirtyGoalMemberPrs` / `decideGoalMemberPrRedrive` — functions  *(serialize-goal-member-spec-builds Phase 2)*
+
+```ts
+async function reconcileDirtyGoalMemberPrs(adminClient?): Promise<DirtyGoalMemberPrResult>
+function decideGoalMemberPrRedrive(prMergeable: PrReadOutcome, reason?: string): 'redrive' | 'skip'
+```
+
+Goal-bound spec PRs can become DIRTY when their base (the goal branch) advances — the spec branch was rebased onto an earlier goal-branch state. `decideGoalMemberPrRedrive` is a **pure predicate** that returns the redrive verdict for a goal-member PR:
+- **`'redrive'`** — enqueue a `pr-resolve` job. TRUE when: the PR is open (not merged/closed) AND `mergeable_state ∈ {dirty, behind}` (a real conflict or behind-base, requiring rebase/rebuild).
+- **`'skip'`** — leave the PR untouched. TRUE when: PR read failed (`null` outcome), `mergeable_state` is `unknown/null/clean/unstable/blocked`, or the PR is `merged`/`closed`.
+
+`reconcileDirtyGoalMemberPrs` is the **standing-pass reconciler** — enumerates open goal-member build PRs (from `agent_jobs` rows with goal-bound specs via `resolveGoalSlugForSpec`), reads each PR's status via [[github-pr-resolve]] `getPr` (which now returns `mergeableState` + `baseRef`), and idempotently enqueues a `pr-resolve` job on `'redrive'` verdict. Skips one-off specs (already covered by the main-based `detectAndEnqueueDirtyPrs` lane). Wired into `scripts/builder-worker.ts` **standing pass** alongside `detectAndEnqueueDirtyPrs` (the mirror lane for one-off PRs). Idempotent (`enqueuePrResolveJob` dedupes per PR) + retry-capped (3 attempts max per PR). Best-effort per PR; never throws. Phase 2 also widened [[github-pr-resolve]] `getPr` to include `mergeableState` (from GitHub's `mergeable_state`) + `baseRef` (from `pr.base.ref`), enabling dynamic base-branch reads for `runPrResolveJob` (see [[github-pr-resolve]] § "Exports").
+
 ### `promoteCompleteGoalsToMain` — function  *(spec-goal-branch-pm-flow M5 — the ATOMIC goal→main promotion)*
 
 ```ts
