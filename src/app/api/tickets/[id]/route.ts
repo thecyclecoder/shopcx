@@ -219,10 +219,14 @@ export async function PATCH(
   const admin = createAdminClient();
   const body = await request.json();
 
-  // Verify ticket belongs to workspace
+  // Verify ticket belongs to workspace. `escalated_at`/`escalated_to` +
+  // `analyzer_locked` are read here (not just for the ownership check)
+  // so the analyzer-veto auto-set below can detect "was previously
+  // escalated" without a second round trip. Phase 2 of
+  // human-directives-hard-gates-over-ticket-ai.
   const { data: existing } = await admin
     .from("tickets")
-    .select("id, status, workspace_id, customer_id, subject")
+    .select("id, status, workspace_id, customer_id, subject, escalated_at, escalated_to, analyzer_locked")
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId)
     .single();
@@ -286,6 +290,42 @@ export async function PATCH(
     updates.ai_disabled_at = next ? new Date().toISOString() : null;
     aiDisabledAudit = { toDisabled: next };
   }
+
+  // Human veto — analyzer_locked. Phase 2 of
+  // human-directives-hard-gates-over-ticket-ai. Two entry points:
+  //   1. Explicit `analyzer_locked` toggle from the dashboard button.
+  //   2. Auto-set when a human manually closes + unescalates a
+  //      previously-escalated ticket in the SAME request — that
+  //      close+unescalate IS the veto ("I reviewed this, do not
+  //      re-open it"). We detect it here (before the escalation clear
+  //      overwrites the existing flags on the row we already read) and
+  //      merge into updates. The explicit toggle wins if both are set.
+  const existingWithGate = existing as unknown as {
+    escalated_at?: string | null;
+    escalated_to?: string | null;
+    analyzer_locked?: boolean;
+    status?: string;
+  };
+  const priorEscalated = !!(existingWithGate.escalated_at || existingWithGate.escalated_to);
+  const closingNow = "status" in body && (body.status === "closed" || body.status === "resolved")
+    && existing.status !== "closed" && existing.status !== "resolved";
+  let analyzerLockedAudit: { toLocked: boolean; reason: "explicit_toggle" | "auto_close_veto" } | null = null;
+  if ("analyzer_locked" in body) {
+    const next = !!body.analyzer_locked;
+    updates.analyzer_locked = next;
+    updates.locked_by = next ? user.id : null;
+    updates.locked_at = next ? new Date().toISOString() : null;
+    analyzerLockedAudit = { toLocked: next, reason: "explicit_toggle" };
+  } else if (
+    closingNow &&
+    priorEscalated &&
+    !existingWithGate.analyzer_locked
+  ) {
+    updates.analyzer_locked = true;
+    updates.locked_by = user.id;
+    updates.locked_at = new Date().toISOString();
+    analyzerLockedAudit = { toLocked: true, reason: "auto_close_veto" };
+  }
   if ("csat_score" in body) updates.csat_score = body.csat_score;
   if ("auto_reply_at" in body) updates.auto_reply_at = body.auto_reply_at;
   // Escalate to the AI Routine: escalated_at set + escalated_to = null (the
@@ -318,14 +358,18 @@ export async function PATCH(
   // Audit note for the ai_disabled toggle — cite the actor so the trail
   // survives a later re-enable. Only fires when the field was in the
   // request, so a normal PATCH doesn't spam ticket_messages.
-  if (aiDisabledAudit) {
+  const needsActorLookup = !!(aiDisabledAudit || analyzerLockedAudit);
+  let actorName = "A team member";
+  if (needsActorLookup) {
     const { data: actor } = await admin
       .from("workspace_members")
       .select("display_name")
       .eq("workspace_id", workspaceId)
       .eq("user_id", user.id)
       .maybeSingle();
-    const actorName = actor?.display_name || user.email || "A team member";
+    actorName = actor?.display_name || user.email || "A team member";
+  }
+  if (aiDisabledAudit) {
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
       direction: "outbound",
@@ -334,6 +378,20 @@ export async function PATCH(
       body: aiDisabledAudit.toDisabled
         ? `[System] ${actorName} turned OFF the AI on this ticket. The handler + auto-analysis will skip it until AI is re-enabled.`
         : `[System] ${actorName} re-enabled the AI on this ticket.`,
+    });
+  }
+  if (analyzerLockedAudit) {
+    const suffix = analyzerLockedAudit.reason === "auto_close_veto"
+      ? " (auto — closed + unescalated a previously-escalated ticket)"
+      : "";
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: analyzerLockedAudit.toLocked
+        ? `[System] ${actorName} LOCKED the analyzer on this ticket${suffix}. The auto-analysis cron will skip it and will not re-open + escalate, even on a severe-type or threat-keyword override.`
+        : `[System] ${actorName} unlocked the analyzer on this ticket. The auto-analysis cron may re-select it again.`,
     });
   }
 

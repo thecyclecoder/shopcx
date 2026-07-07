@@ -39,9 +39,18 @@ export const ticketAnalysisCron = inngest.createFunction(
       // column reference, and the whole query errors). Fetch the window
       // and filter in JS instead. Volume is small (~tens to a few
       // hundred per 30-min window) so this is fine.
+      //
+      // ⚠️ analyzer_locked is EXCLUDED at the source, not filtered in
+      // JS — a human has vetoed the analyzer on these rows (Phase 2 of
+      // human-directives-hard-gates-over-ticket-ai). Any updated_at
+      // bump on a locked row (a new tag, an audit note) would otherwise
+      // re-trip the close → analyze → reopen → close loop the veto is
+      // there to break. Paired with the applySeverityActions
+      // hard-return + the stamp-on-slip guard below.
       const { data } = await admin.from("tickets")
-        .select("id, workspace_id, last_analyzed_at, updated_at, tags")
+        .select("id, workspace_id, last_analyzed_at, updated_at, tags, analyzer_locked")
         .eq("status", "closed")
+        .eq("analyzer_locked", false)
         .contains("tags", ["ai"])
         .gte("updated_at", cutoff)
         .order("updated_at", { ascending: false })

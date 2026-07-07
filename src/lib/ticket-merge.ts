@@ -238,6 +238,13 @@ export async function mergeTickets(
     // keeps its own value (default false). Phase 1 of
     // docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md —
     // "a merge conveys context, never control."
+    //
+    // analyzer_locked is DELIBERATELY NOT propagated for the same
+    // reason. A human vetoed the analyzer on one specific ticket ("I
+    // reviewed this, do not re-open it"); folding it onto the target
+    // would silently disable the grader on unrelated conversations
+    // that never got a human review. Target keeps its own value
+    // (default false). Phase 2 of the same spec.
 
     // CARRY ESCALATION FORWARD. If the source was escalated and the target
     // isn't, the target inherits the escalation — otherwise the work

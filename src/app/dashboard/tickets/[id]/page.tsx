@@ -2774,6 +2774,39 @@ export default function TicketDetailPage() {
                 </div>
               );
             })()}
+            {/* Analyzer veto — a human's "I reviewed this, do not re-open
+                it" over the ticket-analysis cron. Distinct from AI
+                Handling above: analyzer_locked only stops the after-the-
+                fact GRADER + auto-reopen; the inbound handler still runs
+                if a customer replies. Auto-set when a human closes AND
+                unescalates a previously-escalated ticket in the same
+                PATCH (see src/app/api/tickets/[id]/route.ts). Phase 2 of
+                human-directives-hard-gates-over-ticket-ai. */}
+            {(() => {
+              const analyzerLocked = !!(ticket as TicketDetail & { analyzer_locked?: boolean }).analyzer_locked;
+              return (
+                <div>
+                  <label className="block text-sm text-zinc-500">Analyzer</label>
+                  <button
+                    type="button"
+                    onClick={() => handlePatch({ analyzer_locked: !analyzerLocked })}
+                    disabled={ticket.status === "archived"}
+                    className={`mt-1 w-full rounded-md border px-2 py-1.5 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+                      analyzerLocked
+                        ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300 dark:hover:bg-amber-900"
+                        : "border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700"
+                    }`}
+                  >
+                    {analyzerLocked ? "🔒 Analyzer LOCKED · click to unlock" : "Lock from analyzer / Approve handling"}
+                  </button>
+                  {analyzerLocked && (
+                    <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">
+                      Auto-analysis cron will skip this ticket — no reopen/escalate, even on severe-type or threat-keyword overrides. Does not propagate on merge.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
             <div>
               <label className="block text-sm text-zinc-500">Channel</label>
               <p className="mt-1 text-sm capitalize text-zinc-700 dark:text-zinc-300">{ticket.channel.replace("_", " ")}</p>

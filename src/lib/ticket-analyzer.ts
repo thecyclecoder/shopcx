@@ -454,7 +454,7 @@ async function analyzeTicketInner(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled, analyzer_locked")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
@@ -471,6 +471,16 @@ async function analyzeTicketInner(
   // opposite of what the human directive asked for.
   if ((ticket as unknown as { ai_disabled?: boolean }).ai_disabled) {
     return { ok: false, reason: "ai_disabled" };
+  }
+
+  // Human veto — analyzer_locked. The cron's find-tickets already
+  // excludes these at the source, but a race is possible: a human
+  // toggles the lock AFTER the tick's SELECT ran. Bail here too so the
+  // caller's skip branch stamps last_analyzed_at and a later
+  // updated_at bump can't re-select the row (Phase 2 of
+  // human-directives-hard-gates-over-ticket-ai).
+  if ((ticket as unknown as { analyzer_locked?: boolean }).analyzer_locked) {
+    return { ok: false, reason: "analyzer_locked" };
   }
 
   // do_not_reply tickets don't get analyzed — the AI intentionally
@@ -799,6 +809,29 @@ async function applySeverityActions(
 ): Promise<void> {
   const score = analysis.score;
   const issues = analysis.issues || [];
+
+  // ── Human veto: analyzer_locked ──
+  // Checked BEFORE the forceEscalate math (below) so a severe-issue
+  // type or a customer-threat keyword can't punch through the veto.
+  // Compare-and-set against a fresh row read — a human may have
+  // toggled the lock AFTER analyzeTicketInner's initial select. On hit
+  // we log a non-actionable audit note and return; NO tickets update,
+  // NO reopen, NO escalate. Phase 2 of
+  // human-directives-hard-gates-over-ticket-ai. Companion: the cron's
+  // find-tickets .eq("analyzer_locked", false) filter.
+  const { data: lockCheck } = await admin.from("tickets")
+    .select("analyzer_locked")
+    .eq("id", ticketId).maybeSingle();
+  if ((lockCheck as unknown as { analyzer_locked?: boolean } | null)?.analyzer_locked) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — analyzer is LOCKED on this ticket by human directive; skipping any reopen/escalate (severe-type + customer-threat overrides all suppressed). ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
 
   const severeTypes = new Set(issues.map(i => i.type).filter(t => SEVERE_ISSUE_TYPES.has(t)));
   const hasSevereIssue = severeTypes.size > 0;
