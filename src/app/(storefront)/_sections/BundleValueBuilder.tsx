@@ -53,7 +53,7 @@ export function BundleValueBuilder({ data }: { data: PageData }) {
     <div className="bvb" data-section="bundle-value-builder">
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <div className="bvb__price">
-        <span className="bvb__now">$49.95</span>
+        <span className="bvb__now">$49.96</span>
         <span className="bvb__was">$154.85</span>
         <span className="bvb__badge">65% Off Today</span>
       </div>
