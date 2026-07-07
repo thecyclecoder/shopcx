@@ -29,6 +29,7 @@ import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBr
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
 import { upsertPhaseChecks, parseVerificationBlobToChecks, type SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
+import { resolveFunctionMandates, type FunctionMandate } from "@/lib/function-mandates";
 import { inngest } from "@/lib/inngest/client";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
@@ -329,6 +330,136 @@ export function assertValidParent(
       `(parentKind:"mandate", parentRef:"{owner}#{mandate-slug}") or a goal milestone.`;
   }
   throw new InvalidParentError(parent, `${why} — CLAUDE.md: parent = a function mandate OR a goal milestone, never a spec.`);
+}
+
+// ── improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 2 ────────────────
+// When a spec is authored with a BARE-FUNCTION parent (`[[../functions/{slug}]]` — matches a function
+// but names no specific mandate and doesn't bind a milestone), the assertValidParent gate above throws
+// InvalidParentError. Phase 2 makes the chokepoint SELF-CORRECT instead: resolve the function's
+// mandates, pick the best fit for the spec's intent (title + why + what), rewrite the parent prose to
+// the canonical `[[../functions/{slug}]] — "{Mandate heading}" mandate: {short reason}.` form, and set
+// parentKind='mandate' + parentRef='{slug}#{mandate-slug}' — so a bare-function author lands rather
+// than bounces. Zero-mandate functions still fail (nothing to anchor to → InvalidParentError).
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+
+const BARE_FUNCTION_PARENT_RE = /functions\/([a-z0-9][a-z0-9-]*)/i;
+
+/** True iff `parent` names a function (`functions/{slug}`) but has NO `#anchor`, NO `mandate` keyword,
+ *  and NO goal reference — the exact shape assertValidParent would bounce. Returns the extracted
+ *  function slug on match, else null. Handles the bracket-stripped shape too (parseAuthoredSpecMarkdown
+ *  unwraps `[[…]]` before it reaches here). */
+export function detectBareFunctionParent(parent: string): { functionSlug: string } | null {
+  const p = (parent || "").trim();
+  if (!p) return null;
+  const m = p.match(BARE_FUNCTION_PARENT_RE);
+  if (!m) return null;
+  if (p.includes("#")) return null; // has a `#anchor` — already a specific mandate
+  if (/\bmandate\b/i.test(p)) return null; // names "mandate" in prose — already anchored to one
+  if (/goals\//i.test(p)) return null; // mixed goal reference — not a pure bare-function parent
+  return { functionSlug: m[1].toLowerCase() };
+}
+
+/** Minimal English stopword list — plus a handful of author-boilerplate tokens ("spec", "phase")
+ *  that appear in every spec and would drown out signal on the best-fit compare. Kept small on
+ *  purpose so meaningful mandate-headline terms (build/store/tech/infra/devops/reliability/calibrate
+ *  /ticket/escalation) are NOT filtered out. */
+const AUTO_ANCHOR_STOPWORDS = new Set<string>([
+  "the","a","an","and","or","but","of","in","on","at","to","for","with","by","from","is","are","was",
+  "were","be","been","being","this","that","these","those","it","its","as","if","so","not","no","do",
+  "does","did","done","have","has","had","will","would","should","can","could","may","might","must",
+  "shall","than","then","when","where","which","who","whom","whose","how","why","what","we","us","our",
+  "you","your","they","their","them","he","she","him","her","his","hers","me","my","mine","one","two",
+  "three","also","just","only","own","same","other","any","all","every","more","most",
+  "spec","specs","phase","phases",
+]);
+
+/** Tokenize a text into a distinct-lowercase-alphanumeric term set, dropping stopwords + very short
+ *  tokens. Distinct so a repeated buzzword doesn't dominate the score. */
+function tokenizeForAnchor(s: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of (s || "").toLowerCase().split(/[^a-z0-9]+/)) {
+    if (raw.length < 3) continue;
+    if (AUTO_ANCHOR_STOPWORDS.has(raw)) continue;
+    out.add(raw);
+  }
+  return out;
+}
+
+/** Pick the mandate whose heading+body has the strongest DISTINCT-term overlap with the spec's title +
+ *  why + what. Ties → declaration order (first mandate wins), which matches the charter authoring
+ *  convention where the primary/most-load-bearing mandate is listed first. Never returns null (called
+ *  only when `mandates.length >= 1`). */
+export function bestFitMandate(
+  mandates: FunctionMandate[],
+  spec: { title: string; why: string; what: string },
+): FunctionMandate {
+  if (mandates.length === 1) return mandates[0];
+  const specTerms = tokenizeForAnchor(`${spec.title} ${spec.why} ${spec.what}`);
+  let best = mandates[0];
+  let bestScore = -1;
+  for (const m of mandates) {
+    const mTerms = tokenizeForAnchor(`${m.heading} ${m.body}`);
+    let hits = 0;
+    for (const t of specTerms) if (mTerms.has(t)) hits++;
+    if (hits > bestScore) {
+      bestScore = hits;
+      best = m;
+    }
+  }
+  return best;
+}
+
+/** Render the canonical bracketed parent prose the auto-anchor rewrites to. Same shape existing
+ *  platform-owned specs use (`[[../functions/platform]] — "Infra & DevOps / reliability" mandate:
+ *  {reason}.`) so a downstream reader (Vale, roadmap surfaces) reads a familiar wikilink form. */
+function formatAutoAnchoredParentProse(functionSlug: string, heading: string, reason: string): string {
+  const clean = (reason || "").trim().replace(/\s+/g, " ");
+  const trimmed = clean.length > 140 ? clean.slice(0, 137).replace(/\s+\S*$/, "") + "…" : clean;
+  const withStop = /[.!?…]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  return `[[../functions/${functionSlug}]] — "${heading}" mandate: ${withStop}`;
+}
+
+/** The result of an auto-anchor: canonical parent prose + typed parentKind/parentRef pair + the chosen
+ *  mandate (so the caller can surface which mandate was picked in the Improve tab's "auto-anchored to
+ *  X" hint). */
+export interface AutoAnchorResult {
+  parent: string;
+  parentKind: "mandate";
+  parentRef: string;
+  mandate: FunctionMandate;
+}
+
+/**
+ * The Phase 2 auto-anchor decision: given a candidate spec's parent + intent, decide whether the
+ * chokepoint should REWRITE the parent to a specific mandate on the named function.
+ *
+ * Returns:
+ *  - `null` when `parent` is NOT a bare-function reference (nothing to auto-anchor — leave the caller's
+ *    value alone; assertValidParent will handle it).
+ *  - `null` when the function has ZERO mandates (nothing to anchor to — the caller falls through to
+ *    assertValidParent which THROWS `InvalidParentError`, preserving the spec's fail-loud behavior for
+ *    unclosable parents).
+ *  - `AutoAnchorResult` otherwise (exactly one mandate → anchor there; multiple → best-fit by
+ *    distinct-term overlap with the spec's title + why + what).
+ *
+ * Deterministic, no LLM. Reads only `docs/brain/functions/{slug}.md` via [[function-mandates]].
+ */
+export async function autoAnchorBareFunctionParent(
+  parent: string,
+  spec: { title: string; why: string; what: string },
+): Promise<AutoAnchorResult | null> {
+  const bare = detectBareFunctionParent(parent);
+  if (!bare) return null;
+  const mandates = await resolveFunctionMandates(bare.functionSlug);
+  if (mandates.length === 0) return null;
+  const chosen = bestFitMandate(mandates, spec);
+  const shortReason = spec.title.trim() || spec.why.trim() || "auto-anchored from a bare-function parent";
+  return {
+    parent: formatAutoAnchoredParentProse(bare.functionSlug, chosen.heading, shortReason),
+    parentKind: "mandate",
+    parentRef: `${bare.functionSlug}#${chosen.slug}`,
+    mandate: chosen,
+  };
 }
 
 /**
@@ -642,6 +773,12 @@ export interface AuthorSpecOpts {
    *  free-text `**Brain refs:**` line). Omit → the chokepoint derives from summary + phase bodies via
    *  the existing suggester. Each ref carries a canonical `kind/name` slug + an optional phase link. */
   brainRefs?: Array<{ brain_slug: string; phase_id?: string | null }>;
+  /** improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 2 — best-effort callback
+   *  fired IFF the chokepoint auto-anchored a bare-function parent to a specific mandate. The Improve tab
+   *  uses this to display "auto-anchored to X" back to the human author, so the fallback is transparent
+   *  (Phase 3 makes it rare rather than routine, but never invisible). Ignored errors — the auto-anchor
+   *  itself still applies. */
+  onAutoAnchor?: (result: AutoAnchorResult) => void;
 }
 
 /** A structured phase a caller hands to `authorSpecRowStructured` — title + body + the verification checklist
@@ -982,10 +1119,43 @@ export async function authorSpecRowStructured(
       const derivedParent = await deriveMilestoneParentProse(opts.milestoneId);
       if (derivedParent) spec = { ...spec, parent: derivedParent };
     }
+    // improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 2 — SELF-CORRECT a
+    // bare-function parent (matches `functions/{slug}` but no `#anchor`, no `mandate` keyword, no goal
+    // ref) BEFORE assertValidParent runs: resolve the function's mandates, pick the best fit for the
+    // spec's title+why+what, and rewrite parent + parentKind + parentRef to the specific mandate. So a
+    // bare `[[../functions/cs]]` parent no longer bounces — it lands anchored. Skipped when a milestone
+    // is bound (the goal path owns the parent) or when the caller already declared a typed mandate/
+    // milestone parent (trust the caller). A zero-mandate function still falls through to
+    // assertValidParent → InvalidParentError (nothing to anchor to).
+    let effectiveParentKind: AuthorSpecOpts["parentKind"] = opts.parentKind ?? null;
+    let effectiveParentRef: AuthorSpecOpts["parentRef"] = opts.parentRef ?? null;
+    if (
+      !opts.milestoneId &&
+      effectiveParentKind !== "mandate" &&
+      effectiveParentKind !== "milestone"
+    ) {
+      const anchor = await autoAnchorBareFunctionParent(spec.parent, {
+        title: spec.title,
+        why: spec.why,
+        what: spec.what,
+      });
+      if (anchor) {
+        spec = { ...spec, parent: anchor.parent };
+        effectiveParentKind = anchor.parentKind;
+        effectiveParentRef = anchor.parentRef;
+        if (opts.onAutoAnchor) {
+          try { opts.onAutoAnchor(anchor); } catch { /* best-effort — the anchor still applies */ }
+        }
+        console.log(
+          `[author-spec] ${slug} — auto-anchored bare function parent → ${anchor.parentRef} ` +
+            `("${anchor.mandate.heading}" mandate)`,
+        );
+      }
+    }
     // one-off-spec-parent: reject a bare-goal parent BEFORE the write (fail-loud, like the Verification/Intent
     // gates) so a one-off spec never lands with a goal parent Vale will bounce forever. Trusts a declared
     // typed parent / bound milestoneId (see assertValidParent).
-    assertValidParent(spec.parent, { milestoneId: opts.milestoneId, parentKind: opts.parentKind });
+    assertValidParent(spec.parent, { milestoneId: opts.milestoneId, parentKind: effectiveParentKind });
     const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
       position: i + 1,
       title: p.title,
@@ -1025,8 +1195,11 @@ export async function authorSpecRowStructured(
         what: spec.what.trim(),
         // pm-structured-intent-and-refs Phase 2 — typed parent (function|mandate|milestone). Optional at
         // the SDK layer; the structured input carries them when known. Legacy shapes leave them null.
-        parent_kind: opts.parentKind ?? null,
-        parent_ref: opts.parentRef ?? null,
+        // improve-tab auto-anchor Phase 2 — when the chokepoint SELF-CORRECTED a bare-function parent
+        // above, `effectiveParentKind`/`effectiveParentRef` carry the derived `mandate` / `{fn}#{mandate}`
+        // pair (else fall through to the caller's typed values).
+        parent_kind: effectiveParentKind ?? null,
+        parent_ref: effectiveParentRef ?? null,
         // auto-build-default-on: an autonomously-authored spec auto-builds by DEFAULT — only an EXPLICIT
         // `autoBuild: false` parks it (request-fix + pre-merge-fix opt out deliberately; Pia's planner
         // decomposition + spec-chat + director-authored specs pass nothing → on). Omitting it used to default
@@ -1166,10 +1339,6 @@ export async function authorSpecRowFromMarkdown(
 
   try {
     const card = parseAuthoredSpecMarkdown(slug, markdown);
-    // one-off-spec-parent: reject a bare-goal parent before the write (the markdown path never passes a typed
-    // parentKind, so this catches a markdown-authored one-off forced onto a bare goal). Thrown → caught below
-    // → author returns false (the spec never lands), same as any parse defect on this soft path.
-    assertValidParent(card.parent ?? "", { milestoneId: opts.milestoneId, parentKind: opts.parentKind });
     const regressionHeaders = extractRegressionHeaders(markdown);
     // pm-structured-intent-and-refs Phase 1 — extract plain-language intent headers from the markdown
     // (`**Why:**` / `**What:**`) when present. The markdown path is SOFT: if the surfaces haven't been
@@ -1192,6 +1361,42 @@ export async function authorSpecRowFromMarkdown(
     } catch {
       existing = null;
     }
+
+    // improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 2 — SELF-CORRECT a
+    // bare-function parent BEFORE assertValidParent runs (same behavior as the structured path). The
+    // markdown path unwraps `[[…]]` brackets on parse, so `card.parent` reaches us bracket-stripped —
+    // `detectBareFunctionParent` matches both forms. Skipped when a milestone is bound OR when the caller
+    // already declared a typed mandate/milestone parent.
+    let mdEffectiveParentKind: AuthorSpecOpts["parentKind"] = opts.parentKind ?? null;
+    let mdEffectiveParentRef: AuthorSpecOpts["parentRef"] = opts.parentRef ?? null;
+    let mdParent = card.parent ?? "";
+    if (
+      !opts.milestoneId &&
+      mdEffectiveParentKind !== "mandate" &&
+      mdEffectiveParentKind !== "milestone"
+    ) {
+      const anchor = await autoAnchorBareFunctionParent(mdParent, {
+        title: card.title,
+        why: intent.why ?? "",
+        what: intent.what ?? "",
+      });
+      if (anchor) {
+        mdParent = anchor.parent;
+        mdEffectiveParentKind = anchor.parentKind;
+        mdEffectiveParentRef = anchor.parentRef;
+        if (opts.onAutoAnchor) {
+          try { opts.onAutoAnchor(anchor); } catch { /* best-effort — the anchor still applies */ }
+        }
+        console.log(
+          `[author-spec] ${slug} — auto-anchored bare function parent → ${anchor.parentRef} ` +
+            `("${anchor.mandate.heading}" mandate)`,
+        );
+      }
+    }
+    // one-off-spec-parent: reject a bare-goal parent BEFORE the write (the markdown path never passes a typed
+    // parentKind, so this catches a markdown-authored one-off forced onto a bare goal). Thrown → caught below
+    // → author returns false (the spec never lands), same as any parse defect on this soft path.
+    assertValidParent(mdParent, { milestoneId: opts.milestoneId, parentKind: mdEffectiveParentKind });
 
     const phases: SpecPhaseInput[] = card.phases.map((p, i) => ({
       position: i + 1,
@@ -1217,7 +1422,7 @@ export async function authorSpecRowFromMarkdown(
         title: card.title,
         summary: card.summary || null,
         owner: card.owner ?? "",
-        parent: card.parent ?? "",
+        parent: mdParent,
         blocked_by: (card.blockedBy ?? []).map((b) => b.slug),
         priority: card.critical ? "critical" : null,
         deferred: card.status === "deferred",
@@ -1234,6 +1439,11 @@ export async function authorSpecRowFromMarkdown(
         // surface hasn't been migrated yet; the structured chokepoint is HARD-gated).
         why: intent.why,
         what: intent.what,
+        // improve-tab auto-anchor Phase 2 — a self-corrected bare-function parent carries the
+        // derived `mandate` / `{fn}#{mandate}` pair through to the DB. Otherwise inherits the
+        // caller's typed values (else null).
+        parent_kind: mdEffectiveParentKind ?? null,
+        parent_ref: mdEffectiveParentRef ?? null,
         // auto-build-default-on: HONOR the markdown parser's documented contract — "**Auto-build:** absent = on;
         // only off/no/false/manual/disabled flips it false" (brain-roadmap.ts ~307). `card.autoBuild` is
         // `undefined` when no line is present, which the parser MEANS as "on" — so `!== false` (undefined → on,

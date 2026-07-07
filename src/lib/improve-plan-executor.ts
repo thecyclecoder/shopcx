@@ -158,12 +158,43 @@ export async function executeImprovePlan(
   // 3. Author ticket-sourced spec(s) to public.specs (owner=cs). Never auto-builds — surfaced on
   //    Roadmap. retire-md-spec-writers-db-is-sole-spec Phase 1 — through the authorSpecRowStructured
   //    chokepoint (DB is the spec), not a docs/brain/specs/{slug}.md commit.
+  //
+  //    improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 3 — the box's
+  //    Improve agent MAY hand back `a.spec.mandate` (the CS-function mandate it picked at write time
+  //    against the mandate list surfaced in the ticket-improve skill). When it does + the slug
+  //    resolves to a real CS mandate, we anchor the parent to it up-front (parentKind='mandate',
+  //    parentRef='cs#{mandate}'). When it doesn't — the LLM omitted the pick, or picked an unknown
+  //    slug — we pass the bare `[[../functions/cs]]` parent and let the [[author-spec]] chokepoint's
+  //    Phase 2 auto-anchor pick the best fit deterministically. Either way we capture the chosen
+  //    mandate via the `onAutoAnchor` callback and surface it in `a.result` so the human sees which
+  //    CS mandate the spec landed under (Phase 3 verification bullet: "the Improve-tab author
+  //    response includes the resolved/auto-anchored mandate").
   for (const a of actions) {
     if (a.status !== "approved" || a.kind !== "ticket_spec" || !a.spec) continue;
     const slug = a.spec.slug.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
     try {
       const { authorSpecRowStructured } = await import("@/lib/author-spec");
+      const { resolveFunctionMandates } = await import("@/lib/function-mandates");
       const { summary, phaseBody, phaseVerification } = ticketSpecFields(a.spec, ticketId);
+
+      const csMandates = await resolveFunctionMandates("cs");
+      const llmPickedRaw = (a.spec.mandate || "").trim().toLowerCase();
+      const llmPickedMandate =
+        llmPickedRaw ? csMandates.find((m) => m.slug === llmPickedRaw) ?? null : null;
+
+      // When the LLM's pick resolves to a real mandate, anchor up-front (parent_kind='mandate' +
+      // parent_ref) — the chokepoint's Phase 2 auto-anchor is a no-op (typed parent trusted). When
+      // it doesn't, pass the bare `[[../functions/cs]]` parent and let the chokepoint self-correct.
+      const authoredParent = llmPickedMandate
+        ? `[[../functions/cs#${llmPickedMandate.slug}]] — "${llmPickedMandate.heading}" mandate: ${a.spec.title}.`
+        : `[[../functions/cs]]`;
+      const parentKind = llmPickedMandate ? "mandate" : null;
+      const parentRef = llmPickedMandate ? `cs#${llmPickedMandate.slug}` : null;
+
+      let anchoredMandateSlug: string | null = llmPickedMandate?.slug ?? null;
+      let anchoredMandateHeading: string | null = llmPickedMandate?.heading ?? null;
+      const anchoredBy: "llm" | "auto" = llmPickedMandate ? "llm" : "auto";
+
       const authored = await authorSpecRowStructured(
         workspaceId,
         slug,
@@ -171,7 +202,7 @@ export async function executeImprovePlan(
           title: a.spec.title,
           summary,
           owner: "cs",
-          parent: `[[../functions/cs]] — Ticket-derived product fixes`,
+          parent: authoredParent,
           blocked_by: [],
           autoBuild: false, // improve-plan-executor: commission on Roadmap; do NOT auto-build.
           why: `Ticket ${ticketId} identified a product gap that requires a durable spec fix commissioned on the Roadmap.`,
@@ -188,10 +219,26 @@ export async function executeImprovePlan(
           ],
         },
         "planned",
-        { intendedStatusSetBy: "box:ticket-improve" },
+        {
+          intendedStatusSetBy: "box:ticket-improve",
+          parentKind,
+          parentRef,
+          onAutoAnchor: (r) => {
+            anchoredMandateSlug = r.mandate.slug;
+            anchoredMandateHeading = r.mandate.heading;
+          },
+        },
       );
       a.status = authored ? "done" : "failed";
-      a.result = authored ? `Spec authored: ${slug} (owner=cs) — commission on Roadmap` : `spec author failed for ${slug}`;
+      if (authored) {
+        const mandateSuffix = anchoredMandateSlug
+          ? ` — anchored to CS mandate "${anchoredMandateHeading ?? anchoredMandateSlug}" (cs#${anchoredMandateSlug})` +
+            (anchoredBy === "auto" ? " [auto]" : "")
+          : "";
+        a.result = `Spec authored: ${slug} (owner=cs)${mandateSuffix} — commission on Roadmap`;
+      } else {
+        a.result = `spec author failed for ${slug}`;
+      }
     } catch (e) {
       a.status = "failed";
       a.result = `spec author failed: ${e instanceof Error ? e.message : String(e)}`;

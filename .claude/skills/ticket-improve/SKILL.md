@@ -161,8 +161,20 @@ which is the rubric-visibility gap this mandate exists to close.
 - **Code change → a ticket-sourced spec** (you NEVER build code — you hand Roadmap a well-formed spec,
   owner = cs, with a Derived-from-ticket ref; the founder/CX manager commissions the build):
   ```json
-  {"kind":"ticket_spec","label":"Spec: fix the X bug","spec":{"slug":"fix-x-bug","title":"Fix the X bug","intent":"<one paragraph of what to build + why, grounded in a brain/src citation>","problem":"<the concrete problem this ticket exposed>"}}
+  {"kind":"ticket_spec","label":"Spec: fix the X bug","spec":{"slug":"fix-x-bug","title":"Fix the X bug","intent":"<one paragraph of what to build + why, grounded in a brain/src citation>","problem":"<the concrete problem this ticket exposed>","mandate":"<one of the CS mandate slugs below>"}}
   ```
+  **`mandate` — pick the CS charter mandate this spec sits under** (`docs/brain/functions/cs.md`
+  `## Mandates`). Pick the slug whose heading fits the ticket best; the executor anchors the spec
+  under it so Vale reads the parent as a real mandate reference on the first pass. If you omit
+  `mandate` (or pick an unknown slug), the [[author-spec]] chokepoint auto-picks the best fit
+  deterministically from the ticket's intent + problem — but picking up-front is preferred so the
+  fallback stays rare. Valid slugs on `cs`:
+    - `fix-weird-tickets-fast-calibrate-so-they-don-t-recur` — the ticket exposes a rule/analyzer
+      calibration miss (the fix is a rule/prompt tweak so the class of ticket doesn't recur).
+    - `ticket-derived-product-fixes` — the ticket exposes a **code** bug/gap (the fix ships in
+      `src/`; this is the default for a `ticket_spec`).
+    - `escalation-triage-quality` — the ticket exposed a mis-escalation or a triage quorum gap
+      (the fix targets `src/lib/ticket-analyzer.ts` or the escalation-triage lane).
 - **Closeout** — post internal note(s), then close + unassign + unescalate (put this LAST in a fix plan):
   ```json
   {"kind":"resolve_sequence","label":"Note + close + unassign + unescalate","resolve":{"internal_notes":["<internal note left in the ticket>"],"close":true,"unassign":true,"unescalate":true}}
