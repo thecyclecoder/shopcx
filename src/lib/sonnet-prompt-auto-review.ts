@@ -2,23 +2,27 @@
  * Auto-review of proposed sonnet_prompts.
  *
  * Reads a workspace's `status='proposed' AND auto_decision IS NULL`
- * prompts, fetches similar approved prompts + relevant policies +
- * source-pattern tickets + voice docs, calls Claude Opus with a
- * decision schema, and applies the decision under Phase 3 safety
- * guards (confidence floor, daily cap, audit-first, supersede-not-
- * delete, per-workspace flag).
+ * prompts, assembles similar approved prompts + relevant policies +
+ * source-pattern tickets + voice docs into the review inputs a
+ * supervised box-session agent (kind='prompt-review', dispatched by
+ * scripts/builder-worker.ts under June, the CS Director) consumes.
+ * The agent emits a per-proposal verdict; the deterministic worker
+ * applies it via `applyDecision` under Phase 3 safety guards
+ * (confidence floor, daily cap, audit-first, supersede-not-delete,
+ * per-workspace flag). No code path here calls api.anthropic.com
+ * directly — the north-star cascade is CEO → June (CS Director) →
+ * the box agent, never a headless raw-API cron.
  *
- * See docs/brain/specs/prompt-learning.md.
+ * See docs/brain/specs/prompt-learning.md and
+ * docs/brain/specs/prompt-auto-review-becomes-box-agent-under-june.md.
  */
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
 import { resolve } from "path";
-import { createAdminClient } from "@/lib/supabase/admin";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
-
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+import { applyReviewDecision as applyReviewDecisionSdk, archiveSupersededPrompt } from "@/lib/sonnet-prompts-table";
 
 // ── Constants ──────────────────────────────────────────────────────
 // Below this confidence, we DROP (reject) the proposal — not bother
@@ -37,7 +41,12 @@ export const REVIEW_MODEL = OPUS_MODEL;
 const TOP_K_SIMILAR_PROMPTS = 8;
 const TOP_K_POLICIES = 10;
 const TOP_K_SOURCE_TICKETS = 5;
-const MAX_PROPOSALS_PER_CRON_RUN = 50;
+// Per-tick cap on how many kind='prompt-review' agent_jobs the
+// sonnet-prompt-auto-review Inngest cron enqueues across a single
+// workspace's proposed-prompt backlog. A large backlog drains over
+// consecutive daily ticks so the box's concurrency-1 review lane
+// never floods.
+export const MAX_PROPOSALS_PER_CRON_RUN = 50;
 
 // ── Types ──────────────────────────────────────────────────────────
 type Admin = SupabaseClient<any, any, any>;
@@ -70,15 +79,6 @@ export interface ReviewInputs {
   policies: any[];
   sourceTickets: any[];
   voiceDocs: { customer_voice: string; operational_rules: string; ui_conventions: string };
-}
-
-export interface ReviewResult {
-  ok: boolean;
-  decision?: ReviewDecision;
-  applied?: boolean;
-  reason?: string;
-  decisionRowId?: string;
-  forcedToHumanReview?: boolean;
 }
 
 // ── Voice doc loading (read once, hash for audit) ──────────────────
@@ -255,46 +255,15 @@ export function buildUserPrompt(inputs: ReviewInputs): string {
   ].join("\n");
 }
 
-// ── Call Opus ──────────────────────────────────────────────────────
-export async function callOpusReview(
-  inputs: ReviewInputs,
-): Promise<{
-  ok: boolean;
-  decision?: ReviewDecision;
-  raw?: any;
-  reason?: string;
-  usage?: any;
-  latencyMs?: number;
-}> {
-  if (!ANTHROPIC_API_KEY) return { ok: false, reason: "no_api_key" };
-
-  const t0 = Date.now();
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: REVIEW_MODEL,
-      max_tokens: 2000,
-      system: buildSystemPrompt(),
-      messages: [{ role: "user", content: buildUserPrompt(inputs) }],
-    }),
-  });
-
-  const latencyMs = Date.now() - t0;
-  if (!res.ok) {
-    return { ok: false, reason: `opus_${res.status}`, latencyMs };
-  }
-  const raw = await res.json();
-  const text = (raw?.content?.[0]?.text || "").trim();
-  const parsed = parseDecision(text);
-  if (!parsed) return { ok: false, reason: "parse_failed", raw, latencyMs };
-  return { ok: true, decision: parsed, raw, usage: raw.usage, latencyMs };
-}
-
+// ── Parse the box-session verdict ──────────────────────────────────
+// The direct-Opus fetch that used to live here was retired: the
+// cron now enqueues a kind='prompt-review' box-session agent job
+// (scripts/builder-worker.ts → runPromptReviewJob) that emits the
+// same JSON verdict as a supervised agent session under June (CS
+// Director), and the deterministic runner calls `applyDecision`
+// with the parsed verdict — the north-star cascade CEO → role
+// agent → tool. No code path in the auto-review calls
+// api.anthropic.com directly.
 export function parseDecision(text: string): ReviewDecision | null {
   const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
   let obj: any = null;
@@ -482,66 +451,44 @@ export async function applyDecision(
     };
   }
 
-  // ── Step 2: mutate the prompt row according to the decision.
-  const promptUpdates: Record<string, any> = {
-    auto_decision: finalDecision,
-    auto_decision_at: new Date().toISOString(),
-    auto_decision_reason: rawDecision.reasoning.slice(0, 2000),
-    auto_decision_model: modelMeta.model,
-    auto_decision_confidence: rawDecision.confidence,
-  };
-
-  switch (finalDecision) {
-    case "accept":
-      promptUpdates.status = "approved";
-      promptUpdates.reviewed_at = new Date().toISOString();
-      break;
-    case "reject":
-      promptUpdates.status = "rejected";
-      promptUpdates.reviewed_at = new Date().toISOString();
-      promptUpdates.enabled = false;
-      break;
-    case "merge":
-      // Missing-target case already downgraded to reject in the safety
-      // section above — by this point merge_target_id is guaranteed.
-      promptUpdates.merged_into_id = rawDecision.merge_target_id;
-      promptUpdates.status = "rejected";
-      promptUpdates.enabled = false;
-      break;
-    case "supersede":
-      // Missing-target case already downgraded to reject above.
-      promptUpdates.status = "approved";
-      promptUpdates.reviewed_at = new Date().toISOString();
-      // The new proposal supersedes the old one. Disable the old.
-      await admin
-        .from("sonnet_prompts")
-        .update({
-          superseded_by_id: proposal.id,
-          enabled: false,
-          status: "archived",
-        })
-        .eq("id", rawDecision.supersede_target_id)
-        .eq("workspace_id", workspaceId);
-      break;
-    case "revise":
-      // Stays as proposed; the suggested_revisions live on the audit row.
-      promptUpdates.status = "proposed";
-      break;
-  }
-
-  const { error: updErr } = await admin
-    .from("sonnet_prompts")
-    .update(promptUpdates)
-    .eq("id", proposal.id)
-    .eq("workspace_id", workspaceId);
-  if (updErr) {
+  // ── Step 2: mutate the prompt row through the sonnet-prompts SDK. The SDK owns the
+  //   decision→row mapping (status/enabled/reviewed_at + all five auto_decision columns) so no
+  //   two callers can drift on which combination each verdict writes. `applyReviewDecision`
+  //   compare-and-sets on (id, workspace_id) and asserts one row transitioned — a race with a
+  //   manual override lands here as `rows=0` rather than a silent double-write.
+  //   ([[sonnet-prompts-table]] · sonnet-prompts-sdk-for-review-agent-db-access Phase 1.)
+  const applied = await applyReviewDecisionSdk(admin, {
+    workspaceId,
+    promptId: proposal.id,
+    finalDecision,
+    reasoning: rawDecision.reasoning,
+    confidence: rawDecision.confidence,
+    model: modelMeta.model,
+    mergeTargetId: finalDecision === "merge" ? rawDecision.merge_target_id ?? null : null,
+    supersedeTargetId: finalDecision === "supersede" ? rawDecision.supersede_target_id ?? null : null,
+  });
+  if (!applied.ok) {
     return {
       applied: false,
       forcedToHumanReview: forcedDowngrade,
       decisionRowId: audit.id,
       finalDecision,
-      reason: `prompt_update_failed: ${updErr.message}`,
+      reason: `prompt_update_failed: ${applied.error ?? "unknown"}`,
     };
+  }
+  // On supersede, archive the OLD row (superseded_by_id + status='archived' + enabled=false).
+  // Never delete — a supersede is reversible ([[../tables/sonnet_prompts]]).
+  if (finalDecision === "supersede" && rawDecision.supersede_target_id) {
+    const archived = await archiveSupersededPrompt(admin, {
+      workspaceId,
+      oldPromptId: rawDecision.supersede_target_id,
+      newPromptId: proposal.id,
+    });
+    if (!archived.ok) {
+      // The NEW row already landed as approved; log the archive failure so a supervisor sees why
+      // the OLD row didn't archive, but don't roll back the accepted supersede.
+      console.warn(`[applyDecision] supersede archive failed: ${archived.error ?? "unknown"}`);
+    }
   }
 
   // Token usage accounting.
@@ -566,104 +513,14 @@ export async function applyDecision(
   };
 }
 
-// ── End-to-end review for a single proposal (the cron's worker) ────
-export async function reviewSingleProposal(
-  admin: Admin,
-  workspaceId: string,
-  proposal: any,
-  options: { dailyCap: number; alreadyAcceptedToday: number; source?: "cron" | "safety_test" } = {
-    dailyCap: DEFAULT_DAILY_CAP,
-    alreadyAcceptedToday: 0,
-  },
-): Promise<ReviewResult> {
-  try {
-    const inputs = await loadReviewInputs(admin, workspaceId, proposal);
-    const opus = await callOpusReview(inputs);
-    if (!opus.ok || !opus.decision) {
-      return { ok: false, reason: opus.reason || "opus_failed" };
-    }
-    const applied = await applyDecision(
-      admin,
-      workspaceId,
-      proposal,
-      opus.decision,
-      inputs,
-      {
-        model: REVIEW_MODEL,
-        usage: opus.usage,
-        latencyMs: opus.latencyMs,
-        source: options.source || "cron",
-      },
-      { dailyCap: options.dailyCap, alreadyAcceptedToday: options.alreadyAcceptedToday },
-    );
-    return {
-      ok: applied.applied,
-      decision: opus.decision,
-      applied: applied.applied,
-      decisionRowId: applied.decisionRowId,
-      forcedToHumanReview: applied.forcedToHumanReview,
-      reason: applied.reason,
-    };
-  } catch (err: any) {
-    return { ok: false, reason: `exception: ${err?.message || "unknown"}` };
-  }
-}
+// ── End-to-end review is now a box-session agent ──────────────────
+// The previous `reviewSingleProposal` + `reviewWorkspace` functions
+// (which called `callOpusReview` → api.anthropic.com directly from
+// the Inngest cron) are retired. Each proposal is now a kind=
+// 'prompt-review' agent_jobs row that scripts/builder-worker.ts →
+// runPromptReviewJob dispatches as a Max box session under June (CS
+// Director), and the deterministic worker calls `applyDecision`
+// with the parsed verdict. The Inngest cron
+// (src/lib/inngest/sonnet-prompt-auto-review.ts) enqueues those
+// rows — see docs/brain/inngest/sonnet-prompt-auto-review.md.
 
-// ── Workspace sweep ────────────────────────────────────────────────
-export async function reviewWorkspace(
-  admin: Admin,
-  workspaceId: string,
-): Promise<{ reviewed: number; accepted: number; humanReview: number; errors: string[] }> {
-  const errors: string[] = [];
-  let reviewed = 0,
-    accepted = 0,
-    humanReview = 0;
-
-  const { data: ws } = await admin
-    .from("workspaces")
-    .select("sonnet_auto_review_enabled, sonnet_auto_review_daily_cap")
-    .eq("id", workspaceId)
-    .single();
-  if (!ws?.sonnet_auto_review_enabled) {
-    return { reviewed: 0, accepted: 0, humanReview: 0, errors: ["disabled"] };
-  }
-  const dailyCap = ws.sonnet_auto_review_daily_cap || DEFAULT_DAILY_CAP;
-
-  const { data: proposals } = await admin
-    .from("sonnet_prompts")
-    .select("id, title, content, category, source_pattern_id, derived_from_ticket_id")
-    .eq("workspace_id", workspaceId)
-    .eq("status", "proposed")
-    .is("auto_decision", null)
-    .order("proposed_at", { ascending: true })
-    .limit(MAX_PROPOSALS_PER_CRON_RUN);
-
-  if (!proposals?.length) return { reviewed: 0, accepted: 0, humanReview: 0, errors };
-
-  let acceptedToday = (await acceptsRemainingToday(admin, workspaceId, dailyCap)) === dailyCap
-    ? 0
-    : dailyCap - (await acceptsRemainingToday(admin, workspaceId, dailyCap));
-
-  for (const p of proposals) {
-    const r = await reviewSingleProposal(admin, workspaceId, p, {
-      dailyCap,
-      alreadyAcceptedToday: acceptedToday,
-      source: "cron",
-    });
-    reviewed++;
-    if (r.ok && r.decision) {
-      if (r.applied && r.decision.decision === "accept") {
-        accepted++;
-        acceptedToday++;
-      }
-      // `humanReview` counter is retained as a telemetry field for
-      // backward compat; semantically it now counts safety downgrades
-      // (the cron no longer routes anything to a human queue).
-      if (r.forcedToHumanReview) humanReview++;
-    } else {
-      errors.push(`${p.id}: ${r.reason}`);
-    }
-  }
-
-  return { reviewed, accepted, humanReview, errors };
-}

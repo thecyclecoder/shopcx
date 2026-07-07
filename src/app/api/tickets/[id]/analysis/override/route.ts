@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
+import { applyAdminOverride, getLatestForTicket } from "@/lib/ticket-analyses-table";
 
 // POST — admin overrides the auto score on the latest analysis.
 // Optionally also drafts a grader_prompts rule via Opus that admin can
@@ -43,25 +44,31 @@ export async function POST(
     return NextResponse.json({ error: "reason_required" }, { status: 400 });
   }
 
-  // Find latest analysis for the ticket
-  const { data: latest } = await admin.from("ticket_analyses")
-    .select("id, score, issues, summary")
-    .eq("ticket_id", ticketId)
-    .eq("workspace_id", workspaceId)
-    .order("window_end", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Find latest analysis for the ticket — via the ticket-analyses SDK (Phase 2 of ticket-
+  // analyzer-becomes-box-agent-under-june). Scoped to the caller's workspace so a cross-
+  // workspace ticket_id can never surface a foreign analysis.
+  const latest = await getLatestForTicket(ticketId, {
+    workspaceId,
+    select: "id, score, issues, summary",
+  });
   if (!latest) {
     return NextResponse.json({ error: "no_analysis_to_override" }, { status: 404 });
   }
+  const latestId = latest.id as string;
 
-  // Save override
-  await admin.from("ticket_analyses").update({
-    admin_score: score,
-    admin_score_reason: reason,
-    admin_corrected_at: new Date().toISOString(),
-    admin_corrected_by: user.id,
-  }).eq("id", latest.id);
+  // Save override — SDK-owned write. applyAdminOverride does compare-and-set against
+  // (analysis id, workspace_id) so an id from another workspace (the RLS shouldn't allow it,
+  // but belt-and-braces) can never flip a foreign row.
+  const overrideResult = await applyAdminOverride({
+    analysisId: latestId,
+    workspaceId,
+    score,
+    reason,
+    correctedBy: user.id,
+  });
+  if (!overrideResult.ok) {
+    return NextResponse.json({ error: overrideResult.error ?? "override_failed" }, { status: 500 });
+  }
 
   let proposedRuleId: string | null = null;
 
@@ -118,7 +125,7 @@ Output JSON:
               content: parsed.content,
               status: "proposed",
               derived_from_ticket_id: ticketId,
-              derived_from_analysis_id: latest.id,
+              derived_from_analysis_id: latestId,
             }).select("id").single();
             proposedRuleId = inserted?.id || null;
           }
@@ -131,7 +138,7 @@ Output JSON:
 
   return NextResponse.json({
     ok: true,
-    analysis_id: latest.id,
+    analysis_id: latestId,
     proposed_rule_id: proposedRuleId,
   });
 }

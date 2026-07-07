@@ -1,0 +1,1 @@
+- **Ticket-analyzer workprobe must exclude analyzer_locked tickets (mirror cron source filter)** · verified 2026-07-07 · → [[libraries/control-tower]]

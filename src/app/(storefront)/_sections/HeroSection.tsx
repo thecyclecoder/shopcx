@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import type { PageData, MediaItem } from "../_lib/page-data";
 import { useActiveMember } from "../_lib/active-member-context";
+import { resolveBundleCtaTargets } from "@/lib/bundle-cta";
 import { StarRating } from "../_components/StarRating";
 import { BenefitChip } from "../_components/BenefitChip";
 import { ShopCTA } from "../_components/ShopCTA";
@@ -96,9 +97,23 @@ export function HeroSection({ data, bundle = false }: { data: PageData; bundle?:
   // scrolls down to pricing — no need to bounce the customer to a
   // sibling product's URL just to show its pricing.
   void pathname;
-  // Bundle mode wires the hero CTA straight to add-to-cart on the base variant (placeholder for the
-  // Starter Kit variant, per the offer-creator spec) instead of scrolling to a price table.
-  const bundleVariantId = bundle ? data.base_variant?.id || null : null;
+  // Bundle mode wires the hero CTA straight to add-to-cart on the Starter Kit
+  // variant (offer-creator Phase 4). See src/lib/bundle-cta.ts —
+  // `resolveBundleCtaTargets` prefers products.bundle_variant_id (resolved
+  // into data.bundle_variant) and falls back to the base variant so an
+  // unwired workspace still gets a working Select Bundle CTA. Adding the
+  // Starter Kit variant fires the offer (Phase 2 attaches its included items
+  // as $0 lines). The bundle coupon code (products.bundle_coupon_code) rides
+  // as data-coupon-code so the storefront click handler passes it as
+  // `discount_code` on the /api/cart POST — the $10 recurring_cycle_limit=1
+  // lands on the first order only.
+  const { variantId: bundleVariantId, couponCode: bundleCouponCode } = bundle
+    ? resolveBundleCtaTargets({
+        bundle_variant: data.bundle_variant,
+        base_variant: data.base_variant,
+        bundle_coupon_code: data.product.bundle_coupon_code,
+      })
+    : { variantId: null, couponCode: null };
   const bundleFreqs = data.pricing_rule?.available_frequencies || [];
   const bundleFreq = bundleFreqs.find((f) => f.default) || bundleFreqs[0] || null;
   const ctaHref = bundleVariantId ? `#buy-${bundleVariantId}` : "#pricing";
@@ -314,7 +329,13 @@ export function HeroSection({ data, bundle = false }: { data: PageData; bundle?:
               align="center"
               dataAttributes={
                 bundleVariantId
-                  ? { "variant-id": bundleVariantId, "tier-quantity": 1, mode: "subscribe", "frequency-days": bundleFreq?.interval_days ?? null }
+                  ? {
+                      "variant-id": bundleVariantId,
+                      "tier-quantity": 1,
+                      mode: "subscribe",
+                      "frequency-days": bundleFreq?.interval_days ?? null,
+                      ...(bundleCouponCode ? { "coupon-code": bundleCouponCode } : {}),
+                    }
                   : undefined
               }
             />

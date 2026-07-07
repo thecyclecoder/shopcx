@@ -154,15 +154,6 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
-  "prompt-review": {
-    key: "prompt-review", name: "Wren", role: "Prompt Analyzer", emoji: "📝",
-    personality: "The editor of the conversation-rule library — reviews every proposed sonnet_prompt, approves the clear/actionable ones and rejects the vague/wrong, with a reasoned verdict. Precise and skeptical; keeps the rules that shape the AI's voice honest.",
-    pronouns: { subject: "they", object: "them", possessive: "their" },
-    mascotId: "default", avatarUrl: `${AV}wren-prompt-analyzer.jpg?v=1`,
-    chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
-    dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
-  },
-
   // ── Platform workers (agent_jobs kinds) — report to Ada/Platform ─────────────
   repair: {
     key: "repair", name: "Rafa", role: "Repair", emoji: "🟢",
@@ -315,6 +306,19 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
+  // ── CS workers (agent_jobs kinds) — report to June/CS ─────────────────────────
+  // prompt-auto-review-becomes-box-agent-under-june Phase 2 — Prue reviews proposed sonnet_prompts as
+  // a supervised box-session agent (kind='prompt-review') under June. Same discipline as
+  // ticket-improve / triage-escalations: agent optimizes "review each proposal well" within June's
+  // rails; hitting a rail escalates rather than executes silently.
+  "prompt-review": {
+    key: "prompt-review", name: "Prue", role: "Prompt Review", emoji: "📖",
+    personality: "Reads every proposed sonnet_prompt against similar approved rules + policies + voice + source tickets, decides accept / reject / merge / supersede with calibrated confidence — decisive by design (no human-review queue). Autonomous within June's rails; escalates unparseable verdicts + safety-downgrades rather than executing silently.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}prue-prompt-review.jpg?v=1`,
+    chip: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-900/40",
+    dot: "bg-sky-500", ring: "bg-sky-50 dark:bg-sky-900/20", accent: "text-sky-600 dark:text-sky-400",
+  },
   "sms-marketing": {
     key: "sms-marketing", name: "Margo", role: "SMS Marketing", emoji: "📣",
     personality: "Runs owned-channel SMS promos under Iris — picks the sale theme (VIP / Weekend), tailors the copy per segment, and schedules the cadence to grow attributed revenue-per-send. Autonomous within Iris's leash (weekly cap + segment scope + send windows); blocks + escalates on a stale audience or a missing coupon rather than blasting a bad send.",
@@ -437,6 +441,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Optimize predicted-LTV-per-visitor across every DB-driven surface — chapters (incl. chapter reorder), cart-recovery flow, lead popup, survey",
     "Stay within Max's leash — reversible levers auto-run within policy; offers + structural rewrites escalate for approval",
     "Draft a spec (never write code) when a test needs a capability that doesn't exist; hand it to Platform to build",
+  ],
+  "prompt-review": [
+    "Review every proposed sonnet_prompt against similar approved prompts, active policies, source-pattern tickets, and voice docs",
+    "Decide accept / reject / merge / supersede with calibrated confidence — decisive, never punt to a human-review queue",
+    "Preserve the safety rails: no delete-of-approved (supersede + archive); low-confidence proposals resurface with more evidence",
+    "Surface reasoning + safety-downgrades to June's activity feed; escalate an unparseable verdict rather than executing silently",
   ],
 };
 

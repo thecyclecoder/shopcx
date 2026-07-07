@@ -21,21 +21,25 @@ export async function isAuthorizedUser(email: string): Promise<boolean> {
 
   if (invites && invites.length > 0) return true;
 
-  // Check if they're already a member of any workspace (previously accepted invite)
-  const { data: { users } } = await admin.auth.admin.listUsers();
-  const matchedUser = users?.find((u) => u.email?.toLowerCase() === email.toLowerCase());
+  // Check if they're already a member of any workspace (previously accepted invite).
+  // Targeted lookup — the previous full-page auth.users scan silently paginated at 50
+  // rows and dropped every user whose id sorted past that page. RPC returns the one id
+  // we need, then getUserById verifies the user still exists (null/not-found → denied).
+  const { data: matchedUserId } = await admin.rpc("get_user_id_by_email", {
+    p_email: email.toLowerCase(),
+  });
+  if (!matchedUserId) return false;
 
-  if (matchedUser) {
-    const { data: memberships } = await admin
-      .from("workspace_members")
-      .select("id")
-      .eq("user_id", matchedUser.id)
-      .limit(1);
+  const { data: { user } } = await admin.auth.admin.getUserById(matchedUserId as string);
+  if (!user) return false;
 
-    if (memberships && memberships.length > 0) return true;
-  }
+  const { data: memberships } = await admin
+    .from("workspace_members")
+    .select("id")
+    .eq("user_id", user.id)
+    .limit(1);
 
-  return false;
+  return !!(memberships && memberships.length > 0);
 }
 
 export async function isAuthorizedUserId(userId: string): Promise<boolean> {

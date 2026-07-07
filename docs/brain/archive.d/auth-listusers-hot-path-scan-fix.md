@@ -1,0 +1,1 @@
+- **Replace auth.users full-table scans on hot-path routes** · verified 2026-07-07 · → [[../libraries/access]]

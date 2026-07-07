@@ -1,0 +1,1 @@
+- **Drop Supabase GoTrue 504 /auth/v1/user edge noise at the error-feed capture layer** · verified 2026-07-07 · → [[libraries/control-tower]]

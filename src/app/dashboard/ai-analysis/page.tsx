@@ -250,7 +250,12 @@ export default function AIAnalysisPage() {
                 </div>
                 <span className="text-xs text-zinc-500">{Math.round(d.confidence * 100)}%</span>
                 <span className="ml-auto text-[11px] text-zinc-400">{new Date(d.created_at).toLocaleString()}</span>
-                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{d.source}</span>
+                <span
+                  className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                  title="Reviewed by Prue (box-session prompt-review agent) under June, CS Director. June owns conversation-rule quality; the agent optimizes 'review each proposal well' within her rails."
+                >
+                  {d.source === "cron" ? "Prue · under June" : d.source}
+                </span>
               </div>
               <div className="mt-3">
                 <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{d.prompt?.title || "(prompt deleted)"}</div>

@@ -104,6 +104,11 @@ function safeParseJson(s: string): unknown {
  * original Response so callers don't need to change downstream parsing.
  *
  * Endpoint label is optional; when omitted we infer it from the path.
+ *
+ * Bounded by a 20s per-request deadline (below Vercel's 30s Lambda ceiling)
+ * — a stalled Appstle upstream would otherwise hold the portal Lambda open
+ * until the platform reap emits a runtime timeout the customer sees as a
+ * hang. Mirrors the pattern in src/lib/portal/helpers.ts `portalFetch`.
  */
 export async function loggedAppstleFetch(
   url: string,
@@ -111,7 +116,16 @@ export async function loggedAppstleFetch(
   endpoint?: string,
 ): Promise<Response> {
   const t0 = Date.now();
-  const res = await fetch(url, init);
+  let res: Response;
+  try {
+    res = await fetch(url, { ...(init || {}), signal: AbortSignal.timeout(20_000) });
+  } catch (e) {
+    const err = e as { name?: string };
+    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+      throw new Error("upstream_timeout");
+    }
+    throw e;
+  }
   let body = "";
   try { body = await res.clone().text(); } catch { /* ignore */ }
   const inferredEndpoint = endpoint
@@ -137,6 +151,10 @@ export async function loggedAppstleFetch(
  * The "success" boolean factors in GraphQL-style errors that come
  * back with HTTP 200 — without this, a Shopify userErrors response
  * would log as success=true while the action actually failed.
+ *
+ * Shares the same 20s per-request deadline as loggedAppstleFetch so a
+ * stalled Shopify / EasyPost upstream can't hang the caller to Vercel's
+ * runtime-timeout reap.
  */
 export async function loggedActionFetch(
   url: string,
@@ -144,7 +162,16 @@ export async function loggedActionFetch(
   opts: { endpoint: string; bodySuccessCheck?: (body: string) => boolean },
 ): Promise<Response> {
   const t0 = Date.now();
-  const res = await fetch(url, init);
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, signal: AbortSignal.timeout(20_000) });
+  } catch (e) {
+    const err = e as { name?: string };
+    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+      throw new Error("upstream_timeout");
+    }
+    throw e;
+  }
   let body = "";
   try { body = await res.clone().text(); } catch { /* ignore */ }
   let success = res.ok;

@@ -161,7 +161,41 @@ export type DirectorActionKind =
   // `approvePlaybookProposal` ([[../libraries/playbook-compiler]]) under
   // director_function='cs', spec_slug=null. metadata: { playbook_id,
   // source_tree_key, approver_user_id?, autonomous:false, phase:2 }.
-  | "playbook_seed_approved";
+  | "playbook_seed_approved"
+  // media-buyer-test-winner-loop Phase 2 — the Media Buyer's Test→Measure→Promote→Kill
+  // cadence lane in scripts/builder-worker.ts. Owned by Growth (director_function='growth').
+  // Each row cites the source meta_ad_id + realized ROAS + policy version so the audit
+  // trail names the concrete creative, not the wrapper object.
+  //   • media_buyer_promoted_winner — scale_up on a winner's parent adset (persisted via iteration_actions).
+  //   • media_buyer_paused_loser — pause a scorecard adset below the policy's roas_floor.
+  //   • media_buyer_replenished_test_cohort — published a ready-to-test campaign into the
+  //     test ad set via origin='media-buyer-test' (Phase 1 gate).
+  //   • media_buyer_replenish_missing_config — cohort is missing default_meta_account_id /
+  //     default_meta_page_id — replenish deferred until the operator completes the row.
+  //   • media_buyer_no_active_policy — the pass ran with no active iteration_policies row;
+  //     the loop is dormant until one is authored + activated (never silent).
+  //   • media_buyer_pass_completed — pass heartbeat, one row per cadence pass, always emitted.
+  | "media_buyer_promoted_winner"
+  | "media_buyer_paused_loser"
+  | "media_buyer_replenished_test_cohort"
+  | "media_buyer_replenish_missing_config"
+  | "media_buyer_no_active_policy"
+  | "media_buyer_pass_completed"
+  // media-buyer-test-winner-loop Phase 3 — the Media Buyer's fatigue-triggered variant
+  // spawn. When a WINNING ad's parent adset crosses the fatigue threshold
+  // (`iteration_scorecards_daily.fatigue_score >= 0.5` — same signal decision-engine
+  // reads), the runner calls `amplifyWinner` to spawn N fresh variants of the winning
+  // angle at `status='ready'`; the standard replenish path then publishes them live
+  // into the test cohort. Metadata carries source_meta_ad_id + roas + fatigue_score
+  // + new_ad_campaign_ids so the audit trail cites the concrete winner in decline.
+  | "media_buyer_fatigue_replenish_triggered"
+  // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the CS Director (💬 June) supervision
+  // ledger for the per-ticket QC grader. One row per box-session verdict (applyAnalyzerVerdict
+  // completed on the box lane, kind='ticket-analyze'), so June's activity feed / EOD recap /
+  // rollup surfaces every analyze decision + its reasoning. Owned by CS (director_function='cs').
+  // metadata: { job_id, ticket_id, analysis_id, score, issues_types, ai_message_count,
+  // trigger, autonomous:true }.
+  | "ticket_analyzed";
 
 export interface DirectorActivityInput {
   workspaceId: string;

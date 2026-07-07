@@ -28,6 +28,11 @@ interface OrderProps {
   line_items: Array<Record<string, unknown>>;
   shipping_address: Record<string, string> | null;
   savings_cents?: number;
+  subtotal_cents?: number;
+  discount_cents?: number;
+  discount_code?: string | null;
+  shipping_protection_cents?: number;
+  tax_cents?: number;
 }
 
 interface ReviewProps {
@@ -121,9 +126,35 @@ export function ThankYouClient({ order, workspace, review }: { order: OrderProps
               </li>
             ))}
           </ul>
-          <div className="mt-4 flex items-baseline justify-between border-t border-zinc-200 pt-3">
-            <span className="text-sm text-zinc-700">Total</span>
-            <span className="text-lg font-bold text-zinc-900">${(order.total_cents / 100).toFixed(2)}</span>
+          <div className="mt-4 space-y-1.5 border-t border-zinc-200 pt-3 text-sm">
+            {order.subtotal_cents != null && (
+              <div className="flex justify-between">
+                <span className="text-zinc-600">Subtotal</span>
+                <span className="text-zinc-800">${(order.subtotal_cents / 100).toFixed(2)}</span>
+              </div>
+            )}
+            {order.discount_cents ? (
+              <div className="flex justify-between">
+                <span className="text-emerald-700">Discount{order.discount_code ? ` (${order.discount_code})` : ""}</span>
+                <span className="font-semibold text-emerald-700">−${(order.discount_cents / 100).toFixed(2)}</span>
+              </div>
+            ) : null}
+            {order.shipping_protection_cents ? (
+              <div className="flex justify-between">
+                <span className="text-zinc-600">Shipping Protection</span>
+                <span className="text-zinc-800">${(order.shipping_protection_cents / 100).toFixed(2)}</span>
+              </div>
+            ) : null}
+            {order.tax_cents ? (
+              <div className="flex justify-between">
+                <span className="text-zinc-600">Sales Tax</span>
+                <span className="text-zinc-800">${(order.tax_cents / 100).toFixed(2)}</span>
+              </div>
+            ) : null}
+            <div className="flex items-baseline justify-between border-t border-zinc-100 pt-1.5">
+              <span className="font-semibold text-zinc-800">Total</span>
+              <span className="text-lg font-bold text-zinc-900">${(order.total_cents / 100).toFixed(2)}</span>
+            </div>
           </div>
           {order.savings_cents && order.savings_cents > 0 ? (
             <div className="mt-3 text-right">

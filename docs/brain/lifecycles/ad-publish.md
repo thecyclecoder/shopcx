@@ -9,11 +9,13 @@ Takes a finished campaign video ([[ad-render]]) and publishes it as a Meta ad: g
 1. **Generate copy** — `POST /api/ads/campaigns/[id]/meta-copy` → `generateMetaCopy` (Opus, from the campaign's angle + script + product intelligence) → **4 headlines + 4 primary texts + a description**, editable in the panel. Pick a **CTA** (`META_CTA_TYPES`) + **destination URL**.
 2. **Pick targets** — selectors hit `GET /api/ads/meta?resource=accounts|pages|campaigns|adsets` (proxy Graph via the user token). **Facebook Page** (its linked IG account → `instagram_user_id`), **ad account → campaign → ad set** (cascading).
 3. **Publish** — `POST /api/ads/campaigns/[id]/publish` inserts an [[../tables/ad_publish_jobs]] row (`queued`) + fires `ad-tool/publish-to-meta`.
+   - **Media-Buyer test-cohort gate** (media-buyer-test-winner-loop Phase 1). A publish body with `origin='media-buyer-test'` opts INTO the autonomous go-live rail. The route calls [[../libraries/media-buyer-publish-gate]] `evaluateMediaBuyerTestPublish` BEFORE insert: on ALLOW (in-cohort + under-ceiling) it keeps `publish_active=true` and pins the ad-set's `daily_budget` to the cohort ceiling via [[../libraries/meta-ads]] `updateObjectBudget`; on REFUSE (`no_active_cohort` | `wrong_adset` | `over_ceiling`) it forces `publish_active=false` and calls `escalateMediaBuyerTestPublishRefusal` → CEO Approval Request + growth `director_activity` `media_buyer_test_gate_refused`. Non-media-buyer origins skip the gate entirely — the studio path is unchanged.
 4. **`adToolPublishToMeta`** (Inngest):
    - `uploadAdVideo` → `act_{id}/advideos` (`file_url` = a fresh signed URL of `ad_videos.meta.storage_path`; Meta downloads it) → `meta_video_id` (`status='uploading'`).
    - `waitForVideoReady` — poll `GET /{video_id}?fields=status` until `video_status='ready'` (Meta processes async; skipping this errors the ad).
    - `createAdCreative` → `act_{id}/adcreatives` with `asset_feed_spec` (all headlines as `titles[]` × all primary texts as `bodies[]` — a **non-dynamic multi-text** creative, "Add text/headline option") + `object_story_spec.page_id`/`instagram_user_id` + CTA + link in `link_urls` + UTM `url_tags` → `meta_creative_id` (`status='creating'`).
-   - `createAd` → `act_{id}/ads` (`adset_id`, `creative_id`, `status` = PAUSED unless `publish_active`) → `meta_ad_id` (`status='published'`).
+   - **Belt-and-suspenders re-check of the Media-Buyer gate** — before `createAd`, if the job's `origin='media-buyer-test'` AND `publish_active=true`, re-run `evaluateMediaBuyerTestPublish` against the loaded job. On a refusal (a cohort retired between insert and publish, or a script that bypassed the route) DOWNGRADE `publish_active=false` (written back to the job row) + escalate (idempotent — same dedupe key as the route). The ad still ships, just PAUSED. Never silently spend.
+   - `createAd` → `act_{id}/ads` (`adset_id`, `creative_id`, `status` = PAUSED unless the effective `publish_active` after the re-check is true) → `meta_ad_id` (`status='published'`).
    - On any Graph error → `status='failed'` + `error`.
 5. The panel shows each job's status + a deep link to the ad in Ads Manager.
 
@@ -50,4 +52,4 @@ The Growth director can now queue ready-to-test creatives ([[../libraries/ready-
 
 ## Related
 
-[[ad-render]] · [[ad-static]] · [[../integrations/meta-marketing]] · [[../integrations/meta-graph]] · [[../tables/ad_publish_jobs]] · [[../inngest/ad-tool]] · [[../libraries/meta-ads]] · [[../libraries/ready-to-test]] · [[director_activity]]
+[[ad-render]] · [[ad-static]] · [[../integrations/meta-marketing]] · [[../integrations/meta-graph]] · [[../tables/ad_publish_jobs]] · [[../tables/media_buyer_test_cohorts]] · [[../inngest/ad-tool]] · [[../libraries/meta-ads]] · [[../libraries/media-buyer-publish-gate]] · [[../libraries/ready-to-test]] · [[director_activity]]

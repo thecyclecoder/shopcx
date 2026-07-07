@@ -13,6 +13,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { ActionContext, ActionParams, ActionResult } from "@/lib/action-executor";
+import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -387,19 +388,17 @@ export async function runImproveActions(
           break;
         }
         case "propose_sonnet_prompt": {
-          const { data: ins, error } = await admin.from("sonnet_prompts").insert({
-            workspace_id: workspaceId,
-            title: a.title,
-            content: a.content,
-            category: a.category || "rule",
-            enabled: false,
-            status: "proposed",
-            derived_from_ticket_id: ticketId,
-            proposed_at: new Date().toISOString(),
-            sort_order: 200,
-          }).select("id").single();
-          if (error) { results.push(`propose_sonnet_prompt failed: ${error.message}`); break; }
-          results.push(`Proposed sonnet_prompt rule "${a.title}" — review at /dashboard/settings/ai/prompts (id ${ins.id})`);
+          // sonnet-prompts-sdk-for-review-agent-db-access Phase 1 — proposal inserts route through
+          // the sonnet-prompts SDK ([[sonnet-prompts-table]]).
+          const { id, error } = await proposePrompt(admin, {
+            workspaceId,
+            title: String(a.title || ""),
+            content: String(a.content || ""),
+            category: (a.category as string | undefined) || "rule",
+            derivedFromTicketId: ticketId,
+          });
+          if (error) { results.push(`propose_sonnet_prompt failed: ${error}`); break; }
+          results.push(`Proposed sonnet_prompt rule "${a.title}" — review at /dashboard/settings/ai/prompts (id ${id})`);
           break;
         }
         case "propose_grader_rule": {

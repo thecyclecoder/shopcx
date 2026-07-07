@@ -482,8 +482,27 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     // grandfathered overrides) — never read from a baked value on the row. The
     // engine returns per-line charged prices; we snapshot them as the order's
     // line items (an order is a historical record, so it DOES bake the price).
+    //
+    // Phase 3 of offer-creator: strip offer-sourced $0 items whose current
+    // offer scope is `checkout_only` BEFORE pricing runs, so a monthly renewal
+    // ships only the paid product. Items with scope `checkout_and_renewals`
+    // pass through and are priced as $0 gift lines. A deleted / deactivated
+    // offer is treated as `checkout_only` (safety default — don't ship an
+    // extra that no longer has an active offer backing it).
+    const { stripCheckoutOnlyOfferItems } = await import("@/lib/offers");
+    const strippedItems = await stripCheckoutOnlyOfferItems(
+      workspace_id,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Array.isArray(ctx.sub.items) ? (ctx.sub.items as any[]) : []) as Array<{
+        variant_id?: unknown;
+        offer_source_variant_id?: unknown;
+        is_gift?: unknown;
+      }>,
+    );
+    const subForPricing = { ...ctx.sub, items: strippedItems };
+
     const { resolveSubscriptionPricing } = await import("@/lib/pricing");
-    const pricing = await resolveSubscriptionPricing(workspace_id, ctx.sub);
+    const pricing = await resolveSubscriptionPricing(workspace_id, subForPricing);
     const items = pricing.lines
       .filter((l) => l.kind === "product")
       .map((l) => ({
