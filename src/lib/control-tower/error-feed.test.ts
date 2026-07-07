@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
   isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
@@ -284,6 +285,40 @@ test("isTransientSupabaseLogNoise scopes GoTrue 504 gateway-timeout as transient
     isTransientSupabaseLogNoise("auth", { severity: "error", message: "504: Processing this request timed out, please retry after a moment." }),
     true,
   );
+});
+
+// ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──
+// Supabase's own /auth/v1/user 504 on edge_logs — foreign-owned surface, no lever from us.
+// The transient class still recurred inside TRANSIENT_RECUR_WINDOW_MS and escalated on
+// every cycle; drop AT CAPTURE to the exact shape only.
+
+test("isForeignGoTrueEdgeNoise drops /auth/v1/user + 504 (numeric or string)", () => {
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 504), true);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", "504"), true);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", " 504 "), true);
+});
+
+test("isForeignGoTrueEdgeNoise KEEPS /auth/v1/user on other 5xx (real GoTrue outages still page)", () => {
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 500), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 502), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 503), false);
+});
+
+test("isForeignGoTrueEdgeNoise KEEPS a 504 on non-auth paths (rest/v1 still pages)", () => {
+  assert.equal(isForeignGoTrueEdgeNoise("/rest/v1/customers", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/rest/v1/", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/token", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/", 504), false);
+});
+
+test("isForeignGoTrueEdgeNoise returns false on missing path/status", () => {
+  assert.equal(isForeignGoTrueEdgeNoise(null, 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise(undefined, 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", null), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", undefined), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", ""), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", "5xx"), false);
 });
 
 test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate limit) — pages", () => {

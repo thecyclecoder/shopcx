@@ -42,20 +42,42 @@ export async function GET(
     .eq("ticket_id", ticketId)
     .order("created_at", { ascending: true });
 
-  // Enrich messages with author names
+  // Enrich messages with author names — display_name from workspace_members for the
+  // specific author_ids (and the assigned user) in scope, plus a targeted getUserById
+  // per id for the auth.users email (workspace_members doesn't store email). No
+  // auth.users scan.
   const authorIds = [...new Set(messages?.filter((m) => m.author_id).map((m) => m.author_id))];
-  const { data: usersData } = await admin.auth.admin.listUsers();
-  const userMap = new Map(
-    usersData?.users?.map((u) => [
-      u.id,
-      { name: u.user_metadata?.full_name || u.user_metadata?.name || u.email, email: u.email },
-    ]) ?? []
+  const lookupIds = [...new Set([...authorIds, ticket.assigned_to].filter(Boolean))] as string[];
+
+  const memberByUser = new Map<string, string | null>();
+  if (lookupIds.length > 0) {
+    const { data: memberRows } = await admin
+      .from("workspace_members")
+      .select("user_id, display_name")
+      .eq("workspace_id", workspaceId)
+      .in("user_id", lookupIds);
+    for (const m of memberRows ?? []) memberByUser.set(m.user_id, m.display_name);
+  }
+
+  const emailByUser = new Map<string, string | null>();
+  await Promise.all(
+    lookupIds.map(async (uid) => {
+      const { data } = await admin.auth.admin.getUserById(uid);
+      emailByUser.set(uid, data.user?.email ?? null);
+    }),
+  );
+
+  const userMap = new Map<string, { name: string | null; email: string | null }>(
+    lookupIds.map((uid) => {
+      const email = emailByUser.get(uid) ?? null;
+      return [uid, { name: memberByUser.get(uid) || email, email }];
+    }),
   );
 
   const enrichedMessages = messages?.map((m) => ({
     ...m,
-    author_name: m.author_id ? userMap.get(m.author_id)?.name : null,
-    author_email: m.author_id ? userMap.get(m.author_id)?.email : null,
+    author_name: m.author_id ? userMap.get(m.author_id)?.name ?? null : null,
+    author_email: m.author_id ? userMap.get(m.author_id)?.email ?? null : null,
   }));
 
   // Get customer with recent orders

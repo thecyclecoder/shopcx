@@ -315,7 +315,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
     key: "prompt-review", name: "Prue", role: "Prompt Review", emoji: "📖",
     personality: "Reads every proposed sonnet_prompt against similar approved rules + policies + voice + source tickets, decides accept / reject / merge / supersede with calibrated confidence — decisive by design (no human-review queue). Autonomous within June's rails; escalates unparseable verdicts + safety-downgrades rather than executing silently.",
     pronouns: { subject: "she", object: "her", possessive: "her" },
-    mascotId: "default",
+    mascotId: "default", avatarUrl: `${AV}prue-prompt-review.jpg?v=1`,
     chip: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-900/40",
     dot: "bg-sky-500", ring: "bg-sky-50 dark:bg-sky-900/20", accent: "text-sky-600 dark:text-sky-400",
   },

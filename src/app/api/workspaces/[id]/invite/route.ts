@@ -43,19 +43,19 @@ export async function POST(
     return NextResponse.json({ error: "Invalid role" }, { status: 400 });
   }
 
-  // Check if already a member
-  const { data: existingUsers } = await admin.auth.admin.listUsers();
-  const existingUser = existingUsers?.users?.find(
-    (u) => u.email?.toLowerCase() === email.toLowerCase()
-  );
+  // Check if already a member — targeted email→id lookup (no auth.users scan),
+  // then a single workspace_members query for that specific user_id.
+  const { data: existingUserId } = await admin.rpc("get_user_id_by_email", {
+    p_email: email.toLowerCase(),
+  });
 
-  if (existingUser) {
+  if (existingUserId) {
     const { data: existingMember } = await admin
       .from("workspace_members")
       .select("id")
       .eq("workspace_id", workspaceId)
-      .eq("user_id", existingUser.id)
-      .single();
+      .eq("user_id", existingUserId as string)
+      .maybeSingle();
 
     if (existingMember) {
       return NextResponse.json({ error: "User is already a member" }, { status: 409 });
