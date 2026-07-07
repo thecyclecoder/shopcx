@@ -645,7 +645,7 @@ export const unifiedTicketHandler = inngest.createFunction(
     // completed. Lee Summers' shipping_address ticket showed this:
     // the form was sent twice, the second send was confusing the customer.
     {
-      const SENTINEL_MESSAGES = new Set(["address_confirmed", "items_selected", "playbook-apply"]);
+      const SENTINEL_MESSAGES = new Set(["address_confirmed", "items_selected", "playbook-apply", "payment_method_added"]);
       const trimmed = (msg || "").trim().toLowerCase();
       if (!isNew && SENTINEL_MESSAGES.has(trimmed)) {
         const { data: ticket } = await admin.from("tickets")
@@ -938,7 +938,7 @@ export const unifiedTicketHandler = inngest.createFunction(
       msgType = await step.run("classify-bucket", async (): Promise<"account" | "general" | "outreach"> => {
         const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
         // System re-triggers always count as account
-        if (["address_confirmed", "items_selected", "playbook-apply"].includes(cleanMsg)) return "account";
+        if (["address_confirmed", "items_selected", "playbook-apply", "payment_method_added"].includes(cleanMsg)) return "account";
 
         const check = await claude(
           `Classify this customer message into ONE of three buckets.
@@ -1313,7 +1313,7 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
         // call it NEW_TOPIC, and bounce to the orchestrator, so a freshly-applied
         // playbook would never execute (Ida McDonald 2026-06-10: applied Refund
         // playbook just sat at step 0 and never explained the ineligibility).
-        const isSentinel = ["address_confirmed", "items_selected", "playbook-apply"].includes(msg.trim().toLowerCase());
+        const isSentinel = ["address_confirmed", "items_selected", "playbook-apply", "payment_method_added"].includes(msg.trim().toLowerCase());
         // Ask Haiku: is this message about the active playbook or something new?
         const isPlaybookRelated = isSentinel ? true : await step.run("classify-playbook-msg", async () => {
           const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
