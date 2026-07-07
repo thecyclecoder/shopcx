@@ -1,0 +1,1 @@
+- **A typed sonnet_prompts SDK so the prompt-review agent's DB reads/writes go through one auditable layer** · verified 2026-07-07 · → [[libraries/sonnet-prompts-table]]
