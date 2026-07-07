@@ -49,6 +49,7 @@ const { count } = await admin.from("workspace_members")
 
 - Roles: `owner`, `admin`, `agent`, `social`, `marketing`, `read_only`, `cs_manager`. `cs_manager` (the CX manager, added by [[../specs/box-ticket-improve]] via `ALTER TYPE workspace_role ADD VALUE`) can drive the ticket Improve agent + approve customer-action plans; it owns ticket-derived specs ([[../functions/cs]]). Prompt/grader-rule approval stays at `admin`.
 - Always use `display_name` for user-facing strings — never full name. See feedback_display_name.
+- **Preferred enrichment source:** Use workspace_members as the primary source for user metadata enrichment in hot-path routes — it's a targeted workspace-scoped query. Only call `admin.auth.admin.getUserById()` when a field that lives only in auth.users (e.g. email) is actually needed. Never call `admin.auth.admin.listUsers()` — it paginates at 50 rows and silently drops users past the first page. See [[../libraries/access]] § Hot-path auth optimization for the pattern.
 
 ---
 
