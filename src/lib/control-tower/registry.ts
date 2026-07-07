@@ -356,7 +356,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     kind: "cron",
     owner: "cs",
     label: "Escalation triage enqueue",
-    description: "Hourly enqueue of the box escalation-triage sweep.",
+    description: "Hourly enqueue of one cs-director-call (June-review) box job per eligible escalated ticket — the primary escalation triage (june-review-replaces-solver-skeptic-quorum-triage Phase 1).",
     expectedCadence: "hourly (30 * * * *)",
     livenessWindowMs: 2 * HOUR,
     outputAssertion: "escalation-idle",

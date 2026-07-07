@@ -1,11 +1,14 @@
 /**
- * GET /api/tickets/triage-status — is a box escalation-triage sweep in-flight for this workspace?
+ * GET /api/tickets/triage-status — is a box escalation triage review in-flight for this workspace?
  *
- * The hourly triage-escalations-cron enqueues one agent_jobs row (kind='triage-escalations') per
- * workspace per tick; the box claims it on its concurrency-1 lane and runs the solver→skeptic→quorum
- * sweep over routine-escalated tickets. While such a job is in an active state, the
- * AiInvestigationBadge appends "· triage in progress" so a human agent knows the routine is actively
- * working the escalated queue right now. See docs/brain/specs/ai-investigation-ticket-visibility.md.
+ * The hourly triage-escalations-cron enqueues one agent_jobs row per eligible escalated ticket. Phase 1
+ * of june-review-replaces-solver-skeptic-quorum-triage swapped the enqueue kind: it now enqueues
+ * `cs-director-call` (June's review — the primary triage) per ticket instead of the legacy per-
+ * workspace `triage-escalations` sweep job. This route considers BOTH kinds so the badge still fires
+ * during rollout AND after: while any such job is in an active state, the AiInvestigationBadge appends
+ * "· triage in progress" so a human agent knows the routine is actively reviewing the escalated queue
+ * right now. See docs/brain/specs/ai-investigation-ticket-visibility.md +
+ * docs/brain/specs/june-review-replaces-solver-skeptic-quorum-triage.md.
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
@@ -38,7 +41,7 @@ export async function GET() {
     .from("agent_jobs")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspaceId)
-    .eq("kind", "triage-escalations")
+    .in("kind", ["cs-director-call", "triage-escalations"])
     .in("status", ACTIVE_JOB_STATUSES);
 
   return NextResponse.json({ in_progress: (count || 0) > 0 });
