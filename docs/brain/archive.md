@@ -19,6 +19,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Replace auth.users full-table scans on hot-path routes** · verified 2026-07-07 · → [[../libraries/access]]
 - **Backfill the order_refunds ledger from historical refunds so past refunds are auditable too** · verified 2026-07-07 · → [[tables/order_refunds]]
 - **Builder applies migrations via the working pgClient apply-script, not the broken db push lane** · verified 2026-07-07 · → [[../recipes/write-a-migration-apply-script]]
+- **The builder upserts a persona by key + auto-generates its avatar — no duplicate keys, no imageless agents** · verified 2026-07-07 · → [[libraries/agent-personas]]
 - **Guard against merged-but-unapplied migrations (applied-state drift), not just missing ones** · verified 2026-07-07 · → [[../libraries/control-tower]]
 - **CI guard: every table a code path queries must have a migration that creates it** · verified 2026-07-07 · → [[../operational-rules#Every code path must have a migration for every table it queries]]
 - **A clarification turn sends the model's full message, not a context-stripped bare question** · verified 2026-07-07 · → [[lifecycles/ai-multi-turn]]
