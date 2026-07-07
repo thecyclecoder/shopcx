@@ -25,10 +25,15 @@ import { TrustChipRow } from "../_components/TrustChipRow";
  * a linked member is selected, href flips to that member's product
  * page since this page's price table is for the wrong format.
  */
-export function HeroSection({ data }: { data: PageData }) {
+export function HeroSection({ data, bundle = false }: { data: PageData; bundle?: boolean }) {
   const pathname = usePathname() || "";
-  const heroMedia = data.media_by_slot["hero"] || null;
-  const heroGallery = data.media_gallery_by_slot["hero"] || (heroMedia ? [heroMedia] : []);
+  // Bundle PDP: same hero as the standard PDP, with three swaps — the main image is the composed
+  // bundle shot (bundle_hero slot), the CTA is "Select Bundle" (adds to cart here, no scroll to a
+  // price table), and the linked-product format toggle is hidden (a bundle isn't a K-Cups/Instant swap).
+  const heroMedia = (bundle ? data.media_by_slot["bundle_hero"] : null) || data.media_by_slot["hero"] || null;
+  const heroGallery = bundle
+    ? (heroMedia ? [heroMedia] : [])
+    : data.media_gallery_by_slot["hero"] || (heroMedia ? [heroMedia] : []);
   const heroAlt = heroMedia?.alt_text || data.product.title;
 
   // Format toggle (linked products). When the customer toggles to a
@@ -90,7 +95,12 @@ export function HeroSection({ data }: { data: PageData }) {
   // scrolls down to pricing — no need to bounce the customer to a
   // sibling product's URL just to show its pricing.
   void pathname;
-  const ctaHref = "#pricing";
+  // Bundle mode wires the hero CTA straight to add-to-cart on the base variant (placeholder for the
+  // Starter Kit variant, per the offer-creator spec) instead of scrolling to a price table.
+  const bundleVariantId = bundle ? data.base_variant?.id || null : null;
+  const bundleFreqs = data.pricing_rule?.available_frequencies || [];
+  const bundleFreq = bundleFreqs.find((f) => f.default) || bundleFreqs[0] || null;
+  const ctaHref = bundleVariantId ? `#buy-${bundleVariantId}` : "#pricing";
 
   const ratingValue = data.product.rating ?? null;
   const ratingCount =
@@ -211,7 +221,7 @@ export function HeroSection({ data }: { data: PageData }) {
             </div>
           )}
 
-          {linkGroup && sortedMembers.length > 1 && (
+          {!bundle && linkGroup && sortedMembers.length > 1 && (
             <div className="mt-5">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
@@ -292,9 +302,14 @@ export function HeroSection({ data }: { data: PageData }) {
           <div className="mt-6">
             <ShopCTA
               href={ctaHref}
-              label={!isViewingCurrent && activeMember ? `Shop ${activeMember.value}` : undefined}
+              label={bundle ? "Select Bundle" : !isViewingCurrent && activeMember ? `Shop ${activeMember.value}` : undefined}
               lowestPriceCents={lowestPrice}
               align="center"
+              dataAttributes={
+                bundleVariantId
+                  ? { "variant-id": bundleVariantId, "tier-quantity": 1, mode: "subscribe", "frequency-days": bundleFreq?.interval_days ?? null }
+                  : undefined
+              }
             />
           </div>
 

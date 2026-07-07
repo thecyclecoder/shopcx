@@ -41,7 +41,6 @@ import { ReasonsListicle } from "../_sections/ReasonsListicle";
 import { BeforeAfterHero } from "../_sections/BeforeAfterHero";
 import { WeightLossTestimonialWall } from "../_sections/WeightLossTestimonialWall";
 import { BlueprintLander } from "../_sections/BlueprintLander";
-import { BundleHero } from "../_sections/BundleHero";
 import { StickyJumpNav } from "../_components/StickyJumpNav";
 import type { AdvertorialContent } from "@/lib/advertorial-pages";
 import type { BlueprintRenderContent } from "@/lib/blueprint-render";
@@ -286,7 +285,7 @@ export function StorefrontPage({
             ) : (
             <>
             <CompleteOrderBanner guaranteeCopy={data.page_content?.guarantee_copy ?? null} />
-            {bundleName ? <BundleHero data={data} /> : <HeroSection data={data} />}
+            <HeroSection data={data} bundle={!!bundleName} />
             {/* Survey chapter — interactive lead-capture quiz placed right
                 after the hero to rescue the ~70% hero→ch1 drop-off, capture
                 zero-party data, and gate the signup code behind email/phone.
