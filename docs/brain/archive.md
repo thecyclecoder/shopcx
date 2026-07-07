@@ -26,6 +26,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Order-creating actions ship to the customer's CURRENT address, not a stale cited-order snapshot** · verified 2026-07-07 · → [[../lifecycles/ticket-lifecycle]] | [[../libraries/customer-shipping-address]] | [[../tables/customers]] | [[../tables/orders]] | [[../tables/subscriptions]] | [[../tables/replacements]]
 - **Retire skip_next_order (88% failure) — shadow-measured alias to change_next_date / bill_now** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Serialize goal-member spec builds to prevent hot-file merge collisions** · verified 2026-07-07 · → [[../lifecycles/spec-goal-branch-pm-flow]]
+- **Summarize once at merge, then stop re-sending the full history to Opus every turn** · verified 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **ticket_resolution_events write-ahead ledger + SonnetDecision schema extension** · verified 2026-07-07 · → [[tables/ticket_resolution_events]]
 - **Extend verifyActionInDB coverage: returns, date/frequency, item ops, price** · verified 2026-07-07 · → [[libraries/action-executor]]
 - **Verify+escalate on the inline (journey/playbook-alongside) send path** · verified 2026-07-07 · → [[libraries/action-executor]]
