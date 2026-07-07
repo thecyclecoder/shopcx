@@ -1,0 +1,1 @@
+- **Scope Supabase auth `dial tcp <addr>: i/o timeout` as transient in the log poller** · verified 2026-07-07 · → [[../libraries/control-tower]]
