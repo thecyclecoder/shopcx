@@ -449,6 +449,15 @@ export function isTransientSupabaseLogNoise(
     // host=... : dial error (dial tcp [::1]:5432: operation was canceled)`. Same class,
     // different phrase — allowlist `operation was canceled` and the general `dial ...
     // canceled` shape too.
+    //
+    // The TIMEOUT sibling of `dial ... canceled`: when GoTrue's dial timer fires before the
+    // TCP handshake completes (as opposed to the parent context dying mid-dial), Go emits
+    // `failed to connect to host=... : dial error (dial tcp <addr>: i/o timeout)`. Same
+    // self-healing class as `canceled` — the upstream reachability already recovered by the
+    // next beat, no user impact, just repair-loop churn on a healed blip
+    // ([[../specs/error-feed-scope-supabase-auth-dial-io-timeout-transient]]) — allowlist
+    // the `dial ... i/o timeout` shape too. Recur-window escalation still applies: a chronic
+    // dial-timeout spike (a real upstream outage) recurs inside the window and pages.
     const msg = String(ctx.message ?? "").toLowerCase();
     if (!msg.trim()) return false;
     return (
@@ -456,6 +465,7 @@ export function isTransientSupabaseLogNoise(
       msg.includes("context deadline exceeded") ||
       msg.includes("operation was canceled") ||
       /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
+      /\bdial\b[^\n]*i\/o timeout/.test(msg) ||
       // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
       // load: `504: Processing this request timed out, please retry after a moment.` Same
       // transient class as the context-deadline shape above (restore of the reverted
