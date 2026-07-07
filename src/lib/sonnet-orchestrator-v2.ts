@@ -62,6 +62,22 @@ export interface SonnetDecision {
   response_message?: string;
   needs_clarification?: boolean;
   clarification_question?: string;
+  // ── Resolution-record fields (Phase 2 of ticket-resolution-events
+  // -writeahead-ledger-and-decision-schema-extension) ──
+  // All optional so parseSonnetDecision stays backward-compatible: a
+  // model that omits them still executes, but a WARN is logged so we
+  // can watch adoption (see parseSonnetDecision below). The write-ahead
+  // ledger row on [[../tables/ticket_resolution_events]] persists these
+  // per-turn — problem/confidence/options/chosen — for M1's inline
+  // verify block, M2's confidence-gated clarify, and M4's compiler loop.
+  problem?: string;
+  confidence?: number;
+  options?: Array<{
+    label: string;
+    action_shape?: unknown;
+    expected_effect?: string;
+  }>;
+  chosen?: { option_index: number; why: string };
 }
 
 const FALLBACK_DECISION: SonnetDecision = {
@@ -462,6 +478,11 @@ On ANY subscription cancel / refund / "wrong price" / "charged too much" ticket,
 3. A customer_reply: we caught the pricing error, refunded the difference, fixed the subscription so future renewals are correct, and there's no need to cancel.
 Run all three in one direct_action turn. If the context shows NO overcharge, do not invent one — follow the PRICE COMPARISON RULE (a renewal matching prior renewals, or a below-floor price raised to the 50% floor, is NOT an overcharge).
 
+RETIRED ACTION (hard rule — do NOT emit): The direct-action type "skip_next_order" has been RETIRED. It ran against a dead upstream endpoint and failed ~88% of the time. Never include an action with type "skip_next_order" in your response. Route the intent by what the customer actually wants:
+- The customer wants their next box LATER ("push it to next month", "skip the next one", "not ready yet", "delay") → emit direct_action with type "change_next_date" and a date roughly one billing cycle out (the next-next-scheduled-date).
+- The customer wants their next box NOW ("send today", "asap", "ship it now", "I'm out") → emit direct_action with type "bill_now".
+- If neither reading fits, escalate rather than emit skip_next_order.
+
 When you have enough data, respond with ONLY valid JSON (no tool calls):
 {
   "reasoning": "brief explanation",
@@ -470,8 +491,20 @@ When you have enough data, respond with ONLY valid JSON (no tool calls):
   "handler_name": "name of journey/playbook/workflow if applicable",
   "response_message": "message to send customer",
   "needs_clarification": false,
-  "clarification_question": null
-}`;
+  "clarification_question": null,
+  "problem": "one-line diagnosis of the customer's underlying problem (what they actually need resolved, not the surface ask)",
+  "confidence": 0.0-1.0,
+  "options": [{ "label": "short name of an option you considered", "action_shape": {"type": "...", "...": "..."}, "expected_effect": "what the customer sees if we pick this" }],
+  "chosen": { "option_index": 0, "why": "one sentence — why this option beats the others for THIS customer" }
+}
+
+RESOLUTION-RECORD FIELDS (problem / confidence / options / chosen) — a per-turn ledger of your reasoning:
+- problem: your one-line diagnosis of the underlying problem, in your words (not the customer's phrasing).
+- confidence: 0.0-1.0 how sure you are the chosen action solves it. Below 0.6 → prefer a clarifying question (needs_clarification=true) over acting.
+- options: 1-4 options you SERIOUSLY considered before picking. Each carries the action_shape it would fire and the expected_effect on the customer.
+- chosen: option_index into options[] plus a one-sentence why. If options is a single row, chosen.option_index is 0.
+These do NOT change what you execute — action_type + actions + response_message are still the authoritative plan. The four fields let downstream verification catch responses that don't actually address the diagnosed problem, and let calibration mine your reasoning over time. Always include them on a real decision.
+Note: "type" on any actions[] entry must NEVER be "skip_next_order" (retired — see above).`;
 
   // ── VOLATILE per-ticket / per-turn content — NOT cached (it changes every
   // turn as the conversation grows). currentDateContext() lives here too so
@@ -1983,9 +2016,67 @@ function parseSonnetDecision(text: string, inboundMessage: string = ""): SonnetD
       return fallbackWithCancelRoute(inboundMessage, `Parse fail: missing reasoning/action_type. Got keys: ${Object.keys(parsed).join(", ")}`);
     }
 
-    return parsed as SonnetDecision;
+    const decision = parsed as SonnetDecision;
+    // Adoption WARN (Phase 2 of ticket-resolution-events-writeahead-ledger
+    // -and-decision-schema-extension). buildSystemPrompt asks the model
+    // for problem/confidence/options/chosen; the interface tolerates
+    // them being absent so a straggler prompt still executes, but a real
+    // (non-fallback) decision without them means the ticket_resolution
+    // _events row lands with NULL diagnosis and calibration loses signal.
+    // Each miss increments the [resolution-schema-adoption] counter in
+    // structured logs — Vercel log drain / control tower aggregate it so
+    // adoption is watchable across the fleet without a schema change.
+    warnOnMissingResolutionFields(decision);
+    return decision;
   } catch (err) {
     console.warn("Sonnet v2: JSON parse error:", err, "text:", snippet);
     return fallbackWithCancelRoute(inboundMessage, `Parse fail: ${err instanceof Error ? err.message : String(err)}. Got: "${snippet}"`);
   }
+}
+
+// Counters for the Phase-2 adoption watch. Bumped once per real,
+// successfully-parsed decision missing a field. In-process only — the
+// authoritative signal is the console.warn line's [resolution-schema
+// -adoption] prefix (Vercel log drain aggregates it). Exported so a
+// caller or a test can read the current tallies without scraping logs.
+export const resolutionSchemaAdoption = {
+  total: 0,
+  missingProblem: 0,
+  missingConfidence: 0,
+  missingOptions: 0,
+  missingChosen: 0,
+};
+
+// Exported so a unit-shaped test can drive it against a mocked SonnetDecision
+// without hitting the network — the smallest-test-for-the-named-failing-state
+// mandate for the "model omits the new fields" verification bullet.
+export function warnOnMissingResolutionFields(decision: SonnetDecision): string[] {
+  const missing: string[] = [];
+  if (typeof decision.problem !== "string" || decision.problem.length === 0) {
+    missing.push("problem");
+    resolutionSchemaAdoption.missingProblem += 1;
+  }
+  if (typeof decision.confidence !== "number" || Number.isNaN(decision.confidence)) {
+    missing.push("confidence");
+    resolutionSchemaAdoption.missingConfidence += 1;
+  }
+  if (!Array.isArray(decision.options)) {
+    missing.push("options");
+    resolutionSchemaAdoption.missingOptions += 1;
+  }
+  if (
+    decision.chosen == null ||
+    typeof decision.chosen !== "object" ||
+    typeof decision.chosen.option_index !== "number"
+  ) {
+    missing.push("chosen");
+    resolutionSchemaAdoption.missingChosen += 1;
+  }
+  if (missing.length > 0) {
+    resolutionSchemaAdoption.total += 1;
+    console.warn(
+      `[resolution-schema-adoption] real Sonnet decision missing fields: ${missing.join(",")} — action_type=${decision.action_type} count=${resolutionSchemaAdoption.total}`,
+    );
+  }
+  return missing;
 }

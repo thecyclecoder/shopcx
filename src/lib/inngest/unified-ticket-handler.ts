@@ -28,7 +28,7 @@ import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
-import { matchPlaybook, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
+import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -2118,7 +2118,24 @@ async function routeExec(
 
   // 2. Playbook
   if (hasCust && !social) {
-    const pbMatch = await matchPlaybook(admin, wsId, intent, msg);
+    // Matcher-defer guard (playbook-compiler-loop § Phase 3 —
+    // matcher-defers-on-uncertainty). Below DEFER_THRESHOLD (DB-driven, default
+    // 0.65) the matcher returns null and we fall through to Sonnet —
+    // "not sure → interpret" beats "guess a wrong playbook and step through it".
+    const deferThreshold = await loadDeferThreshold(admin, wsId);
+    const scored = await matchPlaybookScored(admin, wsId, intent, msg);
+    const gated = applyDeferThreshold(scored, deferThreshold);
+    let pbMatch: { id: string; name: string } | null = gated;
+    if (!gated && scored) {
+      // Log the exact string the spec-test verification asserts on:
+      // '[playbook] deferred: top_score X < Y'.
+      console.log(`[playbook] deferred: top_score ${scored.score.toFixed(2)} < ${deferThreshold.toFixed(2)}`);
+      pbMatch = null;
+    }
+    // Legacy fall-through: if the scored matcher found nothing (workspaces
+    // whose playbooks don't score by our formula), fall back to the boolean
+    // matcher so we don't regress existing behavior.
+    if (!scored) pbMatch = await matchPlaybook(admin, wsId, intent, msg);
     if (pbMatch) {
       await sysNote(admin, tid, `[System] → Playbook: ${pbMatch.name} (${conf}%)`);
       await startPlaybook(admin, tid, pbMatch.id);

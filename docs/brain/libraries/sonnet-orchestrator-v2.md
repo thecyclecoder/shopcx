@@ -34,6 +34,12 @@ async function callSonnetOrchestratorV2(workspaceId: string, ticketId: string, c
 
 ### `SonnetDecision` — interface
 
+Carries the executor plan (`reasoning`, `action_type`, `actions`, `handler_name`, `response_message`, clarification pair) **plus** the resolution-record fields shipped in Phase 2 of [[../specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension]]: `problem?: string`, `confidence?: number` (0..1), `options?: Array<{label, action_shape, expected_effect}>`, `chosen?: {option_index, why}`. All optional so `parseSonnetDecision` stays backward-compatible with a straggler prompt / fallback path. `buildSystemPrompt`'s JSON contract asks the model for all four on every real decision; the four values land on [[../tables/ticket_resolution_events]] per turn via [[action-executor]] `stageResolutionEvent`, which range-guards them before insert (CHECK constraints — confidence ∈ [0,1]; options must be an array; chosen must carry a numeric `option_index`).
+
+### `resolutionSchemaAdoption` — const + `warnOnMissingResolutionFields` — function
+
+Adoption watch for the Phase 2 rollout. `parseSonnetDecision` runs `warnOnMissingResolutionFields` on every successfully-parsed **real** (non-fallback) decision; each missing field increments both a per-field counter and the aggregate total on the exported `resolutionSchemaAdoption` object AND emits a single `console.warn` line prefixed `[resolution-schema-adoption]` — the Vercel log drain aggregates that prefix so adoption is watchable across the fleet without a schema change. The counters are in-process (per Node instance, reset on cold start), exported for unit-shape tests to assert against without hitting the network. Fallback / degrade paths (`fallbackWithCancelRoute` via `DEGRADED_DECISIONS`) never touch the counters — the point is to measure whether *real* model output populates the resolution record, not to flag every non-model escalation.
+
 ### `OrchestratorModelKey` — type
 
 ## Callers

@@ -1,15 +1,27 @@
 /**
- * commerce/replacement.ts — Display ops for replacements.
+ * commerce/replacement.ts — Display + mutation ops for replacements.
  *
- * A replacement is created from a source order and can adjust the linked
- * subscription's next billing date — that side effect belongs on the Mutation
- * op, not on any surface. See [[../../docs/brain/libraries/replacement-order]].
+ * DISPLAY: A replacement is created from a source order and can adjust the
+ * linked subscription's next billing date — that side effect belongs on the
+ * Mutation op, not on any surface. See
+ * [[../../docs/brain/libraries/replacement-order]].
  *
- * Ships with zero call-site consumers — the M3 harness compares parity before
- * any surface migrates.
+ * MUTATION:
+ *  - `issueReplacement` — thin SDK wrapper over [[../replacement-order]]
+ *    `createReplacementOrder`. The SDK-side surface every future callsite
+ *    consumes.
+ *  - `issueDollarReplacement` — the $-bearing variant (Phase 3 of the
+ *    `commerce-sdk-actions-…` spec). Combines `issueReplacement` with either
+ *    `commerce/refund.issueRefund` (refund half) OR
+ *    `commerce/subscription.subscriptionOrderNow` (upcharge half) inside a
+ *    shared txn boundary: if the money half fails, the just-created
+ *    replacement is rolled back (compensating delete on the replacements
+ *    row) so no orphan record survives. On refund success, mirrors an
+ *    `order_refunds` row (best-effort — the M1 spec ships the mirror table).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { ReplacementView } from "./types";
+import type { IssueRefundResult } from "./refund";
 
 export type { ReplacementView } from "./types";
 
@@ -155,4 +167,325 @@ export async function listReplacements(
   }
 
   return out;
+}
+
+// ── Mutation ops ─────────────────────────────────────────────────────
+
+export interface IssueReplacementArgs {
+  customerId: string;
+  shopifyCustomerId: string;
+  items: Array<{ variantId: string; quantity: number; title?: string }>;
+  shippingAddress: {
+    firstName?: string;
+    lastName?: string;
+    address1: string;
+    address2?: string;
+    city: string;
+    province?: string;
+    provinceCode?: string;
+    zip: string;
+    countryCode?: string;
+  };
+  reason: string;
+  originalOrderNumber?: string | null;
+  ticketId?: string | null;
+  subscriptionId?: string | null;
+  customerError?: boolean;
+  shopifyNote?: string;
+  initiatedBy?: "ai" | "agent" | "script" | "playbook";
+  initiatedByName?: string;
+}
+
+export interface IssueReplacementResult {
+  success: boolean;
+  replacementId: string;
+  shopifyOrderName: string | null;
+  error?: string;
+}
+
+/**
+ * SDK-side wrapper for creating a replacement order. Delegates to
+ * [[../replacement-order]] `createReplacementOrder`, which is the shared
+ * implementation (record-first insert, Shopify draft+complete, status
+ * stamp — same contract). Callers point at the SDK wrapper so future
+ * concerns (per-workspace policy checks, mirror writes) drop in here
+ * without touching every callsite.
+ */
+export async function issueReplacement(
+  workspaceId: string,
+  args: IssueReplacementArgs,
+): Promise<IssueReplacementResult> {
+  if (!workspaceId) return { success: false, replacementId: "", shopifyOrderName: null, error: "workspaceId is required" };
+  if (!args.customerId) return { success: false, replacementId: "", shopifyOrderName: null, error: "customerId is required" };
+  const { createReplacementOrder } = await import("@/lib/replacement-order");
+  return createReplacementOrder({ workspaceId, ...args });
+}
+
+// ── $-bearing replacement variant (Phase 3) ─────────────────────────
+
+export interface DollarReplacementRefundArgs {
+  orderId: string;
+  amountCents: number;
+  reason: string;
+  source?: string;
+  eventProperties?: Record<string, unknown>;
+}
+
+export interface DollarReplacementUpchargeArgs {
+  contractId: string;
+}
+
+export interface DollarReplacementArgs extends IssueReplacementArgs {
+  /** The refund half — money moves BACK to the customer. Mutually
+   *  exclusive with `upcharge`. */
+  refund?: DollarReplacementRefundArgs;
+  /** The upcharge half — the customer pays for the replacement via a
+   *  fresh subscription bill_now. Mutually exclusive with `refund`. */
+  upcharge?: DollarReplacementUpchargeArgs;
+}
+
+export interface DollarReplacementResult {
+  success: boolean;
+  replacementId?: string;
+  shopifyOrderName?: string | null;
+  refundResult?: IssueRefundResult;
+  upchargeResult?: { success: boolean; error?: string; summary?: string };
+  orderRefundsMirrored?: boolean;
+  error?: string;
+  rolledBack?: boolean;
+}
+
+/**
+ * Injectable delegates so the atomicity harness (node:test) can drive
+ * `issueDollarReplacement` deterministically without standing up Supabase +
+ * Shopify + Braintree. Real callers omit the `_deps` param and get the
+ * production wiring; the test overrides each with a spy/stub.
+ */
+export interface DollarReplacementDeps {
+  issueReplacement: (
+    workspaceId: string,
+    args: IssueReplacementArgs,
+  ) => Promise<IssueReplacementResult>;
+  issueRefund: (
+    workspaceId: string,
+    args: {
+      orderId: string;
+      amountCents: number;
+      reason: string;
+      source?: string;
+      customerId?: string | null;
+      eventProperties?: Record<string, unknown>;
+    },
+  ) => Promise<IssueRefundResult>;
+  subscriptionOrderNow: (
+    workspaceId: string,
+    contractId: string,
+  ) => Promise<{ success: boolean; error?: string; summary?: string }>;
+  rollbackReplacement: (workspaceId: string, replacementId: string) => Promise<{ deleted: boolean }>;
+  writeOrderRefundMirror: (
+    workspaceId: string,
+    mirror: {
+      order_id: string;
+      replacement_id: string;
+      amount_cents: number;
+      method: string | null;
+      refund_id: string | null;
+      reason: string;
+    },
+  ) => Promise<{ inserted: boolean }>;
+}
+
+/** Real-wiring default deps. Test suites override each via the `_deps`
+ *  optional param. */
+async function defaultDollarReplacementDeps(): Promise<DollarReplacementDeps> {
+  const [{ issueRefund }, subMod] = await Promise.all([
+    import("./refund"),
+    import("./subscription"),
+  ]);
+  return {
+    issueReplacement,
+    issueRefund,
+    subscriptionOrderNow: subMod.subscriptionOrderNow,
+    rollbackReplacement: async (workspaceId, replacementId) => {
+      // Compensating rollback. Guard predicates:
+      //  - workspace_id scope (never reach across tenants)
+      //  - id specificity (exactly one row)
+      //  - status NOT IN ('shipped','delivered') so a race where the
+      //    replacement already shipped between create + refund can't
+      //    destroy a fulfilled row.
+      //  - .select('id') to assert exactly one row transitioned; zero
+      //    → treat as no-op (already rolled back / already shipped),
+      //    do not error out.
+      const admin = createAdminClient();
+      const { data, error } = await admin
+        .from("replacements")
+        .delete()
+        .eq("workspace_id", workspaceId)
+        .eq("id", replacementId)
+        .not("status", "in", "(shipped,delivered)")
+        .select("id");
+      if (error) {
+        console.error("[issueDollarReplacement] rollback delete failed:", error.message);
+        return { deleted: false };
+      }
+      return { deleted: (data ?? []).length === 1 };
+    },
+    writeOrderRefundMirror: async (workspaceId, mirror) => {
+      // Best-effort mirror write. The M1 spec ships the order_refunds
+      // table; until it does, this insert may fail with "relation
+      // does not exist" — log + move on. The refund itself already
+      // succeeded (money moved) so a mirror miss is not a rollback
+      // trigger.
+      try {
+        const admin = createAdminClient();
+        const { error } = await admin.from("order_refunds").insert({
+          workspace_id: workspaceId,
+          order_id: mirror.order_id,
+          replacement_id: mirror.replacement_id,
+          amount_cents: mirror.amount_cents,
+          method: mirror.method,
+          refund_id: mirror.refund_id,
+          reason: mirror.reason,
+        });
+        if (error) {
+          console.warn("[issueDollarReplacement] order_refunds mirror write failed:", error.message);
+          return { inserted: false };
+        }
+        return { inserted: true };
+      } catch (e) {
+        console.warn("[issueDollarReplacement] order_refunds mirror write threw:", e);
+        return { inserted: false };
+      }
+    },
+  };
+}
+
+/**
+ * Create a replacement AND move money in the same operation, atomically.
+ *
+ * Two variants:
+ *  - `refund` — customer gets both a replacement shipment AND cash back.
+ *    Used when we shipped something the customer needs BUT some money
+ *    should refund (e.g. shipping protection they paid for that
+ *    didn't help, or a partial refund on the item that had defects).
+ *    Writes an `order_refunds` mirror row on the refund order for
+ *    audit — the shared choke point for future refund reconciliation.
+ *  - `upcharge` — customer gets a replacement they PAY for, billed as a
+ *    fresh subscription order via `subscriptionOrderNow`. Used when
+ *    the customer is due a replacement but there's a legitimate charge
+ *    (upgrade, add-on).
+ *
+ * Atomicity (compensating rollback):
+ *   1. Create the replacement first (record-first: replacements row +
+ *      Shopify draft-complete).
+ *   2. Do the money half.
+ *   3. If the money half fails, roll back the replacements row via
+ *      `rollbackReplacement` — a workspace-scoped, id-specific delete
+ *      guarded so a fulfilled row (`status IN ('shipped','delivered')`)
+ *      is never destroyed.
+ *
+ * The Shopify order is created inline with step 1 and cannot itself be
+ * "rolled back" — the rollback removes the DB record so we don't carry
+ * an orphan replacement. Callers relying on the invariant "no
+ * replacements row without matching money movement" get it from this
+ * function.
+ */
+export async function issueDollarReplacement(
+  workspaceId: string,
+  args: DollarReplacementArgs,
+  _deps?: Partial<DollarReplacementDeps>,
+): Promise<DollarReplacementResult> {
+  if (!workspaceId) return { success: false, error: "workspaceId is required" };
+  if (args.refund && args.upcharge) {
+    return { success: false, error: "issueDollarReplacement: pass `refund` OR `upcharge`, not both" };
+  }
+  if (!args.refund && !args.upcharge) {
+    return { success: false, error: "issueDollarReplacement: one of `refund` / `upcharge` is required (bare replacements go through issueReplacement)" };
+  }
+
+  const deps: DollarReplacementDeps = { ...(await defaultDollarReplacementDeps()), ..._deps };
+
+  // ── 1. Replacement half (record-first) ─────────────────────────
+  const rep = await deps.issueReplacement(workspaceId, {
+    customerId: args.customerId,
+    shopifyCustomerId: args.shopifyCustomerId,
+    items: args.items,
+    shippingAddress: args.shippingAddress,
+    reason: args.reason,
+    originalOrderNumber: args.originalOrderNumber,
+    ticketId: args.ticketId,
+    subscriptionId: args.subscriptionId,
+    customerError: args.customerError,
+    shopifyNote: args.shopifyNote,
+    initiatedBy: args.initiatedBy,
+    initiatedByName: args.initiatedByName,
+  });
+  if (!rep.success || !rep.replacementId) {
+    return {
+      success: false,
+      error: `Replacement failed: ${rep.error ?? "unknown"}`,
+      replacementId: rep.replacementId || undefined,
+    };
+  }
+
+  // ── 2. Money half ──────────────────────────────────────────────
+  if (args.refund) {
+    const refund = await deps.issueRefund(workspaceId, {
+      orderId: args.refund.orderId,
+      amountCents: args.refund.amountCents,
+      reason: args.refund.reason,
+      source: args.refund.source ?? "dollar_replacement",
+      customerId: args.customerId,
+      eventProperties: {
+        ...(args.refund.eventProperties ?? {}),
+        replacement_id: rep.replacementId,
+      },
+    });
+    if (!refund.success) {
+      // Compensating rollback — delete the just-created replacements
+      // row so we don't ship a replacement without the refund.
+      const roll = await deps.rollbackReplacement(workspaceId, rep.replacementId);
+      return {
+        success: false,
+        error: `Refund failed after replacement created: ${refund.error ?? "unknown"}`,
+        replacementId: rep.replacementId,
+        refundResult: refund,
+        rolledBack: roll.deleted,
+      };
+    }
+    const mirror = await deps.writeOrderRefundMirror(workspaceId, {
+      order_id: args.refund.orderId,
+      replacement_id: rep.replacementId,
+      amount_cents: args.refund.amountCents,
+      method: refund.method ?? null,
+      refund_id: refund.refund_id ?? null,
+      reason: args.refund.reason,
+    });
+    return {
+      success: true,
+      replacementId: rep.replacementId,
+      shopifyOrderName: rep.shopifyOrderName,
+      refundResult: refund,
+      orderRefundsMirrored: mirror.inserted,
+    };
+  }
+
+  // upcharge branch (args.upcharge guaranteed by the guard above)
+  const up = await deps.subscriptionOrderNow(workspaceId, args.upcharge!.contractId);
+  if (!up.success) {
+    const roll = await deps.rollbackReplacement(workspaceId, rep.replacementId);
+    return {
+      success: false,
+      error: `Upcharge failed after replacement created: ${up.error ?? "unknown"}`,
+      replacementId: rep.replacementId,
+      upchargeResult: up,
+      rolledBack: roll.deleted,
+    };
+  }
+  return {
+    success: true,
+    replacementId: rep.replacementId,
+    shopifyOrderName: rep.shopifyOrderName,
+    upchargeResult: up,
+  };
 }

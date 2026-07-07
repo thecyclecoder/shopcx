@@ -163,6 +163,17 @@ export interface PlaybookExecResult {
   newStep?: number;
   context?: Record<string, unknown>;
   error?: string;
+  /**
+   * Action families ([[claim-guard]] `EFFECT_PATTERNS.families`) that a
+   * step's `response` legitimately references as completed. Set by steps
+   * whose response confirms an effect that already ran + verified in a
+   * prior turn (e.g. the cancel-journey-completed confirmation at
+   * apply_policy → "Your subscription is now cancelled" is backed by
+   * `["cancel"]`). Consumed by the inline claim-guard in
+   * [[action-executor]] `handlePlaybook` so post-completion truthful
+   * confirmations aren't false-positive escalated.
+   */
+  backedActions?: string[];
 }
 
 // ── Main executor ──
@@ -503,6 +514,11 @@ async function executeStep(
         action: "respond", response,
         context: { cancel_journey_completed: true, paused_for_cancel: false, subscription_cancelled: cancelled, cancel_handled: true },
         systemNote: `[Playbook] Cancel journey completed. Outcome: ${latest.outcome}. ${cancelled ? "Subscription cancelled." : "Subscription saved."} Not mentioning refund. Playbook reset to apply_policy.`,
+        // The "Your subscription is now cancelled" response is truthful — the
+        // cancel journey completed in a prior turn and its outcome is what
+        // gates this branch. Tell the inline claim-guard `cancel` is backed
+        // so it doesn't false-positive block the confirmation.
+        backedActions: cancelled ? ["cancel"] : undefined,
       };
     }
 
@@ -2224,6 +2240,193 @@ export async function matchPlaybook(
   return null;
 }
 
+// ── Matcher-defer + fail-fast escalation (M4 spec — matcher-defers-on-uncertainty) ──
+
+/** Default `top_score < DEFER_THRESHOLD` → matcher returns null → fall through to Sonnet. */
+export const DEFAULT_DEFER_THRESHOLD = 0.65;
+
+/** Default per-step Sonnet-chosen-option `confidence < FAIL_FAST_THRESHOLD` → escalate. */
+export const DEFAULT_FAIL_FAST_THRESHOLD = 0.5;
+
+/**
+ * Score a playbook against a ticket's classified intent + raw message.
+ *
+ * Pure function — the matcher-defer test exercises it directly with synthetic
+ * inputs. Score ranges 0.0..1.0:
+ *   - exact intent match / full pattern match → 1.0
+ *   - substring intent match (intent contains a trigger_intent) → 0.85
+ *   - substring pattern match (msg contains a trigger_pattern) → 0.85
+ *   - reverse intent match (a trigger_intent contains the classified intent) → 0.55
+ *   - word-overlap fraction × 0.7 (weak partial pattern match) → up to 0.7
+ *
+ * A playbook with no triggers scores 0. The top score across all triggers wins;
+ * playbooks are compared later, priority-ordered as a tiebreaker.
+ */
+export function scorePlaybookAgainst(
+  playbook: { trigger_intents: string[]; trigger_patterns: string[] },
+  intent: string,
+  msg: string,
+): number {
+  const i = (intent || "").toLowerCase();
+  const m = (msg || "").toLowerCase();
+  let best = 0;
+  for (const raw of playbook.trigger_intents || []) {
+    const t = (raw || "").toLowerCase();
+    if (!t) continue;
+    if (t === i) best = Math.max(best, 1.0);
+    else if (i.includes(t)) best = Math.max(best, 0.85);
+    else if (t.includes(i) && i.length > 0) best = Math.max(best, 0.55);
+  }
+  for (const raw of playbook.trigger_patterns || []) {
+    const t = (raw || "").toLowerCase();
+    if (!t) continue;
+    if (t === m) best = Math.max(best, 1.0);
+    else if (m.includes(t)) best = Math.max(best, 0.85);
+    else {
+      const words = t.split(/\s+/).filter(Boolean);
+      if (words.length > 0) {
+        const hits = words.filter((w) => m.includes(w)).length;
+        const frac = hits / words.length;
+        if (frac > 0) best = Math.max(best, frac * 0.7);
+      }
+    }
+  }
+  return best;
+}
+
+export interface PlaybookScoredMatch {
+  id: string;
+  name: string;
+  /** 0..1 — the top-scoring trigger's match strength (see `scorePlaybookAgainst`). */
+  score: number;
+}
+
+/**
+ * Score every active playbook for the workspace against (intent, msg) and
+ * return the top scorer. Returns null when no playbook has any signal.
+ *
+ * The DEFER guard lives one level up in the unified-ticket-handler wrapper
+ * (`matchPlaybookOrDefer`) — this function always returns the top, regardless
+ * of threshold. Splitting the two lets the test assert both the scoring and
+ * the threshold guard in isolation.
+ */
+export async function matchPlaybookScored(
+  admin: Admin, wsId: string, intent: string, msg: string,
+): Promise<PlaybookScoredMatch | null> {
+  const { data: playbooks } = await admin.from("playbooks")
+    .select("id, name, trigger_intents, trigger_patterns")
+    .eq("workspace_id", wsId)
+    .eq("is_active", true)
+    .order("priority", { ascending: false });
+
+  let best: PlaybookScoredMatch | null = null;
+  for (const pb of playbooks || []) {
+    const s = scorePlaybookAgainst(
+      { trigger_intents: pb.trigger_intents as string[], trigger_patterns: pb.trigger_patterns as string[] },
+      intent, msg,
+    );
+    if (best === null || s > best.score) best = { id: pb.id, name: pb.name, score: s };
+  }
+  return best;
+}
+
+/**
+ * Read the DB-driven DEFER_THRESHOLD from workspaces (default `DEFAULT_DEFER_THRESHOLD` —
+ * 0.65). Column `playbook_defer_threshold` is optional — a missing / non-numeric value
+ * falls back to the default so the guard still fires without a migration.
+ */
+export async function loadDeferThreshold(admin: Admin, wsId: string): Promise<number> {
+  try {
+    const { data } = await admin
+      .from("workspaces")
+      .select("playbook_defer_threshold")
+      .eq("id", wsId)
+      .maybeSingle();
+    const raw = (data as { playbook_defer_threshold?: unknown } | null)?.playbook_defer_threshold;
+    if (typeof raw === "number" && Number.isFinite(raw) && raw > 0 && raw <= 1) return raw;
+  } catch {
+    // column absent — fall back to the compiled default.
+  }
+  return DEFAULT_DEFER_THRESHOLD;
+}
+
+/**
+ * Score → threshold-gate: return the match only when its `score >= deferThreshold`.
+ * Below the threshold the matcher returns null and the pipeline falls through to
+ * Sonnet — the spec's "not sure → interpret" defer.
+ *
+ * Pure function so the test can drive it with synthetic inputs. The runtime wrapper
+ * `matchPlaybookOrDefer` in unified-ticket-handler.ts logs
+ * `[playbook] deferred: top_score X < Y` when this returns null due to under-threshold.
+ */
+export function applyDeferThreshold(
+  match: PlaybookScoredMatch | null,
+  deferThreshold: number,
+): PlaybookScoredMatch | null {
+  if (!match) return null;
+  if (match.score < deferThreshold) return null;
+  return match;
+}
+
+/**
+ * Read the DB-driven FAIL_FAST_THRESHOLD from workspaces (default `DEFAULT_FAIL_FAST_THRESHOLD` —
+ * 0.5). Column `playbook_fail_fast_threshold` is optional — a missing / non-numeric value
+ * falls back to the default.
+ */
+export async function loadFailFastThreshold(admin: Admin, wsId: string): Promise<number> {
+  try {
+    const { data } = await admin
+      .from("workspaces")
+      .select("playbook_fail_fast_threshold")
+      .eq("id", wsId)
+      .maybeSingle();
+    const raw = (data as { playbook_fail_fast_threshold?: unknown } | null)?.playbook_fail_fast_threshold;
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw;
+  } catch {
+    // column absent — fall back to the compiled default.
+  }
+  return DEFAULT_FAIL_FAST_THRESHOLD;
+}
+
+/**
+ * Fail-fast escalation gate: if the Sonnet-chosen option carries
+ * `confidence < failFastThreshold`, stop stepping and escalate the ticket
+ * with reason `'playbook_low_confidence'` — never let the step engine
+ * push a low-confidence action through.
+ *
+ * Returns `true` when the step MUST NOT continue (the caller should bail
+ * immediately). The escalate write goes through the same shape
+ * `action-executor.ts:escalateTicket` uses (status=open + escalated_to=null +
+ * escalated_at + escalation_reason) so the idle-triage cron picks it up.
+ *
+ * Pure business logic — the test exercises the low-confidence and
+ * healthy-confidence branches directly (with an injected escalate fn).
+ */
+export async function assertPlaybookStepConfidence(
+  admin: Admin,
+  ticketId: string,
+  chosenConfidence: number | null | undefined,
+  failFastThreshold: number,
+  opts?: { escalate?: (reason: string) => Promise<void> },
+): Promise<{ stopped: boolean; reason?: string }> {
+  if (typeof chosenConfidence !== "number" || !Number.isFinite(chosenConfidence)) {
+    return { stopped: false };
+  }
+  if (chosenConfidence >= failFastThreshold) return { stopped: false };
+
+  const reason = "playbook_low_confidence";
+  const escalate = opts?.escalate ?? (async (r: string) => {
+    await admin.from("tickets").update({
+      status: "open",
+      escalated_to: null,
+      escalated_at: new Date().toISOString(),
+      escalation_reason: r,
+    }).eq("id", ticketId);
+  });
+  await escalate(reason);
+  return { stopped: true, reason };
+}
+
 // ── Start a playbook on a ticket ──
 
 export async function startPlaybook(
@@ -3002,7 +3205,9 @@ async function handleAdjustSubscription(
   if (!sub || sub.status !== "active" || !isFullReplacement) {
     const replacementName = ctx.replacement_order_name ? `${ctx.replacement_order_name} ` : "";
     const response = `Your replacement order ${replacementName}has been created and will ship within 2-3 business days.`;
-    return { action: "complete", response, context: ctx };
+    // The replacement order was created by a prior step in this playbook —
+    // the "Your replacement order has been created" claim is truthful.
+    return { action: "complete", response, context: ctx, backedActions: ["create_replacement_order"] };
   }
 
   // Calculate new date
@@ -3055,7 +3260,9 @@ async function handleAdjustSubscription(
   const subNote = ctx.subscription_adjusted ? ` Your next subscription shipment has been adjusted to ${ctx.new_next_billing_date}.` : "";
   const response = `Your replacement order${orderRef} has been created and will ship within 2-3 business days.${subNote}`;
 
-  return { action: "complete", response, context: ctx };
+  // Same reasoning as the fallback branch above: replacement order was
+  // created by a prior step in this playbook.
+  return { action: "complete", response, context: ctx, backedActions: ["create_replacement_order"] };
 }
 
 // ══════════════════════════════════════════════════════════════════

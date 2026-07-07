@@ -9,6 +9,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
+import { resolveAlias } from "@/lib/action-handler-aliases";
+import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
+import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
 
 // ── Types ──
 
@@ -30,6 +33,21 @@ export interface SonnetDecision {
   response_message?: string;
   needs_clarification?: boolean;
   clarification_question?: string;
+  // ── Resolution-record fields (Phase 2 of ticket-resolution-events
+  // -writeahead-ledger-and-decision-schema-extension) ──
+  // Mirror the shape declared on src/lib/sonnet-orchestrator-v2.ts's
+  // SonnetDecision. All optional so a fallback / straggler decision
+  // still executes; stageResolutionEvent range-guards + coerces before
+  // insert (respects the DB CHECK constraints — confidence ∈ [0,1];
+  // verified_outcome enum). See docs/brain/tables/ticket_resolution_events.md.
+  problem?: string;
+  confidence?: number;
+  options?: Array<{
+    label: string;
+    action_shape?: unknown;
+    expected_effect?: string;
+  }>;
+  chosen?: { option_index: number; why: string };
 }
 
 export interface ActionParams {
@@ -87,6 +105,35 @@ export interface ActionParams {
   // chat); the handler matches it against the Shopify payment methods
   // on file and applies the switch.
   card_last4?: string;
+  // dollar_replacement — Phase 3 $-bearing replacement variant. The
+  // action carries the refund amount (replacement_amount_cents), the
+  // order to refund against (shopify_order_id / order_number), and the
+  // replacement's variant/quantity via variant_id + quantity above.
+  replacement_amount_cents?: number;
+  // create_order / create_subscription — compiler-loop primitives.
+  // The vendor arg picks the internal-aware-dispatcher branch (see
+  // commerce/order.createOrder + commerce/subscription.createSubscription).
+  // line_items[]/items[] are the freshly-created lines; unit_cents is
+  // the per-unit price at create time (frozen onto the row).
+  vendor?: "shopify" | "internal" | "appstle";
+  line_items?: Array<{
+    variant_id: string;
+    product_id?: string | null;
+    title: string;
+    quantity: number;
+    unit_cents: number;
+  }>;
+  items?: Array<{
+    variant_id: string;
+    product_id?: string | null;
+    title?: string;
+    variant_title?: string | null;
+    sku?: string | null;
+    quantity?: number;
+    is_gift?: boolean;
+    price_override_cents?: number | null;
+  }>;
+  next_billing_date?: string;
 }
 
 export interface ActionContext {
@@ -112,6 +159,12 @@ export interface ActionContext {
   // without this flag the "no message sent → reopen" branch would flip
   // the just-closed ticket back to open.
   _closedThisRun?: boolean;
+  // Internal: the ticket_resolution_events row id inserted at the top of
+  // executeSonnetDecision. Downstream stampers (shipped_at from the send
+  // path, verified_at + verified_outcome from verifyActionInDB) update
+  // this row so every branch shares one write-ahead ledger row per turn.
+  // See docs/brain/tables/ticket_resolution_events.md.
+  _resolutionEventId?: string;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -230,10 +283,27 @@ async function executeActionsInline(
   const results: { action: ActionParams; result: ActionResult }[] = [];
 
   for (const action of actions) {
-    const handler = directActionHandlers[action.type];
+    let handler = directActionHandlers[action.type];
     if (!handler) {
-      results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
-      continue;
+      const aliased = await resolveAlias(ctx.admin, ctx.workspaceId, action.type);
+      if (aliased && directActionHandlers[aliased]) {
+        await sysNote(`alias resolved: ${action.type}→${aliased}`);
+        action.type = aliased;
+        handler = directActionHandlers[aliased];
+      } else {
+        // Record the miss on the review queue so an admin can approve it
+        // into a permanent alias (Phase 2). Fire-and-forget — a telemetry
+        // failure must not change customer-facing behavior.
+        await recordUnknownActionType({
+          admin: ctx.admin,
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          sourceType: action.type,
+          handlerKeys: Object.keys(directActionHandlers),
+        });
+        results.push({ action, result: { success: false, error: `Unknown action type: ${action.type}` } });
+        continue;
+      }
     }
     const substituted = substituteActionParams(action, results);
     try {
@@ -441,9 +511,83 @@ export const directActionHandlers: Record<
   },
 
   skip_next_order: async (ctx, p) => {
+    // skip_next_order is RETIRED — the orchestrator's system prompt + the
+    // seeded sonnet_prompts routing rule now alias skip intents to
+    // change_next_date / bill_now (spec:
+    // retire-skip-next-order-action-type-with-shadow-measured-alias Phase 2).
+    // This handler stays wired for two weeks as an idempotency net for
+    // any in-flight retries (Sonnet caches / older workflow queues); a hit
+    // here is a signal the retirement didn't fully land, so the WARN lets
+    // on-call investigate. Handler + subscriptionSkipNextOrder wrapper are
+    // deleted in a follow-up PR after the soft window closes.
+    console.warn(
+      `skip_next_order fired post-retire — investigate (workspace=${ctx.workspaceId}, ticket=${ctx.ticketId}, contract=${p.contract_id ?? "?"})`,
+    );
     const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
     const r = await subscriptionSkipNextOrder(ctx.workspaceId, p.contract_id!);
     return { ...r, summary: "Skipped next order" };
+  },
+
+  // create_order — compiler-loop primitive. Creates a fresh order via
+  // commerce/order.createOrder's internal-aware dispatcher. `vendor`
+  // picks the branch: `'shopify'` creates a real Shopify order and
+  // stamps `shopify_order_id`; `'internal'` writes the mirror row
+  // directly. Line items ship as `{ variant_id, title, quantity,
+  // unit_cents }` — `unit_cents` is the per-unit price at create time.
+  create_order: async (ctx, p) => {
+    const { createOrder } = await import("@/lib/commerce/order");
+    if (!p.vendor) return { success: false, error: "create_order missing vendor" };
+    if (!p.line_items?.length) return { success: false, error: "create_order missing line_items" };
+    if (p.vendor !== "shopify" && p.vendor !== "internal") {
+      return { success: false, error: `create_order: invalid vendor '${p.vendor}'` };
+    }
+    const r = await createOrder(ctx.workspaceId, {
+      vendor: p.vendor,
+      customer_id: ctx.customerId,
+      email: p.email ?? null,
+      line_items: p.line_items,
+      shipping_address: (p.address as unknown as Record<string, unknown> | undefined) ?? null,
+      order_type: "shopcx-created",
+    });
+    if (!r.success) return { success: false, error: r.error, summary: `Create order failed: ${r.error}` };
+    return {
+      success: true,
+      summary: `Created order (${p.vendor})${r.shopify_order_id ? ` shopify=${r.shopify_order_id}` : ""}`,
+    };
+  },
+
+  // create_subscription — compiler-loop primitive. Creates a fresh
+  // subscription via commerce/subscription.createSubscription's
+  // internal-aware dispatcher. Phase 1 ships the `'internal'` branch
+  // only (appstle path returns an explicit "unsupported" error). Items
+  // carry the same shape as internal-subscription: variant_id (UUID) +
+  // quantity + optional price_override_cents.
+  create_subscription: async (ctx, p) => {
+    const { createSubscription } = await import("@/lib/commerce/subscription");
+    if (!p.vendor) return { success: false, error: "create_subscription missing vendor" };
+    if (!p.items?.length) return { success: false, error: "create_subscription missing items" };
+    if (!p.interval || !p.interval_count) {
+      return { success: false, error: "create_subscription missing interval/interval_count" };
+    }
+    if (!p.next_billing_date) {
+      return { success: false, error: "create_subscription missing next_billing_date" };
+    }
+    if (p.vendor !== "internal" && p.vendor !== "appstle") {
+      return { success: false, error: `create_subscription: invalid vendor '${p.vendor}'` };
+    }
+    const r = await createSubscription(ctx.workspaceId, {
+      vendor: p.vendor,
+      customer_id: ctx.customerId,
+      items: p.items,
+      billing_interval: String(p.interval).toLowerCase() as "day" | "week" | "month" | "year",
+      billing_interval_count: Number(p.interval_count),
+      next_billing_date: p.next_billing_date,
+    });
+    if (!r.success) return { success: false, error: r.error, summary: `Create subscription failed: ${r.error}` };
+    return {
+      success: true,
+      summary: `Created subscription (${p.vendor})${r.shopify_contract_id ? ` contract=${r.shopify_contract_id}` : ""}`,
+    };
   },
 
   change_frequency: async (ctx, p) => {
@@ -1032,19 +1176,46 @@ export const directActionHandlers: Record<
   },
 
   partial_refund: async (ctx, p) => {
-    const { refundOrder } = await import("@/lib/refund");
+    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
     const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (!p.amount_cents) return { success: false, error: "Missing amount_cents" };
 
-    // Resolve internal order UUID — refundOrder takes our internal
+    // Resolve internal order UUID — issueRefund takes our internal
     // orders.id, never the human-facing shopify_order_id / order_number.
     const oid = String(p.shopify_order_id);
     const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
     const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+
+    // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
+    // Compute the request_key up-front and check the order_refunds mirror
+    // BEFORE calling the vendor. If a succeeded/settled row already exists
+    // for this (order_id, request_key), a prior attempt succeeded and this
+    // is a retry (self-heal or otherwise) — short-circuit to success
+    // without touching Braintree/Shopify. Scoped by workspace so a
+    // cross-tenant row can never authorize a short-circuit.
+    // Passing the same requestKey down to refundOrder keeps the write-side
+    // hash consistent with this lookup, so the mirror insert Phase 1 does
+    // hits the exact same UNIQUE-index row Phase 2 checked here.
+    const requestKey = hashRefundRequestKey(ord.id, p.amount_cents, reason);
+    const { data: existing } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", ord.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        summary: `Partial refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
+        refundAmountCents: existing.amount_cents ?? (p.amount_cents || 0),
+      };
+    }
 
     // refundOrder dispatches on the order's gateway (Braintree /
     // Shopify), preserves the double-refund guard (stamps refunded_at
@@ -1053,6 +1224,7 @@ export const directActionHandlers: Record<
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId },
+      requestKey,
     });
     if (r.success) await notifySlack(ctx, p, amountDecimal);
 
@@ -1077,7 +1249,7 @@ export const directActionHandlers: Record<
 
   redeem_points_as_refund: async (ctx, p) => {
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
-    const { refundOrder } = await import("@/lib/refund");
+    const { refundOrder, hashRefundRequestKey } = await import("@/lib/refund");
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
@@ -1107,10 +1279,33 @@ export const directActionHandlers: Record<
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
 
+    // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
+    // Compute request_key up-front and check the mirror. If a prior
+    // attempt already fired for this (order_id, request_key), do NOT
+    // call refundOrder AND do NOT spend points again — the earlier
+    // attempt already burned them. Matches the partial_refund pattern.
+    const requestKey = hashRefundRequestKey(order.id, amountCents, reason);
+    const { data: existingRedemption } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", order.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existingRedemption) {
+      return {
+        success: true,
+        summary: `${tier.points_cost}-point redemption for $${tier.discount_value} refund on order #${order.order_number} already fired${existingRedemption.vendor_refund_id ? ` — txn ${existingRedemption.vendor_refund_id}` : ""}`,
+        refundAmountCents: existingRedemption.amount_cents ?? amountCents,
+      };
+    }
+
     const refund = await refundOrder(ctx.workspaceId, order.id, amountCents, reason, {
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId, loyalty_tier: tier.label, points_spent: tier.points_cost },
+      requestKey,
     });
     if (!refund.success) return { success: false, error: refund.error };
 
@@ -1950,6 +2145,108 @@ export const directActionHandlers: Record<
     if (!r.success) return { success: false, error: r.error || "replacement creation failed" };
     return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${quantity}x ${variantTitle} shipped free` };
   },
+
+  // dollar_replacement — Phase 3 $-bearing variant. Ships a replacement
+  // AND refunds `replacement_amount_cents` back on the original order,
+  // atomically: if the refund half fails, the just-created replacement
+  // is rolled back (compensating delete guarded by workspace + id +
+  // NOT-shipped-yet status) so no orphan record survives. Same shape as
+  // create_replacement_order (variant_id + quantity, address resolution,
+  // reason) plus `shopify_order_id` / `order_number` to identify the
+  // order the refund lands on. Wraps commerce/replacement.issueDollarReplacement.
+  dollar_replacement: async (ctx, p) => {
+    const amountCents = Number(p.replacement_amount_cents ?? 0);
+    if (!amountCents || amountCents <= 0) return { success: false, error: "dollar_replacement missing replacement_amount_cents" };
+    if (!p.shopify_order_id && !p.order_number) return { success: false, error: "dollar_replacement missing shopify_order_id / order_number to refund against" };
+
+    const { data: cust } = await ctx.admin.from("customers")
+      .select("shopify_customer_id").eq("id", ctx.customerId).single();
+    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
+
+    // Resolve order UUID for the refund half — issueRefund takes an
+    // internal orders.id UUID, never the human-facing identifier.
+    const oidRaw = String(p.shopify_order_id || p.order_number);
+    const orderMatch = /^\d+$/.test(oidRaw) ? { col: "shopify_order_id", val: oidRaw } : { col: "order_number", val: oidRaw };
+    const { data: ord } = await ctx.admin.from("orders")
+      .select("id, order_number")
+      .eq(orderMatch.col, orderMatch.val)
+      .eq("workspace_id", ctx.workspaceId)
+      .maybeSingle();
+    if (!ord?.id) return { success: false, error: `Order not found for ${oidRaw}` };
+
+    // Address resolution — reuses the same fallback chain as
+    // create_replacement_order (explicit → order-match → sub → recent
+    // order). Kept inline to preserve provinceCode coercion + Amplifier
+    // wrong-address override.
+    let addr: Record<string, string> = {};
+    if (p.address?.address1) {
+      const a = p.address;
+      addr = {
+        firstName: a.first_name || "",
+        lastName: a.last_name || "",
+        address1: a.address1 || "",
+        address2: a.address2 || "",
+        city: a.city || "",
+        provinceCode: (a.province || a.state || "").toUpperCase().slice(0, 2),
+        zip: a.zip || a.postal_code || "",
+        countryCode: (a.country || a.country_code || "US").toUpperCase().slice(0, 2),
+      };
+    }
+    if (!addr.address1) {
+      const { data: order } = await ctx.admin.from("orders")
+        .select("shipping_address")
+        .eq("id", ord.id)
+        .maybeSingle();
+      if (order?.shipping_address) addr = order.shipping_address as Record<string, string>;
+    }
+    if (!addr.address1) return { success: false, error: "No shipping address resolvable for dollar_replacement" };
+
+    const variantId = p.variant_id || "";
+    if (!variantId) return { success: false, error: "dollar_replacement missing variant_id" };
+    const quantity = p.quantity || 1;
+
+    const { issueDollarReplacement } = await import("@/lib/commerce/replacement");
+    const r = await issueDollarReplacement(ctx.workspaceId, {
+      customerId: ctx.customerId,
+      shopifyCustomerId: cust.shopify_customer_id,
+      items: [{ variantId, quantity }],
+      shippingAddress: {
+        firstName: addr.firstName || "",
+        lastName: addr.lastName || "",
+        address1: addr.address1 || "",
+        address2: addr.address2 || "",
+        city: addr.city || "",
+        province: addr.province || "",
+        provinceCode: addr.provinceCode || addr.province || "",
+        zip: addr.zip || "",
+        countryCode: addr.countryCode || "US",
+      },
+      reason: p.reason || "damaged_items",
+      originalOrderNumber: ord.order_number || null,
+      ticketId: ctx.ticketId || null,
+      initiatedBy: "ai",
+      shopifyNote: `$-bearing replacement — includes $${(amountCents / 100).toFixed(2)} refund on ${ord.order_number ?? oidRaw}`,
+      refund: {
+        orderId: ord.id,
+        amountCents,
+        reason: p.reason || "Dollar replacement partial refund",
+        source: "ai",
+        eventProperties: { ticket_id: ctx.ticketId },
+      },
+    });
+    if (!r.success) {
+      return {
+        success: false,
+        error: r.error,
+        summary: r.rolledBack ? `Dollar replacement failed — refund step errored, replacement rolled back` : `Dollar replacement failed: ${r.error}`,
+      };
+    }
+    return {
+      success: true,
+      summary: `Dollar replacement issued — ${quantity}x variant ${variantId} shipped + $${(amountCents / 100).toFixed(2)} refund`,
+      refundAmountCents: amountCents,
+    };
+  },
 };
 
 async function notifySlack(ctx: ActionContext, p: ActionParams, amountDecimal: string): Promise<void> {
@@ -1976,9 +2273,25 @@ export async function executeSonnetDecision(
   send: SendFn,
   sysNote: SysNoteFn,
 ): Promise<{ messageSent: boolean; escalated: boolean; closed: boolean; statusManaged: boolean }> {
+  // ── WRITE-AHEAD LEDGER ──
+  // Insert a ticket_resolution_events row BEFORE any customer-facing claim
+  // ships, so every branch (direct_action/journey/playbook/workflow/macro/
+  // kb_response/ai_response/clarification) shares the same row. shipped_at
+  // gets stamped from the send wrappers below; verified_at + verified_outcome
+  // get stamped from verifyActionInDB (direct_action) or the executor's
+  // return-time verdict (message-only branches). Phase 2 populates
+  // problem/confidence/options/chosen from the extended SonnetDecision —
+  // Phase 1 lands the substrate with those columns NULL.
+  // Spec: docs/brain/specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension.md
+  await stageResolutionEvent(ctx, decision);
+  const stampedSend: SendFn = async (m, sb) => {
+    await send(m, sb);
+    await stampResolutionShipped(ctx);
+  };
+
   // Handle clarification first — applies regardless of action_type
   if (decision.needs_clarification && decision.clarification_question) {
-    await send(decision.clarification_question, ctx.sandbox);
+    await stampedSend(decision.clarification_question, ctx.sandbox);
     return { messageSent: true, escalated: false, closed: false, statusManaged: false };
   }
 
@@ -1989,12 +2302,37 @@ export async function executeSonnetDecision(
   // leaves return_to_sender open). When true the post-execute status
   // block in unified-ticket-handler must NOT override it.
   let statusManaged = false;
-  const trackedSend: SendFn = async (m, sb) => { messageSent = true; await send(m, sb); };
+  const trackedSend: SendFn = async (m, sb) => { messageSent = true; await stampedSend(m, sb); };
 
   switch (decision.action_type) {
-    case "direct_action":
+    case "direct_action": {
+      // ── Selective-clarify gate ──
+      // Phase 2 of confidence-gated-problem-lockin-and-selective-clarify. Low
+      // confidence × irreversible action → send a scoped confirmation-turn instead
+      // of firing the action. Sandbox stays out of this path (its stamped-note
+      // dry-run flow is already non-destructive).
+      // See src/lib/selective-clarify.ts + docs/brain/libraries/selective-clarify.md.
+      if (!ctx.sandbox) {
+        const irreversibleSet = await loadIrreversibleSet(ctx.admin, ctx.workspaceId);
+        if (shouldClarify(
+          { confidence: decision.confidence, actions: decision.actions },
+          { irreversibleSet },
+        )) {
+          const clarifyMsg = buildClarificationMessage(decision.actions || []);
+          await trackedSend(clarifyMsg, ctx.sandbox);
+          await stampResolutionVerified(ctx, "clarified");
+          // Prevent the return-time 'confirmed' stamp — the direct_action stamp
+          // already wins via idempotent compare-and-set on verified_at IS NULL,
+          // but we mark _escalatedThisRun-adjacent state by returning through the
+          // usual break; the outer post-switch block re-checks messageSent and
+          // would double-stamp 'confirmed' otherwise. The verified_at guard on
+          // stampResolutionVerified holds, so this is defense-in-depth.
+          break;
+        }
+      }
       await handleDirectAction(ctx, decision, trackedSend, sysNote);
       break;
+    }
 
     case "journey":
       await handleJourney(ctx, decision, trackedSend, sysNote);
@@ -2013,7 +2351,10 @@ export async function executeSonnetDecision(
       // Signal statusManaged so the post-execute block doesn't reopen a
       // legitimately-closed ticket (Mindy Freeman a89dcf76: magic-link
       // sent + closed, then orchestrator reopened it as "no message sent").
-      statusManaged = await handleWorkflow(ctx, decision, send, sysNote);
+      // Pass stampedSend (not raw send) so the workflow's own sendReply
+      // path stamps ticket_resolution_events.shipped_at like every other
+      // branch — see the write-ahead ledger comment at the top of this fn.
+      statusManaged = await handleWorkflow(ctx, decision, stampedSend, sysNote);
       break;
 
     case "macro":
@@ -2061,12 +2402,130 @@ export async function executeSonnetDecision(
       await sysNote(`Unknown action_type: ${decision.action_type}`);
   }
 
+  // Stamp the write-ahead ledger row's verified_at + verified_outcome now
+  // that the branch has resolved. handleDirectAction stamps its own
+  // 'confirmed'/'drifted' verdict from verifyActionInDB (its outcome is
+  // more specific — a per-action DB check). For message-only branches
+  // (journey/playbook/macro/kb_response/ai_response/workflow) the verdict
+  // is derived from whether a customer-facing message actually shipped.
+  // Escalate paths leave verified_outcome NULL — the agent takes over and
+  // the row stays open until the outcome is known (M4 closes it out).
+  if (ctx._escalatedThisRun !== true) {
+    if (messageSent || statusManaged || ctx._closedThisRun === true) {
+      await stampResolutionVerified(ctx, "confirmed");
+    }
+  }
+
   return {
     messageSent,
     escalated: ctx._escalatedThisRun === true,
     closed: ctx._closedThisRun === true,
     statusManaged,
   };
+}
+
+// ── Ticket resolution write-ahead ledger ──
+//
+// One row per executeSonnetDecision() call, inserted at the top of the
+// function so every branch shares the same substrate. See
+// docs/brain/tables/ticket_resolution_events.md.
+
+async function stageResolutionEvent(
+  ctx: ActionContext,
+  decision: SonnetDecision,
+): Promise<void> {
+  try {
+    // turn_index = count of prior rows for this ticket + 1. Cheap: the
+    // (workspace_id, ticket_id, turn_index) index covers it.
+    const { count } = await ctx.admin
+      .from("ticket_resolution_events")
+      .select("id", { count: "exact", head: true })
+      .eq("ticket_id", ctx.ticketId);
+    const turnIndex = (count ?? 0) + 1;
+
+    // Phase 2 populates problem/confidence/options/chosen on SonnetDecision;
+    // the interface (src/lib/sonnet-orchestrator-v2.ts:32) declares them
+    // optional so a fallback / straggler prompt still executes. We coerce
+    // + range-guard here so the row respects the DB CHECK constraints
+    // (confidence ∈ [0,1]; options must be an array) — the model can and
+    // does return out-of-range floats and object-shaped options during
+    // the buildSystemPrompt rollout.
+    const problem = typeof decision.problem === "string" && decision.problem.length > 0
+      ? decision.problem
+      : null;
+    const confidence = typeof decision.confidence === "number"
+      && Number.isFinite(decision.confidence)
+      && decision.confidence >= 0
+      && decision.confidence <= 1
+      ? decision.confidence
+      : null;
+    const options = Array.isArray(decision.options) ? decision.options : null;
+    const chosen = decision.chosen && typeof decision.chosen === "object"
+      && typeof decision.chosen.option_index === "number"
+      ? decision.chosen
+      : null;
+
+    const { data: row, error } = await ctx.admin
+      .from("ticket_resolution_events")
+      .insert({
+        workspace_id: ctx.workspaceId,
+        ticket_id: ctx.ticketId,
+        turn_index: turnIndex,
+        problem,
+        confidence,
+        options,
+        chosen,
+        reasoning: decision.reasoning ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (!error && row?.id) ctx._resolutionEventId = row.id;
+  } catch {
+    // Never fail the executor because the ledger insert failed. The row
+    // is a diagnostic + optimizer substrate, not a critical path.
+  }
+}
+
+async function stampResolutionShipped(ctx: ActionContext): Promise<void> {
+  if (!ctx._resolutionEventId) return;
+  try {
+    // Idempotent: only stamp shipped_at once per row. Compare-and-set on
+    // workspace_id + shipped_at IS NULL so a re-send in the same turn
+    // doesn't overwrite the first-ship timestamp.
+    await ctx.admin
+      .from("ticket_resolution_events")
+      .update({ shipped_at: new Date().toISOString() })
+      .eq("id", ctx._resolutionEventId)
+      .eq("workspace_id", ctx.workspaceId)
+      .is("shipped_at", null);
+  } catch {
+    // Never fail the send path because the ledger stamp failed.
+  }
+}
+
+async function stampResolutionVerified(
+  ctx: ActionContext,
+  outcome: "confirmed" | "unbacked" | "drifted" | "clarified",
+): Promise<void> {
+  if (!ctx._resolutionEventId) return;
+  try {
+    // Idempotent: only stamp verified_at once per row (compare-and-set on
+    // verified_at IS NULL). A more specific verdict from handleDirectAction
+    // (e.g. 'drifted' after verifyActionInDB) wins over the return-time
+    // 'confirmed' because the direct-action stamp fires FIRST.
+    await ctx.admin
+      .from("ticket_resolution_events")
+      .update({
+        verified_at: new Date().toISOString(),
+        verified_outcome: outcome,
+      })
+      .eq("id", ctx._resolutionEventId)
+      .eq("workspace_id", ctx.workspaceId)
+      .is("verified_at", null);
+  } catch {
+    // Never fail the executor because the ledger stamp failed.
+  }
 }
 
 // ── Handler: Direct Actions ──
@@ -2123,13 +2582,30 @@ async function handleDirectAction(
   const { withActionContext } = await import("@/lib/commerce/call-log");
 
   for (const action of actions) {
-    const handler = directActionHandlers[action.type];
+    let handler = directActionHandlers[action.type];
     if (!handler) {
-      results.push({
-        action,
-        result: { success: false, error: `Unknown action type: ${action.type}` },
-      });
-      continue;
+      const aliased = await resolveAlias(ctx.admin, ctx.workspaceId, action.type);
+      if (aliased && directActionHandlers[aliased]) {
+        await sysNote(`alias resolved: ${action.type}→${aliased}`);
+        action.type = aliased;
+        handler = directActionHandlers[aliased];
+      } else {
+        // Record the miss on the review queue so an admin can approve it
+        // into a permanent alias (Phase 2). Fire-and-forget — a telemetry
+        // failure must not change customer-facing behavior.
+        await recordUnknownActionType({
+          admin: ctx.admin,
+          workspaceId: ctx.workspaceId,
+          ticketId: ctx.ticketId,
+          sourceType: action.type,
+          handlerKeys: Object.keys(directActionHandlers),
+        });
+        results.push({
+          action,
+          result: { success: false, error: `Unknown action type: ${action.type}` },
+        });
+        continue;
+      }
     }
 
     // Substitute placeholders in this action's string params using
@@ -2179,14 +2655,26 @@ async function handleDirectAction(
     await new Promise(resolve => setTimeout(resolve, 3000));
     const verifyFailures: string[] = [];
 
-    // Refunds are NOT idempotent — re-running one double-refunds the customer.
-    // They're also confirmed by their own handler (Braintree refund id / polled
-    // Shopify gateway status), and their DB verification (Shopify financial_status)
-    // is unreliable for Braintree-direct refunds, which never flip it. So never
-    // self-heal-retry a refund. (Sonia Stevens: a settled $179.88 Braintree refund
-    // couldn't be confirmed via financial_status, the retry tried to refund AGAIN,
-    // hit "amount too large", and falsely escalated a refund that had succeeded.)
-    const NO_SELF_HEAL_RETRY = new Set(["partial_refund", "redeem_points_as_refund"]);
+    // Verify-and-retry safety.
+    //
+    // Refunds used to be excluded from self-heal retry because a retry
+    // could double-refund (Sonia Stevens SC132396: the vendor refund
+    // succeeded, financial_status verification couldn't confirm it, the
+    // retry re-fired against Braintree, hit "amount too large", and
+    // falsely escalated).
+    //
+    // Refund-integrity Phase 2 makes verify+retry safe for refunds. The
+    // partial_refund + redeem_points_as_refund handlers now do a
+    // pre-flight lookup against order_refunds on the (order_id,
+    // request_key) pair; a retry sees the Phase-1 mirror row from the
+    // first successful attempt and short-circuits without touching the
+    // vendor. If the mirror row is genuinely missing (rare — mirror
+    // insert failure), a retry re-fires and re-inserts, which is the
+    // intended safety net for the Sonia Stevens exact failure mode
+    // (vendor succeeded, we couldn't confirm). The NO_SELF_HEAL_RETRY
+    // set is retained as the extension point for any FUTURE action
+    // whose handler doesn't carry its own idempotency guard.
+    const NO_SELF_HEAL_RETRY = new Set<string>([]);
 
     for (const s of successes) {
       if (NO_SELF_HEAL_RETRY.has(s.action.type)) continue;
@@ -2213,6 +2701,17 @@ async function handleDirectAction(
           verifyFailures.push(`${s.action.type}: verification failed, no handler for retry`);
         }
       }
+    }
+
+    // Stamp the resolution-events verified_outcome from the verifyActionInDB
+    // outcome — 'confirmed' when every action verified (or self-heal
+    // retried cleanly), 'drifted' when a claim couldn't be backed by a DB
+    // read. Runs BEFORE the return-time stamp so this more-specific
+    // verdict wins the idempotent-once compare-and-set.
+    if (verifyFailures.length === 0) {
+      await stampResolutionVerified(ctx, "confirmed");
+    } else {
+      await stampResolutionVerified(ctx, "drifted");
     }
 
     // Send the customer-facing confirmation only AFTER verify+retry have
@@ -2252,9 +2751,14 @@ async function handleDirectAction(
 /**
  * Verify that a direct action's expected state change is reflected in the DB.
  * Returns true if verified, false if the expected state wasn't found.
+ *
+ * Exported for unit tests (see action-executor.verify-in-db.test.ts). The
+ * production caller passes the executor's ActionContext; tests pass a
+ * minimal object that carries { admin, ticketId } — the only fields this
+ * switch reads.
  */
-async function verifyActionInDB(
-  ctx: ActionContext,
+export async function verifyActionInDB(
+  ctx: Pick<ActionContext, "admin" | "ticketId">,
   action: ActionParams,
 ): Promise<boolean> {
   const admin = ctx.admin;
@@ -2302,10 +2806,206 @@ async function verifyActionInDB(
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
     }
+    case "create_return":
+    case "create_replacement": {
+      // Both action types write a `returns` row scoped to this ticket
+      // (create_return via createFullReturn; create_replacement is a
+      // routing alias that lands in the same table). The create_return
+      // handler enforces at-most-one non-cancelled return per ticket
+      // (HARD INVARIANT — see the create_return case above), so we
+      // read by ticket_id and expect a non-cancelled row.
+      //
+      // The initial Phase-1 landing gated on status IN ('pending','approved') —
+      // strings NO code path writes. The real `returns.status` enum that
+      // createFullReturn writes is 'open' (shopify-returns.ts:210,781) at
+      // creation and 'label_created' (line 327,944) once EasyPost issues the
+      // label, transitioning to 'in_transit' / 'delivered' / 'refunded' /
+      // 'restocked' / 'closed' downstream. Only 'cancelled' means "not a
+      // real return" — so the confirming predicate is: a row exists for
+      // this ticket AND status ≠ 'cancelled'. That mirrors the HARD
+      // invariant used at the create_return case (~line 972) and keeps
+      // the verify semantic stable as the enum grows. Per CLAUDE.md:
+      // "the database is the spec" — the switch reads the live shape.
+      if (!ctx.ticketId) return true;
+      const { data } = await admin.from("returns")
+        .select("status")
+        .eq("ticket_id", ctx.ticketId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!data?.status) return false;
+      return data.status !== "cancelled";
+    }
+    case "skip_next_order": {
+      // After a skip, `subscriptions.next_billing_date` must be strictly
+      // in the future — the whole point of the skip is to move the next
+      // charge past the currently-scheduled cycle. A next_billing_date
+      // that's still today/past means the mutation didn't stick.
+      // (skip_next_order is retired by the sibling M3 spec, so this
+      // case exists just for the transition window.)
+      if (!action.contract_id) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      return new Date(String(nbd)).getTime() > Date.now();
+    }
+    case "change_next_date": {
+      // Expect subscriptions.next_billing_date's calendar day equals
+      // action.date's calendar day (YYYY-MM-DD). Edge case: the
+      // change_next_date handler fires order-now instead when action.date
+      // is ≤ today (customer said "ship now"), in which case
+      // next_billing_date isn't touched and instead advances on the
+      // next successful renewal. For that path we accept any future
+      // next_billing_date as verified — the customer's intent (get
+      // product ASAP) was satisfied by the order-now dispatch.
+      if (!action.contract_id || !action.date) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("next_billing_date")
+        .eq("shopify_contract_id", action.contract_id).single();
+      const nbd = data?.next_billing_date;
+      if (!nbd) return false;
+      const requested = String(action.date).slice(0, 10);
+      const actualDay = String(nbd).slice(0, 10);
+      if (actualDay === requested) return true;
+      const today = new Date().toISOString().slice(0, 10);
+      if (requested <= today) {
+        return new Date(String(nbd)).getTime() > Date.now();
+      }
+      return false;
+    }
+    case "change_frequency": {
+      // Read the mirror columns billing_interval + billing_interval_count
+      // — those are the ACTUAL DB column names (docs/brain/tables/subscriptions.md).
+      // The spec calls them `billing_policy_interval` / `billing_policy_interval_count`;
+      // per CLAUDE.md "the database is the spec" — we use the live shape.
+      if (!action.contract_id || !action.interval) return true;
+      const { data } = await admin.from("subscriptions")
+        .select("billing_interval, billing_interval_count")
+        .eq("shopify_contract_id", action.contract_id).single();
+      if (!data) return false;
+      const wantInterval = String(action.interval).toUpperCase();
+      const gotInterval = String(data.billing_interval || "").toUpperCase();
+      if (gotInterval !== wantInterval) return false;
+      if (action.interval_count != null) {
+        return Number(data.billing_interval_count) === Number(action.interval_count);
+      }
+      return true;
+    }
+    case "swap_variant":
+    case "add_item":
+    case "remove_item":
+    case "change_quantity":
+    case "change_item_quantity":
+    case "update_line_item_price": {
+      // Item-op / base-price cases all read the subscription's `items` jsonb
+      // (there is no standalone subscription_items table — the mirror lives
+      // as an array on subscriptions.items; see docs/brain/tables/subscriptions.md
+      // and src/lib/subscription-items.ts). Each entry carries { variant_id,
+      // quantity, price_cents } — the columns the spec's phase-2 bullets
+      // name. Verify against that array.
+      if (!action.contract_id) return true;
+      const { data: sub } = await admin.from("subscriptions")
+        .select("items")
+        .eq("shopify_contract_id", action.contract_id).single();
+      type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
+      const items = (sub?.items || []) as Line[];
+
+      if (action.type === "swap_variant") {
+        // Post-swap: the target line's variant_id should equal
+        // action.new_variant_id; the pre-swap variant_id should be gone
+        // (unless the customer had it on multiple lines — we only assert
+        // the invariant the spec names: NEW is present).
+        const newVid = action.new_variant_id || (action as { new_id?: string }).new_id;
+        if (!newVid) return true;
+        return items.some(i => String(i.variant_id) === String(newVid));
+      }
+
+      if (action.type === "add_item") {
+        if (!action.variant_id) return true;
+        return items.some(i => String(i.variant_id) === String(action.variant_id));
+      }
+
+      if (action.type === "remove_item") {
+        const vid = action.variant_id || (action as { variantId?: string }).variantId;
+        if (!vid) return true;
+        return !items.some(i => String(i.variant_id) === String(vid));
+      }
+
+      if (action.type === "change_quantity" || action.type === "change_item_quantity") {
+        if (!action.variant_id || action.quantity == null) return true;
+        const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+        if (!line) return false;
+        return Number(line.quantity) === Number(action.quantity);
+      }
+
+      // update_line_item_price — base-price restore. Compare price_cents
+      // on the target line. Handler resolves candidate variants when
+      // action.variant_id is stale (crisis-swap history); here we verify
+      // ONLY the explicit variant_id the caller declared, since that's
+      // the invariant the spec's bullet names ("subscription_items.price_cents
+      // matches action.base_price_cents"). If a self-healed swap-target
+      // ended up carrying the new price on a different variant, that
+      // still passes the handler's own success flag; verifyActionInDB
+      // stays conservative and reads only what the action declared.
+      if (action.variant_id == null || action.base_price_cents == null) return true;
+      const line = items.find(i => String(i.variant_id) === String(action.variant_id));
+      if (!line) return false;
+      return Number(line.price_cents) === Number(action.base_price_cents);
+    }
     default:
-      // No verification logic for this action type — assume OK
+      // Fail-safe: no verification wired for this action type yet —
+      // return true so we don't wrongly escalate, but WARN so coverage
+      // gaps are OBSERVABLE (grep server logs for "[verifyActionInDB]").
+      // Spec Phase-2 bullet: "unknown/still-uncovered action types fall
+      // through to 'return true' with a WARN-level console log naming
+      // the uncovered type so we can watch coverage grow".
+      console.warn(`[verifyActionInDB] uncovered action type — assuming OK: ${action.type}`);
       return true;
   }
+}
+
+// ── Claim↔action binding guard (inline send path) ──
+
+/**
+ * Phase 1 wiring of the deterministic claim-guard onto the inline send path
+ * shared by handleJourney + handlePlaybook. If `response_message` asserts a
+ * COMPLETED effect ("I've cancelled your subscription") that no attached
+ * action family backs, write a sysNote + escalate INSTEAD of sending. Returns
+ * true when the guard blocked (caller must NOT proceed with the outbound
+ * insert). Fail-safe: any evaluator throw is treated as a non-hit so a bug
+ * in the guard can never block a real reply.
+ *
+ * Extracted as a small callback-based helper so it stays unit-testable
+ * without booting the whole ActionContext + Supabase surface.
+ * See [[../docs/brain/libraries/claim-guard.md]].
+ */
+export async function claimGuardBlocksInlineSend(
+  responseMessage: string | null | undefined,
+  actions: ActionParams[] | undefined,
+  actionType: string,
+  handlerName: string | undefined,
+  sysNote: SysNoteFn,
+  escalate: (reason: string) => Promise<void>,
+  evaluate: (m: string | null | undefined, b: Set<string>) => string | null = unbackedEffectClaim,
+): Promise<boolean> {
+  let hit: string | null = null;
+  try {
+    const backed = new Set((actions || []).map((a) => a.type));
+    hit = evaluate(responseMessage, backed);
+  } catch {
+    // Fail-safe: if the guard evaluator itself throws, treat it as a non-hit
+    // rather than blocking a legitimate reply. Deterministic pure code should
+    // never throw, but a future change could accidentally introduce one.
+    hit = null;
+  }
+  if (!hit) return false;
+  await sysNote(
+    `[Guard] Blocked unbacked "${hit}" claim in ${actionType}${handlerName ? ` (${handlerName})` : ""} — no matching action attached. Escalating instead of sending a false promise.`,
+  );
+  await escalate(`blocked_unbacked_claim:${hit}`);
+  return true;
 }
 
 // ── Handler: Journey ──
@@ -2318,6 +3018,22 @@ async function handleJourney(
 ): Promise<void> {
   if (!decision.handler_name) {
     await sysNote("Journey action missing handler_name.");
+    return;
+  }
+
+  // Pre-send: block a first-person "already done" claim that no attached
+  // action backs. A journey ROUTES (mini-site CTA / follow-up) — routing
+  // does not back a completed-effect assertion; only side actions that
+  // actually ran + verified in this decision do. Match Phase 0's
+  // sysNote/escalate shape ("blocked_unbacked_claim:<effect>").
+  if (await claimGuardBlocksInlineSend(
+    decision.response_message,
+    decision.actions,
+    decision.action_type,
+    decision.handler_name,
+    sysNote,
+    (reason) => escalateTicket(ctx, reason),
+  )) {
     return;
   }
 
@@ -2443,6 +3159,21 @@ async function handlePlaybook(
     return;
   }
 
+  // Pre-send: block a first-person "already done" claim in the launch
+  // response_message that no attached action backs. The playbook has not
+  // yet run any step at this point — a "cancelled/refunded/paused"
+  // assertion here is unbacked by definition.
+  if (await claimGuardBlocksInlineSend(
+    decision.response_message,
+    decision.actions,
+    decision.action_type,
+    decision.handler_name,
+    sysNote,
+    (reason) => escalateTicket(ctx, reason),
+  )) {
+    return;
+  }
+
   // Look up playbook by name or trigger_intents — case-insensitive AND
   // tolerant of space↔underscore swaps. The model frequently snake-cases
   // a handler ("Replacement Order" → "replacement_order") that wouldn't
@@ -2492,6 +3223,33 @@ async function handlePlaybook(
 
   const { startPlaybook, executePlaybookStep } = await import("@/lib/playbook-executor");
 
+  // Step-level claim-guard: every playbook-step response_message is a model-
+  // or-code-authored outbound. Guard each one before the outbound insert,
+  // combining the decision's attached actions with the step's own
+  // `backedActions` hint (post-completion confirmations like "Your
+  // subscription is now cancelled" mark themselves backed so we don't
+  // false-positive escalate a truthful reply).
+  const guardedStepSend = async (
+    result: { response?: string; backedActions?: string[] },
+  ): Promise<void> => {
+    if (!result.response) return;
+    const combined: ActionParams[] = [
+      ...(decision.actions || []),
+      ...(result.backedActions || []).map((type) => ({ type })),
+    ];
+    if (await claimGuardBlocksInlineSend(
+      result.response,
+      combined,
+      "playbook_step",
+      decision.handler_name,
+      sysNote,
+      (reason) => escalateTicket(ctx, reason),
+    )) {
+      return;
+    }
+    await send(result.response, ctx.sandbox);
+  };
+
   // Check if this playbook is already active on the ticket (continuation vs new)
   const { data: ticketState } = await ctx.admin.from("tickets")
     .select("active_playbook_id").eq("id", ctx.ticketId).single();
@@ -2506,7 +3264,7 @@ async function handlePlaybook(
 
     let result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
     if (result.systemNote) await sysNote(result.systemNote);
-    if (result.response) { await send(result.response, ctx.sandbox); return; }
+    if (result.response) { await guardedStepSend(result); return; }
 
     // Auto-advance: keep executing steps until one sends a response or completes
     let advances = 0;
@@ -2514,7 +3272,7 @@ async function handlePlaybook(
       advances++;
       result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
-      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.response) { await guardedStepSend(result); return; }
       if (result.action === "complete") break;
     }
   } else {
@@ -2539,14 +3297,14 @@ async function handlePlaybook(
     );
 
     if (result.systemNote) await sysNote(result.systemNote);
-    if (result.response) { await send(result.response, ctx.sandbox); return; }
+    if (result.response) { await guardedStepSend(result); return; }
 
     let advances = 0;
     while (result.action === "advance" && advances < 10) {
       advances++;
       result = await executePlaybookStep(ctx.workspaceId, ctx.ticketId, customerMsg, personality);
       if (result.systemNote) await sysNote(result.systemNote);
-      if (result.response) { await send(result.response, ctx.sandbox); return; }
+      if (result.response) { await guardedStepSend(result); return; }
       if (result.action === "complete") break;
     }
   }

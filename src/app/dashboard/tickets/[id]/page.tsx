@@ -50,6 +50,16 @@ interface OrderFulfillment {
   createdAt: string | null;
 }
 
+interface OrderRefundMirrorRow {
+  id: string;
+  vendor: string;
+  vendor_refund_id: string | null;
+  amount_cents: number;
+  status: string;
+  requested_at: string;
+  settled_at: string | null;
+}
+
 interface RecentOrder {
   id: string;
   shopify_order_id: string | null;
@@ -65,6 +75,7 @@ interface RecentOrder {
   fulfillments: OrderFulfillment[];
   shipping_address?: { address1?: string; address2?: string; city?: string; province?: string; provinceCode?: string; zip?: string; country?: string } | null;
   created_at: string;
+  order_refunds?: OrderRefundMirrorRow[];
 }
 
 function getOrderShippingStatus(o: RecentOrder): { label: string; classes: string } {
@@ -286,6 +297,14 @@ export default function TicketDetailPage() {
   const [improveExcluded, setImproveExcluded] = useState<Record<string, boolean>>({});
   // Client-side execute error (e.g. the founder-gate 403 on link_customer_accounts).
   const [improveExecError, setImproveExecError] = useState<string | null>(null);
+  // Resolution-context tile (Phase 1 of confidence-gated-problem-lockin-and-selective-clarify) —
+  // the current turn's reasoning + the confidence-gated established problem the orchestrator locked in.
+  type ResolutionContext = {
+    latest: { turn: number; reasoning: string | null; confidence: number | null; problem: string | null } | null;
+    established: { turn: number; problem: string } | null;
+    threshold: number;
+  };
+  const [resolutionContext, setResolutionContext] = useState<ResolutionContext | null>(null);
 
   // Load the ticket's Improve session on entering the tab, then self-reschedule: fast-poll while a box
   // turn is thinking, slow-poll otherwise. The server session is the source of truth (the route appends
@@ -310,6 +329,19 @@ export default function TicketDetailPage() {
     tick();
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [activeTab, id]);
+
+  // Resolution-context tile — fetch the latest ticket_resolution_events row + the confidence-gated
+  // established problem when the Improve tab opens (and whenever the box turn settles), so an
+  // operator entering the tab sees what the orchestrator is anchored to. Read-only; the box never mutates.
+  useEffect(() => {
+    if (activeTab !== "improve") return;
+    let alive = true;
+    void fetch(`/api/tickets/${id}/resolution-context`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((d: ResolutionContext | null) => { if (alive) setResolutionContext(d); })
+      .catch(() => { /* transient — the poll will pick it up next time the tab opens */ });
+    return () => { alive = false; };
+  }, [activeTab, id, improveSession?.updated_at]);
 
   // Auto-mark-on-open (improve-queue-mark-read): opening the Improve tab — or having a fresh box reply
   // land while you're watching it — means you've seen it, so clear it from the Improve Queue + nav badge.
@@ -1666,6 +1698,34 @@ export default function TicketDetailPage() {
           {/* Improve tab — box-hosted, ticket-bound Max session (box-ticket-improve) */}
           {activeTab === "improve" && ["owner", "admin", "cs_manager"].includes(workspace.role) && (
             <div className="mt-4 flex flex-col" style={{ minHeight: 300 }}>
+              {/* Resolution-context tile — the orchestrator's current-turn reasoning + the
+                  confidence-gated established problem (Phase 1 of
+                  confidence-gated-problem-lockin-and-selective-clarify). */}
+              {(resolutionContext?.latest || resolutionContext?.established) && (
+                <div className="mb-3 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-900">
+                  {resolutionContext.established && (
+                    <p className="text-zinc-800 dark:text-zinc-200">
+                      <span className="font-semibold text-indigo-700 dark:text-indigo-400">
+                        ESTABLISHED PROBLEM (locked in at T{resolutionContext.established.turn}):
+                      </span>{" "}
+                      <span className="font-mono">{resolutionContext.established.problem}</span>
+                    </p>
+                  )}
+                  {resolutionContext.latest && (
+                    <p className={`text-zinc-600 dark:text-zinc-400 ${resolutionContext.established ? "mt-1.5" : ""}`}>
+                      <span className="font-semibold text-zinc-700 dark:text-zinc-300">
+                        T{resolutionContext.latest.turn} reasoning:
+                      </span>{" "}
+                      {resolutionContext.latest.reasoning || <em>(not recorded)</em>}
+                      {typeof resolutionContext.latest.confidence === "number" && (
+                        <span className="ml-1 text-[10px] text-zinc-500 dark:text-zinc-500">
+                          conf={resolutionContext.latest.confidence.toFixed(2)}
+                        </span>
+                      )}
+                    </p>
+                  )}
+                </div>
+              )}
               {/* Transcript */}
               <div className="flex-1 space-y-3 overflow-y-auto" style={{ maxHeight: 400 }}>
                 {(!improveSession || improveSession.messages.length === 0) && (
@@ -3195,6 +3255,27 @@ export default function TicketDetailPage() {
                             <div key={idx} className="flex justify-between">
                               <span className="text-zinc-600 dark:text-zinc-400">{li.quantity}× {li.title}</span>
                               <span className="text-zinc-400">{formatCents(li.price_cents * li.quantity)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Refund lines — sourced from the order_refunds mirror
+                          (refund-integrity Phase 1). Replaces "read
+                          orders.financial_status" as the source of refund
+                          truth in this widget. */}
+                      {o.order_refunds && o.order_refunds.length > 0 && (
+                        <div className="mt-1.5 space-y-0.5 border-t border-zinc-200 pt-1.5 dark:border-zinc-700">
+                          {o.order_refunds.map((r) => (
+                            <div key={r.id} className="flex justify-between text-sm">
+                              <span className="text-zinc-600 dark:text-zinc-400">
+                                Refunded via {r.vendor}
+                                {r.status === "settled" ? " · settled" : ""}
+                                {r.vendor_refund_id ? ` · ${r.vendor_refund_id}` : ""}
+                              </span>
+                              <span className="text-zinc-400">
+                                −{formatCents(r.amount_cents)}
+                              </span>
                             </div>
                           ))}
                         </div>

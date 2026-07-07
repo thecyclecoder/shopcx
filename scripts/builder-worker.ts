@@ -145,6 +145,20 @@ const MAX_DEPLOY_REVIEW = 1;
 // One deploy-review pass: read-only diff walk + a few code Reads for each candidate signal (typically
 // 1-3). Minutes — same ballpark as a migration-fix / repair turn.
 const DEPLOY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
+// CS Director hard-call jobs (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1) run in
+// their OWN concurrency-1 lane: enqueued by the box-escalation-triage no-quorum block (Phase 2), one
+// top-level Max `claude -p` (cs-director-call skill) per call. Reads the ticket + resolution events +
+// triage_runs row + customer/subs/orders (read-only via the same DB creds the triage lane uses) and
+// emits ONE JSON verdict { decision:'approve_remedy'|'author_spec'|'escalate_founder', reasoning,
+// remedy?, spec_seed? } that Phase 2's applyBoxCsDirectorCall (deterministic Node) will materialize.
+// The runner is Phase 1 — it stops at writing a `director_activity` row (kind='cs_director_call')
+// carrying the verdict JSON so the CEO can audit what the CS Director decided BEFORE the executor
+// wires up. Serialized so the hourly triage sweep never overlaps a call the CS Director is still
+// judging.
+const MAX_CS_DIRECTOR_CALL = 1;
+// One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
+// investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
+const CS_DIRECTOR_CALL_TIMEOUT_MS = 15 * 60 * 1000;
 // Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
 // lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
 // (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
@@ -510,7 +524,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -2331,7 +2345,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -9758,6 +9772,26 @@ async function runSpecTestJob(job: Job) {
           parsed = reparsed;
         }
       }
+
+      // Fix 1 of confidence-gated-problem-lockin-and-selective-clarify (Phase 3) — when the retry ALSO
+      // failed to land an envelope AND the session did not self-declare error, synthesize a structured
+      // `needs_human` stub envelope so downstream classifyFusedSecurityEnvelope reads STRUCTURED
+      // per-check evidence ("session could not classify a check") instead of the OPAQUE bare-fall-through
+      // reason ("no security envelope on the fused spec-test result") the parked job a869f697 tripped on.
+      // The synthesized envelope NEVER classifies clean — every per-check entry is needs_human — so we
+      // strand the branch for a human exactly as we would have anyway, but with an actionable log_tail.
+      if (
+        parsed &&
+        parsed.status !== "error" &&
+        (!parsed.security || typeof parsed.security !== "object" || Array.isArray(parsed.security))
+      ) {
+        const { synthesizeMissingEnvelopeStub } = await import("../src/lib/security-envelope");
+        parsed = {
+          ...parsed,
+          security: synthesizeMissingEnvelopeStub("fused session did not emit a security envelope after one repair retry"),
+        };
+        console.log(`${tag} fused envelope still missing after retry — synthesized needs_human stub so parked reason is structured, not opaque`);
+      }
     }
 
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
@@ -10809,6 +10843,317 @@ async function runDeployReviewJob(job: Job) {
     } catch (fsErr) {
       console.error(`${tag} fail-safe on runner catch threw:`, fsErr instanceof Error ? fsErr.message : fsErr);
     }
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// ── Box-hosted CS Director hard-call lane (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1) ──
+// A kind='cs-director-call' job is ONE hard call the CS Director agent (💬 June) makes on an escalated
+// ticket the box-escalation-triage solver→skeptic sweep could NOT reach quorum on. Phase 2 of this spec
+// enqueues these from the no-quorum branch (replacing the current straight-to-founder path); Phase 1
+// (this file) wires the box worker lane end-to-end so a synthetic no-quorum triage_runs row → an
+// agent_jobs row of this kind → a Max `claude -p` (cs-director-call skill) that reads:
+//   (a) the ticket + its ticket_messages,
+//   (b) all ticket_resolution_events rows for the ticket (the write-ahead ledger of every prior turn),
+//   (c) the triage_runs row that dispatched this call (solver/skeptic transcripts + no-quorum reasoning),
+//   (d) the linked customer + subscriptions + orders (read-only via commerce/*).
+// It emits ONE JSON verdict — { decision:'approve_remedy'|'author_spec'|'escalate_founder', reasoning,
+// remedy?, spec_seed? } — and the RUNNER (Phase 1) records it to `director_activity`
+// (action_kind='cs_director_call', director_function='cs') so the CEO/audit trail sees WHAT the CS
+// Director decided + WHY, BEFORE the mechanical actioner wires up. The MUTATOR that turns the verdict
+// into a shipped remedy / authored spec / founder escalation is Phase 2's applyBoxCsDirectorCall — this
+// runner deliberately stops at the audit row so a Phase-1 misfire never mutates prod.
+// Read-only against everything; the deterministic worker is the only mutator per the north star
+// (CEO → role agent → tool). See docs/brain/libraries/cs-director.md + docs/brain/tables/director_activity.md.
+async function runCsDirectorCallClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "cs-director-call", sandbox: "max", timeout: CS_DIRECTOR_CALL_TIMEOUT_MS });
+}
+
+interface CsDirectorCallInstructions {
+  // The triage_runs row that produced the no-quorum outcome that dispatched this call. Phase 2's
+  // enqueue path stamps it; Phase 1 verification inserts a synthetic row that mirrors the shape.
+  triage_run_id?: string;
+  // The ticket the call is about. Kept alongside `triage_run_id` so the runner can build its brief
+  // even if the run row was deleted between enqueue and claim (defensive; the same guard the
+  // deploy-review runner uses for `watch_id`).
+  ticket_id?: string;
+}
+
+type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
+
+// The verdict shape the CS Director emits. `remedy` + `spec_seed` are the loose Phase-2 handoff shapes
+// (RemedyPlan + SpecSeed) — the runner records them verbatim so applyBoxCsDirectorCall can consume the
+// same JSON without a Phase-1↔Phase-2 shape re-map. Their concrete types land alongside the mutator.
+interface CsDirectorVerdict {
+  decision: CsDirectorDecision;
+  reasoning: string;
+  remedy?: Record<string, unknown>;
+  spec_seed?: Record<string, unknown>;
+}
+
+// Normalize the box's JSON verdict → CsDirectorVerdict, dropping malformed entries. Never throws.
+// Any missing/invalid `decision` becomes 'escalate_founder' — the shape-safe conservative default: a
+// runner that can't parse the verdict must NEVER silently upgrade to auto-approve/auto-author. Same
+// rule the deploy-review runner uses for its unparseable-verdict fallback.
+function normalizeCsDirectorVerdict(raw: unknown): CsDirectorVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const decisionRaw = String(r.decision || "").toLowerCase();
+  const decision: CsDirectorDecision =
+    decisionRaw === "approve_remedy" || decisionRaw === "author_spec" || decisionRaw === "escalate_founder"
+      ? (decisionRaw as CsDirectorDecision)
+      : "escalate_founder";
+  const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
+  const remedy = r.remedy && typeof r.remedy === "object" && !Array.isArray(r.remedy) ? (r.remedy as Record<string, unknown>) : undefined;
+  const spec_seed = r.spec_seed && typeof r.spec_seed === "object" && !Array.isArray(r.spec_seed) ? (r.spec_seed as Record<string, unknown>) : undefined;
+  return { decision, reasoning, remedy, spec_seed };
+}
+
+// Read-only brief the CS Director sees at the top of its prompt: the ticket header, its full
+// resolution-events ledger (the turn-by-turn write-ahead history — problem, confidence, chosen,
+// verified_outcome), the triage_runs row that dispatched this call (solver decision + skeptic verdict
+// + why quorum missed), and the customer/subs/orders slice loadTriageBrief already builds. Kept inline
+// here (mirroring runDeployReviewJob) so Phase 1 doesn't introduce a src/lib/cs-director.ts module the
+// Phase 2 mutator will otherwise design around.
+async function loadCsDirectorCallBrief(workspaceId: string, ticketId: string, triageRunId: string | null): Promise<string> {
+  const { loadTriageBrief } = await import("../src/lib/agent-todos/triage");
+  const parts: string[] = [];
+  parts.push(await loadTriageBrief(db, workspaceId, ticketId));
+
+  // Resolution-events ledger — the M1/M2 write-ahead history for every prior orchestrator turn on
+  // this ticket. Cited so the CS Director sees what confidence + problem + verified_outcome each turn
+  // landed on (surfaces a repeated 'unbacked' / 'drifted' pattern the triage quorum couldn't reach a
+  // vote on). Best-effort — if the table isn't populated yet on this workspace the section still
+  // renders (as "no rows").
+  try {
+    const { data: rows } = await db
+      .from("ticket_resolution_events")
+      .select("turn_index, staged_at, shipped_at, verified_at, verified_outcome, confidence, problem, reasoning, chosen")
+      .eq("workspace_id", workspaceId)
+      .eq("ticket_id", ticketId)
+      .order("turn_index", { ascending: true });
+    parts.push("");
+    parts.push(`RESOLUTION EVENTS LEDGER (${rows?.length ?? 0} turns) — the write-ahead history for this ticket:`);
+    for (const r of rows ?? []) {
+      const conf = r.confidence != null ? Number(r.confidence).toFixed(2) : "—";
+      const outcome = r.verified_outcome ?? "(unverified)";
+      const problem = r.problem ? String(r.problem).slice(0, 200) : "(none)";
+      const reason = r.reasoning ? String(r.reasoning).slice(0, 200) : "";
+      parts.push(`  T${r.turn_index} · staged ${String(r.staged_at ?? "").slice(0, 19)} · shipped ${r.shipped_at ? "yes" : "no"} · verified ${outcome} · conf ${conf}`);
+      parts.push(`    problem: ${problem}`);
+      if (reason) parts.push(`    reasoning: ${reason}`);
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`RESOLUTION EVENTS LEDGER: read failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Triage_runs row — the solver→skeptic transcripts + no-quorum outcome that produced this call.
+  // Optional (the runner accepts a null triage_run_id so Phase 1 synthetic tests can dispatch without
+  // one), but when present it anchors the CS Director's brief on WHY the quorum missed.
+  if (triageRunId) {
+    try {
+      const { data: run } = await db
+        .from("triage_runs")
+        .select("id, ticket_id, decision, verdict, materialized, outcome, solver_transcript, skeptic_transcript, created_at")
+        .eq("id", triageRunId)
+        .maybeSingle();
+      parts.push("");
+      if (run) {
+        parts.push(`TRIAGE RUN ${run.id} (ticket ${run.ticket_id}) — dispatched this call:`);
+        parts.push(`  decision=${run.decision ?? "(none)"} · verdict=${run.verdict ?? "(none)"} · materialized=${!!run.materialized} · created ${String(run.created_at ?? "").slice(0, 19)}`);
+        parts.push(`  outcome: ${String(run.outcome ?? "").slice(0, 600)}`);
+        if (run.solver_transcript) parts.push(`  solver: ${JSON.stringify(run.solver_transcript).slice(0, 1200)}`);
+        if (run.skeptic_transcript) parts.push(`  skeptic: ${JSON.stringify(run.skeptic_transcript).slice(0, 1200)}`);
+      } else {
+        parts.push(`TRIAGE RUN ${triageRunId}: not found (may have been deleted).`);
+      }
+    } catch (e) {
+      parts.push(`TRIAGE RUN ${triageRunId}: read failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  return parts.join("\n");
+}
+
+function csDirectorCallPrompt(brief: string): string {
+  return [
+    `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the THIRD RUNG of the escalation ladder: box-escalation-triage's solver→skeptic quorum could not vote on this ticket, so it landed with you INSTEAD of routing straight to the founder. You investigate READ-ONLY and emit ONE JSON object — a typed verdict — and the WORKER (deterministic Node) materializes it in Phase 2 of this spec. You NEVER mutate anything from here.`,
+    ``,
+    `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
+    `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor will fire through executeSonnetDecision.`,
+    `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so Phase 2 authors it as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
+    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. Return only the reasoning; Phase 2 surfaces it as a CEO dashboard notification.`,
+    ``,
+    brief,
+    ``,
+    `Investigate read-only (the improve-box-tools.ts read-only tools + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
+    `Final message = ONLY one JSON object matching this exact shape:`,
+    `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec}`,
+    `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs only reasoning).`,
+  ].join("\n");
+}
+
+async function runCsDirectorCallJob(job: Job) {
+  const tag = `[cs-director:${job.id.slice(0, 8)}]`;
+  let inst: CsDirectorCallInstructions = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as CsDirectorCallInstructions) : {};
+  } catch {
+    /* leave inst empty — the guard below will fail-safe */
+  }
+  // The ticket_id is the anchor: without it we can't build a brief. triage_run_id is optional (Phase 1
+  // synthetic tests can dispatch without one; Phase 2 always stamps it). Same shape guard the
+  // deploy-review runner uses for its watch_id anchor.
+  const ticketId = inst.ticket_id;
+  const triageRunId = inst.triage_run_id ?? null;
+  if (!ticketId) {
+    await update(job.id, { status: "failed", error: "cs-director-call job missing ticket_id in instructions" });
+    return;
+  }
+  console.log(`${tag} judging ticket ${ticketId.slice(0, 8)}${triageRunId ? ` · triage_run=${triageRunId.slice(0, 8)}` : ""}`);
+
+  try {
+    const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId);
+    const prompt = csDirectorCallPrompt(brief);
+    const { session, resultText, isError, raw, usage, model, configDir: csDir } = await runBoxLane(
+      (cfg, sid) => runCsDirectorCallClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, csDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: csDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizeCsDirectorVerdict(parsed);
+    console.log(`${tag} claude finished — decision: ${verdict?.decision ?? "(none)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // No parseable verdict → surface as needs_attention so a human can eyeball, and DO NOT write a
+      // director_activity row (a lie in the audit trail is worse than a gap). Same guardrail
+      // deploy-review's fail-safe uses: never silently upgrade an unparseable verdict.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "cs-director-call returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    // Phase 1: record the verdict to `director_activity` (director_function='cs', action_kind=
+    // 'cs_director_call'). The CEO/audit trail now shows WHAT the CS Director decided + WHY, BEFORE
+    // Phase 2's applyBoxCsDirectorCall wires up. metadata carries the raw verdict JSON verbatim so
+    // Phase 2 can consume it without re-parsing the log_tail. spec_slug is the triage_run_id when
+    // present (the natural per-call anchor) — a spec-scoped audit slice is still meaningful even
+    // pre-Phase-2 since a `decision='author_spec'` verdict names the SpecSeed slug.
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "cs_director_call",
+        specSlug: verdict.decision === "author_spec" && typeof verdict.spec_seed?.slug === "string" ? String(verdict.spec_seed.slug) : null,
+        reason: verdict.reasoning.slice(0, 4000),
+        metadata: {
+          job_id: job.id,
+          ticket_id: ticketId,
+          triage_run_id: triageRunId,
+          decision: verdict.decision,
+          remedy: verdict.remedy ?? null,
+          spec_seed: verdict.spec_seed ?? null,
+          // autonomous:false — Phase 1 records only; Phase 2 flips true when the executor fires the
+          // in-leash remedy without asking the CEO. The audit shape stays consistent across the phases.
+          autonomous: false,
+          phase: 1,
+        },
+      });
+    } catch (e) {
+      // recordDirectorActivity is best-effort + never-throws, so this only catches a dynamic-import
+      // failure. The verdict still lands on the log_tail so an operator can recover it.
+      console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
+    // Phase 2 of cs-director-storyline-digests-to-founder-with-bidirectional-reply — route
+    // decision='escalate_founder' verdicts into the CURRENT digest as a `per_ticket_escalation`
+    // storyline instead of firing a real-time dashboard_notifications page. EXCEPT: a black-swan
+    // verdict (fraud alert · chargeback storm · systemic outage — see cs-director-black-swan) still
+    // pages the CEO in real time, because its harm compounds during the weekly batching lag.
+    if (verdict.decision === "escalate_founder") {
+      try {
+        const { classifyBlackSwan } = await import("../src/lib/cs-director-black-swan");
+        const cls = classifyBlackSwan({
+          decision: verdict.decision,
+          reasoning: verdict.reasoning,
+          metadata: verdict as unknown as Record<string, unknown>,
+        });
+        if (cls.isBlackSwan) {
+          // Real-time page — dashboard_notifications, mirroring the escalation.ts shape. Best-effort;
+          // a failed insert still lets the job complete so the audit row (already recorded above) is
+          // the trail. The metadata carries the classifier's source so an audit can distinguish an
+          // explicit verdict tag from a keyword-default hit.
+          const { error: notifErr } = await db.from("dashboard_notifications").insert({
+            workspace_id: job.workspace_id,
+            type: "system",
+            title: `CS Director — black-swan escalation (${cls.class_key ?? "unspecified"})`,
+            body: (verdict.reasoning || "").slice(0, 500),
+            link: `/dashboard/tickets/${ticketId}`,
+            metadata: {
+              ticket_id: ticketId,
+              triage_run_id: triageRunId,
+              cs_director_call_job_id: job.id,
+              black_swan_class: cls.class_key ?? null,
+              black_swan_source: cls.source ?? null,
+            },
+          });
+          if (notifErr) {
+            console.warn(`${tag} black-swan dashboard_notifications insert failed: ${notifErr.message}`);
+          } else {
+            console.log(`${tag} black-swan page fired (class=${cls.class_key ?? "unspecified"} · source=${cls.source})`);
+          }
+        } else {
+          // Non-black-swan — append to the current digest. The lazy-create branch inside
+          // appendPerTicketEscalation guarantees a digest exists even if the composer hasn't run yet.
+          const { appendPerTicketEscalation } = await import("../src/lib/cs-director-digest");
+          const r = await appendPerTicketEscalation(db, {
+            workspaceId: job.workspace_id,
+            ticketId,
+            reasoning: verdict.reasoning,
+            verdictMetadata: {
+              cs_director_call_job_id: job.id,
+              triage_run_id: triageRunId,
+              remedy: verdict.remedy ?? null,
+              spec_seed: verdict.spec_seed ?? null,
+            },
+          });
+          if (r.appended) {
+            console.log(`${tag} escalate_founder appended to digest ${r.digest_id?.slice(0, 8)} @ idx ${r.storyline_index}`);
+          } else {
+            console.warn(`${tag} escalate_founder append failed — verdict still on the audit trail`);
+          }
+        }
+      } catch (e) {
+        console.warn(`${tag} escalate_founder routing threw:`, e instanceof Error ? e.message : e);
+      }
+    }
+
+    const summary = [
+      `decision=${verdict.decision}`,
+      verdict.reasoning ? verdict.reasoning : "",
+      verdict.remedy ? `remedy: ${JSON.stringify(verdict.remedy).slice(0, 400)}` : "",
+      verdict.spec_seed ? `spec_seed: ${JSON.stringify(verdict.spec_seed).slice(0, 400)}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was audited. Complete with the error
+      // surfaced so a human can eyeball — the audit row isn't silently rolled back. Same rule
+      // deploy-review uses.
+      await update(job.id, { status: "completed", error: "cs-director-call session errored (verdict recorded)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} verdict=${verdict.decision} (session errored — recorded + logged)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} verdict=${verdict.decision}`);
+  } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
@@ -18058,6 +18403,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "spec-review") return runSpecReviewJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
+  if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "god-mode") return runGodModeJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
@@ -19141,7 +19487,7 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
     `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
@@ -19193,6 +19539,7 @@ async function main() {
   const countSpecReview = () => [...active.values()].filter((v) => v.kind === "spec-review").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
+  const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countGodMode = () => [...active.values()].filter((v) => v.kind === "god-mode").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
@@ -19218,7 +19565,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -19467,6 +19814,18 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed deploy-review ${job.id.slice(0, 8)} → ${countDeployReview() + 1}/${MAX_DEPLOY_REVIEW} deploy-review lane`);
+        launch(job);
+      }
+      // Fill the cs-director-call lane (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1):
+      // one Max `claude -p` (cs-director-call skill) per no-quorum triage escalation the CS Director
+      // (💬 June) hard-calls. Concurrency-1 so the hourly triage sweep never overlaps a call still being
+      // judged. Gated on the Claude-down breaker — a director call needs Claude to reason; parked
+      // jobs drain on recovery, matching the deploy-review pattern.
+      while (!claudeDown && countCsDirectorCall() < MAX_CS_DIRECTOR_CALL) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["cs-director-call"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed cs-director-call ${job.id.slice(0, 8)} → ${countCsDirectorCall() + 1}/${MAX_CS_DIRECTOR_CALL} cs-director-call lane`);
         launch(job);
       }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
