@@ -29,7 +29,7 @@ Synced from Shopify. Email, retention_score, subscription_status, LTV, marketing
 | `updated_at` | `timestamptz` | — | default: `now()` |
 | `email_marketing_status` | `text` | ✓ | default: `'not_subscribed'` |
 | `sms_marketing_status` | `text` | ✓ | default: `'not_subscribed'` |
-| `default_address` | `jsonb` | ✓ |  |
+| `default_address` | `jsonb` | ✓ | Canonical current address written by `update_shipping_address`. The order-creating actions via [[../libraries/customer-shipping-address]] resolve to this first when choosing a shipment destination. |
 | `addresses` | `jsonb` | ✓ | default: `'[]'` |
 | `locale` | `text` | ✓ |  |
 | `note` | `text` | ✓ |  |
@@ -164,6 +164,8 @@ Per-table `reloptions` are tightened on `public.customers` — the cluster defau
 - `subscription_status`: `"active"`, `"cancelled"`, `"never"`, `"paused"`. `"never"` = a lead (no orders yet).
 - Customers can be linked. To get a customer's full history, expand to linked group first (see `customer_links`).
 - A lead IS a customer (no orders, `subscription_status='never'`). No parallel `leads` table.
+- **`default_address` is the canonical current address for order destinations.** All order-creating actions ([[../libraries/customer-shipping-address]]) resolve the shipment address to this field first — it is the source-of-truth when a customer updates their address on file via `update_shipping_address`. Subscription `shipping_address` is a fallback for customers who have a subscription but never updated their account address; cited orders are the last resort. This priority prevents stale-order snapshots from silently shipping to the wrong address (ticket 49ddd6c4).
+
 - **`comp_role` IS the comp allowlist.** The set of customers with a non-null `comp_role` is the standing free-product roster. A [[subscriptions]] `comp=true` sub only ships free when its customer has a valid `comp_role` — the renewal path ([[../inngest/internal-subscription-renewals]]) **fails closed** otherwise (no $0 leak). Partial index `idx_customers_comp_role` `(workspace_id, comp_role) WHERE comp_role IS NOT NULL` backs the roster + the Customers → Comp Subscriptions list. See [[../lifecycles/subscription-billing]] § Comp.
 - `banned` (storefront ban) vs `portal_banned` (customer portal ban) are different flags.
 - Email is the matching key but **`shopify_customer_id` is the primary lookup** — match by it first, fall back to email. See feedback_shopify_id_primary.

@@ -12,8 +12,24 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { SONNET_MODEL } from "@/lib/ai-models";
+import { logAiUsage } from "@/lib/ai-usage";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+/**
+ * Message shape passed to the merge-summary builder. Only the fields the
+ * summarizer reads — kept minimal so the prompt stays token-efficient.
+ */
+interface MergedMessage {
+  direction: string | null;
+  author_type: string | null;
+  visibility: string | null;
+  body: string | null;
+  created_at: string | null;
+}
 
 export interface MergeResult {
   success: boolean;
@@ -172,8 +188,22 @@ export async function mergeTickets(
 
   let totalMoved = 0;
   const nowIso = () => new Date().toISOString();
+  // Collect the messages that MOVED in this merge event — the "pre-merge
+  // thread" the summarizer distills at the end of the loop. Captured on the
+  // source PRIOR to the move so we can identify them again on the target.
+  const movedMessageIds: string[] = [];
 
   for (const source of sources) {
+    // Snapshot the source's message ids BEFORE the move — the update below
+    // only returns a count, and we need the ids to feed the summarizer
+    // exactly the newly-merged content (not the target's pre-existing
+    // history) on a repeat-merge.
+    const { data: preMove } = await admin
+      .from("ticket_messages")
+      .select("id")
+      .eq("ticket_id", source.id);
+    if (preMove) for (const row of preMove) movedMessageIds.push(row.id as string);
+
     // MOVE messages from source to target. Reassign ticket_id rather than
     // copy-and-delete so we keep email_message_id linkage intact and don't
     // need to manage two rows for the same message.
@@ -313,12 +343,203 @@ export async function mergeTickets(
     }).eq("id", target.id);
   }
 
+  // Lock in the pre-merge state as a durable Sonnet summary on the target so
+  // downstream Opus turns read the summary instead of re-costing the full
+  // merged history on every call (kills the cache-recost loop measured on
+  // ticket 49ddd6c4 → $8.92). Fire-and-forget: a summarizer failure must
+  // never break the merge itself. See docs/brain/specs/ticket-merge-summary-
+  // and-context-cap.md Phase 1.
+  try {
+    await generateAndPersistMergeSummary(admin, workspaceId, target.id, movedMessageIds);
+  } catch (err) {
+    console.warn("[ticket-merge] merge-summary generation failed (non-fatal):", err);
+  }
+
   return {
     success: true,
     targetTicketId: target.id,
     mergedCount: sources.length,
     messagesMoved: totalMoved,
   };
+}
+
+/**
+ * Regenerate the merge summary?
+ *
+ *   • No prior summary → always summarize (first merge on this target).
+ *   • Prior summary exists → summarize only when this merge event actually
+ *     moved new content in. A merge that moved zero messages (edge case:
+ *     empty source thread) with a prior summary is a no-op — this is the
+ *     verification bullet "does not re-summarize unchanged history on a
+ *     later unrelated update."
+ *
+ * Pure predicate — unit-testable with no DB / no network. Kept exported for
+ * the Phase-1 test (src/lib/ticket-merge.test.ts).
+ */
+export function shouldRegenerateMergeSummary(
+  priorSummary: string | null,
+  newlyMovedCount: number,
+): boolean {
+  if (!priorSummary) return true;
+  return newlyMovedCount > 0;
+}
+
+/**
+ * Build the Sonnet summarizer prompt. Pure — no I/O — so it can be tested
+ * against the Phase-1 verification (compact plain-text state summary, prior
+ * summary carried forward on repeat merges). Kept exported for the test.
+ *
+ * Two shapes:
+ *   • First merge — no prior summary → summarize the merged conversation
+ *     itself.
+ *   • Repeat merge — prior summary present → carry the prior summary
+ *     forward as "prior state" + feed only the newly-merged messages,
+ *     so we don't re-cost the entire target history to Sonnet on every
+ *     merge event.
+ */
+export function buildMergeSummaryPrompt(
+  priorSummary: string | null,
+  messages: MergedMessage[],
+): { system: string; user: string } {
+  const system =
+    "You are a support-ticket state summarizer. Distill the STATE of this ticket " +
+    "into a compact plain-text summary that downstream AI turns can rely on instead " +
+    "of re-reading every message. Include: the customer's core issue; confirmed " +
+    "facts (address, order id, product, dates, contact channel); actions already " +
+    "taken (refund issued, replacement sent, cancellation processed); and open " +
+    "items still to resolve. Be terse: state, not chat. No markdown, no bullet " +
+    "characters, no headers — one short paragraph per fact/action/open item. Cover " +
+    "all durable state so a fresh reader can pick up cold; skip pleasantries and " +
+    "quoted email boilerplate.";
+
+  const conversation = messages
+    .map((m) => {
+      const who = m.author_type || "unknown";
+      const dir = m.direction || "";
+      const vis = m.visibility === "internal" ? " (internal)" : "";
+      const body = (m.body || "").trim();
+      return `[${who}/${dir}${vis}] ${body}`;
+    })
+    .join("\n\n");
+
+  const user = priorSummary
+    ? `PRIOR STATE (carry forward, refine as needed):\n${priorSummary}\n\n` +
+      `NEWLY MERGED MESSAGES:\n${conversation}\n\n` +
+      `Return the updated compact state summary as plain text.`
+    : `MERGED CONVERSATION:\n${conversation}\n\n` +
+      `Return the compact state summary as plain text.`;
+
+  return { system, user };
+}
+
+/**
+ * Generate + persist the one-shot merge summary on the target. Called from
+ * mergeTickets() after all messages have been moved. Fire-and-forget on
+ * failure (missing API key / Anthropic outage / parse failure) so the merge
+ * itself is never blocked — Phase 2's context assembly falls back to the
+ * legacy behavior when merge_summary is NULL.
+ */
+async function generateAndPersistMergeSummary(
+  admin: Admin,
+  workspaceId: string,
+  targetId: string,
+  newlyMovedMessageIds: string[],
+): Promise<void> {
+  if (!ANTHROPIC_API_KEY) return;
+
+  const { data: t } = await admin
+    .from("tickets")
+    .select("merge_summary")
+    .eq("id", targetId)
+    .maybeSingle();
+  const priorSummary = (t?.merge_summary as string | null) || null;
+
+  if (!shouldRegenerateMergeSummary(priorSummary, newlyMovedMessageIds.length)) return;
+
+  // Which messages feed the summarizer:
+  //   first merge (no prior)  → the full target thread (includes moved sources)
+  //   repeat merge (prior)    → only the ids that moved in this event
+  let msgs: MergedMessage[] = [];
+  if (!priorSummary) {
+    const { data } = await admin
+      .from("ticket_messages")
+      .select("direction, author_type, visibility, body, created_at")
+      .eq("ticket_id", targetId)
+      .order("created_at", { ascending: true })
+      .limit(500);
+    msgs = (data || []) as MergedMessage[];
+  } else if (newlyMovedMessageIds.length > 0) {
+    const { data } = await admin
+      .from("ticket_messages")
+      .select("direction, author_type, visibility, body, created_at")
+      .in("id", newlyMovedMessageIds)
+      .order("created_at", { ascending: true })
+      .limit(500);
+    msgs = (data || []) as MergedMessage[];
+  }
+
+  if (msgs.length === 0 && !priorSummary) return;
+
+  const { system, user } = buildMergeSummaryPrompt(priorSummary, msgs);
+
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: SONNET_MODEL,
+        max_tokens: 800,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
+  } catch (err) {
+    console.warn("[ticket-merge] merge-summary Sonnet fetch failed:", err);
+    return;
+  }
+  if (!res.ok) {
+    console.warn("[ticket-merge] merge-summary Sonnet HTTP", res.status);
+    return;
+  }
+
+  const data = (await res.json()) as {
+    content?: Array<{ text?: string }>;
+    usage?: Parameters<typeof logAiUsage>[0]["usage"];
+  };
+  const summary = (data.content?.[0]?.text || "").trim();
+  if (!summary) return;
+
+  // Persist. Guard with .eq("id", targetId) + .select("id") so a stale target
+  // id can't accidentally scribble across another workspace's row — same
+  // compare-and-set discipline as the rest of the merge writes.
+  const { data: written } = await admin
+    .from("tickets")
+    .update({
+      merge_summary: summary,
+      merge_summary_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", targetId)
+    .eq("workspace_id", workspaceId)
+    .select("id");
+
+  if (!written || written.length !== 1) {
+    console.warn("[ticket-merge] merge-summary update matched", written?.length ?? 0, "rows");
+    return;
+  }
+
+  await logAiUsage({
+    workspaceId,
+    model: SONNET_MODEL,
+    usage: data.usage,
+    purpose: "merge_summary",
+    ticketId: targetId,
+  });
 }
 
 /**

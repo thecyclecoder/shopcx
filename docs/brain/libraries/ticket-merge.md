@@ -26,6 +26,16 @@ For every non-target source ticket in the merge:
 
 If the target was previously `closed` and didn't inherit `do_not_reply` through the merge, the target reopens to `open` so the agent can engage.
 
+Finally, **lock in the pre-merge state as a durable Sonnet summary** on the target via `merge_summary` + `merge_summary_at` on [[../tables/tickets]] (Phase 1 of [[../specs/ticket-merge-summary-and-context-cap]]). Downstream orchestrator turns in [[sonnet-orchestrator-v2]] `buildPreContext` read this compact state snapshot as a cache-controlled per-ticket prefix instead of re-costing the full merged history to Opus on every turn — the failure mode measured on ticket 49ddd6c4 ($8.92 via [[ai-usage]] `usageCostCents`). Subsequent tail growth is bounded by the rollup mechanism in `buildPreContext` (Phase 2), which folds accumulated messages back into the summary once the tail crosses K messages or T chars and advances `merge_summary_at` so the "since window" stays small and the prefix stays stable. Summary writing is fire-and-forget: a Sonnet outage / missing key never blocks the merge, and context assembly falls back to legacy behavior when `merge_summary` is NULL.
+
+## Merge summary lifecycle
+
+- **First merge on a target** → Sonnet summarizes the full merged target thread (up to 500 messages).
+- **Repeat merge on a target that already has a summary** → the prior summary is carried forward as "PRIOR STATE" and only the newly-moved message ids feed the summarizer. No merge event ever re-costs unchanged history to Sonnet.
+- **Repeat merge that moved zero messages** → `shouldRegenerateMergeSummary(prior, 0)` returns `false`; the write is skipped. This is the Phase-1 verification bullet "does not re-summarize unchanged history on a later unrelated update."
+
+The persist call uses compare-and-set (`.eq("id", target).eq("workspace_id", ws).select("id")`) so a stale target id can't scribble across another workspace's row.
+
 ## Target selection — order by customer activity
 
 The target is the ticket where the **customer most recently spoke**, not just the newest one created. We sort `last_customer_reply_at DESC NULLS LAST, created_at DESC` and take the first. Reason: a customer who has switched to a fresh chat session can't see replies dropped into an older one — the merge needs to land in whatever surface they're actually watching. Same logic applies to email back-and-forth where one of multiple recent tickets is the live conversation.
@@ -115,6 +125,12 @@ Reusable FK-repointer used by both the live merge and the backfill.
 
 ### `resolveMergedTarget(admin, ticketId) → Promise<string>`
 Follow the `merged_into` chain to the terminal id (max 10 hops). Used by the email-inbound router.
+
+### `shouldRegenerateMergeSummary(priorSummary, newlyMovedCount) → boolean`
+Pure predicate. Returns `true` on a first merge (no prior summary) or a repeat merge that moved new content in. Returns `false` when a prior summary exists AND this event moved zero messages — that's the "don't re-cost unchanged history" case. Unit-tested in `src/lib/ticket-merge.test.ts`.
+
+### `buildMergeSummaryPrompt(priorSummary, messages) → { system, user }`
+Pure builder for the Sonnet summarizer prompt. Two shapes — first-merge vs. repeat-merge — so a repeat merge only feeds the newly-moved messages plus the prior summary as "PRIOR STATE." Unit-tested.
 
 ### `MergeResult` — interface
 `{ success, targetTicketId, mergedCount, messagesMoved, error? }`

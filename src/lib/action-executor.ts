@@ -541,12 +541,44 @@ export const directActionHandlers: Record<
     if (p.vendor !== "shopify" && p.vendor !== "internal") {
       return { success: false, error: `create_order: invalid vendor '${p.vendor}'` };
     }
+    // Route the destination through the shared current-address resolver
+    // so a fresh order goes to the customer's current address, not a
+    // stale cited-order snapshot. Same priority chain as
+    // create_replacement_order (override → default_address → subscription
+    // → cited order → recent order). Phase 2 of ticket 49ddd6c4 — closes
+    // the bug class for create_order too.
+    let shippingAddress: Record<string, unknown> | null = null;
+    if (ctx.customerId) {
+      const { resolveCustomerShippingAddress, formatDivergenceNote } = await import("@/lib/customer-shipping-address");
+      const resolved = await resolveCustomerShippingAddress(ctx.admin, ctx.workspaceId, ctx.customerId, {
+        addressOverride: p.address as Record<string, unknown> | undefined,
+        orderNumber: p.order_number || null,
+      });
+      if (resolved) {
+        shippingAddress = resolved.address as unknown as Record<string, unknown>;
+        if (resolved.diverged && ctx.ticketId) {
+          await ctx.admin.from("ticket_messages").insert({
+            ticket_id: ctx.ticketId,
+            direction: "outbound",
+            visibility: "internal",
+            author_type: "system",
+            body: formatDivergenceNote(resolved, p.order_number || null),
+          });
+        }
+      }
+    }
+    // Fall back to whatever Sonnet passed directly if the resolver
+    // couldn't find anything (e.g. an internal order for a customer
+    // with no addresses on file). createOrder itself accepts null.
+    if (!shippingAddress && p.address) {
+      shippingAddress = p.address as unknown as Record<string, unknown>;
+    }
     const r = await createOrder(ctx.workspaceId, {
       vendor: p.vendor,
       customer_id: ctx.customerId,
       email: p.email ?? null,
       line_items: p.line_items,
-      shipping_address: (p.address as unknown as Record<string, unknown> | undefined) ?? null,
+      shipping_address: shippingAddress,
       order_type: "shopcx-created",
     });
     if (!r.success) return { success: false, error: r.error, summary: `Create order failed: ${r.error}` };
@@ -2043,57 +2075,34 @@ export const directActionHandlers: Record<
       .select("shopify_customer_id").eq("id", ctx.customerId).single();
     if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
 
-    // Resolve shipping address — explicit override wins (used when the
-    // original order is in Amplifier with a wrong address; we ship the
-    // replacement to a different address). Otherwise: order match →
-    // any subscription → most recent order. The original code only
-    // looked at active subs, which broke replacements for one-time
-    // customers and anyone with paused/cancelled subs.
-    let addr: Record<string, string> = {};
-    if (p.address?.address1) {
-      const a = p.address;
-      addr = {
-        firstName: a.first_name || "",
-        lastName: a.last_name || "",
-        address1: a.address1 || "",
-        address2: a.address2 || "",
-        city: a.city || "",
-        provinceCode: (a.province || a.state || "").toUpperCase().slice(0, 2),
-        zip: a.zip || a.postal_code || "",
-        countryCode: (a.country || a.country_code || "US").toUpperCase().slice(0, 2),
-      };
+    // Resolve shipping address through the shared current-address
+    // resolver — priority: explicit override → customers.default_address
+    // (the canonical current address update_shipping_address writes) →
+    // active subscription → cited order (last resort). This is the
+    // fix for ticket 49ddd6c4 (Catherine Green — replacement shipped
+    // to a stale Rochester MN snapshot when both her account default
+    // and her active subscription said Kirkland WA). Any divergence
+    // between the cited order and the current canonical address is
+    // logged as an internal system note.
+    const { resolveCustomerShippingAddress, formatDivergenceNote } = await import("@/lib/customer-shipping-address");
+    const resolved = await resolveCustomerShippingAddress(ctx.admin, ctx.workspaceId, ctx.customerId, {
+      addressOverride: p.address as Record<string, unknown> | undefined,
+      orderNumber: p.order_number || null,
+    });
+    if (!resolved) return { success: false, error: "No shipping address found on any subscription or order" };
+    if (resolved.diverged && ctx.ticketId) {
+      // Fire-and-forget — the note is a signal, not part of the
+      // shipping-critical path. If insert fails (RLS, network) we
+      // still ship to the right address.
+      await ctx.admin.from("ticket_messages").insert({
+        ticket_id: ctx.ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: formatDivergenceNote(resolved, p.order_number || null),
+      });
     }
-    if (!addr.address1 && p.order_number) {
-      const { data: order } = await ctx.admin.from("orders")
-        .select("shipping_address")
-        .eq("workspace_id", ctx.workspaceId)
-        .eq("order_number", p.order_number)
-        .maybeSingle();
-      if (order?.shipping_address) addr = order.shipping_address as Record<string, string>;
-    }
-    if (!addr.address1) {
-      const { data: subs } = await ctx.admin.from("subscriptions")
-        .select("shipping_address, status")
-        .eq("customer_id", ctx.customerId)
-        .order("status", { ascending: true })
-        .limit(5);
-      for (const s of subs || []) {
-        const sa = s.shipping_address as Record<string, string> | null;
-        if (sa?.address1) { addr = sa; break; }
-      }
-    }
-    if (!addr.address1) {
-      const { data: orders } = await ctx.admin.from("orders")
-        .select("shipping_address")
-        .eq("customer_id", ctx.customerId)
-        .order("created_at", { ascending: false })
-        .limit(5);
-      for (const o of orders || []) {
-        const oa = o.shipping_address as Record<string, string> | null;
-        if (oa?.address1) { addr = oa; break; }
-      }
-    }
-    if (!addr.address1) return { success: false, error: "No shipping address found on any subscription or order" };
+    const addr = resolved.address;
 
     const variantId = p.variant_id || "42614433513645"; // fallback variant (Peach Mango)
     const quantity = p.quantity || 1;
@@ -2125,15 +2134,15 @@ export const directActionHandlers: Record<
       shopifyCustomerId: cust.shopify_customer_id,
       items: [{ variantId, quantity, title: variantTitle }],
       shippingAddress: {
-        firstName: addr.firstName || addr.first_name || "",
-        lastName: addr.lastName || addr.last_name || "",
-        address1: addr.address1 || "",
-        address2: addr.address2 || "",
-        city: addr.city || "",
-        province: addr.province || "",
-        provinceCode: addr.provinceCode || addr.province_code || addr.province || "",
-        zip: addr.zip || "",
-        countryCode: "US",
+        firstName: addr.firstName,
+        lastName: addr.lastName,
+        address1: addr.address1,
+        address2: addr.address2,
+        city: addr.city,
+        province: addr.province,
+        provinceCode: addr.provinceCode,
+        zip: addr.zip,
+        countryCode: addr.countryCode || "US",
       },
       reason: (p.reason as string) || "damaged_items",
       originalOrderNumber: p.order_number || null,
@@ -2174,32 +2183,28 @@ export const directActionHandlers: Record<
       .maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oidRaw}` };
 
-    // Address resolution — reuses the same fallback chain as
-    // create_replacement_order (explicit → order-match → sub → recent
-    // order). Kept inline to preserve provinceCode coercion + Amplifier
-    // wrong-address override.
-    let addr: Record<string, string> = {};
-    if (p.address?.address1) {
-      const a = p.address;
-      addr = {
-        firstName: a.first_name || "",
-        lastName: a.last_name || "",
-        address1: a.address1 || "",
-        address2: a.address2 || "",
-        city: a.city || "",
-        provinceCode: (a.province || a.state || "").toUpperCase().slice(0, 2),
-        zip: a.zip || a.postal_code || "",
-        countryCode: (a.country || a.country_code || "US").toUpperCase().slice(0, 2),
-      };
+    // Address resolution — same shared current-address resolver as
+    // create_replacement_order + create_order. Priority: override →
+    // customers.default_address → active subscription → cited order →
+    // recent-order safety net. Phase 2 of ticket 49ddd6c4 — closes the
+    // bug class for dollar_replacement (which used to read the cited
+    // order's shipping_address directly before falling back).
+    const { resolveCustomerShippingAddress: resolveAddr, formatDivergenceNote: fmtDivergence } = await import("@/lib/customer-shipping-address");
+    const resolved = await resolveAddr(ctx.admin, ctx.workspaceId, ctx.customerId, {
+      addressOverride: p.address as Record<string, unknown> | undefined,
+      orderNumber: ord.order_number || null,
+    });
+    if (!resolved) return { success: false, error: "No shipping address resolvable for dollar_replacement" };
+    if (resolved.diverged && ctx.ticketId) {
+      await ctx.admin.from("ticket_messages").insert({
+        ticket_id: ctx.ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: fmtDivergence(resolved, ord.order_number || null),
+      });
     }
-    if (!addr.address1) {
-      const { data: order } = await ctx.admin.from("orders")
-        .select("shipping_address")
-        .eq("id", ord.id)
-        .maybeSingle();
-      if (order?.shipping_address) addr = order.shipping_address as Record<string, string>;
-    }
-    if (!addr.address1) return { success: false, error: "No shipping address resolvable for dollar_replacement" };
+    const addr = resolved.address;
 
     const variantId = p.variant_id || "";
     if (!variantId) return { success: false, error: "dollar_replacement missing variant_id" };
@@ -2211,14 +2216,14 @@ export const directActionHandlers: Record<
       shopifyCustomerId: cust.shopify_customer_id,
       items: [{ variantId, quantity }],
       shippingAddress: {
-        firstName: addr.firstName || "",
-        lastName: addr.lastName || "",
-        address1: addr.address1 || "",
-        address2: addr.address2 || "",
-        city: addr.city || "",
-        province: addr.province || "",
-        provinceCode: addr.provinceCode || addr.province || "",
-        zip: addr.zip || "",
+        firstName: addr.firstName,
+        lastName: addr.lastName,
+        address1: addr.address1,
+        address2: addr.address2,
+        city: addr.city,
+        province: addr.province,
+        provinceCode: addr.provinceCode,
+        zip: addr.zip,
         countryCode: addr.countryCode || "US",
       },
       reason: p.reason || "damaged_items",

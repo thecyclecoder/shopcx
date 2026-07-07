@@ -24,7 +24,7 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 | `updated_at` | `timestamptz` | — | default: `now()` |
 | `consecutive_skips` | `int4` | ✓ | default: `0` |
 | `pause_resume_at` | `timestamptz` | ✓ |  |
-| `shipping_address` | `jsonb` | ✓ |  |
+| `shipping_address` | `jsonb` | ✓ | Subscription-specific shipping address (fallback for customers who have a sub but never updated their account default_address). Order-creating actions resolve via [[../libraries/customer-shipping-address]], preferring `customers.default_address` first. |
 | `subscription_created_at` | `timestamptz` | ✓ |  |
 | `applied_discounts` | `jsonb` | — | default: `'[]'` |
 | `is_internal` | `bool` | — | default: `false` |
@@ -110,6 +110,7 @@ const { data } = await admin.from("customer_events")
 ## Gotchas
 
 - `status` is **lowercase**: `"active"`, `"paused"`, `"cancelled"`. `.eq("status", "ACTIVE")` returns zero rows.
+- **`shipping_address` is a fallback, not authoritative.** Order-creating actions must NOT read it directly to resolve a shipment destination — they must use [[../libraries/customer-shipping-address]] `resolveCustomerShippingAddress()`, which prefers `customers.default_address` (the canonical current address) and uses the subscription address only when the customer's default and all cited orders are empty. Same priority applies to orders — a cited order's snapshot is the last resort, not the default.
 - No `cancelled_at` / `paused_at` columns — the timestamp lives in `customer_events`. To know *when* a sub was cancelled, query the event log.
 - **Internal joins ALWAYS use the UUID.** `id` (UUID) joins to `dunning_cycles.subscription_id`, `payment_failures.subscription_id`, `orders.subscription_id`, etc. `shopify_contract_id` + `shopify_customer_id` are Shopify-boundary fields ONLY — webhook ingest, Shopify API calls. Never use them as join keys between internal tables. They'll be deprecated once we sunset Shopify.
 - Always include linked customers — use `linkedIds(customerId)` helper, then `.in("customer_id", ids)`.

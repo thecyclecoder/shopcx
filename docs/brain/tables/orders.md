@@ -153,7 +153,7 @@ Per-table `reloptions` are tightened on `public.orders` — the cluster default 
 
 - There is no `name` column — use `order_number` (e.g. `"SC129467"`).
 - There is no `processed_at` — use `created_at` for time-ordering.
-- `shipping_address` and `billing_address` are both JSONB. If only one is populated on the Shopify side, both are mirrored — see feedback_address_mirror_rule.
+- `shipping_address` and `billing_address` are both JSONB. If only one is populated on the Shopify side, both are mirrored — see feedback_address_mirror_rule. **Note:** `shipping_address` is a snapshot of the customer's address at the time of the order. Order-creating actions that need a current address (replacements, new orders) must NOT read this directly — they must resolve via [[../libraries/customer-shipping-address]] `resolveCustomerShippingAddress()`, which reads `customers.default_address` first and uses the cited order's snapshot only as a last-resort fallback (ticket 49ddd6c4).
 - `line_items` is JSONB. Variant ids inside, not a join.
 - `shopify_order_id` is a numeric string. Internal joins should use `id` (UUID), not the Shopify id.
 - `financial_status`: **mixed-case in production data** — both `"PAID"` (94% of rows, from Shopify webhook ingestion) and `"paid"` (6%, normalized) exist. Same for `"REFUNDED"`/`"refunded"`, `"PARTIALLY_REFUNDED"`/`"partially_refunded"`, `"PENDING"`/`"pending"`. Use `ILIKE` or `.in("financial_status", ["PAID","paid"])`. Don't use `.eq("financial_status", "paid")` — you'll miss 94% of rows.
