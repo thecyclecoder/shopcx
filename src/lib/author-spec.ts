@@ -225,6 +225,24 @@ export class MissingIntentError extends Error {
 }
 
 /**
+ * Thrown by `markNewSpecInReview` when `authorSpecRowFromMarkdown` returned `false` instead of throwing —
+ * i.e. the author chokepoint's INNER try/catch swallowed a raw DB/upsert error into a boolean `false`.
+ * (`repair-author-write-surface-real-error-not-swallow` Phase 1.) Before this class existed, the caller
+ * (`markNewSpecInReview`) did a bare `await authorSpecRowFromMarkdown(...)`, ignored the boolean, and
+ * silently continued — so the repair flow enqueued a `repair_build` for a slug that was NEVER persisted to
+ * `public.specs`. Capturing the boolean and throwing this error surfaces the failure to
+ * `groupOrAuthorRepairSpec`'s catch, which routes the parked repair job to `needs_attention` instead of
+ * phantom-completing. Phase 2 will attach the concrete inner-catch message; today the raw cause is only in
+ * the console.warn line inside `authorSpecRowFromMarkdown`.
+ */
+export class AuthorWriteFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthorWriteFailedError";
+  }
+}
+
+/**
  * Thrown when a spec is authored with a BARE-GOAL parent (one-off-spec-parent hotfix). CLAUDE.md's work
  * hierarchy — `Function → (Mandate | Goal→Milestone) → Spec` — says a spec's parent is a function MANDATE
  * or a goal MILESTONE, NEVER a bare goal. A one-off (standalone) spec parents to a function mandate; only a
