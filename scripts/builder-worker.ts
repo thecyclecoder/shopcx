@@ -14451,13 +14451,32 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
       await appendSignatureToSpec(slug, existing.body, signature, workspaceId);
       return { slug, alreadyExists: true, grouped: false, rootCause };
     }
+    // repair-author-write-parent-coercion: Rafa's `s.parent` is untrusted LLM output. A non-empty but
+    // INVALID parent (free text, or an `[[../specs/…]]` pointer) previously got swallowed to a phantom-
+    // complete; since #1290 it hard-throws InvalidParentError at the author chokepoint (every repair the box
+    // "completed" was actually dying here). Repair specs are ALWAYS platform-owned self-healing infra, so
+    // coerce any parent that fails `assertValidParent` to the canonical platform reliability mandate — a bad
+    // LLM parent can never again block a repair from persisting. The empty case already defaulted; this also
+    // catches the non-empty-invalid case (the real InvalidParentError source).
+    const { assertValidParent: assertValidRepairParent } = await import("../src/lib/author-spec");
+    const CANONICAL_REPAIR_PARENT = "[[../functions/platform#infra-devops-reliability]]";
+    const proposedParent = String(s.parent || "").trim();
+    let repairParent = CANONICAL_REPAIR_PARENT;
+    if (proposedParent) {
+      try {
+        assertValidRepairParent(proposedParent, {});
+        repairParent = proposedParent;
+      } catch {
+        repairParent = CANONICAL_REPAIR_PARENT;
+      }
+    }
     const markdown = repairSpecMarkdown(
       {
         slug,
         title,
         owner: String(s.owner || "[[../functions/platform]]"),
-        // no-spec-parent: default to the platform reliability MANDATE, never an `extends [[../specs/…]]` parent.
-        parent: String(s.parent || '[[../functions/platform]] — "Infra & DevOps / reliability" mandate'),
+        // no-spec-parent: coerced above to a VALID function mandate (never an `extends [[../specs/…]]` parent).
+        parent: repairParent,
         // The origin-spec pointer (if any) rides on `related_spec`, never the parent.
         relatedSpec: typeof s.relatedSpec === "string" ? s.relatedSpec : (typeof s.related_spec === "string" ? s.related_spec : undefined),
         intent: String(s.intent || "Close the issue behind this Control Tower signature."),
