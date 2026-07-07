@@ -14,7 +14,7 @@ Dispatches by `action_type`:
 | `action_type` | adapter |
 |---|---|
 | `new_static_adset` / `new_video_adset` | **enabled** — reuse the native publish path: create an [[../tables/ad_publish_jobs]] row (`publish_active=false` → PAUSED, tagged `[ie]` via `ad_name`, linked via `recommendation_id`) and fire `ad-tool/publish-to-meta` ([[../inngest/ad-tool]]), which uploads the built creative + creates the ad PAUSED in the target adset |
-| `new_campaign` | deferred (ship LAST — needs net-new `createCampaign`/`createAdSet` + targeting decisions) |
+| `new_campaign` | **enabled** (media-buyer loop, meta-campaign-adset-creation-primitive Phase 2) — get-or-create the shared `MB — Testing (ABO)` campaign via `getOrCreateTestingCampaign` and create one PAUSED purchase-optimized ad set via `createAdSet` ([[meta-ads]]) with ad-set-level `daily_budget`, `optimization_goal=OFFSITE_CONVERSIONS`, `bid_strategy=LOWEST_COST_WITHOUT_CAP`, `promoted_object={pixel_id,custom_event_type:"PURCHASE"}`, Advantage+ placements. **Governed** by [[ad-spend-governor]]: a proposed daily × `windowDays` that would push the account's rolling spend past its `ad_spend_budgets` ceiling ESCALATES (growth `director_activity` `escalated_new_adset_over_ceiling` + `external_result.deferred='governor_ceiling_breach'`) instead of creating a live object. Every successful create stamps a growth `director_activity` `created_test_adset` for Max's audit. When `params.ad_campaign_id` is set, chains straight into the publish adapter so the concept's ad lands PAUSED inside the new ad set. |
 | `test_benefit_angle` | deferred (seed `ad_campaigns` + `ad-tool/generate-full`, then publish) |
 | `new_lander_variant` | deferred (`generateAdvertorialPagesForCampaign`) |
 | `offer_test` | deferred (a pricing/offer change, not an ad publish) |
@@ -51,11 +51,15 @@ Safe to call more than once (non-approved / already-dispatched rows short-circui
 
 ### `ENABLED_ADAPTERS` — `ReadonlySet<RecommendationType>`
 
-The shipped-and-enabled recommendation types (`new_static_adset`, `new_video_adset`).
+The shipped-and-enabled recommendation types (`new_static_adset`, `new_video_adset`, `new_campaign`).
 
 ### `ENGINE_NAME_TAG` — `"[ie]"`
 
 The stable engine-created marker prepended to every engine-published ad name.
+
+### `evaluateGovernorHeadroom(budget, actualCents, proposedDailyBudgetCents)` — pure function
+
+The "test-ceiling" predicate. Projects `actualCents + proposedDailyBudgetCents × budget.windowDays` against `budget.usdCeilingCents`; returns `{ ok: true }` when the projection fits under the ceiling, `{ ok: false, reason }` when the caller must escalate. A `null` budget = `ok:true` (no ceiling configured — nothing to enforce). Called by the `new_campaign` adapter; kept pure so a media-buyer dry-run can simulate it without a live Graph call.
 
 ## Callers
 
@@ -68,9 +72,8 @@ The stable engine-created marker prepended to every engine-published ad name.
   resulting Meta ad is PAUSED until Dylan flips it live.
 - The `[ie]` tag rides on `ad_publish_jobs.ad_name` (the publisher prefers it over
   `ad_campaigns.name`), so the operator's campaign is never renamed.
-- Enabling a deferred adapter is a one-line `ENABLED_ADAPTERS` change — but
-  `new_campaign`/`test_benefit_angle` first need the adset objective/targeting
-  decision (see [[../specs/storefront-iteration-engine]] Phase 6 open questions).
+- Enabling a deferred adapter is a one-line `ENABLED_ADAPTERS` change — `test_benefit_angle`/`new_lander_variant`/`offer_test` still need their build paths (see [[../specs/storefront-iteration-engine]] Phase 6 open questions).
+- **Guarded compare-and-set on every `iteration_recommendations` update.** `updateRecommendationGuarded` narrows every post-async write to `(.eq id .eq workspace_id .eq status='approved').select('id')`; the callers bail on `changed=false` so a stale read cannot overwrite a rec that was flipped mid-flight. This is the "prove the guard before the mutation fires" rule from the coaching.
+- **Governor is a hard rail, not advisory.** On breach the `new_campaign` adapter escalates and returns `deferred:'governor_ceiling_breach'` — it does NOT create a PAUSED-but-recoverable object either. The `director_activity` row records the projection numbers so the CEO can raise the ceiling and re-approve. Same north-star pattern as [[ad-spend-governor]].
 
-See [[../specs/storefront-iteration-engine]] (Phase 6b) · [[meta__execution]] (6a) ·
-[[../lifecycles/ad-publish]] · [[../tables/iteration_recommendations]].
+See [[../specs/storefront-iteration-engine]] (Phase 6b) · [[../specs/meta-campaign-adset-creation-primitive]] (Phase 2) · [[meta-ads]] (`createCampaign`/`createAdSet`/`getOrCreateTestingCampaign`) · [[ad-spend-governor]] · [[director-activity]] · [[meta__execution]] (6a) · [[../lifecycles/ad-publish]] · [[../tables/iteration_recommendations]].
