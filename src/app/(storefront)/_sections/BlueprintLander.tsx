@@ -27,6 +27,7 @@ function lowestPriceCents(data: PageData): number | null {
     : null;
 }
 
+
 export function BlueprintLander({
   data,
   content,

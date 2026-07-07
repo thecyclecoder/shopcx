@@ -1,5 +1,5 @@
 import type { OfferData } from "@/lib/blueprint-render";
-import { LanderCTA } from "../_components/LanderCTA";
+import { LanderCTA, type LanderBuy } from "../_components/LanderCTA";
 import { CountdownTimer } from "../_components/CountdownTimer";
 
 /**
@@ -28,7 +28,7 @@ const CSS = `
 @media (min-width:900px){.bp-of__headline{font-size:2rem}.bp-of__title{font-size:1.7rem}}
 `;
 
-export function BlueprintOffer({ offer }: { offer: OfferData }) {
+export function BlueprintOffer({ offer, buy }: { offer: OfferData; buy?: LanderBuy }) {
   return (
     <section className="bp-of" data-section="blueprint-offer" id="pricing">
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
@@ -49,7 +49,7 @@ export function BlueprintOffer({ offer }: { offer: OfferData }) {
                 <li key={i}><span className="ck" aria-hidden>✓</span><span>{item}</span></li>
               ))}
             </ul>
-            <div className="bp-of__cta"><LanderCTA label={offer.ctaLabel} /></div>
+            <div className="bp-of__cta"><LanderCTA label={offer.ctaLabel} buy={buy} /></div>
             <div className="bp-of__rate"><span className="s" aria-hidden>★★★★★</span> {offer.ratingText}</div>
             <div className="bp-of__timer">Sale Ends in: <CountdownTimer seconds={offer.countdownSeconds} /></div>
           </div>

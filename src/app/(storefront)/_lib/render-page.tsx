@@ -231,23 +231,13 @@ export function StorefrontPage({
         >
           <main className="flex w-full flex-col">
             {blueprint ? (
-              <>
-                {/* Blueprint-driven lander: every above-the-fold block comes
-                    from lander_blueprints.content.blocks[] (Carrie's copy +
-                    resolved product_media). The SHARED-CHECKOUT closers
-                    (ingredients / pricing / reviews / final CTA) are reused
-                    unchanged so the buy-flow matches every other lander. */}
-                <BlueprintLander data={data} content={blueprint} />
-                <IngredientsSection data={data} />
-                <PriceTableSection data={data} />
-                <ReviewsSection
-                  data={data}
-                  slug={reviewSlug}
-                  workspaceSlug={data.workspace.storefront_slug || ""}
-                />
-                <FinalCTASection data={data} />
-                <BrandTrustSection workspaceName={data.workspace.name || "Superfoods Company"} />
-              </>
+              /* Blueprint-driven lander: a SELF-CONTAINED fixed composition (hero → intro → reasons
+                 → reviews → featured → offer → FAQ → social proof → footer). It carries its own
+                 offer card + checkout CTA (the offer's LanderCTA renders the same #buy-… add-to-cart
+                 the price table would), so the PDP closers (ingredients / price table / reviews /
+                 final CTA / brand trust) are intentionally NOT appended — the lander ends at its
+                 own footer. */
+              <BlueprintLander data={data} content={blueprint} />
             ) : advertorial ? (
               advertorial.variant === "reasons" ? (
                 <>
