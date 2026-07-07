@@ -53,7 +53,7 @@ async function loggedActionFetch(url: string, init: RequestInit, opts: { endpoin
 
 ## Gotchas
 
-_None documented._
+- **20s upstream deadline.** Both `loggedAppstleFetch` and `loggedActionFetch` bound each outbound call with `AbortSignal.timeout(20_000)` and translate an `AbortError` / `TimeoutError` into `throw new Error("upstream_timeout")`. Callers hit `handleAppstleError` (see [[../libraries/portal-helpers]]) which renders a 502-class response, instead of the portal Lambda hanging until Vercel's 30s runtime-timeout reap. Mirrors [[../libraries/portal-helpers]] `portalFetch`. When translated to `upstream_timeout`, no `appstle_api_calls` row is written for the stall — surface the timeout via the caller's error surface (Control Tower signature `vercel:db57eb2d13e0a610` is the original repro).
 
 ---
 
