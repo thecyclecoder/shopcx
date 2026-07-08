@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { verifyGithubWebhook, detectAndEnqueueDirtyPrs, autoMergeReadyPrs } from "@/lib/github-pr-resolve";
 import { promoteEligibleSpecsToGoalBranch, promoteCompleteGoalsToMain } from "@/lib/agent-jobs";
 
@@ -10,21 +10,33 @@ import { promoteEligibleSpecsToGoalBranch, promoteCompleteGoalsToMain } from "@/
  *   - `pull_request` opened/synchronize/reopened/ready_for_review.
  *   - `check_suite` / `check_run` completed + `status` — a build PR's checks just went green (the event
  *      that makes a PR READY to auto-merge). Needed only by Gate A below.
- * On either, we run TWO mirror gates over the open `claude/*` PRs:
+ * On either, we run FOUR mirror gates over the open `claude/*` PRs:
  *   1. Dirty-PR resolver (CONFLICTING half): list, check each `mergeable` (GitHub recomputes it async
  *      after a push, so a null is polled briefly), and enqueue ONE deduped `pr-resolve` agent_jobs row for
  *      any that just became CONFLICTING. The box worker (`runPrResolveJob`) then merges origin/main,
  *      resolves the (usually additive) conflicts, tsc-gates, and pushes — or rebuilds-on-main / surfaces.
  *   2. Auto-merge gate (READY half — auto-ship-pipeline Phase 1 / Gate A): squash-merge + delete branch
  *      ONE ready (mergeable + all-checks-green) claude/* PR — serialized, sync-aware, owner kill-switch.
+ *   3. Gate B — spec→goal-branch integration (spec-goal-branch-pm-flow M4).
+ *   4. Gate C — atomic goal→main promotion (spec-goal-branch-pm-flow M5).
  *
  * HMAC verification (X-Hub-Signature-256, secret = GITHUB_WEBHOOK_SECRET) runs first on the raw body —
  * without it anyone who learns the URL could spoof a build-queue enqueue or an auto-merge. A `ping` is
  * acked. No workspace lookup: the repo serves one build console (the job attaches to the build-console
  * workspace, whose `auto_merge_enabled` flag is the Gate A kill-switch).
  *
- * Webhook events to subscribe in GitHub: Pushes, Pull requests (the dirty-PR resolver) PLUS Check suites,
- * Check runs, Statuses (so Gate A fires the moment a PR's checks go green).
+ * ACK-fast + bounded-after() pattern. Each of the four gates lists every open `claude/*` PR and makes
+ * per-candidate GitHub REST calls (fetch mergeable, per-member spec-eligibility, /merges). On a busy
+ * build board the combined work used to exceed Vercel's 300s Lambda cap in the response path, killing
+ * the delivery mid-fanout and re-feeding the Runtime Timeout as a level=error log back through the log
+ * drain. We now ACK GitHub with `{ ok: true, deferred: true }` the moment the event passes the HMAC +
+ * ping + relevance checks (GitHub only needs the ACK — it redelivers on failure), and run the four gates
+ * inside `after()`. `after()` still runs on the SAME Lambda invocation (so it counts against the 300s
+ * cap), so the loop is wall-clock-bounded to 250s — 50s under the cap — with a warn on trip. Any gate
+ * deferred by the deadline is a no-op for this invocation; the next GitHub event (or the box worker's
+ * platform-director standing pass, which already re-runs these same gates) picks it up. This is the same
+ * shape already load-bearing on `/api/webhooks/vercel-logs`; both webhooks share one bounded-fanout
+ * pattern and one place to reason about the Vercel cap.
  */
 export async function POST(request: Request) {
   const rawBody = await request.text();
@@ -63,22 +75,43 @@ export async function POST(request: Request) {
 
   if (!dirtyRelevant && !mergeRelevant) return NextResponse.json({ ok: true, skipped: event });
 
-  try {
-    const dirty = dirtyRelevant
-      ? await detectAndEnqueueDirtyPrs()
-      : { checked: 0, conflicting: 0, enqueued: 0, closedDuplicate: 0, prs: [] };
-    if (dirtyRelevant) {
-      console.log(
-        `[github-webhook] ${event}: checked ${dirty.checked} claude/* PR(s), ${dirty.conflicting} conflicting, ${dirty.enqueued} pr-resolve job(s) enqueued, ${dirty.closedDuplicate} closed as already-merged duplicate(s)`,
-      );
-    }
+  // ACK GitHub immediately; run the four heavy gates inside after() so the response path can't hit the
+  // 300s Vercel Lambda cap. Wall-clock deadline (250_000 ms) inside the callback bounds the total
+  // fan-out; any gate deferred by the deadline is picked up by the next event or the box worker's
+  // standing pass. Each gate keeps its own try/catch so a failure in one still lets the others run
+  // (the existing "independent gates" semantics). Mirror of /api/webhooks/vercel-logs.
+  after(async () => {
+    const started = Date.now();
+    const TOTAL_GATES = 4;
+    let ranGates = 0;
+    const remaining = () => TOTAL_GATES - ranGates;
+    const deadlineHit = () => Date.now() - started > 250_000;
 
-    // Gate A — auto-merge ready PRs (serialized, sync-aware, kill-switched). Independent of the dirty gate;
-    // a failure in one must not block the other.
-    let autoMerge: Awaited<ReturnType<typeof autoMergeReadyPrs>> | undefined;
+    // Gate 1 — dirty-PR resolver (CONFLICTING half). dirtyRelevant only.
+    if (deadlineHit()) {
+      console.warn("[github-webhook] after() deadline hit, deferring %d gate(s)", remaining());
+      return;
+    }
+    if (dirtyRelevant) {
+      try {
+        const dirty = await detectAndEnqueueDirtyPrs();
+        console.log(
+          `[github-webhook] ${event}: checked ${dirty.checked} claude/* PR(s), ${dirty.conflicting} conflicting, ${dirty.enqueued} pr-resolve job(s) enqueued, ${dirty.closedDuplicate} closed as already-merged duplicate(s)`,
+        );
+      } catch (err) {
+        console.error("[github-webhook] dirty-PR detection failed:", err);
+      }
+    }
+    ranGates++;
+
+    // Gate A — auto-merge ready PRs (serialized, sync-aware, kill-switched).
+    if (deadlineHit()) {
+      console.warn("[github-webhook] after() deadline hit, deferring %d gate(s)", remaining());
+      return;
+    }
     if (mergeRelevant) {
       try {
-        autoMerge = await autoMergeReadyPrs();
+        const autoMerge = await autoMergeReadyPrs();
         console.log(
           `[github-webhook] ${event}: auto-merge ${autoMerge.enabled ? (autoMerge.syncActive ? "deferred (sync active)" : `checked ${autoMerge.checked}, ${autoMerge.ready} ready, ${autoMerge.buildGateBlocked} build-gate-blocked, ${autoMerge.accumulationBlocked} accumulation-blocked, ${autoMerge.goalBoundBlocked} goal-bound-handed-off, ${autoMerge.testsGateBlocked} tests-gate-blocked, merged ${autoMerge.merged}${autoMerge.mergedPr ? ` (PR #${autoMerge.mergedPr})` : ""}`) : "disabled (kill-switch)"}`,
         );
@@ -86,15 +119,17 @@ export async function POST(request: Request) {
         console.error("[github-webhook] auto-merge gate failed:", err);
       }
     }
+    ranGates++;
 
-    // Gate B — spec-goal-branch-pm-flow M4: promote every goal-bound, promote-eligible spec branch onto its
-    // goal branch (`goal/{goal-slug}`), sequenced by blocked_by. Independent of the auto-merge gate; a failure
-    // in one must not block the other. Uses the GitHub /merges API (no local checkout) so it runs here AND in
-    // the box worker standing pass. Does NOT push the goal branch to main (M5 owns that).
-    let goalPromote: Awaited<ReturnType<typeof promoteEligibleSpecsToGoalBranch>> | undefined;
+    // Gate B — spec→goal-branch promotion (spec-goal-branch-pm-flow M4). GitHub /merges API (no local
+    // checkout) so it runs here AND in the box worker standing pass. Does NOT push the goal branch to main.
+    if (deadlineHit()) {
+      console.warn("[github-webhook] after() deadline hit, deferring %d gate(s)", remaining());
+      return;
+    }
     if (mergeRelevant) {
       try {
-        goalPromote = await promoteEligibleSpecsToGoalBranch();
+        const goalPromote = await promoteEligibleSpecsToGoalBranch();
         if (goalPromote.promoted.length || goalPromote.conflicts.length || goalPromote.goalBranchesCreated.length) {
           console.log(
             `[github-webhook] ${event}: goal-promote merged ${goalPromote.promoted.length} (${goalPromote.promoted.join(", ") || "—"}), seeded ${goalPromote.goalBranchesCreated.length} goal branch(es), ${goalPromote.conflicts.length} conflict(s)${goalPromote.conflicts.length ? ` (${goalPromote.conflicts.join(", ")})` : ""}`,
@@ -104,17 +139,18 @@ export async function POST(request: Request) {
         console.error("[github-webhook] goal-branch promote failed:", err);
       }
     }
+    ranGates++;
 
-    // Gate C — spec-goal-branch-pm-flow M5: ATOMIC goal→main promotion. After Gate B integrates eligible spec
-    // branches onto their goal branches, promote every COMPLETE + GREEN goal branch to main in ONE merge and
-    // stamp every member phase shipped (the only shipped-writer), then trigger the fold pipeline. Parent goals
-    // are skipped (their children promote independently). One-off specs ship via the auto-merge gate (Gate A),
-    // not here. Independent of the other gates; a failure in one must not block the others. GitHub /merges API
-    // (no checkout) so it runs here AND in the box worker standing pass.
-    let goalToMain: Awaited<ReturnType<typeof promoteCompleteGoalsToMain>> | undefined;
+    // Gate C — ATOMIC goal→main promotion (spec-goal-branch-pm-flow M5). The only shipped-writer for
+    // goal-bound member phases; parent goals skip (their children promote independently); one-off specs
+    // ship via Gate A (not here).
+    if (deadlineHit()) {
+      console.warn("[github-webhook] after() deadline hit, deferring %d gate(s)", remaining());
+      return;
+    }
     if (mergeRelevant) {
       try {
-        goalToMain = await promoteCompleteGoalsToMain();
+        const goalToMain = await promoteCompleteGoalsToMain();
         if (goalToMain.promoted.length || goalToMain.conflicts.length) {
           console.log(
             `[github-webhook] ${event}: goal→main promoted ${goalToMain.promoted.length} (${goalToMain.promoted.join(", ") || "—"}), ${goalToMain.conflicts.length} conflict(s)${goalToMain.conflicts.length ? ` (${goalToMain.conflicts.join(", ")})` : ""}, ${goalToMain.parentExempt.length} parent-exempt`,
@@ -124,10 +160,8 @@ export async function POST(request: Request) {
         console.error("[github-webhook] goal→main atomic promote failed:", err);
       }
     }
+    ranGates++;
+  });
 
-    return NextResponse.json({ ok: true, ...dirty, autoMerge, goalPromote, goalToMain });
-  } catch (err) {
-    console.error("[github-webhook] dirty-PR detection failed:", err);
-    return NextResponse.json({ error: "Processing failed" }, { status: 500 });
-  }
+  return NextResponse.json({ ok: true, deferred: true });
 }

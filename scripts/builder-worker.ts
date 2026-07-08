@@ -24,6 +24,11 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
+// agent-jobs-update-retry-and-error-surface Phase 1 — the bounded-retry chokepoint the shared
+// `update(id, patch)` helper below funnels every agent_jobs PATCH through. Absorbs a transient
+// Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
+// AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
+import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -2401,7 +2406,29 @@ async function update(id: string, patch: Record<string, unknown>) {
       };
     }
   }
-  await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+  // agent-jobs-update-retry-and-error-surface Phase 1 — inspect Supabase's response instead of
+  // firing-and-forgetting. A Cloudflare 521 in front of PostgREST used to silently drop the
+  // transition (build stays running past terminal, needs_input never lands, dispatch proceeds as
+  // if the row was updated). writeAgentJobsUpdateWithRetry retries the transient class (5xx /
+  // fetch failed / ECONNRESET) with bounded backoff and THROWS AgentJobsUpdateError on the
+  // terminal case so the caller cannot continue as if the write succeeded. A bug-shaped throw
+  // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
+  const finalPatch = { ...patch, updated_at: new Date().toISOString() };
+  const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
+  await writeAgentJobsUpdateWithRetry(
+    async () => {
+      // Supabase-js resolves this awaited chain to { data, error, status, statusText }. The
+      // retry helper ONLY reads `error` + `status` — data can be undefined on a bare update
+      // without .select(), which is exactly what we do here (fire the transition, no read).
+      const resp = (await db.from("agent_jobs").update(finalPatch).eq("id", id)) as {
+        error: { message?: string; code?: string | null; details?: string | null; hint?: string | null } | null;
+        status?: number | null;
+        statusText?: string | null;
+      };
+      return { error: resp.error, status: resp.status ?? null, statusText: resp.statusText ?? null };
+    },
+    { jobId: id, attemptedStatus },
+  );
   // no-parked-specs-auto-route-needs-attention Phase 0 — classify every park at the single chokepoint.
   // Every needs_attention write goes through this helper, so stamping here covers every caller (build,
   // repair, regression, security, spec-test, …) with no per-callsite plumbing. Best-effort + async:
@@ -3100,6 +3127,17 @@ async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown
 // Read the live `public` BASE TABLE names off the pooler (raw SQL — information_schema isn't exposed
 // through PostgREST). Returns null when the host has no DB password (→ the check reports 'skipped',
 // never a false "no drift"). Best-effort connect/teardown.
+//
+// Reads pg_catalog.pg_class directly — the AUTHORITATIVE system-catalog source — instead of
+// information_schema.tables, which is filtered by the connecting role's per-table privileges (see the
+// SQL-standard note in [pg docs / 34.19]: "Only those tables ... that the current user has access to
+// ... are shown"). The migration-drift-check-stop-false-positive-on-present-tables spec Phase 1
+// root-caused the god_mode_sessions/god_mode_approvals phantom-absent alerts to exactly this: the
+// tables were CREATEd + RLS-guarded via scripts/apply-god-mode-sessions-migration.ts, but the pooler
+// role's effective privilege on them left them invisible to information_schema.tables even though
+// they physically exist. pg_class is unaffected — it is the raw catalog view every table registers
+// in on CREATE, regardless of grants. relkind: 'r' = ordinary base table, 'p' = partitioned table
+// (still a table, materialized as its partitions). Excludes toast/index/view/materialized-view/etc.
 async function fetchLivePublicTables(): Promise<string[] | null> {
   let connectionString: string;
   try {
@@ -3113,7 +3151,9 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   await c.connect();
   try {
     const res = await c.query(
-      "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
+      "select c.relname as table_name from pg_catalog.pg_class c " +
+        "join pg_catalog.pg_namespace n on n.oid = c.relnamespace " +
+        "where n.nspname = 'public' and c.relkind in ('r', 'p')",
     );
     return (res.rows as Array<{ table_name: string }>).map((r) => r.table_name);
   } finally {
@@ -3448,6 +3488,32 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       const finding = mod.analyzeSlowQuery(row, plan);
       if (finding) findings.push(finding);
     }
+
+    // db-health-request-volume (2026-07-08): the aggregate request/egress firehose signal — the blind
+    // spot that let ~78K PostgREST req/hr + ~182K rows/hr of internal polling drive egress with no Devi
+    // finding. Reuses this pass's pg_stat_statements access. Best-effort — additive; a failure here must
+    // never break the slow-query pass.
+    try {
+      const infoRes = await c.query(`select stats_reset from pg_stat_statements_info`);
+      const statsReset = (infoRes.rows[0] as { stats_reset?: string } | undefined)?.stats_reset;
+      const windowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
+      const totalsRes = await c.query(`select coalesce(sum(calls),0)::bigint as calls, coalesce(sum(rows),0)::bigint as rows from pg_stat_statements`);
+      const totals = (totalsRes.rows[0] ?? {}) as Record<string, unknown>;
+      const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by calls desc limit 8`);
+      const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by rows desc limit 8`);
+      const mapTop = (rs: Array<Record<string, unknown>>) => rs.map((r) => ({ queryid: String(r.queryid ?? ""), query: String(r.query ?? ""), calls: Number(r.calls ?? 0), rows: Number(r.rows ?? 0) }));
+      const rvFinding = mod.analyzeRequestVolume({
+        windowHours,
+        totalCalls: Number(totals.calls ?? 0),
+        totalRows: Number(totals.rows ?? 0),
+        topByCalls: mapTop(topCallsRes.rows as Array<Record<string, unknown>>),
+        topByRows: mapTop(topRowsRes.rows as Array<Record<string, unknown>>),
+      });
+      if (rvFinding) findings.push(rvFinding);
+    } catch (e) {
+      console.warn("[db-health] request-volume escalation failed:", e instanceof Error ? e.message : String(e));
+    }
+
     const proposed = await surfaceDbHealthFindings(findings);
     const ranked = mod.dedupeFindings(findings);
     const slow_queries = ranked.slice(0, 10).map((f) => ({ queryid: f.signature.split(":").pop() || "", cause: f.cause, table: f.table, impact: f.impact }));
@@ -3762,6 +3828,31 @@ async function runDbHealthInstanceJob(): Promise<void> {
       /* best-effort: partial signals are still worth beating */
     }
 
+    // db-health-temp-spill-attribution (2026-07-08): pg_stat_database.temp_bytes is an instance
+    // aggregate with no query attribution — so name the top temp_blks_written offenders here so a
+    // temp_spill_pressure finding fingers the spilling query (the subscriptions LTV scan was 98% of
+    // spill, invisible in the aggregate). Best-effort — a failure must never skip the pass.
+    let tempOffenders: import("../src/lib/control-tower/db-health").TempSpillOffender[] = [];
+    try {
+      const toRes = await c.query(
+        `select queryid::text as queryid, query, calls,
+                (temp_blks_written * current_setting('block_size')::bigint)::bigint as temp_bytes
+           from pg_stat_statements
+          where temp_blks_written > 0
+            and query not ilike '%pg_stat_statements%'
+          order by temp_blks_written desc
+          limit 5`,
+      );
+      tempOffenders = (toRes.rows as Array<Record<string, unknown>>).map((r) => ({
+        queryid: String(r.queryid ?? ""),
+        query: String(r.query ?? ""),
+        calls: Number(r.calls ?? 0),
+        tempBytes: Number(r.temp_bytes ?? 0),
+      }));
+    } catch {
+      /* best-effort: pg_stat_statements may be unreadable; the aggregate temp flag still fires */
+    }
+
     const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
       xactCommit: statDb.xactCommit,
       xactRollback: statDb.xactRollback,
@@ -3776,6 +3867,7 @@ async function runDbHealthInstanceJob(): Promise<void> {
       statementsNearTimeout,
       nearTimeoutSamples,
       authenticatedStatementTimeoutMs,
+      tempOffenders,
     };
     const findings = mod.analyzeInstanceHealth(input);
     const ranked = mod.rankFindings(findings);

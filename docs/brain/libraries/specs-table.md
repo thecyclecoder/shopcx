@@ -65,6 +65,16 @@ supabase-js has no transaction surface, so `upsertSpec` is a sequence of writes 
 - **Build queue gates** ([[../specs/planner-gates-build-queue-on-authored-specs]]) — `runPlanJob` and the foreman dispatch gates both call `getSpec(workspaceId, slug)` to **verify a spec row actually exists** in `public.specs` before queuing a build. A missing row → the job is parked `needs_attention` with `needs_attention_class='spec_row_missing'` (the author lane silently failed upstream). This prevents phantom builds when an authored spec never reached the DB.
 - **Fold process** ([[../specs/spec-fold-from-db-row]] Phase 1) — the box worker's `runFoldJob` calls `getSpec` with a `status='shipped'` guard to fetch shipped specs, then materializes each into `.box/spec-{slug}.md` for the fold-agent to read. After fold commits succeed, the worker updates the row to `status='folded'`. The spec row is PRESERVED (not deleted) so archive views + audit history can render it unchanged.
 
+## Invariant — no client-side id/slug array batching ([[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] Phase 3)
+
+**All specs/phase reads on this file go through server-side RPCs — NEVER a client-side id/slug array over the wire.** The 2026-07-08 DB-overload incident and its precedent ([[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]]) traced to `.in("id", [large-array])` calls whose URL overflowed the ~16KB undici header cap (`UND_ERR_HEADERS_OVERFLOW`) once the workspace held a few hundred specs, wedging `getSpec` / the roadmap / the build claim-gate / the spec-review enqueue reaper. The three sanctioned reads on this file:
+
+- `listSpecs` / `getActiveSpecs` / `getAllSpecs` → **`list_specs_with_phases(uuid, text)`** RPC (server-side specs+phases join).
+- `listSpecPhaseAnomalies` → **`list_spec_phase_anomalies(uuid)`** RPC (server-side orphan + provenance-gap sweep via a single `spec_phases LEFT JOIN specs`).
+- `getSpec` — one row by `(workspace_id, slug)` PK, then one phase-lookup by `(spec_id)` — no id array by construction.
+
+**CI-enforced** by `scripts/_check-specs-phases-no-client-in-batching.ts` (chained into `predeploy`): a reintroduced `.in("id", <array>)` or `.in("spec_slug", <array>)` in `src/lib/specs-table.ts` or `src/lib/brain-roadmap.ts` fails the build. Genuinely-bounded LITERAL arrays (`.in("id", ["a","b"])`) still pass — a variable, `.slice(...)` batch, or spread does not.
+
 ## Gotchas
 
 - **The trigger is the rail.** Don't write `specs.status='shipped'` directly while a phase is still `planned` — the next phase write will roll it back. That's the DB-enforced rule that kills the [[../specs/spec-review-agent]] "shipped with 1 phase" class.
@@ -75,4 +85,4 @@ supabase-js has no transaction surface, so `upsertSpec` is a sequence of writes 
 
 ## Related
 
-[[../tables/specs]] · [[../tables/spec_phases]] · [[brain-roadmap]] · [[spec-card-state]] · [[../recipes/backfill-specs-from-markdown]] · [[../specs/spec-body-table-and-backfill]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-phase-pr-provenance]] · [[../specs/spec-fold-from-db-row]] · [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] · [[../goals/db-driven-specs]]
+[[../tables/specs]] · [[../tables/spec_phases]] · [[brain-roadmap]] · [[spec-card-state]] · [[../recipes/backfill-specs-from-markdown]] · [[../specs/spec-body-table-and-backfill]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-phase-pr-provenance]] · [[../specs/spec-fold-from-db-row]] · [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] · [[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] · [[../goals/db-driven-specs]]
