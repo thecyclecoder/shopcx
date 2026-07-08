@@ -52,7 +52,7 @@ async function getBrand(workspaceId: string, resendDomain: string): Promise<{
   };
 }
 
-interface OrderLineLike {
+export interface OrderLineLike {
   title: string;
   variant_title?: string | null;
   quantity: number;
@@ -64,9 +64,10 @@ interface OrderLineLike {
   is_gift?: boolean;
   image_url?: string | null;
   sku?: string | null;
+  product_id?: string | null;
 }
 
-interface AddressLike {
+export interface AddressLike {
   first_name?: string;
   last_name?: string;
   address1?: string;
@@ -77,7 +78,7 @@ interface AddressLike {
   country_code?: string;
 }
 
-interface OrderForEmail {
+export interface OrderForEmail {
   id: string;
   order_number: string;
   email: string;
