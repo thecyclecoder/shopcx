@@ -6,9 +6,9 @@ Server SDK for the durable **Direction artifact** Sol writes ONCE per ticket on 
 
 ## Types
 
-- `TicketDirectionPath = "playbook" | "stateless" | "needs_info"` — the three treatment paths Sol can commit the ticket to on first touch. `playbook` drives an existing playbook; `stateless` is a single stateless reply; `needs_info` asks the customer for a specific missing piece before any action.
+- `TicketDirectionPath = "playbook" | "journey" | "stateless" | "needs_info"` — the four treatment paths Sol can commit the ticket to on first touch. `playbook` drives an existing playbook; `journey` launches a matched [[../tables/journey_definitions|journey]] via [[sol-direction-apply]] `launchJourney` (Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]); `stateless` is a single stateless reply; `needs_info` asks the customer for a specific missing piece before any action.
 - `TicketDirection` — the full row: `{ id, workspace_id, ticket_id, intent, context_summary, chosen_path, plan, guardrails, authored_by, authored_at, superseded_at, resession_count }`. `guardrails` is `Record<string, unknown>` (Sol picks the bounded proxies; hitting a rail = escalate — see [[../../CLAUDE]] § North star). `plan` is the typed `TicketDirectionPlan` (see plan-shape below).
-- `TicketDirectionPlanError` — typed exception thrown by `writeDirection` when the plan violates the path-specific contract. Carries `code: 'playbook_slug_missing' | 'playbook_slug_unknown' | 'playbook_slug_not_string'` + `slug?` so callers can render user-legible diagnostics without string-matching on `message`.
+- `TicketDirectionPlanError` — typed exception thrown by `writeDirection` when the plan violates the path-specific contract. Carries `code: 'playbook_slug_missing' | 'playbook_slug_unknown' | 'playbook_slug_not_string' | 'journey_slug_missing' | 'journey_slug_unknown' | 'journey_slug_not_string'` + `slug?` so callers can render user-legible diagnostics without string-matching on `message`.
 
 ## Plan-shape
 
@@ -17,6 +17,7 @@ Server SDK for the durable **Direction artifact** Sol writes ONCE per ticket on 
 | `chosen_path` | Required `plan` keys | Optional `plan` keys | Writer check |
 |---|---|---|---|
 | `playbook` | `playbook_slug` (string, must exist in `public.playbooks.slug` for this workspace) | `playbook_seed_context` (record — order/subscription/customer ids to merge into `tickets.playbook_context` on step 0) | short lookup `SELECT id FROM playbooks WHERE workspace_id=? AND slug=?` — a null result throws `TicketDirectionPlanError(code='playbook_slug_unknown')` with the slug echoed |
+| `journey` | `journey_slug` (string, must exist in `public.journey_definitions.slug` with `is_active=true` for this workspace) | — | short lookup `SELECT id FROM journey_definitions WHERE workspace_id=? AND slug=? AND is_active=true` — a null result throws `TicketDirectionPlanError(code='journey_slug_unknown')` with the slug echoed. Cheap-execution APPLIES the journey via [[sol-direction-apply]] `applySolDirection` → `launchJourneyForTicket` (Phase 2 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]) — never a freeform "click below" reply |
 | `stateless` | — (Sol conventionally sets `action:"send_stateless_reply"`) | — | shape-only, no cross-table lookup |
 | `needs_info` | — (Sol conventionally sets `needs:[…]` with the concrete list of missing pieces) | — | shape-only, no cross-table lookup |
 
