@@ -18,9 +18,20 @@ The DevOps Director's **coaching brain** — the supervisory pass that detects a
   - frequency-only candidates (no recurrence) are **surfaced** for director review — never auto-coached (no false coaching).
 - **`recheckPendingCoachings(admin, workspaceId, { apply? })`** — for each `pending` coaching, did the `(worker, class)` disposition recur in [[director_activity]] **after** the coaching? → `recurred` (counts toward escalation next pass) else (once ≥1 day old) `stuck`. Run at the top of each pass.
 
+## Blameless box-outage — auto-resolve (skip coaching, no CEO escalation)
+
+A worker's low grade CAN come from the BOX going down mid-run — the Claude CLI drops with `authentication_failed` / `Not logged in` when its account credentials evict, the Claude-down breaker trips (`Claude is down (breaker tripped) — auto-resumes on recovery`), or the same identical box-level runtime error stamps every action in the outage window. That is an INFRA failure — the worker never reached its judgment layer. Coaching such a batch wastes a slot; leaving the coach job parked `needs_attention` mints a CEO [[../tables/dashboard_notifications]] card every cycle while the outage grades age out (the [[../specs/agent-coach-auto-resolves-blameless-box-outage-grade-batches-instead-of-escalating|spec]] this section documents).
+
+Two-part guard, wired inside [[../../scripts/builder-worker.ts]] `runAgentCoachJob` BEFORE the Max box session dispatches:
+
+- **`classifyBlamelessOutageBatch(lows): { blameless, dominantSignature, perGrade, reason }`** — pure classifier over the batch's low grades. Reads each grade's grader `reasoning` + the underlying [[../tables/agent_jobs]]`.error` + `.log_tail`, matches against `BLAMELESS_OUTAGE_SIGNATURES` (`cli_auth_failed` · `cli_not_logged_in` · `cli_login_prompt` · `claude_breaker_tripped` · `breaker_tripped` · `blocked_on_dependency_claude`), and demotes the batch on any `WORKER_ATTRIBUTABLE_MARKERS` hit (wrong disposition · misdiagnosed root cause · false positive/negative · symptom-not-root · rebuild churn). **A batch is blameless-outage iff EVERY low grade matches a box signature AND NONE carries a worker-attributable marker.** One real slip demotes the whole batch back to COACHABLE — an outage co-occurrence never masks a genuine worker mistake.
+- **`decideBlamelessOutageOutcome(verdict, recentAuditRows, now?): CoachBatchOutcome`** — pure decision fn. Not blameless → `proceed_to_coach` (the normal coach → route-to-repair → escalate path runs untouched). Blameless with a `blameless_outage` audit row for the same (workspace, agent_kind) inside `BLAMELESS_OUTAGE_DEDUP_MS` (24h) → `auto_resolve_deduped` (mark the coach job `completed` referencing the existing audit id — recurring outage grades aging out do NOT re-mint a card every cycle). Blameless with no recent audit row → `record_blameless_outage` (insert ONE row into [[../tables/agent_coaching_log]] with `kind='blameless_outage'` · `recheck_status='stuck'` since there is nothing to re-check on an outage · `error_class=blameless-outage:{signature}` · `source_activity_ids` = the grade ids that made up the batch).
+
+Either way the coach `agent_jobs` row lands `status='completed'` — **NEVER `needs_attention`** — so the CEO card path never fires. Verification tests: `src/lib/agents/agent-coaching.test.ts` (both pure functions, 16 cases covering the classifier signature vocabulary + every decision branch + the dedup boundary).
+
 ## Constants (tunable defaults)
 
-`COACHING_DIRECTOR_FUNCTION='platform'` · `COACHING_WINDOW_DAYS=14` · `REPEAT_ERROR_THRESHOLD=3` · `COACHING_ATTEMPTS_BEFORE_ESCALATE=2`.
+`COACHING_DIRECTOR_FUNCTION='platform'` · `COACHING_WINDOW_DAYS=14` · `REPEAT_ERROR_THRESHOLD=3` · `COACHING_ATTEMPTS_BEFORE_ESCALATE=2` · `BLAMELESS_OUTAGE_DEDUP_MS=24h`.
 
 ## Why this exists
 
