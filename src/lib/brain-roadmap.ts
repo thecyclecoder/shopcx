@@ -910,36 +910,28 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
     const { getLatestSpecTestRuns, getHumanCheckResolutions, isCleanMachinePassRun } = await import("@/lib/spec-test-runs");
     const { getSecurityStateBySlug } = await import("@/lib/security-agent");
     const admin = createAdminClient();
-    const slugs = cards.map((c) => c.slug);
-    const [jobRows, runs, resolutions, securityBySlug] = await Promise.all([
-      // Defensive `select("*")` so a deploy that pre-dates the `preview_url`/`merge_sha` column migration
-      // degrades gracefully (column absent ⇒ undefined ⇒ no preview / not-merged ⇒ no in_testing override).
-      // Slug-batched (inSpecSlugChunks) so the URL can't overflow the 16KB header limit at scale.
-      inSpecSlugChunks<Record<string, unknown>>(slugs, (batch) =>
-        admin
-          .from("agent_jobs")
-          .select("*")
-          .eq("workspace_id", workspaceId)
-          .eq("kind", "build")
-          .in("spec_slug", batch)
-          .order("created_at", { ascending: false })
-          .limit(2000),
-      ),
+    const [jobRowsRes, runs, resolutions, securityBySlug] = await Promise.all([
+      // list-specs-with-phases-rpc Phase 3 — server-side rollup. `roadmap_latest_build_signals` returns
+      // ONE row per spec_slug (the LATEST kind='build' agent_jobs row) via a `distinct on (spec_slug)
+      // order by spec_slug, created_at desc` scan of the (workspace_id, spec_slug, created_at desc)
+      // index. Replaces the prior slug-batched `.in("spec_slug", [...]) limit(2000)` fan-out that grew
+      // with the workspace's spec count and was the cause of the slow roadmap page load. No id/slug
+      // array crosses the wire.
+      admin.rpc("roadmap_latest_build_signals", { p_workspace_id: workspaceId }),
       getLatestSpecTestRuns(workspaceId),
       getHumanCheckResolutions(workspaceId),
       getSecurityStateBySlug(admin, workspaceId),
     ]);
-    // Reduce build jobs to the LATEST per slug (the rows arrive newest-first, so the first one wins).
-    const latestJobBySlug = new Map<string, Record<string, unknown>>();
-    for (const row of jobRows as Record<string, unknown>[]) {
-      const slug = String(row.spec_slug || "");
-      if (!slug || latestJobBySlug.has(slug)) continue;
-      latestJobBySlug.set(slug, row);
+    if (jobRowsRes.error) throw jobRowsRes.error;
+    const latestJobBySlug = new Map<string, { status: string; preview_url: string | null }>();
+    for (const row of (jobRowsRes.data ?? []) as { spec_slug: string; status: string | null; preview_url: string | null }[]) {
+      if (!row.spec_slug || latestJobBySlug.has(row.spec_slug)) continue;
+      latestJobBySlug.set(row.spec_slug, { status: String(row.status ?? ""), preview_url: row.preview_url });
     }
     for (const card of cards) {
       const job = latestJobBySlug.get(card.slug);
-      const previewUrl = job ? (job["preview_url"] as string | null | undefined) : undefined;
-      const jobStatus = job ? String(job["status"] || "") : "";
+      const previewUrl = job ? job.preview_url : undefined;
+      const jobStatus = job ? job.status : "";
       const hasPreview = typeof previewUrl === "string" && previewUrl.length > 0;
       // REAL-TIME in_progress signal: the latest build job for this spec is actively working/paused-mid-build
       // (not merely queued, not terminal). The overlay uses it to show "in progress" before any build_sha lands.
@@ -1009,22 +1001,19 @@ async function recordInTestingTransitions(workspaceId: string, cards: SpecCard[]
   try {
     const { createAdminClient } = await import("@/lib/supabase/admin");
     const admin = createAdminClient();
-    // Pull the latest `field='status'` history row per slug in one query (workspace_id + slug indexed).
-    // Newest-first; the first row we see per slug is the most recent.
-    const slugs = cards.map((c) => c.slug);
-    const data = await inSpecSlugChunks<{ spec_slug: string; to_value: string }>(slugs, (batch) =>
-      admin
-        .from("spec_status_history")
-        .select("spec_slug, to_value, at")
-        .eq("workspace_id", workspaceId)
-        .eq("field", "status")
-        .in("spec_slug", batch)
-        .order("at", { ascending: false })
-        .limit(5000),
+    // list-specs-with-phases-rpc Phase 3 — server-side rollup. `roadmap_latest_status_transitions`
+    // returns ONE (spec_slug, to_value) row per spec_slug (the LATEST field='status' row) via a
+    // `distinct on (spec_slug) order by spec_slug, at desc` scan of the (workspace_id, spec_slug, at
+    // desc) index. Replaces the prior slug-batched `.in("spec_slug", [...]) limit(5000)` fan-out — the
+    // idempotency check now runs on a bounded workspace-scoped set instead of the full history table.
+    const { data: statusRows, error: statusErr } = await admin.rpc(
+      "roadmap_latest_status_transitions",
+      { p_workspace_id: workspaceId },
     );
+    if (statusErr) throw statusErr;
     const latestBySlug = new Map<string, string>();
-    for (const r of data as { spec_slug: string; to_value: string }[]) {
-      if (!latestBySlug.has(r.spec_slug)) latestBySlug.set(r.spec_slug, r.to_value);
+    for (const r of (statusRows ?? []) as { spec_slug: string; to_value: string }[]) {
+      if (r.spec_slug && !latestBySlug.has(r.spec_slug)) latestBySlug.set(r.spec_slug, r.to_value);
     }
     const rows: {
       workspace_id: string;

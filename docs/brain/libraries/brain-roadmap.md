@@ -81,6 +81,16 @@ A standalone (outside) spec that depends on work inside a goal declares (or norm
 
 **Invariant.** EVERY enqueue path applies the SAME `.some((b) => !b.cleared)` predicate (queueRoadmapBuild's blocker gate, `enqueueBuildIfDue`, `autoQueueUnblockedBy` / `autoQueueUnblockedByGoal`, the platform-director autobuild sweeps). A named point-of-truth `isSpecEnqueueBlocked(card)` lives in [[blocker-goal-normalize]] with the Phase 3 tests that pin the invariant — so an outside dependent is **never** claimed while its goal is off `main`.
 
+## Server-side rollup RPCs — the roadmap read path ([[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]])
+
+The roadmap/pipeline page (`getRoadmap` → `readSpecsFromDb`) reads three server-side RPCs instead of the pre-2026-07-08 slug-batched `.in(...)` fan-outs (the interim workarounds for the `UND_ERR_HEADERS_OVERFLOW` ~16KB undici header cap that wedged the page once the workspace held a few hundred specs). RPC is the DURABLE fix — no id/slug array crosses the wire, one indexed round-trip per rollup.
+
+- **`public.list_specs_with_phases(p_workspace_id, p_scope)`** (migration `20261001120000_list_specs_with_phases_rpc.sql`, Phase 1) → the spec+phases join, consumed via [[specs-table]] `listSpecs` / `getActiveSpecs` / `getAllSpecs`. Returns `(spec jsonb, phases jsonb)` per row so a new column on `public.specs` or `public.spec_phases` is a zero-churn addition.
+- **`public.roadmap_latest_build_signals(p_workspace_id)`** (migration `20261002120000_roadmap_rollups_rpc.sql`, Phase 3) → `(spec_slug, status, preview_url)`. One row per spec — the LATEST `agent_jobs` row with `kind='build'` — via `DISTINCT ON (spec_slug) ORDER BY spec_slug, created_at DESC` against the existing `agent_jobs_slug_idx (workspace_id, spec_slug, created_at desc)` index. Consumed by `readInTestingSignals` for the `hasPreview` / `hasLiveBuild` / `merged` signals. Retires the `agent_jobs kind='build' limit(2000)` slug-batched fan-out.
+- **`public.roadmap_latest_status_transitions(p_workspace_id)`** (same migration, Phase 3) → `(spec_slug, to_value)`. One row per spec — the LATEST `spec_status_history` row with `field='status'` — via the existing `spec_status_history_slug_at (workspace_id, spec_slug, at desc)` index. Consumed by `recordInTestingTransitions` for its idempotency check. Retires the `spec_status_history field='status' limit(5000)` slug-batched fan-out.
+
+The remaining slug-batched `.in()` reader inside `readInTestingSignals` — `readNeedsFixReasons` against `public.director_activity` — is untouched: no server-side rollup is authored yet for the Vale needs-fix diagnosis path. The general rule is "keep the batched `.in` reads only where a server-side rollup isn't yet available".
+
 ## Callers
 
 `src/app/dashboard/roadmap/**` (board, `[slug]`, map, goals, functions) · `src/lib/roadmap-actions.ts` (the build gate) · the spec-test cron ([[../specs/spec-test-agent]]) · `src/lib/brain-links.ts`.
@@ -91,7 +101,7 @@ A standalone (outside) spec that depends on work inside a goal declares (or norm
 
 ## Related
 
-[[roadmap-actions]] · [[spec-card-state]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_card_state]] · [[../dashboard/roadmap]] · [[../project-management]] · [[../specs/spec-blockers]] · [[../specs/goal-decomposition-engine]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../lifecycles/roadmap-build-console]]
+[[roadmap-actions]] · [[spec-card-state]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_card_state]] · [[../dashboard/roadmap]] · [[../project-management]] · [[../specs/spec-blockers]] · [[../specs/goal-decomposition-engine]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] · [[../lifecycles/roadmap-build-console]]
 
 ---
 
