@@ -131,7 +131,10 @@ interface CatalogProduct {
 export type ActionApi = {
   startAction: () => void;
   completeAction: (description?: string) => void;
-  failAction: (description?: string) => void;
+  /** On error the second arg carries the API's `error` code (e.g.
+   *  "payment_failed_update_blocked") so the overlay can render an
+   *  inline CTA instead of dead-ending at a Close button. */
+  failAction: (description?: string, errorCode?: string) => void;
 };
 
 /** One row of the last-5-orders widget. Fields cover both the render
@@ -160,6 +163,7 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [actionPhase, setActionPhase] = useState<ActionPhase>("idle");
   const [actionDescription, setActionDescription] = useState<string | undefined>(undefined);
+  const [actionErrorCode, setActionErrorCode] = useState<string | undefined>(undefined);
   // When true, the screen renders <CancelFlow/> instead of the detail
   // cards. Cancel runs inside the same portal shell so the customer
   // never leaves the page — escape-hatch is the "Never mind" button
@@ -169,9 +173,9 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
   // Branded full-screen overlay — never a corner toast. See
   // feedback_portal_action_overlay memory.
   const action: ActionApi = {
-    startAction: () => { setActionDescription(undefined); setActionPhase("loading"); },
-    completeAction: (description) => { setActionDescription(description); setActionPhase("success"); },
-    failAction: (description) => { setActionDescription(description); setActionPhase("error"); },
+    startAction: () => { setActionDescription(undefined); setActionErrorCode(undefined); setActionPhase("loading"); },
+    completeAction: (description) => { setActionDescription(description); setActionErrorCode(undefined); setActionPhase("success"); },
+    failAction: (description, errorCode) => { setActionDescription(description); setActionErrorCode(errorCode); setActionPhase("error"); },
   };
 
   const loadContract = useCallback(async () => {
@@ -443,6 +447,15 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
         phase={actionPhase}
         description={actionDescription}
         onClose={() => setActionPhase("idle")}
+        primaryAction={actionErrorCode === "payment_failed_update_blocked" ? {
+          label: "Update payment method",
+          onClick: () => {
+            // Route to the in-portal payment section in add-card mode,
+            // pinned to this sub — same deep-link pattern the "+ Add a
+            // new card" button on the payment-method card uses.
+            window.location.href = `/payment-methods?add=1&forSub=${encodeURIComponent(contract.internal_id || contract.id)}`;
+          },
+        } : null}
       />
     </div>
   );
@@ -1392,7 +1405,7 @@ function useMutator(action: ActionApi, onMutate: () => Promise<void>) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) {
-        action.failAction(data?.message || data?.error || undefined);
+        action.failAction(data?.message || data?.error || undefined, typeof data?.error === "string" ? data.error : undefined);
         return;
       }
       action.completeAction(success);
