@@ -105,8 +105,12 @@ export interface PendingAction {
  * | 'goal-fold' (goal-fold-from-db-row — the post-M5 finalize lane: fold ONE complete goal into the
  *   permanent brain + retire its row. The SIBLING of 'fold' for goals; owns a `claude/goal-fold-*`
  *   branch and, like 'fold', authors brain-doc-only changes the system itself produced — so it counts
- *   as a legitimate branch owner for the auto-merge success gate). */
-export type JobKind = "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "spec-review";
+ *   as a legitimate branch owner for the auto-merge success gate).
+ * | 'mario' (mario-stall-detector — the M3 detector cron `marioStallCron` enqueues one of these per
+ *   stalled spec; each row carries a `MarioBrief` JSON payload on `instructions` so the M4 reasoning
+ *   agent can pick it up without re-reading. Dedupe: one active mario row per spec_slug, enforced
+ *   at the app layer by [[../lib/mario]] `enqueueMarioJob`). */
+export type JobKind = "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "migration-fix" | "pr-resolve" | "platform-director" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "spec-review" | "mario";
 
 export interface AgentJob {
   id: string;

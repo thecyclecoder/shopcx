@@ -136,6 +136,7 @@ import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
 import { claudeStatusPollCron } from "@/lib/inngest/claude-status-poll-cron";
 import { deployGuardianCron } from "@/lib/inngest/deploy-guardian-cron";
+import { marioStallCron } from "@/lib/inngest/mario-stall-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
 import { buildOnEligible } from "@/lib/inngest/build-on-eligible";
@@ -150,6 +151,7 @@ import { orderConfirmationSend } from "@/lib/inngest/order-confirmation";
 export const registeredInngestFunctions = [
   claudeStatusPollCron,
   deployGuardianCron,
+  marioStallCron,
   ...adToolFunctions,
   syncCustomers,
   syncOrders,
