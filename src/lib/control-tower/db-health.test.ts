@@ -707,3 +707,40 @@ test("the request_volume_pressure spec renders escalation guidance (aggregate, n
   assert.match(md, /aggregate request-volume/i);
   assert.match(md, /aggregate RPC/); // the durable lever is called out
 });
+
+// ── db-health-temp-spill-rate (2026-07-08): self-clearing temp detection ──
+
+test("temp_spill_pressure fires on the RATE when a prior reading is present", () => {
+  const input: InstanceHealthInput = {
+    ...healthyInput(),
+    tempBytes: 500 * GB,        // huge cumulative — but that's not the signal now
+    tempBytesPrev: 490 * GB,    // +10 GB
+    tempReadingAgeHours: 0.25,  // in 15 min → 40 GB/hr ≥ 2 GB/hr flag
+  };
+  const t = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(t, "a high spill RATE must fire temp_spill_pressure");
+  assert.match(t!.impact, /\/hr/);
+  assert.match(t!.evidence, /Spill RATE:/);
+});
+
+test("temp_spill_pressure SELF-CLEARS: huge cumulative temp_bytes but ~0 recent spill ⇒ no finding", () => {
+  const input: InstanceHealthInput = {
+    ...healthyInput(),
+    tempBytes: 500 * GB,                 // the un-resettable cumulative counter is still enormous
+    tempBytesPrev: 500 * GB - 0.1 * GB,  // but only 0.1 GB spilled recently
+    tempReadingAgeHours: 0.25,           // 0.4 GB/hr < 2 GB/hr flag → NOT active
+  };
+  const findings = analyzeInstanceHealth(input);
+  assert.equal(
+    findings.find((f) => f.cause === "temp_spill_pressure"),
+    undefined,
+    "once the spill stops, the rate drops below the flag and the finding clears even though the cumulative counter can't be reset",
+  );
+});
+
+test("temp_spill_pressure falls back to the cumulative flag when there is no prior reading", () => {
+  const input: InstanceHealthInput = { ...healthyInput(), tempBytes: 200 * GB }; // no prev → cumulative 100 GB flag
+  const t = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(t, "with no prior reading the cumulative flag must still catch an acute incident");
+  assert.match(t!.evidence, /cumulative fallback/);
+});
