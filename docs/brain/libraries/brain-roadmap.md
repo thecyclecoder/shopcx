@@ -81,6 +81,21 @@ A standalone (outside) spec that depends on work inside a goal declares (or norm
 
 **Invariant.** EVERY enqueue path applies the SAME `.some((b) => !b.cleared)` predicate (queueRoadmapBuild's blocker gate, `enqueueBuildIfDue`, `autoQueueUnblockedBy` / `autoQueueUnblockedByGoal`, the platform-director autobuild sweeps). A named point-of-truth `isSpecEnqueueBlocked(card)` lives in [[blocker-goal-normalize]] with the Phase 3 tests that pin the invariant — so an outside dependent is **never** claimed while its goal is off `main`.
 
+## Server-side rollup RPCs — the roadmap read path ([[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]])
+
+The roadmap/pipeline page (`getRoadmap` → `readSpecsFromDb`) reads three server-side RPCs instead of the pre-2026-07-08 slug-batched `.in(...)` fan-outs (the interim workarounds for the `UND_ERR_HEADERS_OVERFLOW` ~16KB undici header cap that wedged the page once the workspace held a few hundred specs). RPC is the DURABLE fix — no id/slug array crosses the wire, one indexed round-trip per rollup.
+
+- **`public.list_specs_with_phases(p_workspace_id, p_scope)`** (migration `20261001120000_list_specs_with_phases_rpc.sql`, Phase 1) → the spec+phases join, consumed via [[specs-table]] `listSpecs` / `getActiveSpecs` / `getAllSpecs`. Returns `(spec jsonb, phases jsonb)` per row so a new column on `public.specs` or `public.spec_phases` is a zero-churn addition.
+- **`public.roadmap_latest_build_signals(p_workspace_id)`** (migration `20261002120000_roadmap_rollups_rpc.sql`, Phase 3) → `(spec_slug, status, preview_url)`. One row per spec — the LATEST `agent_jobs` row with `kind='build'` — via `DISTINCT ON (spec_slug) ORDER BY spec_slug, created_at DESC` against the existing `agent_jobs_slug_idx (workspace_id, spec_slug, created_at desc)` index. Consumed by `readInTestingSignals` for the `hasPreview` / `hasLiveBuild` / `merged` signals. Retires the `agent_jobs kind='build' limit(2000)` slug-batched fan-out.
+- **`public.roadmap_latest_status_transitions(p_workspace_id)`** (same migration, Phase 3) → `(spec_slug, to_value)`. One row per spec — the LATEST `spec_status_history` row with `field='status'` — via the existing `spec_status_history_slug_at (workspace_id, spec_slug, at desc)` index. Consumed by `recordInTestingTransitions` for its idempotency check. Retires the `spec_status_history field='status' limit(5000)` slug-batched fan-out.
+- **`public.roadmap_latest_needs_fix_reasons(p_workspace_id)`** (migration `20261003130000_roadmap_latest_needs_fix_reasons_rpc.sql`, [[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] Phase 2) → `(spec_slug, reason, metadata)`. One row per spec — the LATEST `director_activity` row with `action_kind='spec_review_needs_fix'` — via the sibling `director_activity_ws_slug_created_idx (workspace_id, spec_slug, created_at desc)` index. Consumed by `readNeedsFixReasons` for the Vale needs-fix chip overlay. Retires the residual `inSpecSlugChunks` slug-batched `.in("spec_slug", […])` reader — the LAST per-slug brain-roadmap reader that shipped a slug array over the wire. `inSpecSlugChunks` is DELETED.
+
+## Invariant — no client-side id/slug array batching ([[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] Phase 3)
+
+**All per-slug reads on this file go through server-side RPCs — NEVER a client-side id/slug array over the wire.** The 2026-07-08 DB-overload incident (with [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] as precedent) traced to `.in("spec_slug", [large-array])` calls whose URL overflowed the ~16KB undici header cap (`UND_ERR_HEADERS_OVERFLOW`) once the workspace held a few hundred specs, wedging the roadmap page load. Every per-slug reader on this file now calls one of the four server-side RPCs above (`list_specs_with_phases`, `roadmap_latest_build_signals`, `roadmap_latest_status_transitions`, `roadmap_latest_needs_fix_reasons`) and intersects with the requested slug set in-memory (bounded by the current board).
+
+**CI-enforced** by `scripts/_check-specs-phases-no-client-in-batching.ts` (chained into `predeploy`): a reintroduced `.in("id", <array>)` or `.in("spec_slug", <array>)` in `src/lib/specs-table.ts` or `src/lib/brain-roadmap.ts` fails the build. Genuinely-bounded LITERAL arrays (`.in("spec_slug", ["a","b"])`) still pass — a variable, `.slice(...)` batch, or spread does not.
+
 ## Callers
 
 `src/app/dashboard/roadmap/**` (board, `[slug]`, map, goals, functions) · `src/lib/roadmap-actions.ts` (the build gate) · the spec-test cron ([[../specs/spec-test-agent]]) · `src/lib/brain-links.ts`.
@@ -91,7 +106,7 @@ A standalone (outside) spec that depends on work inside a goal declares (or norm
 
 ## Related
 
-[[roadmap-actions]] · [[spec-card-state]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_card_state]] · [[../dashboard/roadmap]] · [[../project-management]] · [[../specs/spec-blockers]] · [[../specs/goal-decomposition-engine]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../lifecycles/roadmap-build-console]]
+[[roadmap-actions]] · [[spec-card-state]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_card_state]] · [[../dashboard/roadmap]] · [[../project-management]] · [[../specs/spec-blockers]] · [[../specs/goal-decomposition-engine]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] · [[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] · [[../lifecycles/roadmap-build-console]]
 
 ---
 

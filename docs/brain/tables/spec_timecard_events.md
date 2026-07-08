@@ -32,7 +32,27 @@ Owned by the SDK ([[../libraries/spec-timecards]] `TimecardEventKind`). Free-tex
 
 ## Wait-span pattern
 
-Two events per wait: a `wait_entered` (carrying `wait_kind` + `waiting_on`) opens the span, a `wait_exited` (matching `wait_kind`) closes it. `getTimecard` folds a matched pair into a single closed span with `duration_ms`; an unmatched `wait_entered` surfaces as an open wait in `TimecardView.open_waits` (the spec is still waiting on someone). This is the only paired-event pattern in the vocabulary — every other kind is a point-in-time.
+Two events per wait: a `wait_entered` (carrying `wait_kind` + `waiting_on`) opens the span, a `wait_exited` (matching `wait_kind`) closes it. `getTimecard` folds a matched pair into a SINGLE step of `event_kind='wait_exited'` whose `duration_ms` is the entry-to-exit delta — the `wait_entered` marker on its own is NOT a timeline step, only an open-wait signal. An unmatched `wait_entered` surfaces as an open wait in `TimecardView.open_waits` with a `gap_ms` counting up to `now()` (the spec is still waiting on someone). This is the only paired-event pattern in the vocabulary — every other kind is a point-in-time.
+
+### Emission rule (Phase 4)
+
+The paired events are emitted at the SINGLE `agent_jobs.status` update chokepoint in the box worker (`scripts/builder-worker.ts` `update()` — the same helper that carries the needs_input orphan guard). The worker reads the CURRENT `agent_jobs.status` right before the write and compares it to the DESTINATION:
+
+- **Entering a wait** — destination ∈ `{needs_input, needs_approval, blocked_on_dependency, blocked_on_usage}` AND current is NOT a wait → emit `wait_entered` with `wait_kind` = destination.
+- **Exiting a wait** — destination = `queued_resume` AND current IS a wait → emit `wait_exited` with `wait_kind` = the CURRENT (exiting) wait status.
+- **Wait → wait** (e.g. `needs_input` → `needs_approval`) — NO emission. The ledger records ONE CONTINUOUS wait span; only entry into and exit from the wait region are marked.
+- **Non-wait → non-wait** — NO emission (the wait vocabulary is silent).
+- **Spec-less rows** (a per-workspace triage sweep with `spec_slug=null`) — NO emission (the ledger is keyed on spec).
+
+### `waiting_on` vocabulary (derived at entry)
+
+| `wait_kind` | `waiting_on` |
+|---|---|
+| `needs_input` · `needs_approval` | The workspace owner's `display_name` from [[workspace_members]] (or `null` when the lookup misses / the owner has no display name set). This IS the party the spec is waiting on: the CEO answering a question / approving a gated action. |
+| `blocked_on_dependency` | The dependency slug carried on the job's `pending_actions` (`dependency_slug` / `blocked_by` / `spec_slug` on any pending action, first match wins), else `null`. The Claude-breaker path uses this destination too, and the caller records the breaker cause on `agent_jobs.error`. |
+| `blocked_on_usage` | The literal `'max-usage'` sentinel — the box parked the job because every Max account hit its usage wall ([[../libraries/box-multi-account-failover]]); auto-resumes at the soonest reset. |
+
+Every emission is best-effort (write error logs and returns, never blocks the status transition itself) and fire-and-forget (a slow `.insert()` cannot delay a queue-critical write).
 
 ## Reads / writes
 

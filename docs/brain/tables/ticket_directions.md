@@ -40,7 +40,8 @@ Phase 2 lands the read paths. On the first turn after the Sol session ships, [[.
 ## Row lifecycle
 
 1. **Insert (`authored_at`, `superseded_at IS NULL`)** — Sol's box session (Phase 2's `runTicketHandleJob`) writes ONE row via `writeDirection` at the end of the session, after reading the ticket + merged customer + subscription context. The partial UNIQUE on `ticket_id WHERE superseded_at IS NULL` guarantees there is at most one live Direction per ticket at any moment.
-2. **Supersede (`superseded_at` compare-and-set on NULL)** — a later inflection (customer pivots the ask, downstream execution hits a guardrail and escalates back to Sol) calls `superseDirection(admin, ticket_id)` which stamps `superseded_at = now()` on the live row via a compare-and-set on `superseded_at IS NULL`; a fresh `writeDirection` immediately follows with the new live row.
+2. **Required-outcomes items authored alongside the Direction** — the message-is-last pipeline ([[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] Phase 1) distills the customer's concrete asks into N structured [[ticket_required_outcomes]] rows keyed to the same `ticket_id` (and optionally back-linked via `direction_id`). Downstream: Phase 2's [[../libraries/honor-required-outcomes|honor step]] executes + verifies each item; Phase 3's [[../libraries/sol-outcome-claim-guard|send guard]] blocks any reply asserting an outcome whose backing row isn't `status='verified'`; Phase 4's [[../libraries/outcome-completion-gate|completion gate]] blocks auto-close until every row is verified.
+3. **Supersede (`superseded_at` compare-and-set on NULL)** — a later inflection (customer pivots the ask, downstream execution hits a guardrail and escalates back to Sol) calls `superseDirection(admin, ticket_id)` which stamps `superseded_at = now()` on the live row via a compare-and-set on `superseded_at IS NULL`; a fresh `writeDirection` immediately follows with the new live row.
 
 ## RLS
 Service-role only (RLS enabled with no policies). Every write goes through `createAdminClient()` from the Phase-2 SDK — per CLAUDE.md's "All writes go through `createAdminClient()`" invariant. No client-side reads.
@@ -58,4 +59,4 @@ Service-role only (RLS enabled with no policies). Every write goes through `crea
 
 ---
 
-[[../README]] · [[tickets]] · [[ticket_resolution_events]] · [[workspaces]] · [[../lifecycles/ticket-lifecycle]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
+[[../README]] · [[tickets]] · [[ticket_resolution_events]] · [[ticket_required_outcomes]] · [[workspaces]] · [[../lifecycles/ticket-lifecycle]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]

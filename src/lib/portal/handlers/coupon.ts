@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch, safeStartsWith } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isInternalSubscription } from "@/lib/internal-subscription";
@@ -85,7 +85,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
 
     if (mode === "apply") {
       // Loyalty coupons (LOYALTY-* or smile-*) always allowed — skip all checks
-      const isLoyalty = discountCode.startsWith("LOYALTY-") || discountCode.startsWith("smile-");
+      const isLoyalty = safeStartsWith(discountCode, "LOYALTY-") || safeStartsWith(discountCode, "smile-");
 
       if (!isLoyalty) {
         // Check grandfathered pricing floor for sale coupons

@@ -1,0 +1,1 @@
+- **Loyalty redemption must never spend points without applying the coupon — fix the redeem→apply code-threading** · verified 2026-07-08 · → [[../libraries/loyalty]]

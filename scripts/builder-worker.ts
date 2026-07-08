@@ -24,6 +24,11 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
+// agent-jobs-update-retry-and-error-surface Phase 1 — the bounded-retry chokepoint the shared
+// `update(id, patch)` helper below funnels every agent_jobs PATCH through. Absorbs a transient
+// Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
+// AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
+import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -2371,6 +2376,62 @@ async function markReady(prNumber: number): Promise<boolean> {
 
 let db: Awaited<ReturnType<typeof admin>>;
 
+// spec-timecard-chokepoint-instrumentation Phase 1: single wrapper the worker's lifecycle chokepoints
+// (Vale/build/ship/fold) call to append one timecard event per checkpoint. Best-effort — the SDK
+// already swallows insert errors, but the extra try/catch keeps an SDK-load failure (dynamic import
+// crash) from ever escaping into the chokepoint's own control flow. Emits a single `[timecards]`
+// warning on any failure. See [[../docs/brain/tables/spec_timecard_events]].
+async function emitTimecard(input: {
+  workspace_id: string;
+  spec_slug: string;
+  phase_index?: number | null;
+  event_kind: string;
+  actor: string;
+  wait_kind?: string | null;
+  waiting_on?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const { recordTimecardEvent } = await import("../src/lib/spec-timecards");
+    await recordTimecardEvent(db, input);
+  } catch (e) {
+    console.warn(
+      `[timecards] emit failed spec=${input.spec_slug} kind=${input.event_kind}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+// spec-timecard-chokepoint-instrumentation Phase 2 (Fix 1) — fused-session-safe emitter. runSpecTestJob
+// on the pre-merge branch is a FUSED session (Vera runs the spec-test AND Vault runs the security
+// review in ONE claude -p pass — see applyFusedSecurityAsBranchVerdict below), so both spec_test_*
+// and security_* pairs get emitted from the same job's lifetime. This helper keys off the SESSION-
+// LOCAL Set the runner owns: the first call for a given event_kind emits + adds the kind; any
+// subsequent call for the same kind in the same job silently no-ops. That guarantees the fused
+// session emits "one of each, not two of one" as the spec verification requires.
+async function emitTimecardOnceInSession(
+  emitted: Set<string>,
+  input: {
+    workspace_id: string;
+    spec_slug: string | null | undefined;
+    phase_index?: number | null;
+    event_kind: string;
+    actor: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  if (!input.spec_slug) return; // spec-less rows never emit (mirrors emitTimecard's caller guard)
+  if (emitted.has(input.event_kind)) return; // second emit for this kind — the fused-session guard
+  emitted.add(input.event_kind);
+  await emitTimecard({
+    workspace_id: input.workspace_id,
+    spec_slug: input.spec_slug,
+    phase_index: input.phase_index ?? null,
+    event_kind: input.event_kind,
+    actor: input.actor,
+    metadata: input.metadata,
+  });
+}
+
 async function update(id: string, patch: Record<string, unknown>) {
   // needs-input-must-carry-a-question — reject an EMPTY needs_input park at the single chokepoint.
   // A `needs_input` park is an answerable pause: the owner inbox / build card / /dashboard/migrations
@@ -2401,7 +2462,39 @@ async function update(id: string, patch: Record<string, unknown>) {
       };
     }
   }
-  await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+  // agent-jobs-update-retry-and-error-surface Phase 1 — inspect Supabase's response instead of
+  // firing-and-forgetting. A Cloudflare 521 in front of PostgREST used to silently drop the
+  // transition (build stays running past terminal, needs_input never lands, dispatch proceeds as
+  // if the row was updated). writeAgentJobsUpdateWithRetry retries the transient class (5xx /
+  // fetch failed / ECONNRESET) with bounded backoff and THROWS AgentJobsUpdateError on the
+  // terminal case so the caller cannot continue as if the write succeeded. A bug-shaped throw
+  // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
+  const finalPatch = { ...patch, updated_at: new Date().toISOString() };
+  const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
+  // spec-timecard-chokepoint-instrumentation Phase 4 — wait-span tracking. When this update() is a
+  // status transition, read the current status BEFORE the write to detect entry into and exit from
+  // a wait region ({needs_input, needs_approval, blocked_on_dependency, blocked_on_usage}). A
+  // transition BETWEEN two wait statuses does NOT emit — the ledger treats an unbroken wait as
+  // one continuous span (only the entry marker and the exit marker are recorded). Reads are cheap
+  // (`.eq('id',…).maybeSingle()` on the primary key) + gated on `attemptedStatus`, so a heartbeat-
+  // only patch pays nothing. Best-effort throughout.
+  const pendingWaitTransition = attemptedStatus
+    ? await resolvePendingWaitTransition(id, attemptedStatus, patch.pending_actions)
+    : null;
+  await writeAgentJobsUpdateWithRetry(
+    async () => {
+      // Supabase-js resolves this awaited chain to { data, error, status, statusText }. The
+      // retry helper ONLY reads `error` + `status` — data can be undefined on a bare update
+      // without .select(), which is exactly what we do here (fire the transition, no read).
+      const resp = (await db.from("agent_jobs").update(finalPatch).eq("id", id)) as {
+        error: { message?: string; code?: string | null; details?: string | null; hint?: string | null } | null;
+        status?: number | null;
+        statusText?: string | null;
+      };
+      return { error: resp.error, status: resp.status ?? null, statusText: resp.statusText ?? null };
+    },
+    { jobId: id, attemptedStatus },
+  );
   // no-parked-specs-auto-route-needs-attention Phase 0 — classify every park at the single chokepoint.
   // Every needs_attention write goes through this helper, so stamping here covers every caller (build,
   // repair, regression, security, spec-test, …) with no per-callsite plumbing. Best-effort + async:
@@ -2412,6 +2505,146 @@ async function update(id: string, patch: Record<string, unknown>) {
       console.warn(`[needs-attention-classify] background classify failed for ${id}:`, e instanceof Error ? e.message : e),
     );
   }
+  // spec-timecard-chokepoint-instrumentation Phase 4 — emit the wait_entered / wait_exited event the
+  // pre-write read decided on, AFTER the row's status write succeeded. Skipped when the row didn't
+  // change wait-region (a wait→wait or non-wait→non-wait transition). Best-effort — the emitter
+  // itself catches SDK insert / import failures. Fire-and-forget so the write chokepoint returns
+  // immediately.
+  if (pendingWaitTransition) {
+    void emitTimecard({
+      workspace_id: pendingWaitTransition.workspace_id,
+      spec_slug: pendingWaitTransition.spec_slug,
+      phase_index: null,
+      event_kind: pendingWaitTransition.kind,
+      actor: "worker",
+      wait_kind: pendingWaitTransition.wait_kind,
+      waiting_on: pendingWaitTransition.waiting_on,
+      metadata: { job_id: id, ...(pendingWaitTransition.extra ?? {}) },
+    });
+  }
+}
+
+// spec-timecard-chokepoint-instrumentation Phase 4 — the pre-write half of the wait-span guard. Given
+// an agent_jobs row's id + the destination status the update() is about to write, reads the CURRENT
+// status/workspace/spec_slug (bounded by the primary key, one .maybeSingle() lookup) and decides:
+//
+//   • entering a wait — destination ∈ WAIT_STATUSES and current status is NOT already a wait. Emit
+//     `wait_entered` with wait_kind=<destination> and a derived waiting_on: workspace owner's
+//     display_name for needs_input/needs_approval; a dependency slug from pending_actions/blocked_by
+//     for blocked_on_dependency; the literal 'max-usage' for blocked_on_usage.
+//   • exiting a wait — destination is `queued_resume` and current status IS a wait. Emit
+//     `wait_exited` with wait_kind=<current wait status being exited>.
+//   • wait → wait (needs_input → needs_approval, etc.) — return null: the ledger records one
+//     continuous span, not double-emission per hop.
+//
+// Any read/lookup failure returns null so the write chokepoint proceeds cleanly. Only spec-slug-
+// bearing rows emit (a triage-escalations sweep with spec_slug=null is skipped).
+const WAIT_STATUSES: ReadonlySet<string> = new Set([
+  "needs_input",
+  "needs_approval",
+  "blocked_on_dependency",
+  "blocked_on_usage",
+]);
+
+type PendingWaitTransition = {
+  kind: "wait_entered" | "wait_exited";
+  wait_kind: string;
+  waiting_on: string | null;
+  workspace_id: string;
+  spec_slug: string;
+  extra?: Record<string, unknown>;
+};
+
+async function resolvePendingWaitTransition(
+  jobId: string,
+  destinationStatus: string,
+  patchPendingActions: unknown,
+): Promise<PendingWaitTransition | null> {
+  const isEntering = WAIT_STATUSES.has(destinationStatus);
+  const isExiting = destinationStatus === "queued_resume";
+  if (!isEntering && !isExiting) return null;
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, status, pending_actions")
+      .eq("id", jobId)
+      .maybeSingle();
+    const row = data as {
+      workspace_id: string;
+      spec_slug: string | null;
+      status: string;
+      pending_actions: unknown;
+    } | null;
+    if (!row || !row.spec_slug) return null; // spec-less rows (per-workspace sweeps) never emit
+    if (isEntering) {
+      if (WAIT_STATUSES.has(row.status)) return null; // wait → wait: no double-emit
+      const waiting_on = await deriveWaitingOn(
+        row.workspace_id,
+        destinationStatus,
+        patchPendingActions ?? row.pending_actions,
+      );
+      return {
+        kind: "wait_entered",
+        wait_kind: destinationStatus,
+        waiting_on,
+        workspace_id: row.workspace_id,
+        spec_slug: row.spec_slug,
+      };
+    }
+    // isExiting → queued_resume; only emit when leaving a wait region.
+    if (!WAIT_STATUSES.has(row.status)) return null;
+    return {
+      kind: "wait_exited",
+      wait_kind: row.status,
+      waiting_on: null,
+      workspace_id: row.workspace_id,
+      spec_slug: row.spec_slug,
+    };
+  } catch (e) {
+    console.warn(`[timecards] wait-transition preread failed for job ${jobId}: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+// spec-timecard-chokepoint-instrumentation Phase 4 — derive the `waiting_on` party the wait_entered
+// event records for later fold-into-a-span rendering.
+//   • needs_input / needs_approval → the workspace owner's display_name (they're the party the wait
+//     is on). Falls back to null if the lookup fails or the owner has no display_name set.
+//   • blocked_on_dependency → the dependency slug carried on pending_actions (if present) — the
+//     Claude-breaker path uses this too, and the caller records the breaker cause in `error`.
+//     Falls back to null when nothing structured is present.
+//   • blocked_on_usage → the literal 'max-usage' sentinel (the wait is on the Max account rotation).
+async function deriveWaitingOn(
+  workspaceId: string,
+  destinationStatus: string,
+  pendingActionsInput: unknown,
+): Promise<string | null> {
+  if (destinationStatus === "blocked_on_usage") return "max-usage";
+  if (destinationStatus === "needs_input" || destinationStatus === "needs_approval") {
+    try {
+      const { data: owner } = await db
+        .from("workspace_members")
+        .select("display_name")
+        .eq("workspace_id", workspaceId)
+        .eq("role", "owner")
+        .maybeSingle();
+      const name = (owner as { display_name?: string | null } | null)?.display_name ?? null;
+      return name && name.trim() ? name : null;
+    } catch {
+      return null;
+    }
+  }
+  if (destinationStatus === "blocked_on_dependency") {
+    // Best-effort dependency-slug extraction: check pending_actions for a structured hint. Callers
+    // that carry a `dependency_slug` or `blocked_by` field surface it here; otherwise null.
+    const actions = Array.isArray(pendingActionsInput) ? (pendingActionsInput as Array<Record<string, unknown>>) : [];
+    for (const a of actions) {
+      const dep = (a?.dependency_slug ?? a?.blocked_by ?? a?.spec_slug ?? null) as string | null | undefined;
+      if (typeof dep === "string" && dep.trim()) return dep;
+    }
+    return null;
+  }
+  return null;
 }
 
 /**
@@ -2898,6 +3131,53 @@ function derivePhase(instructions: string | null | undefined): string | null {
   const m = /\bPhase\s+(\d+)\b/i.exec(instructions);
   return m ? `Phase ${m[1]}` : null;
 }
+// build-box-page-reflects-real-per-lane-group-usage Phase 1: the box worker runs each kind in its
+// OWN dedicated lane with its own cap (MAX_CONCURRENT for the build/plan pool, MAX_TICKET_HANDLE +
+// MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL for customer service, MAX_PLATFORM_DIRECTOR +
+// MAX_DIRECTOR_COACH for director, MAX_FOLD for fold, everything else in a bag of small
+// concurrency-1/2 lanes). The pre-existing scalar build_lanes/fold_lanes only carried two of those
+// caps, which is why /dashboard/roadmap/box could render nonsense like "13/10 in use" — it lumped
+// every non-fold in-flight lane against the build/plan pool cap. LANE_GROUPS is the FULL per-group
+// cap picture, emitted verbatim into the heartbeat row's `lane_groups` jsonb column each tick so
+// the page + BoxChip can render each group against its OWN cap (and its OWN kind-set). Kinds MUST
+// stay in sync with the poll-loop count* helpers below (countPlatformDirector groups
+// platform-director + director-bounce-back + growth-director; countFold groups fold + goal-fold; …).
+const LANE_GROUPS = {
+  build_plan: {
+    cap: MAX_CONCURRENT,
+    kinds: ["build", "plan"] as const,
+  },
+  customer_service: {
+    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL,
+    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call"] as const,
+  },
+  director: {
+    cap: MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH,
+    kinds: ["platform-director", "director-bounce-back", "growth-director", "director-coach"] as const,
+  },
+  fold: {
+    cap: MAX_FOLD,
+    kinds: ["fold", "goal-fold"] as const,
+  },
+  other: {
+    cap:
+      MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST + MAX_SPEC_REVIEW +
+      MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
+      MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
+      MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
+      MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE +
+      MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
+      MAX_PROPOSED_MODEL_TIER,
+    kinds: [
+      "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test", "spec-review",
+      "migration-fix", "deploy-review", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
+      "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
+      "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
+      "media-buyer-grade", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
+    ] as const,
+  },
+} as const;
 async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
   // reconcile-per-account-in-flight-count (Phase 2): heal the free-running load counter to the ground-truth
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
@@ -2913,8 +3193,12 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       status,
       active_builds: activeBuilds,
       detail: detail ?? null,
-      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
-      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
+      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling) — kept for back-compat
+      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane) — kept for back-compat
+      // build-box-page-reflects-real-per-lane-group-usage Phase 1 — per-group caps so the page can
+      // render each lane group against its OWN cap instead of lumping every non-fold kind into the
+      // build/plan pool. Kind-sets mirror the poll-loop count* helpers.
+      lane_groups: LANE_GROUPS,
       lanes, // [{ kind, job_id, spec_slug, since, phase }] for every in-flight lane this tick
       // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2): surfaces how each
       // account's quota is burning + an all-capped state to the box-health view + Control Tower box tile.
@@ -3049,6 +3333,17 @@ async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown
 // Read the live `public` BASE TABLE names off the pooler (raw SQL — information_schema isn't exposed
 // through PostgREST). Returns null when the host has no DB password (→ the check reports 'skipped',
 // never a false "no drift"). Best-effort connect/teardown.
+//
+// Reads pg_catalog.pg_class directly — the AUTHORITATIVE system-catalog source — instead of
+// information_schema.tables, which is filtered by the connecting role's per-table privileges (see the
+// SQL-standard note in [pg docs / 34.19]: "Only those tables ... that the current user has access to
+// ... are shown"). The migration-drift-check-stop-false-positive-on-present-tables spec Phase 1
+// root-caused the god_mode_sessions/god_mode_approvals phantom-absent alerts to exactly this: the
+// tables were CREATEd + RLS-guarded via scripts/apply-god-mode-sessions-migration.ts, but the pooler
+// role's effective privilege on them left them invisible to information_schema.tables even though
+// they physically exist. pg_class is unaffected — it is the raw catalog view every table registers
+// in on CREATE, regardless of grants. relkind: 'r' = ordinary base table, 'p' = partitioned table
+// (still a table, materialized as its partitions). Excludes toast/index/view/materialized-view/etc.
 async function fetchLivePublicTables(): Promise<string[] | null> {
   let connectionString: string;
   try {
@@ -3062,7 +3357,9 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   await c.connect();
   try {
     const res = await c.query(
-      "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
+      "select c.relname as table_name from pg_catalog.pg_class c " +
+        "join pg_catalog.pg_namespace n on n.oid = c.relnamespace " +
+        "where n.nspname = 'public' and c.relkind in ('r', 'p')",
     );
     return (res.rows as Array<{ table_name: string }>).map((r) => r.table_name);
   } finally {
@@ -3397,6 +3694,32 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       const finding = mod.analyzeSlowQuery(row, plan);
       if (finding) findings.push(finding);
     }
+
+    // db-health-request-volume (2026-07-08): the aggregate request/egress firehose signal — the blind
+    // spot that let ~78K PostgREST req/hr + ~182K rows/hr of internal polling drive egress with no Devi
+    // finding. Reuses this pass's pg_stat_statements access. Best-effort — additive; a failure here must
+    // never break the slow-query pass.
+    try {
+      const infoRes = await c.query(`select stats_reset from pg_stat_statements_info`);
+      const statsReset = (infoRes.rows[0] as { stats_reset?: string } | undefined)?.stats_reset;
+      const windowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
+      const totalsRes = await c.query(`select coalesce(sum(calls),0)::bigint as calls, coalesce(sum(rows),0)::bigint as rows from pg_stat_statements`);
+      const totals = (totalsRes.rows[0] ?? {}) as Record<string, unknown>;
+      const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by calls desc limit 8`);
+      const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by rows desc limit 8`);
+      const mapTop = (rs: Array<Record<string, unknown>>) => rs.map((r) => ({ queryid: String(r.queryid ?? ""), query: String(r.query ?? ""), calls: Number(r.calls ?? 0), rows: Number(r.rows ?? 0) }));
+      const rvFinding = mod.analyzeRequestVolume({
+        windowHours,
+        totalCalls: Number(totals.calls ?? 0),
+        totalRows: Number(totals.rows ?? 0),
+        topByCalls: mapTop(topCallsRes.rows as Array<Record<string, unknown>>),
+        topByRows: mapTop(topRowsRes.rows as Array<Record<string, unknown>>),
+      });
+      if (rvFinding) findings.push(rvFinding);
+    } catch (e) {
+      console.warn("[db-health] request-volume escalation failed:", e instanceof Error ? e.message : String(e));
+    }
+
     const proposed = await surfaceDbHealthFindings(findings);
     const ranked = mod.dedupeFindings(findings);
     const slow_queries = ranked.slice(0, 10).map((f) => ({ queryid: f.signature.split(":").pop() || "", cause: f.cause, table: f.table, impact: f.impact }));
@@ -3711,6 +4034,31 @@ async function runDbHealthInstanceJob(): Promise<void> {
       /* best-effort: partial signals are still worth beating */
     }
 
+    // db-health-temp-spill-attribution (2026-07-08): pg_stat_database.temp_bytes is an instance
+    // aggregate with no query attribution — so name the top temp_blks_written offenders here so a
+    // temp_spill_pressure finding fingers the spilling query (the subscriptions LTV scan was 98% of
+    // spill, invisible in the aggregate). Best-effort — a failure must never skip the pass.
+    let tempOffenders: import("../src/lib/control-tower/db-health").TempSpillOffender[] = [];
+    try {
+      const toRes = await c.query(
+        `select queryid::text as queryid, query, calls,
+                (temp_blks_written * current_setting('block_size')::bigint)::bigint as temp_bytes
+           from pg_stat_statements
+          where temp_blks_written > 0
+            and query not ilike '%pg_stat_statements%'
+          order by temp_blks_written desc
+          limit 5`,
+      );
+      tempOffenders = (toRes.rows as Array<Record<string, unknown>>).map((r) => ({
+        queryid: String(r.queryid ?? ""),
+        query: String(r.query ?? ""),
+        calls: Number(r.calls ?? 0),
+        tempBytes: Number(r.temp_bytes ?? 0),
+      }));
+    } catch {
+      /* best-effort: pg_stat_statements may be unreadable; the aggregate temp flag still fires */
+    }
+
     const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
       xactCommit: statDb.xactCommit,
       xactRollback: statDb.xactRollback,
@@ -3725,6 +4073,7 @@ async function runDbHealthInstanceJob(): Promise<void> {
       statementsNearTimeout,
       nearTimeoutSamples,
       authenticatedStatementTimeoutMs,
+      tempOffenders,
     };
     const findings = mod.analyzeInstanceHealth(input);
     const ranked = mod.rankFindings(findings);
@@ -7917,6 +8266,17 @@ async function closeOutSpecForFold(workspaceId: string, slug: string): Promise<{
   }
   const { error } = await db.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: slug, p_user: null });
   if (error) return { ok: false, error: `enqueue_fold failed: ${error.message}`, flipped };
+  // spec-timecard-chokepoint-instrumentation Phase 3 — enqueue_fold coalesces (reuse-or-create a
+  // fold-batch row); either way this slug is now queued for the fold lane. Job_id is null because
+  // the RPC returns nothing — the fold-batch row's id is a shared batch, not a per-slug identifier.
+  await emitTimecard({
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    phase_index: null,
+    event_kind: "job_queued",
+    actor: "closeOutSpecForFold",
+    metadata: { kind: "fold" },
+  });
   return { ok: true, flipped };
 }
 
@@ -8538,6 +8898,16 @@ async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise
       console.warn(`${tag} re-enqueue fold failed: ${error.message}`);
       return;
     }
+    // spec-timecard-chokepoint-instrumentation Phase 3 — the snapshot-race sweep re-queues the fold
+    // lane for a slug that landed in pending_folds after this job's initial snapshot.
+    await emitTimecard({
+      workspace_id: workspaceId,
+      spec_slug: pendingSlug,
+      phase_index: null,
+      event_kind: "job_queued",
+      actor: "reEnqueueFoldIfPending",
+      metadata: { kind: "fold", snapshot_race: true },
+    });
     console.log(`${tag} ↻ re-enqueued a fold-batch — pending_folds rows arrived during this job (snapshot-race sweep)`);
   } catch (e) {
     console.warn(`${tag} re-enqueue fold errored: ${e instanceof Error ? e.message : String(e)}`);
@@ -8880,6 +9250,21 @@ async function runFoldJob(job: Job) {
     }
   }
 
+  // spec-timecard-chokepoint-instrumentation Phase 1 — one fold_started per slug in the surviving batch
+  // (post-guards). phase_index=null (fold is spec-level). Best-effort per slug; a timecard failure never
+  // blocks the fold. Fired here (post-release, pre-worktree) so a slug released back to `pending` above
+  // never gets an unmatched fold_started.
+  for (const slug of slugs) {
+    await emitTimecard({
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "fold_started",
+      actor: "worker",
+      metadata: { job_id: job.id, batch_size: slugs.length },
+    });
+  }
+
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]);
@@ -8998,6 +9383,18 @@ async function runFoldJob(job: Job) {
         const { setSpecStatus } = await import("../src/lib/specs-table");
         for (const slug of slugs) await setSpecStatus(job.workspace_id, slug, "folded", "fold-worker");
       }
+      // spec-timecard-chokepoint-instrumentation Phase 1 — no-op fold terminal (no brain changes): the
+      // specs still folded from the ledger's point of view.
+      for (const slug of slugs) {
+        await emitTimecard({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          phase_index: null,
+          event_kind: "folded",
+          actor: "worker",
+          metadata: { job_id: job.id, no_new_changes: true },
+        });
+      }
       // A fold can pause on needs_input → draft PR; un-draft it on a no-new-change resume (same gap as runJob).
       const pr = await ensurePr(branch!, slugs[0] || "fold", false);
       if (pr) {
@@ -9038,6 +9435,18 @@ async function runFoldJob(job: Job) {
     {
       const { setSpecStatus } = await import("../src/lib/specs-table");
       for (const slug of slugs) await setSpecStatus(job.workspace_id, slug, "folded", "fold-worker");
+    }
+    // spec-timecard-chokepoint-instrumentation Phase 1 — the post-commit success terminal: PR opened
+    // and the batch flipped to `folded`. Emit one `folded` event per slug.
+    for (const slug of slugs) {
+      await emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: null,
+        event_kind: "folded",
+        actor: "worker",
+        metadata: { job_id: job.id, pr: pr.number, pr_url: pr.url },
+      });
     }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
@@ -10043,16 +10452,46 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
 // error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
+  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
+  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
+  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
   const base = await loadImproveBrief(ticketId);
-  const { data: ticket } = await db
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot (customer + merged identity, subscriptions with
+  // realized pricing + applied_discounts, orders w/ per-unit computed, active products, active
+  // policies) so Sol's Direction is grounded in the same numbers the deployed orchestrator sees —
+  // never a guess from improvised SQL. Best-effort: a missing customer / SDK read failure leaves
+  // the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  return cxBrief ? `${base}\n\n${cxBrief}` : base;
+}
+
+/**
+ * Build the CX SDK snapshot text block for a ticket. Resolves the ticket's workspace_id +
+ * customer_id, then calls the deterministic getCxBundle → formatCxBundle. Non-throwing:
+ * a null customer still emits the workspace's products + policies. A hard read failure
+ * leaves the block empty (the caller falls back to the base brief). Phase 1 of
+ * docs/brain/specs/cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-
+ * access-no-raw-sql.md.
+ */
+async function loadCxAgentSdkBrief(ticketId: string): Promise<string> {
+  const { data: t } = await db
     .from("tickets")
-    .select("workspace_id")
+    .select("workspace_id, customer_id")
     .eq("id", ticketId)
     .maybeSingle();
-  const workspaceId = (ticket as { workspace_id: string | null } | null)?.workspace_id ?? null;
-  if (!workspaceId) return base;
-  const policiesBlock = await loadActivePoliciesBlock(workspaceId);
-  return policiesBlock ? `${base}\n\n${policiesBlock}` : base;
+  if (!t?.workspace_id) return "";
+  try {
+    const { getCxBundle, formatCxBundle } = await import("../src/lib/cx-agent-sdk");
+    const bundle = await getCxBundle(
+      db,
+      t.workspace_id as string,
+      (t.customer_id as string | null) ?? null,
+    );
+    return formatCxBundle(bundle);
+  } catch {
+    return "";
+  }
 }
 
 // Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
@@ -10113,6 +10552,8 @@ async function runTicketHandleJob(job: Job) {
       `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
       brief,
       ``,
+      `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
+      `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
       `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
@@ -10139,9 +10580,20 @@ async function runTicketHandleJob(job: Job) {
       // with an empty slug — the writer will fail the Direction otherwise, and the ticket
       // burns the box turn.
       `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
+      // Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+      // MESSAGE-IS-LAST. Any concrete outcome your first_reply CLAIMS (added a bag, applied a
+      // credit, issued a refund, created a return, cancelled a subscription, …) MUST also appear
+      // as a structured required_outcomes item so the honor step can fire + verify it BEFORE the
+      // send. Judy 0a9e4d7f: the reply claimed bag+credit while neither action ran. The worker
+      // (a) writes each required_outcomes item to the DB, (b) runs the honor step (dispatches +
+      // verifies via the shared action executor), (c) only THEN allows the reply to send. An item
+      // that fails to verify blocks the send. When your first_reply makes NO concrete claim (a
+      // needs_info question, a bare informational reply), return required_outcomes:[] — the honor
+      // step is a no-op and the reply flows normally.
+      `REQUIRED OUTCOMES — the structured 'what'. For every concrete outcome your first_reply CLAIMS (or promises to make happen), also emit a required_outcomes entry with {kind:'<action_type>', description:'<one-line human summary>', target_ids:{…the ids the executor needs: contract_id, order_id, product_id, coupon_code, amount_cents…}, expected_db_state:{…the DB predicate that would prove it done…}}. The worker fires each entry via the shared action executor (directActionHandlers[kind]) and verifies against the DB BEFORE your first_reply sends — an unverifiable entry BLOCKS the send. Emit the outcomes in the order they should run. If your first_reply makes no concrete claim (a question, an informational answer, a policy explanation), return required_outcomes:[] — the honor step is a no-op.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"required_outcomes":[{"kind":"…","description":"…","target_ids":{…},"expected_db_state":{…}}],"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
@@ -10227,8 +10679,9 @@ async function runTicketHandleJob(job: Job) {
       const guardrails = (d.guardrails && typeof d.guardrails === "object" ? d.guardrails : {}) as Record<string, unknown>;
 
       const { writeDirection } = await import("../src/lib/ticket-directions");
+      let directionId: string | null = null;
       try {
-        await writeDirection(db, {
+        const directionRow = await writeDirection(db, {
           workspace_id: workspaceId,
           ticket_id: ticketId,
           intent,
@@ -10238,6 +10691,7 @@ async function runTicketHandleJob(job: Job) {
           guardrails,
           // authored_by default = 'sol_box_session' (the SDK default; matches the Phase 3 verification)
         });
+        directionId = directionRow.id;
       } catch (e) {
         // The partial-UNIQUE on ticket_id WHERE superseded_at IS NULL enforces the one-live-row
         // invariant — a re-dispatched job on the same ticket that already has a live Direction fails
@@ -10246,6 +10700,125 @@ async function runTicketHandleJob(job: Job) {
         const msg = e instanceof Error ? e.message : String(e);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
+      }
+
+      // ── Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified ──
+      // Phase 1 wire-in: persist Sol's required_outcomes — the structured "what" behind the reply.
+      // Every concrete outcome the first_reply CLAIMS is stored as an individually-checkable row
+      // (kind + description + target_ids + expected_db_state, status='pending') so the honor step
+      // can dispatch it AND the send guards can gate on verified state. Sol's prompt requires the
+      // array; an omitted / non-array field is treated as [] (no claims → no rows → honor step is
+      // a no-op → reply flows normally).
+      const { writeRequiredOutcomes } = await import("../src/lib/ticket-required-outcomes");
+      const rawOutcomes = Array.isArray((parsed as { required_outcomes?: unknown }).required_outcomes)
+        ? ((parsed as { required_outcomes: unknown[] }).required_outcomes as unknown[])
+        : [];
+      const outcomeItems: Array<{
+        kind: string;
+        description: string;
+        target_ids?: Record<string, unknown>;
+        expected_db_state?: Record<string, unknown>;
+      }> = [];
+      for (const it of rawOutcomes) {
+        if (!it || typeof it !== "object") continue;
+        const o = it as {
+          kind?: unknown;
+          description?: unknown;
+          target_ids?: unknown;
+          expected_db_state?: unknown;
+        };
+        const kind = typeof o.kind === "string" ? o.kind.trim() : "";
+        const description = typeof o.description === "string" ? o.description.trim() : "";
+        if (!kind || !description) continue;
+        const targetIds =
+          o.target_ids && typeof o.target_ids === "object" && !Array.isArray(o.target_ids)
+            ? (o.target_ids as Record<string, unknown>)
+            : {};
+        const expected =
+          o.expected_db_state && typeof o.expected_db_state === "object" && !Array.isArray(o.expected_db_state)
+            ? (o.expected_db_state as Record<string, unknown>)
+            : {};
+        outcomeItems.push({ kind, description, target_ids: targetIds, expected_db_state: expected });
+      }
+      if (outcomeItems.length > 0) {
+        try {
+          await writeRequiredOutcomes(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            direction_id: directionId,
+            items: outcomeItems,
+          });
+        } catch (e) {
+          // A required_outcomes insert failure does NOT unwind the Direction — the ledger is durable
+          // substrate. Surface the error in log_tail so it's grep-able but continue: with zero rows
+          // written, the honor step is a no-op and the outcome-claim guard downstream will block any
+          // send that CLAIMS an unverified outcome (Judy 0a9e4d7f's failure mode) via
+          // assertClaimsBackedByOutcomes.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} writeRequiredOutcomes failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      // Phase 2 wire-in: HONOR every required_outcome BEFORE composing/sending the customer reply.
+      // The honor step walks each row in authored order, dispatches the action via the shared
+      // directActionHandlers, and verifies via verifyActionInDB. Actions run to completion (or fail
+      // loudly) FIRST — the reply-drafting step is NOT reached while any item is pending. A failed
+      // item routes the ticket to needs_human naming the unfinished item (Judy 0a9e4d7f: bag/credit
+      // would fire OR fail loudly here — never a reply promising them while neither ran).
+      let honorBlockLine: string | null = null;
+      if (outcomeItems.length > 0) {
+        const { data: tCustomer } = await db
+          .from("tickets")
+          .select("customer_id, channel")
+          .eq("id", ticketId)
+          .single();
+        const customerId = (tCustomer?.customer_id as string | null) ?? null;
+        const honorChannel = (tCustomer?.channel as string | null) || "email";
+        if (!customerId) {
+          // No linked customer — the executor can't dispatch a customer-scoped action. Block the
+          // reply so an unverifiable claim can't ship; the Improve tab picks up the ticket.
+          honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${honorBlockLine}`);
+          await update(job.id, {
+            log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          try {
+            const { honorRequiredOutcomes } = await import("../src/lib/honor-required-outcomes");
+            const honor = await honorRequiredOutcomes({
+              admin: db,
+              workspace_id: workspaceId,
+              ticket_id: ticketId,
+              customer_id: customerId,
+              channel: honorChannel,
+              // Real production dispatchers — the box worker has admin creds and this is the
+              // very step the spec's Phase 2 verification names ("re-running Judy's scenario
+              // executes bag/credit (or fails loudly) BEFORE any reply exists").
+              sandbox: false,
+            });
+            if (!honor.all_verified) {
+              const failedNames =
+                [...honor.failed_items, ...honor.carried_forward_failed]
+                  .map((f) => `${f.kind}:${f.description}${f.failed_reason ? ` (${f.failed_reason})` : ""}`)
+                  .join(" | ") || "(none named)";
+              honorBlockLine = `Sol reply BLOCKED by honor step: ${honor.failed_items.length} failed / ${honor.carried_forward_failed.length} carried-forward. Failed: ${failedNames}. Direction authored; a human re-drafts via Improve.`;
+              console.warn(`${tag} ${honorBlockLine}`);
+              await update(job.id, {
+                log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+              });
+            }
+          } catch (e) {
+            // Honor step blew up — block the send. A message-is-last invariant is that we NEVER
+            // ship a claim we couldn't verify; erroring is the same as unverified from the send
+            // gate's perspective.
+            const msg = e instanceof Error ? e.message : String(e);
+            honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${honorBlockLine}`);
+            await update(job.id, {
+              log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          }
+        }
       }
 
       // Ship the first customer-facing reply through the SAME production delivery sink the orchestrator
@@ -10263,7 +10836,10 @@ async function runTicketHandleJob(job: Job) {
       // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
       // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
-      if (firstReply) {
+      // The honor step above sets honorBlockLine when a required_outcome failed to verify — the
+      // message-is-last invariant refuses to compose OR send a reply when any promise is unbacked.
+      // The Direction is still durable; the ticket routes to needs_human via the Improve tab.
+      if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
         if (bait.ok === false) {
@@ -10273,17 +10849,43 @@ async function runTicketHandleJob(job: Job) {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
           });
         } else {
-          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-          const channel = (t?.channel as string | null) || "email";
-          try {
-            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-          } catch (e) {
-            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-            const msg = e instanceof Error ? e.message : String(e);
-            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          // Phase 3 of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+          // the MESSAGE-IS-LAST send guard. After the policy-bait guard passes, check that every
+          // outcome the DRAFT reply CLAIMS (adding a bag, applying a credit, issuing a refund, …)
+          // is backed by a ticket_required_outcomes row with status='verified'. Judy 0a9e4d7f's
+          // failure was exactly this — the reply promised bag+credit while neither action had
+          // actually run. Fail-open on unknown kinds (a novel action can't over-block a legit
+          // reply); every match against an unverified row blocks the send and routes to the
+          // Improve tab (same needs_human path the policy-bait guard uses).
+          const { assertClaimsBackedByOutcomes } = await import("../src/lib/sol-outcome-claim-guard");
+          const claimVerdict = await assertClaimsBackedByOutcomes({
+            admin: db,
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            message: firstReply,
+          });
+          if (claimVerdict.ok === false) {
+            const claimSummary = claimVerdict.blocked_claims
+              .map((c) => `${c.kind}[status=${c.current_status}]:${JSON.stringify(c.matched_phrase.slice(0, 60))}`)
+              .join(" | ");
+            const blockLine = `Sol reply BLOCKED by outcome-claim guard: ${claimVerdict.reason}. Claims: ${claimSummary}. Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${blockLine}`);
+            await update(job.id, {
+              log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          } else {
+            const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+            const channel = (t?.channel as string | null) || "email";
+            try {
+              const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+              await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+            } catch (e) {
+              // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+              // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+              // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+              const msg = e instanceof Error ? e.message : String(e);
+              console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+            }
           }
         }
       }
@@ -10654,6 +11256,20 @@ async function runSpecTestJob(job: Job) {
   const slug = job.spec_slug;
   const tag = `[spec-test:${slug}]`;
   console.log(`${tag} testing shipped spec (job ${job.id.slice(0, 8)})`);
+  // spec-timecard-chokepoint-instrumentation Phase 2 — fused-session in-memory guard. The pre-merge
+  // path here also runs the security review inline (applyFusedSecurityAsBranchVerdict); this set is
+  // threaded through so both spec_test_* and security_* pairs emit AT MOST ONCE PER KIND per job.
+  const emittedThisSession = new Set<string>();
+  // Emit spec_test_started at claim (before Vera even opens the session). phase_index=null — spec-test
+  // grades the WHOLE spec, not a specific phase. Best-effort — every emission wraps a failing insert.
+  await emitTimecardOnceInSession(emittedThisSession, {
+    workspace_id: job.workspace_id,
+    spec_slug: slug,
+    phase_index: null,
+    event_kind: "spec_test_started",
+    actor: "vera",
+    metadata: { job_id: job.id },
+  });
   try {
     // spec-test-materialize-on-derived-status: Vera reads the spec from `.box/spec-${slug}.md` (the prompt +
     // SKILL.md both point there) — the worker MUST materialize the DB row to that path first, or Vera reads a
@@ -10803,6 +11419,16 @@ async function runSpecTestJob(job: Job) {
         transcript: transcript.slice(-8000), error: reason,
         spec_branch: branch, preview_url: previewOrigin,
       });
+      // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict at the spec_test_runs
+      // insert (error path). Fused-session-guarded so a fused session emits only one verdict per kind.
+      await emitTimecardOnceInSession(emittedThisSession, {
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: null,
+        event_kind: "spec_test_verdict",
+        actor: "vera",
+        metadata: { job_id: job.id, agent_verdict: "error", reason },
+      });
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
 
@@ -10920,6 +11546,17 @@ async function runSpecTestJob(job: Job) {
       // null (the standing lane targets prod, not a branch).
       spec_branch: branch, preview_url: previewOrigin,
     });
+    // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict at the canonical
+    // spec_test_runs insert (success path). Carries the agent_verdict + one-line summary for the
+    // M5 timeline. Fused-session-guarded so a fused session emits only one verdict.
+    await emitTimecardOnceInSession(emittedThisSession, {
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "spec_test_verdict",
+      actor: "vera",
+      metadata: { job_id: job.id, agent_verdict, summary },
+    });
     // spec-test-maximize-machine-coverage Phase 3: reflect the run's green (`pass`) checks onto the spec
     // markdown's verification bullets (leading ✅, committed to main). Best-effort — never fail the run.
     try {
@@ -10948,6 +11585,9 @@ async function runSpecTestJob(job: Job) {
           parsedFused: parsed as Record<string, unknown>,
           raw,
           tag,
+          // spec-timecard-chokepoint-instrumentation Phase 2 — share the fused-session set so
+          // security_started + security_verdict emit AT MOST ONCE for this pre-merge session.
+          emittedThisSession,
         });
       } catch (e) {
         console.error(`${tag} fused-security apply failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
@@ -11064,6 +11704,17 @@ async function runSpecTestJob(job: Job) {
         agent_verdict: "error", summary: {}, checks: [], transcript: null, error: `error: ${msg}`,
         spec_branch: job.spec_branch ?? null, preview_url: previewOrigin,
       });
+      // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict on a worker-side throw.
+      // Fused-session-guarded: the writeErrorRun/success paths already fired this kind, this is a
+      // no-op when it did.
+      await emitTimecardOnceInSession(emittedThisSession, {
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: null,
+        event_kind: "spec_test_verdict",
+        actor: "vera",
+        metadata: { job_id: job.id, agent_verdict: "error", reason: msg },
+      });
     } catch { /* audit best-effort */ }
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
@@ -11162,6 +11813,19 @@ async function runSpecReviewJob(job: Job) {
       console.error(`${tag} ${tail}`);
       return;
     }
+  }
+
+  // spec-timecard-chokepoint-instrumentation Phase 1 — Vale enters review for each materialized slug.
+  // phase_index=null (Vale reviews the spec as a whole, not a specific phase).
+  for (const slug of reviewable) {
+    await emitTimecard({
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "review_started",
+      actor: "vale",
+      metadata: { job_id: job.id },
+    });
   }
 
   // agent-mandate-hardening-spec-review Phase 1 — bake the accumulated coaching into the run-job. Pre-
@@ -11298,6 +11962,16 @@ async function runSpecReviewJob(job: Job) {
       const disposition = rawDisposition && rawDispositionReason ? rawDisposition : undefined;
       const disposition_reason = disposition ? rawDispositionReason : undefined;
       const result = await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects, disposition, disposition_reason });
+      // spec-timecard-chokepoint-instrumentation Phase 1 — Vale's verdict lands. phase_index=null; a
+      // pass/needs_fix is a spec-level event (Vale reviews the whole spec at the vale_pass seam).
+      await emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: d.slug,
+        phase_index: null,
+        event_kind: result.applied === "pass" ? "review_passed" : "review_failed",
+        actor: "vale",
+        metadata: { job_id: job.id, ...(defects.length ? { defects } : {}) },
+      });
       if (result.applied === "pass") {
         passed++;
         if (disposition) dispositions++;
@@ -12102,6 +12776,17 @@ async function loadCsDirectorCallBrief(
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
 
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot so June's verdict is grounded in the same shape Sol
+  // and Cora saw — customer + merged identity, subscriptions w/ realized pricing + discounts,
+  // orders w/ per-unit computed, active products, active policies. Best-effort — a missing
+  // customer / SDK read failure leaves the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  if (cxBrief) {
+    parts.push("");
+    parts.push(cxBrief);
+  }
+
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
   // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
   // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
@@ -12202,7 +12887,9 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     ``,
     brief,
     ``,
-    `Investigate read-only (the improve-box-tools.ts read-only tools + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
+    `DETERMINISTIC READ-ONLY CX DATA — call the shared SDK for customer + merged identity, orders w/ per-unit, subscriptions w/ realized pricing + applied_discounts, active products, and active policies (never improvise SQL):`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
     `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs reasoning + recommended_remedy when a concrete action is nameable, reasoning alone when it isn't).`,
@@ -12825,10 +13512,14 @@ function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | nul
 // worker's applyAnalyzerVerdict is the only writer. Bounded: a handful of targeted lookups per
 // grade, not open-ended. See the ticket-analyze skill for when to research vs. defer to the
 // low-confidence unverified handling.
-function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string): string {
+function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string, cxSdkBrief: string = ""): string {
   return [
     `You are Cora, the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director). Use the ticket-analyze skill (cwd is the repo root).`,
     `Score the AI's behavior in the conversation window below against the QC rubric. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `DETERMINISTIC READ-ONLY CX DATA — PREFERRED FIRST STOP. Every CX lookup goes through the shared read-only SDK; NEVER improvise SQL for these surfaces:`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `The bundle carries customer + merged identity, subscriptions w/ realized pricing + applied_discounts, orders w/ per-unit computed + variant title, active products (variants/flavors/pricing), and active sonnet_prompts policies — the SAME shape the deployed orchestrator sees.`,
     ``,
     `PRIMARY PATH — RESEARCH BEFORE FLAGGING (Phase 2). When the AI made a factual claim you can't confirm from the transcript (a variant/flavor, a per-unit price, a subscription state, a policy, a customer entitlement), verify it FIRST with the bounded read-only research CLI:`,
     `  npx tsx scripts/analyzer-research-tools.ts <tool> ${ticketId} [json_input]`,
@@ -12842,7 +13533,7 @@ function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string):
     ``,
     `--- USER TURN ---`,
     userMsg,
-    ``,
+    cxSdkBrief ? `\n${cxSdkBrief}\n` : ``,
     `Final message = ONLY one JSON object, no prose around it:`,
     `{"score":<integer 1-10>,"issues":[{"type":"<one of the issue types above>","description":"..."}],"action_items":[{"priority":"high|medium|low","description":"..."}],"summary":"<1-2 sentences>"}`,
   ].join("\n");
@@ -12881,8 +13572,15 @@ async function runTicketAnalyzeJob(job: Job) {
       return;
     }
 
+    // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+    // pull the deterministic CX SDK snapshot (customer + merged identity, subscriptions w/ realized
+    // pricing + applied_discounts, orders w/ per-unit computed, active products, active policies)
+    // so Cora starts every grade with the SAME numbers the deployed orchestrator sees. Best-effort:
+    // an SDK read failure leaves the snapshot empty and the grade still proceeds on the
+    // conversation-window + system rubric.
+    const cxSdkBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
     const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
-      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId), sid, REPO_DIR, cfg, job.id),
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId, cxSdkBrief), sid, REPO_DIR, cfg, job.id),
     );
     await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
@@ -19731,13 +20429,33 @@ async function applySecurityVerdictToJob(
     tag: string;
     recordDirectorActivity: typeof import("../src/lib/director-activity").recordDirectorActivity;
     SECURITY_DIRECTOR_FUNCTION: string;
+    // spec-timecard-chokepoint-instrumentation Phase 2 — the session-local Set the caller owns so
+    // security_verdict emits AT MOST ONCE per fused (or standalone) job. Optional so a caller that
+    // has no set (legacy path, if any) still works — it just falls back to a fresh single-shot set.
+    emittedThisSession?: Set<string>;
   },
 ): Promise<void> {
   const { parsed, verdict, raw, isError, fallbackReason, source, specLabel, activityReason, activityMetadata, parentSlug, instr, mode, tag, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION } = args;
+  const emittedThisSession = args.emittedThisSession ?? new Set<string>();
+  // spec-timecard-chokepoint-instrumentation Phase 2 — a single per-job security_verdict at the
+  // shared applier's terminal write. Fires here (once) regardless of the verdict branch below, so
+  // both standalone runSecurityReviewJob and the fused pre-merge session record exactly one
+  // verdict per session. Best-effort — a timecard failure never blocks the apply.
+  const emitVerdict = async () => {
+    await emitTimecardOnceInSession(emittedThisSession, {
+      workspace_id: job.workspace_id,
+      spec_slug: parentSlug || job.spec_slug || null,
+      phase_index: null,
+      event_kind: "security_verdict",
+      actor: "vault",
+      metadata: { job_id: job.id, agent_verdict: verdict, mode, source_kind: source.kind },
+    });
+  };
   if (verdict === "clean" || verdict === "false-positive") {
     const review = String(parsed?.review || `${verdict} — no vulnerability introduced`);
     const ledger = JSON.stringify({ ...instr, verdict });
     await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `${verdict}: ${review}`.slice(-2000) });
+    await emitVerdict();
     console.log(`${tag} ${verdict} → no action`);
     // reactive-fold-on-gate-complete: a POST-MERGE (diff-mode) security review reaching clean is the LAST gate
     // for a one-off / already-spec-test-passed spec — `getSecurityStateBySlug` now reports `completedClean`, so
@@ -19766,6 +20484,7 @@ async function applySecurityVerdictToJob(
       metadata: activityMetadata,
     });
     await update(job.id, { status: "needs_attention", error: "needs-human", instructions: JSON.stringify({ ...instr, verdict }), log_tail: review.slice(-2000) });
+    await emitVerdict();
     console.log(`${tag} needs-human → surfaced, no spec`);
     return;
   }
@@ -19774,19 +20493,23 @@ async function applySecurityVerdictToJob(
     const authored = await authorSecurityFixSpec(parsed?.spec, parentSlug, source, job.workspace_id);
     if (!authored) {
       await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real vulnerability but no valid fix spec" });
+      await emitVerdict();
       console.log(`${tag} real-vuln but no valid spec → surfaced needs-human`);
       return;
     }
     const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
     await routeSecurityFix(job, authored, { tag, specLabel, review, ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION });
+    await emitVerdict();
     return;
   }
   if (isError && !parsed) {
     await update(job.id, { status: "failed", error: "security review errored", log_tail: raw.slice(-2000) });
+    await emitVerdict();
     return;
   }
   // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never auto-pass.
   await update(job.id, { status: "needs_attention", error: fallbackReason ?? "security review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
+  await emitVerdict();
 }
 
 /**
@@ -19807,11 +20530,28 @@ async function applyFusedSecurityAsBranchVerdict(args: {
   parsedFused: Record<string, unknown>;
   raw: string;
   tag: string;
+  // spec-timecard-chokepoint-instrumentation Phase 2 — the fused-session emit-once set the caller
+  // (runSpecTestJob) owns. Threaded here so security_started + security_verdict AT MOST ONCE per
+  // fused job regardless of how many terminal branches applySecurityVerdictToJob takes.
+  emittedThisSession?: Set<string>;
 }): Promise<void> {
   const { job, slug, branch, previewOrigin, parsedFused, raw, tag } = args;
+  const emittedThisSession = args.emittedThisSession ?? new Set<string>();
   const { classifyFusedSecurityEnvelope, mapFusedSecurityToVerdict } = await import("../src/lib/security-envelope");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { SECURITY_DIRECTOR_FUNCTION } = await import("../src/lib/security-agent");
+  // spec-timecard-chokepoint-instrumentation Phase 2 — security_started for the fused pre-merge
+  // session. The security review is running INSIDE the spec-test session, so this fires as the
+  // fused caller pivots into the security-verdict apply. phase_index=null — security_review is
+  // spec-scoped, not phase-scoped.
+  await emitTimecardOnceInSession(emittedThisSession, {
+    workspace_id: job.workspace_id,
+    spec_slug: slug,
+    phase_index: null,
+    event_kind: "security_started",
+    actor: "vault",
+    metadata: { job_id: job.id, fused: true, branch },
+  });
 
   const fusedSecurity = parsedFused.security;
   const verdictInfo = classifyFusedSecurityEnvelope(fusedSecurity);
@@ -19914,6 +20654,16 @@ async function applyFusedSecurityAsBranchVerdict(args: {
       instructions: JSON.stringify({ ...instrJson, verdict, routed: "fixes-as-phases" }),
       log_tail: `real-vuln → ${outcome}`.slice(-2000),
     });
+    // spec-timecard-chokepoint-instrumentation Phase 2 — security_verdict for the fused real-vuln
+    // early-return (fixes-as-phases path bypasses applySecurityVerdictToJob).
+    await emitTimecardOnceInSession(emittedThisSession, {
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "security_verdict",
+      actor: "vault",
+      metadata: { job_id: job.id, agent_verdict: "real-vuln", mode: "branch", routed: "fixes-as-phases", fused: true },
+    });
     console.log(`${tag} fused real-vuln on ${branch} → ${outcome}`);
     return;
   }
@@ -19948,6 +20698,9 @@ async function applyFusedSecurityAsBranchVerdict(args: {
     tag: `[fused-security:${syntheticJob.id.slice(0, 8)}]`,
     recordDirectorActivity,
     SECURITY_DIRECTOR_FUNCTION,
+    // spec-timecard-chokepoint-instrumentation Phase 2 — carry the fused-session set into the
+    // shared applier so the security_verdict emit stays single-fire.
+    emittedThisSession,
   });
 }
 
@@ -19955,6 +20708,21 @@ async function runSecurityReviewJob(job: Job) {
   const tag = `[security:${job.id.slice(0, 8)}]`;
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { SECURITY_DIRECTOR_FUNCTION, depFindingSignature } = await import("../src/lib/security-agent");
+  // spec-timecard-chokepoint-instrumentation Phase 2 — session-local emit-once guard. A standalone
+  // security-review job runs a single security pass; the set makes the security_started + verdict
+  // pair robust to any accidental re-fire in later maintenance.
+  const emittedThisSession = new Set<string>();
+  // Emit security_started at claim. phase_index=null — the security review grades the whole
+  // diff/branch/dep-scan, not a specific phase. spec_slug is null for a dep-watch scan; the emitter
+  // no-ops in that case (nothing to correlate on the ledger).
+  await emitTimecardOnceInSession(emittedThisSession, {
+    workspace_id: job.workspace_id,
+    spec_slug: job.spec_slug,
+    phase_index: null,
+    event_kind: "security_started",
+    actor: "vault",
+    metadata: { job_id: job.id, kind: "security-review" },
+  });
   let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
@@ -20108,6 +20876,8 @@ async function runSecurityReviewJob(job: Job) {
       source, specLabel, activityReason, activityMetadata,
       parentSlug, instr, mode, tag,
       recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION,
+      // spec-timecard-chokepoint-instrumentation Phase 2 — carry the standalone session's guard set.
+      emittedThisSession,
     });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
@@ -21271,6 +22041,16 @@ async function dispatchJob(job: Job) {
             try {
               await stampPhaseBuilt(job.workspace_id, slug, pos, { build_sha: opts.headSha });
               console.log(`${tag} stamped phase ${pos} BUILT (build_sha ${opts.headSha.slice(0, 8)}, in_progress — not shipped)`);
+              // spec-timecard-chokepoint-instrumentation Phase 1 — every phase-position we just stamped
+              // BUILT gets one build_done. Best-effort; a timecard failure never blocks stampPhaseBuilt.
+              await emitTimecard({
+                workspace_id: job.workspace_id,
+                spec_slug: slug,
+                phase_index: pos,
+                event_kind: "build_done",
+                actor: "worker",
+                metadata: { job_id: job.id, build_sha: opts.headSha },
+              });
             } catch (e) {
               console.error(`${tag} stampPhaseBuilt(pos=${pos}) failed (non-fatal, continuing):`, e instanceof Error ? e.message : e);
             }
@@ -21519,6 +22299,21 @@ async function dispatchJob(job: Job) {
           console.error(`${tag} next-planned-phase derivation failed (proceeding unscoped — pre-flight still applies):`, e instanceof Error ? e.message : e);
         }
       }
+    }
+
+    // spec-timecard-chokepoint-instrumentation Phase 1 — a build session is opening for this spec. The
+    // build/plan-pool claim RPC just flipped this row to `building`; emit build_started at the point the
+    // TypeScript worker actually starts running the phase, once phasePosition is derived. phase_index
+    // carries the 1-based phase position (null on a one-shot / unscoped session).
+    if (slug) {
+      await emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: phasePosition,
+        event_kind: "build_started",
+        actor: "worker",
+        metadata: { job_id: job.id, resume: !!isResume },
+      });
     }
 
     // `isResume && sessionId`: a started-fresh run (owning account was capped → sessionId cleared) has no
@@ -22092,6 +22887,20 @@ async function main() {
       // mid-run queued_resume flip); a job dispatched with null started fresh (cache-cold).
       resumed: !!job.claude_session_id,
     });
+    // spec-timecard-chokepoint-instrumentation Phase 3 — every claim_agent_job return that carries a
+    // spec_slug lands one `job_claimed`. This single seam covers every kind's claim lane (the RPC just
+    // flipped the row to `building`); a triage-escalations claim with spec_slug=null is skipped inside
+    // emitTimecard by the SDK's caller-side guard. Best-effort — never blocks the launch.
+    if (job.spec_slug) {
+      void emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: job.spec_slug,
+        phase_index: null,
+        event_kind: "job_claimed",
+        actor: "worker",
+        metadata: { kind: job.kind, job_id: job.id, box_id: WORKER_BOX_ID },
+      });
+    }
     // Stamp an initial heartbeat at claim time (stale-session-reaper) so a just-claimed job that hasn't
     // emitted its first stream-json line yet isn't immediately treated as stale — the reaper's N-minute
     // window starts now, and runBoxSession's per-line bumps keep it fresh while the session is alive.

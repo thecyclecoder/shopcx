@@ -174,6 +174,44 @@ export function isActive(status: JobStatus): boolean {
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+// spec-timecard-chokepoint-instrumentation Phase 3 — emit a `job_queued` timecard whenever an enqueue
+// helper below successfully inserts an `agent_jobs` row that CARRIES a `spec_slug`. Skipped when the
+// slug is null (a per-workspace triage sweep has no spec target). Best-effort: recordTimecardEvent
+// swallows insert errors, and we wrap the dynamic import too so a load failure never leaks into the
+// enqueue caller's control flow. Callers pass their name as `actor` so the ledger records who queued.
+async function emitJobQueued(
+  admin: Admin,
+  input: {
+    workspace_id: string;
+    spec_slug: string | null | undefined;
+    kind: string;
+    job_id: string | null | undefined;
+    actor: string;
+    extra?: Record<string, unknown>;
+  },
+): Promise<void> {
+  if (!input.spec_slug) return; // triage sweep + other spec-less kinds skip the ledger
+  try {
+    const { recordTimecardEvent } = await import("@/lib/spec-timecards");
+    await recordTimecardEvent(admin, {
+      workspace_id: input.workspace_id,
+      spec_slug: input.spec_slug,
+      phase_index: null,
+      event_kind: "job_queued",
+      actor: input.actor,
+      metadata: {
+        kind: input.kind,
+        ...(input.job_id ? { job_id: input.job_id } : {}),
+        ...(input.extra ?? {}),
+      },
+    });
+  } catch (e) {
+    console.warn(
+      `[timecards] job_queued emit failed spec=${input.spec_slug} kind=${input.kind}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
 /**
  * fold-guard-live-build (Phase 1): the most recent NON-TERMINAL build/spec-test job for a spec, or null.
  *
@@ -540,14 +578,25 @@ export async function enqueueSpecTestIfDue(
     .limit(1);
   if (recent && recent.length) return { enqueued: false, reason: "fresh-run" };
 
-  const { error } = await admin.from("agent_jobs").insert({
+  const { data: inserted, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "spec-test",
+      status: "queued",
+      created_by: null,
+    })
+    .select("id")
+    .single();
+  if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
+  await emitJobQueued(admin, {
     workspace_id: workspaceId,
     spec_slug: slug,
     kind: "spec-test",
-    status: "queued",
-    created_by: null,
+    job_id: (inserted as { id?: string } | null)?.id ?? null,
+    actor: "enqueueSpecTestIfDue",
   });
-  if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
   return { enqueued: true };
 }
 
@@ -641,6 +690,14 @@ export async function enqueueBuildIfDue(
     .select("id")
     .single();
   if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
+  await emitJobQueued(admin, {
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    kind: "build",
+    job_id: inserted?.id ?? null,
+    actor: "enqueueBuildIfDue",
+    extra: opts?.createdBy ? { created_by: opts.createdBy } : undefined,
+  });
   return { enqueued: true, jobId: inserted?.id };
 }
 
@@ -758,8 +815,16 @@ export async function enqueuePreMergeSpecTest(
     created_by: null,
     preview_url: origin,
   };
-  const { error } = await admin.from("agent_jobs").insert(insertRow);
+  const { data: inserted, error } = await admin.from("agent_jobs").insert(insertRow).select("id").single();
   if (error) return { enqueued: false, reason: `insert-failed: ${error.message}` };
+  await emitJobQueued(admin, {
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    kind: "spec-test",
+    job_id: (inserted as { id?: string } | null)?.id ?? null,
+    actor: "enqueuePreMergeSpecTest",
+    extra: { spec_branch: branch },
+  });
   return { enqueued: true };
 }
 
@@ -1858,14 +1923,25 @@ export async function finalizePromotedGoal(
       .limit(1);
     if (inflight && inflight.length) return { ...out, reason: "goal-fold-in-flight" };
 
-    const { error } = await admin.from("agent_jobs").insert({
-      workspace_id: workspaceId,
-      spec_slug: goalSlug, // the goal-fold lane carries the GOAL slug on spec_slug
-      kind: "goal-fold",
-      status: "queued",
-      created_by: null,
-    });
+    const { data: inserted, error } = await admin
+      .from("agent_jobs")
+      .insert({
+        workspace_id: workspaceId,
+        spec_slug: goalSlug, // the goal-fold lane carries the GOAL slug on spec_slug
+        kind: "goal-fold",
+        status: "queued",
+        created_by: null,
+      })
+      .select("id")
+      .single();
     if (error) return { ...out, reason: `goal-fold-insert-failed: ${error.message}` };
+    await emitJobQueued(admin, {
+      workspace_id: workspaceId,
+      spec_slug: goalSlug,
+      kind: "goal-fold",
+      job_id: (inserted as { id?: string } | null)?.id ?? null,
+      actor: "finalizePromotedGoal",
+    });
     out.foldQueued = true;
     return out;
   } catch (e) {
@@ -2396,18 +2472,30 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
   // re-check the review-pass gate redundantly AND drop the session-resume/chain_phases fields the
   // helper doesn't accept. The dedup + in-flight guards above are the enqueueBuildIfDue equivalents
   // for this narrower "same phase already queued" case.
-  const { error } = await admin.from("agent_jobs").insert({
+  const { data: inserted, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "build",
+      status: resumeCandidate ? "queued_resume" : "queued",
+      created_by: null,
+      chain_phases: true,
+      instructions: scoped,
+      claude_session_id: resumeCandidate?.sessionId ?? null,
+      claude_session_config_dir: resumeCandidate?.sessionConfigDir ?? null,
+    })
+    .select("id")
+    .single();
+  if (error) return null;
+  await emitJobQueued(admin, {
     workspace_id: workspaceId,
     spec_slug: slug,
     kind: "build",
-    status: resumeCandidate ? "queued_resume" : "queued",
-    created_by: null,
-    chain_phases: true,
-    instructions: scoped,
-    claude_session_id: resumeCandidate?.sessionId ?? null,
-    claude_session_config_dir: resumeCandidate?.sessionConfigDir ?? null,
+    job_id: (inserted as { id?: string } | null)?.id ?? null,
+    actor: "queueNextChainedPhase",
+    extra: { chained: true, resumed: !!resumeCandidate },
   });
-  if (error) return null;
   return next.title;
 }
 

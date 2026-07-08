@@ -1,0 +1,1 @@
+- **Bound /api/widget/[workspaceId]/articles so a slow KB search fails fast instead of hitting Vercel's 300s cap** · verified 2026-07-08 · → [[../libraries/widget-articles-route]]

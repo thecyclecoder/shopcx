@@ -1,0 +1,1 @@
+- **Server-side RPC for spec reads — retire the client-side .in([ids]) join so the pipeline scales to 100-200+ specs** · verified 2026-07-08 · → [[../libraries/specs-table]]

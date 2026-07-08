@@ -1,0 +1,1 @@
+- **Bound supabase.auth.getUser() in proxy middleware so a hung GoTrue call fails fast instead of holding to Vercel's 300s ceiling** · verified 2026-07-08 · → [[libraries/supabase__middleware]]

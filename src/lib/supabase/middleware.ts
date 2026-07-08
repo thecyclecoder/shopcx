@@ -576,9 +576,20 @@ export async function updateSession(
     }
   );
 
+  // Bound the upstream — a hanging Supabase GoTrue auth call must not lock the
+  // middleware invocation until Vercel's 300s ceiling. supabase-js's auth
+  // methods do not accept an AbortSignal, so race the call against a 2s timer
+  // that resolves to `{ data: { user: null } }`; on timeout we fall through to
+  // the existing unauthenticated branch below (public routes pass, protected
+  // routes redirect to /login), which is the correct safe degradation.
   const {
     data: { user },
-  } = await supabase.auth.getUser();
+  } = await Promise.race([
+    supabase.auth.getUser(),
+    new Promise<{ data: { user: null } }>((resolve) =>
+      setTimeout(() => resolve({ data: { user: null } }), 2_000),
+    ),
+  ]);
 
   const pathname = request.nextUrl.pathname;
   const isPublicRoute = PUBLIC_ROUTES.some((r) => pathname.startsWith(r));

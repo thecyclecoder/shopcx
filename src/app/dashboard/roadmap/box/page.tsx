@@ -8,6 +8,7 @@ import { getPersona, type AgentPersona } from "@/lib/agents/personas";
 import { PersonaAvatar } from "@/components/agents/persona-chip";
 import { SessionChecklist } from "@/components/agents/session-checklist";
 import type { SessionChecklistItem } from "@/lib/agent-jobs";
+import { deriveLaneGroupSections } from "@/lib/box-lane-group-sections";
 
 // Live build-box view (build-box-status-view): box health + SHA, lane grid (what each lane is building
 // right now), queue depth, and a paused callout. Polls /api/roadmap/box every ~5s — phone-friendly,
@@ -68,6 +69,13 @@ interface AccountsSnapshot {
   events: AccountEvent[];
   codex?: AccountSlot | null; // the second runtime (box-codex-runner) — null when Codex is disabled
 }
+// build-box-page-reflects-real-per-lane-group-usage Phase 2 — per-group cap map from the heartbeat.
+// The page renders each named group as its own LaneRowGrid, filtered by the group's kind-set against
+// the group's cap. Null on legacy heartbeat rows (the page then falls back to the old build_lanes /
+// fold_lanes single-pool render).
+interface LaneGroups {
+  [group: string]: { cap: number; kinds: string[] };
+}
 interface Worker {
   running_sha: string | null;
   status: string;
@@ -77,6 +85,7 @@ interface Worker {
   started_at: string | null;
   build_lanes: number;
   fold_lanes: number;
+  lane_groups: LaneGroups | null;
   lanes: LaneRow[];
   accounts: AccountsSnapshot | null;
 }
@@ -114,6 +123,13 @@ interface PreviewBuildOverride {
   reason: string | null;
   fetched_at: string | null;
 }
+
+// build-box-page-reflects-real-per-lane-group-usage Phase 3 + build-box-page-other-lanes-truthful-
+// capacity-not-summed-caps Phase 1 — display order, labels, and the pool-vs-supervisory-bucket
+// distinction now live in the pure derivation helper `deriveLaneGroupSections` (src/lib/
+// box-lane-group-sections.ts). Real concurrent pools (build/plan 10, CS 5, director 2, fold 1)
+// keep their cap; the `other` supervisory bucket carries cap=null so LaneRowGrid renders it as
+// an active-count only — no phantom /35 denominator, no phantom open cells.
 
 // Route a FAILED job to where you'd look at / rebuild it (a failure isn't an approval — see the paused
 // section below, which routes to the routed inbox). SAFE-BY-DEFAULT (a NEW agent kind can never 404 here):
@@ -459,7 +475,34 @@ function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
   );
 }
 
-function LaneRowGrid({ label, total, lanes }: { label: string; total: number; lanes: LaneRow[] }) {
+function LaneRowGrid({ label, total, lanes }: { label: string; total: number | null; lanes: LaneRow[] }) {
+  // build-box-page-other-lanes-truthful-capacity-not-summed-caps Phase 1 — total=null is the
+  // truthful supervisory-bucket display for the 'other' group. Its per-kind caps (spec-test 3 +
+  // agent-grade 1 + … ~ 35) never co-run at the summed ceiling, so a "4/35 in use" render is a
+  // phantom denominator. Render just the ACTIVE count with no open cells; the empty state reads
+  // as "no supervisory agents running" instead of ~30 fake empty slots. Real concurrent pools
+  // (build/plan, CS, director, fold) still render against their cap unchanged.
+  if (total === null) {
+    return (
+      <div>
+        <div className="mb-1.5 flex items-center gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{label}</h3>
+          <span className="text-xs tabular-nums text-zinc-400">{lanes.length} active</span>
+        </div>
+        {lanes.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-zinc-200 py-4 text-center text-xs text-zinc-400 dark:border-zinc-800">
+            No supervisory agents running
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+            {lanes.map((c) => (
+              <LaneCell key={c.job_id} lane={c} />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
   // Fill the first cells with in-use lanes, the rest render "open".
   const cells: (LaneRow | null)[] = Array.from({ length: total }, (_, i) => lanes[i] ?? null);
   return (
@@ -651,6 +694,14 @@ export default function BoxPage() {
   }
 
   const stale = worker ? workerStale(worker) : true;
+  // build-box-page-reflects-real-per-lane-group-usage Phase 3 + build-box-page-other-lanes-
+  // truthful-capacity-not-summed-caps Phase 1 — the pure derivation in `deriveLaneGroupSections`
+  // filters each lane group's rows by its kind-set AND collapses the 'other' supervisory bucket's
+  // summed-caps to a null cap (LaneRowGrid then renders "N active" — no phantom /35 denominator,
+  // no phantom open cells). Real concurrent pools (build/plan, CS, director, fold) keep their
+  // cap unchanged. When lane_groups is null (a legacy heartbeat row) the helper returns null and
+  // the page falls back to the old single-pool render so nothing regresses on an old box.
+  const laneGroupSections = deriveLaneGroupSections<LaneRow>(worker?.lane_groups, worker?.lanes);
   const buildLanes = (worker?.lanes ?? []).filter((l) => l.kind !== "fold");
   const foldLanes = (worker?.lanes ?? []).filter((l) => l.kind === "fold");
 
@@ -761,8 +812,24 @@ export default function BoxPage() {
           {/* Lane grid + per-account Max load */}
           <div className="space-y-5">
             {worker.accounts && <AccountsPanel accounts={worker.accounts} />}
-            <LaneRowGrid label="Build / plan lanes" total={worker.build_lanes} lanes={buildLanes} />
-            <LaneRowGrid label="Fold lane" total={worker.fold_lanes} lanes={foldLanes} />
+            {laneGroupSections ? (
+              // build-box-page-reflects-real-per-lane-group-usage Phase 3 + build-box-page-other-
+              // lanes-truthful-capacity-not-summed-caps Phase 1 — one LaneRowGrid per lane group.
+              // Real pools render against their own cap; the supervisory bucket (cap=null) always
+              // renders (its "N active" tally is meaningful even at zero — an empty-state chip).
+              laneGroupSections.map((section) =>
+                section.cap === null || section.cap > 0 || section.lanes.length > 0 ? (
+                  <LaneRowGrid key={section.key} label={section.label} total={section.cap} lanes={section.lanes} />
+                ) : null,
+              )
+            ) : (
+              // Legacy fallback for a heartbeat row written before lane_groups existed — same single-
+              // pool render as before, no regression on an older box.
+              <>
+                <LaneRowGrid label="Build / plan lanes" total={worker.build_lanes} lanes={buildLanes} />
+                <LaneRowGrid label="Fold lane" total={worker.fold_lanes} lanes={foldLanes} />
+              </>
+            )}
           </div>
 
           {/* Jobs in queue — a faces-attached log of what's lined up behind the active lanes (queued-jobs-log) */}

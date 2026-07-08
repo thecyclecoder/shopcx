@@ -277,7 +277,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
     dot: "bg-purple-500", ring: "bg-purple-50 dark:bg-purple-900/20", accent: "text-purple-600 dark:text-purple-400",
   },
   "product-seed": {
-    key: "product-seed", name: "Sol", role: "Product Seeding", emoji: "🩷",
+    key: "product-seed", name: "Piper", role: "Product Seeding", emoji: "🩷",
     personality: "Takes a product from nothing to published — pulls intel, builds the page, ships the catalog row.",
     mascotId: "default", avatarUrl: `${AV}sol-productseed.jpg?v=4`,
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
@@ -485,8 +485,20 @@ function defaultPersona(slug: string, label?: string): AgentPersona {
 }
 
 /** Resolve a persona by function slug, worker kind, or "ceo"; falls back to a neutral persona. */
+// Agent JOB kinds whose persona lives under a DIFFERENT key than the kind string
+// (the job's agentKind ≠ the persona's key). Without this, getPersona(kind) misses
+// PERSONAS and falls back to the blank default mascot — e.g. a `deploy-review` box
+// lane rendered with no avatar instead of Reva's photo (agentKind `deploy-review`
+// → persona `deploy-guardian`; agentKind `cs-director-call` → persona `cs-director`).
+// Mirrors the control-tower registry's agentKind→personaKind mapping.
+const KIND_PERSONA_ALIAS: Record<string, string> = {
+  "deploy-review": "deploy-guardian", // Reva's canary-investigation box session
+  "cs-director-call": "cs-director", // June's CS-director review box session
+};
+
 export function getPersona(slug: string, label?: string): AgentPersona {
-  const base = PERSONAS[slug] ?? defaultPersona(slug, label);
-  const responsibilities = RESPONSIBILITIES[slug];
+  const key = KIND_PERSONA_ALIAS[slug] ?? slug;
+  const base = PERSONAS[key] ?? defaultPersona(slug, label);
+  const responsibilities = RESPONSIBILITIES[key] ?? RESPONSIBILITIES[slug];
   return responsibilities ? { ...base, responsibilities } : base;
 }

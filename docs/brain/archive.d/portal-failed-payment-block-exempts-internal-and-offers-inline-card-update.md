@@ -1,0 +1,1 @@
+- **Portal failed-payment block exempts internal subs + offers inline card-update recovery** · verified 2026-07-08 · → [[../lifecycles/subscription-billing]] § Failed-payment mutation block is Appstle-only · [[../lifecycles/customer-portal]] § Payment methods · Failed-payment block → inline card-update recovery
