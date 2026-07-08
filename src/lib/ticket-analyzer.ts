@@ -1053,6 +1053,84 @@ function guidanceHasNoEscalateDirective(guidanceBlock: string): boolean {
   return NO_ESCALATE_DIRECTIVE.test(guidanceBlock);
 }
 
+export type EscalationAction = "escalate_with_message" | "escalate_silent" | "none";
+
+export interface EscalationDecisionInput {
+  /** The grader's 1–10 score for this window. */
+  score: number;
+  /** True when the grader flagged a `SEVERE_ISSUE_TYPES` class (inaccuracy /
+   *  false_promise / broken_action) and the inaccuracy-only positive-close
+   *  override did NOT suppress it. */
+  hasSevereIssue: boolean;
+  /** True when a customer message in the window carries a threat/actionable
+   *  keyword (chargeback, BBB, "speak to human", etc.). */
+  customerThreat: boolean;
+  /** True when `hasCleanPositiveClose` confirms the ticket's most recent
+   *  lifecycle event is a positive close with no reopen note and no
+   *  unanswered inbound after it. */
+  positivelyClosed: boolean;
+  /** Pre-computed `(hasSevereIssue || customerThreat)` with the pinned
+   *  directive + inaccuracy-only overrides folded in. When true the
+   *  severity / actionability trigger fires unconditionally (silent
+   *  escalation). */
+  forceEscalate: boolean;
+}
+
+/**
+ * Pure escalation decision predicate — the heart of
+ * `escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed`
+ * Phase 2. Escalation keys on SEVERITY (a severe issue class) or
+ * ACTIONABILITY (an unresolved / mishandled customer / a threat keyword),
+ * NOT a raw middling score. A cleanly positively closed ticket with no
+ * severe issue class and no customer-threat is not an actionable customer
+ * situation — the score, however low, is a coaching note and MUST NOT fire
+ * a reopen/escalate (no cs-director-call). A severe issue class or an
+ * unresolved / threatening customer still auto-escalates exactly as before.
+ *
+ * Kept pure and exported so the test suite can pin the predicate without
+ * a DB. The DB-backed `applySeverityActions` wrapper computes each input
+ * (severe-issue set, threat keywords, positive-close scan, forceEscalate
+ * with directive + inaccuracy-only overrides folded in) and hands them
+ * here; the escalation tier is decided in one place.
+ */
+export function decideEscalationAction(
+  input: EscalationDecisionInput,
+): { action: EscalationAction; reason: string } {
+  const { score, hasSevereIssue, customerThreat, positivelyClosed, forceEscalate } = input;
+
+  if (forceEscalate) {
+    return {
+      action: "escalate_silent",
+      reason: "severity or actionable-customer trigger (forceEscalate) — silent escalation",
+    };
+  }
+
+  if (positivelyClosed && !hasSevereIssue && !customerThreat) {
+    return {
+      action: "none",
+      reason:
+        "resolved ticket with only a minor quality note (positively closed, no severe issue class, no customer-threat) — escalation keys on severity/actionability, not the raw score; stays closed for coaching only",
+    };
+  }
+
+  if (score <= 5) {
+    return {
+      action: "escalate_with_message",
+      reason: "actionable customer + low score — escalate with customer message",
+    };
+  }
+  if (score === 6) {
+    return {
+      action: "escalate_silent",
+      reason: "actionable customer + score 6 — escalate silently",
+    };
+  }
+  return {
+    action: "none",
+    reason: "score in the good-enough band and no severity/actionability trigger — no action",
+  };
+}
+
 async function applySeverityActions(
   admin: Admin,
   ticketId: string,
@@ -1104,6 +1182,12 @@ async function applySeverityActions(
     return CUSTOMER_ESCALATION_KEYWORDS.some(k => matchesEscalationKeyword(txt, k));
   });
 
+  // Precompute once — the positive-close state is read by three downstream
+  // gates (sole-unverified override, inaccuracy-only override, and the
+  // Phase 2 severity/actionability gate below). One DB scan; three
+  // decisions.
+  const positivelyClosed = await hasCleanPositiveClose(admin, ticketId);
+
   // ── Sole-unverified-from-surface positive-close override ──
   // Phase 2 of cora-grades-against-ai-data-surface. When the analyzer's
   // ONLY flag is `unverified_from_surface` (a Phase 1 grader tag for a
@@ -1120,18 +1204,15 @@ async function applySeverityActions(
   // customerThreat still always wins so a resolved ticket where the
   // customer threatened chargeback/BBB/etc. escalates as before.
   const soleUnverifiedFromSurface = analysisIssuesAreSoleUnverifiedFromSurface(issues);
-  if (soleUnverifiedFromSurface && !customerThreat) {
-    const positivelyClosed = await hasCleanPositiveClose(admin, ticketId);
-    if (positivelyClosed) {
-      await admin.from("ticket_messages").insert({
-        ticket_id: ticketId,
-        direction: "outbound",
-        visibility: "internal",
-        author_type: "system",
-        body: `[Auto-Analysis] Score ${score}/10 — sole flag is 'unverified_from_surface' (a claim the grader could not verify from its own context, but did not contradict). The ticket is cleanly positively closed and there is no customer-threat keyword; skipping any reopen/escalate. An unverified detail on a resolved ticket is not an actionable customer situation and must not fire a cs-director-call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
-      });
-      return;
-    }
+  if (soleUnverifiedFromSurface && !customerThreat && positivelyClosed) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — sole flag is 'unverified_from_surface' (a claim the grader could not verify from its own context, but did not contradict). The ticket is cleanly positively closed and there is no customer-threat keyword; skipping any reopen/escalate. An unverified detail on a resolved ticket is not an actionable customer situation and must not fire a cs-director-call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
   }
 
   // ── Inaccuracy-only positive-close override (ticket 9a6e53d9) ──
@@ -1150,10 +1231,8 @@ async function applySeverityActions(
     severeTypes.has("inaccuracy") &&
     !severeTypes.has("false_promise") &&
     !severeTypes.has("broken_action");
-  let suppressInaccuracyEscalation = false;
-  if (hasSevereIssue && onlyInaccuracySevere && !customerThreat && score >= 7) {
-    suppressInaccuracyEscalation = await hasCleanPositiveClose(admin, ticketId);
-  }
+  const suppressInaccuracyEscalation =
+    hasSevereIssue && onlyInaccuracySevere && !customerThreat && score >= 7 && positivelyClosed;
 
   // ── Human directive beats the overrides ──
   // A pinned agent guidance note containing an explicit "do not escalate"
@@ -1179,16 +1258,19 @@ async function applySeverityActions(
     !directiveSuppressesEscalation &&
     ((hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat);
 
-  // Decide tier
-  // ≤5: escalate + customer message
-  // 6 OR forceEscalate at any score: escalate silent (NO customer message)
-  // 7+ without force: nothing
-  let action: "escalate_with_message" | "escalate_silent" | "none" = "none";
-  if (score <= 5) {
-    action = "escalate_with_message";
-  } else if (score === 6 || forceEscalate) {
-    action = "escalate_silent";
-  }
+  // Decide tier via the pure predicate. Escalation keys on SEVERITY (a
+  // severe issue class) or ACTIONABILITY (unresolved customer / threat),
+  // NOT a raw middling score — a cleanly positively closed ticket with no
+  // severe issue and no customer-threat is a coaching-only note, not a
+  // June call. See decideEscalationAction() above and
+  // escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed.
+  const { action } = decideEscalationAction({
+    score,
+    hasSevereIssue,
+    customerThreat,
+    positivelyClosed,
+    forceEscalate,
+  });
 
   // ── Research & Heal hook ──
   // Severe issues (false_promise / broken_action) are the prime case for
@@ -1227,6 +1309,31 @@ async function applySeverityActions(
       visibility: "internal",
       author_type: "system",
       body: `[Auto-Analysis] Score ${score}/10 — an 'inaccuracy'-typed issue would normally force-escalate, but skipped: it was the only severe-issue trigger (no false_promise/broken_action), the score is ≥7, and the ticket is cleanly positively closed. Not re-opening a happy, well-resolved ticket over cosmetic phrasing. Regression guard for ticket 9a6e53d9. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+  }
+
+  // ── Phase 2 severity/actionability gate audit note ──
+  // Log the coaching-only decision when the Phase 2 gate suppressed a
+  // reopen/escalate that would have fired under the old raw-score policy
+  // (score ≤6 on a cleanly positively closed ticket with no severe issue
+  // and no customer-threat). Skip the log at score ≥7 (unchanged baseline)
+  // and skip when the inaccuracy-only override already logged its own note
+  // above (avoid double-audits on the same ticket).
+  // escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed.
+  const phase2SuppressedNote =
+    action === "none" &&
+    positivelyClosed &&
+    !hasSevereIssue &&
+    !customerThreat &&
+    !suppressInaccuracyEscalation &&
+    score <= 6;
+  if (phase2SuppressedNote) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — ticket is cleanly positively closed with no severe issue class (inaccuracy/false_promise/broken_action) and no customer-threat keyword; not reopening or escalating. Auto-escalation keys on severity or an actionable customer situation, not a raw middling score — a minor quality note on a resolved ticket is coaching material, not a June call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
     });
   }
 
