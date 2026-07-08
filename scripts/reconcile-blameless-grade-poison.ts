@@ -30,12 +30,19 @@
  *
  * Dry-run by default — prints what it WOULD neutralize. Pass --apply to write.
  *
- *   npx tsx scripts/reconcile-blameless-grade-poison.ts --workspace-id <uuid>              # dry run
- *   npx tsx scripts/reconcile-blameless-grade-poison.ts --workspace-id <uuid> --apply      # write
- *   npx tsx scripts/reconcile-blameless-grade-poison.ts --workspace-id <uuid> --window-days 14
+ * If --workspace-id is omitted the script iterates every workspace in the DB and reconciles each
+ * in turn (per-workspace failures are logged + accumulated but do NOT abort the sweep). This
+ * matches sibling `scripts/reconcile-*.ts` scripts + the CLAUDE.md multi-tenant invariant — the
+ * reconcile is safe to run globally because every guard is workspace-scoped in the SDK function.
+ *
+ *   npx tsx scripts/reconcile-blameless-grade-poison.ts                                     # dry run, all workspaces
+ *   npx tsx scripts/reconcile-blameless-grade-poison.ts --apply                             # write, all workspaces
+ *   npx tsx scripts/reconcile-blameless-grade-poison.ts --workspace-id <uuid>               # dry run, one workspace
+ *   npx tsx scripts/reconcile-blameless-grade-poison.ts --workspace-id <uuid> --apply       # write, one workspace
+ *   npx tsx scripts/reconcile-blameless-grade-poison.ts --window-days 14                    # narrower window
  */
 import { createAdminClient } from "./_bootstrap";
-import { reconcileBlamelessGradePoison } from "../src/lib/agents/agent-grader";
+import { reconcileBlamelessGradePoison, type ReconcileBlamelessResult } from "../src/lib/agents/agent-grader";
 
 function arg(name: string, fallback?: string): string | undefined {
   const flag = `--${name}`;
@@ -45,30 +52,68 @@ function arg(name: string, fallback?: string): string | undefined {
   return v && !v.startsWith("--") ? v : fallback;
 }
 
-async function main() {
-  const workspaceId = arg("workspace-id");
-  const apply = process.argv.includes("--apply");
-  const windowDaysRaw = arg("window-days");
-  const windowDays = windowDaysRaw ? Math.max(1, Math.floor(Number(windowDaysRaw))) : 30;
-  if (!workspaceId) {
-    console.error("usage: npx tsx scripts/reconcile-blameless-grade-poison.ts --workspace-id <uuid> [--apply] [--window-days N]");
-    process.exit(2);
-  }
+type Admin = ReturnType<typeof createAdminClient>;
 
-  const admin = createAdminClient();
-  const res = await reconcileBlamelessGradePoison({ workspaceId, admin, apply, windowDays });
+async function listWorkspaceIds(admin: Admin): Promise<string[]> {
+  const { data, error } = await admin.from("workspaces").select("id");
+  if (error) throw new Error(`workspaces read failed: ${error.message}`);
+  return ((data as Array<{ id: string }> | null) ?? []).map((w) => w.id);
+}
+
+function printPerWorkspaceLine(
+  workspaceId: string,
+  windowDays: number,
+  apply: boolean,
+  res: ReconcileBlamelessResult,
+): void {
   console.log(
     `reconcile-blameless-grade-poison ws=${workspaceId} window=${windowDays}d ` +
       `${apply ? "APPLIED" : "DRY RUN"} · considered=${res.considered} matched=${res.matched} applied=${res.applied}`,
   );
   for (const d of res.details) {
-    console.log(
-      `  · grade=${d.gradeId} job=${d.agentJobId} kind=${d.agentKind} sig=${d.matchedSignature} old=${d.oldGrade}/10`,
-    );
+    console.log(`  · grade=${d.gradeId} job=${d.agentJobId} kind=${d.agentKind} sig=${d.matchedSignature} old=${d.oldGrade}/10`);
   }
-  if (!apply && res.matched > 0) {
-    console.log(`\n  → re-run with --apply to neutralize the ${res.matched} matched grade(s).`);
+}
+
+async function main() {
+  const explicitWorkspaceId = arg("workspace-id");
+  const apply = process.argv.includes("--apply");
+  const windowDaysRaw = arg("window-days");
+  const windowDays = windowDaysRaw ? Math.max(1, Math.floor(Number(windowDaysRaw))) : 30;
+
+  const admin = createAdminClient();
+  const workspaceIds = explicitWorkspaceId ? [explicitWorkspaceId] : await listWorkspaceIds(admin);
+  if (!workspaceIds.length) {
+    console.log("no workspaces to reconcile — nothing to do.");
+    return;
   }
+
+  let totalConsidered = 0;
+  let totalMatched = 0;
+  let totalApplied = 0;
+  const failures: Array<{ workspaceId: string; error: string }> = [];
+  for (const workspaceId of workspaceIds) {
+    try {
+      const res = await reconcileBlamelessGradePoison({ workspaceId, admin, apply, windowDays });
+      printPerWorkspaceLine(workspaceId, windowDays, apply, res);
+      totalConsidered += res.considered;
+      totalMatched += res.matched;
+      totalApplied += res.applied;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`  ! ws=${workspaceId} failed: ${msg}`);
+      failures.push({ workspaceId, error: msg });
+    }
+  }
+
+  console.log(
+    `\nSUMMARY · workspaces=${workspaceIds.length} ${apply ? "APPLIED" : "DRY RUN"} · ` +
+      `considered=${totalConsidered} matched=${totalMatched} applied=${totalApplied} failed=${failures.length}`,
+  );
+  if (!apply && totalMatched > 0) {
+    console.log(`  → re-run with --apply to neutralize the ${totalMatched} matched grade(s).`);
+  }
+  if (failures.length) process.exit(1);
 }
 
 main().catch((e) => {
