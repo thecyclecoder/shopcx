@@ -571,12 +571,22 @@ export function isForeignGoTrueEdgeNoise(
  *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
  *      `dial ... (i/o timeout | operation was canceled)` phrase.
  *
- * Narrowly gated so everything actionable still surfaces / pages on first sight: `context
- * canceled` (browser-abort) + a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE
- * host (a real Postgres pooler on our side — not the `host=localhost user=supabase_auth_admin`
- * GoTrue-internal shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`,
- * rate limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504
- * on `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
+ *  (d) outer-request-timeout ([[../specs/error-feed-drop-supabase-gotrue-timeout-context-canceled]],
+ *      `supabase-logs:c9eb05fd1d3fb82c`, 15 occ / 7 days) — msg-only mirror of shape (a):
+ *      the trimmed + lowercased msg equals `unhandled server error: timeout: context canceled`.
+ *      The `timeout:` prefix is Go's phrasing for GoTrue's own outer-request-timeout wrapper
+ *      firing on its Postgres backend (same foreign-owned saturation class as (a); we hold
+ *      zero levers on Supabase's managed auth service, and the transient recur-window
+ *      empirically fails to absorb the ~2/day cadence). Narrowly gated to the exact phrase
+ *      so plain `context canceled` (real browser-abort noise, still transient) is untouched.
+ *
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: plain
+ * `context canceled` (browser-abort, no `timeout:` prefix) + a `dial ... i/o timeout` /
+ * `dial ... canceled` on a REMOTE host (a real Postgres pooler on our side — not the
+ * `host=localhost user=supabase_auth_admin` GoTrue-internal shape) stay transient via
+ * `isTransientSupabaseLogNoise`; `invalid JWT`, rate limits, signature mismatches, a 504
+ * on `/token` / `/admin`, a non-504 5xx, or a 504 on `/user` with a non-GET (mutation)
+ * method all carry different shapes and stay captured.
  */
 export function isForeignGoTrueAuthLogNoise(
   msg: string | null | undefined,
@@ -585,6 +595,10 @@ export function isForeignGoTrueAuthLogNoise(
   // (a) context-deadline shape — msg-only, exact phrase.
   const text = (msg ?? "").trim().toLowerCase();
   if (text === "unhandled server error: context deadline exceeded") return true;
+  // (d) outer-request-timeout shape — msg-only mirror of (a), gated on the exact phrase
+  // (the `timeout:` prefix is GoTrue's outer-timeout wrapper; plain `context canceled`
+  // stays transient).
+  if (text === "unhandled server error: timeout: context canceled") return true;
   // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
   const m = (msg ?? "").trimStart();
   if (m.startsWith("504: Processing this request timed out")) {
