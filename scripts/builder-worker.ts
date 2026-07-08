@@ -15924,9 +15924,81 @@ async function repairLedger(windowMs: number): Promise<RepairLedgerEntry[]> {
   });
 }
 
+// build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: eagerly reap ORPHAN active
+// build rows for this spec whose heartbeat is stale (>= REAP_STALE_MS). A worker-restart / crash
+// leaves the row `building`/`claimed`/`queued_resume` even though its process is gone; the periodic
+// `reapStaleSessions` sweep would eventually catch it, but until then the row still counts as
+// "active" — so a re-enqueue for the same spec is BLOCKED (hasActiveBuildForSlug sees it) or, if the
+// stale-session sweep beats the enqueue by a hair, we end up with two live builds racing the same
+// `claude/build-<slug>`. Doing a slug-scoped reap right at the guard (and at build dispatch)
+// transitions the orphan to `failed` (terminal — the spec sanctions "terminal state OR queued_resume")
+// BEFORE the enqueue/claim proceeds, so at most one build ever holds `claude/build-<slug>`. Never
+// touches a row whose session is running in THIS worker process (`active` Map) — that's alive, not
+// orphaned. Never touches the caller's own job (excludeJobId) — the build path calls this with its
+// own id to avoid reaping itself. Best-effort: a reap-internal error is logged, never thrown.
+async function reapStaleSiblingBuildsForSlug(
+  slug: string,
+  opts: { excludeJobId?: string; activeMap?: Map<string, unknown>; tag?: string } = {},
+): Promise<{ reaped: number }> {
+  if (!slug) return { reaped: 0 };
+  const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
+  const tag = opts.tag ?? "[reap-sibling-builds]";
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("id, status, last_heartbeat_at, updated_at, claimed_at")
+      .eq("kind", "build")
+      .eq("spec_slug", slug)
+      .in("status", REAP_STALE_STATUSES as unknown as string[])
+      .or(`last_heartbeat_at.lt.${cutoff},and(last_heartbeat_at.is.null,updated_at.lt.${cutoff})`)
+      .limit(20);
+    const rows = (data ?? []) as Array<{ id: string; status: string; last_heartbeat_at: string | null; updated_at: string | null; claimed_at: string | null }>;
+    let reaped = 0;
+    for (const r of rows) {
+      if (opts.excludeJobId && r.id === opts.excludeJobId) continue; // never reap the caller's own job
+      if (opts.activeMap && opts.activeMap.has(r.id)) continue;      // never reap a live session in THIS process
+      // Compare-and-set: only transition if the row is STILL in the stale in-flight state we read.
+      // This closes a race where the row flipped to a terminal state (or another reaper beat us to it)
+      // between our SELECT and this UPDATE — bail on zero rows updated rather than silently overwriting.
+      const { data: updated, error: uErr } = await db
+        .from("agent_jobs")
+        .update({
+          status: "failed",
+          claimed_at: null,
+          claude_session_id: null,
+          claude_session_config_dir: null,
+          error: `orphan reaped by slug-scoped sibling-build guard — another build for ${slug} is proceeding; this row was ${r.status} with stale heartbeat`,
+          log_tail: `(reapStaleSiblingBuildsForSlug: heartbeat stale on status '${r.status}' — transitioned terminal so at most one build ever holds claude/build-${slug})`,
+        })
+        .eq("id", r.id)
+        .in("status", REAP_STALE_STATUSES as unknown as string[])
+        .select("id");
+      if (uErr) {
+        console.error(`${tag} reap update failed for ${r.id.slice(0, 8)}: ${uErr.message}`);
+        continue;
+      }
+      if (updated && updated.length) {
+        reaped++;
+        console.warn(`${tag} REAP orphan build ${slug} (job ${r.id.slice(0, 8)}) — was ${r.status} with stale heartbeat → failed (single-owner-per-branch invariant)`);
+      }
+    }
+    return { reaped };
+  } catch (e) {
+    console.error(`${tag} slug-scoped sibling reap failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+    return { reaped: 0 };
+  }
+}
+
 // Is a build for this spec slug already live (active build job OR an open claude/<slug>-* PR)? The
 // auto-build dedup guard — never enqueue a second build / open a 4th identical PR for one spec slug.
 async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; reason?: string }> {
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: reap stale orphans FIRST
+  // so a dead building/claimed row can't masquerade as active and (a) block a legitimate re-enqueue
+  // OR (b) end up co-live with a new build for the same spec. reapStaleSiblingBuildsForSlug flips
+  // any stale-heartbeat active build row for THIS slug to `failed` (terminal state per the spec —
+  // single-owner-per-branch invariant), so the .in(ACTIVE_BUILD_STATUSES) probe below reads the
+  // TRUE post-reap active-build set. Best-effort; a reap error just leaves the probe as-is.
+  await reapStaleSiblingBuildsForSlug(slug, { tag: "[hasActiveBuildForSlug]" });
   const { data: job } = await db
     .from("agent_jobs")
     .select("id")
@@ -20672,6 +20744,19 @@ async function dispatchJob(job: Job) {
   const safeSlug = (slug || "").replace(/[^a-zA-Z0-9_-]/g, "");
   const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
+
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: single-owner-per-branch
+  // invariant — before this freshly-claimed build touches the worktree, transition ANY sibling
+  // active build row for the same slug whose heartbeat is stale to `failed`. A worker-restart
+  // orphan (dead `building`/`claimed`/`queued_resume` row) can otherwise co-exist with the row we
+  // just claimed, and both would try to push to `claude/build-<slug>` — the losing push is a
+  // non-fast-forward reject and the phase work strands (Phase 2's rebase-retry rescues MOST of
+  // these; this ensures the orphan row itself doesn't stay live). Excludes THIS job so we never
+  // reap ourselves. Heartbeat-stale filter (>= REAP_STALE_MS) means a live process's row (bumped
+  // every M minutes by runBoxSession) is never eligible — no risk of yanking a live sibling. Runs
+  // BEFORE the claim-gate + worktree add so a live-orphan collision is caught before any side
+  // effect. Best-effort: a reap-internal error just logs and proceeds.
+  if (slug) await reapStaleSiblingBuildsForSlug(slug, { excludeJobId: job.id, tag });
 
   // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
   // is AUTHORED + Vale-spec-review-PASSED + every blocked_by SHIPPED (all DERIVED via the brain-roadmap
