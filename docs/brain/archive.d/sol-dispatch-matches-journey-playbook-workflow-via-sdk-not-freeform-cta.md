@@ -1,0 +1,1 @@
+- **Sol Dispatches a Matched Journey / Playbook / Workflow via SDK — Not a Freeform CTA** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
