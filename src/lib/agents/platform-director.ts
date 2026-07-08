@@ -651,6 +651,38 @@ function isEscortableGoal(goal: GoalCard, specBySlug: Map<string, SpecCard>): bo
   return goalSpecs(goal, specBySlug).some(isBuildableSpec);
 }
 
+/**
+ * escort-reliably-dispatches-ready-goal-members Phase 2 — the PURE readiness predicate the async
+ * `reconcileReadyGoalMembers` backstop sweep applies to every approved-goal member before it queues a build.
+ * Kept PURE (no DB seam) so the "ready but undispatched → queue exactly one" decision is testable without a
+ * Supabase fixture — the exact failing-state axis the Phase 2 verification pins.
+ *
+ * TRUE iff ALL of:
+ *   1. `isBuildableSpec(card)` — not really-shipped, not a tagless-shipped drift suspect, not deferred,
+ *      spec-review passed, `auto_build` on, every blocker cleared (per [[spec-phase-provenance]] after
+ *      Phase 1's fix). The primary escort's static readiness set — the backstop reuses it EXACTLY so its
+ *      decisions never contradict `escortApprovedGoals`.
+ *   2. `buildState.inFlight === false` — no queued / building / paused-mid-build / already-landed build
+ *      row for this spec. This is the IDEMPOTENCY seam: after the sweep queues once, `specBuildState`
+ *      reads inFlight=true on the next tick and the sweep skips — no double-queue.
+ *   3. `buildState.failedCount < PLATFORM_DIRECTOR_LOOP_GUARD_MAX` — a spec at the loop-guard ceiling
+ *      is OWNED by the primary escort's CEO escalation lane; a backstop re-queue would clash with that
+ *      surface (silent retries above the cap the CEO already sees), so we bail here too.
+ *
+ * The composition is identical to the guard chain inside `escortApprovedGoals`'s per-card readiness loop
+ * — factored into a pure predicate so the backstop sweep AND the test can both exercise the same decision
+ * without duplicating the guard order (and drifting).
+ */
+export function isReadyForBackstopQueue(
+  card: Pick<SpecCard, "status" | "phases" | "shippedPr" | "valeReviewPassed" | "autoBuild" | "blockedBy">,
+  buildState: Pick<SpecBuildState, "inFlight" | "failedCount">,
+): boolean {
+  if (!isBuildableSpec(card as SpecCard)) return false;
+  if (buildState.inFlight) return false;
+  if (buildState.failedCount >= PLATFORM_DIRECTOR_LOOP_GUARD_MAX) return false;
+  return true;
+}
+
 /** Per-goal outcome of one escort pass. */
 export interface GoalEscortResult {
   goalSlug: string;
@@ -800,6 +832,113 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   }
 
   return { goals: results, queued: queuedAll, escalated: escalatedAll };
+}
+
+/** One backstop-reconciled dispatch — a ready-but-undispatched approved-goal member the sweep just queued. */
+export interface ReadyReconcileEntry {
+  goalSlug: string;
+  goalTitle: string;
+  specSlug: string;
+}
+
+export interface ReadyReconcileResult {
+  /** approved-goal members scanned (isEscortableGoal ∩ goalSpecs). */
+  scanned: number;
+  /** members the backstop queued a build for this pass. */
+  reconciled: ReadyReconcileEntry[];
+}
+
+/**
+ * escort-reliably-dispatches-ready-goal-members Phase 2 — the BACKSTOP RECONCILE SWEEP. Runs on the platform-
+ * director standing tick AFTER `escortApprovedGoals` — the primary lane already tried to dispatch every
+ * ready member, so anything this sweep still catches is a MISS by the primary path (a race, a partial
+ * failure mid-loop, a fresh drift the Phase-1 predicate fix didn't cover). Queuing it here means the class
+ * of silent stall the 2026-07-08 shadow-mode incident exposed can't recur — even a bug in the primary lane
+ * self-heals within one tick.
+ *
+ * Design principles:
+ *   1. **Same static readiness set as the primary escort** — `isReadyForBackstopQueue` reuses
+ *      `isBuildableSpec` (spec-review done, autoBuild on, blockers cleared per [[../spec-phase-provenance]])
+ *      composed with `specBuildState` (no in-flight build ∧ under the loop-guard cap). Two decision paths
+ *      reading the same guards can never contradict each other.
+ *   2. **Idempotent by construction** — the `state.inFlight` check reads `agent_jobs` fresh each call, so a
+ *      spec the primary just queued is immediately visible (inFlight=true) and skipped. Running the sweep
+ *      twice in a row queues at most ONE build. The verification's "sweep twice does not create a second
+ *      build" case.
+ *   3. **Distinct audit trail** — a `reconciled_ready_goal_member` [[../director_activity]] row per queue
+ *      (kind separate from `escorted_goal`), so the CEO can measure how often the backstop is needed. A
+ *      persistent uptick means either the primary lane has a bug or a new class of drift crept in.
+ *   4. **Best-effort per goal + per spec** — a single spec's read/insert error never blocks the rest; the
+ *      failure is logged and the loop continues. Never throws.
+ *
+ * Same self-healing philosophy as `builder-worktree-prune-before-add` (the box's worktree slot self-heal):
+ * catch the state you MIGHT expect to be already handled, apply the corrective action idempotently, and log
+ * it so the audit trail shows the self-heal firing. Dormant until Platform is live+autonomous (mirrors
+ * every other escort lane).
+ */
+export async function reconcileReadyGoalMembers(admin: Admin): Promise<ReadyReconcileResult> {
+  const autonomy = await loadAutonomyMap();
+  if (!platformIsAutoApprover(autonomy)) return { scanned: 0, reconciled: [] }; // dormant until Phase 4 flips the flag
+
+  const workspaceId = await resolveDirectorWorkspace(admin);
+  if (!workspaceId) return { scanned: 0, reconciled: [] };
+
+  const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
+  const mine = goals.filter((g) => g.owner === PLATFORM);
+  const specBySlug = new Map(specs.map((s) => [s.slug, s]));
+
+  const owned = mine.filter((g) => isEscortableGoal(g, specBySlug));
+  if (!owned.length) return { scanned: 0, reconciled: [] };
+
+  const reconciled: ReadyReconcileEntry[] = [];
+  const seenSpecs = new Set<string>(); // a spec in >1 milestone/goal is scanned once per pass
+  let scanned = 0;
+
+  for (const goal of owned) {
+    for (const card of goalSpecs(goal, specBySlug)) {
+      if (seenSpecs.has(card.slug)) continue; // one attempt per spec per sweep
+      seenSpecs.add(card.slug);
+      scanned++;
+      try {
+        // Cheap static filter FIRST — skip the DB read for any spec that flunks the pure predicate.
+        if (!isBuildableSpec(card)) continue;
+        const state = await specBuildState(admin, workspaceId, card.slug);
+        if (!isReadyForBackstopQueue(card, state)) continue;
+        // Ready + no in-flight build. Queue exactly one — same shape as `escortApprovedGoals`'s enqueue
+        // (agent-inserted row: `created_by=null`, distinct `instructions` so the audit shows this was the
+        // backstop, not the primary lane).
+        const { error } = await admin.from("agent_jobs").insert({
+          workspace_id: workspaceId,
+          spec_slug: card.slug,
+          kind: "build",
+          status: "queued",
+          created_by: null,
+          instructions: `Backstop-reconciled by the Platform/DevOps Director: ${goal.title} (${goal.pct}%) — ${card.slug} is ready-but-undispatched (all blockers cleared, spec-review done, no in-flight build) and the primary escort did not queue it this pass. Queuing exactly one build so the goal chain doesn't silently stall.`,
+        });
+        if (error) {
+          console.warn(`[platform-director] reconcileReadyGoalMembers ${card.slug} insert failed (continuing):`, error.message ?? error);
+          continue;
+        }
+        reconciled.push({ goalSlug: goal.slug, goalTitle: goal.title, specSlug: card.slug });
+        // Move the leaf phase in_progress — mirrors the primary escort so the board reflects the start.
+        await markLeafPhaseInProgress(workspaceId, card.slug);
+        // Distinct audit trail per queue — one row per (goal, spec) so the CEO can measure how often the
+        // backstop is firing (a persistent uptick is a signal the primary lane has a bug OR a new drift
+        // class crept in). specSlug is populated so `director_activity`'s spec-scoped surfaces pick it up.
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: PLATFORM,
+          actionKind: "reconciled_ready_goal_member",
+          specSlug: card.slug,
+          reason: `Backstop reconcile queued a build for ${card.slug} — ready-but-undispatched under goal ${goal.title} (${goal.pct}%). The primary escortApprovedGoals lane did not queue it this pass, so the backstop caught the miss and closed the silent stall.`,
+          metadata: { goal_slug: goal.slug, pct: goal.pct, spec_slug: card.slug, autonomous: true, source: "backstop_reconcile" },
+        });
+      } catch (e) {
+        console.warn(`[platform-director] reconcileReadyGoalMembers ${card.slug} failed (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
+  }
+  return { scanned, reconciled };
 }
 
 /** A SpecCard's phases mapped to the spec_card_state per-phase snapshot shape (the P6 PM-companion write). */

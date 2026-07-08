@@ -4962,6 +4962,25 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // escort-reliably-dispatches-ready-goal-members Phase 2 — BACKSTOP RECONCILE SWEEP. Runs AFTER
+    // escortApprovedGoals so the primary lane's just-queued rows are visible via `specBuildState` and
+    // skipped — meaning anything this sweep still catches is a MISS by the primary path (a race, a
+    // partial failure mid-loop, a fresh drift the Phase-1 predicate fix didn't cover). Queues one build
+    // per miss and writes a distinct `reconciled_ready_goal_member` activity row so the CEO can measure
+    // how often the backstop is needed. Idempotent by construction (the inFlight guard), dormant until
+    // live+autonomous. Same self-healing philosophy as builder-worktree-prune-before-add.
+    const backstop = await lib.reconcileReadyGoalMembers(db);
+    if (backstop.reconciled.length) {
+      const slugs = backstop.reconciled.map((r) => r.specSlug).join(", ");
+      notes.push(`escort-backstop → reconciled ${backstop.reconciled.length} ready-but-undispatched member(s): ${slugs}`);
+    } else if (backstop.scanned) {
+      notes.push(`escort-backstop: ${backstop.scanned} member(s) scanned, no misses`);
+    }
+  } catch (e) {
+    notes.push(`escort-backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing escort-backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // director-escalations-must-surface-to-ceo (Phase 2) — backstop: re-emit any CEO notification that was
     // swallowed before the Phase-1 fix (an `escalated` activity row with no live inbox item), so a recorded-
     // but-invisible escalation is retroactively surfaced. Idempotent (re-emits once, then the dedupe holds).
