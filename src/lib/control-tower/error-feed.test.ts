@@ -685,10 +685,10 @@ test("isForeignGoTrueAuthLogNoise drops the exact 'unable to fetch records: cont
 });
 
 test("isForeignGoTrueAuthLogNoise KEEPS a plain 'context canceled' on a non-/user path (still routed through the transient class)", () => {
-  // A plain `context canceled` on a different path — NOT the exact (d) phrase, so still
-  // captured. `isTransientSupabaseLogNoise('auth', …)` still tags it transient (recur window
-  // catches a chronic upstream outage) so a real problem still surfaces.
-  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+  // A plain `context canceled` on a different path — NOT the exact (d) or timeout-context
+  // -canceled sibling shape, so still captured. `isTransientSupabaseLogNoise('auth', …)`
+  // still tags it transient (recur window catches a chronic upstream outage) so a real
+  // problem still surfaces.
   assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
   // A longer/embedded variant of the exact (d) phrase — the exact-match contract keeps it.
   assert.equal(
