@@ -197,6 +197,19 @@ export interface InstanceHealthInput {
    * aggregate flag still fires without it; offenders make the proposal actionable at the source.
    */
   tempOffenders?: TempSpillOffender[];
+  /**
+   * db-health-temp-spill-rate (2026-07-08): `pg_stat_database.temp_bytes` is CUMULATIVE since the last
+   * stats reset — and Supabase's `postgres` role isn't superuser, so `pg_stat_reset()` is denied and
+   * the counter can't be zeroed after a fix. A pure cumulative flag therefore stays lit forever once
+   * tripped (the 314 GB the subscriptions scan left behind never drops). So the pass also passes the
+   * PRIOR instance-pass reading (`tempBytesPrev` = the last heartbeat's temp_bytes, `tempReadingAgeHours`
+   * = hours since it) and `analyzeInstanceHealth` prefers the RATE (Δbytes / Δhours): an active spiller
+   * keeps the rate high, a fixed one drops it to ~0 so the finding SELF-CLEARS. Absent (first pass /
+   * unreadable prior) ⇒ fall back to the cumulative flag (preserves acute-incident detection).
+   */
+  tempBytesPrev?: number;
+  /** Hours since the prior instance-pass reading that produced `tempBytesPrev`. */
+  tempReadingAgeHours?: number;
 }
 
 /**
@@ -261,8 +274,10 @@ export const BLOAT_AUTOVACUUM_STALE_MS = 24 * 60 * 60 * 1000; // last autovacuum
 // load. These thresholds are the bounded proxy that lets the instance pass surface the same signature.
 /** xact_rollback / (xact_commit + xact_rollback) at or above this ⇒ rollback_error_rate. Incident was 0.0743. */
 export const INSTANCE_ROLLBACK_RATIO_FLAG = 0.05; // 5%
-/** cumulative temp_bytes over the sampled window at or above this ⇒ temp_spill_pressure. Incident was 883 GB. */
+/** cumulative temp_bytes over the sampled window at or above this ⇒ temp_spill_pressure (the fallback flag when there's no prior reading to rate against). Incident was 883 GB. */
 export const INSTANCE_TEMP_BYTES_WINDOW_FLAG = 100 * 1024 * 1024 * 1024; // 100 GB
+/** db-health-temp-spill-rate: temp-file spill RATE (Δtemp_bytes / Δhours between passes) at or above this ⇒ temp_spill_pressure. Preferred over the cumulative flag because it SELF-CLEARS once the spill stops (the cumulative counter can't be reset — Supabase's postgres role isn't superuser). The 314 GB subscriptions runaway averaged ~3 GB/hr; 2 GB/hr is "actively spilling hard". */
+export const INSTANCE_TEMP_BYTES_RATE_FLAG = 2 * 1024 * 1024 * 1024; // 2 GB/hr
 /** blks_hit / (blks_hit + blks_read) BELOW this ⇒ cache_pressure (working set spilling out of shared_buffers). Incident was 0.9869. */
 export const INSTANCE_CACHE_HIT_FLOOR = 0.99;
 /** (active + waiting) / max_connections at or above this ⇒ connection_saturation. */
@@ -817,6 +832,7 @@ export function analyzeBloat(tables: TableSizeRow[], now: number): DbHealthFindi
 export interface InstanceHealthThresholds {
   rollbackRatioFlag?: number;
   tempBytesWindowFlag?: number;
+  tempBytesRateFlag?: number;
   cacheHitFloor?: number;
   connUtilFlag?: number;
   timeoutHeadroomFraction?: number;
@@ -837,6 +853,7 @@ export function analyzeInstanceHealth(
 ): DbHealthFinding[] {
   const rollbackFlag = thresholds.rollbackRatioFlag ?? INSTANCE_ROLLBACK_RATIO_FLAG;
   const tempFlag = thresholds.tempBytesWindowFlag ?? INSTANCE_TEMP_BYTES_WINDOW_FLAG;
+  const tempRateFlag = thresholds.tempBytesRateFlag ?? INSTANCE_TEMP_BYTES_RATE_FLAG;
   const cacheFloor = thresholds.cacheHitFloor ?? INSTANCE_CACHE_HIT_FLOOR;
   const connFlag = thresholds.connUtilFlag ?? INSTANCE_CONN_UTIL_FLAG;
   const timeoutHeadroom = thresholds.timeoutHeadroomFraction ?? INSTANCE_TIMEOUT_HEADROOM_FRACTION;
@@ -893,8 +910,19 @@ export function analyzeInstanceHealth(
   //    98% of all spill) hid inside the aggregate for a week. When the box captured the top
   //    temp_blks_written offenders, NAME them and point the fix at the dominant spiller (an
   //    index/rewrite at the source, not a blanket work_mem bump).
-  if (input.tempBytes >= tempFlag) {
-    const impact = `${humanBytes(input.tempBytes)} spilled to temp files (${input.tempFiles.toLocaleString()} files) — hash/sort work_mem is undersized`;
+  // db-health-temp-spill-rate: prefer the RATE (Δtemp_bytes / Δhours since the prior pass) so the
+  // finding SELF-CLEARS once the spill stops — the cumulative counter can't be reset (Supabase's
+  // postgres role isn't superuser). Fall back to the cumulative flag only when there's no prior
+  // reading to rate against (first pass / unreadable prior), which preserves acute-incident detection.
+  const haveTempRate = input.tempBytesPrev != null && (input.tempReadingAgeHours ?? 0) > 0;
+  const tempDelta = haveTempRate ? Math.max(0, input.tempBytes - (input.tempBytesPrev as number)) : 0;
+  const tempRatePerHr = haveTempRate ? tempDelta / (input.tempReadingAgeHours as number) : 0;
+  const tempTripped = haveTempRate ? tempRatePerHr >= tempRateFlag : input.tempBytes >= tempFlag;
+  if (tempTripped) {
+    const ageH = (input.tempReadingAgeHours as number) ?? 0;
+    const impact = haveTempRate
+      ? `spilling ${humanBytes(tempRatePerHr)}/hr to temp files (${humanBytes(tempDelta)} in the last ${ageH.toFixed(1)}h; ${input.tempFiles.toLocaleString()} files cumulative) — hash/sort work_mem is undersized`
+      : `${humanBytes(input.tempBytes)} spilled to temp files (${input.tempFiles.toLocaleString()} files) — hash/sort work_mem is undersized`;
     const offenders = (input.tempOffenders ?? []).filter((o) => o.tempBytes > 0).slice(0, 5);
     const dominant = offenders[0];
     const offenderLines = offenders.length > 0
@@ -909,23 +937,28 @@ export function analyzeInstanceHealth(
             : `Confirm the dominant spiller's plan (a Sort/Hash reporting \`external merge\` / \`Disk: NkB\`) before proposing a work_mem bump — an index on the sort/group key is often the cheaper win.`,
         ]
       : [];
+    const spillEvidenceLine = haveTempRate
+      ? `Spill RATE: ${humanBytes(tempRatePerHr)}/hr (Δ ${humanBytes(tempDelta)} over ${ageH.toFixed(1)}h since the prior pass) — rate flag ${humanBytes(tempRateFlag)}/hr. pg_stat_database.temp_bytes is ${humanBytes(input.tempBytes)} cumulative, but it can't be reset without superuser, so the RATE is the self-clearing signal.`
+      : `pg_stat_database.temp_bytes: ${humanBytes(input.tempBytes)} (${input.tempBytes.toLocaleString()} bytes) — cumulative window flag is ${humanBytes(tempFlag)} (no prior reading to compute a rate; cumulative fallback).`;
     findings.push({
       signature: `dbhealth:instance:temp_spill_pressure`,
       category: "instance",
       cause: "temp_spill_pressure",
       fixKind: "raise_work_mem",
       table: "(instance)",
-      title: `Temp-spill pressure — ${humanBytes(input.tempBytes)} across ${input.tempFiles.toLocaleString()} files`,
+      title: haveTempRate
+        ? `Temp-spill pressure — ${humanBytes(tempRatePerHr)}/hr spilling`
+        : `Temp-spill pressure — ${humanBytes(input.tempBytes)} across ${input.tempFiles.toLocaleString()} files`,
       impact,
-      score: input.tempBytes,
+      score: haveTempRate ? tempRatePerHr : input.tempBytes,
       evidence: [
-        `pg_stat_database.temp_files: ${input.tempFiles.toLocaleString()} on-disk temp files.`,
-        `pg_stat_database.temp_bytes: ${humanBytes(input.tempBytes)} (${input.tempBytes.toLocaleString()} bytes) — window flag is ${humanBytes(tempFlag)}.`,
+        `pg_stat_database.temp_files: ${input.tempFiles.toLocaleString()} on-disk temp files (cumulative).`,
+        spillEvidenceLine,
         `The 2026-07-02 incident hit ${humanBytes(883 * 1024 * 1024 * 1024)} across 92,832 files — the operator-visible signature of an undersized work_mem: every hash/sort >work_mem spills, dragging every heavy query.`,
         ...offenderLines,
       ].join("\n"),
       specSlug: slugFor("raise_work_mem", "instance"),
-      specTitle: specTitleFor("temp_spill_pressure", "the instance", `${humanBytes(input.tempBytes)} temp-file spill across ${input.tempFiles.toLocaleString()} files`),
+      specTitle: specTitleFor("temp_spill_pressure", "the instance", impact),
     });
   }
 

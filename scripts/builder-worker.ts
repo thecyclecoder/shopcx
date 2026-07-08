@@ -3853,6 +3853,30 @@ async function runDbHealthInstanceJob(): Promise<void> {
       /* best-effort: pg_stat_statements may be unreadable; the aggregate temp flag still fires */
     }
 
+    // db-health-temp-spill-rate (2026-07-08): read the PRIOR instance-pass reading so
+    // analyzeInstanceHealth can rate the temp spill (Δbytes/Δhours) — a self-clearing signal — instead
+    // of the cumulative pg_stat_database.temp_bytes, which can't be reset (Supabase's postgres role
+    // isn't superuser) and so would keep the temp tile red forever after a fix. Best-effort.
+    let tempBytesPrev: number | undefined;
+    let tempReadingAgeHours: number | undefined;
+    try {
+      const { data: prev } = await db
+        .from("loop_heartbeats")
+        .select("ran_at, produced")
+        .eq("loop_id", mod.DB_HEALTH_INSTANCE_LOOP_ID)
+        .order("ran_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const prevTemp = (prev as { produced?: { signals?: { temp_bytes?: number } } } | null)?.produced?.signals?.temp_bytes;
+      const prevAt = (prev as { ran_at?: string } | null)?.ran_at;
+      if (typeof prevTemp === "number" && prevAt) {
+        const ageH = (Date.now() - new Date(prevAt).getTime()) / 3_600_000;
+        if (ageH > 0) { tempBytesPrev = prevTemp; tempReadingAgeHours = ageH; }
+      }
+    } catch {
+      /* best-effort: no prior reading ⇒ analyzeInstanceHealth uses the cumulative fallback */
+    }
+
     const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
       xactCommit: statDb.xactCommit,
       xactRollback: statDb.xactRollback,
@@ -3868,6 +3892,8 @@ async function runDbHealthInstanceJob(): Promise<void> {
       nearTimeoutSamples,
       authenticatedStatementTimeoutMs,
       tempOffenders,
+      tempBytesPrev,
+      tempReadingAgeHours,
     };
     const findings = mod.analyzeInstanceHealth(input);
     const ranked = mod.rankFindings(findings);
