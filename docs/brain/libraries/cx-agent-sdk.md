@@ -256,7 +256,7 @@ interface CxActionableOutcomes {
 
 Phase 1 (deterministic read-only CX SDK) is shipped and in production. Phases 2 (deterministic playbook resolution) and 3 (brain access for Sol/Cora/June) remain in planned.
 
-`listActionableOutcomes` (Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]) added — deterministic outcome→mechanism catalog reader. Phases 2–4 (apply the matched mechanism, claim-guard on referenced-CTA-without-launch, end-to-end tests) remain planned.
+`listActionableOutcomes` (Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]) added — deterministic outcome→mechanism catalog reader. Sol's first-touch box session consults it to name a real catalog row on the Direction (`journey_slug` / `playbook_slug`), and Phase 2's [[sol-direction-apply]] `applySolDirection` then APPLIES the matched mechanism (launchJourneyForTicket / startPlaybook) instead of composing a freeform "click below" reply. Phase 3's [[sol-cta-reference-guard]] backstops the send path: an ai_response / kb_response reply that references a CTA is blocked unless a journey was launched this turn. Phase 4 wires end-to-end tests + this brain snapshot; the spec's four phases are shipping together per the parent goal's rollout. See [[../lifecycles/ticket-lifecycle]] § Step 2d.1 for the end-to-end flow.
 
 ## Callers
 
