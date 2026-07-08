@@ -18,6 +18,7 @@ Universal email tracking — sent, delivered, opened, clicked, bounced. Joined b
 | `metadata` | `jsonb` | ✓ | default: `'{}'` |
 | `ticket_id` | `uuid` | ✓ | → [[tickets]].id |
 | `customer_id` | `uuid` | ✓ | → [[customers]].id |
+| `order_id` | `uuid` | ✓ | → [[orders]].id · FK `on delete set null`. Added Phase 3 of [[../specs/shopify-order-confirmation-emails]] so the resend-events pipeline attributes `sent`/`delivered`/`opened`/`clicked` back to the source order for order-confirmation emails. Indexed `email_events_order_id_idx` (partial where `order_id IS NOT NULL`). Null for the pre-existing ticket/customer flows. |
 | `created_at` | `timestamptz` | — | default: `now()` |
 
 ## Foreign keys
@@ -25,6 +26,7 @@ Universal email tracking — sent, delivered, opened, clicked, bounced. Joined b
 **Out (this → others):**
 
 - `customer_id` → [[customers]].`id`
+- `order_id` → [[orders]].`id` (on delete set null)
 - `ticket_id` → [[tickets]].`id`
 - `workspace_id` → [[workspaces]].`id`
 

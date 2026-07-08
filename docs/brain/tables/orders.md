@@ -69,6 +69,8 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 | `avalara_transaction_code` | `text` | ✓ |  |
 | `avalara_total_tax_cents` | `int4` | ✓ |  |
 | `avalara_committed_at` | `timestamptz` | ✓ |  |
+| `order_confirmation_email_id` | `text` | ✓ | Resend id of the order-confirmation email sent for this order. Written by the Phase-4 sender (`src/lib/inngest/order-confirmation.ts`) via [[../libraries/email-storefront]] `sendOrderConfirmationEmail`'s Phase-3 `resendEmailId` return. Doubles as the dedupe key — a non-null value means "already sent, no-op". Non-unique in DB (the Phase-4 sender's null-check is the actual guard) but paired with `[[email_events]].order_id` for delivered/opened join-back. |
+| `order_confirmation_sent_at` | `timestamptz` | ✓ | When the Phase-4 sender wrote `order_confirmation_email_id`. Together the two columns prove we sent the transactional confirmation ([[../specs/shopify-order-confirmation-emails]] Phase 3). |
 
 ## Foreign keys
 
