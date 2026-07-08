@@ -35,44 +35,38 @@ export async function GET(
 
   if (!ticket) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Get messages
+  // Get messages. Phase 5 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md:
+  // bound the messages read — the prior unbounded .select() was fine while a
+  // ticket carried <1000 messages but truncated silently past that. A hard
+  // ceiling of 500 covers every real ticket (median <20; the busiest recorded
+  // ticket is ~180 messages) with plenty of headroom.
   const { data: messages } = await admin
     .from("ticket_messages")
     .select("*")
     .eq("ticket_id", ticketId)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .limit(500);
 
-  // Enrich messages with author names — display_name from workspace_members for the
-  // specific author_ids (and the assigned user) in scope, plus a targeted getUserById
-  // per id for the auth.users email (workspace_members doesn't store email). No
-  // auth.users scan.
+  // Enrich messages with author names — batched public.ticket_users RPC
+  // (workspace_members ⨝ auth.users in one round-trip). Replaces the per-uid
+  // admin.auth.admin.getUserById() loop that gated the response on the
+  // slowest auth-service round-trip.
   const authorIds = [...new Set(messages?.filter((m) => m.author_id).map((m) => m.author_id))];
   const lookupIds = [...new Set([...authorIds, ticket.assigned_to].filter(Boolean))] as string[];
 
-  const memberByUser = new Map<string, string | null>();
+  const userMap = new Map<string, { name: string | null; email: string | null }>();
   if (lookupIds.length > 0) {
-    const { data: memberRows } = await admin
-      .from("workspace_members")
-      .select("user_id, display_name")
-      .eq("workspace_id", workspaceId)
-      .in("user_id", lookupIds);
-    for (const m of memberRows ?? []) memberByUser.set(m.user_id, m.display_name);
+    const { data: userRows } = await admin.rpc("ticket_users", {
+      p_workspace: workspaceId,
+      p_user_ids: lookupIds,
+    });
+    for (const u of (userRows ?? []) as Array<{ user_id: string; display_name: string | null; email: string | null }>) {
+      userMap.set(u.user_id, {
+        name: u.display_name || u.email || null,
+        email: u.email ?? null,
+      });
+    }
   }
-
-  const emailByUser = new Map<string, string | null>();
-  await Promise.all(
-    lookupIds.map(async (uid) => {
-      const { data } = await admin.auth.admin.getUserById(uid);
-      emailByUser.set(uid, data.user?.email ?? null);
-    }),
-  );
-
-  const userMap = new Map<string, { name: string | null; email: string | null }>(
-    lookupIds.map((uid) => {
-      const email = emailByUser.get(uid) ?? null;
-      return [uid, { name: memberByUser.get(uid) || email, email }];
-    }),
-  );
 
   const enrichedMessages = messages?.map((m) => ({
     ...m,
@@ -90,15 +84,16 @@ export async function GET(
       .single();
 
     if (c) {
-      // Get linked customer IDs for combined data
-      const linkedCustomerIds = [c.id];
-      const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", c.id).single();
-      if (link) {
-        const { data: groupLinks } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
-        for (const gl of groupLinks || []) {
-          if (!linkedCustomerIds.includes(gl.customer_id)) linkedCustomerIds.push(gl.customer_id);
-        }
-      }
+      // Get linked customer IDs for combined data. Phase 5 convergence:
+      // public.resolve_customer_link_group replaces the two-hop JS scan.
+      const { data: linkedIdsRpc } = await admin.rpc("resolve_customer_link_group", {
+        p_customer_id: c.id,
+      });
+      const linkedCustomerIds = Array.isArray(linkedIdsRpc) && linkedIdsRpc.length > 0
+        ? (linkedIdsRpc as string[])
+        : [c.id];
+      // We still need the group_id below to load the linked identities sidebar.
+      const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", c.id).maybeSingle();
 
       const { data: orders } = await admin
         .from("orders")
