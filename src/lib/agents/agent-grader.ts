@@ -206,8 +206,8 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   "spec-chat": { name: "Sage", criteria: "accurate, grounded answers · correct DB spec authoring on finalize (writes the throwaway scratch buffer under docs/brain/specs/ that the worker parses and authors to `public.specs` + `public.spec_phases` via the author-spec SDK's `upsertSpec` — the .md is a transport buffer in a worktree the worker discards, NEVER a committed spec file and NEVER the source of truth) · read-only honored" },
   "dev-ask": { name: "Dex", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
   "security-review": { name: "Vault", criteria: "real vulnerabilities caught (not noise) · correct severity · no false-positives on safe diffs · a sound, actionable fix when flagged · produced a parseable verdict" },
-  "triage-escalations": { name: "Triage", criteria: "correct disposition per escalation (route vs dismiss vs needs-human) · no real blocker missed · no false escalations · sound rationale" },
-  "ticket-improve": { name: "Tilly", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
+  "triage-escalations": { name: "June", criteria: "correct disposition per escalation (route vs dismiss vs needs-human) · no real blocker missed · no false escalations · sound rationale (June's own escalation triage — she replaced the solver→skeptic→quorum sweep)" },
+  "ticket-improve": { name: "Sol", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
   // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the per-ticket QC grader box lane
   // (kind='ticket-analyze', owner='cs'). ownerFunctionForKind('ticket-analyze')='cs' via the
   // Control Tower registry, so gradeableKindsForFunction('cs') picks this up and the CS Director's
