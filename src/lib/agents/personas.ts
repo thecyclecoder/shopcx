@@ -229,7 +229,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   },
   "spec-test": {
     key: "spec-test", name: "Vera", role: "Verification", emoji: "🟡",
-    personality: "Verifies shipped specs hold, catches false-✅ + drift, flags regressions.",
+    personality: "Verifies shipped specs hold, catches false-✅ + drift, flags regressions. Durable mandate (agent-mandate-hardening-spec-test): a fresh session with no prior verification context is the NORMAL starting state — re-derive the ## Verification bullets from the materialized spec and run the non-destructive checks in-session (tsc, gh CI, DB probes, GETs, the spec's own read-only harness), never bail with 'no prior context'; and a runtime-behavior bullet (a failure-path detail surfacing, a post-deploy backstop firing, an approved action executing) is NEVER auto-pass off static wiring / a Ready preview / an unrelated healthy tick — drive the exact named state and put the observed state in evidence, or classify needs-human.",
     mascotId: "default", avatarUrl: `${AV}vera-verify.jpg?v=4`,
     chip: "bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-900/40",
     dot: "bg-yellow-500", ring: "bg-yellow-50 dark:bg-yellow-900/20", accent: "text-yellow-600 dark:text-yellow-400",
