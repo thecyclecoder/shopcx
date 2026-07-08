@@ -3,7 +3,8 @@
  * `runCsDirectorCallJob` (scripts/builder-worker.ts) to mint the CEO inbox card for every
  * `escalate_founder` verdict. Mirrors the sibling `cs-director-verdict-note.test.ts` pattern.
  *
- * Verification (each bullet mirrors the spec's Phase-1 Verification block):
+ * Verification bullets:
+ *   Phase 1 —
  *   - EVERY escalate_founder verdict yields a card shape with type-ready fields
  *     (title/body/link/metadata) — no branch swallows the mint.
  *   - metadata.routed_to_function === 'ceo' → the row lands in `buildApprovalsFeed`'s escalated set
@@ -13,6 +14,15 @@
  *   - Metadata carries the ticket + cs_director_call_job_id back-pointers so the audit trail joins.
  *   - Empty reasoning is normalized so the mint never silently produces a bare card.
  *   - Black-swan classification threads through when present, and stays absent when not.
+ *   Phase 2 —
+ *   - The card body carries a `Diagnosis:` line quoting June's reasoning + a `Recommended remedy:`
+ *     line quoting the recommendation, so the CEO reads the concrete finding + the suggested action
+ *     in one glance (never a bare "needs human review").
+ *   - The recommended remedy is carried on metadata.recommended_remedy so a downstream approver /
+ *     bounce-back handler can pick it up structurally.
+ *   - When June does NOT provide a recommendation, the card still cites the diagnosis (Phase 1
+ *     back-compat) with a "Recommended remedy: (none — CEO to decide the action)" fallback so the
+ *     shape stays consistent and the card is never bare.
  *
  * Pure helper — no network, no DB. Run:
  *   npx tsx --test src/lib/cs-director-escalate-founder-card.test.ts
@@ -114,4 +124,95 @@ test("black-swan class of 'unspecified' does NOT badge the title (a bare `black_
   });
   assert.equal(row.title, "CS Director — escalate to founder", "unspecified class does not badge the title");
   assert.equal(row.metadata.black_swan_class, "unspecified", "but the class is still carried in metadata for the audit");
+});
+
+// ── Phase 2 — diagnosis + recommended remedy on the card body ─────────────────────────────────
+
+test("Phase 2 — card body labels the diagnosis (June's reasoning) explicitly so the CEO reads the concrete finding", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Grandfathered subscription renewed at the new $59.90 price instead of the $33.01 lock — customer was overcharged $26.89 on the 2026-06-24 renewal and disputes the last two.",
+    jobId: "job-1",
+  });
+  assert.match(row.body, /Diagnosis:\s+/, "body carries a labeled Diagnosis line");
+  assert.match(row.body, /overcharged \$26\.89/, "the diagnosis quotes the concrete finding");
+});
+
+test("Phase 2 — card body names a recommended remedy when June provides one", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Grandfathered sub overcharged $26.89 on the 2026-06-24 renewal — needs CEO ruling.",
+    jobId: "job-1",
+    recommendedRemedy: {
+      kind: "refund_and_price_lock",
+      summary: "Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock on the sub before the next renewal.",
+    },
+  });
+  assert.match(row.body, /Recommended remedy:\s+/, "body carries a labeled Recommended remedy line");
+  assert.match(row.body, /Refund \$26\.89/, "the remedy quotes the concrete recommendation");
+  assert.match(row.body, /refund_and_price_lock/, "the remedy kind is surfaced for the CEO to see the shape");
+  assert.deepEqual(
+    row.metadata.recommended_remedy,
+    { kind: "refund_and_price_lock", summary: "Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock on the sub before the next renewal." },
+    "the recommendation is carried structurally on metadata so a downstream handler can pick it up",
+  );
+});
+
+test("Phase 2 — verification: the CEO card names the concrete issue and a recommended remedy; it is not a bare 'needs human review'", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Chargeback dispute on a legitimate order — customer claims fraud, our fraud tools show no risk. In CS refund ceiling territory but the storyline is non-binary.",
+    jobId: "job-1",
+    recommendedRemedy: {
+      kind: "refund_full_order",
+      summary: "Refund the full $89.94 order — CS ceiling covers it, but wanted a CEO sign-off given the fraud claim.",
+    },
+  });
+  assert.doesNotMatch(row.body, /needs human review/i, "not a bare fallback string");
+  assert.match(row.body, /Diagnosis:\s+.*chargeback dispute/i, "names the concrete issue");
+  assert.match(row.body, /Recommended remedy:\s+.*refund the full \$89\.94/i, "names a recommended remedy");
+});
+
+test("Phase 2 — no recommendation falls back to an explicit 'CEO to decide' line, still cites the diagnosis, still not bare", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Non-binary judgment call — customer wants a partial refund + a policy change; the policy call is CEO's, not mine.",
+    jobId: "job-1",
+  });
+  assert.match(row.body, /Diagnosis:\s+.*non-binary judgment call/i, "diagnosis still present");
+  assert.match(row.body, /Recommended remedy:\s+\(none — CEO to decide the action\)/, "explicit no-recommendation fallback");
+  assert.doesNotMatch(row.body, /needs human review/i);
+  assert.equal(row.metadata.recommended_remedy, null, "metadata carries null (not omitted) so downstream can distinguish absent vs unread");
+});
+
+test("Phase 2 — recommendation with only a summary (no kind) still surfaces on the card", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Something specific.",
+    jobId: "job-1",
+    recommendedRemedy: {
+      summary: "Comp a full month + escalate to the fulfillment vendor about the repeated delay.",
+    },
+  });
+  assert.match(row.body, /Recommended remedy:\s+.*Comp a full month/i);
+});
+
+test("Phase 2 — recommendation with only a kind (no summary) still surfaces on the card as the kind", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Something specific.",
+    jobId: "job-1",
+    recommendedRemedy: { kind: "refund_order" },
+  });
+  assert.match(row.body, /Recommended remedy:\s+refund_order/);
+});
+
+test("Phase 2 — empty/malformed recommendation object (no kind + no summary) falls back to the 'CEO to decide' line, not a bare '(kind unknown)'", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Something specific.",
+    jobId: "job-1",
+    recommendedRemedy: {},
+  });
+  assert.match(row.body, /Recommended remedy:\s+\(none — CEO to decide the action\)/);
 });

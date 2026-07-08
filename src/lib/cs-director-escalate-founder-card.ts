@@ -40,6 +40,13 @@ export interface EscalateFounderCardInput {
   blackSwanClass?: string | null;
   /** how the black-swan class was derived — 'verdict_metadata' | 'keyword_default' | null. */
   blackSwanSource?: string | null;
+  /**
+   * Phase 2 — June's SUGGESTED remedy for the CEO to approve/adjust in one read. Loose shape
+   * mirroring RemedyPlan (`kind` + `summary`) but a SUGGESTION, not for auto-execution — the CEO
+   * still owns the hard call. When absent/empty, the card body renders an explicit "CEO to decide
+   * the action" line so the surface stays consistent and never reads as a bare "needs human review".
+   */
+  recommendedRemedy?: Record<string, unknown> | null;
 }
 
 export interface EscalateFounderCardRow {
@@ -62,12 +69,43 @@ export interface EscalateFounderCardRow {
     autonomous: boolean;
     /** so the approvals-feed enrichment can join to the cs-director-call agent_jobs row. */
     agent_job_id: string;
+    /**
+     * Phase 2 — the STRUCTURED suggested remedy carried verbatim from the verdict, so a downstream
+     * approver / bounce-back handler can pick it up without re-parsing the human body text. Null
+     * when June did not provide a recommendation (distinct from omitted — the caller can tell
+     * "absent" from "unread").
+     */
+    recommended_remedy: Record<string, unknown> | null;
   };
 }
 
 function normalizeReasoning(raw: string): string {
   const s = (raw || "").trim();
   return s.length > 0 ? s : "(no reasoning recorded)";
+}
+
+function pickString(source: Record<string, unknown> | null | undefined, key: string): string | null {
+  if (!source) return null;
+  const v = source[key];
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+}
+
+/**
+ * Render June's suggested remedy as a one-line summary — the surface the CEO reads on the card
+ * body. Mirrors `cs-director-verdict-note.ts` `summarizeRemedy` on shape (`kind`/`type`/`action` +
+ * `summary`/`description`/`reason`) so June's verdict-emit conventions land the same across the
+ * internal note and the CEO card. When the recommendation is absent OR the object carries no
+ * usable kind + summary, the fallback names the founder as the decider explicitly — never a bare
+ * "needs human review" (the Phase-2 verification's exact negation).
+ */
+export function summarizeRecommendedRemedy(remedy: Record<string, unknown> | null | undefined): string {
+  if (!remedy) return "(none — CEO to decide the action)";
+  const kind = pickString(remedy, "kind") ?? pickString(remedy, "type") ?? pickString(remedy, "action");
+  const summary = pickString(remedy, "summary") ?? pickString(remedy, "description") ?? pickString(remedy, "reason");
+  if (kind && summary) return `${kind}: ${summary}`;
+  if (summary) return summary;
+  if (kind) return kind;
+  return "(none — CEO to decide the action)";
 }
 
 /**
@@ -80,13 +118,26 @@ function normalizeReasoning(raw: string): string {
  * full context.
  */
 export function buildEscalateFounderCard(input: EscalateFounderCardInput): EscalateFounderCardRow {
-  const { ticketId, reasoning, jobId, triageRunId, blackSwanClass, blackSwanSource } = input;
+  const { ticketId, reasoning, jobId, triageRunId, blackSwanClass, blackSwanSource, recommendedRemedy } = input;
   const normalizedReason = normalizeReasoning(reasoning);
   const link = `/dashboard/tickets/${ticketId}`;
 
   const classSuffix = blackSwanClass && blackSwanClass !== "unspecified" ? ` (${blackSwanClass})` : "";
   const title = `CS Director — escalate to founder${classSuffix}`.slice(0, 200);
-  const body = normalizedReason.slice(0, 4000);
+
+  // Phase 2 — labeled body: Diagnosis (June's finding) + Recommended remedy (June's suggested
+  // action, or an explicit "CEO to decide" line when absent). The founder can approve/adjust in
+  // one read rather than re-investigating; the surface stays the same shape whether or not June
+  // proposed a concrete remedy (never a bare "needs human review").
+  const diagnosisLine = `Diagnosis: ${normalizedReason}`;
+  const remedyLine = `Recommended remedy: ${summarizeRecommendedRemedy(recommendedRemedy)}`;
+  const body = [diagnosisLine, remedyLine].join("\n").slice(0, 4000);
+
+  // The structured recommendation persists on metadata verbatim so a downstream approver can
+  // pick it up without re-parsing the body — null (not omitted) so the caller can distinguish
+  // "absent" from "unread".
+  const recommendedRemedyMeta =
+    recommendedRemedy && Object.keys(recommendedRemedy).length > 0 ? recommendedRemedy : null;
 
   return {
     title,
@@ -106,6 +157,7 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
       deep_link: link,
       autonomous: true,
       agent_job_id: jobId,
+      recommended_remedy: recommendedRemedyMeta,
     },
   };
 }
