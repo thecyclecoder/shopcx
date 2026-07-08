@@ -513,38 +513,51 @@ export function isForeignGoTrueEdgeNoise(
 }
 
 /**
- * Foreign-app noise — Supabase's own GoTrue auth server timing out on its Postgres
- * backend, arriving on the AUTH log feed
- * ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]]).
- *
- * The auth-log sibling of `isForeignGoTrueEdgeNoise`. Supabase's GoTrue `/user` handler
- * intermittently 504s waiting on its own Postgres backend after ~14.8s and emits a
- * `level:'error'` row on `auth_logs` with `msg = 'Unhandled server error: context
- * deadline exceeded'` — the handler-side deadline, upstream infra we hold zero levers on.
- * The prior fix scoped generic `context deadline exceeded` into the transient class
- * ([[isTransientSupabaseLogNoise]] `kind:'auth'` branch), but Supabase's GoTrue
- * saturates on a cadence outside our control, so the signature recurs inside
- * `TRANSIENT_RECUR_WINDOW_MS` and escalates on every cycle — a Platform owner paged in
- * a loop they can't fix (Control Tower `supabase-logs:9f39fe11dd105b2a`, 39 occurrences
- * across 6 days).
- *
- * Same choice we already made for `isForeignGoTrueEdgeNoise` / supabase-edge-ssl-handshake
- * / undici-headers-timeout: DROP AT CAPTURE — no error_event / loop_alert / signature.
- * Narrowly gated to the EXACT phrase 'Unhandled server error: context deadline exceeded'
- * (case-insensitive, trimmed) so:
- *   - `context canceled` (a real browser-abort — parent context died mid-request) stays
- *     classified as transient by `isTransientSupabaseLogNoise`,
- *   - `dial ... i/o timeout` / `dial ... canceled` (Postgres reachability failures) stay
- *     transient,
- *   - `invalid JWT`, rate limits, signature mismatches, and any actionable GoTrue error
- *     class carry different message shapes and stay captured / paged on first sighting.
- *
+ * Foreign-app noise — Supabase's own GoTrue `/user` saturating on its Postgres backend,
+ * arriving on the app-level auth_logs feed. The auth-log sibling of
+ * [[isForeignGoTrueEdgeNoise]] (which drops the same blip on the Cloudflare edge_logs).
+ * We do not run GoTrue and hold ZERO levers on its gateway; both shapes below are a healed
+ * foreign-app blip a user never sees (a normal `supabase.auth.getUser()` just retries and
+ * succeeds), so DROP AT CAPTURE — no error_event / loop_alert / signature / repair fan-out.
  * Consumed by the `auth` LogQuery's `mapRow` in [[./supabase-log-poll]] — the mapRow
- * contract treats `null` as `drop, do not record`, matching the `api` mapRow at line 203.
+ * contract treats `null` as `drop, do not record`, matching the `api` mapRow's edge-noise
+ * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
+ * passes just the message), the 504 shape needs the request JSON.
+ *
+ * Two distinct GoTrue-saturation signatures, EITHER of which drops (both surfaced as
+ * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
+ * owner in a loop they can't fix):
+ *
+ *  (a) context-deadline ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]],
+ *      `supabase-logs:9f39fe11dd105b2a`, 39 occ / 6 days) — the `/user` handler 504s waiting
+ *      on its Postgres backend after ~14.8s and emits `level:'error'` with the EXACT phrase
+ *      `Unhandled server error: context deadline exceeded` (case-insensitive, trimmed).
+ *
+ *  (b) 504 gateway-timeout ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]],
+ *      `supabase-logs:9d5fae2f5f92ec3d`, 46 occ / 7 days) — msg starts with
+ *      `504: Processing this request timed out` AND the request JSON (`eventMessage`) carries
+ *      BOTH `"path":"/user"` AND `"method":"GET"`.
+ *
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: `context
+ * canceled` (browser-abort) + `dial ... i/o timeout` / `dial ... canceled` (Postgres
+ * reachability) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`, rate
+ * limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504 on
+ * `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
  */
-export function isForeignGoTrueAuthLogNoise(msg: string | null | undefined): boolean {
+export function isForeignGoTrueAuthLogNoise(
+  msg: string | null | undefined,
+  eventMessage?: string | null | undefined,
+): boolean {
+  // (a) context-deadline shape — msg-only, exact phrase.
   const text = (msg ?? "").trim().toLowerCase();
-  return text === "unhandled server error: context deadline exceeded";
+  if (text === "unhandled server error: context deadline exceeded") return true;
+  // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
+  const m = (msg ?? "").trimStart();
+  if (m.startsWith("504: Processing this request timed out")) {
+    const em = eventMessage ?? "";
+    if (em.includes('"path":"/user"') && em.includes('"method":"GET"')) return true;
+  }
+  return false;
 }
 
 /**

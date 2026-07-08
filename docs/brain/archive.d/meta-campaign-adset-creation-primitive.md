@@ -1,0 +1,1 @@
+- **Meta campaign + ad-set creation primitive (make the media buyer hands-off)** · verified 2026-07-07 · → [[../lifecycles/ad-publish]]

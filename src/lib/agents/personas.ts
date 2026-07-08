@@ -86,21 +86,14 @@ export const PERSONAS: Record<string, AgentPersona> = {
   // god-mode-becomes-ceo-executive-assistant-agent Phase 1: gives the god-mode cockpit
   // its own identity (a female name + persona) so it no longer resolves to the Platform
   // orphan-default. Owner=ceo (see [[../control-tower/registry]] `OwnerFunction`), rendered
-  // under the CEO seat in Phase 2. Fix 1 (pre-merge spec-test regression check
-  // 3122218882ab4f64: "real avatarUrl" clause was unmet — Eve shipped with a null
-  // avatarUrl + no `agent-avatars/eve-god-mode.jpg` file in the bucket): reuse the CEO
-  // seat's existing bucket file as a PLACEHOLDER portrait until a distinct Eve headshot
-  // is uploaded — the same "reuse the linked persona's headshot" pattern the CS Director
-  // alias used (commit 824d3bb2d: "reuses June's existing headshot in the supabase
-  // agent-avatars bucket; a distinct cs-director portrait can be uploaded later"). She
-  // is semantically the CEO's own agent, so the crown is the closest linked identity;
-  // the companion spec builder-persona-add-upserts-by-key-and-generates-avatar auto-avatar
-  // path will swap this in for a Nano Banana Pro headshot at `eve-god-mode.jpg` later.
+  // under the CEO seat in Phase 2. Her distinct Nano Banana Pro headshot lives at
+  // `agent-avatars/eve-god-mode.jpg` (generated via scripts/_gen-eve-avatar.ts, 2026-07-07)
+  // — replaced the earlier ceo-crown.jpg placeholder that reused the CEO seat's portrait.
   "god-mode": {
     key: "god-mode", name: "Eve", role: "Executive Assistant", emoji: "🌙",
     personality: "The CEO's right hand from the god-mode cockpit — does anything the founder asks within the PIN + risk-tier gates. Reads/diagnostics fly; every risky write surfaces the reasoning and asks. Autonomous within the founder's leash; escalates rather than silently mutating.",
     pronouns: { subject: "she", object: "her", possessive: "her" },
-    mascotId: "ceo", avatarUrl: `${AV}ceo-crown.jpg?v=4`,
+    mascotId: "ceo", avatarUrl: `${AV}eve-god-mode.jpg?v=1`,
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
