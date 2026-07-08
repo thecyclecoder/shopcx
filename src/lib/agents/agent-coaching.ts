@@ -168,6 +168,61 @@ export function classifyBlamelessOutageBatch(lows: CoachBatchLowGrade[]): Blamel
   };
 }
 
+// ── Phase 2: dedup window + pure decision fn for auto-resolving a blameless batch ────────────────
+//
+// The classifier says "blameless." The wiring says WHAT the coach does with that verdict:
+//
+//   1. If the classifier says NOT blameless → the existing coach path runs untouched (route to Repair
+//      for a code-bug class · coach for a guidance gap · roll into a fix spec after the loop guard).
+//   2. If the classifier says blameless AND there is NO recent `blameless_outage` audit row for this
+//      (workspace, agent_kind) → mint ONE audit row (`agent_coaching_log` with kind='blameless_outage',
+//      recheck_status='stuck' since there is nothing to re-check on an outage) so the run is accounted
+//      for, and mark the coach job `completed`. NEVER `needs_attention` — an outage is not a park.
+//   3. If a recent `blameless_outage` audit row already exists inside BLAMELESS_OUTAGE_DEDUP_MS → the
+//      recurring outage grades aging out must NOT re-mint a card every cycle: just mark the coach job
+//      `completed` and reference the existing audit row. This is the dedup the spec calls out.
+//
+// The decision function is PURE — it takes the classifier verdict and the recent audit rows and returns
+// the action. The DB writes happen at the call site (runAgentCoachJob).
+export const BLAMELESS_OUTAGE_DEDUP_MS = 24 * 60 * 60 * 1000;
+
+export interface BlamelessOutageAuditRow {
+  id: string;
+  /** ISO timestamp — `agent_coaching_log.created_at`. */
+  createdAt: string;
+}
+
+export type CoachBatchOutcome =
+  | { action: "proceed_to_coach"; reason: string }
+  | { action: "record_blameless_outage"; dominantSignature: string; reason: string }
+  | { action: "auto_resolve_deduped"; existingId: string; reason: string };
+
+/**
+ * Given the classifier verdict + any recent `blameless_outage` audit rows for (workspace, agent_kind),
+ * decide what the coach lane does with this batch. Pure — no DB / IO — so the runAgentCoachJob wiring
+ * is fully testable without stubbing Supabase.
+ *
+ * `now` is injectable so a test can freeze time; production callers use `Date.now()` (the default).
+ */
+export function decideBlamelessOutageOutcome(
+  verdict: BlamelessOutageVerdict,
+  recentAuditRows: BlamelessOutageAuditRow[],
+  now: number = Date.now(),
+): CoachBatchOutcome {
+  if (!verdict.blameless) return { action: "proceed_to_coach", reason: verdict.reason };
+  const cutoff = now - BLAMELESS_OUTAGE_DEDUP_MS;
+  const dedup = recentAuditRows.find((r) => {
+    const t = new Date(r.createdAt).getTime();
+    return Number.isFinite(t) && t >= cutoff;
+  });
+  if (dedup) return { action: "auto_resolve_deduped", existingId: dedup.id, reason: verdict.reason };
+  return {
+    action: "record_blameless_outage",
+    dominantSignature: verdict.dominantSignature ?? "unknown_box_outage",
+    reason: verdict.reason,
+  };
+}
+
 /** Dispositions that are JUDGMENT calls (a wrong one is a guidance gap → coachable). */
 const DISMISSAL_VERDICTS = new Set([
   "transient",

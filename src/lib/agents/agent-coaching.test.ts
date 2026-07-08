@@ -14,8 +14,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  BLAMELESS_OUTAGE_DEDUP_MS,
   BLAMELESS_OUTAGE_SIGNATURES,
   classifyBlamelessOutageBatch,
+  decideBlamelessOutageOutcome,
+  type BlamelessOutageAuditRow,
+  type BlamelessOutageVerdict,
   type CoachBatchLowGrade,
 } from "./agent-coaching";
 
@@ -129,4 +133,96 @@ test("classifyBlamelessOutageBatch: a log-tail-only match still counts (the sign
   const v = classifyBlamelessOutageBatch(lows);
   assert.equal(v.blameless, true);
   assert.equal(v.dominantSignature, "cli_not_logged_in");
+});
+
+// ── Phase 2 — auto-resolve blameless batches, no CEO escalation, deduped ─────────────────────────
+//
+// Verification:
+//  "A blameless-outage coach batch produces NO CEO-routed dashboard_notification and leaves no
+//   needs_attention park; a re-run on the same still-outage-tainted grades does not create a new
+//   card; a batch with real low grades still coaches / routes to repair / escalates exactly as
+//   before."
+//
+// The DB writes live at the runAgentCoachJob call site; here we cover the PURE decision function
+// (which the wiring dispatches on). Together with the classifier tests above, this exercises every
+// branch: proceed_to_coach (Verification bullet 3) · record_blameless_outage (bullet 1) ·
+// auto_resolve_deduped (bullet 2).
+
+const BLAMELESS_VERDICT: BlamelessOutageVerdict = {
+  blameless: true,
+  dominantSignature: "cli_auth_failed",
+  perGrade: [],
+  reason: "all_3_low_grades_matched_box_outage_signature_cli_auth_failed",
+};
+
+const COACHABLE_VERDICT: BlamelessOutageVerdict = {
+  blameless: false,
+  dominantSignature: null,
+  perGrade: [],
+  reason: "low_grade_g4_carries_worker_attributable_marker",
+};
+
+test("decideBlamelessOutageOutcome: NOT blameless → proceed_to_coach (the existing coach path runs untouched — Verification bullet 3)", () => {
+  const out = decideBlamelessOutageOutcome(COACHABLE_VERDICT, []);
+  assert.equal(out.action, "proceed_to_coach");
+  if (out.action === "proceed_to_coach") assert.equal(out.reason, COACHABLE_VERDICT.reason);
+});
+
+test("decideBlamelessOutageOutcome: blameless + no prior audit row → record_blameless_outage (no CEO card, no needs_attention — Verification bullet 1)", () => {
+  const out = decideBlamelessOutageOutcome(BLAMELESS_VERDICT, []);
+  assert.equal(out.action, "record_blameless_outage");
+  if (out.action === "record_blameless_outage") {
+    assert.equal(out.dominantSignature, "cli_auth_failed");
+    assert.equal(out.reason, BLAMELESS_VERDICT.reason);
+  }
+});
+
+test("decideBlamelessOutageOutcome: blameless + a recent audit row inside the dedup window → auto_resolve_deduped (Verification bullet 2)", () => {
+  const now = 1_000_000_000_000;
+  const recent: BlamelessOutageAuditRow[] = [
+    // Just 1h old — well inside the 24h dedup window.
+    { id: "audit-1", createdAt: new Date(now - 60 * 60 * 1000).toISOString() },
+  ];
+  const out = decideBlamelessOutageOutcome(BLAMELESS_VERDICT, recent, now);
+  assert.equal(out.action, "auto_resolve_deduped");
+  if (out.action === "auto_resolve_deduped") assert.equal(out.existingId, "audit-1");
+});
+
+test("decideBlamelessOutageOutcome: blameless + a STALE audit row past the dedup window → record_blameless_outage (a fresh card, not deduped)", () => {
+  // A recurring outage two days later is a new outage window — mint a new audit row so the
+  // dedup window doesn't silently swallow every future occurrence forever.
+  const now = 1_000_000_000_000;
+  const stale: BlamelessOutageAuditRow[] = [
+    { id: "audit-old", createdAt: new Date(now - BLAMELESS_OUTAGE_DEDUP_MS - 1).toISOString() },
+  ];
+  const out = decideBlamelessOutageOutcome(BLAMELESS_VERDICT, stale, now);
+  assert.equal(out.action, "record_blameless_outage");
+});
+
+test("decideBlamelessOutageOutcome: blameless + a mix of recent + stale audit rows → deduped against the recent one", () => {
+  const now = 1_000_000_000_000;
+  const rows: BlamelessOutageAuditRow[] = [
+    { id: "audit-old", createdAt: new Date(now - BLAMELESS_OUTAGE_DEDUP_MS - 1).toISOString() },
+    { id: "audit-recent", createdAt: new Date(now - 30 * 60 * 1000).toISOString() },
+  ];
+  const out = decideBlamelessOutageOutcome(BLAMELESS_VERDICT, rows, now);
+  assert.equal(out.action, "auto_resolve_deduped");
+  if (out.action === "auto_resolve_deduped") assert.equal(out.existingId, "audit-recent");
+});
+
+test("decideBlamelessOutageOutcome: blameless + an audit row with an unparseable createdAt is ignored → record_blameless_outage (never wedge on bad data)", () => {
+  const rows: BlamelessOutageAuditRow[] = [{ id: "audit-junk", createdAt: "not-a-date" }];
+  const out = decideBlamelessOutageOutcome(BLAMELESS_VERDICT, rows);
+  assert.equal(out.action, "record_blameless_outage");
+});
+
+test("decideBlamelessOutageOutcome: blameless + verdict has null dominantSignature → record_blameless_outage with a safe fallback signature", () => {
+  const v: BlamelessOutageVerdict = { ...BLAMELESS_VERDICT, dominantSignature: null };
+  const out = decideBlamelessOutageOutcome(v, []);
+  assert.equal(out.action, "record_blameless_outage");
+  if (out.action === "record_blameless_outage") assert.equal(out.dominantSignature, "unknown_box_outage");
+});
+
+test("BLAMELESS_OUTAGE_DEDUP_MS default is 24 hours", () => {
+  assert.equal(BLAMELESS_OUTAGE_DEDUP_MS, 24 * 60 * 60 * 1000);
 });
