@@ -216,6 +216,9 @@ All three produce the same [[../tables/ticket_messages]] rows + the same [[../ta
 **Fixed 2026-06-19 (ticket 178ae5a7):**
 - **Cancel journey no longer pre-binds a subscription.** `handleJourney` (`action-executor.ts`) now skips `subscription_id` resolution for cancel journeys (`isCancelJourney` guard) — selection is fully code-driven via the picker. Previously `find(a => a.contract_id)` could grab a side action's contract on a *different* sub, mis-bind the cancel session, and skip the picker. Jodi (ticket 178ae5a7) asked to cancel her Superfood Tabs sub but the journey bound to her Ashwavana sub (a concurrent `remove_item` was first in `actions[]`); she accepted a 20%-off save that landed on the wrong sub while the Tabs sub renewed full-price. Remedied: 20% refund on SC132928 + coupon removed from the Ashwavana sub.
 
+**Fixed 2026-07-08 (ticket 472310cc):**
+- **Refund-playbook pause step is skipped when the identified subscription is already cancelled.** A `pause_subscription`/`pause` step in the Refund playbook now routes through `decidePauseSubscriptionStep` in `playbook-executor.ts`: if the target sub's status is `cancelled`, the step advances with no action and no response (nothing for the step-level claim-guard to block); on active/paused the pause still fires with `backedActions: ["pause_timed", "pause"]`. Previously the step tried to pause an already-cancelled sub, the "I've paused your subscription" claim was unbacked, and the guard dead-ended the run in escalation. See [[../playbooks/refund]] § Communication rules.
+
 **Known gaps / open work:**
 - **Internal-sub billing/dunning not wired.** `appstleAttemptBilling` / dunning have no internal path (Braintree renewal scheduler not built — see `internal-subscription.ts` stubs). Internal subs don't generate Appstle billing attempts, so this isn't reached in normal flow, but bill-now / dunning admin paths assume Appstle.
 
