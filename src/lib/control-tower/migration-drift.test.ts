@@ -125,6 +125,63 @@ test("drop-awareness still holds alongside renames (create→rename→drop = net
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-check-stop-false-positive-on-present-tables spec Phase 2 —
+// regression pin: expected tables that EXIST in the live-present set MUST NOT surface as absent.
+// The 2026-07-08 incident: 20260908120000_god_mode_sessions_and_approvals CREATE-TABLEs both
+// god_mode_sessions + god_mode_approvals; both tables physically existed in prod, but the pooler's
+// per-role privilege filter on information_schema.tables hid them from the drift check's live-set
+// read → both flagged missing → the loop:migration-drift-check tile paged a phantom alert. Phase 1
+// swapped the fetch to pg_catalog.pg_class (permission-agnostic); this test pins the invariant at
+// the pure layer so a future regression that shrinks the live set the same way is caught in unit-test.
+// ─────────────────────────────────────────────────────────────────────────────
+test("runMigrationDriftCheck — expected tables PRESENT in the live set are never flagged missing (god_mode phantom-alert regression pin)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20260908120000_god_mode_sessions_and_approvals.sql"),
+      `create table if not exists public.god_mode_sessions (id uuid primary key);
+       create table if not exists public.god_mode_approvals (id uuid primary key);`,
+    );
+    const result = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      // Both expected tables ARE present in the live-set read — the state that WAS misreported.
+      fetchLiveTables: async () => ["god_mode_sessions", "god_mode_approvals"],
+    });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.allowlistedMissing, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runMigrationDriftCheck — a GENUINELY-absent expected table still surfaces (no over-correction from the god_mode fix)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20260908120000_god_mode_sessions_and_approvals.sql"),
+      `create table if not exists public.god_mode_sessions (id uuid primary key);
+       create table if not exists public.god_mode_approvals (id uuid primary key);`,
+    );
+    writeFileSync(
+      join(dir, "20260930120000_truly_missing.sql"),
+      `create table public.truly_missing (id uuid primary key);`,
+    );
+    // Live set has the god_mode pair but is genuinely missing `truly_missing` — the check MUST flag it.
+    const result = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["god_mode_sessions", "god_mode_approvals"],
+    });
+    assert.equal(result.status, "drift");
+    assert.deepEqual(result.missing, [
+      { table: "truly_missing", migration: "20260930120000_truly_missing.sql" },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ci-guard-migrations-applied-not-just-merged spec Phase 1 — applied-set reconcile.
 // Regression pin: 20260918120000_order_refunds_mirror.sql merged 2026-07-06 but never applied,
 // so order_refunds did not exist in prod until a manual apply. The reconcile is the guard.
