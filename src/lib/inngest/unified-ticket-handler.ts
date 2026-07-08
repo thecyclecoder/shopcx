@@ -2119,6 +2119,122 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
     }
 
+    // ── 3.99 SOL DIRECTION APPLY ──
+    // Phase 2 of docs/brain/specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta.md.
+    // When Sol's live Direction resolves chosen_path to a JOURNEY or a FRESH PLAYBOOK (no
+    // active_playbook_id yet), APPLY the matched mechanism deterministically — launchJourneyForTicket
+    // with a message-aware leadIn (generateJourneyLeadIn mirrors the customer's incoming message)
+    // or startPlaybook + one executePlaybookStep — instead of paying for a Sonnet turn that would
+    // otherwise compose a freeform "click below" reply. A rule flagged self-service-only reroutes
+    // a playbook Direction to the matching active journey so a direct mutation can never run FOR
+    // the customer (verification bullet 3).
+    //
+    // Positioned AFTER 3.98's follow-up-turn playbook shortcircuit and BEFORE the Sonnet
+    // orchestrator: the follow-up-turn path (§ 3.98) already handles active_playbook_id NOT NULL
+    // → my apply path re-asserts active_playbook_id IS NULL for the FRESH start; if any read-time
+    // precondition drifts we fall through to Sonnet (learning #6 — confirming predicate at the
+    // action point, no coarse proxy authorizes the deterministic apply).
+    const solDirectionApply = await step.run("sol-direction-apply-check", async () => {
+      const { loadLiveDirection } = await import("@/lib/ticket-directions");
+      const direction = await loadLiveDirection(admin, tid, { workspace_id: wsId });
+      if (!direction || direction.superseded_at) return null;
+      if (direction.chosen_path !== "journey" && direction.chosen_path !== "playbook") return null;
+      // Direction points at a mechanism — hand off to the apply module.
+      return { direction };
+    });
+
+    if (solDirectionApply) {
+      const applyOutcome = await step.run("sol-direction-apply-execute", async () => {
+        if (await newerActivity(admin, tid, t0)) return { skipped: true as const };
+
+        // Stage a ticket_resolution_events row for this deterministic turn — same stage-then-CAS
+        // shape sendFirstTouchAck and the § 3.98 shortcircuit use so cost analytics can count
+        // Direction-applied turns.
+        let resolutionEventId: string | null = null;
+        try {
+          const { count } = await admin
+            .from("ticket_resolution_events")
+            .select("id", { count: "exact", head: true })
+            .eq("ticket_id", tid);
+          const turnIndex = (count ?? 0) + 1;
+          const { data: row } = await admin
+            .from("ticket_resolution_events")
+            .insert({
+              workspace_id: wsId,
+              ticket_id: tid,
+              turn_index: turnIndex,
+              reasoning: `sol:direction-apply:${solDirectionApply.direction.chosen_path}:${solDirectionApply.direction.plan.journey_slug ?? solDirectionApply.direction.plan.playbook_slug ?? "?"}`,
+            })
+            .select("id")
+            .single();
+          resolutionEventId = (row as { id: string } | null)?.id ?? null;
+        } catch {
+          // Ledger is diagnostic — a failed insert must NOT block the customer-facing send.
+        }
+
+        const { applySolDirection } = await import("@/lib/sol-direction-apply");
+        const { launchJourneyForTicket: launchFn } = await import("@/lib/journey-delivery");
+        const { startPlaybook: startPbFn, executePlaybookStep: execStepFn } = await import(
+          "@/lib/playbook-executor"
+        );
+        const { getCxPolicies } = await import("@/lib/cx-agent-sdk");
+
+        const result = await applySolDirection(solDirectionApply.direction, {
+          admin,
+          workspaceId: wsId,
+          ticketId: tid,
+          customerId: st.custId || "",
+          channel: st.ch,
+          message: msg,
+          personality: pers,
+          sandbox: cfg.sandbox,
+          send: async (m: string, sb: boolean) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
+          sysNote: async (m: string) => {
+            await sysNote(admin, tid, m);
+          },
+          generateLeadIn: generateJourneyLeadIn,
+          launchJourney: launchFn,
+          startPlaybookFn: startPbFn,
+          executePlaybookStepFn: execStepFn,
+          loadRules: async (a, ws) => {
+            const pols = await getCxPolicies(a, ws);
+            return pols.map((p) => ({ category: p.category, title: p.title, content: p.content }));
+          },
+        });
+
+        // CAS shipped_at on the ledger row so a racing writer cannot overwrite the first-ship
+        // timestamp (learning #6).
+        if (resolutionEventId && result.applied) {
+          try {
+            await admin
+              .from("ticket_resolution_events")
+              .update({ shipped_at: new Date().toISOString() })
+              .eq("id", resolutionEventId)
+              .eq("workspace_id", wsId)
+              .is("shipped_at", null);
+          } catch {
+            // Never fail the deterministic turn on a ledger stamp failure.
+          }
+        }
+
+        if (result.applied) {
+          await setStatus(admin, tid, cfg.auto_resolve);
+        }
+        return { skipped: false as const, applied: result.applied, kind: result.kind, slug: result.slug, reason: result.reason, override: result.override ?? null };
+      });
+
+      if (!applyOutcome.skipped && applyOutcome.applied) {
+        return {
+          status: "sol_direction_apply",
+          kind: applyOutcome.kind,
+          slug: applyOutcome.slug,
+          reason: applyOutcome.reason,
+          override: applyOutcome.override,
+        };
+      }
+      // Not applied → fall through to the Sonnet orchestrator below with the reason on the log.
+    }
+
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.

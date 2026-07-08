@@ -1,0 +1,1 @@
+- **Sol flags a crisis-swap order the customer rejects for full refund + texts the founder to cancel it in Amplifier** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle#crisis-swap-rejected--full-refund--founder-cancel-sms]]

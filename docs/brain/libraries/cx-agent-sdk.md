@@ -52,6 +52,15 @@ getCxBundle(admin, workspaceId, customerId | null) → Promise<CxBundle>
 ```
 One-shot `Promise.all` of all five getters. Returns typed data (see below); the plain-text rendering is `formatCxBundle`.
 
+```typescript
+listActionableOutcomes(admin, workspaceId, intent, opts?: { channel?: string | null }) → Promise<CxActionableOutcomes>
+```
+Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]] — deterministic catalog reader Sol's first-touch box session consults before authoring the Direction. Returns the workspace's **ACTIVE** [[../tables/journey_definitions|journeys]] (matched by `trigger_intent`), [[../tables/playbooks|playbooks]] (matched by `trigger_intents[]`), and [[../tables/workflows|workflows]] (matched by `trigger_tag`) for the resolved `intent`. Optional `opts.channel` narrows journeys + workflows to those whose `channels[]` includes the ticket's channel (an empty `channels[]` on the mechanism means broad-match — always passes).
+- Case-insensitive on all trigger fields.
+- Workspace-scoped on every axis (learning #6 — the confirming predicate at the action point).
+- Empty catalog is a valid, non-error result: Sol treats it as "no active mechanism → `chosen_path='stateless'`". A non-empty catalog is her signal to name a `journey_slug` / `playbook_slug` on the Direction so Phase 2 can APPLY the mechanism (`launchJourneyForTicket` / `startPlaybook`) rather than compose a freeform "click below" reply.
+- Rendered by `formatActionableOutcomes` (one-block plain text; the empty case surfaces the `stateless` fallback line explicitly).
+
 ### Formatters
 
 ```typescript
@@ -191,6 +200,42 @@ interface CxBundle {
   products: CxProduct[];
   policies: CxPolicy[];
 }
+
+interface CxActionableJourney {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  trigger_intent: string;
+  channels: string[];
+  priority: number;
+}
+
+interface CxActionablePlaybook {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  trigger_intents: string[];
+  priority: number;
+}
+
+interface CxActionableWorkflow {
+  id: string;
+  name: string;
+  template: string;
+  trigger_tag: string;
+  channels: string[];
+}
+
+interface CxActionableOutcomes {
+  workspace_id: string;
+  intent: string;
+  channel: string | null;
+  journeys: CxActionableJourney[];
+  playbooks: CxActionablePlaybook[];
+  workflows: CxActionableWorkflow[];
+}
 ```
 
 ## Implementation notes
@@ -210,6 +255,8 @@ interface CxBundle {
 ## Status / open work
 
 Phase 1 (deterministic read-only CX SDK) is shipped and in production. Phases 2 (deterministic playbook resolution) and 3 (brain access for Sol/Cora/June) remain in planned.
+
+`listActionableOutcomes` (Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]) added — deterministic outcome→mechanism catalog reader. Sol's first-touch box session consults it to name a real catalog row on the Direction (`journey_slug` / `playbook_slug`), and Phase 2's [[sol-direction-apply]] `applySolDirection` then APPLIES the matched mechanism (launchJourneyForTicket / startPlaybook) instead of composing a freeform "click below" reply. Phase 3's [[sol-cta-reference-guard]] backstops the send path: an ai_response / kb_response reply that references a CTA is blocked unless a journey was launched this turn. Phase 4 wires end-to-end tests + this brain snapshot; the spec's four phases are shipping together per the parent goal's rollout. See [[../lifecycles/ticket-lifecycle]] § Step 2d.1 for the end-to-end flow.
 
 ## Callers
 

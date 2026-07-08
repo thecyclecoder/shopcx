@@ -5082,7 +5082,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     //      when the spec-review job that set vale_pass crashed before reaching its inline dispose tail.
     // Preserves the Vale quality gate + Ada disposition semantics — it never auto-passes; it just makes sure
     // the review actually RUNS. Best-effort; both helpers are idempotent.
-    const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs } = await import("../src/lib/agents/spec-review");
+    const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs, runValeReviewPassReconciler } = await import("../src/lib/agents/spec-review");
     const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
     // vale-reactive-spec-review Phase 1 / vale-instant-per-spec-review — the selector returns only in_review
     // specs that LACK a current Vale verdict (vale_pass IS NULL), so the backstop skips workspaces whose
@@ -5098,6 +5098,21 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const dispo = await runAdaDispositionSweep(db, job.workspace_id);
     if (dispo.same || dispo.downgraded || dispo.upgrade_proposed) {
       notes.push(`spec-review backstop → disposed ${dispo.scanned}: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`);
+    }
+    // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the "passed-but-unstamped" self-heal
+    // reconciler. Finds specs that already have a `spec_review_passed` director_activity row but a NULL
+    // `specs.vale_review_passed_at` (pre-Phase-1 residue where the mirror dual-write silently dropped the
+    // durable stamp), stamps the flag via stampSpecValeReviewPassed, and records a `healed_review_passed_flag`
+    // audit row. Never touches a spec without spec_review_passed evidence — the reconciler heals residue, it
+    // does NOT invent a pass. Self-selecting: the candidate cohort is `vale_review_passed_at IS NULL AND
+    // NOT folded`, so once residue is drained the sweep no-ops for free.
+    try {
+      const rec = await runValeReviewPassReconciler(db, job.workspace_id);
+      if (rec.healed || rec.failed) {
+        notes.push(`spec-review backstop → vale-review-passed reconciler: healed ${rec.healed}/${rec.scanned}${rec.failed ? ` · ${rec.failed} failed` : ""}`);
+      }
+    } catch (e) {
+      console.warn(`${tag} vale-review-passed reconciler failed (continuing):`, e instanceof Error ? e.message : e);
     }
   } catch (e) {
     notes.push(`spec-review backstop failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -5600,22 +5615,28 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not cleared: ${list}; left queued for the escort to re-release` };
   }
 
-  // ── 4) SERIALIZE WITHIN GOAL (serialize-goal-member-spec-builds Phase 1) ──
-  // Individual blocked_by clearance (leg 3 above) said nothing about goal-MATES that ALSO cleared this
-  // tick — so N goal-mates could all pass the gate and race, colliding on hot files shared across the
-  // goal (the 2026-07-06 guaranteed-ticket-handling jam: #1245/#1246/#1248 all collided on
-  // action-executor.ts + refund handlers). This leg makes the dispatch SERIAL within a goal:
-  //   (b) no other build for this goal is currently in-flight (claimed/building/…), AND
-  //   (c) this spec is the earliest not-yet-built goal-member in blocked_by-topological order.
-  // Cross-GOAL parallelism is preserved (one-off + members of different goals are unaffected — the
-  // helper no-ops for one-off specs). Ordered AFTER blocked_by clearance so a genuinely-blocked spec
-  // still holds on the semantic reason; BEFORE the Vale leg so a still-in-review out-of-order spec is
-  // caught here before Vale's cooldown extends. Requeue (never park) — the next tick re-evaluates as
-  // soon as the sibling merges onto the goal branch.
+  // ── 4) SERIALIZE WITHIN GOAL — defensive assertion (goal-member-builds-gate-at-enqueue-not-at-claim Phase 2) ──
+  // Phase 1 of goal-member-builds-gate-at-enqueue-not-at-claim moved the (b) "no other goal-mate
+  // build in-flight" check UP to enqueue time (`evaluateGoalMemberEnqueueAdmission`), so a
+  // second goal-mate never lands as a `queued` row in the first place. Phase 2 (this session)
+  // adds the RELEASE side (`admitNextGoalMemberOnCompletion` runs from `applyMergedBuildEffects`
+  // after every merge), so a goal's serial slot is admitted-and-refilled without any claim-gate
+  // requeue loops. The legacy claim-time serializer's (b) + (c) legs are therefore UNREACHABLE
+  // in a healthy run — kept here as a DEFENSIVE ASSERTION with a leak-visible log line, so if
+  // Phase 1's fail-open path (transient DB error → admission returns ok:true) ever admits a
+  // second goal-mate, this claim-gate still catches it + we know to look. Cross-GOAL
+  // parallelism is preserved (one-off + members of different goals no-op here).
   const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
   const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, slug);
   if (!serial.ok) {
-    return { ok: false, disposition: "requeue", reason: `claim-gate: ${serial.reason}; held until the goal serializer releases` };
+    console.warn(
+      `[phase1-gate-leak] claim-time goal-member serializer fired for ${slug} — the enqueue-time admission gate should have caught this. serial verdict: ${serial.reason}`,
+    );
+    return {
+      ok: false,
+      disposition: "requeue",
+      reason: `claim-gate defensive assertion (phase1-gate-leak): ${serial.reason}`,
+    };
   }
 
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
@@ -5629,6 +5650,27 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
   // consumed by the disposition, so it survives into `planned`/shipped; a send-back / re-author clears it
   // (markSpecCardBackToReview) so a materially-changed spec must be re-reviewed. We do NOT invent a parallel
   // reviewer — same Vale PASS, durable marker.
+  //
+  // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the CLAIM-ADJACENT self-heal. Before the
+  // gate check, try to heal THIS slug (a spec whose only holding condition is a missing durable stamp
+  // proceeds without a hold, per the spec's Phase-2 verification: "assert the reconciler stamps it (and its
+  // build proceeds)"). reconcileValeReviewPassStampFor is idempotent + narrow: it heals ONLY specs whose
+  // `spec_review_passed` director_activity row proves a prior pass — never invents a pass that didn't
+  // happen. If the row IS stamped by this call, re-read `card.valeReviewPassed` from a fresh getSpec so the
+  // gate check below sees the freshly-stamped state; otherwise fall through to the existing hold + Vale
+  // enqueue path unchanged.
+  if (card.valeReviewPassed !== true) {
+    try {
+      const { reconcileValeReviewPassStampFor } = await import("../src/lib/agents/spec-review");
+      const outcome = await reconcileValeReviewPassStampFor(db, job.workspace_id, slug);
+      if (outcome === "healed") {
+        console.log(`${tag} claim-gate: ${slug} healed — passed-but-unstamped reconciler stamped vale_review_passed_at inline; proceeding`);
+        return { ok: true };
+      }
+    } catch (e) {
+      console.warn(`${tag} claim-gate: claim-adjacent vale-review-passed reconciler failed for ${slug} (falling through to hold):`, e instanceof Error ? e.message : e);
+    }
+  }
   if (card.valeReviewPassed !== true) {
     // Two deadlock classes both land here with no durable pass:
     //   (a) status=in_review — a freshly authored spec still in Vale's queue (normal — just hold + nudge).
@@ -11610,7 +11652,7 @@ interface SpecReviewDecisionJson {
 
 async function runSpecReviewJob(job: Job) {
   const tag = `[spec-review:${job.id.slice(0, 8)}]`;
-  const { selectUnreviewedInReviewSpecs, applySpecReviewDecision } = await import("../src/lib/agents/spec-review");
+  const { selectUnreviewedInReviewSpecs, applySpecReviewDecision, runValeReviewPassReconciler } = await import("../src/lib/agents/spec-review");
   const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
   const a = await admin();
   // vale-reactive-spec-review Phase 1 — the selector returns only in_review specs LACKING a current Vale
@@ -11629,7 +11671,14 @@ async function runSpecReviewJob(job: Job) {
     // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
     // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
     const dispo = await runAdaDispositionSweep(a, job.workspace_id);
-    const tail = `no in_review specs to review · dispose: ${dispo.same}=${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
+    // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the passed-but-unstamped reconciler runs
+    // in the same tail so a workspace with no fresh Vale work still heals legacy residue on the ~30s poll.
+    let heal = { scanned: 0, healed: 0, skipped: 0, failed: 0 };
+    try { heal = await runValeReviewPassReconciler(a, job.workspace_id); } catch (e) {
+      console.warn(`${tag} vale-review-passed reconciler failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+    const healNote = heal.healed || heal.failed ? ` · heal-vale-pass: ${heal.healed}/${heal.scanned}${heal.failed ? ` (${heal.failed} failed)` : ""}` : "";
+    const tail = `no in_review specs to review · dispose: ${dispo.same}=${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}${healNote}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ${tail}`);
     return;
@@ -11819,7 +11868,15 @@ async function runSpecReviewJob(job: Job) {
     // Phase 3 — every Vale pass enqueues a candidate for Ada's disposition lane. Run the sweep INLINE
     // so a pass + dispose lands in one cron tick (no waiting for the next director pass).
     const dispo = await runAdaDispositionSweep(a, job.workspace_id);
-    const tail = `reviewed ${parsed.decisions.length}/${reviewable.length} — ✅${passed}${dispositions ? ` (${dispositions} w/ vale-rec)` : ""} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`;
+    // spec-review-pass-always-stamps-review-passed-flag Phase 2 — tail the passed-but-unstamped reconciler
+    // after the disposition sweep so a per-spec review job's cadence also drains legacy residue for the
+    // whole workspace (idempotent; a workspace with no residue no-ops for free on the free `IS NULL` filter).
+    let heal = { scanned: 0, healed: 0, skipped: 0, failed: 0 };
+    try { heal = await runValeReviewPassReconciler(a, job.workspace_id); } catch (e) {
+      console.warn(`${tag} vale-review-passed reconciler failed (continuing):`, e instanceof Error ? e.message : e);
+    }
+    const healNote = heal.healed || heal.failed ? ` · heal-vale-pass: ${heal.healed}/${heal.scanned}${heal.failed ? ` (${heal.failed} failed)` : ""}` : "";
+    const tail = `reviewed ${parsed.decisions.length}/${reviewable.length} — ✅${passed}${dispositions ? ` (${dispositions} w/ vale-rec)` : ""} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}${healNote}`;
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {

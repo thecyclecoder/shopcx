@@ -78,3 +78,13 @@ The box escalates decisions via `scripts/god-mode-plan.ts decide "<category>" "<
 **Phase 2:** [[../libraries/agent-personas]] `org-chart.ts` now renders CEO-owned workers under the CEO seat alongside goals (lines 413–418) — filtered from the same roster that fills directors' workers, so a lane renders in exactly one place. Liveness for Eve derives from cockpit `armed` [[../tables/god_mode_sessions]] rows (healthy when armed, even idle) + `loop_heartbeats` for the `god-mode-cockpit` loop + recent `god_mode_approvals` (a pending approval holds liveness open). The cockpit is event-driven, but liveness is beats-based so the roster dashboard never breaks.
 
 **Phase 3 Fix 1:** Pre-merge spec-test regression (check 3122218882ab4f64) required Eve to have a "real avatarUrl" (not null). Fixed by the companion spec `builder-persona-add-upserts-by-key-and-generates-avatar` ✅ — the builder now auto-generates a Nano Banana Pro headshot for Eve and all agent personas on the persona-add step, uploading to the `agent-avatars` bucket with a `?v=` query stamp.
+
+## Founder-phone reuse — external founder-alert emitters
+
+`resolveFounderPhone` is the shared reader for the founder's mobile ([[../tables/workspaces]] `god_mode_sms_number` → `GOD_MODE_FOUNDER_PHONE` env fallback). External flows that need to text the founder OUTSIDE the god-mode session lifecycle reuse it (paired with [[../integrations/twilio]] `sendSMS`) rather than adding a new phone-resolution surface. Current external emitters:
+
+| Emitter | Trigger | Idempotency | Spec |
+|---|---|---|---|
+| `src/lib/commerce/founder-cancel-sms.ts` `sendFounderCancelAmplifierSMS` | Sol classifies an OOS renewal as `crisis_swap_rejected` and the order is not yet Shipped in Amplifier → text the founder to cancel it manually before it ships (Amplifier exposes no cancel API). Best-effort, never-throws, Shipped-guarded. | `customer_events` row of `event_type='order.founder_cancel_amplifier_sms_sent'` scoped by `(workspace_id, properties.order_id)` — durable ledger, same order never gets two texts. Ledger stamped ONLY on delivered SMS so a transient Twilio failure retries. | [[../specs/sol-crisis-swap-rejected-full-refund-and-sms-founder-to-cancel-amplifier-order]] Phase 2 |
+
+The `sendGodModeSMS` inside this SDK stays reserved for the god-mode session lifecycle (arm / 5-min approval nudge / done). External founder alerts get their own module so their idempotency ledger, kind vocabulary, and best-effort discipline don't leak into the god-mode approval nudge state machine.

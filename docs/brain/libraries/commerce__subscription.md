@@ -107,6 +107,7 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
   - **Internal sub** (`is_internal=true`): requires `status === "active"`, fires [[../inngest/internal-subscription-renewals]] via `inngest.send` → real Braintree charge → order → Avalara → Amplifier → advance `next_billing_date`. Returns `{ success: true, internal: true }`.
   - **Appstle sub:** `appstleGetUpcomingOrders` → `appstleAttemptBilling`.
 - **Why it exists:** `appstleAttemptBilling`'s `internal-*` guard is a NO-OP success — fine for dunning cron (real renewal follows separately), but for on-demand order-now with no cron follow-up, calling Appstle directly **silently drops the charge** (the bug that left internal sub's "Order Now" reporting success while never billing — ticket `dd67f3c7`, customer Angel). Replaces the fragmented path.
+- **Async-aware verify (Phase 1 of [[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]]):** the ticket-executor's `bill_now` direct action routes through `subscriptionOrderNowVerified` (see [[./order-now-verify]]) — fires this function AND schedules `commerce/order-now.verify` to read the REAL outcome minutes later. Appstle returns `pending: true` so the ticket_resolution_events verdict is stamped by the async verify, not the trigger ack (ticket `0a9e4d7f`, Judy — bill_now ack'd success then Shopify declined).
 
 ### Types
 

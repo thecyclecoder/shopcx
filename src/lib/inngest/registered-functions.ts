@@ -144,6 +144,7 @@ import { securityDiffBackstopCron } from "@/lib/inngest/security-diff-backstop-c
 import { refundSettlementReconcileCron } from "@/lib/inngest/refund-settlement-reconcile";
 import { playbookCompilerCron } from "@/lib/inngest/playbook-compiler";
 import { digitalGoodsDelivery } from "@/lib/inngest/digital-goods-delivery";
+import { orderNowVerify } from "@/lib/inngest/order-now-verify";
 import { orderConfirmationSend } from "@/lib/inngest/order-confirmation";
 
 /** Every function served at /api/inngest. The serve route spreads this verbatim. */
@@ -301,6 +302,7 @@ export const registeredInngestFunctions = [
   refundSettlementReconcileCron,
   playbookCompilerCron,
   digitalGoodsDelivery,
+  orderNowVerify,
   orderConfirmationSend,
 ];
 

@@ -32,6 +32,12 @@ import {
   type VaultResult,
 } from "@/lib/integrations/braintree-customer";
 import { migrateCustomerAppstleSubsToInternal } from "@/lib/migrate-to-internal";
+import {
+  dispatchOrderNowRetryOnMigrate,
+  defaultOrderNowRetryDeps,
+  subscriptionOrderNowVerified,
+  type OrderNowRetryOutcome,
+} from "@/lib/commerce/order-now-verify";
 
 export interface VaultAndMigrateInput {
   workspaceId: string;
@@ -47,6 +53,13 @@ export interface VaultAndMigrateInput {
   migrate?: boolean;
   /** forwarded to migrateCustomerAppstleSubsToInternal — flags this as a failed-payment recovery. */
   isRecovery?: boolean;
+  /** default = `isRecovery` — when the migrate is a recovery (the customer
+   *  came in from the update-payment-method journey after an order-now
+   *  decline), retry order-now DETERMINISTICALLY on each migrated internal
+   *  sub. Phase 3 of order-now-verify-async-result-then-decline-recovery-
+   *  migrate-and-deterministic-retry. Set false to opt out (e.g. checkout
+   *  auto-migrate where the order is already being charged). */
+  retryOrderNowOnMigrate?: boolean;
 }
 
 export interface VaultAndMigrateResult {
@@ -54,6 +67,11 @@ export interface VaultAndMigrateResult {
   braintreeCustomerId: string;
   vaulted: VaultResult;
   migratedCount: number;
+  /** Phase 3: one entry per migrated sub the recovery flow retried
+   *  order-now on (empty when retryOrderNowOnMigrate is false OR no subs
+   *  actually migrated). Callers surface this in logs; the ledger stamp
+   *  itself is driven by the async verify. */
+  orderNowRetries: OrderNowRetryOutcome[];
 }
 
 export async function vaultAndMigratePaymentMethod(
@@ -107,6 +125,7 @@ export async function vaultAndMigratePaymentMethod(
   });
 
   let migratedCount = 0;
+  let migrated: Array<{ contractId: string; subId: string; billableCustomerId: string }> = [];
   if (doMigrate) {
     try {
       const mig = await migrateCustomerAppstleSubsToInternal(
@@ -115,6 +134,7 @@ export async function vaultAndMigratePaymentMethod(
         { isRecovery: !!input.isRecovery },
       );
       migratedCount = mig.migrated.length;
+      migrated = mig.migrated;
       if (mig.failed.length) {
         console.error("[vault-and-migrate] migration failures:", mig.failed);
       }
@@ -125,10 +145,69 @@ export async function vaultAndMigratePaymentMethod(
     }
   }
 
+  // Phase 3: order-now deterministic retry on the migrated internal subs. The
+  // journey completing means the customer just fixed their card — retry the
+  // original bill_now on the (now internal) sub so the order they were
+  // told-was-coming actually lands, without waiting for the next scheduled
+  // renewal. Idempotent — subscriptionOrderNowVerified fires an
+  // internal-subscription/renewal-attempt Inngest event AND the retry
+  // dispatcher's guard predicate (commerce.order_now.retry_after_migrate
+  // customer_events row since migrated_at) blocks a double-charge on a
+  // re-drive of vaultAndMigratePaymentMethod.
+  const orderNowRetries: OrderNowRetryOutcome[] = [];
+  const doRetry = (input.retryOrderNowOnMigrate ?? !!input.isRecovery) && migrated.length > 0;
+  if (doRetry) {
+    const migratedAt = new Date().toISOString();
+    for (const m of migrated) {
+      // Look up the sub's post-migration shopify_contract_id (now internal).
+      const { data: subRow } = await admin
+        .from("subscriptions")
+        .select("shopify_contract_id")
+        .eq("id", m.subId)
+        .eq("workspace_id", input.workspaceId)
+        .maybeSingle();
+      const contractId = (subRow?.shopify_contract_id as string | null) || null;
+      if (!contractId) continue;
+      try {
+        // Wire the retry to the async-verify pipeline explicitly — the
+        // `fireVerifiedOrderNow` slot is subscriptionOrderNowVerified, which
+        // (a) fires subscriptionOrderNow → for the migrated internal sub =
+        // the `internal-subscription/renewal-attempt` Inngest event (real
+        // Braintree charge + paid order), and (b) schedules the Phase 1
+        // async verify so the ledger stamps against a real paid order.
+        const retryDeps = {
+          ...defaultOrderNowRetryDeps(),
+          fireVerifiedOrderNow: (
+            workspace_id: string,
+            contract_id: string,
+            ctx: Parameters<typeof subscriptionOrderNowVerified>[2],
+          ) => subscriptionOrderNowVerified(workspace_id, contract_id, ctx),
+        };
+        const outcome = await dispatchOrderNowRetryOnMigrate(
+          {
+            workspace_id: input.workspaceId,
+            customer_id: input.customerId,
+            subscription_id: m.subId,
+            contract_id: contractId,
+            migrated_at: migratedAt,
+          },
+          retryDeps,
+        );
+        orderNowRetries.push(outcome);
+      } catch (e) {
+        console.error(
+          `[vault-and-migrate] order-now retry threw (non-fatal) for sub ${m.subId}:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
+    }
+  }
+
   return {
     paymentMethodId: saved.id,
     braintreeCustomerId,
     vaulted,
     migratedCount,
+    orderNowRetries,
   };
 }

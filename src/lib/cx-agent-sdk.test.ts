@@ -24,6 +24,8 @@ import {
   runCxSdkVerb,
   isCxSdkVerb,
   CX_SDK_VERBS,
+  listActionableOutcomes,
+  formatActionableOutcomes,
 } from "./cx-agent-sdk";
 
 interface Row {
@@ -37,6 +39,9 @@ interface FakeState {
   subscriptions: Row[];
   products: Row[];
   sonnet_prompts: Row[];
+  journey_definitions?: Row[];
+  playbooks?: Row[];
+  workflows?: Row[];
 }
 
 function makeAdmin(state: FakeState) {
@@ -98,8 +103,7 @@ function makeAdmin(state: FakeState) {
   }
   return {
     from(table: string) {
-      const rows = (state as unknown as Record<string, Row[]>)[table];
-      if (!rows) throw new Error(`unexpected table: ${table}`);
+      const rows = (state as unknown as Record<string, Row[] | undefined>)[table] ?? [];
       return makeBuilder(rows);
     },
   } as unknown as import("@supabase/supabase-js").SupabaseClient;
@@ -330,4 +334,248 @@ test("runCxSdkVerb dispatches every named verb", async () => {
 test("isCxSdkVerb refuses an unknown verb", () => {
   assert.equal(isCxSdkVerb("customer"), true);
   assert.equal(isCxSdkVerb("drop-table"), false);
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// listActionableOutcomes — Phase 1 of
+// docs/brain/specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta.md.
+// Sol's first-touch box session consults this deterministic reader and records the specific
+// matched mechanism (journey / playbook / workflow) on the Direction — chosen_path points at a
+// real catalog row, not a prose description.
+// ──────────────────────────────────────────────────────────────────────
+
+function catalogState(): FakeState {
+  const s = baseState();
+  s.journey_definitions = [
+    {
+      id: "j-cancel",
+      workspace_id: WS,
+      slug: "cancel_subscription",
+      name: "Cancel Subscription",
+      description: "Self-service cancel journey",
+      trigger_intent: "cancel_subscription",
+      channels: ["email", "chat"],
+      priority: 10,
+      is_active: true,
+    },
+    {
+      id: "j-retired",
+      workspace_id: WS,
+      slug: "old_cancel",
+      name: "Old Cancel",
+      description: null,
+      trigger_intent: "cancel_subscription",
+      channels: [],
+      priority: 0,
+      is_active: false,
+    },
+    {
+      id: "j-refund",
+      workspace_id: WS,
+      slug: "refund_flow",
+      name: "Refund Flow",
+      description: null,
+      trigger_intent: "refund_request",
+      channels: ["email"],
+      priority: 5,
+      is_active: true,
+    },
+    {
+      id: "j-other-ws",
+      workspace_id: "00000000-0000-0000-0000-00000000ws2",
+      slug: "cancel_subscription",
+      name: "Foreign Cancel",
+      description: null,
+      trigger_intent: "cancel_subscription",
+      channels: [],
+      priority: 0,
+      is_active: true,
+    },
+  ];
+  s.playbooks = [
+    {
+      id: "pb-refund",
+      workspace_id: WS,
+      slug: "refund_with_recovery",
+      name: "Refund with Recovery",
+      description: "Refund + sub recovery",
+      trigger_intents: ["refund_request", "refund"],
+      priority: 8,
+      is_active: true,
+    },
+    {
+      id: "pb-inactive",
+      workspace_id: WS,
+      slug: "old_refund",
+      name: "Old Refund",
+      description: null,
+      trigger_intents: ["refund_request"],
+      priority: 0,
+      is_active: false,
+    },
+    {
+      id: "pb-cancel",
+      workspace_id: WS,
+      slug: "loyalty_save",
+      name: "Loyalty Save",
+      description: null,
+      trigger_intents: ["cancel_subscription"],
+      priority: 3,
+      is_active: true,
+    },
+  ];
+  s.workflows = [
+    {
+      id: "wf-order-tracking",
+      workspace_id: WS,
+      name: "Order Tracking",
+      template: "order_tracking",
+      trigger_tag: "order_status",
+      channels: ["chat"],
+      enabled: true,
+    },
+    {
+      id: "wf-disabled",
+      workspace_id: WS,
+      name: "Disabled",
+      template: "cancel_request",
+      trigger_tag: "cancel_subscription",
+      channels: [],
+      enabled: false,
+    },
+  ];
+  return s;
+}
+
+test("listActionableOutcomes: active cancel_subscription intent surfaces the active journey (retired + foreign-ws filtered out)", async () => {
+  const admin = makeAdmin(catalogState());
+  const out = await listActionableOutcomes(admin, WS, "cancel_subscription");
+  const slugs = out.journeys.map((j) => j.slug);
+  assert.deepEqual(slugs, ["cancel_subscription"], "only the ACTIVE workspace journey is returned");
+  assert.equal(out.playbooks[0]?.slug, "loyalty_save");
+  assert.equal(out.workflows.length, 0, "the matching workflow is disabled → not returned");
+  assert.equal(out.intent, "cancel_subscription");
+  assert.equal(out.workspace_id, WS);
+});
+
+test("listActionableOutcomes: refund_request intent matches the refund journey + playbook, case-insensitive", async () => {
+  const admin = makeAdmin(catalogState());
+  const out = await listActionableOutcomes(admin, WS, "REFUND_REQUEST");
+  assert.equal(out.journeys[0]?.slug, "refund_flow");
+  assert.equal(out.playbooks[0]?.slug, "refund_with_recovery");
+  assert.equal(out.workflows.length, 0);
+});
+
+test("listActionableOutcomes: intent with no matching mechanism returns an empty catalog", async () => {
+  const admin = makeAdmin(catalogState());
+  const out = await listActionableOutcomes(admin, WS, "shipping_address_change");
+  assert.deepEqual(out.journeys, []);
+  assert.deepEqual(out.playbooks, []);
+  assert.deepEqual(out.workflows, []);
+});
+
+test("listActionableOutcomes: channel filter narrows journeys (chat-only journey is filtered out when channel=email)", async () => {
+  const s = catalogState();
+  s.journey_definitions = [
+    {
+      id: "j-chat",
+      workspace_id: WS,
+      slug: "chat_only",
+      name: "Chat Only",
+      description: null,
+      trigger_intent: "cancel_subscription",
+      channels: ["chat"],
+      priority: 10,
+      is_active: true,
+    },
+    {
+      id: "j-email",
+      workspace_id: WS,
+      slug: "email_only",
+      name: "Email Only",
+      description: null,
+      trigger_intent: "cancel_subscription",
+      channels: ["email"],
+      priority: 5,
+      is_active: true,
+    },
+  ];
+  const admin = makeAdmin(s);
+  const out = await listActionableOutcomes(admin, WS, "cancel_subscription", { channel: "email" });
+  const slugs = out.journeys.map((j) => j.slug);
+  assert.deepEqual(slugs, ["email_only"], "chat_only must be filtered out when channel=email");
+  assert.equal(out.channel, "email");
+});
+
+test("listActionableOutcomes: an empty channels[] on a journey does NOT filter out (broad-match convention)", async () => {
+  const s = catalogState();
+  s.journey_definitions = [
+    {
+      id: "j-broad",
+      workspace_id: WS,
+      slug: "broad_match",
+      name: "Broad",
+      description: null,
+      trigger_intent: "cancel_subscription",
+      channels: [],
+      priority: 10,
+      is_active: true,
+    },
+  ];
+  const admin = makeAdmin(s);
+  const out = await listActionableOutcomes(admin, WS, "cancel_subscription", { channel: "chat" });
+  assert.equal(out.journeys[0]?.slug, "broad_match");
+});
+
+test("listActionableOutcomes: cross-workspace journey is never returned", async () => {
+  const admin = makeAdmin(catalogState());
+  const out = await listActionableOutcomes(admin, WS, "cancel_subscription");
+  const foreign = out.journeys.find((j) => j.id === "j-other-ws");
+  assert.equal(foreign, undefined, "cross-workspace slug collision must not leak into the returned catalog");
+});
+
+test("listActionableOutcomes: empty / whitespace-only intent short-circuits to an empty catalog", async () => {
+  const admin = makeAdmin(catalogState());
+  const empty = await listActionableOutcomes(admin, WS, "");
+  assert.deepEqual(empty.journeys, []);
+  assert.deepEqual(empty.playbooks, []);
+  assert.deepEqual(empty.workflows, []);
+  const whitespace = await listActionableOutcomes(admin, WS, "   ");
+  assert.deepEqual(whitespace.journeys, []);
+});
+
+test("formatActionableOutcomes: empty catalog surfaces the 'stateless' fallback line", () => {
+  const txt = formatActionableOutcomes({
+    workspace_id: WS,
+    intent: "shipping_address_change",
+    channel: null,
+    journeys: [],
+    playbooks: [],
+    workflows: [],
+  });
+  assert.match(txt, /no matching active mechanism/);
+  assert.match(txt, /chosen_path='stateless'/);
+});
+
+test("formatActionableOutcomes: non-empty catalog renders each axis under its heading", () => {
+  const txt = formatActionableOutcomes({
+    workspace_id: WS,
+    intent: "cancel_subscription",
+    channel: "email",
+    journeys: [
+      { id: "j", slug: "cancel_subscription", name: "Cancel", description: "desc", trigger_intent: "cancel_subscription", channels: ["email"], priority: 10 },
+    ],
+    playbooks: [
+      { id: "p", slug: "loyalty_save", name: "Loyalty Save", description: null, trigger_intents: ["cancel_subscription"], priority: 3 },
+    ],
+    workflows: [
+      { id: "w", name: "Order Tracking", template: "order_tracking", trigger_tag: "order_status", channels: ["chat"] },
+    ],
+  });
+  assert.match(txt, /Journeys:/);
+  assert.match(txt, /cancel_subscription \(Cancel\)/);
+  assert.match(txt, /Playbooks:/);
+  assert.match(txt, /loyalty_save \(Loyalty Save\)/);
+  assert.match(txt, /Workflows:/);
+  assert.match(txt, /Order Tracking template=order_tracking/);
 });
