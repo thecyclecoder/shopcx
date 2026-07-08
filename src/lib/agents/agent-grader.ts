@@ -218,7 +218,7 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   // (kind='ticket-analyze', owner='cs'). ownerFunctionForKind('ticket-analyze')='cs' via the
   // Control Tower registry, so gradeableKindsForFunction('cs') picks this up and the CS Director's
   // sweep grades every concluded verdict against this rubric.
-  "ticket-analyze": { name: "Anya", criteria: "score matched the AI's real conversation quality · issues are concrete + type-correct · severity actions fired only on real severe issues (no false-escalate on positive close) · no analyzer_locked/do_not_reply/ai_disabled/agent_intervened violations · reasoning cites the transcript" },
+  "ticket-analyze": { name: "Cora", criteria: "score matched the AI's real conversation quality · issues are concrete + type-correct · severity actions fired only on real severe issues (no false-escalate on positive close) · no analyzer_locked/do_not_reply/ai_disabled/agent_intervened violations · reasoning cites the transcript" },
   // prompt-auto-review-becomes-box-agent-under-june Phase 2 — Prue reviews proposed sonnet_prompts as a
   // supervised box-session agent under June (CS Director). ownerFunctionForKind('prompt-review')==='cs'
   // (Control Tower registry `agent:prompt-review`), so gradeableKindsForFunction('cs') picks this up
