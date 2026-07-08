@@ -86,7 +86,7 @@ const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
 // tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn. See
 // docs/brain/specs/sol-ticket-direction-artifact-and-first-touch-box-session.md.
 const TICKET_HANDLE_TIMEOUT_MS = 15 * 60 * 1000;
-const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
+const MAX_CONCURRENT = 10; // build/plan pool — the "everything currently happening" general pool. Real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; 5→8→10, watch box logs for Max 529/overloaded before pushing further). Director (platform-director) + customer-service (ticket-handle/ticket-analyze/cs-director-call) run in their OWN dedicated lanes below, so this pool never starves them.
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
