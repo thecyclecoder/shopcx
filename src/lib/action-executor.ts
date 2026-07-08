@@ -3178,51 +3178,75 @@ async function handleDirectAction(
  * switch reads.
  */
 export async function verifyActionInDB(
-  ctx: Pick<ActionContext, "admin" | "ticketId">,
+  ctx: Pick<ActionContext, "admin" | "ticketId"> & Partial<Pick<ActionContext, "workspaceId" | "customerId">>,
   action: ActionParams,
 ): Promise<boolean> {
   const admin = ctx.admin;
 
+  // Scope helpers — Phase 1 of docs/brain/specs/secure-sol-required-outcomes-dispatch.md. When the
+  // caller supplied workspaceId / customerId (the honor step passes both from ActionContext), add
+  // them to subscription/order reads so a target that belongs to a different tenant or a
+  // different customer legitimately returns zero rows (→ verified=false) instead of confirming
+  // an unscoped identifier. Existing callers that pass only { admin, ticketId } are unaffected —
+  // the eq() calls are skipped when the field is undefined. Typed as `unknown` because
+  // Supabase's builder generic tree overflows tsc's instantiation-depth limit if we type-thread
+  // the concrete query type — the switch arms upcast to unknown on entry and cast back to the
+  // builder shape here.
+  type ScopableQuery = { eq: (col: string, val: unknown) => ScopableQuery };
+  const scopeSub = (q: unknown): ScopableQuery => {
+    let out = q as ScopableQuery;
+    if (ctx.workspaceId) out = out.eq("workspace_id", ctx.workspaceId);
+    if (ctx.customerId) out = out.eq("customer_id", ctx.customerId);
+    return out;
+  };
+  const scopeOrder = scopeSub;
+
   switch (action.type) {
     case "cancel": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "cancelled";
     }
     case "pause":
     case "crisis_pause": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "paused";
     }
     case "resume":
     case "reactivate": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "active";
     }
     case "partial_refund":
     case "redeem_points_as_refund": {
       // Check if order financial_status changed
       if (!action.shopify_order_id) return true;
-      const { data } = await admin.from("orders")
-        .select("financial_status").eq("shopify_order_id", action.shopify_order_id).single();
+      const q = scopeOrder(admin.from("orders")
+        .select("financial_status").eq("shopify_order_id", action.shopify_order_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { financial_status?: string } | null }> }).maybeSingle();
       return data?.financial_status === "partially_refunded" || data?.financial_status === "refunded";
     }
     case "pause_timed": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "paused";
     }
     case "apply_coupon":
     case "apply_loyalty_coupon": {
       if (!action.contract_id || !action.code) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("applied_discounts").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("applied_discounts").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { applied_discounts?: { title?: string }[] } | null }> }).maybeSingle();
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
     }
@@ -3264,9 +3288,10 @@ export async function verifyActionInDB(
       // (skip_next_order is retired by the sibling M3 spec, so this
       // case exists just for the transition window.)
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
+      const q = scopeSub(admin.from("subscriptions")
         .select("next_billing_date")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { next_billing_date?: string } | null }> }).maybeSingle();
       const nbd = data?.next_billing_date;
       if (!nbd) return false;
       return new Date(String(nbd)).getTime() > Date.now();
@@ -3281,9 +3306,10 @@ export async function verifyActionInDB(
       // next_billing_date as verified — the customer's intent (get
       // product ASAP) was satisfied by the order-now dispatch.
       if (!action.contract_id || !action.date) return true;
-      const { data } = await admin.from("subscriptions")
+      const q = scopeSub(admin.from("subscriptions")
         .select("next_billing_date")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { next_billing_date?: string } | null }> }).maybeSingle();
       const nbd = data?.next_billing_date;
       if (!nbd) return false;
       const requested = String(action.date).slice(0, 10);
@@ -3301,9 +3327,10 @@ export async function verifyActionInDB(
       // The spec calls them `billing_policy_interval` / `billing_policy_interval_count`;
       // per CLAUDE.md "the database is the spec" — we use the live shape.
       if (!action.contract_id || !action.interval) return true;
-      const { data } = await admin.from("subscriptions")
+      const q = scopeSub(admin.from("subscriptions")
         .select("billing_interval, billing_interval_count")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { billing_interval?: string; billing_interval_count?: number } | null }> }).maybeSingle();
       if (!data) return false;
       const wantInterval = String(action.interval).toUpperCase();
       const gotInterval = String(data.billing_interval || "").toUpperCase();
@@ -3326,9 +3353,10 @@ export async function verifyActionInDB(
       // quantity, price_cents } — the columns the spec's phase-2 bullets
       // name. Verify against that array.
       if (!action.contract_id) return true;
-      const { data: sub } = await admin.from("subscriptions")
+      const qSub = scopeSub(admin.from("subscriptions")
         .select("items")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data: sub } = await (qSub as unknown as { maybeSingle: () => Promise<{ data: { items?: unknown } | null }> }).maybeSingle();
       type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
       const items = (sub?.items || []) as Line[];
 

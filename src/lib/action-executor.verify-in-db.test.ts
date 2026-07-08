@@ -474,6 +474,57 @@ test("update_line_item_price — price_cents mismatch → verified FALSE", async
   assert.equal(await verifyActionInDB(ctx, action), false);
 });
 
+// ── Phase 1 of secure-sol-required-outcomes-dispatch: workspace/customer scoping ─────────
+// A verify call that carries workspaceId/customerId in the ctx MUST return false when the target
+// row lives in a different workspace or belongs to a different customer — the whole point is
+// that a prompt-injected required_outcomes item can't confirm itself by pointing at some other
+// customer's contract_id.
+
+test("cancel — cross-CUSTOMER contract_id with scoped ctx → verified FALSE (Phase 1: cannot confirm on unscoped identifier)", async () => {
+  const ctx = {
+    admin: makeAdmin({
+      subscriptions: [
+        { id: "s1", shopify_contract_id: "SC-OTHER", workspace_id: "w1", customer_id: "c-other", status: "cancelled" },
+      ],
+    }),
+    ticketId: "ticket-1",
+    workspaceId: "w1",
+    customerId: "c-mine",
+  };
+  const action: ActionParams = { type: "cancel", contract_id: "SC-OTHER" };
+  assert.equal(await verifyActionInDB(ctx, action), false, "another customer's cancelled sub MUST NOT confirm my ticket's cancel");
+});
+
+test("cancel — same-customer contract with scoped ctx → verified TRUE (positive control)", async () => {
+  const ctx = {
+    admin: makeAdmin({
+      subscriptions: [
+        { id: "s1", shopify_contract_id: "SC-MINE", workspace_id: "w1", customer_id: "c-mine", status: "cancelled" },
+      ],
+    }),
+    ticketId: "ticket-1",
+    workspaceId: "w1",
+    customerId: "c-mine",
+  };
+  const action: ActionParams = { type: "cancel", contract_id: "SC-MINE" };
+  assert.equal(await verifyActionInDB(ctx, action), true);
+});
+
+test("partial_refund — cross-CUSTOMER shopify_order_id with scoped ctx → verified FALSE", async () => {
+  const ctx = {
+    admin: makeAdmin({
+      orders: [
+        { id: "o1", shopify_order_id: "O-OTHER", workspace_id: "w1", customer_id: "c-other", financial_status: "refunded" },
+      ],
+    }),
+    ticketId: "ticket-1",
+    workspaceId: "w1",
+    customerId: "c-mine",
+  };
+  const action: ActionParams = { type: "partial_refund", shopify_order_id: "O-OTHER" };
+  assert.equal(await verifyActionInDB(ctx, action), false);
+});
+
 // ── unmapped types fall through (with a WARN) ─────────────────────────
 
 test("unknown/uncovered action type falls through to true AND writes a WARN naming the type (fail-safe pattern)", async () => {
