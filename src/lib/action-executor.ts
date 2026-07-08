@@ -166,6 +166,15 @@ export interface ActionContext {
   // this row so every branch shares one write-ahead ledger row per turn.
   // See docs/brain/tables/ticket_resolution_events.md.
   _resolutionEventId?: string;
+  // Internal: set by a direct action whose REAL outcome is async and
+  // can't be known at the executor's return time (bill_now on Appstle
+  // is the archetype — the vendor accepts the trigger then can decline
+  // minutes later). When true, the executor SKIPS stamping the
+  // resolution_event verified_outcome — an out-of-band Inngest verify
+  // (commerce-order-now-verify) reads the real outcome and stamps the
+  // ledger row when the verdict is known. See
+  // docs/brain/libraries/order-now-verify.md.
+  _resolutionOutcomePending?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -814,12 +823,32 @@ export const directActionHandlers: Record<
    * "I'm out of product". Does NOT change next_billing_date — after
    * the charge, the schedule advances by one cycle. Flavor-aware:
    * internal subs fire the Braintree renewal pipeline, Appstle subs
-   * attempt the upcoming Appstle billing (subscriptionOrderNow).
+   * attempt the upcoming Appstle billing.
+   *
+   * Order-now on Appstle is DELAYED — the vendor accepts the trigger,
+   * then charges asynchronously and can decline. Route through
+   * `subscriptionOrderNowVerified` so the fire schedules an async
+   * `commerce/order-now.verify` re-check that reads the REAL outcome
+   * and stamps the ticket_resolution_events row only on a verified
+   * paid order. When the wrapper returns `pending: true` we mark the
+   * ctx flag so the executor's return-time stamp is SKIPPED — the
+   * async verify owns the verdict from here (spec Phase 1:
+   * order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry).
    */
   bill_now: async (ctx, p) => {
-    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "bill_now missing contract_id" };
-    return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
+    const { subscriptionOrderNowVerified } = await import("@/lib/commerce/order-now-verify");
+    const result = await subscriptionOrderNowVerified(ctx.workspaceId, p.contract_id, {
+      resolution_event_id: ctx._resolutionEventId,
+      ticket_id: ctx.ticketId,
+      customer_id: ctx.customerId,
+    });
+    if (result.success && result.pending) ctx._resolutionOutcomePending = true;
+    return {
+      success: result.success,
+      error: result.error,
+      summary: result.summary,
+    };
   },
 
   add_item: async (ctx, p) => {
@@ -2596,7 +2625,12 @@ export async function executeSonnetDecision(
   // is derived from whether a customer-facing message actually shipped.
   // Escalate paths leave verified_outcome NULL — the agent takes over and
   // the row stays open until the outcome is known (M4 closes it out).
-  if (ctx._escalatedThisRun !== true) {
+  //
+  // Also NULL when ctx._resolutionOutcomePending is set: a bill_now on an
+  // Appstle sub triggered but the real charge is minutes away — the async
+  // commerce-order-now-verify Inngest job stamps the verdict once known
+  // (docs/brain/libraries/order-now-verify.md).
+  if (ctx._escalatedThisRun !== true && !ctx._resolutionOutcomePending) {
     if (messageSent || statusManaged || ctx._closedThisRun === true) {
       await stampResolutionVerified(ctx, "confirmed");
     }
@@ -2959,10 +2993,20 @@ async function handleDirectAction(
     // retried cleanly), 'drifted' when a claim couldn't be backed by a DB
     // read. Runs BEFORE the return-time stamp so this more-specific
     // verdict wins the idempotent-once compare-and-set.
-    if (verifyFailures.length === 0) {
-      await stampResolutionVerified(ctx, "confirmed");
-    } else {
-      await stampResolutionVerified(ctx, "drifted");
+    //
+    // Exception: an async action (bill_now on Appstle) has a real outcome
+    // that's minutes away — the direct action returned success on the
+    // trigger ack alone. When ctx._resolutionOutcomePending is set the
+    // out-of-band commerce-order-now-verify Inngest job owns the ledger
+    // stamp; the executor MUST NOT stamp 'confirmed' here or the async
+    // verdict's compare-and-set silently no-ops later
+    // (docs/brain/libraries/order-now-verify.md).
+    if (!ctx._resolutionOutcomePending) {
+      if (verifyFailures.length === 0) {
+        await stampResolutionVerified(ctx, "confirmed");
+      } else {
+        await stampResolutionVerified(ctx, "drifted");
+      }
     }
 
     // Send the customer-facing confirmation only AFTER verify+retry have
