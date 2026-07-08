@@ -93,13 +93,23 @@ async function readExistingBackfillKeys(admin: Admin, workspace_id: string): Pro
 async function readSpecs(admin: Admin, workspace_id: string): Promise<{
   proposed: ProposedRow[];
   slugById: Map<string, string>;
+  foldedFromSpecs: Array<{ slug: string; at: string }>;
 }> {
   const proposed: ProposedRow[] = [];
   const slugById = new Map<string, string>();
+  // Fix 1 — the fold path in this workspace apparently doesn't emit a `spec_status_history`
+  // row for the specs.status='folded' transition, so the history source alone produces zero
+  // `folded` events. Collect a fallback: every spec whose CURRENT status is 'folded' is a
+  // known-folded spec; we emit a synthetic `folded` event at specs.updated_at UNLESS
+  // spec_status_history already gave us one for that slug (cross-source dedup, wired in
+  // backfillOneWorkspace). specs.updated_at is bumped on every write so it's a coarse
+  // signal, but for a folded spec the fold is almost always one of the last writes; the
+  // Verification bullet asserts existence + non-null total_elapsed_ms, not exact timing.
+  const foldedFromSpecs: Array<{ slug: string; at: string }> = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
       .from("specs")
-      .select("id, slug, created_at, vale_review_passed_at")
+      .select("id, slug, created_at, vale_review_passed_at, status, updated_at")
       .eq("workspace_id", workspace_id)
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`specs read failed: ${error.message}`);
@@ -130,10 +140,13 @@ async function readSpecs(admin: Admin, workspace_id: string): Promise<{
           metadata: { backfill_source: "specs.vale_review_passed_at" },
         });
       }
+      if (String(s.status ?? "") === "folded" && s.updated_at) {
+        foldedFromSpecs.push({ slug, at: String(s.updated_at) });
+      }
     }
     if (data.length < PAGE) break;
   }
-  return { proposed, slugById };
+  return { proposed, slugById, foldedFromSpecs };
 }
 
 async function readStatusHistory(admin: Admin, workspace_id: string): Promise<ProposedRow[]> {
@@ -312,13 +325,42 @@ async function backfillOneWorkspace(
   const specsResult = await safe(
     "specs",
     () => readSpecs(admin, workspace_id),
-    { proposed: [] as ProposedRow[], slugById: new Map<string, string>() },
+    {
+      proposed: [] as ProposedRow[],
+      slugById: new Map<string, string>(),
+      foldedFromSpecs: [] as Array<{ slug: string; at: string }>,
+    },
   );
-  console.log(`    specs → ${specsResult.proposed.length} event(s), ${specsResult.slugById.size} spec(s) mapped`);
+  console.log(`    specs → ${specsResult.proposed.length} event(s), ${specsResult.slugById.size} spec(s) mapped, ${specsResult.foldedFromSpecs.length} folded-by-status`);
 
   console.log(`  reading spec_status_history …`);
   const statusRows = await safe("spec_status_history", () => readStatusHistory(admin, workspace_id), []);
   console.log(`    spec_status_history → ${statusRows.length} event(s)`);
+
+  // Fix 1 — fallback: for every spec whose CURRENT specs.status='folded' but whose
+  // spec_status_history has NO folded transition (the observed case in this workspace —
+  // the fold path apparently doesn't write a history row for that transition, so the
+  // history source alone produces zero `folded` events → the Phase-3 Verification bullet
+  // "at least a created event AND a folded event" fails). Cross-source dedup: emit ONLY
+  // for slugs not already covered by history, so a workspace that DOES write the history
+  // transition later stays canonical on the more-accurate timestamp.
+  const foldedSlugsFromHistory = new Set(
+    statusRows.filter((r) => r.event_kind === "folded").map((r) => r.spec_slug),
+  );
+  const foldedFallbackRows: ProposedRow[] = [];
+  for (const f of specsResult.foldedFromSpecs) {
+    if (foldedSlugsFromHistory.has(f.slug)) continue;
+    foldedFallbackRows.push({
+      workspace_id,
+      spec_slug: f.slug,
+      phase_index: null,
+      event_kind: "folded",
+      actor: "backfill",
+      at: f.at,
+      metadata: { backfill_source: "specs.status=folded[fallback,at=updated_at]" },
+    });
+  }
+  console.log(`    folded fallback → ${foldedFallbackRows.length} event(s) (specs.status='folded' not covered by history)`);
 
   console.log(`  reading spec_phases …`);
   const phaseRows = await safe(
@@ -339,6 +381,7 @@ async function backfillOneWorkspace(
   const proposed: ProposedRow[] = [
     ...specsResult.proposed,
     ...statusRows,
+    ...foldedFallbackRows,
     ...phaseRows,
     ...buildRows,
     ...testRows,

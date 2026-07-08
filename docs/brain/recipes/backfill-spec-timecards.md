@@ -33,7 +33,8 @@ Every reconstructed row carries `actor='backfill'` + `metadata.backfill_source` 
 | `build_started` | `agent_jobs` where `kind='build' AND claimed_at IS NOT NULL` | `claimed_at` | one per build claim |
 | `build_done` | `agent_jobs` where `kind='build' AND status='completed'` | `updated_at` | one per completed build |
 | `spec_test_verdict` | `spec_test_runs` | `run_at` | one per QA run; carries `agent_verdict` on metadata |
-| `folded` | `spec_status_history` where `field='status' AND to_value='"folded"'` | `at` | one per fold-transition |
+| `folded` | `spec_status_history` where `field='status' AND to_value='"folded"'` | `at` | one per fold-transition · **PRIMARY** — canonical fold timestamp |
+| `folded` (fallback) | `specs` where `status='folded'` AND no history row above exists | `updated_at` | Fix 1 — the fold path in this workspace apparently doesn't write a `spec_status_history` row for the folded transition, so every folded spec was missing its `folded` event. Cross-source guard: emitted ONLY for slugs the history source didn't already cover, so the primary source stays canonical when it fires |
 
 **Deliberately skipped** (documented on the script's header so the omission is auditable):
 
