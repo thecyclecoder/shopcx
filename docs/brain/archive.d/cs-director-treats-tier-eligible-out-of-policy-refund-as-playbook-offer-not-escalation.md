@@ -1,0 +1,1 @@
+- **CS Director (June): a tier-eligible out-of-policy refund is a playbook tier-1/tier-2 offer, not a founder escalation** · verified 2026-07-08 · → [[lifecycles/ticket-lifecycle]] + [[libraries/cs-director]] + [[playbooks/refund]]
