@@ -20,6 +20,15 @@ Inside the `resolve` step (right after the ticket row load) the handler short-ci
 
 The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
 
+## Step 2e — Sonnet orchestrator (Direction-scoped user block)
+
+The `sonnet-orchestrate` step (Step 2e in the pipeline) loads the live [[../tables/ticket_directions]] row for the ticket via [[../libraries/ticket-directions]] `loadLiveDirection` BEFORE the picker + orchestrator call — Phases 2/3/5-Fix-1 of [[../specs/sol-cheap-execution-over-ticket-direction]]. Two things branch off it:
+
+- **Direction present + non-superseded (Direction-scoped path).** The Direction is passed to [[../libraries/sonnet-orchestrator-v2]] `callSonnetOrchestratorV2` as `directionOverride`. `buildPreContext` swaps the `CUSTOMER: name (email)` + `RECENT ORDERS` + full-history user block for the Direction's rendered suffix (intent + context_summary + JSON-stringified guardrails + chosen_path) — see [[../libraries/ai-context]] `assembleDirectionContext` + `renderDirectionSystemPrompt`. Sol has already summarized customer + orders + prior history into `context_summary` at first-touch, so re-fetching wastes tokens on data the model would re-summarize identically. The shared system prefix stays byte-identical (cache-friendly); only the volatile user block changes. `callSonnetOrchestratorV2` prefixes the returned decision's `reasoning` with `sol:direction-context ` so [[../libraries/action-executor]] `stageResolutionEvent` stamps [[../tables/ticket_resolution_events]] `.reasoning` with the tag — cost analytics can split cost-per-turn by path without a heuristic classifier.
+- **No live Direction (legacy tickets / workspaces without `sol_first_touch_enabled`).** `directionOverride` is null; the full-context `buildPreContext` path runs exactly as before, and the ledger `reasoning` does NOT carry the `sol:direction-context` prefix.
+
+Also feeds [[../libraries/model-picker]] `pickOrchestratorModel` — a fresh + high-confidence + stateless Direction relaxes the picker toward Haiku (see [[../libraries/model-picker]] § Direction-driven Haiku route). The `active_playbook_id` case is short-circuited earlier at Step 3.98 (§ [[../specs/sol-cheap-execution-over-ticket-direction]] Phase 4) so this Step 2e branch only sees stateless / needs_info / playbook-with-no-active-id Directions.
+
 ## Outage resilience — no silent Claude swallows
 
 The local `claude()` helper (Haiku/Sonnet quick turns) **throws** on a failed call instead of the old `if (!r.ok) return ""` (which let callers proceed on empty data): retryable status / network → `AnthropicDependencyError` (run retries), terminal status / missing key → `NonRetriableError` (fail fast). See [[../libraries/anthropic-retry]]. The main Sonnet decision ([[../libraries/sonnet-orchestrator-v2]]) likewise throws on a retryable failure rather than degrading every ticket to "escalate". The one explicit exception is `personalizeMacroText` (`{ optional: true }`) — the macro body is already a valid reply, so it degrades gracefully.

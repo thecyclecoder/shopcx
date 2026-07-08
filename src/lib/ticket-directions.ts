@@ -112,3 +112,11 @@ export async function getLiveDirection(
   if (error) throw error;
   return (data as TicketDirection | null) ?? null;
 }
+
+/**
+ * Alias for {@link getLiveDirection}. The Sol cheap-execution spec (M2) names the accessor
+ * `loadLiveDirection` at its Phase-2 orchestrator wire-in; keeping both names is intentional so
+ * downstream call sites can read the more precise verb (`load`) at the branch point without
+ * changing the M1 SDK's shipped name.
+ */
+export const loadLiveDirection = getLiveDirection;
