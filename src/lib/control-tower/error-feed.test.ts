@@ -508,9 +508,25 @@ test("isForeignGoTrueAuthLogNoise drops the exact phrase (case + whitespace inse
   assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: context deadline exceeded  "), true);
 });
 
-test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / invalid JWT / rate-limit)", () => {
-  // The browser-abort sibling — still routed through the transient class.
-  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-timeout-context-canceled) ──
+// Shape (e): msg-only mirror of shape (a) — GoTrue's outer-request-timeout wrapper firing on
+// its Postgres backend (`timeout:` prefix in Go's error phrasing). Foreign-owned surface,
+// no lever from our side; the transient recur-window empirically failed to absorb the
+// ~2/day cadence (supabase-logs:c9eb05fd1d3fb82c, 15 occ / 7 days). Drop AT CAPTURE — the
+// exact phrase only so plain `context canceled` (real browser-abort noise, still transient)
+// is untouched.
+
+test("isForeignGoTrueAuthLogNoise drops the exact 'timeout: context canceled' phrase (case + whitespace insensitive)", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("unhandled server error: timeout: context canceled"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: timeout: context canceled  "), true);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (plain context canceled / invalid JWT / rate-limit)", () => {
+  // The browser-abort sibling WITHOUT the `timeout:` prefix — a real client-goes-away signal
+  // on other paths (including /authorize). Still routed through the transient class.
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: context canceled"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
   // Actionable GoTrue errors — must still surface / page on first sighting.
   assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
   assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
@@ -649,10 +665,8 @@ test("isForeignGoTrueAuthLogNoise drops the exact 'unable to fetch records: cont
 });
 
 test("isForeignGoTrueAuthLogNoise KEEPS a plain 'context canceled' on a non-/user path (still routed through the transient class)", () => {
-  // A plain `context canceled` on a different path — NOT the exact (d) phrase, so still
-  // captured. `isTransientSupabaseLogNoise('auth', …)` still tags it transient (recur window
-  // catches a chronic upstream outage) so a real problem still surfaces.
-  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+  // A plain `context canceled` on a different path — NOT the exact (d) or (e) phrase, so
+  // still captured. `isTransientSupabaseLogNoise('auth', …)` still tags it transient.
   assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
   // A longer/embedded variant of the exact (d) phrase — the exact-match contract keeps it.
   assert.equal(
