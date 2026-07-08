@@ -1,0 +1,1 @@
+- **Sol: set the ticket's direction once (box session), then run it cheap (API) — re-session on drift** · folded 2026-07-08 · → [[lifecycles/ticket-lifecycle]]
