@@ -840,6 +840,27 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
  * Returns a map keyed by slug; absent = no recorded diagnosis (the chip renders without a reason). Read-only,
  * best-effort — the caller swallows any error.
  */
+/**
+ * Run an `.in("spec_slug", …)` read in slug-batches so the PostgREST request URL never exceeds the
+ * ~16KB HTTP header limit (`UND_ERR_HEADERS_OVERFLOW`). Once the workspace's spec count grew past a few
+ * hundred, a single `.in("spec_slug", [all slugs])` produced a ~15.6KB URL that threw on EVERY
+ * getSpec/roadmap/claim-gate read — wedging the build claim-gate + spec-review lanes (the failure showed
+ * up as a swallowed `[object Object]` job error). Batching keeps each URL small; because a given slug's
+ * rows all land in ONE batch, per-slug newest-first ordering (first-seen-per-slug reduces) is preserved.
+ */
+async function inSpecSlugChunks<T>(
+  slugs: string[],
+  run: (batch: string[]) => PromiseLike<{ data: T[] | null }>,
+  size = 80,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < slugs.length; i += size) {
+    const { data } = await run(slugs.slice(i, i + size));
+    if (data) out.push(...data);
+  }
+  return out;
+}
+
 async function readNeedsFixReasons(
   workspaceId: string,
   slugs: string[],
@@ -848,13 +869,17 @@ async function readNeedsFixReasons(
   if (!slugs.length) return out;
   const { createAdminClient } = await import("@/lib/supabase/admin");
   const admin = createAdminClient();
-  const { data } = await admin
-    .from("director_activity")
-    .select("spec_slug, reason, metadata, created_at")
-    .eq("workspace_id", workspaceId)
-    .eq("action_kind", "spec_review_needs_fix")
-    .in("spec_slug", slugs)
-    .order("created_at", { ascending: false });
+  const data = await inSpecSlugChunks<{ spec_slug: string; reason: string | null; metadata: unknown }>(
+    slugs,
+    (batch) =>
+      admin
+        .from("director_activity")
+        .select("spec_slug, reason, metadata, created_at")
+        .eq("workspace_id", workspaceId)
+        .eq("action_kind", "spec_review_needs_fix")
+        .in("spec_slug", batch)
+        .order("created_at", { ascending: false }),
+  );
   for (const row of (data ?? []) as { spec_slug: string; reason: string | null; metadata: unknown }[]) {
     if (out.has(row.spec_slug)) continue; // newest-first → first seen is the latest verdict
     const defectsRaw = (row.metadata as { defects?: unknown } | null)?.defects;
@@ -886,24 +911,27 @@ async function readInTestingSignals(workspaceId: string, cards: SpecCard[]): Pro
     const { getSecurityStateBySlug } = await import("@/lib/security-agent");
     const admin = createAdminClient();
     const slugs = cards.map((c) => c.slug);
-    const [jobsRes, runs, resolutions, securityBySlug] = await Promise.all([
+    const [jobRows, runs, resolutions, securityBySlug] = await Promise.all([
       // Defensive `select("*")` so a deploy that pre-dates the `preview_url`/`merge_sha` column migration
       // degrades gracefully (column absent ⇒ undefined ⇒ no preview / not-merged ⇒ no in_testing override).
-      admin
-        .from("agent_jobs")
-        .select("*")
-        .eq("workspace_id", workspaceId)
-        .eq("kind", "build")
-        .in("spec_slug", slugs)
-        .order("created_at", { ascending: false })
-        .limit(2000),
+      // Slug-batched (inSpecSlugChunks) so the URL can't overflow the 16KB header limit at scale.
+      inSpecSlugChunks<Record<string, unknown>>(slugs, (batch) =>
+        admin
+          .from("agent_jobs")
+          .select("*")
+          .eq("workspace_id", workspaceId)
+          .eq("kind", "build")
+          .in("spec_slug", batch)
+          .order("created_at", { ascending: false })
+          .limit(2000),
+      ),
       getLatestSpecTestRuns(workspaceId),
       getHumanCheckResolutions(workspaceId),
       getSecurityStateBySlug(admin, workspaceId),
     ]);
     // Reduce build jobs to the LATEST per slug (the rows arrive newest-first, so the first one wins).
     const latestJobBySlug = new Map<string, Record<string, unknown>>();
-    for (const row of (jobsRes.data ?? []) as Record<string, unknown>[]) {
+    for (const row of jobRows as Record<string, unknown>[]) {
       const slug = String(row.spec_slug || "");
       if (!slug || latestJobBySlug.has(slug)) continue;
       latestJobBySlug.set(slug, row);
@@ -984,16 +1012,18 @@ async function recordInTestingTransitions(workspaceId: string, cards: SpecCard[]
     // Pull the latest `field='status'` history row per slug in one query (workspace_id + slug indexed).
     // Newest-first; the first row we see per slug is the most recent.
     const slugs = cards.map((c) => c.slug);
-    const { data } = await admin
-      .from("spec_status_history")
-      .select("spec_slug, to_value, at")
-      .eq("workspace_id", workspaceId)
-      .eq("field", "status")
-      .in("spec_slug", slugs)
-      .order("at", { ascending: false })
-      .limit(5000);
+    const data = await inSpecSlugChunks<{ spec_slug: string; to_value: string }>(slugs, (batch) =>
+      admin
+        .from("spec_status_history")
+        .select("spec_slug, to_value, at")
+        .eq("workspace_id", workspaceId)
+        .eq("field", "status")
+        .in("spec_slug", batch)
+        .order("at", { ascending: false })
+        .limit(5000),
+    );
     const latestBySlug = new Map<string, string>();
-    for (const r of (data ?? []) as { spec_slug: string; to_value: string }[]) {
+    for (const r of data as { spec_slug: string; to_value: string }[]) {
       if (!latestBySlug.has(r.spec_slug)) latestBySlug.set(r.spec_slug, r.to_value);
     }
     const rows: {
