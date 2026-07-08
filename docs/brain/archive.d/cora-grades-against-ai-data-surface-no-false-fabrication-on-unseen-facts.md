@@ -1,0 +1,1 @@
+- **Cora grades against the data the AI had — no fabrication flag or escalation on facts absent from her own surface** · verified 2026-07-08 · → [[../lifecycles/ai-analysis]] + [[../libraries/ticket-analyzer]]
