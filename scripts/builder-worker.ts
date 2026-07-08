@@ -10043,16 +10043,46 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
 // error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
+  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
+  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
+  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
   const base = await loadImproveBrief(ticketId);
-  const { data: ticket } = await db
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot (customer + merged identity, subscriptions with
+  // realized pricing + applied_discounts, orders w/ per-unit computed, active products, active
+  // policies) so Sol's Direction is grounded in the same numbers the deployed orchestrator sees —
+  // never a guess from improvised SQL. Best-effort: a missing customer / SDK read failure leaves
+  // the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  return cxBrief ? `${base}\n\n${cxBrief}` : base;
+}
+
+/**
+ * Build the CX SDK snapshot text block for a ticket. Resolves the ticket's workspace_id +
+ * customer_id, then calls the deterministic getCxBundle → formatCxBundle. Non-throwing:
+ * a null customer still emits the workspace's products + policies. A hard read failure
+ * leaves the block empty (the caller falls back to the base brief). Phase 1 of
+ * docs/brain/specs/cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-
+ * access-no-raw-sql.md.
+ */
+async function loadCxAgentSdkBrief(ticketId: string): Promise<string> {
+  const { data: t } = await db
     .from("tickets")
-    .select("workspace_id")
+    .select("workspace_id, customer_id")
     .eq("id", ticketId)
     .maybeSingle();
-  const workspaceId = (ticket as { workspace_id: string | null } | null)?.workspace_id ?? null;
-  if (!workspaceId) return base;
-  const policiesBlock = await loadActivePoliciesBlock(workspaceId);
-  return policiesBlock ? `${base}\n\n${policiesBlock}` : base;
+  if (!t?.workspace_id) return "";
+  try {
+    const { getCxBundle, formatCxBundle } = await import("../src/lib/cx-agent-sdk");
+    const bundle = await getCxBundle(
+      db,
+      t.workspace_id as string,
+      (t.customer_id as string | null) ?? null,
+    );
+    return formatCxBundle(bundle);
+  } catch {
+    return "";
+  }
 }
 
 // Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
@@ -10113,6 +10143,8 @@ async function runTicketHandleJob(job: Job) {
       `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
       brief,
       ``,
+      `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
+      `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
       `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
@@ -12102,6 +12134,17 @@ async function loadCsDirectorCallBrief(
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
 
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot so June's verdict is grounded in the same shape Sol
+  // and Cora saw — customer + merged identity, subscriptions w/ realized pricing + discounts,
+  // orders w/ per-unit computed, active products, active policies. Best-effort — a missing
+  // customer / SDK read failure leaves the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  if (cxBrief) {
+    parts.push("");
+    parts.push(cxBrief);
+  }
+
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
   // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
   // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
@@ -12202,7 +12245,9 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     ``,
     brief,
     ``,
-    `Investigate read-only (the improve-box-tools.ts read-only tools + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
+    `DETERMINISTIC READ-ONLY CX DATA — call the shared SDK for customer + merged identity, orders w/ per-unit, subscriptions w/ realized pricing + applied_discounts, active products, and active policies (never improvise SQL):`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
     `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs reasoning + recommended_remedy when a concrete action is nameable, reasoning alone when it isn't).`,
@@ -12825,10 +12870,14 @@ function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | nul
 // worker's applyAnalyzerVerdict is the only writer. Bounded: a handful of targeted lookups per
 // grade, not open-ended. See the ticket-analyze skill for when to research vs. defer to the
 // low-confidence unverified handling.
-function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string): string {
+function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string, cxSdkBrief: string = ""): string {
   return [
     `You are Cora, the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director). Use the ticket-analyze skill (cwd is the repo root).`,
     `Score the AI's behavior in the conversation window below against the QC rubric. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `DETERMINISTIC READ-ONLY CX DATA — PREFERRED FIRST STOP. Every CX lookup goes through the shared read-only SDK; NEVER improvise SQL for these surfaces:`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `The bundle carries customer + merged identity, subscriptions w/ realized pricing + applied_discounts, orders w/ per-unit computed + variant title, active products (variants/flavors/pricing), and active sonnet_prompts policies — the SAME shape the deployed orchestrator sees.`,
     ``,
     `PRIMARY PATH — RESEARCH BEFORE FLAGGING (Phase 2). When the AI made a factual claim you can't confirm from the transcript (a variant/flavor, a per-unit price, a subscription state, a policy, a customer entitlement), verify it FIRST with the bounded read-only research CLI:`,
     `  npx tsx scripts/analyzer-research-tools.ts <tool> ${ticketId} [json_input]`,
@@ -12842,7 +12891,7 @@ function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string):
     ``,
     `--- USER TURN ---`,
     userMsg,
-    ``,
+    cxSdkBrief ? `\n${cxSdkBrief}\n` : ``,
     `Final message = ONLY one JSON object, no prose around it:`,
     `{"score":<integer 1-10>,"issues":[{"type":"<one of the issue types above>","description":"..."}],"action_items":[{"priority":"high|medium|low","description":"..."}],"summary":"<1-2 sentences>"}`,
   ].join("\n");
@@ -12881,8 +12930,15 @@ async function runTicketAnalyzeJob(job: Job) {
       return;
     }
 
+    // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+    // pull the deterministic CX SDK snapshot (customer + merged identity, subscriptions w/ realized
+    // pricing + applied_discounts, orders w/ per-unit computed, active products, active policies)
+    // so Cora starts every grade with the SAME numbers the deployed orchestrator sees. Best-effort:
+    // an SDK read failure leaves the snapshot empty and the grade still proceeds on the
+    // conversation-window + system rubric.
+    const cxSdkBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
     const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
-      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId), sid, REPO_DIR, cfg, job.id),
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId, cxSdkBrief), sid, REPO_DIR, cfg, job.id),
     );
     await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
