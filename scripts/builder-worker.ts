@@ -12251,12 +12251,20 @@ async function runCsDirectorCallJob(job: Job) {
       return;
     }
 
-    // Phase 1: record the verdict to `director_activity` (director_function='cs', action_kind=
-    // 'cs_director_call'). The CEO/audit trail now shows WHAT the CS Director decided + WHY, BEFORE
-    // Phase 2's applyBoxCsDirectorCall wires up. metadata carries the raw verdict JSON verbatim so
-    // Phase 2 can consume it without re-parsing the log_tail. spec_slug is the triage_run_id when
-    // present (the natural per-call anchor) — a spec-scoped audit slice is still meaningful even
-    // pre-Phase-2 since a `decision='author_spec'` verdict names the SpecSeed slug.
+    // Phase 1 of cs-director-third-rung-hard-calls-above-triage-quorum: record the verdict to
+    // `director_activity` (director_function='cs', action_kind='cs_director_call'). The CEO/audit
+    // trail shows WHAT the CS Director decided + WHY. `metadata` carries the raw verdict JSON
+    // verbatim so the Phase-2 executor consumes it without re-parsing the log_tail. `spec_slug` is
+    // the SpecSeed's slug on `author_spec` verdicts (the natural per-call anchor for that decision).
+    //
+    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — the metadata markers now
+    // reflect Phase-2 execution (`phase: 2`, `autonomous: true`): `applyBoxCsDirectorCall` is called
+    // immediately after this record and the mutator is in-chain. Phase 1 of that spec is scaffold-
+    // only — its per-decision handlers currently STUB the action (approve_remedy →
+    // `executeSonnetDecision` + `deliverTicketMessage` in Phase 2; author_spec → specs SDK in
+    // Phase 3; escalate_founder → the runner already mints the CEO card here, so the executor stub
+    // logs and defers) — but the routing contract exists and the audit contract advances.
+    let applyResult: { ok: boolean; handler?: string; reason?: string } = { ok: true, handler: "not_run" };
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -12280,16 +12288,42 @@ async function runCsDirectorCallJob(job: Job) {
           // Phase 2) carry the first review's id so the audit feed can pair the two verdicts.
           // Null on the default primary June review.
           second_opinion_of: secondOpinionOfRunId,
-          // autonomous:false — Phase 1 records only; Phase 2 flips true when the executor fires the
-          // in-leash remedy without asking the CEO. The audit shape stays consistent across the phases.
-          autonomous: false,
-          phase: 1,
+          // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — the Phase-2 executor
+          // scaffold (`applyBoxCsDirectorCall` in src/lib/cs-director.ts) is wired below and runs
+          // immediately after this record; `phase:2` reflects that the executor tier is in-chain,
+          // `autonomous:true` reflects that the runner now hands the verdict to a deterministic
+          // mutator without waiting on the CEO to act. Phase 1 of that spec ships the scaffold with
+          // stub handlers; Phase 2/3 wire the actual remedy / spec / escalation writes.
+          autonomous: true,
+          phase: 2,
         },
       });
     } catch (e) {
       // recordDirectorActivity is best-effort + never-throws, so this only catches a dynamic-import
       // failure. The verdict still lands on the log_tail so an operator can recover it.
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
+    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — the executor scaffold. Called
+    // ONCE per cs-director-call job, IMMEDIATELY after the Phase-1 audit record above so the
+    // mutator sees the SAME normalized verdict the audit trail carries. `applyBoxCsDirectorCall`
+    // routes `approve_remedy` / `author_spec` / `escalate_founder` to their per-decision handlers;
+    // any other value (a shape drift out of `normalizeCsDirectorVerdict`, which defensively falls
+    // back to `escalate_founder`) is a clean logged no-op. Never throws — a `{ ok:false, reason }`
+    // result surfaces on the job's `log_tail` without rolling back the completed job. Same
+    // never-throws contract `applyBoxDeployReview` uses.
+    try {
+      const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
+      applyResult = await applyBoxCsDirectorCall(db, job.id, verdict);
+      console.log(
+        `${tag} applyBoxCsDirectorCall → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${applyResult.reason ? ` reason=${applyResult.reason}` : ""}`,
+      );
+    } catch (e) {
+      // Defensive belt: the mutator swallows its own throws, so this only catches a dynamic-import
+      // failure or a truly unexpected re-throw. The audit row above is the primary trail; a stub-
+      // routing failure never rolls back the completed job.
+      console.warn(`${tag} applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
+      applyResult = { ok: false, reason: e instanceof Error ? e.message : String(e) };
     }
 
     // Phase 1 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — write
@@ -12520,8 +12554,13 @@ async function runCsDirectorCallJob(job: Job) {
       }
     }
 
+    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — surface which executor
+    // handler took the verdict on the log_tail (approve_remedy / author_spec / escalate_founder /
+    // noop) so an audit reader sees BOTH what June decided AND how the mutator routed it.
+    const applyLine = `apply → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${applyResult.reason ? ` · reason=${applyResult.reason}` : ""}`;
     const summary = [
       `decision=${verdict.decision}`,
+      applyLine,
       verdict.reasoning ? verdict.reasoning : "",
       verdict.remedy ? `remedy: ${JSON.stringify(verdict.remedy).slice(0, 400)}` : "",
       verdict.spec_seed ? `spec_seed: ${JSON.stringify(verdict.spec_seed).slice(0, 400)}` : "",
