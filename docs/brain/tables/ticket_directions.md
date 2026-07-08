@@ -58,4 +58,4 @@ Service-role only (RLS enabled with no policies). Every write goes through `crea
 
 ---
 
-[[../README]] · [[tickets]] · [[ticket_resolution_events]] · [[workspaces]] · [[../lifecycles/ticket-lifecycle]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
+[[../README]] · [[tickets]] · [[ticket_resolution_events]] · [[ticket_required_outcomes]] · [[workspaces]] · [[../lifecycles/ticket-lifecycle]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
