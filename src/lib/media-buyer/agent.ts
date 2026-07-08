@@ -279,6 +279,99 @@ export interface MediaBuyerLoser {
   triggeringScorecardId: string;
 }
 
+// ── Shadow-mode persistence (media-buyer-shadow-mode Phase 2) ────────────────
+
+/**
+ * One director_activity row the runner writes in shadow mode. Emitted 1:1 per
+ * plan action — verb `<verb>_shadow` (`media_buyer_promoted_winner_shadow`,
+ * `media_buyer_paused_loser_shadow`, `media_buyer_replenished_test_cohort_shadow`,
+ * `media_buyer_fatigue_replenish_triggered_shadow`) — carrying `metadata.mode='shadow'`
+ * + the full `plan_action` JSON so a human reviewer can concur/dissent against the
+ * complete proposal, not a paraphrase.
+ */
+export interface ShadowActivityRow {
+  actionKind:
+    | "media_buyer_promoted_winner_shadow"
+    | "media_buyer_paused_loser_shadow"
+    | "media_buyer_replenished_test_cohort_shadow"
+    | "media_buyer_fatigue_replenish_triggered_shadow";
+  reason: string;
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Pure — build the shadow-mode director_activity rows for a computed plan. Emits ONE
+ * row per plan action across the four verbs (promote / kill / replenish / fatigue_replenish)
+ * so a human reviewer sees the exact same set of proposed moves the armed executor would
+ * make — minus the actual iteration_actions / ad_publish_jobs writes. The runner writes
+ * these via `recordDirectorActivity` on the `growth` director-function AND ALSO writes a
+ * `media_buyer_pass_completed` heartbeat with `metadata.mode='shadow'` so the audit trail
+ * shows a shadow pass even when the plan is empty.
+ *
+ * Every row carries `metadata.mode='shadow'` + `metadata.plan_action=<action JSON>`
+ * (the CEO-facing citation contract) plus the canonical `source_meta_ad_id`, `roas`, and
+ * `policy_version_id` fields — same shape the armed director_activity rows use, so a
+ * later "flip to armed" comparison stays apples-to-apples.
+ */
+export function buildShadowActivityRows(plan: MediaBuyerPlan): ShadowActivityRow[] {
+  const rows: ShadowActivityRow[] = [];
+  for (const a of plan.promote) {
+    rows.push({
+      actionKind: "media_buyer_promoted_winner_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  for (const a of plan.kill) {
+    rows.push({
+      actionKind: "media_buyer_paused_loser_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  for (const a of plan.replenish) {
+    rows.push({
+      actionKind: "media_buyer_replenished_test_cohort_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        policy_version_id: plan.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  for (const a of plan.fatigueReplenish) {
+    rows.push({
+      actionKind: "media_buyer_fatigue_replenish_triggered_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  return rows;
+}
+
 /** Inputs to the pure plan computer — all reads already done by the runner. */
 export interface MediaBuyerPlanInputs {
   policy: IterationPolicy | null;
@@ -685,6 +778,60 @@ export async function runMediaBuyerLoop(
     currentTestCohortSize,
     cohortTargetCount: opts.cohortTargetCount,
   });
+
+  // ── Shadow branch (media-buyer-shadow-mode Phase 2) ───────────────────────
+  // The CEO's non-negotiable "shadow / read-only before armed" guardrail: when the
+  // active policy is on `mode='shadow'`, compute the plan but write ZERO
+  // iteration_actions + ZERO ad_publish_jobs and NEVER call amplifyWinner. Instead,
+  // emit one `<verb>_shadow` director_activity row per plan action (carrying the full
+  // plan_action JSON + mode='shadow') plus a `media_buyer_pass_completed` heartbeat
+  // whose metadata also carries mode='shadow' so the audit trail proves the shadow
+  // pass ran even when the plan is empty. The flip to `armed` is a separate,
+  // audited surface — the runtime here NEVER promotes the mode itself.
+  if (policy.mode === "shadow") {
+    let directorActivityRows = 0;
+    for (const row of buildShadowActivityRows(plan)) {
+      const rec = await recordDirectorActivity(admin, {
+        workspaceId: opts.workspaceId,
+        directorFunction: GROWTH_DIRECTOR_FUNCTION,
+        actionKind: row.actionKind,
+        specSlug: null,
+        reason: row.reason,
+        metadata: row.metadata,
+      });
+      if (rec.recorded) directorActivityRows += 1;
+    }
+    const heartbeat = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_pass_completed",
+      specSlug: null,
+      reason: plan.summary,
+      metadata: {
+        mode: "shadow",
+        policy_version_id: plan.policyVersionId,
+        promote_count: plan.promote.length,
+        kill_count: plan.kill.length,
+        replenish_count: plan.replenish.length,
+        fatigue_replenish_count: plan.fatigueReplenish.length,
+        amplified_ad_campaign_ids: [],
+        cohort_configured: plan.cohortConfigured,
+        current_test_cohort_size: plan.currentTestCohortSize,
+        cohort_target_count: plan.cohortTargetCount,
+        autonomous: true,
+      },
+    });
+    if (heartbeat.recorded) directorActivityRows += 1;
+    return {
+      plan,
+      writes: {
+        iterationActionsInserted: 0,
+        directorActivityRows,
+        publishJobsInserted: 0,
+        amplifiedAdCampaignIds: [],
+      },
+    };
+  }
 
   // ── Persist: iteration_actions + director_activity + ad_publish_jobs ──────
   const writes = { iterationActionsInserted: 0, directorActivityRows: 0, publishJobsInserted: 0, amplifiedAdCampaignIds: [] as string[] };
