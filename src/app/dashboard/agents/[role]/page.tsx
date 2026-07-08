@@ -51,7 +51,12 @@ interface DirectorNode {
   autonomous: boolean;
 }
 interface OrgChart {
-  ceo: { goals: { slug: string; title: string; pct: number; status: "proposed" | "greenlit" | "complete"; proposedBy?: string; proposedByLabel?: string }[] };
+  ceo: {
+    goals: { slug: string; title: string; pct: number; status: "proposed" | "greenlit" | "complete"; proposedBy?: string; proposedByLabel?: string }[];
+    // Phase 2 (god-mode-becomes-ceo-executive-assistant-agent) — CEO-owned workers so
+    // `/dashboard/agents/god-mode` (Eve's profile) resolves via resolveRole, not "unknown".
+    workers: WorkerLane[];
+  };
   directors: DirectorNode[];
 }
 
@@ -68,6 +73,25 @@ function resolveRole(org: OrgChart, role: string): Resolved {
   for (const d of org.directors) {
     const worker = d.workers.find((w) => w.kind === role);
     if (worker) return { kind: "worker", worker, director: d };
+  }
+  // Phase 2 (god-mode-becomes-ceo-executive-assistant-agent) — a CEO-owned worker (Eve today)
+  // resolves through the SAME worker branch, with the CEO seat standing in as the reports-to
+  // "director". No parallel code path — a synthetic DirectorNode-shaped stub carries the CEO
+  // as her supervisor, so /dashboard/agents/god-mode shows reports-to Henry, not "unknown".
+  const ceoWorker = (org.ceo.workers ?? []).find((w) => w.kind === role);
+  if (ceoWorker) {
+    const ceoStub: DirectorNode = {
+      slug: "ceo",
+      title: "CEO",
+      summary: "",
+      mandates: [],
+      goalSlugs: [],
+      workers: org.ceo.workers ?? [],
+      status: "autonomous",
+      live: true,
+      autonomous: true,
+    };
+    return { kind: "worker", worker: ceoWorker, director: ceoStub };
   }
   return { kind: "unknown" };
 }

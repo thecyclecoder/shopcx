@@ -1,0 +1,1 @@
+- **Add partial index on customers.segments_refreshed_at for the SMS-subscribed stale-tail monitor count** · verified 2026-07-07 · → [[../tables/customers]]

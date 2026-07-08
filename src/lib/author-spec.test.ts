@@ -27,7 +27,11 @@ import {
   MissingIntentError,
   assertValidParent,
   InvalidParentError,
+  detectBareFunctionParent,
+  autoAnchorBareFunctionParent,
+  bestFitMandate,
 } from "./author-spec";
+import { resolveFunctionMandates, type FunctionMandate } from "./function-mandates";
 import { parseVerificationBlobToChecks } from "./spec-phase-checks-table";
 import { parseBrainRefsLineToSlugs } from "./spec-brain-refs-table";
 import { unbuildableReason, specHasBuildableContent } from "./build-spec-materializer";
@@ -407,4 +411,119 @@ test("intent round-trips author→store→read unchanged and carries no code fen
   assert.doesNotThrow(() => assertIntentIsPlainLanguage("fixture", "what", stored.what));
   assert.equal(/```/.test(stored.why), false);
   assert.equal(/```/.test(stored.what), false);
+});
+
+// ── improve-tab-spec-author-auto-anchors-bare-function-parent-to-mandate Phase 2 ──────────────────
+// The chokepoint SELF-CORRECTS a bare-function parent (matches `functions/{slug}` but no `#anchor`,
+// no `mandate` keyword, no goal ref) by resolving the function's mandates and anchoring to the best-
+// fit one instead of hard-failing the author. A function with zero mandates still throws (nothing to
+// anchor to).
+
+test("detectBareFunctionParent — bare `[[../functions/cs]]` is detected", () => {
+  const r = detectBareFunctionParent("[[../functions/cs]]");
+  assert.deepEqual(r, { functionSlug: "cs" });
+});
+
+test("detectBareFunctionParent — bracket-stripped `../functions/cs` (markdown-path shape) is also detected", () => {
+  const r = detectBareFunctionParent("../functions/cs — some prose here");
+  assert.deepEqual(r, { functionSlug: "cs" });
+});
+
+test("detectBareFunctionParent — a function reference WITH `#anchor` returns null (already anchored)", () => {
+  assert.equal(detectBareFunctionParent("[[../functions/platform#infra-devops-reliability]] — x."), null);
+});
+
+test("detectBareFunctionParent — a function reference with the `mandate` keyword returns null (already anchored in prose)", () => {
+  assert.equal(
+    detectBareFunctionParent('[[../functions/platform]] — "Autonomous build platform" mandate: x.'),
+    null,
+  );
+});
+
+test("detectBareFunctionParent — a goal reference returns null (not a function parent at all)", () => {
+  assert.equal(detectBareFunctionParent("[[../goals/acquisition-research-engine]]"), null);
+});
+
+test("detectBareFunctionParent — free text returns null", () => {
+  assert.equal(detectBareFunctionParent("a fix proposed by the DB Health Agent"), null);
+});
+
+test("bestFitMandate — with a single mandate returns it", () => {
+  const only: FunctionMandate = { slug: "only", heading: "Only mandate", body: "does the thing" };
+  assert.equal(bestFitMandate([only], { title: "unrelated", why: "u", what: "u" }), only);
+});
+
+test("bestFitMandate — picks the mandate with the strongest distinct-term overlap", () => {
+  const ms: FunctionMandate[] = [
+    { slug: "a", heading: "Escalation triage quality", body: "adversarial quorum sweep of escalations" },
+    { slug: "b", heading: "Fix weird tickets fast, calibrate", body: "reproduce the founder's terminal fix ticket chat and calibrate so they do not recur" },
+    { slug: "c", heading: "Ticket-derived product fixes", body: "a code recommendation from a ticket becomes a ticket-sourced spec" },
+  ];
+  const best = bestFitMandate(ms, {
+    title: "calibrate the analyzer so miscategorized dunning tickets stop recurring",
+    why: "the analyzer rule fires on legitimate dunning failures — calibrate so they do not recur",
+    what: "the calibrated rule stops mis-escalation",
+  });
+  assert.equal(best.slug, "b", `expected the calibration mandate (b), got ${best.slug}`);
+});
+
+test("bestFitMandate — ties fall back to the first mandate (declaration order in the charter)", () => {
+  const ms: FunctionMandate[] = [
+    { slug: "first", heading: "First", body: "" },
+    { slug: "second", heading: "Second", body: "" },
+  ];
+  // no shared terms with either mandate → each score = 0 → the first mandate wins
+  assert.equal(bestFitMandate(ms, { title: "unrelated words", why: "x", what: "y" }).slug, "first");
+});
+
+// ── The spec's Phase 2 verification bullet ────────────────────────────────────────────────────────
+// "authoring a spec whose parent is the bare [[../functions/cs]] with a calibration-flavored why no
+//  longer throws — it lands with parent_kind='mandate' and a parent_ref of the form cs#{mandate-slug}
+//  that resolves to a real CS mandate; a bare function with zero mandates still throws
+//  InvalidParentError."
+// Tested at the deterministic helper layer (no DB): the helper is what the authorSpec* entry points
+// call BEFORE assertValidParent to decide the anchor, and its output shape is exactly what the entry
+// points then persist as `specs.parent` / `parent_kind` / `parent_ref`.
+
+test("bare [[../functions/cs]] parent + calibration-flavored why auto-anchors to a real CS mandate — no longer throws", async () => {
+  const result = await autoAnchorBareFunctionParent("[[../functions/cs]]", {
+    title: "calibrate the ticket-analyzer to stop mis-escalating dunning failures",
+    why:
+      "we're mis-escalating dunning failures as customer tickets because the analyzer rule is too broad — " +
+      "calibrate the rule so they do not recur.",
+    what: "the analyzer skips the mis-categorized dunning path, escalations drop, calibration sticks.",
+  });
+  assert.ok(result, "expected the chokepoint to auto-anchor rather than return null");
+  assert.equal(result!.parentKind, "mandate");
+  assert.match(result!.parentRef, /^cs#[a-z0-9-]+$/, `parent_ref shape (got ${result!.parentRef})`);
+  // parent prose is the canonical shape assertValidParent already accepts.
+  assert.doesNotThrow(() => assertValidParent(result!.parent, { parentKind: result!.parentKind }));
+  // The chosen mandate slug resolves back to a real CS mandate (not fabricated).
+  const cs = await resolveFunctionMandates("cs");
+  const found = cs.find((m) => `cs#${m.slug}` === result!.parentRef);
+  assert.ok(
+    found,
+    `parent_ref ${result!.parentRef} did not resolve to a real CS mandate (available: ${cs.map((m) => `cs#${m.slug}`).join(", ")})`,
+  );
+});
+
+test("bare function with ZERO mandates returns null → caller's assertValidParent still throws InvalidParentError", async () => {
+  const r = await autoAnchorBareFunctionParent("[[../functions/this-function-does-not-exist]]", {
+    title: "x", why: "y", what: "z",
+  });
+  assert.equal(r, null, "no mandates on the function → helper returns null so the caller can throw");
+  // Prove the fallthrough: the caller re-runs assertValidParent on the ORIGINAL bare-function parent
+  // and it STILL throws InvalidParentError (Phase 2's "keep the current InvalidParentError" rule).
+  assert.throws(
+    () => assertValidParent("[[../functions/this-function-does-not-exist]]", {}),
+    (e: unknown) => e instanceof InvalidParentError,
+  );
+});
+
+test("a NON bare-function parent (mandate-anchored already) is passed through unchanged (returns null)", async () => {
+  const r = await autoAnchorBareFunctionParent(
+    "[[../functions/platform#infra-devops-reliability]] — a proper anchored parent",
+    { title: "x", why: "y", what: "z" },
+  );
+  assert.equal(r, null);
 });

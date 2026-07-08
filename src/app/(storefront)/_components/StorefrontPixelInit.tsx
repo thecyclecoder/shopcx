@@ -36,7 +36,7 @@ interface Props {
   /** Bundle PDP only. When set, a click on any `#pricing` CTA (chapter mid-CTAs, final CTA — which
    *  have no price table to scroll to on this page) is treated as the bundle add-to-cart, exactly
    *  like the hero's Add to Cart. Null on every other page. */
-  bundleBuy?: { variantId: string; mode: "subscribe" | "onetime"; frequencyDays: number | null } | null;
+  bundleBuy?: { variantId: string; mode: "subscribe" | "onetime"; frequencyDays: number | null; couponCode?: string | null } | null;
 }
 
 interface CtaPayload {
@@ -44,6 +44,11 @@ interface CtaPayload {
   mode: "subscribe" | "onetime";
   frequency_days: number | null;
   line_items: Array<{ variant_id: string; quantity: number }>;
+  // Phase 4 of offer-creator: when the CTA carries data-coupon-code
+  // (e.g. the bundle PDP's Select Bundle CTA for the Starter Kit), we
+  // pass it to /api/cart as `discount_code` so the coupon lands on the
+  // cart without a popup-claim step.
+  discount_code?: string | null;
 }
 
 export function StorefrontPixelInit({
@@ -192,6 +197,10 @@ export function StorefrontPixelInit({
         mode,
         frequency_days: freqDays,
         line_items: [],
+        // Phase 4 of offer-creator: forward the bundle coupon to /api/cart so it lands on the first
+        // order. The #buy CTAs (hero, value builder) carry it as data-coupon-code; the #pricing
+        // chapter CTAs have no data attr, so the coupon rides on bundleBuy instead.
+        discount_code: isPricingBundle ? bundleBuy!.couponCode ?? null : ds.couponCode || null,
       };
 
       if (isPricingBundle) {
@@ -268,6 +277,9 @@ export function StorefrontPixelInit({
           mode: cta.mode,
           frequency_days: cta.frequency_days,
           source_product_handle: productHandle,
+          // Phase 4 of offer-creator: the bundle CTA's data-coupon-code
+          // rides here so cart route resolves + applies the coupon.
+          ...(cta.discount_code ? { discount_code: cta.discount_code } : {}),
         }),
       })
         .then(async (res) => {

@@ -686,11 +686,19 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // between the 30-min ticks hasn't been given a chance yet, so its updated_at must also be
             // older than the grace. Eliminates the between-ticks false positive; a genuinely-stuck
             // analyzer (ticket still null a whole cycle later) still counts and alerts.
+            // Human-veto mirror (ticket-analyzer-workprobe-exclude-analyzer-locked): analyzer_locked
+            // is EXCLUDED at the source, mirroring ticket-analysis-cron.ts:48-54 — a human has
+            // vetoed the analyzer on those rows (Phase 2 of human-directives-hard-gates-over-ticket-ai),
+            // so the cron will never process them by design. Counting them here manufactures a false
+            // idle_while_work on loop:ai:ticket-analyzer during otherwise-quiet windows. The probe and
+            // the cron have to see the same universe of work (standing pattern — siblings:
+            // ticket-decision-workprobe-exclude-positive-close, ticket-decision-workprobe-exclude-active-playbook).
             const graceCutoffIso = new Date(Date.now() - TICKET_ANALYSIS_FEEDER_GRACE_MS).toISOString();
             const { count } = await admin
               .from("tickets")
               .select("id", { count: "exact", head: true })
               .eq("status", "closed")
+              .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
               .is("last_analyzed_at", null)
               .gte("updated_at", sinceIso)
@@ -1183,7 +1191,18 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .order("escalated_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
-    admin.from("agent_jobs").select("created_at").eq("kind", "triage-escalations").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    // june-review-replaces-solver-skeptic-quorum-triage Phase 1: the triage-escalations cron now
+    // enqueues cs-director-call jobs (one per eligible escalated ticket) as the primary triage
+    // instead of the legacy per-workspace triage-escalations sweep. Consider BOTH kinds so the
+    // "no triage job since it escalated" check keeps working during rollout AND after — the newest
+    // create_at across the two is what "the last time the cron picked work up" means.
+    admin
+      .from("agent_jobs")
+      .select("created_at")
+      .in("kind", ["cs-director-call", "triage-escalations"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
     admin.from("agent_jobs").select("created_at").eq("kind", "spec-test").order("created_at", { ascending: false }).limit(1).maybeSingle(),
     // Overdue = strictly before today 00:00 UTC ⇒ a full renewal window has passed
     // (no false positive on a sub merely due today that the async attempt hasn't processed yet).

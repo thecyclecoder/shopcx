@@ -20,6 +20,9 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
+// pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
+// member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
+import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
 
 const envPath = resolve(__dirname, "../.env.local");
@@ -169,6 +172,43 @@ const MAX_CS_DIRECTOR_CALL = 1;
 // One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
 // investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
 const CS_DIRECTOR_CALL_TIMEOUT_MS = 15 * 60 * 1000;
+// Playbook-compile jobs (playbook-compiler-becomes-box-agent-mining-full-history Phase 1) run in
+// their OWN concurrency-1 lane: enqueued by the Inngest cron (Mondays 12 UTC + manual
+// `playbook-compiler/run` event) — one Max `claude -p` (playbook-compile skill) per workspace. Reads
+// the FULL history (tickets + ticket_analyses over the whole workspace, NOT the old 30-day floor)
+// through the read-only DB creds the box already holds, and emits ONE JSON verdict {trees, reasoning}
+// which applyBoxPlaybookCompile upserts into `compiled_trees` (idempotent — UNIQUE (workspace_id,
+// tree_key), so a re-run over unchanged history is a no-op). Serialized so a Monday sweep never
+// overlaps a manually-triggered out-of-band run on the same workspace (the enqueuer also dedupes on
+// active-job-exists but concurrency-1 is the belt).
+const MAX_PLAYBOOK_COMPILE = 1;
+// One playbook-compile run: FULL-history read (typically thousands of rows) + one JSON verdict.
+// Generous ceiling — the read is larger than a CS-director call's brief, but still bounded (the
+// runner caps the cluster brief at 40 for size); Max session on a full-history workspace fits well
+// under 25 minutes in practice.
+const PLAYBOOK_COMPILE_TIMEOUT_MS = 25 * 60 * 1000;
+// Ticket-analyze jobs (ticket-analyzer-becomes-box-agent-under-june Phase 1) run in their OWN
+// concurrency-lane — a top-level Max `claude -p` session per ticket that produces the QC grade +
+// severity verdict. The feeder cron (ticket-analysis-cron) enqueues at most 100 per */30 tick; the
+// bounded parallelism here drains the queue without starving the shared build lane. Read-only via
+// the same DB creds the analyzer already needed, and the worker (deterministic Node) is the only
+// mutator (applyAnalyzerVerdict). Gated on the Claude-down breaker (below) — a grade needs Claude
+// to reason, so during an outage queued rows park `blocked_on_dependency` and drain on recovery
+// (mirrors the analyzer's prior park-and-drain, moved from the cron to the box lane).
+const MAX_TICKET_ANALYZE = 3;
+// One analyzer pass reads the ticket window + guidance + playbook context and emits ONE JSON
+// verdict. Minutes — same ballpark as a triage solver pass, not the seed ceiling.
+const TICKET_ANALYZE_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_PROMPT_REVIEW = 1;
+// Prompt-review jobs (prompt-auto-review-becomes-box-agent-under-june Phase 1) run in their OWN
+// concurrency-1 lane: enqueued daily by the sonnet-prompt-auto-review Inngest cron, ONE row per
+// proposed sonnet_prompt. Reads the proposal + similar approved prompts + relevant policies +
+// source-pattern tickets + voice docs (the same inputs `loadReviewInputs` used to hand to the
+// retired direct-Opus fetch) and emits ONE JSON verdict {decision, confidence, reasoning,
+// references, ...} that the deterministic runner applies via `applyDecision` — REJECT_FLOOR and
+// the never-queue-to-humans behavior are preserved verbatim. Serialized so a slow review never
+// starves the box lane.
+const PROMPT_REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
 // Developer Message Center turns (developer-message-center) run in their OWN concurrency-1 interactive
 // lane: a resumable Max `claude -p` session per thread that carries read-only DB access AND WebSearch
 // (the founder's "ask the box anything" analyst/planner). Serialized so a turn never races the per-thread
@@ -321,6 +361,14 @@ const RESEARCH_BATCH_CAP = 8;
 // generate/flag deterministically. 30 min mirrors the research lane cap.
 const DR_CONTENT_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
+// media-buyer-test-winner-loop Phase 2: concurrency-1 lane for the Media Buyer's
+// cadence pass. Deterministic-Node lane (no Max session), light on I/O — one
+// pass per workspace at a time is more than enough for the weekly cadence.
+const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
+// media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
+// grading pass. Deterministic-Node; scores media-buyer director_activity rows
+// against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
+const MAX_MEDIA_BUYER_GRADE = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER_GRADE || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -534,7 +582,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "ticket-analyze" | "prompt-review" | "playbook-compile";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -556,6 +604,56 @@ interface Job {
   // parsing `instructions` — Phase 2's runSpecTestJob reads it directly.
   preview_url?: string | null;
 }
+
+// worker-self-update-force-on-unknown-queued-kind Phase 1: mirror of the `Job['kind']` union above,
+// enumerated at runtime so the poll loop can detect a queued `agent_jobs.kind` the running binary
+// does not know how to dispatch. Placed next to the union so a new kind is added in BOTH spots —
+// missing an entry here has one visible failure mode (the coarse busy/behind<25 self-update defer
+// no longer force-overrides for that kind), never a wrong claim, so the mirror is safe.
+const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
+  "build",
+  "plan",
+  "fold",
+  "goal-fold",
+  "product-seed",
+  "ticket-improve",
+  "spec-chat",
+  "triage-escalations",
+  "spec-test",
+  "spec-review",
+  "migration-fix",
+  "dev-ask",
+  "god-mode",
+  "director-coach",
+  "pr-resolve",
+  "repair",
+  "regression",
+  "storefront-optimizer",
+  "db_health",
+  "coverage-register",
+  "platform-director",
+  "director-bounce-back",
+  "growth-director",
+  "proposed-goal",
+  "security-review",
+  "proposed-model-tier",
+  "audit-spec-shipped-state",
+  "agent-grade",
+  "agent-coach",
+  "director-grade",
+  "campaign-grade",
+  "gap-grade",
+  "research",
+  "ceo-authorized-out-of-leash",
+  "dr-content",
+  "deploy-review",
+  "cs-director-call",
+  "media-buyer",
+  "media-buyer-grade",
+  "ticket-analyze",
+  "prompt-review",
+  "playbook-compile",
+]);
 
 async function admin() {
   const { createAdminClient } = await import("../src/lib/supabase/admin");
@@ -1372,7 +1470,7 @@ async function requeueBlockedOnUsage() {
 // Scope = the autonomous agents the spec names (repair, optimizer, db-health, spec-test); interactive
 // (dev-ask/spec-chat/ticket-improve) + owner-driven build/plan jobs are left alone (their failure is the
 // owner's to see + retry). The customer-facing ticket path is covered by Phase 1's outage-spanning retry.
-const CLAUDE_OUTAGE_PARK_KINDS = ["repair", "storefront-optimizer", "db_health", "spec-test"] as const;
+const CLAUDE_OUTAGE_PARK_KINDS = ["repair", "storefront-optimizer", "db_health", "spec-test", "ticket-analyze"] as const;
 
 // Read the Claude-down breaker once per tick (best-effort; defaults to "up" so a breaker-read hiccup
 // never wrongly parks the box). The lib lives in src/lib — dynamic-import it like the other src helpers.
@@ -2355,7 +2453,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile", "prompt-review"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -2455,6 +2553,41 @@ function removeWorktreeForBranch(branch: string) {
     }
     removeWorktreeDir(e.path);
   }
+  sh("git", ["worktree", "prune"]);
+}
+
+// builder-worktree-prune-before-add: idempotent PATH-side precondition for `git worktree add <wt>`.
+// The wedge this fixes (2026-07-08 media-buyer-sensor-trust-probe): the target dir
+// /home/builder/builds/build-<slug> pre-existed as an orphan (only tsconfig.tsbuildinfo inside; NOT a
+// registered worktree) from a crashed prior attempt. The bare `git worktree remove --force <wt>` was a
+// no-op (nothing to remove), and the follow-up `git worktree add` failed with "'<wt>' already exists".
+// removeWorktreeForBranch (branch-side) doesn't help — the branch was never held, only the DIR was
+// orphaned on disk.
+//
+// The heal is what a human would do: prune stale admin entries first (a registered worktree whose dir
+// was manually deleted still shows up in `git worktree list` — prune reconciles), then if <wt> IS a
+// registered worktree, force-remove it, else if the dir just exists on disk (orphan), rm -rf it. Never
+// throws — best-effort cleanup. SAFETY: reuses the removeWorktreeDir BUILDS_DIR guard, so an errant
+// call with wt === REPO_DIR (or any non-BUILDS_DIR path) refuses and returns.
+function ensureWorktreeSlotFree(wt: string) {
+  const resolved = resolve(wt);
+  if (resolved !== BUILDS_DIR && !resolved.startsWith(BUILDS_DIR + "/")) {
+    console.error(`[worktree] ensureWorktreeSlotFree REFUSING ${resolved} — only build worktrees under ${BUILDS_DIR} may be freed.`);
+    return;
+  }
+  // 1) Reconcile admin state with disk state (a registered worktree whose dir was manually deleted
+  //    still lists — prune clears it; a stale entry pointing at <wt> would otherwise interfere).
+  sh("git", ["worktree", "prune"]);
+  // 2) If <wt> IS a registered worktree, force-remove it (drops admin entry + best-effort dir remove).
+  const held = listWorktrees().some((e) => resolve(e.path) === resolved);
+  if (held) {
+    removeWorktreeDir(resolved); // handles remove + rm-rf, with the BUILDS_DIR guard
+  } else if (existsSync(resolved)) {
+    // 3) Orphan directory on disk (not a registered worktree) — nuke it so `git worktree add` doesn't
+    //    fail with "'<wt>' already exists". Guarded above; only BUILDS_DIR paths reach here.
+    sh("rm", ["-rf", resolved]);
+  }
+  // 4) One more prune — a `remove` we just did may have left an admin entry if the dir was gone.
   sh("git", ["worktree", "prune"]);
 }
 
@@ -4240,7 +4373,11 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   const rows = await sd.getOpenSpecDrift(job.workspace_id);
   if (!rows.length) return "drift: none open";
   const CAP = 5;
-  const confirmed: string[] = []; // confirmed reverse-drift (DB shipped, code genuinely gone) → escalated
+  // reese-goal-aware-drift Phase 2 — carry the row shape so each confirmed reverse-drift can be
+  // surfaced BOTH on the director board (existing message) AND as a CEO inbox item (new). Keeping
+  // the same struct through the whole pass avoids re-deriving spec_slug/phase_index/title downstream.
+  interface ConfirmedEntry { specSlug: string; phaseIndex: number; phaseTitle: string; detail: string; driftRowId: string; reason: string }
+  const confirmed: ConfirmedEntry[] = []; // confirmed reverse-drift (DB shipped, code genuinely gone) → escalated
   let reviewed = 0;
   let dedupSkipped = 0;
   let autoResolved = 0;
@@ -4287,7 +4424,14 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
     if (prefilter?.verdict === "code-missing") {
       // High-confidence revert: escalate immediately without a session. The row stays open + surfaces to
       // the CEO exactly like the session's code-missing verdict does; the dedup ledger prevents re-firing.
-      confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${prefilter.reasoning.slice(0, 180)}`);
+      confirmed.push({
+        specSlug: row.spec_slug,
+        phaseIndex: row.phase_index,
+        phaseTitle: row.phase_title,
+        detail: row.detail,
+        driftRowId: row.id,
+        reason: prefilter.reasoning.slice(0, 180),
+      });
       sessionsSaved++;
       try {
         await recordDirectorActivity(db, {
@@ -4334,7 +4478,14 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
         } else if (sessionVerdict === "code-missing") {
           // Genuine reverse-drift: a shipped spec's code vanished. Surface to the CEO — keep the row open +
           // escalate (the CEO decides: re-merge, intentional revert, or downgrade). Never auto-mutate status.
-          confirmed.push(`${item.row.spec_slug} P${item.row.phase_index + 1}: ${sessionReason.slice(0, 180)}`);
+          confirmed.push({
+            specSlug: item.row.spec_slug,
+            phaseIndex: item.row.phase_index,
+            phaseTitle: item.row.phase_title,
+            detail: item.row.detail,
+            driftRowId: item.row.id,
+            reason: sessionReason.slice(0, 180),
+          });
         }
         // unsure / missing-from-batch → leave the row open for the next pass (still deduped by the ledger).
       } catch (e) {
@@ -4356,8 +4507,29 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   if (confirmed.length) {
     try {
       const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `⚠️ Reese caught DB-vs-code drift — ${confirmed.length} spec phase(s) marked SHIPPED in the DB but their code is GONE from main (possible bad/reverted merge):\n${confirmed.map((c) => `• ${c}`).join("\n")}`, kind: "update", mentions: ["ceo"], metadata: { spec_drift_supervise: true, reverse_drift: true } });
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `⚠️ Reese caught DB-vs-code drift — ${confirmed.length} spec phase(s) marked SHIPPED in the DB but their code is GONE from main (possible bad/reverted merge):\n${confirmed.map((c) => `• ${c.specSlug} P${c.phaseIndex + 1}: ${c.reason}`).join("\n")}`, kind: "update", mentions: ["ceo"], metadata: { spec_drift_supervise: true, reverse_drift: true } });
     } catch { /* best-effort */ }
+    // reese-goal-aware-drift Phase 2 — additionally surface each confirmed reverse-drift as a CEO
+    // inbox item on the same `dashboard_notifications` `agent_approval_request` surface every other
+    // escalate_founder card uses (author-spec.ts:979, fleet-spend-governor.ts:321). De-dupe: a stable
+    // per-(workspace, spec, phase) key means a persistent drift row refreshes the existing OPEN card
+    // instead of minting a duplicate every ~30-min pass (the verification's "does not create a
+    // duplicate inbox item" contract). Best-effort per-entry — a Supabase error on one item never
+    // blocks the rest, and the board post (above) already ran.
+    for (const c of confirmed) {
+      try {
+        await sd.emitReverseDriftInboxItem(db, {
+          workspaceId: job.workspace_id,
+          specSlug: c.specSlug,
+          phaseIndex: c.phaseIndex,
+          phaseTitle: c.phaseTitle,
+          detail: c.detail,
+          driftRowId: c.driftRowId,
+        });
+      } catch (e) {
+        console.error(`${tag} drift-supervise inbox emit ${c.specSlug} P${c.phaseIndex + 1} failed (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
   }
   const saveNote = sessionsSaved ? `, saved ${sessionsSaved} session(s) (${autoResolved} auto-resolved by pre-filter)` : "";
   const dedupNote = dedupSkipped ? `, dedup-skipped ${dedupSkipped}` : "";
@@ -7147,7 +7319,7 @@ function shaMatches(full: string, marker: string): boolean {
 // sibling dir, so this never touches a running build), npm ci if deps changed, then exit(0) — systemd
 // Restart=always relaunches the worker on the fresh builder-worker.ts. A clean exit + restart is the
 // safe re-exec; never hot-reload in-process. Returns true when it has triggered an exit path.
-async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
+async function maybeSelfUpdate(activeBuilds: number, forceForUnknownKind: string | null = null): Promise<void> {
   const now = Date.now();
   if (now - lastSelfUpdateCheck < SELF_UPDATE_MIN_INTERVAL_MS) return; // don't thrash
   lastSelfUpdateCheck = now;
@@ -7159,9 +7331,16 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
     selfUpdateSkipReason = `self-update skipped: git fetch failed (${fetched.err.slice(0, 80).trim() || "unknown"})`;
     return;
   }
-  const local = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  // Anchor staleness to what the PROCESS is EXECUTING (boot-time RUNNING_SHA), not a fresh disk
+  // rev-parse HEAD. A prior self-update (or a manual redeploy) can leave the disk already reset
+  // to origin/main while THIS process is still on the older code it was launched from — a disk
+  // HEAD check would return `current` and the box would keep running stale compiled bits until
+  // something else restarted the worker. RUNNING_SHA is captured once at boot (a short sha);
+  // resolve it to a full sha so we can compare + rev-list against origin/main. Fall back to disk
+  // HEAD only if the boot capture failed (empty), preserving pre-existing availability.
+  const running = sh("git", ["rev-parse", RUNNING_SHA || "HEAD"]).out.trim();
   const remote = sh("git", ["rev-parse", "origin/main"]).out.trim();
-  if (!local || !remote || local === remote) {
+  if (!running || !remote || running === remote) {
     selfUpdateSkipReason = null; // fully current → no cause to surface
     return;
   }
@@ -7175,15 +7354,15 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   if (pin && shaMatches(remote, pin)) {
     const via = process.env.WORKER_PIN_SHA?.trim() ? "WORKER_PIN_SHA" : "watchdog";
     console.warn(
-      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${local.slice(0, 8)} (good); fix main to release`,
+      `[self-update] origin/main ${remote.slice(0, 8)} is QUARANTINED by ${via === "watchdog" ? "the watchdog" : via} — holding on ${running.slice(0, 8)} (good); fix main to release`,
     );
-    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${local.slice(0, 8)}`;
+    selfUpdateSkipReason = `self-update skipped: ${via} quarantine on ${remote.slice(0, 8)} — holding on ${running.slice(0, 8)}`;
     return;
   }
 
   // Idle → update on any drift. Busy → only when FAR behind (max-staleness override); a small lag waits for
   // the next idle window so in-flight builds aren't interrupted for one or two commits.
-  const behind = parseInt(sh("git", ["rev-list", "--count", `${local}..${remote}`]).out.trim() || "0", 10);
+  const behind = parseInt(sh("git", ["rev-list", "--count", `${running}..${remote}`]).out.trim() || "0", 10);
 
   // SELF-RESTART ON IDLE (self-restart-on-idle): whenever the box is IDLE (no active build) and behind
   // origin/main, update to latest — regardless of WHAT changed or what is queued. There is no in-flight
@@ -7193,18 +7372,47 @@ async function maybeSelfUpdate(activeBuilds: number): Promise<void> {
   // already gets fresh code via its own per-build worktree), UNLESS a box-impacting change (scripts/ or
   // src/lib/) is FAR behind — then take the max-staleness override rather than let a saturated box run stale.
   if (activeBuilds !== 0) {
-    const changed = sh("git", ["diff", "--name-only", local, remote]).out;
-    if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
-      const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
-      selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
-      return; // busy + (non-box OR small lag) → wait for idle
+    // worker-self-update-force-on-unknown-queued-kind Phase 1: an unambiguous, false-positive-free signal
+    // that the running binary has fallen off the shipped lane surface — a queued `agent_jobs.kind` this
+    // process doesn't know how to dispatch. Override the busy/behind<25 defer here: waiting for idle would
+    // strand that lane indefinitely on a continuously busy box (sacrosanct build/fold jobs keep the box
+    // saturated + the small-lag defer keeps re-firing), which is exactly how the running_sha 3b614c316 box
+    // stranded `agent:ticket-analyze` after PR #1305 shipped. Zero effect on today's steady state (all
+    // shipped kinds are in KNOWN_JOB_KINDS); the override only fires when the queue proves otherwise.
+    if (forceForUnknownKind) {
+      console.warn(
+        `[self-update] forced: queued kind ${forceForUnknownKind} not in running worker's known lanes (${KNOWN_JOB_KINDS.size})`,
+      );
+      // fall through — skip the busy-defer, proceed with reset+exit so the fresh binary can claim it
+    } else {
+      const changed = sh("git", ["diff", "--name-only", running, remote]).out;
+      if (!BOX_RUNTIME_PATHS.test(changed) || behind < 25) {
+        const cause = !BOX_RUNTIME_PATHS.test(changed) ? "non-runtime change" : `only ${behind} behind`;
+        selfUpdateSkipReason = `self-update deferred: busy w/ ${activeBuilds} active build(s), ${cause}`;
+        return; // busy + (non-box OR small lag) → wait for idle
+      }
     }
   }
 
-  const fromTo = `${local.slice(0, 8)}→${remote.slice(0, 8)}`;
+  const fromTo = `${running.slice(0, 8)}→${remote.slice(0, 8)}`;
+
+  // Disk-ahead-of-process: RUNNING_SHA drifted from origin/main but the on-disk checkout is ALREADY at
+  // origin/main (a prior self-update landed the reset + npm ci, then the process failed to restart, or an
+  // operator hard-reset the checkout out-of-band). The reset is redundant — skip it and go straight to the
+  // restart (same process.exit → systemd relaunch) so the fresh on-disk code actually gets loaded. Nothing
+  // else changes: the quarantine guard above already refused any advance ONTO a quarantined tip, and the
+  // crash-loop guard on boot (CRASH_FILE / CRASH_LOOP_MAX) still catches a flap if the disk SHA is bad.
+  const diskHead = sh("git", ["rev-parse", "HEAD"]).out.trim();
+  if (diskHead && diskHead === remote) {
+    console.log(`[self-update] disk already at ${remote.slice(0, 8)} but process on ${running.slice(0, 8)} — restarting without reset`);
+    selfUpdateSkipReason = null;
+    await writeHeartbeat(0, "updating", `self-update ${fromTo} (disk-ahead, restart only)`);
+    process.exit(0);
+  }
+
   console.log(`[self-update] idle + behind (${behind} behind, ${fromTo}) — updating worker code`);
   // Detect a dependency change BEFORE the reset (diff the range we're about to apply).
-  const depsChanged = sh("git", ["diff", "--name-only", local, remote]).out.includes("package-lock.json");
+  const depsChanged = sh("git", ["diff", "--name-only", running, remote]).out.includes("package-lock.json");
 
   const reset = sh("git", ["reset", "--hard", "origin/main"]);
   if (reset.code !== 0) {
@@ -7624,10 +7832,16 @@ function parsePlannerSpecs(parsed: { status: string } | Record<string, unknown> 
         milestone: typeof sp.milestone === "string" ? sp.milestone : undefined,
         intent: String(sp.intent || a.preview || ""),
         gap: typeof sp.gap === "string" ? sp.gap : undefined,
-        // Prerequisite slugs (goal-decomposition-encodes-blockers). Keep only string slugs;
-        // a missing/malformed list → no declared blockers (the spec authors with no Blocked-by).
+        // Prerequisite slugs (goal-decomposition-encodes-blockers). Pia's decomposition sometimes emits
+        // namespaced `goalSlug:specSlug` (or wikilinked / anchored) entries — the build-gating
+        // (areSpecsGoalMates + Kahn sort in src/lib/agent-jobs.ts) resolves each blocker string in
+        // public.specs by exact slug and does NOT split on `:`, so a namespaced entry resolves to no
+        // spec and the gate silently treats it as an external blocker → the dependent builds out of
+        // order (2026-07-07 Sol-goal build shipped M2 before its declared M1 for this reason). Normalize
+        // to plain member slugs at THIS write-path so the DB row's blocked_by is what the gate expects.
+        // A missing/all-junk list → no declared blockers (the spec authors with no Blocked-by).
         blocked_by: Array.isArray(sp.blocked_by)
-          ? (sp.blocked_by as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+          ? normalizePlannerBlockedByList(sp.blocked_by, sp.slug)
           : undefined,
       },
     });
@@ -8323,6 +8537,35 @@ async function runFoldQueueReaperJob(): Promise<void> {
   }
 }
 
+// Fenn's DURABLE operating principles — baked into the fold mandate by
+// agent-mandate-hardening-fold (rolled up from 11 rounds of coaching that never stuck when it was
+// only stored in `agent_instructions`). These are PERMANENT: they ride every fold-batch prompt
+// regardless of what the ephemeral coaching layer says. Each principle names the recurring slip it
+// prevents so a future reader can judge edge cases instead of blindly following the rule.
+const FENN_DURABLE_OPERATING_PRINCIPLES: string[] = [
+  `## Fenn's durable operating principles (permanent — obey before every fold decision)`,
+  `These are baked into your mandate. They are what "fold well" MEANS for you — not one-off coaching. When any principle here conflicts with older transient guidance, THIS section wins.`,
+  ``,
+  `1. **Derive "shipped" from the phase rollup — never \`specs.status\`.** A spec is foldable iff every \`public.spec_phases\` row is \`shipped\` (getRoadmap → deriveSpecCardStatus → rollupPhaseStatus). The stored \`specs.status\` column is vestigial and frequently reads \`planned\`/\`in_progress\` on a genuinely-shipped spec — reading it produces false no-ops. The worker's \`runFoldJob\` already gates on the rollup; do not second-guess a spec it handed you as foldable.`,
+  ``,
+  `2. **Enumerate the FULL owed artifact set BEFORE concluding a fold.** A fold is only done when ALL of these exist:`,
+  `   a. \`grep -r\` the ENTIRE \`docs/brain/\` tree for the folded spec's slug AND for any symbol names it introduced/reverted (function names, prior spec slugs, table/library names). Update EVERY page that still describes the reverted/old concept in present tense — not just the first two or three pages you opened. A sibling page still calling a removed function "now inert" is the recurring completeness slip.`,
+  `   b. \`docs/brain/archive.d/{slug}.md\` written for THIS slug, always — a missing archive line with shipped brain siblings is an INCONSISTENT state, not a clean no-op. Do not skip it because "the brain content already looks present".`,
+  `   c. Shipped-ness re-confirmed from the derived phase rollup (getRoadmap/deriveSpecCardStatus), never the stored \`specs.status\` column, before ever declaring a candidate unfoldable or a no-op.`,
+  ``,
+  `3. **Precision on scope claims in Gotcha/Known-fixes notes.** When you write "both/all/every entry point/caller/site" in a brain note, first \`grep\` the actual callers of the guard function in the merged source and name only the ones that truly call it — e.g. write "authorSpecRowStructured normalizes; the markdown path relies on parseSpec" rather than a blanket "both entry points call normalizeOwnerSlug". A scope overclaim points a future reader at the wrong function; accuracy is the whole point of a fold.`,
+  ``,
+  `4. **Report the actual action.** When the fold PR's diff only creates \`docs/brain/archive.d/{slug}.md\` metadata (the implementation PR already placed the durable knowledge in the correct brain home), report the action explicitly as archive-only. Do NOT claim pages were folded or cross-linked unless the diff actually changed them — a claimed page-fold that the diff doesn't back is the recurring overclaim slip.`,
+  ``,
+  `5. **Emit a structured audit checkpoint per spec.** For every spec you fold, print exactly ONE line to stdout with this shape (so a grader can verify rubric adherence from the log alone, and a mid-job interruption leaves recoverable evidence):`,
+  `     \`[fold-audit] slug=<slug> pages_updated=<page1,page2,…> cross_links=<src→tgt,src→tgt,…> archive=docs/brain/archive.d/<slug>.md action=<full-fold|archive-only>\``,
+  `   Include the same manifest — one entry per slug — in your final JSON \`summary\` field.`,
+  ``,
+  `6. **Retry once on a transient 5xx / API error before exiting.** Zero-output failures from an unhandled 5xx are fully recoverable with a single retry; a bail-on-first-error leaves rubric-compliant work uncredited.`,
+  ``,
+  `7. **NEVER regenerate \`docs/brain/archive.md\` or \`docs/brain/README.md\`.** The board reads \`docs/brain/archive.d/\` directly (getArchive), so regenerating aggregates inside a fold PR is needless AND is the #1 cause of fold PRs going Dirty (every fold re-edits the same lines → the second fold conflicts the moment the first merges). This SUPERSEDES any older ephemeral coaching that told you to run \`npm run brain:index\` — the aggregates are refreshed out-of-band now.`,
+];
+
 function foldBatchPrompt(slugs: string[]): string {
   // spec-fold-from-db-row Phase 1: the spec BODY now lives in `public.specs` + `public.spec_phases`;
   // the worker materializes each row to a gitignored `.box/spec-{slug}.md` (the same shape `build-spec`
@@ -8335,24 +8578,29 @@ function foldBatchPrompt(slugs: string[]): string {
   return [
     `BATCH FOLD-BUILD — fold these owner-verified, shipped specs into the brain and retire them, all in ONE branch. The owner has confirmed each works in production. This is DOCS-ONLY: do NOT rebuild or change any product code.`,
     ``,
+    // agent-mandate-hardening-fold Phase 1 — durable operating principles ride EVERY fold-batch
+    // prompt, ahead of the mechanical steps, so Fenn evaluates each fold through them by default.
+    ...FENN_DURABLE_OPERATING_PRINCIPLES,
+    ``,
     `Spec bodies come from \`public.specs\` + \`public.spec_phases\` (the DB row, per [[spec-fold-from-db-row]]). The worker materialized a read-only copy of each under \`.box/spec-{slug}.md\` (gitignored, regenerated each dispatch) — read those files; do NOT read \`docs/brain/specs/{slug}.md\` (it may not exist post-spec-readers-from-db-retire-parser).`,
     ``,
     `Specs to fold:`,
     slugList,
     ``,
     `For EACH spec above, follow docs/brain/project-management.md "Folding a shipped spec into the brain":`,
-    `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page).`,
+    `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page). Apply principle 2 — enumerate the FULL owed artifact set (grep the whole \`docs/brain/\` tree for the slug + its symbols) before declaring this step done.`,
     `2. Create docs/brain/archive.d/{slug}.md containing EXACTLY ONE line — the per-spec archive entry. archive.md is GENERATED from this directory, so NEVER hand-edit docs/brain/archive.md. Use exactly this shape:`,
     `     - **<the spec's real title>** · verified <today's date — run \`date +%F\`> · → [[lifecycles/<the feature's primary lifecycle or brain home slug>]]`,
     `3. If \`docs/brain/specs/{slug}.md\` exists, \`git rm docs/brain/specs/{slug}.md\` (git history + the DB row are the immutable archive). If it does NOT exist (newly-authored specs post-spec-readers-from-db-retire-parser have no .md), skip the rm — the DB row carries the body and the worker flips its status to \`folded\` after this PR opens.`,
+    `4. Emit the per-spec audit checkpoint line described in principle 5 immediately after finishing the spec's fold, so partial work is recoverable and the outcome is auditable.`,
     ``,
     `Then ONCE for the whole batch:`,
-    `4. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md. The board reads docs/brain/archive.d/ directly (getArchive), so committing the regenerated aggregates inside a fold PR is needless AND the #1 cause of fold PRs going Dirty — every fold re-edits the same archive.md/README lines, so a second fold conflicts the moment the first merges. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), any git-rm'd legacy spec file(s), and the brain pages you folded into. The aggregates are refreshed out-of-band.`,
-    `5. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
+    `5. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md — see principle 7. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), any git-rm'd legacy spec file(s), and the brain pages you folded into. The aggregates are refreshed out-of-band.`,
+    `6. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
     ``,
     `If you cannot determine where a spec's knowledge belongs (no obvious lifecycle/brain home), do NOT guess: still fold the others, and surface that one as a needs_input question naming the slug.`,
     ``,
-    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage legacy spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: …"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
+    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage legacy spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: <per-slug manifest matching principle 5>"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
   ].join("\n");
 }
 
@@ -9888,6 +10136,29 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
 async function runEscalationTriageJob(job: Job) {
   const tag = `[triage:${job.id.slice(0, 8)}]`;
   const wsId = job.workspace_id;
+
+  // june-review-replaces-solver-skeptic-quorum-triage Phase 2 — the solver→skeptic→quorum sweep is
+  // RETIRED as the default escalation triage (June's cs-director-call is the primary; see Phase 1).
+  // The code path is kept so a supervisor can invoke it as an EXPLICIT on-demand exception (an audit
+  // dive on a batch of escalated tickets), but the hourly cron no longer enqueues it. Fail-safe if a
+  // job of this kind is enqueued WITHOUT `on_demand:true` in instructions — never let a stale
+  // enqueue path silently resurrect the routine quorum sweep.
+  let inst: { on_demand?: boolean } = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as { on_demand?: boolean }) : {};
+  } catch {
+    /* fall through — on_demand stays false */
+  }
+  if (!inst.on_demand) {
+    await update(job.id, {
+      status: "failed",
+      error:
+        "triage-escalations quorum sweep is retired as of Phase 2 of june-review-replaces-solver-skeptic-quorum-triage. The hourly cron now enqueues cs-director-call (June-review) per ticket. To run the legacy solver→skeptic→quorum sweep as an on-demand exception, insert an agent_jobs row with instructions={\"on_demand\":true}.",
+    });
+    console.warn(`${tag} refused — quorum sweep retired (no on_demand flag)`);
+    return;
+  }
+
   const { selectEscalatedForTriage, loadTriageBrief, materializeTriageOutcome, recordTriageRun, handUpExhaustedTriage, postTriageNote } = await import(
     "../src/lib/agent-todos/triage"
   );
@@ -11214,6 +11485,26 @@ function deployReviewBrief(inst: DeployReviewInstructions): string {
   ].join("\n");
 }
 
+// Same-session JSON parse-repair re-prompt for Reva's verdict envelope. Mirrors the security-review
+// pattern at securityReviewRepairPrompt (iteration-ingest-async-reports-fix-tooling-69594a) and the
+// spec-test agent's parse-repair (builder-worker.ts:4649): when the first attempt completed real
+// investigative work but flubbed the final JSON shape, re-prompt on the SAME session for ONLY the
+// {decision, signals, reasoning} envelope. The model has all its findings in memory; it just needs to
+// re-emit them in the recognized shape. Re-investigation is explicitly forbidden. Fixes the parked
+// deploy-review job class where the origin's build ran cleanly, Reva investigated, but the terminal
+// envelope was prose/malformed and the runner fail-safed to needs_attention on the first miss.
+function deployReviewRepairPrompt(): string {
+  return [
+    `Your previous message could not be parsed as the deploy-review JSON verdict envelope.`,
+    `Return ONLY one valid JSON object — no prose before or after, no markdown, no commentary. If you must use a code fence the JSON must be the last thing in the message. Reuse the per-signal judgments + reasoning you ALREADY produced; do NOT re-investigate, do NOT re-read files, do NOT re-run git or any other tool.`,
+    ``,
+    `Exact envelope shape:`,
+    `  {"decision":"revert"|"keep"|"escalate","signals":[{"key":"<signature or loop_id>","surface":"<owning route/cron/lib>","caused":true|false,"evidence":"<cited file:line — the causal path or its absence>"}],"reasoning":"<2-4 sentences citing at least one real file:line>"}`,
+    ``,
+    `If you genuinely could not reach a verdict (session ran out of context, blocker, etc.), return ONLY {"decision":"escalate","signals":[],"reasoning":"<one line on why you could not reach a verdict>"} — never guess revert.`,
+  ].join("\n");
+}
+
 function deployReviewPrompt(brief: string): string {
   return [
     `Use the deploy-review skill (cwd is the repo root). You are Reva, the box's Deploy Guardian, on Max — web search on, no API key. You have full brain / \`src/\` / git powers and READ-ONLY prod DB. You NEVER mutate: you investigate, decide, and emit ONE JSON object. The worker (deterministic Node in src/lib/deploy-guardian.ts — applyBoxDeployReview) executes your typed verdict on your response — never re-run the cron, never call revertDeployMerge yourself, never touch deploy_watches.`,
@@ -11310,14 +11601,41 @@ async function runDeployReviewJob(job: Job) {
   try {
     const brief = deployReviewBrief(inst);
     const prompt = deployReviewPrompt(brief);
-    const { session, resultText, isError, raw, usage, model, configDir: drDir } = await runBoxLane(
+    const firstRun = await runBoxLane(
       (cfg, sid) => runDeployReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
+    let { session, resultText, isError, raw, usage, model } = firstRun;
+    const drDir = firstRun.configDir;
     await meterAgentJob(job, drDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: drDir });
 
-    const parsed = extractJson<Record<string, unknown>>(resultText);
-    const verdict = normalizeDeployReviewVerdict(parsed);
+    let parsed = extractJson<Record<string, unknown>>(resultText);
+    let verdict = normalizeDeployReviewVerdict(parsed);
+
+    // Same-session JSON parse-repair (mirrors security-review at 18869 + spec-test at 4649). The prior
+    // Reva pass was a single shot: attempt 1 unparseable → straight to fail-safe (stamp 'unsure' + park
+    // needs_attention). That's the class of parked deploy-review that stalled the origin's build here:
+    // the model completed the causal read (session spent, tokens spent, SessionEnd hooks fired) but the
+    // terminal envelope was prose / a malformed brace, and re-running the whole investigation from
+    // scratch would waste the spend AND often produce the same shape (the model's tendency, not the
+    // input's). Instead, re-prompt on the SAME session for ONLY the JSON envelope — the model already
+    // has its per-signal judgments in context; it just needs to re-emit them in the recognized shape.
+    // Pinned to the same account (drDir) — a --resume can only land on the account that owns the session.
+    // Skipped when there is no session id (nothing to --resume against) or the first attempt landed a
+    // valid verdict. On repair success we ALSO re-persist the session/account (mirrors security-review's
+    // onRun) so the DB row stays coherent for any downstream re-drive.
+    if (!verdict && session) {
+      console.warn(`${tag} unparseable verdict — same-session parse-repair (attempt 2, JSON envelope only)`);
+      const repair = await runDeployReviewClaude(deployReviewRepairPrompt(), session, REPO_DIR, drDir ?? undefined, job.id);
+      await meterAgentJob(job, drDir ?? undefined, repair.usage, repair.model);
+      if (repair.session) await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: drDir });
+      session = repair.session ?? session;
+      resultText = repair.resultText;
+      raw = repair.raw;
+      isError = repair.isError; // if the repair errored but produced a verdict, we still apply it below (matches security-review semantics)
+      parsed = extractJson<Record<string, unknown>>(resultText);
+      verdict = normalizeDeployReviewVerdict(parsed);
+    }
     console.log(`${tag} claude finished — decision: ${verdict?.decision ?? "(none)"} · isError=${isError}`);
 
     // Import Phase-3 mutator + Phase-4 fail-safe once for every branch below.
@@ -11327,14 +11645,15 @@ async function runDeployReviewJob(job: Job) {
     if (!verdict) {
       // Phase 4 fail-safe (never revert without a judgment): stamp the watch 'unsure' + escalate. The
       // atomic pending-guard makes this idempotent — a concurrent apply/failsafe/redriven-job no-ops.
-      // Then the job parks needs_attention so the lane frees and a human sees the error.
-      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session" });
+      // Then the job parks needs_attention so the lane frees and a human sees the error. Only reached
+      // when the same-session parse-repair above ALSO failed (or no session existed to --resume).
+      const fs = await failsafeStampWatchUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Reva box session (after parse-repair)" });
       await update(job.id, {
         status: "needs_attention",
         error: "deploy-review returned no parseable verdict",
         log_tail: `${fs.stamped ? "fail-safe: watch stamped 'unsure' + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`}\n\n${raw}`.slice(-2000),
       });
-      console.warn(`${tag} unparseable verdict — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
+      console.warn(`${tag} unparseable verdict (after parse-repair) — fail-safe ${fs.stamped ? "applied" : "no-op"} · needs_attention`);
       return;
     }
 
@@ -11428,6 +11747,13 @@ interface CsDirectorCallInstructions {
   // even if the run row was deleted between enqueue and claim (defensive; the same guard the
   // deploy-review runner uses for `watch_id`).
   ticket_id?: string;
+  // june-review-replaces-solver-skeptic-quorum-triage Phase 2 — the id of the FIRST June-review
+  // triage_runs row (verdict='june_review') that this call is second-opining. Set only when the
+  // job was enqueued via `enqueueJuneSecondOpinion` (src/lib/cs-director-second-opinion.ts) as an
+  // on-demand exception. Present ⇒ the runner loads the first review into the brief, frames the
+  // prompt as a fresh-eyes SECOND opinion (not the primary triage), and records the resulting
+  // triage_runs row with `verdict='second_opinion'`.
+  second_opinion_of?: string;
 }
 
 type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
@@ -11466,10 +11792,45 @@ function normalizeCsDirectorVerdict(raw: unknown): CsDirectorVerdict | null {
 // + why quorum missed), and the customer/subs/orders slice loadTriageBrief already builds. Kept inline
 // here (mirroring runDeployReviewJob) so Phase 1 doesn't introduce a src/lib/cs-director.ts module the
 // Phase 2 mutator will otherwise design around.
-async function loadCsDirectorCallBrief(workspaceId: string, ticketId: string, triageRunId: string | null): Promise<string> {
+async function loadCsDirectorCallBrief(
+  workspaceId: string,
+  ticketId: string,
+  triageRunId: string | null,
+  secondOpinionOfRunId: string | null = null,
+): Promise<string> {
   const { loadTriageBrief } = await import("../src/lib/agent-todos/triage");
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
+
+  // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
+  // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
+  // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
+  // first had. This is the on-demand exception per june-review-replaces-solver-skeptic-quorum-
+  // triage Phase 2 — never a routine second run.
+  if (secondOpinionOfRunId) {
+    try {
+      const { data: first } = await db
+        .from("triage_runs")
+        .select("id, decision, verdict, outcome, solver_transcript, created_at")
+        .eq("id", secondOpinionOfRunId)
+        .maybeSingle();
+      parts.push("");
+      if (first) {
+        parts.push(
+          `FIRST JUNE REVIEW (id ${first.id}, ${String(first.created_at ?? "").slice(0, 19)}) — you are second-opining THIS verdict:`,
+        );
+        parts.push(`  verdict: ${first.verdict ?? "(none)"} · decision: ${first.decision ?? "(none)"}`);
+        parts.push(`  outcome/reasoning: ${String(first.outcome ?? "").slice(0, 1200)}`);
+        if (first.solver_transcript) {
+          parts.push(`  first-review transcript: ${JSON.stringify(first.solver_transcript).slice(0, 1600)}`);
+        }
+      } else {
+        parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: not found (may have been deleted).`);
+      }
+    } catch (e) {
+      parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: read failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // Resolution-events ledger — the M1/M2 write-ahead history for every prior orchestrator turn on
   // this ticket. Cited so the CS Director sees what confidence + problem + verified_outcome each turn
@@ -11527,9 +11888,12 @@ async function loadCsDirectorCallBrief(workspaceId: string, ticketId: string, tr
   return parts.join("\n");
 }
 
-function csDirectorCallPrompt(brief: string): string {
+function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): string {
+  const roleLine = secondOpinion
+    ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`
+    : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`;
   return [
-    `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the THIRD RUNG of the escalation ladder: box-escalation-triage's solver→skeptic quorum could not vote on this ticket, so it landed with you INSTEAD of routing straight to the founder. You investigate READ-ONLY and emit ONE JSON object — a typed verdict — and the WORKER (deterministic Node) materializes it in Phase 2 of this spec. You NEVER mutate anything from here.`,
+    roleLine,
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor will fire through executeSonnetDecision.`,
@@ -11558,15 +11922,22 @@ async function runCsDirectorCallJob(job: Job) {
   // deploy-review runner uses for its watch_id anchor.
   const ticketId = inst.ticket_id;
   const triageRunId = inst.triage_run_id ?? null;
+  // Phase 2 of june-review-replaces-solver-skeptic-quorum-triage — when present, this call is an
+  // on-demand second-opinion review of the named first `triage_runs` row (verdict='june_review').
+  // The brief includes the first review, the prompt frames the call as fresh-eyes second opinion,
+  // and the triage_runs row we write below carries verdict='second_opinion'.
+  const secondOpinionOfRunId = inst.second_opinion_of ?? null;
   if (!ticketId) {
     await update(job.id, { status: "failed", error: "cs-director-call job missing ticket_id in instructions" });
     return;
   }
-  console.log(`${tag} judging ticket ${ticketId.slice(0, 8)}${triageRunId ? ` · triage_run=${triageRunId.slice(0, 8)}` : ""}`);
+  console.log(
+    `${tag} judging ticket ${ticketId.slice(0, 8)}${triageRunId ? ` · triage_run=${triageRunId.slice(0, 8)}` : ""}${secondOpinionOfRunId ? ` · second_opinion_of=${secondOpinionOfRunId.slice(0, 8)}` : ""}`,
+  );
 
   try {
-    const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId);
-    const prompt = csDirectorCallPrompt(brief);
+    const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId, secondOpinionOfRunId);
+    const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId);
     const { session, resultText, isError, raw, usage, model, configDir: csDir } = await runBoxLane(
       (cfg, sid) => runCsDirectorCallClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
@@ -11611,6 +11982,10 @@ async function runCsDirectorCallJob(job: Job) {
           decision: verdict.decision,
           remedy: verdict.remedy ?? null,
           spec_seed: verdict.spec_seed ?? null,
+          // On-demand second-opinion runs (june-review-replaces-solver-skeptic-quorum-triage
+          // Phase 2) carry the first review's id so the audit feed can pair the two verdicts.
+          // Null on the default primary June review.
+          second_opinion_of: secondOpinionOfRunId,
           // autonomous:false — Phase 1 records only; Phase 2 flips true when the executor fires the
           // in-leash remedy without asking the CEO. The audit shape stays consistent across the phases.
           autonomous: false,
@@ -11621,6 +11996,47 @@ async function runCsDirectorCallJob(job: Job) {
       // recordDirectorActivity is best-effort + never-throws, so this only catches a dynamic-import
       // failure. The verdict still lands on the log_tail so an operator can recover it.
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
+    // june-review-replaces-solver-skeptic-quorum-triage Phase 1 — also record the verdict to
+    // `triage_runs` so the escalation-triage audit slice reflects the leaner June-review path (no
+    // solver-skeptic-quorum sweep produced this call; June's review IS the triage). `verdict` is
+    // the sentinel string `june_review` so a reader can distinguish June-review rows from the
+    // legacy `agree|revise|reject|no_quorum` quorum-verdict rows. `solver_transcript` carries
+    // June's structured verdict verbatim (the "reviewer" transcript); `skeptic_transcript` stays
+    // null (no adversarial pass). `materialized=true` reflects that the audit landed AND the
+    // existing worker path (director_activity + digest / dashboard_notifications on
+    // escalate_founder) fires against it. Best-effort — the audit row on `director_activity` is
+    // already the primary trail; a triage_runs write failure never rolls back the completed job.
+    try {
+      // Phase 2 — verdict is 'second_opinion' when the call was routed through
+      // `enqueueJuneSecondOpinion` (instructions carry `second_opinion_of`); otherwise it's the
+      // primary June review from Phase 1. `solver_transcript` carries a `second_opinion_of` back-
+      // pointer to the first run so a reader can trace the pair.
+      const runVerdict = secondOpinionOfRunId ? "second_opinion" : "june_review";
+      const { error: trErr } = await db.from("triage_runs").insert({
+        id: triageRunId ?? undefined,
+        workspace_id: job.workspace_id,
+        job_id: job.id,
+        ticket_id: ticketId,
+        decision: verdict.decision,
+        verdict: runVerdict,
+        materialized: true,
+        outcome: verdict.reasoning.slice(0, 2000),
+        solver_transcript: {
+          reviewer: "cs_director",
+          decision: verdict.decision,
+          reasoning: verdict.reasoning,
+          remedy: verdict.remedy ?? null,
+          spec_seed: verdict.spec_seed ?? null,
+          second_opinion_of: secondOpinionOfRunId,
+        },
+        skeptic_transcript: null,
+        group_id: null,
+      });
+      if (trErr) console.warn(`${tag} triage_runs insert failed: ${trErr.message}`);
+    } catch (e) {
+      console.warn(`${tag} triage_runs insert threw:`, e instanceof Error ? e.message : e);
     }
 
     // Phase 2 of cs-director-storyline-digests-to-founder-with-bidirectional-reply — route
@@ -11703,6 +12119,557 @@ async function runCsDirectorCallJob(job: Job) {
     }
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// ── Box-hosted playbook-compiler lane (playbook-compiler-becomes-box-agent-mining-full-history P1) ──
+// A kind='playbook-compile' job is ONE full-history sweep the CS-supervised compiler agent runs on
+// a workspace. Enqueued by the Inngest cron (`src/lib/inngest/playbook-compiler.ts`) OR the manual
+// `playbook-compiler/run` event. The runner reads the FULL history (tickets + ticket_analyses over
+// the whole workspace — NO 30-day floor) via `loadPlaybookCompileBrief`, dispatches a Max
+// `claude -p` (playbook-compile skill) that emits ONE JSON verdict {trees, reasoning}, and
+// upserts each tree into `compiled_trees` via `applyBoxPlaybookCompile` (idempotent — UNIQUE
+// (workspace_id, tree_key)). Phase 2 will read this store to propose data-grounded playbooks +
+// playbook_steps (is_active=false). The runner ALSO writes ONE `director_activity` row
+// (director_function='cs', action_kind='compiled_trees_extracted') carrying the agent's overall
+// reasoning + a metadata summary — the CEO/audit trail sees WHAT the compiler decided + WHY. Read-
+// only against everything except `compiled_trees` and `director_activity` (both mutated by the
+// deterministic worker, never by the agent — north star: CEO → role agent → tool).
+async function runPlaybookCompileClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "playbook-compile", sandbox: "max", timeout: PLAYBOOK_COMPILE_TIMEOUT_MS });
+}
+
+function playbookCompilePrompt(workspaceId: string, brief: string): string {
+  return [
+    `Use the playbook-compile skill (cwd is the repo root). You are the CS-supervised playbook-compiler agent on Max — no ANTHROPIC_API_KEY, no external model API. You investigate READ-ONLY and emit ONE JSON verdict; the WORKER (deterministic Node) upserts your trees into \`compiled_trees\` and writes ONE \`director_activity\` row summarizing.`,
+    ``,
+    `WORKSPACE: ${workspaceId}`,
+    ``,
+    brief,
+    ``,
+    `PROCEDURE:`,
+    `  1. For each precomputed cluster at-or-above support_min, judge whether it is a coherent "when X → do Y" TREE (support alone is not enough — an incoherent cluster is signal AGAINST proposing).`,
+    `  2. Derive the intent distribution per tree from the ticket_analyses issue tags on the cluster's sample tickets — this is what Phase 2 will use for playbook.trigger_intents, so ground it.`,
+    `  3. Derive the resolution_sequence per tree from the ordered action shapes the orchestrator returned — Phase 2 will materialize playbook_steps from this.`,
+    `  4. Emit ONE JSON verdict of shape {trees, reasoning}.`,
+    ``,
+    `Reuse each cluster's \`tree_key\` verbatim from the brief — the store's UNIQUE (workspace_id, tree_key) constraint anchors idempotency on this. The runner defensively normalizes, but a mis-typed key reads sloppy in the audit trail.`,
+    ``,
+    `Final message = ONLY one JSON object, no prose before or after:`,
+    `  {"trees":[{"tree_key":"...","problem":"...","action_types":["...","..."],"support":N,"sample_ticket_ids":["..."],"intent_distribution":{"intent":N},"resolution_sequence":[{"action_type":"...","notes":"..."}],"evidence":{"resolution_event_ids":["..."],"ticket_analyses_ids":["..."]},"reasoning":"..."}],"reasoning":"..."}`,
+    `Empty is a valid verdict: {"trees":[],"reasoning":"no tree at or above support_min=<N>"}.`,
+  ].join("\n");
+}
+
+async function runPlaybookCompileJob(job: Job) {
+  const tag = `[playbook-compile:${job.id.slice(0, 8)}]`;
+  try {
+    const { loadPlaybookCompileBrief, applyBoxPlaybookCompile, normalizePlaybookCompileVerdict } =
+      await import("../src/lib/playbook-compiler");
+    const brief = await loadPlaybookCompileBrief(db, job.workspace_id);
+    console.log(
+      `${tag} brief loaded — resolution_rows=${brief.resolutionRows.length} analyses=${brief.analysisRows.length} clusters=${brief.precomputedClusters.length} support_min=${brief.supportMin}`,
+    );
+
+    // Fast path: no mineable history at all → complete with a zero-trees director_activity trail.
+    // Same idempotency contract — a re-run in this state persists no rows, writes one activity row.
+    if (brief.resolutionRows.length === 0 && brief.analysisRows.length === 0) {
+      await applyBoxPlaybookCompile(db, {
+        workspaceId: job.workspace_id,
+        jobId: job.id,
+        verdict: { trees: [], reasoning: "no mineable history (0 confirmed resolution events, 0 ticket_analyses)" },
+      });
+      await update(job.id, { status: "completed", log_tail: "no mineable history — 0 trees" });
+      console.log(`${tag} no mineable history → 0 trees`);
+      return;
+    }
+
+    const prompt = playbookCompilePrompt(job.workspace_id, brief.headerText);
+    const { session, resultText, isError, raw, usage, model, configDir: pcDir } = await runBoxLane(
+      (cfg, sid) => runPlaybookCompileClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, pcDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: pcDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizePlaybookCompileVerdict(parsed);
+
+    if (!verdict) {
+      // No parseable verdict → surface as needs_attention so a human can eyeball; do NOT write a
+      // director_activity row (a lie in the audit trail is worse than a gap). Same guardrail
+      // cs-director-call uses for its unparseable-verdict fallback.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "playbook-compile returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    const applyResult = await applyBoxPlaybookCompile(db, {
+      workspaceId: job.workspace_id,
+      jobId: job.id,
+      verdict,
+    });
+
+    const summary = [
+      `trees_upserted=${applyResult.treesUpserted}/${verdict.trees.length}`,
+      verdict.reasoning ? verdict.reasoning : "",
+      applyResult.reasonSkipped.length ? `skipped: ${applyResult.reasonSkipped.slice(0, 3).join("; ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was persisted. Complete with the
+      // error surfaced so a human can eyeball — the persisted rows are the trail.
+      await update(job.id, {
+        status: "completed",
+        error: "playbook-compile session errored (verdict persisted)",
+        log_tail: summary.slice(-2000),
+      });
+      console.log(`${tag} ${summary.replace(/\n/g, " · ")} (session errored — recorded + persisted)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} ${summary.replace(/\n/g, " · ")}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// ── Ticket analyzer (ticket-analyzer-becomes-box-agent-under-june Phase 1) ────
+// A kind='ticket-analyze' job is ONE Max `claude -p` session per ticket that grades the AI's
+// conversation window against the QC rubric, emits a JSON verdict { score, issues, action_items,
+// summary }, and the WORKER (deterministic Node) then runs applyAnalyzerVerdict — post-grader
+// cancel-claim detection, ticket_analyses insert, tickets.last_analyzed_at bump, and
+// applySeverityActions (all the do_not_reply / ai_disabled / analyzer_locked / agent_intervened /
+// active_playbook_id gates preserved). Replaces the prior inline `fetch('.../v1/messages', …)` in
+// src/lib/ticket-analyzer.ts — the analyzer is now a supervised agent under 💬 June (CS Director),
+// no direct Anthropic call anywhere in the analyzer code path (verifiable via
+// `grep api.anthropic.com src/lib/ticket-analyzer.ts` returning empty).
+async function runTicketAnalyzeClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "ticket-analyze", sandbox: "max", timeout: TICKET_ANALYZE_TIMEOUT_MS });
+}
+
+interface TicketAnalyzeInstructions {
+  ticket_id?: string;
+  trigger?: "auto_close" | "manual_close" | "reopen_close" | "manual";
+}
+
+// The verdict shape the box session emits. Mirrors the AnalysisResult interface in
+// src/lib/ticket-analyzer.ts (kept loose here — normalizeAnalyzerVerdict below coerces the shape
+// applyAnalyzerVerdict expects, never trusting the raw parse). A missing/invalid score is a hard
+// fail (the runner marks the job needs_attention so a human eyeballs the transcript) — the runner
+// NEVER inserts a ticket_analyses row on a score it can't trust; same "silent 0-check approved row
+// is worse than an honest error" guardrail spec-test uses.
+interface TicketAnalyzeVerdict {
+  score: number;
+  issues: { type: string; description: string }[];
+  action_items: { priority: string; description: string }[];
+  summary: string;
+}
+
+function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const score = typeof r.score === "number" ? r.score : Number(r.score);
+  if (!Number.isFinite(score)) return null;
+  const clamped = Math.min(10, Math.max(1, Math.round(score)));
+  const issues = Array.isArray(r.issues)
+    ? (r.issues as unknown[])
+        .map((i) => {
+          const o = (i || {}) as Record<string, unknown>;
+          const type = typeof o.type === "string" ? o.type : "";
+          const description = typeof o.description === "string" ? o.description : "";
+          return type ? { type, description } : null;
+        })
+        .filter((x): x is { type: string; description: string } => !!x)
+    : [];
+  const action_items = Array.isArray(r.action_items)
+    ? (r.action_items as unknown[])
+        .map((i) => {
+          const o = (i || {}) as Record<string, unknown>;
+          const priority = typeof o.priority === "string" ? o.priority : "medium";
+          const description = typeof o.description === "string" ? o.description : "";
+          return description ? { priority, description } : null;
+        })
+        .filter((x): x is { priority: string; description: string } => !!x)
+    : [];
+  const summary = typeof r.summary === "string" ? r.summary : "";
+  return { score: clamped, issues, action_items, summary };
+}
+
+// The prompt the box session sees: the pre-built system rubric (calibration rules + policies +
+// current-date context) followed by the pre-built user turn (window + guidance + playbook context +
+// conversation) prepareAnalyzerRun already assembled. The session's ONLY job is to return the JSON
+// verdict — no investigation, no tool calls, no Read/Grep. Kept intentionally spare (mirrors the
+// prior inline Anthropic call's shape) so the box lane's grade is equivalent to the pre-conversion
+// scores (spec Phase 1 verification: "A replay of recent tickets yields equivalent scores/severity
+// actions").
+function ticketAnalyzePrompt(system: string, userMsg: string): string {
+  return [
+    `You are the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director), Phase 1 of docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md.`,
+    `Score the AI's behavior in the conversation window below against the QC rubric. Do NOT investigate — no Read/Grep/tool use is needed; grade only what the transcript shows. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `--- GRADER SYSTEM (rubric + calibration rules + active policies) ---`,
+    system,
+    ``,
+    `--- USER TURN ---`,
+    userMsg,
+    ``,
+    `Final message = ONLY one JSON object, no prose around it:`,
+    `{"score":<integer 1-10>,"issues":[{"type":"<one of the issue types above>","description":"..."}],"action_items":[{"priority":"high|medium|low","description":"..."}],"summary":"<1-2 sentences>"}`,
+  ].join("\n");
+}
+
+async function runTicketAnalyzeJob(job: Job) {
+  const tag = `[analyze:${job.id.slice(0, 8)}]`;
+  let inst: TicketAnalyzeInstructions = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as TicketAnalyzeInstructions) : {};
+  } catch {
+    /* fall through — the guard below fails the job if ticket_id is missing */
+  }
+  const ticketId = inst.ticket_id;
+  const trigger = inst.trigger ?? "auto_close";
+  if (!ticketId) {
+    await update(job.id, { status: "failed", error: "ticket-analyze job missing ticket_id in instructions" });
+    return;
+  }
+  console.log(`${tag} grading ticket ${ticketId.slice(0, 8)} · trigger=${trigger}`);
+
+  try {
+    // Feeder-side gates + prompt build. prepareAnalyzerRun handles do_not_reply / ai_disabled /
+    // analyzer_locked / merged_into / skip_tag / no_messages_in_window / no_ai_messages_in_window
+    // and returns { ok: false, reason } for each — the runner treats these as SUCCESSFUL skips
+    // (the agent correctly decided not to grade) and stamps last_analyzed_at so the same ticket
+    // isn't re-queued next cron tick.
+    const { prepareAnalyzerRun, applyAnalyzerVerdict } = await import("../src/lib/ticket-analyzer");
+    const prep = await prepareAnalyzerRun(ticketId, trigger);
+    if (!prep.ok) {
+      // Stamp last_analyzed_at on skip so the cron doesn't re-queue the same ticket next tick.
+      // Same behavior the old cron did after an inline analyzeTicket skip.
+      await db.from("tickets").update({ last_analyzed_at: new Date().toISOString() }).eq("id", ticketId);
+      await update(job.id, { status: "completed", log_tail: `skipped: ${prep.reason}` });
+      console.log(`${tag} skipped (${prep.reason})`);
+      return;
+    }
+
+    const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg), sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizeTicketAnalyzeVerdict(parsed);
+    console.log(`${tag} claude finished — score=${verdict?.score ?? "(none)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // No parseable verdict → needs_attention so a human eyeballs the transcript, and DO NOT
+      // write a ticket_analyses row (a made-up score in the audit trail is worse than a gap).
+      // Same guardrail cs-director-call + deploy-review use for unparseable verdicts.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "ticket-analyze returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    // Deterministic apply — post-grader cancel-claim detection, ticket_analyses insert,
+    // last_analyzed_at bump, applySeverityActions (with all the do_not_reply / ai_disabled /
+    // analyzer_locked / agent_intervened / active_playbook_id gates preserved via compare-and-
+    // set inside applySeverityActions).
+    const applied = await applyAnalyzerVerdict(
+      prep.prepared,
+      { score: verdict.score, issues: verdict.issues, action_items: verdict.action_items, summary: verdict.summary },
+      usage
+        ? {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_tokens: usage.cache_creation_input_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+            model,
+          }
+        : { model },
+    );
+
+    // Phase 2 of ticket-analyzer-becomes-box-agent-under-june: record the verdict to
+    // `director_activity` (director_function='cs', action_kind='ticket_analyzed') so the CS
+    // Director's (💬 June) activity feed / EOD recap surfaces every analyze decision + its
+    // reasoning. Idempotent-safe on job_id via recordDirectorActivity's swallow-and-warn shape
+    // (a dynamic-import failure never rolls back the applied ticket_analyses row). autonomous:true
+    // — this is a supervised worker verdict, not a CEO-approved action.
+    try {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "ticket_analyzed",
+        specSlug: null,
+        reason: (applied.analysis.summary || `Score ${applied.analysis.score}/10`).slice(0, 4000),
+        metadata: {
+          job_id: job.id,
+          ticket_id: ticketId,
+          analysis_id: applied.analysis_id ?? null,
+          score: applied.analysis.score,
+          issues_types: applied.analysis.issues.map((i) => i.type),
+          ai_message_count: applied.ai_message_count,
+          trigger,
+          autonomous: true,
+          phase: 2,
+        },
+      });
+    } catch (e) {
+      console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
+    const summary = [
+      `score=${applied.analysis.score}/10`,
+      applied.analysis.summary ? applied.analysis.summary : "",
+      applied.analysis_id ? `analysis=${applied.analysis_id.slice(0, 8)}` : "",
+      applied.analysis.issues.length ? `issues: ${applied.analysis.issues.map((i) => i.type).join(", ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was applied. Complete with the
+      // error surfaced so a human can eyeball — the ticket_analyses row isn't silently rolled back.
+      // Same rule cs-director-call + deploy-review use for verdict-recorded-but-session-errored.
+      await update(job.id, { status: "completed", error: "ticket-analyze session errored (verdict applied)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} score=${applied.analysis.score} (session errored — verdict applied)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} score=${applied.analysis.score}`);
+  } catch (e) {
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// ── Box-hosted prompt-review lane (prompt-auto-review-becomes-box-agent-under-june Phase 1) ────
+// A kind='prompt-review' job is ONE review of ONE proposed sonnet_prompt. The Inngest cron
+// (src/lib/inngest/sonnet-prompt-auto-review.ts) enqueues these daily — one row per proposal —
+// REPLACING the retired direct `fetch("https://api.anthropic.com/v1/messages")` that used to fire
+// straight from the cron (the anti-pattern the operational-rules § North star names: a raw-API
+// cron optimizing a proxy with no objective-owner). The reviewer is now a supervised box-session
+// agent under June (CS Director), same discipline as ticket-improve / triage-escalations /
+// cs-director-call.
+//
+// The runner reads the proposal (by spec_slug = the sonnet_prompts.id) + assembles the SAME
+// review inputs `loadReviewInputs` used to hand the direct-API path (similar approved prompts,
+// active policies, source-pattern tickets, voice docs), concatenates buildSystemPrompt +
+// buildUserPrompt into the box prompt, runs the Max session, parses the verdict via
+// parseDecision, then hands the typed verdict to applyDecision — which writes the SAME
+// auto_decision fields (status, auto_decision, auto_decision_reason, auto_decision_model,
+// auto_decision_confidence) with the SAME REJECT_FLOOR / ACCEPT_FLOOR / daily-cap safety guards
+// and NEVER queues to humans. No code path here touches api.anthropic.com.
+async function runPromptReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "prompt-review", sandbox: "max", timeout: PROMPT_REVIEW_TIMEOUT_MS });
+}
+
+async function runPromptReviewJob(job: Job) {
+  const tag = `[prompt-review:${job.id.slice(0, 8)}]`;
+  // spec_slug carries the sonnet_prompts.id (set by the cron's enqueue — matches spec-review's
+  // per-spec anchor shape). Missing → the enqueue drifted; fail the job with a clear reason
+  // rather than silently claiming a phantom proposal.
+  const proposalId = job.spec_slug;
+  if (!proposalId) {
+    await update(job.id, { status: "failed", error: "prompt-review job missing sonnet_prompts.id in spec_slug" });
+    return;
+  }
+
+  const {
+    loadReviewInputs,
+    buildSystemPrompt,
+    buildUserPrompt,
+    parseDecision,
+    applyDecision,
+    acceptsRemainingToday,
+    REVIEW_MODEL,
+    DEFAULT_DAILY_CAP,
+  } = await import("../src/lib/sonnet-prompt-auto-review");
+
+  try {
+    // ── Pre-flight: proposal still reviewable + workspace still opted in? ─────────
+    // A slow enqueue → dispatch gap could see the proposal already reviewed (via a
+    // manual override or a duplicate cron run), or the workspace toggled off. Bail
+    // cleanly with a completed status + no-op reason so the audit trail shows why
+    // — never re-review something that already has an auto_decision.
+    const { data: proposal, error: pErr } = await db
+      .from("sonnet_prompts")
+      .select("id, workspace_id, title, content, category, source_pattern_id, derived_from_ticket_id, status, auto_decision")
+      .eq("id", proposalId)
+      .eq("workspace_id", job.workspace_id)
+      .maybeSingle();
+    if (pErr) {
+      await update(job.id, { status: "failed", error: `proposal_load_failed: ${pErr.message}` });
+      return;
+    }
+    if (!proposal) {
+      await update(job.id, { status: "completed", log_tail: `no-op: proposal ${proposalId} not found (deleted / cross-workspace)` });
+      console.log(`${tag} no-op: proposal not found`);
+      return;
+    }
+    if (proposal.status !== "proposed" || proposal.auto_decision !== null) {
+      await update(job.id, { status: "completed", log_tail: `no-op: proposal already decided (status=${proposal.status}, auto_decision=${proposal.auto_decision ?? "null"})` });
+      console.log(`${tag} no-op: already decided`);
+      return;
+    }
+
+    const { data: ws, error: wsErr } = await db
+      .from("workspaces")
+      .select("sonnet_auto_review_enabled, sonnet_auto_review_daily_cap")
+      .eq("id", job.workspace_id)
+      .maybeSingle();
+    if (wsErr) {
+      await update(job.id, { status: "failed", error: `workspace_load_failed: ${wsErr.message}` });
+      return;
+    }
+    if (!ws?.sonnet_auto_review_enabled) {
+      await update(job.id, { status: "completed", log_tail: "no-op: sonnet_auto_review_enabled=false" });
+      console.log(`${tag} no-op: disabled`);
+      return;
+    }
+    const dailyCap = (ws.sonnet_auto_review_daily_cap as number | null) ?? DEFAULT_DAILY_CAP;
+
+    // ── Assemble the review inputs + the box prompt ─────────────────────────────
+    const inputs = await loadReviewInputs(db, job.workspace_id, proposal);
+    const prompt = [
+      buildSystemPrompt(),
+      "",
+      buildUserPrompt(inputs),
+      "",
+      // Belt-and-braces: buildSystemPrompt already says "Return only the JSON." — repeated here
+      // as the final line so the box session emits ONLY the JSON object as its final message
+      // (extractJson tolerates surrounding prose, but discipline keeps parse_failed to zero).
+      `Final message = ONLY the JSON object described in the schema above. No markdown fences, no commentary outside the object.`,
+    ].join("\n");
+
+    // ── Run the Max session (June's supervised agent) ───────────────────────────
+    const { session, resultText, isError, raw, usage, model, configDir: prDir } = await runBoxLane(
+      (cfg, sid) => runPromptReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, prDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: prDir });
+
+    // Parse the box's final message. parseDecision (from sonnet-prompt-auto-review.ts) is the
+    // same validator the retired direct-API path used — a shape it rejects gets no auto_decision
+    // write (never queue to humans; the proposal will resurface on the next cron tick).
+    const parsed = parseDecision(resultText);
+    console.log(`${tag} claude finished — decision: ${parsed?.decision ?? "(none)"} · isError=${isError}`);
+
+    // Phase 2 supervision surface — every path below (unparseable, guardrail downgrade, clean
+    // apply) writes ONE row to `director_activity` under the CS function (June's charge). She
+    // owns "conversation-rule quality"; the agent optimizes "review each proposal well" —
+    // hitting a rail escalates, never executes silently (operational-rules § North star).
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+
+    if (!parsed) {
+      // Rail hit: the agent's final message didn't parse as a verdict. Escalate to June via
+      // director_activity so a routinely-monitored surface (her activity feed) shows the miss,
+      // and park the job as failed so the CS lane doesn't silently drop it.
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "prompt_review_escalated",
+        specSlug: proposalId,
+        reason: "prompt-review agent produced no parseable verdict — escalated to June rather than silently rejecting",
+        metadata: {
+          job_id: job.id,
+          proposal_id: proposalId,
+          raw_tail: raw.slice(-1000),
+          reason_code: "unparseable_verdict",
+          autonomous: false,
+        },
+      });
+      await update(job.id, {
+        status: "failed",
+        error: "prompt-review returned no parseable verdict",
+        log_tail: raw.slice(-2000),
+      });
+      console.warn(`${tag} unparseable verdict — escalated to June`);
+      return;
+    }
+
+    // Daily-cap accounting — same query the retired reviewWorkspace ran per-proposal, so a
+    // sequence of prompt-review jobs across a single 24h window respects the workspace's
+    // accept ceiling (past the cap, an accept downgrades to reject via applyDecision).
+    const remaining = await acceptsRemainingToday(db, job.workspace_id, dailyCap);
+    const alreadyAcceptedToday = Math.max(0, dailyCap - remaining);
+
+    // ── applyDecision writes the auto_decision fields exactly as today ─────────
+    // status, auto_decision, auto_decision_reason, auto_decision_model,
+    // auto_decision_confidence — all written unchanged. REJECT_FLOOR /
+    // ACCEPT_FLOOR / daily-cap / supersede-not-delete / audit-first ordering
+    // are all inside applyDecision; this runner passes the parsed verdict
+    // through verbatim.
+    const applied = await applyDecision(
+      db,
+      job.workspace_id,
+      proposal,
+      parsed,
+      {
+        model: model || REVIEW_MODEL,
+        usage,
+        source: "cron",
+      },
+      { dailyCap, alreadyAcceptedToday },
+    );
+
+    // Phase 2 — record the verdict + safety outcome to `director_activity` under the CS function.
+    // A guardrail hit (`forcedToHumanReview === true`) is a rail-escalation to June (not silent
+    // execution): the action_kind + metadata.reason_code make the escalation legible on her feed
+    // + EOD recap. A clean apply lands as `prompt_review_applied` — same audit surface June
+    // supervises the rest of her workers on ([[../docs/brain/tables/director_activity.md]]).
+    const escalated = applied.forcedToHumanReview === true;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: "cs",
+      actionKind: escalated ? "prompt_review_escalated" : "prompt_review_applied",
+      specSlug: proposalId,
+      reason: parsed.reasoning
+        ? `${parsed.reasoning}${applied.reason ? `\n[SAFETY] ${applied.reason}` : ""}`.slice(0, 4000)
+        : (applied.reason || `prompt-review verdict=${applied.finalDecision}`).slice(0, 4000),
+      metadata: {
+        job_id: job.id,
+        proposal_id: proposalId,
+        raw_decision: parsed.decision,
+        final_decision: applied.finalDecision,
+        confidence: parsed.confidence,
+        applied: applied.applied,
+        forced_to_human_review: escalated,
+        safety_reason_code: applied.reason ?? null,
+        decision_row_id: applied.decisionRowId ?? null,
+        model: model || REVIEW_MODEL,
+        // supervised, not silent — June owns the objective, the agent runs within its rails.
+        autonomous: !escalated,
+      },
+    });
+
+    const summary = [
+      `proposal=${proposalId}`,
+      `raw_decision=${parsed.decision} · confidence=${parsed.confidence.toFixed(2)}`,
+      `applied=${applied.applied} · final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated to June)" : ""}`,
+      applied.reason ? `reason: ${applied.reason}` : "",
+      parsed.reasoning ? `reasoning: ${parsed.reasoning}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // Session errored (stream isError) but a verdict landed AND was applied. Complete with the
+      // error surfaced so a human can eyeball — same rule cs-director-call / deploy-review use.
+      await update(job.id, { status: "completed", error: "prompt-review session errored (verdict applied)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} final=${applied.finalDecision} (session errored — applied + logged)`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`);
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -14360,6 +15327,18 @@ function repairPrompt(brief: string): string {
     ``,
     `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if an EXISTING spec you'd extend (a parent, a Blocked-by: link, a sibling root-cause spec you'd group onto) is malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; should be flipped back to in_review via markSpecCardBackToReview before this fix can hang off it"). Never silently patch a malformed spec inline; the in_review flip is what gets it back into Vale's queue.`,
     ``,
+    `⭐ KPI_DRIFT ROOT-CAUSE CONSOLIDATION mandate (baked from agent-mandate-hardening-repair coaching) — Rafa's #1 recurring mistake is treating every \`loop:kpi_drift:<metric>:<cadence>\` signature as its own bug and authoring a per-signature fix. They all share ONE root cause: the stale KPI snapshot row selected by the done-guard in \`src/lib/inngest/platform-director-cron.ts\` and read by \`src/lib/agents/kpi-review.ts\`. One guard heals every metric+cadence at once. So when the SIGNATURE matches \`loop:kpi_drift:<metric>:<cadence>\`, BEFORE deciding a verdict:`,
+    `  1. Read \`src/lib/inngest/platform-director-cron.ts\` (the daily/weekly/monthly done-guards) AND \`src/lib/agents/kpi-review.ts\` (the reader / audit).`,
+    `  2. Grep \`public.specs\` (via getSpec / listSpecs) + recent merges for an existing in-flight or merged snapshot done-guard spec — e.g. kpi-daily-snapshot-heal-stale-inflight-rows, devops-kpi-weekly-snapshot-date-lag-fix, kpi-audit-heal-weekly-stale-snapshot-rows, devops-kpi-daily-snapshot-date-lag-fix, or any \`Related-spec:\` fanning off them.`,
+    `  3. If an existing guard/spec ALREADY COVERS this metric+cadence (or its cadence is trivially reached by extending that spec's target file), return "needs-human" with the ONE-LINE note "resolved-by [[<that-spec>]] — snapshot done-guard already covers this cadence, pending deploy verification (do NOT author a new per-signature spec; the human should confirm the deploy landed + the metric recovered before closing)". Do NOT author a new spec. Do NOT return "transient" — a fix that hasn't deployed is not a transient wait.`,
+    `  4. Only when the guard GENUINELY misses that cadence and no sibling spec is in-flight → verdict "real-bug" with a spec whose \`target\` is the EXISTING guard file (\`src/lib/inngest/platform-director-cron.ts\` OR \`src/lib/agents/kpi-review.ts\`) and whose Phase 1 EXTENDS that same guard to cover the missing cadence. Never author a new spec that re-edits those lines separately from the existing guard — the correct outcome is ONE done-guard for all cadences, not a stack of per-cadence heals.`,
+    ``,
+    `⭐ NEVER CLOSE ON AN UNVERIFIED FIX mandate (baked from agent-mandate-hardening-repair coaching) — Rafa's #2 recurring mistake is marking a job "completed" as soon as a fix is identified/queued/pending-deploy, before confirming the deploy landed and the KPI/error actually recovered. A fix that hasn't landed in production has NOT held; asserting "root cause fixed" without evidence is exactly the pattern the rubric penalizes. Rules:`,
+    `  • Do NOT return "transient" merely because a prior fix "was queued" or "is pending deploy" or "was auto-queued" — that conflates "a fix was authored" with "the fix held". A queued/pending fix is a HYPOTHESIS, not a resolution.`,
+    `  • When a prior fix is referenced (an existing spec, a linked PR, a Blocked-by), your verdict must be "needs-human" with a ONE-LINE note "pending verification — awaiting deploy of [[<spec-or-PR>]] + <specific post-deploy signal, e.g. the KPI returning to baseline / the error signature not recurring for one cycle>". A human confirms and closes; you do NOT close speculatively.`,
+    `  • Only return "transient" when the error is a GENUINE one-off wait that already recovered by itself (a momentary upstream timeout, a deploy-boundary race that self-cleared), with NO pending fix behind it. If your reason has to mention "pending deploy", "already-fixed", "resolved-by", "queued", "in-flight", or "auto-queued", the verdict is "needs-human" (pending verification), not "transient".`,
+    `  • Do NOT invent verdicts — the recognized set is exactly: "real-bug" | "monitor-false-positive" | "foreign-app-noise" | "transient" | "needs-human". "already-fixed" / "pending-verification" are NOT verdicts; when a fix exists but is unverified, use "needs-human" with the pending-verification note above.`,
+    ``,
     `The spec you author is reviewed by the FOUNDER on the Roadmap board BEFORE any build — so its prose must be HUMAN-READABLE, not machine shorthand. A reviewer who never saw this error must understand, in plain language: (a) what is failing + the user-facing/system impact, (b) what you propose to change, concretely, (c) why that's the right fix. Write \`problem\`, \`proposedChange\`, and \`why\` as PROSE a non-engineer can follow — never a bare code-path string. (The \`target\` file is a machine hint, NOT the proposal.)`,
     ``,
     `Final message = ONLY one JSON object:`,
@@ -14853,6 +15832,20 @@ async function runRepairJob(job: Job) {
 
     if (verdict === "transient") {
       const reason = String(parsed?.reason || "transient / genuine wait — no code fix");
+      // agent-mandate-hardening-repair Phase 1: NEVER close on an unverified fix. A "transient" whose
+      // reason cites an unverified pending fix (queued, pending deploy, resolved-by, already-fixed,
+      // auto-queued, in-flight, or a [[spec-slug]] link) is a hypothesis, not a resolution — the
+      // prompt tells Rafa to return "needs-human" (pending verification) instead, but the code holds
+      // the same line so a slipped verdict cannot silently phantom-close the loop before the deploy
+      // lands + the metric recovers. Park needs_attention with an actionable "pending verification"
+      // note; leave the error row OPEN so the reconcile keeps observing it until a human closes.
+      const unverifiedFixRe = /(pending\s+deploy|pending\s+verification|already[-\s]?fixed|resolved[-\s]?by|auto[-\s]?queued|in[-\s]?flight|queued\s+build|\[\[[a-z0-9-]+\]\])/i;
+      if (unverifiedFixRe.test(reason)) {
+        const note = `pending verification — the "transient" reason references an unverified fix (${reason.slice(0, 400)}); a human should confirm the deploy landed + the target metric/error recovered before closing.`;
+        await update(job.id, { status: "needs_attention", error: "pending verification — unverified fix cited", log_tail: note.slice(-2000) });
+        console.log(`${tag} transient with unverified-fix reason → parked needs_attention (pending verification), NOT completed`);
+        return;
+      }
       await resolveRepairErrorRow(instr, `transient: ${reason}`);
       await update(job.id, { status: "completed", error: null, log_tail: `transient → resolved: ${reason}`.slice(-2000) });
       console.log(`${tag} transient → resolved the error row, no spec`);
@@ -16327,6 +17320,120 @@ interface CampaignGradeDecisionJson {
   hypothesis_quality?: number;
   result_quality?: number;
   reasoning: string;
+}
+
+/**
+ * media-buyer lane (media-buyer-test-winner-loop Phase 2). Deterministic-Node lane
+ * (no Max session) that runs the Media Buyer's Test→Measure→Promote→Kill cadence
+ * for each connected Meta ad account in the workspace. Reads winners + losers +
+ * ready-to-test, computes the plan via `computeMediaBuyerPlan`, and PERSISTS it —
+ * writes `iteration_actions` (status='decided') for promote/kill so the existing
+ * Phase-6a executor picks them up, `ad_publish_jobs` (origin='media-buyer-test',
+ * publish_active=true) for replenish so the Phase-1 gate does the ceiling check,
+ * and one `director_activity` row per action + a `media_buyer_pass_completed`
+ * heartbeat. The AGENT never writes Meta objects directly — the executor / the
+ * publisher do (spec verification: "The agent never writes Meta objects directly
+ * — the deterministic worker/executor does").
+ *
+ * Instructions JSON (optional): { meta_ad_account_id?, cohort_target_count? }.
+ * When meta_ad_account_id is omitted, the lane fans out over every meta_ad_accounts
+ * row for the workspace and reports each per-account result.
+ */
+async function runMediaBuyerJob(job: Job) {
+  const tag = `[media-buyer:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: { meta_ad_account_id?: string; cohort_target_count?: number } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+
+  // Resolve target accounts. Explicit id in instructions wins; else fan out over
+  // the workspace's connected Meta ad accounts (workspace-scoped SELECT).
+  let accountIds: string[];
+  if (instr.meta_ad_account_id) {
+    accountIds = [instr.meta_ad_account_id];
+  } else {
+    const { data: accts } = await a
+      .from("meta_ad_accounts")
+      .select("id")
+      .eq("workspace_id", job.workspace_id);
+    accountIds = ((accts || []) as Array<{ id: string }>).map((r) => r.id);
+  }
+  if (!accountIds.length) {
+    await update(job.id, {
+      status: "completed",
+      log_tail: "no connected meta_ad_accounts — media-buyer pass is a no-op",
+    });
+    console.log(`${tag} no accounts → no-op`);
+    return;
+  }
+
+  const { runMediaBuyerLoop } = await import("../src/lib/media-buyer/agent");
+  const perAccount: Array<{ account: string; plan: unknown; writes: unknown; error?: string }> = [];
+  for (const accountId of accountIds) {
+    try {
+      const result = await runMediaBuyerLoop(a, {
+        workspaceId: job.workspace_id,
+        metaAdAccountId: accountId,
+        cohortTargetCount: instr.cohort_target_count,
+      });
+      perAccount.push({ account: accountId, plan: result.plan, writes: result.writes });
+      console.log(
+        `${tag} account=${accountId.slice(0, 8)} → promote=${result.plan.promote.length} kill=${result.plan.kill.length} replenish=${result.plan.replenish.length} (policyActive=${result.plan.policyActive})`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      perAccount.push({ account: accountId, plan: null, writes: null, error: msg });
+      console.error(`${tag} account=${accountId} threw: ${msg}`);
+    }
+  }
+  const anySucceeded = perAccount.some((r) => !r.error);
+  await update(job.id, {
+    status: anySucceeded ? "completed" : "failed",
+    log_tail: JSON.stringify(perAccount).slice(-4000),
+  });
+}
+
+/**
+ * media-buyer-grade lane (media-buyer-test-winner-loop Phase 3). Deterministic-Node
+ * grading pass over concluded Media Buyer director_activity rows. Reads each row's
+ * decision-time signals (source_meta_ad_id, roas at decision time, policy version),
+ * resolves realized attribution from meta_attribution_daily ≥ 3d after the action's
+ * created_at, and scores decision_quality + outcome_quality separately per the
+ * spec's rubric ("a sound call that regressed on a later ROAS shift still grades
+ * well"). Writes to public.media_buyer_action_grades — one row per director_activity
+ * row (UNIQUE), idempotent-safe on re-runs. No Max session; scoring is straightforward
+ * math against the active policy thresholds.
+ *
+ * Instructions JSON (optional): { limit?: number } — cap per-pass row count. Default 50.
+ */
+async function runMediaBuyerGradeJob(job: Job) {
+  const tag = `[media-buyer-grade:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: { limit?: number } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+  const limit = typeof instr.limit === "number" && instr.limit > 0 ? Math.floor(instr.limit) : 50;
+
+  const { gradeMediaBuyerActions } = await import("../src/lib/media-buyer/grader");
+  try {
+    const result = await gradeMediaBuyerActions(a, { workspaceId: job.workspace_id, limit });
+    const tail = `graded=${result.graded} skipped=${result.skipped} errors=${result.errors} · first=${result.grades[0]?.grade.overallGrade ?? "n/a"}`;
+    await update(job.id, {
+      status: "completed",
+      log_tail: `${tail}\n${JSON.stringify(result.grades.map((g) => ({ id: g.directorActivityId, overall: g.grade.overallGrade, decision: g.grade.decisionQuality, outcome: g.grade.outcomeQuality }))).slice(-3500)}`,
+    });
+    console.log(`${tag} ${tail}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await update(job.id, { status: "failed", error: `media-buyer-grade threw: ${msg.slice(0, 300)}` });
+    console.error(`${tag} threw: ${msg}`);
+  }
 }
 
 async function runCampaignGradeJob(job: Job) {
@@ -19006,6 +20113,9 @@ async function dispatchJob(job: Job) {
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
+  if (job.kind === "playbook-compile") return runPlaybookCompileJob(job);
+  if (job.kind === "ticket-analyze") return runTicketAnalyzeJob(job);
+  if (job.kind === "prompt-review") return runPromptReviewJob(job);
   if (job.kind === "dev-ask") return runDeveloperMessageJob(job);
   if (job.kind === "god-mode") return runGodModeJob(job);
   if (job.kind === "director-coach") return runDirectorCoachJob(job);
@@ -19030,6 +20140,8 @@ async function dispatchJob(job: Job) {
   if (job.kind === "proposed-model-tier") return runProposedModelTierJob(job);
   if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
   if (job.kind === "ceo-authorized-out-of-leash") return runCeoAuthorizedOutOfLeashJob(job);
+  if (job.kind === "media-buyer") return runMediaBuyerJob(job);
+  if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -19186,7 +20298,13 @@ async function dispatchJob(job: Job) {
   // when the row's spec_branch is missing — never fall through to a "null" branch. (#980 fixed the cwd half of
   // the chained resume, which unmasked this branch half.)
   let branch = job.spec_branch || (slug ? `claude/build-${slug}` : job.spec_branch);
-  sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
+  // builder-worktree-prune-before-add: clear ANY leftover at <wt> — a registered worktree from a
+  // crashed run OR an ORPHAN directory on disk (the 2026-07-08 media-buyer-sensor-trust-probe wedge:
+  // a lingering builds/build-<slug>/ containing only tsconfig.tsbuildinfo, not tracked by git, made
+  // the bare `git worktree remove --force` a no-op and the follow-up `worktree add` fail with
+  // "'<wt>' already exists"). ensureWorktreeSlotFree prunes admin state, then removes the worktree
+  // OR rm-rf's the orphan dir, guarded to BUILDS_DIR.
+  ensureWorktreeSlotFree(wt);
   if (!isResume) {
     // ── M1: branch-accumulation model (spec-goal-branch-pm-flow) ──────────────────────────────
     // A spec's phases accumulate on ONE PERSISTENT per-spec branch — `claude/build-${slug}` (no
@@ -19721,6 +20839,8 @@ async function dispatchJob(job: Job) {
           `  C) TEST-FIRST for a NAMED FAILING STATE. When the spec (or its instructions) names a concrete failing state — a specific predicate that lets a wrong input through, a gate that omits a disposition, an empty-body accepted via title/summary — write the smallest test that ASSERTS the CORRECT state first, watch it fail, then change ONLY the predicate + phase needed to make it pass. Do not sweep other files "while you're in there" — a targeted change with a green test is the mandate. Skip only when the spec's verification is code inspection / grep-only (no reasonable unit-test seam exists) and say so in the summary.`,
           `  D) DERIVED-PHASE ALIGNMENT — the phase you build MUST be the FIRST nonterminal \`public.spec_phases\` row whose \`build_sha\` is null (the worker's derivation, mirrored in the pre-flight above). If the scope injected above names \`Phase N\`, verify your branch's commit trailer will say \`Phase: N\` (the worker's \`stampPhaseBuilt\` reads that trailer to persist the correct phase's shipped-with SHA + PR). A commit body that self-labels a later phase while the trailer says \`Phase: 1\` is the misalignment that leaves later phases' \`build_sha\` unstamped — do not produce it. When code for THIS phase is already on main, return the no_changes_reason form; do not fabricate a same-phase re-commit.`,
           `  E) ONE PHASE PER SESSION IS THE MANDATE (not a suggestion). The worker enforces one-phase-per-session and AUTO-QUEUES the next phase's build the moment THIS PR merges. Do NOT power through Phase 2/3 in the same session (that is the confusion Ada's ephemeral coaching created; the worker's design supersedes it). Ship THIS phase's diff, return the completed form, and let the auto-chain take the next one — a clean single-phase PR merges faster than an ambitious bundled one that collides at merge.`,
+          `  F) PERSONAS UPSERT BY KEY. When adding an agent persona to \`src/lib/agents/personas.ts\` (or any TypeScript object literal keyed by a stable slug), UPSERT — before writing the new entry, grep the file for that key; if a \`PERSONAS[<key>]\` entry ALREADY EXISTS, REPLACE it (edit in place) instead of appending a second entry with the same key. A duplicate literal key fails \`tsc --noEmit\` with TS1117 ("An object literal cannot have multiple properties with the same name"), breaking EVERY subsequent build's tsc gate until a human dedupes — the 2026-07-07 prompt-review incident (Prue appended on top of Wren → dead build queue until 6777fb895 hotfix). The predeploy \`check:personas-no-duplicate-keys\` guard reds this deterministically, but the correct fix is upstream: check first, edit-in-place. Same rule for the \`RESPONSIBILITIES\` map below PERSONAS.`,
+          `  G) PERSONA AVATAR AUTO-GEN — NEVER SHIP AN IMAGELESS AGENT. When you add (or upsert) a \`PERSONAS[<key>]\` entry in \`src/lib/agents/personas.ts\`, do NOT leave \`avatarUrl\` unset — an imageless persona renders as the neutral 🤖 mascot fallback across every surface (org chart, board posts, approvals feed). After the entry is in place, run \`npx tsx scripts/_gen-persona-avatars-backfill.ts\` (request approval via a \`needs_approval\` action of type \`run_prod_script\` — it needs the Gemini API key + Supabase service-role): it iterates every imageless PERSONAS entry, generates a photoreal headshot via \`generateNanoBananaProCombine\` in \`src/lib/gemini.ts\` (Nano Banana Pro) using the AVATAR STYLE preamble from personas.ts + a role-appropriate distinctive-look line, uploads to the public \`agent-avatars\` Supabase bucket at \`<name-lower>-<key>.jpg\`, and patches the entry to add \`avatarUrl: \\\`\${AV}<file>?v=1\\\`\` on the same line as \`mascotId:\`. Idempotent — a persona whose \`avatarUrl\` is already set is skipped; an existing bucket file is reused rather than regenerated. The 2026-07-07 Prue / earlier Sol-Cora incidents shipped imageless because this step was skipped.`,
           ...(nextPhaseScope ? [nextPhaseScope] : []),
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
@@ -20115,9 +21235,9 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -20169,6 +21289,9 @@ async function main() {
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
+  const countPlaybookCompile = () => [...active.values()].filter((v) => v.kind === "playbook-compile").length;
+  const countTicketAnalyze = () => [...active.values()].filter((v) => v.kind === "ticket-analyze").length;
+  const countPromptReview = () => [...active.values()].filter((v) => v.kind === "prompt-review").length;
   const countDevAsk = () => [...active.values()].filter((v) => v.kind === "dev-ask").length;
   const countGodMode = () => [...active.values()].filter((v) => v.kind === "god-mode").length;
   const countDirectorCoach = () => [...active.values()].filter((v) => v.kind === "director-coach").length;
@@ -20182,6 +21305,8 @@ async function main() {
   const countGapGrade = () => [...active.values()].filter((v) => v.kind === "gap-grade").length;
   const countResearch = () => [...active.values()].filter((v) => v.kind === "research").length;
   const countDrContent = () => [...active.values()].filter((v) => v.kind === "dr-content").length;
+  const countMediaBuyer = () => [...active.values()].filter((v) => v.kind === "media-buyer").length;
+  const countMediaBuyerGrade = () => [...active.values()].filter((v) => v.kind === "media-buyer-grade").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -20194,7 +21319,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "ticket-handle" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "ticket-handle" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "playbook-compile" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -20467,6 +21592,45 @@ async function main() {
         console.log(`claimed cs-director-call ${job.id.slice(0, 8)} → ${countCsDirectorCall() + 1}/${MAX_CS_DIRECTOR_CALL} cs-director-call lane`);
         launch(job);
       }
+      // Fill the playbook-compile lane (playbook-compiler-becomes-box-agent-mining-full-history Phase 1):
+      // one Max `claude -p` (playbook-compile skill) per queued playbook-compile row (enqueued by the
+      // Inngest cron OR a manual `playbook-compiler/run` event). Reads the FULL history read-only and
+      // emits ONE JSON verdict {trees, reasoning} — the deterministic runner upserts trees into
+      // `compiled_trees`. Concurrency-1 so a Monday cron sweep never overlaps a manually-triggered
+      // out-of-band run on the same workspace. Gated on the Claude-down breaker — the compiler needs
+      // Claude to reason; parked jobs drain on recovery, matching the cs-director-call pattern.
+      while (!claudeDown && countPlaybookCompile() < MAX_PLAYBOOK_COMPILE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["playbook-compile"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed playbook-compile ${job.id.slice(0, 8)} → ${countPlaybookCompile() + 1}/${MAX_PLAYBOOK_COMPILE} playbook-compile lane`);
+        launch(job);
+      }
+      // Fill the ticket-analyze lane (ticket-analyzer-becomes-box-agent-under-june Phase 1):
+      // one Max `claude -p` (ticket QC grader) per queued ticket, up to MAX_TICKET_ANALYZE in
+      // parallel. Gated on the Claude-down breaker (grader needs Claude to reason; parked queued
+      // rows drain on recovery) — matches the analyzer's prior park-and-drain but at the lane, not
+      // the cron. `already_in_flight` dedup on the enqueue side (enqueueTicketAnalyzeJob) means the
+      // claim never races the same ticket_id twice.
+      while (!claudeDown && countTicketAnalyze() < MAX_TICKET_ANALYZE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-analyze"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ticket-analyze ${job.id.slice(0, 8)} → ${countTicketAnalyze() + 1}/${MAX_TICKET_ANALYZE} ticket-analyze lane`);
+        launch(job);
+      }
+      // Fill the prompt-review lane (prompt-auto-review-becomes-box-agent-under-june Phase 1): one
+      // Max `claude -p` per proposed sonnet_prompt the sonnet-prompt-auto-review Inngest cron
+      // enqueued. Concurrency-1 so a slow review never starves the CS lane. Gated on the Claude-down
+      // breaker — jobs park blocked_on_dependency + drain on recovery, matching the deploy-review /
+      // cs-director-call pattern.
+      while (!claudeDown && countPromptReview() < MAX_PROMPT_REVIEW) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["prompt-review"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed prompt-review ${job.id.slice(0, 8)} → ${countPromptReview() + 1}/${MAX_PROMPT_REVIEW} prompt-review lane`);
+        launch(job);
+      }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
       while (countDevAsk() < MAX_DEV_ASK) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dev-ask"] });
@@ -20628,6 +21792,29 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed dr-content ${job.id.slice(0, 8)} → ${countDrContent() + 1}/${MAX_DR_CONTENT} dr-content lane`);
+        launch(job);
+      }
+      // Fill the media-buyer lane (media-buyer-test-winner-loop Phase 2): the
+      // deterministic-Node Test→Measure→Promote→Kill cadence pass. Reads winners
+      // + losers + ready-to-test, computes the typed plan, persists via
+      // iteration_actions + ad_publish_jobs + director_activity chokepoints —
+      // the agent NEVER writes Meta objects directly. Concurrency-1 mirrors
+      // dr-content — one pass per workspace at a time is plenty at weekly cadence.
+      while (countMediaBuyer() < MAX_MEDIA_BUYER) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed media-buyer ${job.id.slice(0, 8)} → ${countMediaBuyer() + 1}/${MAX_MEDIA_BUYER} media-buyer lane`);
+        launch(job);
+      }
+      // Fill the media-buyer-grade lane (media-buyer-test-winner-loop Phase 3):
+      // deterministic-Node grading pass — scores media-buyer director_activity rows
+      // against realized ROAS from meta_attribution_daily. Same concurrency shape.
+      while (countMediaBuyerGrade() < MAX_MEDIA_BUYER_GRADE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer-grade"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed media-buyer-grade ${job.id.slice(0, 8)} → ${countMediaBuyerGrade() + 1}/${MAX_MEDIA_BUYER_GRADE} media-buyer-grade lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
@@ -20848,7 +22035,28 @@ async function main() {
       // do NOT: a restart just re-claims them from the queue. Otherwise a long re-test sweep (e.g. the
       // human→machine reclassification backfill) keeps a lane busy indefinitely and the box never updates.
       const sacrosanctActive = [...active.values()].filter((v) => !RERUNNABLE_KINDS.has(v.kind)).length;
-      await maybeSelfUpdate(sacrosanctActive); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running
+      // worker-self-update-force-on-unknown-queued-kind Phase 1: cheap distinct-kind probe over queued rows —
+      // if any queued job's kind is outside KNOWN_JOB_KINDS, the running binary can't claim it and the
+      // ordinary busy/behind<25 defer would strand it. Naming the first offender lets maybeSelfUpdate skip
+      // the defer and reset+exit for a systemd restart onto the shipped code. Best-effort: a DB hiccup here
+      // must never break the poll loop (self-update just runs its usual paths on the next tick).
+      let forceForUnknownKind: string | null = null;
+      try {
+        const { data: queuedKindRows } = await db
+          .from("agent_jobs")
+          .select("kind")
+          .in("status", ["queued", "queued_resume"]);
+        for (const r of ((queuedKindRows as { kind: string | null }[] | null) ?? [])) {
+          const k = r?.kind;
+          if (k && !KNOWN_JOB_KINDS.has(k as Job["kind"])) {
+            forceForUnknownKind = k;
+            break;
+          }
+        }
+      } catch (e) {
+        console.error("[self-update] queued-kind probe failed:", e instanceof Error ? e.message : e);
+      }
+      await maybeSelfUpdate(sacrosanctActive, forceForUnknownKind); // exits (→ systemd restart) when behind origin/main + no sacrosanct lane running (or a queued unknown-kind forces it)
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
     }

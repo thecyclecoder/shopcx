@@ -46,7 +46,11 @@ export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent" | "reac
  * dunning / portal crons → retention; the meta + social loops → growth/cmo; the ticket handler +
  * triage → cs; the build/spec-test/migration-fix agents + the data-infra/monitoring crons → platform).
  */
-export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo";
+export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo" | "ceo";
+// `ceo` is the founder-owned lane — reserved for tools that answer DIRECTLY to the CEO seat,
+// not to a director. Today: the god-mode cockpit's executive-assistant agent (Eve). Deliberately
+// NOT in `OWNER_FUNCTIONS` — the CEO isn't a department that gets a rollup Health tile; she owns
+// her own lane. (god-mode-becomes-ceo-executive-assistant-agent Phase 1.)
 
 /**
  * The departments in CEO-glance order, with the rollup-tile health label the dashboard shows
@@ -352,7 +356,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     kind: "cron",
     owner: "cs",
     label: "Escalation triage enqueue",
-    description: "Hourly enqueue of the box escalation-triage sweep.",
+    description: "Hourly enqueue of one cs-director-call (June-review) box job per eligible escalated ticket — the primary escalation triage (june-review-replaces-solver-skeptic-quorum-triage Phase 1).",
     expectedCadence: "hourly (30 * * * *)",
     livenessWindowMs: 2 * HOUR,
     outputAssertion: "escalation-idle",
@@ -505,6 +509,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Sub-minute / minute crons (window ~10 min) ─
   { id: "claude-status-poll-cron", kind: "cron", owner: "platform", label: "Claude status poll", description: "Polls status.claude.com for the Claude API + Claude Code components → drives the Claude-down breaker.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "deploy-guardian-cron", kind: "cron", owner: "platform", label: "Deploy guardian", description: "Evaluates each auto-merged deploy's canary watch over its window → healthy/regressed/unsure verdict (deploy-health-rollback-guardian).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "deploy-guardian" /* Reva — surfaces under Ada in the agents roster (agent-roster-sync source 2) */ },
+  // Reva's canary-INVESTIGATION box-session (reva-box-session-causal-rollback). The deploy-guardian
+  // cron above fires a kind='deploy-review' job when a canary window closes non-healthy; the job is a
+  // read-only diff walk on Max → typed revert/keep verdict (builder-worker.ts runDeployReviewJob). Same
+  // agent as the cron (Reva), so personaKind:'deploy-guardian' MERGES it into her one card (org-chart
+  // source 2, byPersona), and agentKind:'deploy-review' REGISTERS the job kind so it stops surfacing as a
+  // flagged "unregistered" worker card (org-chart source 3). Reactive + a loose window: a quiet
+  // deploy-review is healthy (most deploys are fine and never trigger an investigation) — the cron's beats
+  // carry Reva's liveness.
+  { id: "deploy-review-agent", kind: "reactive", owner: "platform", agentKind: "deploy-review", personaKind: "deploy-guardian", label: "Deploy review", description: "Reva's box-session investigation of a non-healthy canary — read-only diff walk → typed revert/keep verdict (reva-box-session-causal-rollback).", expectedCadence: "on a non-healthy canary verdict", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
   { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
@@ -666,6 +679,27 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
   // ─ Yearly cron (window ~370 days) ─
 
+  // ── CEO's executive-assistant agent (owner=ceo) ─────────────────────────────
+  // god-mode-becomes-ceo-executive-assistant-agent Phase 1: registers Eve's lane so the
+  // god-mode cockpit's activity has a home in the loop registry with a NON-Platform owner.
+  // She reports to the founder (Henry), not to a director, so `owner: "ceo"` — the reason
+  // OwnerFunction was widened. Phase 2 will render her under the CEO seat (workers alongside
+  // the goals) with liveness derived from god_mode_sessions activity, and wire her actions
+  // to the existing god-mode PIN + risk-tier approvals ([[../../docs/brain/libraries/god-mode]]).
+  {
+    id: "god-mode-cockpit",
+    kind: "reactive",
+    owner: "ceo",
+    personaKind: "god-mode", // Eve — the founder's phone-to-box executive assistant
+    label: "God-mode cockpit",
+    description: "The CEO's executive assistant — the founder's phone-to-box cockpit for reads/diagnostics + risky writes gated on live approval + PIN. Deliberately loose window (a dormant cockpit is healthy — the founder isn't always mid-incident).",
+    expectedCadence: "per founder cockpit session",
+    livenessWindowMs: 30 * DAY,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+    registeredAt: "2026-07-07T18:00:00Z",
+  },
+
   // ── Reactive event-driven Inngest agents (loop_heartbeats, loop_id = inngest fn id) ──
   // Event-driven (not crons, not the box queue). Idle = green; alerted on
   // liveness-when-work-exists / error-rate (same logic as inline-agent). Each beats once
@@ -794,7 +828,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:product-seed", kind: "agent-kind", owner: "cmo", agentKind: "product-seed", label: "Agent — product seed", description: "Product none → published pipeline.", expectedCadence: "on demand", stuckThresholdMs: 90 * MIN },
   { id: "agent:spec-chat", kind: "agent-kind", owner: "platform", agentKind: "spec-chat", label: "Agent — spec chat", description: "Roadmap authoring-chat turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
   { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", label: "Agent — ticket improve", description: "CX ticket-improve turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  // Per-ticket QC-grader box lane (ticket-analyzer-becomes-box-agent-under-june Phase 1) — the
+  // supervised agent under 💬 June (CS Director) that replaced the analyzer's direct fetch to
+  // api.anthropic.com. Enqueued by ticket-analysis-cron; drained by scripts/builder-worker.ts →
+  // runTicketAnalyzeJob as top-level Max `claude -p` sessions. Idle = green (on demand); alerted
+  // only on a stuck job past the threshold. Same owner=cs as the feeder cron.
+  { id: "agent:ticket-analyze", kind: "agent-kind", owner: "cs", agentKind: "ticket-analyze", label: "Agent — ticket analyze", description: "Per-ticket QC grader (box-session under 💬 June).", expectedCadence: "when a closed AI-handled ticket is enqueued", stuckThresholdMs: 30 * MIN, registeredAt: "2026-07-07T14:00:00Z" },
   { id: "agent:triage-escalations", kind: "agent-kind", owner: "cs", agentKind: "triage-escalations", label: "Agent — triage sweep", description: "Solver→skeptic→quorum escalation sweep.", expectedCadence: "hourly when work exists", stuckThresholdMs: 90 * MIN },
+  { id: "agent:prompt-review", kind: "agent-kind", owner: "cs", agentKind: "prompt-review", label: "Agent — prompt review", description: "Per-proposal sonnet_prompt auto-review — a supervised box-session agent under June (CS Director), replacing the retired direct-Opus fetch. Emits one JSON verdict; the deterministic runner applies it via applyDecision (REJECT_FLOOR + never-queue-to-humans preserved).", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:spec-test", kind: "agent-kind", owner: "platform", agentKind: "spec-test", label: "Agent — spec test", description: "Non-destructive spec QA pass.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:migration-fix", kind: "agent-kind", owner: "retention", agentKind: "migration-fix", label: "Agent — migration fix", description: "Event-fired billing repair diagnosis.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:dev-ask", kind: "agent-kind", owner: "platform", agentKind: "dev-ask", label: "Agent — dev ask", description: "Read-only developer message-center turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },

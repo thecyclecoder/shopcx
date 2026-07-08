@@ -6,9 +6,11 @@
  * one persisted singleton (`claude_health`), readable from BOTH runtimes.
  *
  *   (a) EXTERNAL TRUTH — a 1-min Inngest cron polls status.claude.com/api/v2/components.json and reads
- *       the per-component status of "Claude API (api.anthropic.com)" + "Claude Code". A partial/major
- *       outage on either ⇒ external-down. (Verified 2026-06-23: this endpoint reported the live outage
- *       as `major_outage` on both components.) A poll we can't COMPLETE (Statuspage unreachable) does
+ *       the per-component status of "Claude API (api.anthropic.com)" + "Claude Code". A MAJOR outage
+ *       (or maintenance) on either ⇒ external-down; a `partial_outage` does NOT trip it — partial is
+ *       "degraded but usable", so we run and let the retry layer absorb the 529s (CEO decision
+ *       2026-07-07). (Verified 2026-06-23: this endpoint reported the June live outage as `major_outage`
+ *       on both components.) A poll we can't COMPLETE (Statuspage unreachable) does
  *       NOT trip the breaker — "we can't reach the status page" ≠ "Claude is down".
  *   (b) LOCAL SIGNAL — N consecutive retryable failures (429/5xx/529/timeout) from our OWN calls. The
  *       immediate signal: it trips before the status page catches up. It auto-expires (LOCAL_SIGNAL_TTL)
@@ -45,9 +47,14 @@ export const CLAUDE_STATUS_COMPONENTS_URL = "https://status.claude.com/api/v2/co
 const API_COMPONENT_MATCH = "claude api"; // "Claude API (api.anthropic.com)"
 const CODE_COMPONENT_MATCH = "claude code"; // "Claude Code"
 
-/** A component status that means the dependency is DOWN (vs operational / merely degraded). */
+/** A component status that means the dependency is DOWN (vs operational / degraded / partial).
+ *  Only a MAJOR outage (or maintenance) fully freezes the autonomous box. A `partial_outage` means
+ *  "degraded but usable" — a large share of requests still succeed — so we let jobs RUN and lean on
+ *  the anthropic-retry layer to absorb the intermittent 529s, rather than parking the whole pipeline.
+ *  (CEO decision 2026-07-07: a live `partial_outage` on api+code stalled the entire Sol build + 6 PRs
+ *  for an hour while the box's own `claude` CLI was answering fine. Partial = retry, not freeze.) */
 function isOutageStatus(s: ClaudeComponentStatus): boolean {
-  return s === "partial_outage" || s === "major_outage";
+  return s === "major_outage" || s === "under_maintenance";
 }
 
 /** N consecutive retryable failures from our own calls trips the LOCAL signal. */

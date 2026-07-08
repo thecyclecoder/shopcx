@@ -46,7 +46,24 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
-_None documented._
+- **Shopify `countryCode` requires ISO-2 normalization.** When building the
+  shipping address for a replacement order, the country code must be ISO-2
+  ('US', 'CA') not a full name ('United States'). Normalization is applied
+  by [[shopify-draft-orders]] at the draft order creation points. Cross-link
+  for details on the territory/name → ISO-2 mapping.
+
+## Status / open work
+
+**Shipped:** Replacement orders send ISO-2 country codes to Shopify (Phase 1).
+All shipping address fields properly normalize before draft order creation.
+
+**Known gaps / not yet shipped:**
+- None
+
+**Recent activity:**
+- Country code normalization integrated with createReplacementDraftOrder flow
+
+**Open questions:** None
 
 ---
 

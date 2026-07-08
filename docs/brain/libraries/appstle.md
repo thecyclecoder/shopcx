@@ -30,6 +30,8 @@ async function appstleUpdateBillingInterval(workspaceId: string, contractId: str
 
 Short-circuits no-op requests: if the local `subscriptions.billing_interval` + `billing_interval_count` already match the requested values, returns `{ success: true }` without calling Appstle. Same-value submissions previously hit Appstle's billing-policy validator and surfaced as recurring noise on the Vercel error feed / Control Tower (signature `vercel:09366492567e0fde`, fixed by [[../specs/archive.d/appstle-frequency-update-noop-guard]]). Customer intent (frequency = X) is satisfied without the API round-trip.
 
+**Timeout recovery — both `504` and `upstream_timeout` branches verify.** When Appstle responds with HTTP 504 OR when [[appstle-call-log]] aborts the fetch at its 20s deadline (surfaced in the catch block as `Error('upstream_timeout')`), the helper calls the local `verifyBillingInterval(apiKey, contractId, interval, count)` reader against Appstle's contract-external endpoint. If the contract's `billingPolicy.interval` + `intervalCount` match what the customer requested, the timeout is treated as a **successful apply** — the local `subscriptions` row is updated (`billing_interval` + `billing_interval_count`) and `{ success: true }` is returned. Otherwise both paths return the same guarded message: `Request timed out and change could not be verified`. Non-timeout exceptions keep the existing `String(err)` behavior. The upstream_timeout branch mirrors the 504 recovery because the abort exists purely to stop portal Lambdas hanging until Vercel's 30s reap — Appstle occasionally writes the change but never replies, so the recovery is the same either way (signature `vercel:c0c26aa990d22744`).
+
 ### `appstleUpdateNextBillingDate` — function
 
 ```ts

@@ -360,3 +360,144 @@ export async function createAd(
   if (!j.id) throw new Error("meta_ad_no_id");
   return j.id;
 }
+
+// ── Campaign + ad-set creation (media-buyer loop — hands-off scaling) ─────────
+// The autonomous media-buyer needs to STAND UP a new test ad set per creative
+// concept without a human hand-building it. These are the raw Graph writes;
+// they always create objects PAUSED so nothing goes live behind the human's
+// back (going-live is a separate governed step in recommendation-execute).
+
+/** Stable name for the shared ABO testing campaign the media-buyer loop reuses. */
+export const MB_TESTING_CAMPAIGN_NAME = "MB — Testing (ABO)";
+
+export interface CreateCampaignArgs {
+  name: string;
+  /** Meta objective. Default `OUTCOME_SALES` (the sales-optimized funnel). */
+  objective?: string;
+  /**
+   * ABO vs CBO: when true, campaign budget is NOT set here (each ad set carries its
+   * own daily_budget). Meta REQUIRES `is_adset_budget_sharing_enabled=false` on a
+   * campaign that has no campaign-level budget (proven 2026-07-07). Default true.
+   */
+  abo?: boolean;
+  /** Special ad category (e.g. HOUSING/EMPLOYMENT/CREDIT). Default `[]` (none). */
+  specialAdCategories?: string[];
+  /** Buying type. Default `AUCTION`. */
+  buyingType?: string;
+  /** Status. Default `PAUSED` — never create a campaign ACTIVE. */
+  status?: "PAUSED" | "ACTIVE";
+  /** CBO only — campaign-level daily budget in minor units (cents). Ignored when `abo=true`. */
+  dailyBudgetCents?: number | null;
+  /** CBO only — campaign-level lifetime budget in minor units. Ignored when `abo=true`. */
+  lifetimeBudgetCents?: number | null;
+}
+
+/**
+ * Create a Meta campaign under the ad account. Defaults to a PAUSED ABO
+ * `OUTCOME_SALES` campaign (per the media-buyer scaling methodology): no
+ * campaign-level budget + `is_adset_budget_sharing_enabled=false`. Returns the
+ * new campaign id.
+ */
+export async function createCampaign(
+  token: string,
+  accountId: string,
+  args: CreateCampaignArgs,
+): Promise<string> {
+  const abo = args.abo !== false; // default ABO
+  const body: Record<string, unknown> = {
+    name: args.name,
+    objective: args.objective || "OUTCOME_SALES",
+    special_ad_categories: args.specialAdCategories ?? [],
+    buying_type: args.buyingType || "AUCTION",
+    status: args.status || "PAUSED",
+  };
+  if (abo) {
+    // ABO: ad-set-level budgets. Meta requires this flag when no campaign budget is set.
+    body.is_adset_budget_sharing_enabled = false;
+  } else {
+    if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);
+    if (args.lifetimeBudgetCents != null) body.lifetime_budget = Math.round(args.lifetimeBudgetCents);
+  }
+  const j = await metaPost(`${actId(accountId)}/campaigns`, body, token);
+  if (!j.id) throw new Error("meta_campaign_no_id");
+  return j.id as string;
+}
+
+/**
+ * Find-or-create the shared MB testing (ABO) campaign for an ad account. The
+ * media-buyer loop reuses one testing campaign per account so each concept
+ * gets its own ad set under a stable parent. Idempotent by exact name match.
+ */
+export async function getOrCreateTestingCampaign(token: string, accountId: string): Promise<string> {
+  const existing = await listCampaigns(token, accountId);
+  const hit = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
+  if (hit) return hit.id;
+  return createCampaign(token, accountId, { name: MB_TESTING_CAMPAIGN_NAME, abo: true, status: "PAUSED" });
+}
+
+export interface CreateAdSetArgs {
+  name: string;
+  campaignId: string;
+  /** Ad-set daily budget in minor units (cents). Required for an ABO ad set. */
+  dailyBudgetCents?: number | null;
+  /** Ad-set lifetime budget in minor units. Use instead of daily_budget when scheduling. */
+  lifetimeBudgetCents?: number | null;
+  /** Pixel to attribute the purchase optimization against. */
+  pixelId: string;
+  /** Optimization event on the pixel. Default `PURCHASE`. */
+  customEventType?: string;
+  /**
+   * Targeting spec (`geo_locations`, `age_min`/`age_max`, `custom_audiences`, …).
+   * Placements are omitted intentionally so Meta runs Advantage+ (automatic)
+   * placements — the researched default for testing. To force manual placements
+   * pass `targeting.publisher_platforms`/`facebook_positions`/`instagram_positions`.
+   */
+  targeting: Record<string, unknown>;
+  /** Optimization goal. Default `OFFSITE_CONVERSIONS`. */
+  optimizationGoal?: string;
+  /** Billing event. Default `IMPRESSIONS`. */
+  billingEvent?: string;
+  /** Bid strategy. Default `LOWEST_COST_WITHOUT_CAP` (Advantage+ auto-bid). */
+  bidStrategy?: string;
+  /** Bid amount in minor units — required when bid_strategy is a *_WITH_BID_CAP variant. */
+  bidAmountCents?: number | null;
+  /** ISO start time. Defaults to Meta's server default (now) when omitted. */
+  startTime?: string;
+  /** ISO end time. Optional. */
+  endTime?: string;
+  /** Status. Default `PAUSED`. */
+  status?: "PAUSED" | "ACTIVE";
+}
+
+/**
+ * Create a purchase-optimized ad set under a campaign. Defaults mirror the
+ * media-buyer scaling methodology (docs/brain/reference/meta-scaling-methodology.md):
+ * `billing_event=IMPRESSIONS`, `optimization_goal=OFFSITE_CONVERSIONS`,
+ * `bid_strategy=LOWEST_COST_WITHOUT_CAP`, Advantage+ placements (no
+ * publisher_platforms/positions unless the caller opts out), status PAUSED.
+ * Returns the new ad-set id.
+ */
+export async function createAdSet(
+  token: string,
+  accountId: string,
+  args: CreateAdSetArgs,
+): Promise<string> {
+  const body: Record<string, unknown> = {
+    name: args.name,
+    campaign_id: args.campaignId,
+    optimization_goal: args.optimizationGoal || "OFFSITE_CONVERSIONS",
+    billing_event: args.billingEvent || "IMPRESSIONS",
+    bid_strategy: args.bidStrategy || "LOWEST_COST_WITHOUT_CAP",
+    promoted_object: { pixel_id: args.pixelId, custom_event_type: args.customEventType || "PURCHASE" },
+    targeting: args.targeting,
+    status: args.status || "PAUSED",
+  };
+  if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);
+  if (args.lifetimeBudgetCents != null) body.lifetime_budget = Math.round(args.lifetimeBudgetCents);
+  if (args.bidAmountCents != null) body.bid_amount = Math.round(args.bidAmountCents);
+  if (args.startTime) body.start_time = args.startTime;
+  if (args.endTime) body.end_time = args.endTime;
+  const j = await metaPost(`${actId(accountId)}/adsets`, body, token);
+  if (!j.id) throw new Error("meta_adset_no_id");
+  return j.id as string;
+}

@@ -24,7 +24,14 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
-import { recordError, recordFeedDelivery, signatureFor, isTransientSupabaseLogNoise } from "@/lib/control-tower/error-feed";
+import {
+  recordError,
+  recordFeedDelivery,
+  signatureFor,
+  isTransientSupabaseLogNoise,
+  isForeignGoTrueEdgeNoise,
+  isForeignGoTrueAuthLogNoise,
+} from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -162,8 +169,25 @@ const LOG_QUERIES: LogQuery[] = [
       "where metadata.level in ('error','fatal') " +
       `order by t.timestamp desc limit ${ROW_LIMIT}`,
     mapRow: (row) => {
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` 504 on the
+      // auth_logs surface ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]]).
+      // Same choice as the edge_logs twin below — foreign-owned surface, no lever from us;
+      // the transient class still recurred inside the recur window and escalated. Narrow to
+      // (msg 504-prefix + `"path":"/user"` + `"method":"GET"`) so a real GoTrue outage on
+      // other paths (/token, /admin), a non-504 error, or a real auth-signature bug on
+      // /user is still captured normally.
+      if (isForeignGoTrueAuthLogNoise(str(row.msg), str(row.event_message))) return null;
       const severity = str(row.severity) || "error";
       const message = str(row.msg) || str(row.event_message) || "auth error";
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` handler timing
+      // out on its Postgres backend ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]]).
+      // Foreign-owned surface, no lever from our side; the transient-recur window still
+      // escalated the chronic saturation (Control Tower `supabase-logs:9f39fe11dd105b2a`,
+      // 39 occurrences across 6 days). Narrowly gated to the exact
+      // `Unhandled server error: context deadline exceeded` phrase so any actionable
+      // GoTrue class (invalid JWT, rate limit, dial failure on other paths) still
+      // surfaces. Mirrors the `api` mapRow's `isForeignGoTrueEdgeNoise` drop above.
+      if (isForeignGoTrueAuthLogNoise(message)) return null;
       return {
         keyParts: ["auth", severity, message],
         title: `auth ${severity}: ${message}`,
@@ -189,6 +213,12 @@ const LOG_QUERIES: LogQuery[] = [
       const status = str(row.status_code) || "5xx";
       const method = str(row.method) || "GET";
       const path = str(row.path) || "/";
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/auth/v1/user` 504
+      // ([[../specs/error-feed-drop-supabase-gotrue-504-edge-noise]]). Foreign-owned surface,
+      // no lever from our side; the transient-recur window still escalated the chronic
+      // saturation. Narrow to that exact shape so a real GoTrue outage on other paths /
+      // a non-504 5xx still surfaces.
+      if (isForeignGoTrueEdgeNoise(path, row.status_code)) return null;
       return {
         keyParts: ["api", status, method, path],
         title: `api ${status} ${method} ${path}`,

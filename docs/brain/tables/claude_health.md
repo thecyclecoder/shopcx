@@ -13,7 +13,7 @@ The **Claude-down circuit-breaker** state ([[../specs/agent-outage-resilience]] 
 | `id` | `text` | PK · always `'singleton'` |
 | `api_status` | `text` | the "Claude API (api.anthropic.com)" component status — `operational`｜`degraded_performance`｜`partial_outage`｜`major_outage`｜`under_maintenance`｜`unknown` · default `'unknown'` |
 | `code_status` | `text` | the "Claude Code" component status (same vocabulary) · default `'unknown'` |
-| `external_down` | `bool` | derived: either component in `partial_outage`/`major_outage` · default `false` |
+| `external_down` | `bool` | derived: either component in `major_outage`/`under_maintenance` · default `false`. **`partial_outage` does NOT trip it** (CEO decision 2026-07-07) — partial = "degraded but usable", so the box keeps running and the retry layer absorbs the intermittent 529s instead of freezing the whole pipeline. Only a MAJOR outage (or maintenance) parks autonomous jobs. |
 | `last_polled_at` | `timestamptz?` | when the status poll last ran |
 | `poll_ok` | `bool?` | could we reach Statuspage on the last poll? (`null` = never polled; `false` = unreachable → external signal left untouched) |
 | `consecutive_failures` | `int` | the local signal — N consecutive retryable Claude failures from our own calls · default `0` |

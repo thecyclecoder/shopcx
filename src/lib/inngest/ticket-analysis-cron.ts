@@ -1,26 +1,31 @@
 /**
- * Real-time ticket analysis cron.
+ * Real-time ticket analysis cron — the feeder.
  *
- * Runs every 30 minutes. Finds closed AI tickets that haven't been
- * analyzed since their last update, runs the grader on each.
+ * Runs every 30 minutes. Finds closed AI tickets that haven't been analyzed since their last
+ * update and enqueues one `ticket-analyze` agent_jobs row per ticket. The box worker
+ * (scripts/builder-worker.ts → runTicketAnalyzeJob) drains the queue as supervised Max
+ * sessions under 💬 June (CS Director) — Phase 1 of
+ * docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md.
+ *
+ * The prior inline `analyzeTicket()` path (a direct fetch to api.anthropic.com) is gone —
+ * enqueue is cheap + never Anthropic-dependent, so the cron no longer needs its own
+ * park-and-drain deferral for outages (the box lane parks its own queued rows
+ * `blocked_on_dependency` when the Claude-down breaker is tripped).
  *
  * Replaces the old nightly batch (ai-nightly-analysis.ts).
  */
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { analyzeTicket } from "@/lib/ticket-analyzer";
+import { enqueueTicketAnalyzeJob } from "@/lib/ticket-analyzer";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
-import { isRetryableThrownError } from "@/lib/anthropic-retry";
 
 export const ticketAnalysisCron = inngest.createFunction(
   {
     id: "ticket-analysis-cron",
-    // Bumped from 1 for in-run infra resilience. The outage-spanning behaviour
-    // for the analyzer comes from per-ticket DEFERRAL (below) + this cron's
-    // */30 cadence: a Claude outage leaves the ticket un-marked so the next
-    // tick re-grades it on recovery (park-and-drain), rather than relying on a
-    // single long-running run that could overlap the next tick.
+    // 3 retries are still useful for the SELECT/UPDATE steps here — the actual grader work
+    // now happens on the box lane, so this cron's remaining resilience story is just about
+    // its own DB reads/enqueue writes.
     retries: 3,
     triggers: [{ cron: "*/30 * * * *" }],  // every 30 min
   },
@@ -69,58 +74,50 @@ export const ticketAnalysisCron = inngest.createFunction(
       // no beat and control-tower-monitor false-flagged a healthy quiet cron
       // as dead (signature loop:ticket-analysis-cron). Mirrors the empty-path
       // heartbeat in ticket-csat.ts, deliver-pending-send.ts, abandoned-cart.ts.
-      const idleResult = { analyzed: 0, skipped: 0 };
+      const idleResult = { queued: 0, skipped: 0 };
       await step.run("emit-heartbeat", async () => {
         await emitCronHeartbeat("ticket-analysis-cron", { ok: true, produced: idleResult });
       });
       return idleResult;
     }
 
-    let analyzed = 0;
+    let queued = 0;
     let skipped = 0;
-    let deferred = 0;
     const skipReasons: Record<string, number> = {};
 
-    // Process serially — each Sonnet call is non-trivial and we don't
-    // want to slam the API. step.run gives us per-ticket retry isolation.
+    // Enqueue one `ticket-analyze` box job per candidate. Enqueue is idempotent per-ticket
+    // (one-in-flight dedup inside enqueueTicketAnalyzeJob), so a re-selection while an earlier
+    // grade is still running is a no-op skip (`already_in_flight`).
     for (const t of tickets) {
-      const result = await step.run(`analyze-${t.id}`, async () => {
+      const result = await step.run(`enqueue-${t.id}`, async () => {
         try {
-          return await analyzeTicket(t.id, "auto_close");
+          return await enqueueTicketAnalyzeJob(t.id, "auto_close");
         } catch (err) {
-          // Park-and-drain (agent-outage-resilience Phase 1): a Claude/
-          // dependency outage must NOT mark the ticket analyzed — that would
-          // silently drop the grade for good. Flag it for deferral so we leave
-          // last_analyzed_at untouched and the next */30 tick re-grades it on
-          // recovery. A non-dependency (logic) error stays swallowed-and-marked
-          // so one bad ticket can't wedge the batch every cycle.
-          if (isRetryableThrownError(err)) {
-            return { ok: false as const, reason: "deferred_dependency", _defer: true as const };
-          }
-          console.error("[ticket-analysis-cron] analyzeTicket error:", err);
+          console.error("[ticket-analysis-cron] enqueueTicketAnalyzeJob error:", err);
           return { ok: false as const, reason: "exception" };
         }
       });
 
       if (result.ok) {
-        analyzed++;
-      } else if ((result as { _defer?: boolean })._defer) {
-        // Deferred: leave last_analyzed_at untouched so it's re-selected next tick.
-        deferred++;
+        queued++;
       } else {
         skipped++;
         skipReasons[result.reason || "unknown"] = (skipReasons[result.reason || "unknown"] || 0) + 1;
 
-        // Mark last_analyzed_at even on skip so we don't re-check the
-        // same ticket every 30 min. The cron is "have we looked at this
-        // since the last update?", not "has this been analyzed?".
-        await admin.from("tickets")
-          .update({ last_analyzed_at: new Date().toISOString() })
-          .eq("id", t.id);
+        // Mark last_analyzed_at even on skip so we don't re-check the same ticket every 30
+        // min. The cron is "have we looked at this since the last update?", not "has this
+        // been graded?". EXCEPT `already_in_flight` — a grade is in progress and will bump
+        // last_analyzed_at itself; stamping here first would race the box's own compare-and-
+        // set. Same guard the prior park-and-drain path used for deferred jobs.
+        if (result.reason !== "already_in_flight") {
+          await admin.from("tickets")
+            .update({ last_analyzed_at: new Date().toISOString() })
+            .eq("id", t.id);
+        }
       }
     }
 
-    const result = { analyzed, skipped, deferred, skip_reasons: skipReasons };
+    const result = { queued, skipped, skip_reasons: skipReasons };
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
     await step.run("emit-heartbeat", async () => {

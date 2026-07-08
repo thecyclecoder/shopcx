@@ -10,14 +10,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { applyManualOverride } from "@/lib/sonnet-prompts-table";
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id: promptId } = await ctx.params;
   const body = await req.json().catch(() => ({}));
-  const action = body.action as "accept" | "reject" | "revert" | undefined;
-  if (!["accept", "reject", "revert"].includes(action as string)) {
+  const rawAction = body.action as string | undefined;
+  if (!rawAction || !["accept", "reject", "revert"].includes(rawAction)) {
     return NextResponse.json({ error: "action must be accept/reject/revert" }, { status: 400 });
   }
+  const action = rawAction as "accept" | "reject" | "revert";
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -42,39 +44,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ error: "Admin/owner only" }, { status: 403 });
   }
 
-  // Resolve the final state.
+  // Audit row first (matches the cron's audit-first invariant). The audit ledger records the raw
+  // human intent; the SDK write below applies the row shape.
   const reasoningPrefix = `[manual_override:${action}] by ${user.id}`;
-  let finalDecision: "accept" | "reject" | "human_review";
-  const updates: Record<string, any> = {
-    auto_decision_at: new Date().toISOString(),
-    auto_decision_model: "manual_override",
-    auto_decision_reason: reasoningPrefix,
-  };
-  if (action === "revert") {
-    // Move back to proposed; clear auto_decision.
-    finalDecision = "human_review";
-    updates.auto_decision = null;
-    updates.status = "proposed";
-    updates.reviewed_at = null;
-    updates.enabled = true;
-  } else if (action === "accept") {
-    finalDecision = "accept";
-    updates.auto_decision = "accept";
-    updates.status = "approved";
-    updates.reviewed_at = new Date().toISOString();
-    updates.reviewed_by = user.id;
-    updates.enabled = true;
-  } else {
-    finalDecision = "reject";
-    updates.auto_decision = "reject";
-    updates.status = "rejected";
-    updates.reviewed_at = new Date().toISOString();
-    updates.reviewed_by = user.id;
-    updates.enabled = false;
-  }
-
-  // Audit row first (matches the cron's audit-first invariant).
-  const auditDecisionForDb = action === "revert" ? "human_review" : finalDecision;
+  const auditDecisionForDb = action === "revert" ? "human_review" : action;
   const { error: auditErr } = await admin.from("sonnet_prompt_decisions").insert({
     workspace_id: prompt.workspace_id,
     sonnet_prompt_id: promptId,
@@ -100,11 +73,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   });
   if (auditErr) return NextResponse.json({ error: `audit failed: ${auditErr.message}` }, { status: 500 });
 
-  const { error: updErr } = await admin
-    .from("sonnet_prompts")
-    .update(updates)
-    .eq("id", promptId);
-  if (updErr) return NextResponse.json({ error: `update failed: ${updErr.message}` }, { status: 500 });
+  // Route the prompt-row mutation through the sonnet-prompts SDK — the ONE writer that maps
+  // accept / reject / revert onto the row shape (status + enabled + auto_decision* + reviewed_at
+  // + reviewed_by). Compare-and-set on (id, workspace_id) so a stale click on a cross-workspace
+  // id can never flip a foreign row. sonnet-prompts-sdk-for-review-agent-db-access Phase 1.
+  const overrideRes = await applyManualOverride(admin, {
+    workspaceId: prompt.workspace_id,
+    promptId,
+    action,
+    actor: user.id,
+    reasonPrefix: reasoningPrefix,
+  });
+  if (!overrideRes.ok) {
+    return NextResponse.json({ error: `update failed: ${overrideRes.error ?? "unknown"}` }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true, action, prompt_id: promptId });
 }

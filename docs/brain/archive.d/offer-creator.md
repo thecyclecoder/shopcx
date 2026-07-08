@@ -1,0 +1,1 @@
+- **Offer Creator (starter-kit offers over pricing rules)** · verified 2026-07-07 · → [[../lifecycles/storefront-checkout]]

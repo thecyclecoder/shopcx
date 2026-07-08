@@ -1,0 +1,1 @@
+- **Prune stale build worktrees before worktree add (stop goal-build collisions)** · verified 2026-07-08 · → [[../libraries/builder-worker]]

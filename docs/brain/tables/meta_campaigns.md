@@ -4,6 +4,12 @@ Local mirror of Meta campaign structure + budget + status. Populated by the
 Storefront Iteration Engine's Phase 1 performance ingest ([[../inngest/meta-performance]]).
 No structure was stored before — only the account rollup [[daily_meta_ad_spend]].
 
+Also seeded immediately after a media-buyer create by
+[[../libraries/meta__recommendation-execute]] `reconcileCreatedAdSetToMirror`
+(meta-campaign-adset-creation-primitive Phase 3) — on the same `(workspace_id,
+meta_campaign_id)` natural key, so the next `syncMetaStructure` cron overwrites
+cleanly with Meta's computed `effective_status` / `meta_created_time`.
+
 **Primary key:** `id`
 
 ## Columns

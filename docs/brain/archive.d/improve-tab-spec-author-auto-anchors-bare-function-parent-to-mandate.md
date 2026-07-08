@@ -1,0 +1,1 @@
+- **Improve tab: auto-anchor a bare-function parent to a real mandate** · verified 2026-07-07 · → [[../libraries/author-spec]] + [[../libraries/function-mandates]]

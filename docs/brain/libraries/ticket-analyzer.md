@@ -1,23 +1,33 @@
 # libraries/ticket-analyzer
 
-Per-ticket AI analysis: sentiment, intent, summary, suggested action. Writes [[../tables/ticket_analyses]].
+Per-ticket AI analysis: sentiment, intent, summary, suggested action. Runs as a supervised box-session agent (`kind='ticket-analyze'`, Cora, a persona in [[../functions/cs]]'s team) dispatched by the builder worker, not a raw-API cron. Writes [[../tables/ticket_analyses]] through a typed SDK (not raw `.from('ticket_analyses')`). Each verdict is recorded to [[../tables/director_activity]] under CS for June (CS Director) to supervise and grade.
 
 **File:** `src/lib/ticket-analyzer.ts`
 
-## File header
+**Supervision:** [[../functions/cs]] owns escalation triage quality. The analyzer runs on the box lane ([[../recipes/build-box-setup]]), with every verdict recorded to [[../tables/director_activity]] (`director_function='cs'`, `action_kind='analyzed_ticket'`), and the kind graded by the CS director's sweep ([[../libraries/agent-grader]] — June's gradeable kinds include `'ticket-analyze'`). Reasoning from each session is surfaced alongside the grade.
+
+## Box-agent supervision
+
+The analyzer is now a supervised box-session agent. `scripts/builder-worker.ts → runTicketAnalyzeJob` claims each `kind='ticket-analyze'` job, loads the ticket + guidance context, runs ONE Max session with `buildSystemPrompt` + `buildUserPrompt`, parses the JSON verdict via `parseAnalysis`, then calls `applySeverityActions` to write the outcome. Records to [[../tables/director_activity]] on completion (`actor='ticket-analyze:box-session'`, `action_kind='analyzed_ticket'`, `spec_slug=ticket_id`, `reason`, `metadata: { score, severity, issues, escalated?, ai_messages }`). Existin gates (do_not_reply skip, ai_disabled / analyzer_locked respect, force-override rules) are preserved in the dispatch path.
+
+## SDK
+
+[[../libraries/ticket-analyses]] — typed `TicketAnalysis` shape + `getAnalysis`, `insertAnalysis`, `listForTicket`, `updateAnalysis`. Every read/write flows through this SDK (never raw `.from('ticket_analyses').update/insert/delete` outside it). Compliance check ([scripts/_check-pm-sdk-compliance.ts](https://github.com/thecyclecoder/shopcx/blob/main/scripts/_check-pm-sdk-compliance.ts), modeled on the PM-flow guard) forbids raw `ticket_analyses` mutations outside the SDK.
+
+## File header (legacy cron — now dispatched by box agent)
 
 ```
 Per-ticket AI analysis. Replaces the nightly batch.
 Flow:
-1. Find closed tickets needing analysis (cron, every 30 min)
+1. Find closed tickets needing analysis (cron, every 30 min) — now enqueues agent_jobs
 2. For each ticket, pull messages since last_analyzed_at (or ticket creation)
 3. Skip if no AI messages in window (don't waste a call)
 4. Skip if ticket is spam/outreach/auto-reply (low-value)
-5. Send to Sonnet with the rubric + approved grader_prompts
-6. Insert ticket_analyses row + ai_token_usage row tagged with ticket_id
+5. Send to Sonnet with the rubric + approved grader_prompts (now via Max in box session)
+6. Insert ticket_analyses row + ai_token_usage row tagged with ticket_id (via SDK)
 7. Apply severity actions: ≤5 → escalate + notify customer; 6 → escalate silently;
 7+ → log only. Plus issue-type overrides.
-See discussion 2026-05-06 with Dylan.
+See discussion 2026-05-06 with Dylan. Converted to supervised box-session dispatch June 2026.
 ```
 
 ## Exports

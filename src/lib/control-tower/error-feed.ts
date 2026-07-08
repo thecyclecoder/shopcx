@@ -449,6 +449,15 @@ export function isTransientSupabaseLogNoise(
     // host=... : dial error (dial tcp [::1]:5432: operation was canceled)`. Same class,
     // different phrase — allowlist `operation was canceled` and the general `dial ...
     // canceled` shape too.
+    //
+    // The TIMEOUT sibling of `dial ... canceled`: when GoTrue's dial timer fires before the
+    // TCP handshake completes (as opposed to the parent context dying mid-dial), Go emits
+    // `failed to connect to host=... : dial error (dial tcp <addr>: i/o timeout)`. Same
+    // self-healing class as `canceled` — the upstream reachability already recovered by the
+    // next beat, no user impact, just repair-loop churn on a healed blip
+    // ([[../specs/error-feed-scope-supabase-auth-dial-io-timeout-transient]]) — allowlist
+    // the `dial ... i/o timeout` shape too. Recur-window escalation still applies: a chronic
+    // dial-timeout spike (a real upstream outage) recurs inside the window and pages.
     const msg = String(ctx.message ?? "").toLowerCase();
     if (!msg.trim()) return false;
     return (
@@ -456,6 +465,7 @@ export function isTransientSupabaseLogNoise(
       msg.includes("context deadline exceeded") ||
       msg.includes("operation was canceled") ||
       /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
+      /\bdial\b[^\n]*i\/o timeout/.test(msg) ||
       // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
       // load: `504: Processing this request timed out, please retry after a moment.` Same
       // transient class as the context-deadline shape above (restore of the reverted
@@ -464,6 +474,113 @@ export function isTransientSupabaseLogNoise(
       // still surfaces. Invalid JWT / rate-limit / signature mismatch remain first-sight pages.
       msg.includes("processing this request timed out")
     );
+  }
+  return false;
+}
+
+/**
+ * Foreign-app noise — Supabase's own GoTrue user endpoint returning 504 Gateway Timeout
+ * on the edge_logs feed ([[../specs/error-feed-drop-supabase-gotrue-504-edge-noise]]).
+ *
+ * Supabase's GoTrue auth service intermittently 504s on its own `/auth/v1/user` under load
+ * — an upstream infra saturation blip on Supabase's side. We do not run GoTrue and cannot
+ * patch its gateway; we hold ZERO levers here. The prior fix scoped this into the transient
+ * class ([[isTransientSupabaseLogNoise]] `kind:'auth'` `processing this request timed out`
+ * branch — the AUTH log, not the API edge_log), but the same shape ALSO surfaces on
+ * `edge_logs` as a `/auth/v1/user` + `504` row, and because Supabase's gateway saturates on
+ * a cadence outside our control, the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS`
+ * and escalates on every cycle — a Platform owner paged in a loop they cannot fix.
+ *
+ * Same choice we already made for supabase-edge-ssl-handshake and undici-headers-timeout
+ * noise: when the surface is foreign-owned and we hold no levers, DROP AT CAPTURE — do not
+ * even record the row. Narrowly gated to the exact `/auth/v1/user` + `504` shape so a real
+ * GoTrue outage on other paths, a 5xx that isn't 504, or a non-auth endpoint blip is still
+ * captured normally.
+ *
+ * `true` iff `path === '/auth/v1/user'` AND `statusCode` coerces to 504. Consumed by the
+ * `api` LogQuery's `mapRow` in [[./supabase-log-poll]] — the mapRow contract treats `null`
+ * as `drop, do not record`, so returning null here fully suppresses the row (no error_event,
+ * no loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignGoTrueEdgeNoise(
+  path: string | null | undefined,
+  statusCode: unknown,
+): boolean {
+  if (path !== "/auth/v1/user") return false;
+  const raw = typeof statusCode === "string" ? statusCode.trim() : statusCode;
+  const status = Number(raw);
+  return Number.isFinite(status) && status === 504;
+}
+
+/**
+ * Foreign-app noise — Supabase's own GoTrue `/user` saturating on its Postgres backend,
+ * arriving on the app-level auth_logs feed. The auth-log sibling of
+ * [[isForeignGoTrueEdgeNoise]] (which drops the same blip on the Cloudflare edge_logs).
+ * We do not run GoTrue and hold ZERO levers on its gateway; both shapes below are a healed
+ * foreign-app blip a user never sees (a normal `supabase.auth.getUser()` just retries and
+ * succeeds), so DROP AT CAPTURE — no error_event / loop_alert / signature / repair fan-out.
+ * Consumed by the `auth` LogQuery's `mapRow` in [[./supabase-log-poll]] — the mapRow
+ * contract treats `null` as `drop, do not record`, matching the `api` mapRow's edge-noise
+ * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
+ * passes just the message), the 504 shape needs the request JSON.
+ *
+ * Three distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
+ * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
+ * owner in a loop they can't fix):
+ *
+ *  (a) context-deadline ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]],
+ *      `supabase-logs:9f39fe11dd105b2a`, 39 occ / 6 days) — the `/user` handler 504s waiting
+ *      on its Postgres backend after ~14.8s and emits `level:'error'` with the EXACT phrase
+ *      `Unhandled server error: context deadline exceeded` (case-insensitive, trimmed).
+ *
+ *  (b) 504 gateway-timeout ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]],
+ *      `supabase-logs:9d5fae2f5f92ec3d`, 46 occ / 7 days) — msg starts with
+ *      `504: Processing this request timed out` AND the request JSON (`eventMessage`) carries
+ *      BOTH `"path":"/user"` AND `"method":"GET"`.
+ *
+ *  (c) localhost dial-timeout ([[../specs/error-feed-drop-supabase-gotrue-auth-log-localhost-dial-time]],
+ *      `supabase-logs:0ca9220a8f0d2405`, 7 occ / 9h) — GoTrue's `/user` handler can't reach
+ *      its own local Postgres inside its dial timer and emits `Unhandled server error:
+ *      failed to connect to \`host=localhost user=supabase_auth_admin database=postgres\`:
+ *      dial error (dial tcp [::1]:5432: i/o timeout | operation was canceled)`. Msg starts
+ *      with `Unhandled server error: failed to connect to` AND contains BOTH the
+ *      `host=localhost` and `user=supabase_auth_admin` markers (the unambiguous GoTrue →
+ *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
+ *      `dial ... (i/o timeout | operation was canceled)` phrase.
+ *
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: `context
+ * canceled` (browser-abort) + a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE
+ * host (a real Postgres pooler on our side — not the `host=localhost user=supabase_auth_admin`
+ * GoTrue-internal shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`,
+ * rate limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504
+ * on `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
+ */
+export function isForeignGoTrueAuthLogNoise(
+  msg: string | null | undefined,
+  eventMessage?: string | null | undefined,
+): boolean {
+  // (a) context-deadline shape — msg-only, exact phrase.
+  const text = (msg ?? "").trim().toLowerCase();
+  if (text === "unhandled server error: context deadline exceeded") return true;
+  // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
+  const m = (msg ?? "").trimStart();
+  if (m.startsWith("504: Processing this request timed out")) {
+    const em = eventMessage ?? "";
+    if (em.includes('"path":"/user"') && em.includes('"method":"GET"')) return true;
+  }
+  // (c) localhost dial-timeout shape — GoTrue → its own localhost Postgres, dial timer fires
+  // before the TCP handshake completes (i/o timeout) or the parent context dies mid-dial
+  // (operation was canceled). The `host=localhost` + `user=supabase_auth_admin` markers
+  // together pin this to Supabase-internal dialing; a dial failure against OUR remote
+  // Postgres pooler carries different host/user markers and is kept (still transient).
+  const lower = m.toLowerCase();
+  if (
+    lower.startsWith("unhandled server error: failed to connect to") &&
+    lower.includes("host=localhost") &&
+    lower.includes("user=supabase_auth_admin") &&
+    /\bdial\b[^\n]*(?:i\/o timeout|operation was canceled)/.test(lower)
+  ) {
+    return true;
   }
   return false;
 }

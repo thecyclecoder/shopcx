@@ -1,0 +1,1 @@
+- **God-mode becomes the CEO's executive-assistant agent** · verified 2026-07-07 · → [[../lifecycles/god-mode#autonomous-executive-assistant--god-mode-becomes-ceos-agent-phase-8]]

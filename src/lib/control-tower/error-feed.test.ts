@@ -15,6 +15,8 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isForeignGoTrueAuthLogNoise,
+  isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
   isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
@@ -247,6 +249,35 @@ test("isTransientUndiciHeadersTimeout — only 'fetch failed' + HeadersTimeout c
   assert.equal(isTransientUndiciHeadersTimeout(null), false);
 });
 
+test("isTransientSupabaseLogNoise scopes GoTrue dial i/o timeout as transient (timeout sibling of dial ... canceled)", () => {
+  // When GoTrue's dial timer fires before the TCP handshake completes, Go emits
+  // `failed to connect to host=... : dial error (dial tcp [::1]:5432: i/o timeout)` — the
+  // TIMEOUT sibling of the already-scoped `dial ... canceled` shape. Same self-healing
+  // class; the recur window catches a chronic dial-timeout spike
+  // (error-feed-scope-supabase-auth-dial-io-timeout-transient).
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", {
+      severity: "error",
+      message: "dial tcp [::1]:5432: i/o timeout",
+    }),
+    true,
+  );
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", {
+      severity: "error",
+      message:
+        "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    }),
+    true,
+  );
+  // A bare `i/o timeout` phrase without the `dial` shape is NOT this class — some other
+  // Go net.OpError variant — and stays paged on first sighting.
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "read tcp: i/o timeout" }),
+    false,
+  );
+});
+
 test("isTransientSupabaseLogNoise scopes GoTrue 504 gateway-timeout as transient (restored auth-504 spec)", () => {
   // The 2026-07-04 incident shape: `504: Processing this request timed out, please retry
   // after a moment.` A gateway timeout under load, same self-healing class as the
@@ -257,11 +288,275 @@ test("isTransientSupabaseLogNoise scopes GoTrue 504 gateway-timeout as transient
   );
 });
 
+// ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──
+// Supabase's own /auth/v1/user 504 on edge_logs — foreign-owned surface, no lever from us.
+// The transient class still recurred inside TRANSIENT_RECUR_WINDOW_MS and escalated on
+// every cycle; drop AT CAPTURE to the exact shape only.
+
+test("isForeignGoTrueEdgeNoise drops /auth/v1/user + 504 (numeric or string)", () => {
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 504), true);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", "504"), true);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", " 504 "), true);
+});
+
+test("isForeignGoTrueEdgeNoise KEEPS /auth/v1/user on other 5xx (real GoTrue outages still page)", () => {
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 500), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 502), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", 503), false);
+});
+
+test("isForeignGoTrueEdgeNoise KEEPS a 504 on non-auth paths (rest/v1 still pages)", () => {
+  assert.equal(isForeignGoTrueEdgeNoise("/rest/v1/customers", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/rest/v1/", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/token", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/", 504), false);
+});
+
+test("isForeignGoTrueEdgeNoise returns false on missing path/status", () => {
+  assert.equal(isForeignGoTrueEdgeNoise(null, 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise(undefined, 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("", 504), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", null), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", undefined), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", ""), false);
+  assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", "5xx"), false);
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-504-auth-log-noise) ──
+// The auth_logs sibling of isForeignGoTrueEdgeNoise: the same GoTrue saturation blip
+// surfaces on the app-level auth_logs surface as msg `504: Processing this request timed
+// out…` + event_message JSON `"path":"/user"` + `"method":"GET"`. Foreign-owned, no lever
+// from us; scoping into the transient class still recurred inside TRANSIENT_RECUR_WINDOW_MS
+// and escalated on every cycle. Drop AT CAPTURE to the exact shape only.
+
+test("isForeignGoTrueAuthLogNoise drops the exact 504 GoTrue /user shape", () => {
+  const eventMessage =
+    '{"component":"api","level":"error","method":"GET","msg":"504: Processing this request timed out, please retry after a moment.","path":"/user","status":504,"time":"2026-07-06T18:00:00Z"}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      eventMessage,
+    ),
+    true,
+  );
+  // Trailing detail in msg after the 504 prefix stays dropped (same class of GoTrue timeout).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("504: Processing this request timed out — retry", eventMessage),
+    true,
+  );
+  // Leading whitespace tolerated.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("  504: Processing this request timed out", eventMessage),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a non-504 auth error (invalid JWT, rate limit)", () => {
+  const jwtEvent =
+    '{"component":"api","level":"error","method":"GET","msg":"invalid JWT: signature mismatch","path":"/user","status":401}';
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch", jwtEvent), false);
+  const rateEvent =
+    '{"component":"api","level":"error","method":"POST","msg":"rate limit exceeded","path":"/token","status":429}';
+  assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded", rateEvent), false);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a 504 on a non-/user path (real GoTrue outage elsewhere)", () => {
+  // /token — the real auth-signing surface. A 504 here IS a real GoTrue outage worth paging.
+  const tokenEvent =
+    '{"component":"api","level":"error","method":"POST","msg":"504: Processing this request timed out, please retry after a moment.","path":"/token","status":504}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      tokenEvent,
+    ),
+    false,
+  );
+  // /admin — same principle.
+  const adminEvent =
+    '{"component":"api","level":"error","method":"GET","msg":"504: Processing this request timed out, please retry after a moment.","path":"/admin/users","status":504}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      adminEvent,
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a 504 on /user with a non-GET method", () => {
+  // A POST/DELETE to /user would be a mutation surface — a 504 there isn't the getUser noise.
+  const postEvent =
+    '{"component":"api","level":"error","method":"POST","msg":"504: Processing this request timed out, please retry after a moment.","path":"/user","status":504}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      postEvent,
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise returns false on missing / empty inputs", () => {
+  const eventMessage =
+    '{"component":"api","level":"error","method":"GET","msg":"504: Processing this request timed out, please retry after a moment.","path":"/user","status":504}';
+  assert.equal(isForeignGoTrueAuthLogNoise(null, eventMessage), false);
+  assert.equal(isForeignGoTrueAuthLogNoise(undefined, eventMessage), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("", eventMessage), false);
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      "",
+    ),
+    false,
+  );
+});
+
 test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate limit) — pages", () => {
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "invalid JWT: signature mismatch" }), false);
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "rate limit exceeded" }), false);
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: "" }), false);
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: null }), false);
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-context-deadline-us) ──
+// Supabase's own GoTrue `/user` handler timing out on its Postgres backend, arriving on the
+// auth_logs feed. Foreign-owned surface, no lever from our side; the transient-recur window
+// escalated the chronic saturation (supabase-logs:9f39fe11dd105b2a). Drop AT CAPTURE — exact
+// phrase only so `context canceled` / `dial ... i/o timeout` / `invalid JWT` stay unaffected.
+
+test("isForeignGoTrueAuthLogNoise drops the exact phrase (case + whitespace insensitive)", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: context deadline exceeded"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("unhandled server error: context deadline exceeded"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: context deadline exceeded  "), true);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / invalid JWT / rate-limit)", () => {
+  // The browser-abort sibling — still routed through the transient class.
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+  // Actionable GoTrue errors — must still surface / page on first sighting.
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-localhost-dial-time) ──
+// GoTrue → its own localhost Postgres can't finish the dial before its own dial timer
+// fires (i/o timeout) or the parent context dies mid-dial (operation was canceled). Foreign
+// infrastructure, no lever from our side; chronic recur (7 occ / 9h) escalated the transient
+// allowlist entry (supabase-logs:0ca9220a8f0d2405). Drop AT CAPTURE — narrow markers gate the
+// drop to Supabase-internal dialing so a real dial failure against OUR remote pooler still pages.
+
+test("isForeignGoTrueAuthLogNoise drops the localhost dial i/o timeout shape", () => {
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to `host=localhost user=supabase_auth_admin database=postgres`: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    true,
+  );
+  // Sibling phrasing without backticks — still drops.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    true,
+  );
+  // Leading whitespace still drops (trimStart applies).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "  Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise drops the localhost dial 'operation was canceled' sibling", () => {
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to `host=localhost user=supabase_auth_admin database=postgres`: dial error (dial tcp [::1]:5432: operation was canceled)",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: operation was canceled)",
+    ),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a remote-pooler dial failure (no host=localhost / no supabase_auth_admin marker)", () => {
+  // A real Postgres pooler on OUR side — different host and user, still transient (retryable
+  // reachability blip) but NOT dropped at capture. `isTransientSupabaseLogNoise` covers it.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=db.superfoods.co user=postgres database=postgres: dial error (dial tcp 10.0.0.5:5432: i/o timeout)",
+    ),
+    false,
+  );
+  // Right shape, wrong user (some other Supabase-internal role) — still keeps.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=postgres database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    false,
+  );
+  // Right shape, wrong host (a real pooler hostname) but supabase_auth_admin user — still
+  // keeps (localhost marker is REQUIRED — this is what pins the shape to internal dialing).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=db.internal user=supabase_auth_admin database=postgres: dial error (dial tcp 10.0.0.5:5432: i/o timeout)",
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS the localhost prefix without a dial timeout phrase", () => {
+  // A different failure mode against the same host — real auth-admin outage still pages.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: FATAL: password authentication failed",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: connection refused",
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise returns false on empty/nullish", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise(null), false);
+  assert.equal(isForeignGoTrueAuthLogNoise(undefined), false);
+  assert.equal(isForeignGoTrueAuthLogNoise(""), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("   "), false);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a longer/prefixed variant (postgres/api kinds unaffected — different shapes)", () => {
+  // A postgres statement-timeout row + an api 5xx row carry different phrasing and go
+  // through their own kind branches — nothing here would drop them by accident. The
+  // helper is purely a msg-string exact-match, so a non-equal string is always kept.
+  assert.equal(isForeignGoTrueAuthLogNoise("statement timeout"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("api 502 GET /rest/v1/loop_heartbeats"), false);
+  // A longer/embedded variant — the exact-match contract keeps it (only the bare phrase drops).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("prefix Unhandled server error: context deadline exceeded suffix"),
+    false,
+  );
 });
 
 test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {

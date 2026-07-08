@@ -1,0 +1,1 @@
+- **Box self-update: force override when the queue contains a job kind the running worker doesn't know** · verified 2026-07-07 · → [[../libraries/builder-worker]]

@@ -44,6 +44,16 @@ export interface Product {
   // page customers land on; falls back to "Add {upsell.title}" in
   // render when null.
   bundle_name: string | null;
+  // Phase 4 of offer-creator: when set, the bundle PDP's Select Bundle
+  // CTA adds this variant instead of the base variant, and any offer
+  // whose anchor variant_id matches fires (attaches its included items
+  // as $0 lines at cart-add). Falls back to the base variant when null.
+  bundle_variant_id: string | null;
+  // Phase 4 of offer-creator: auto-applied at bundle cart-add — the
+  // Select Bundle CTA passes this as `discount_code` on the /api/cart
+  // POST so the coupon (e.g. a $10 recurring_cycle_limit=1) lands on
+  // the first order. Null = no coupon.
+  bundle_coupon_code: string | null;
   variants: Array<{
     id?: string;
     title?: string;
@@ -406,6 +416,17 @@ export interface PageData {
     servings: number | null;
     servings_unit: string | null;
   } | null;
+  // Phase 4 of offer-creator: the bundle PDP's Select Bundle CTA adds
+  // this variant when set (resolved from products.bundle_variant_id).
+  // Null → the bundle PDP CTA falls back to base_variant.
+  bundle_variant: {
+    id: string | null;
+    shopify_variant_id: string | null;
+    price_cents: number;
+    image_url: string | null;
+    servings: number | null;
+    servings_unit: string | null;
+  } | null;
   /**
    * Every variant of the current product (and any linked-group
    * members) that has supplement_facts populated, used by the
@@ -504,7 +525,7 @@ export async function getPageData(
   const { data: product } = await admin
     .from("products")
     .select(
-      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, upsell_product_id, upsell_complementarity, bundle_name, variants",
+      "id, workspace_id, handle, title, image_url, description, rating, rating_count, target_customer, certifications, allergen_free, awards, intelligence_status, is_bestseller, header_text, header_text_color, header_text_weight, upsell_product_id, upsell_complementarity, bundle_name, bundle_variant_id, bundle_coupon_code, variants",
     )
     .eq("workspace_id", workspace.id)
     .eq("handle", productHandle)
@@ -527,6 +548,7 @@ export async function getPageData(
     linkGroup,
     pricingRule,
     baseVariantRes,
+    bundleVariantRes,
     amazonPriceRes,
   ] = await Promise.all([
     admin
@@ -623,6 +645,18 @@ export async function getPageData(
       .order("position", { ascending: true })
       .limit(1)
       .maybeSingle(),
+    // Phase 4 of offer-creator: bundle variant for the Select Bundle
+    // CTA. When products.bundle_variant_id is null, this returns
+    // { data: null } and the bundle PDP falls back to the base variant.
+    // Nested query keyed by the product's own bundle_variant_id column.
+    product.bundle_variant_id
+      ? admin
+          .from("product_variants")
+          .select("id, shopify_variant_id, price_cents, image_url, servings, servings_unit")
+          .eq("workspace_id", workspace.id)
+          .eq("id", product.bundle_variant_id as string)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
     // Cached Amazon prices for this product. Picks the lowest non-null
     // current_price_cents across any linked amazon_asins — corresponds
     // to the cheapest pack size on Amazon (typically the single-unit
@@ -966,6 +1000,16 @@ export async function getPageData(
           image_url: baseVariantRes.data.image_url,
           servings: baseVariantRes.data.servings,
           servings_unit: baseVariantRes.data.servings_unit,
+        }
+      : null,
+    bundle_variant: bundleVariantRes.data
+      ? {
+          id: bundleVariantRes.data.id,
+          shopify_variant_id: bundleVariantRes.data.shopify_variant_id,
+          price_cents: bundleVariantRes.data.price_cents,
+          image_url: bundleVariantRes.data.image_url,
+          servings: bundleVariantRes.data.servings,
+          servings_unit: bundleVariantRes.data.servings_unit,
         }
       : null,
     amazon_price_cents: amazonPriceRes.data?.current_price_cents ?? null,

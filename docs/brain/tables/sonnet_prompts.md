@@ -80,6 +80,8 @@ The cron is decisive: no `human_review` outcome. Low confidence (< 0.55) → `re
 
 Every transition writes an append-only row to [[sonnet_prompt_decisions]] BEFORE mutating this row. See [[../lifecycles/ai-learning]] for the full self-improvement loop.
 
+**Writes route through [[../libraries/sonnet-prompts-table]].** Since [[../specs/sonnet-prompts-sdk-for-review-agent-db-access]] Phase 1, every review-state write on this table flows through the typed SDK (`proposePrompt` / `applyReviewDecision` / `archiveSupersededPrompt` / `applyManualOverride`) — never a raw `.from('sonnet_prompts').update()` in agent code. The static guard `scripts/_check-sonnet-prompts-sdk-compliance.ts` (chained into `predeploy`) fails CI on any raw write outside the SDK.
+
 ## Common queries
 
 ### List rows for a workspace

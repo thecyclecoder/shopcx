@@ -1,0 +1,1 @@
+- **Draft/replacement orders send the ISO-2 country code ('US'), not the full country name — fixes every US replacement** · verified 2026-07-07 · → [[../libraries/shopify-draft-orders]]

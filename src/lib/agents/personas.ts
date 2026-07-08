@@ -82,6 +82,21 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
+  // ── CEO's executive-assistant agent — reports to the founder (Henry) ─────────
+  // god-mode-becomes-ceo-executive-assistant-agent Phase 1: gives the god-mode cockpit
+  // its own identity (a female name + persona) so it no longer resolves to the Platform
+  // orphan-default. Owner=ceo (see [[../control-tower/registry]] `OwnerFunction`), rendered
+  // under the CEO seat in Phase 2. Her distinct Nano Banana Pro headshot lives at
+  // `agent-avatars/eve-god-mode.jpg` (generated via scripts/_gen-eve-avatar.ts, 2026-07-07)
+  // — replaced the earlier ceo-crown.jpg placeholder that reused the CEO seat's portrait.
+  "god-mode": {
+    key: "god-mode", name: "Eve", role: "Executive Assistant", emoji: "🌙",
+    personality: "The CEO's right hand from the god-mode cockpit — does anything the founder asks within the PIN + risk-tier gates. Reads/diagnostics fly; every risky write surfaces the reasoning and asks. Autonomous within the founder's leash; escalates rather than silently mutating.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "ceo", avatarUrl: `${AV}eve-god-mode.jpg?v=1`,
+    chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
+    dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
+  },
   // ── Directors (function slugs) ──────────────────────────────────────────────
   platform: {
     key: "platform", name: "Ada", role: "Platform", emoji: "🛠️",
@@ -154,15 +169,6 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
-  "prompt-review": {
-    key: "prompt-review", name: "Wren", role: "Prompt Analyzer", emoji: "📝",
-    personality: "The editor of the conversation-rule library — reviews every proposed sonnet_prompt, approves the clear/actionable ones and rejects the vague/wrong, with a reasoned verdict. Precise and skeptical; keeps the rules that shape the AI's voice honest.",
-    pronouns: { subject: "they", object: "them", possessive: "their" },
-    mascotId: "default", avatarUrl: `${AV}wren-prompt-analyzer.jpg?v=1`,
-    chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
-    dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
-  },
-
   // ── Platform workers (agent_jobs kinds) — report to Ada/Platform ─────────────
   repair: {
     key: "repair", name: "Rafa", role: "Repair", emoji: "🟢",
@@ -202,6 +208,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   "deploy-guardian": {
     key: "deploy-guardian", name: "Reva", role: "Deploy Guardian", emoji: "🛡️",
     personality: "Watches each auto-merged deploy over its canary window — on a clear deploy-correlated regression, restores known-good FAST (revert the offending squash on main); escalates anything ambiguous instead of guessing.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
     mascotId: "default", avatarUrl: `${AV}reva-deployguardian.jpg?v=5`,
     chip: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-900/40",
     dot: "bg-fuchsia-500", ring: "bg-fuchsia-50 dark:bg-fuchsia-900/20", accent: "text-fuchsia-600 dark:text-fuchsia-400",
@@ -315,11 +322,24 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
+  // ── CS workers (agent_jobs kinds) — report to June/CS ─────────────────────────
+  // prompt-auto-review-becomes-box-agent-under-june Phase 2 — Prue reviews proposed sonnet_prompts as
+  // a supervised box-session agent (kind='prompt-review') under June. Same discipline as
+  // ticket-improve / triage-escalations: agent optimizes "review each proposal well" within June's
+  // rails; hitting a rail escalates rather than executes silently.
+  "prompt-review": {
+    key: "prompt-review", name: "Prue", role: "Prompt Review", emoji: "📖",
+    personality: "Reads every proposed sonnet_prompt against similar approved rules + policies + voice + source tickets, decides accept / reject / merge / supersede with calibrated confidence — decisive by design (no human-review queue). Autonomous within June's rails; escalates unparseable verdicts + safety-downgrades rather than executing silently.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}prue-prompt-review.jpg?v=1`,
+    chip: "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-900/40",
+    dot: "bg-sky-500", ring: "bg-sky-50 dark:bg-sky-900/20", accent: "text-sky-600 dark:text-sky-400",
+  },
   "sms-marketing": {
     key: "sms-marketing", name: "Margo", role: "SMS Marketing", emoji: "📣",
     personality: "Runs owned-channel SMS promos under Iris — picks the sale theme (VIP / Weekend), tailors the copy per segment, and schedules the cadence to grow attributed revenue-per-send. Autonomous within Iris's leash (weekly cap + segment scope + send windows); blocks + escalates on a stale audience or a missing coupon rather than blasting a bad send.",
     pronouns: { subject: "she", object: "her", possessive: "her" },
-    mascotId: "default",
+    mascotId: "default", avatarUrl: `${AV}margo-sms-marketing.jpg?v=1`,
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
@@ -437,6 +457,18 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Optimize predicted-LTV-per-visitor across every DB-driven surface — chapters (incl. chapter reorder), cart-recovery flow, lead popup, survey",
     "Stay within Max's leash — reversible levers auto-run within policy; offers + structural rewrites escalate for approval",
     "Draft a spec (never write code) when a test needs a capability that doesn't exist; hand it to Platform to build",
+  ],
+  "prompt-review": [
+    "Review every proposed sonnet_prompt against similar approved prompts, active policies, source-pattern tickets, and voice docs",
+    "Decide accept / reject / merge / supersede with calibrated confidence — decisive, never punt to a human-review queue",
+    "Preserve the safety rails: no delete-of-approved (supersede + archive); low-confidence proposals resurface with more evidence",
+    "Surface reasoning + safety-downgrades to June's activity feed; escalate an unparseable verdict rather than executing silently",
+  ],
+  "god-mode": [
+    "Act as the founder's remote hands from the god-mode cockpit — reads, diagnostics, and risky writes on demand",
+    "Run reads + non-destructive diagnostics autonomously; surface reasoning inline so the founder can steer",
+    "Gate every risky write on a one-tap live approval (destructive additionally requires a PIN) — never mutate silently",
+    "Escalate anything ambiguous back to the founder rather than guessing; hit the rail, don't route around it",
   ],
 };
 

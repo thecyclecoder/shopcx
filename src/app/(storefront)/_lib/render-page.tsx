@@ -44,6 +44,7 @@ import { BlueprintLander } from "../_sections/BlueprintLander";
 import { StickyJumpNav } from "../_components/StickyJumpNav";
 import type { AdvertorialContent } from "@/lib/advertorial-pages";
 import type { BlueprintRenderContent } from "@/lib/blueprint-render";
+import { resolveBundleCtaTargets } from "@/lib/bundle-cta";
 import type { ExperimentExposureMeta } from "@/lib/storefront/experiments";
 
 // PriceTable is mid-page but interactive on first scroll — load its
@@ -132,14 +133,18 @@ export function StorefrontPage({
   // Bundle PDP: the add-to-cart target so `#pricing` CTAs (which have no price table to scroll to)
   // fire the bundle buy. Base variant on subscribe at the rule's default frequency (placeholder for
   // the Starter Kit variant, per the offer-creator spec).
-  const bundleBuy = bundleName && data.base_variant?.id
+  const bundleTargets = bundleName
+    ? resolveBundleCtaTargets({ bundle_variant: data.bundle_variant, base_variant: data.base_variant, bundle_coupon_code: data.product.bundle_coupon_code })
+    : { variantId: null, couponCode: null };
+  const bundleBuy = bundleTargets.variantId
     ? {
-        variantId: data.base_variant.id,
+        variantId: bundleTargets.variantId,
         mode: (data.pricing_tiers.some((t) => t.subscribe_price_cents != null) ? "subscribe" : "onetime") as "subscribe" | "onetime",
         frequencyDays:
           (data.pricing_rule?.available_frequencies || []).find((f) => f.default)?.interval_days ??
           (data.pricing_rule?.available_frequencies || [])[0]?.interval_days ??
           null,
+        couponCode: bundleTargets.couponCode,
       }
     : null;
   const themeStyle = {
