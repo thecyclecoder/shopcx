@@ -1001,9 +1001,20 @@ export default function ControlTowerPage() {
   );
 
   useEffect(() => {
+    // cut-internal-egress-pooler-and-spec-rpcs Phase 3: visibility-guard mirrors the sidebar
+    // reduce-calls pattern (src/app/dashboard/sidebar.tsx:347) — a backgrounded tab issues no
+    // poll requests while hidden and refreshes on 'visibilitychange' → visible, so the
+    // 13-17-request fan-out this page's ~15s tick fires doesn't run while the operator is on
+    // another tab. Panels change on events, not routes, so deferring while hidden is safe.
     refresh();
-    const interval = setInterval(refresh, 15000);
-    return () => clearInterval(interval);
+    const runPoll = () => { if (document.visibilityState === "visible") refresh(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
+    const interval = setInterval(runPoll, 15000);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [refresh]);
 
   if (workspace.role !== "owner") {

@@ -1,0 +1,1 @@
+- **Cut the internal DevOps egress firehose — box pooler pool + spec-read RPCs** · verified 2026-07-08 · → [[../libraries/pg-pool]] · [[../libraries/specs-table]] · [[../libraries/control-tower]] · [[../libraries/db-health]]

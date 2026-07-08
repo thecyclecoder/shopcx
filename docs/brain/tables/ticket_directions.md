@@ -15,8 +15,8 @@ Written by Sol's box session (`runTicketHandleJob` — Phase 2) via `src/lib/tic
 | `ticket_id` | `uuid` | — | → [[tickets]].id · ON DELETE CASCADE — the ticket the Direction is authored for |
 | `intent` | `text` | — | one-line customer intent Sol distilled (e.g. "requesting a refund on the October order because the strap frayed") |
 | `context_summary` | `text` | — | short prose summary of the merged customer + subscription + order context Sol read at first touch |
-| `chosen_path` | `public.ticket_direction_path` | — | enum ∈ `playbook` \| `stateless` \| `needs_info` — `playbook` drives an existing playbook, `stateless` is a single stateless reply, `needs_info` asks the customer for a specific missing piece before any action |
-| `plan` | `jsonb` | — | default `'{}'` — the shape of the plan (e.g. `{"playbook_slug":"refund-with-recovery"}`, `{"action":"send_stateless_reply"}`, `{"needs":["order_number"]}`) — Phase 2's SDK defines the shape per `chosen_path` |
+| `chosen_path` | `public.ticket_direction_path` | — | enum ∈ `playbook` \| `journey` \| `stateless` \| `needs_info` — `playbook` drives an existing playbook, `journey` launches a matched [[journey_definitions]] row (Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]), `stateless` is a single stateless reply, `needs_info` asks the customer for a specific missing piece before any action |
+| `plan` | `jsonb` | — | default `'{}'` — the shape of the plan (e.g. `{"playbook_slug":"refund-with-recovery"}`, `{"journey_slug":"cancel_subscription"}`, `{"action":"send_stateless_reply"}`, `{"needs":["order_number"]}`) — the SDK defines the shape per `chosen_path` |
 | `guardrails` | `jsonb` | — | default `'{}'` — bounded proxy constraints downstream execution must respect (e.g. `{"max_coupon_pct":15,"never_promise":["expedited_shipping"]}`); a rail-hit = escalate, not execute (per CLAUDE.md § North star) |
 | `authored_by` | `text` | — | default `'sol_box_session'` — surfaced for the rare non-Sol author (a founder-authored override) |
 | `authored_at` | `timestamptz` | — | default `now()` — stamped at insert |
@@ -56,6 +56,8 @@ Service-role only (RLS enabled with no policies). Every write goes through `crea
 `supabase/migrations/20260925120000_ticket_directions.sql` (apply: `npx tsx scripts/apply-ticket-directions-migration.ts`). Idempotent — creates the `ticket_direction_path` enum (DO-guarded), the table, both indexes (`(workspace_id, ticket_id, authored_at DESC)` + the partial UNIQUE on `ticket_id WHERE superseded_at IS NULL`), and enables RLS with no policies.
 
 `supabase/migrations/20260930120000_sol_resession_cap.sql` (apply: `npx tsx scripts/apply-sol-resession-cap-migration.ts`) — adds `resession_count integer NOT NULL DEFAULT 0` (Phase 1 of [[../specs/sol-runaway-re-session-cap-guardrail]]). Idempotent (ADD COLUMN IF NOT EXISTS).
+
+`supabase/migrations/20261004120000_ticket_directions_journey_path.sql` (apply: `npx tsx scripts/apply-ticket-directions-journey-path-migration.ts`) — extends the `ticket_direction_path` enum with `'journey'` (Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]]) so Sol's Direction can name the specific matched journey slug on the Direction (`chosen_path='journey'` + `plan.journey_slug`). `writeDirection` in [[../libraries/ticket-directions]] gates the slug against `journey_definitions` (`is_active=true`, workspace-scoped) before the row lands; an unknown slug bails HERE with `journey_slug_unknown`, not at the Phase-2 `launchJourneyForTicket` step. Idempotent (ADD VALUE IF NOT EXISTS).
 
 ---
 

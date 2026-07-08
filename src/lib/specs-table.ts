@@ -332,25 +332,36 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
 /**
  * One spec by (workspace, slug) — the parent `specs` row joined with its `spec_phases` ordered by position.
  * Returns `null` when no row matches. Read by authenticated users (RLS) — the admin client just bypasses RLS.
+ *
+ * cut-internal-egress-pooler-and-spec-rpcs Phase 2 — sourced from the `get_spec_with_phases(uuid, text)`
+ * RPC (supabase/migrations/20261004120000_get_spec_with_phases_rpc.sql). The RPC does the specs+phases
+ * join SERVER-SIDE and returns one `(spec jsonb, phases jsonb)` row, replacing the pre-Phase-2 two
+ * PostgREST round trips (`.from('specs')` then `.from('spec_phases')`) — the same set_config preamble +
+ * auth churn `list_specs_with_phases` already retired for [[listSpecs]]. On the box the pooled path
+ * (Phase-1 pg-pool → single pooled query) is preferred; anywhere the pool is unavailable falls back
+ * to the supabase-js RPC path. Returned SpecRow shape is byte-identical to the pre-Phase-2 path.
  */
 export async function getSpec(workspaceId: string, slug: string): Promise<SpecRow | null> {
+  // Pooled path (box worker + any runtime with pooler creds): one round trip, no PostgREST preamble.
+  // `undefined` = pool unavailable / query error → fall through to supabase-js; `null` = no such slug.
+  try {
+    const { getSpecWithPhases } = await import("@/lib/pg-pool");
+    const pooled = await getSpecWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, slug);
+    if (pooled === null) return null;
+    if (pooled !== undefined) return specRowFromDb(pooled.spec, pooled.phases);
+  } catch {
+    /* fall through to supabase-js RPC */
+  }
   const admin = createAdminClient();
-  const { data: spec, error } = await admin
-    .from("specs")
-    .select(SPEC_COLUMNS)
-    .eq("workspace_id", workspaceId)
-    .eq("slug", slug)
-    .maybeSingle();
+  const { data, error } = await admin.rpc("get_spec_with_phases", {
+    p_workspace_id: workspaceId,
+    p_slug: slug,
+  });
   if (error) throw error;
-  if (!spec) return null;
-  const specDb = spec as SpecRowDb;
-  const { data: phases, error: pErr } = await admin
-    .from("spec_phases")
-    .select(PHASE_COLUMNS)
-    .eq("spec_id", specDb.id)
-    .order("position", { ascending: true });
-  if (pErr) throw pErr;
-  return specRowFromDb(specDb, (phases ?? []) as SpecPhaseRow[]);
+  const rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  const row = rows[0];
+  if (!row || !row.spec) return null;
+  return specRowFromDb(row.spec, (row.phases ?? []) as SpecPhaseRow[]);
 }
 
 /**
