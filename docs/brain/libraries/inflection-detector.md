@@ -106,18 +106,57 @@ Newest customer message: <newestMessage>
 
 ## Call sites
 
-- [[../inngest/unified-ticket-handler]] — the pre-`stampedSend` gate (Phase 2 of the spec, still to be wired). On `kind !== 'none'` the drafted reply is NOT shipped; a `ticket_resolution_events` row is staged with `reasoning='sol:inflection-<kind>'` and the re-session router in Phase 3 supersedes the Direction and re-enqueues Sol.
+- [[../inngest/unified-ticket-handler]] — the pre-`stampedSend` gate (Phase 2 of the spec, still to be wired). On `kind !== 'none'` the drafted reply is NOT shipped; a `ticket_resolution_events` row is staged with `reasoning='sol:inflection-<kind>'` and the re-session router (see `reSessionSol` below) supersedes the Direction and re-enqueues Sol.
 
 ## Evidence → ledger
 
 The `evidence` object is stamped verbatim into `ticket_resolution_events.reasoning` prefixed with `sol:inflection-<kind>` when the gate fires. That prefix is what the verification suites for Phases 2 and 3 assert.
+
+## `reSessionSol` — Phase 3 router
+
+The mutating primitive the Phase-2 gate calls on a `'drift'` or `'frustration'` verdict.
+
+```ts
+async function reSessionSol(
+  admin: SupabaseClient,
+  ticket_id: string,
+  input: {
+    workspace_id: string;
+    kind: "drift" | "frustration";
+    evidence: InflectionEvidence;
+    turn_index?: number;
+  },
+): Promise<{
+  superseded: boolean;
+  enqueued: boolean;
+  superseded_direction_id: string | null;
+  job_id: string | null;
+}>;
+```
+
+Two mutations, in order:
+
+1. **Supersede the live Direction** via [[./ticket-directions]] `superseDirection` (workspace-scoped compare-and-set on `superseded_at IS NULL`). If a racing caller stamped it first, `superseDirection` returns `null` — the router bails without enqueueing so we don't fan out a redundant `ticket-handle` session. The DB-level partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` on [[../tables/ticket_directions]] is a second belt guaranteeing exactly one live row per ticket at any moment.
+2. **Enqueue a new box session.** One `agent_jobs` row `kind='ticket-handle'`, `spec_slug='ticket-handle-<first 8 of ticket_id>'` (mirrors first-touch for worker routing uniformity), `status='queued'`, `instructions = JSON.stringify({ticket_id, workspace_id, turn_index, reason:'inflection', kind, evidence, superseded_direction_id})`. `runTicketHandleJob` reads `reason='inflection'` to know it's a bounce (vs `'first_touch'`) and links the new Direction back to `superseded_direction_id` in the ledger.
+
+### The router NEVER sends a customer-facing message
+
+Per spec: the corrected reply is the new box session's job — writing it from the router would put two messages on the ledger for one inflection turn, breaking the "one Direction per intent" invariant [[../specs/sol-cheap-execution-over-ticket-direction]] relies on. The optional holding-message send lives at the Phase-2 gate call site (see below), NOT here.
+
+### Holding message on `'frustration'` (gate-site policy, not router)
+
+The Phase-2 gate call site — BEFORE it calls `reSessionSol` — sends a short "we're looking into that for you" inline holding message via `stampedSend` when:
+
+- `kind === 'frustration'` (drift is silent by default — the customer doesn't need to be told the AI is re-orienting).
+- `ai_channel_config.sol_frustration_holding_message_enabled` is `true` (default `true`, workspace-tunable — a workspace that prefers a fully silent re-session can turn it off). Migration: `supabase/migrations/20260928120000_ai_channel_config_sol_frustration_holding_message_enabled.sql` (`boolean NOT NULL DEFAULT true`), applied via `scripts/apply-ai-channel-config-sol-frustration-holding-message-enabled-migration.ts`.
 
 ## Related
 
 - [[../specs/sol-drift-frustration-detector-and-re-session-router]]
 - [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]]
 - [[../specs/sol-cheap-execution-over-ticket-direction]]
-- [[./ticket-directions]] — the durable Direction artifact whose `intent` this detector reads.
-- [[../tables/ticket_resolution_events]] — where the flagged reasoning lands.
-- [[../tables/ai_channel_config]] — `ai_turn_limit` + (Phase 3) `sol_frustration_holding_message_enabled`.
-- [[../lifecycles/ticket-lifecycle]] — § Phase 2b (Sol first-touch dispatch) + § Phase 2f (executor / write-ahead ledger).
+- [[./ticket-directions]] — the durable Direction artifact whose `intent` this detector reads and whose `superseDirection` the router calls.
+- [[../tables/ticket_directions]] — one live row per ticket (partial UNIQUE `superseded_at IS NULL`).
+- [[../tables/ticket_resolution_events]] — where the flagged `sol:inflection-<kind>` reasoning lands.
+- [[../tables/ai_channel_config]] — `ai_turn_limit` + `sol_frustration_holding_message_enabled`.
+- [[../lifecycles/ticket-lifecycle]] — § Phase 2b (Sol first-touch dispatch + re-session bounce) + § Phase 2f (executor / write-ahead ledger).

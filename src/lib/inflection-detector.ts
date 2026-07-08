@@ -20,7 +20,10 @@
  * but frustration cues are still checked so a "refund now" mid-playbook bounces to re-session
  * per the spec.
  */
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { superseDirection } from "@/lib/ticket-directions";
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -380,5 +383,101 @@ export async function detectInflection(
       cues: stage1.evidence.cues,
       haiku_verdict: verdict,
     },
+  };
+}
+
+// ── Phase 3: re-session router ────────────────────────────────────────────────
+
+/**
+ * Router the Phase-2 gate calls when detectInflection flags 'drift' or 'frustration'.
+ *
+ * Two mutations, in order:
+ *   (1) supersede the live Direction (compare-and-set — reuses [[./ticket-directions]]
+ *       `superseDirection`, which returns null if a racing caller already stamped it, so we
+ *       bail without opening a duplicate ticket-handle job);
+ *   (2) enqueue a `kind='ticket-handle'` `agent_jobs` row carrying the inflection payload
+ *       (`reason='inflection'`, `kind`, `evidence`, `superseded_direction_id`) — mirrors the
+ *       first-touch enqueue shape at unified-ticket-handler.ts (ticket_id + workspace_id + turn
+ *       ride inside the `instructions` JSON blob).
+ *
+ * The router NEVER sends a customer-facing message itself. Per spec: the corrected reply is the
+ * new box session's job (once it authors the new Direction), so the ledger stays a clean
+ * "one Direction per intent" history. The optional "we're looking into that for you" holding
+ * message on `frustration` is sent from the Phase-2 gate call site via `stampedSend` — governed
+ * by `ai_channel_config.sol_frustration_holding_message_enabled` — NOT from here.
+ *
+ * Idempotency: if no live Direction exists (or a racing caller stamped it first), the router
+ * skips the enqueue and returns `{ superseded: false, enqueued: false }` so a duplicate call
+ * cannot fan out extra sessions. The spec's "exactly one live ticket_directions row" invariant
+ * is enforced at the DB level (partial UNIQUE); this router's compare-and-set is a second belt
+ * so the enqueue only fires on the caller who won the supersede race.
+ */
+export interface ReSessionResult {
+  superseded: boolean;
+  enqueued: boolean;
+  superseded_direction_id: string | null;
+  job_id: string | null;
+}
+
+export async function reSessionSol(
+  admin: SupabaseClient,
+  ticket_id: string,
+  input: {
+    workspace_id: string;
+    kind: "drift" | "frustration";
+    evidence: InflectionEvidence;
+    /** Optional — the resolution-events turn_index the newly-enqueued session should carry. */
+    turn_index?: number;
+  },
+): Promise<ReSessionResult> {
+  // (1) supersede the live Direction. `superseDirection` is workspace-scoped and returns null
+  // when there is no live row (already superseded / never authored) — do NOT enqueue in that
+  // case (the caller misfired, and enqueueing anyway would fan out a redundant session).
+  const superseded = await superseDirection(admin, ticket_id, {
+    workspace_id: input.workspace_id,
+  });
+  if (!superseded) {
+    return { superseded: false, enqueued: false, superseded_direction_id: null, job_id: null };
+  }
+
+  // (2) enqueue `kind='ticket-handle'`. spec_slug follows the first-touch pattern
+  // (`ticket-handle-<first 8 of ticket_id>`) so the worker's job routing stays uniform.
+  // instructions.reason='inflection' is what runTicketHandleJob will read to know it's a
+  // bounce (vs 'first_touch'); the payload carries the classifier kind + evidence + the
+  // superseded_direction_id so the ledger can link the new Direction back to the old one.
+  const { data: jobRow, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: input.workspace_id,
+      kind: "ticket-handle",
+      spec_slug: `ticket-handle-${ticket_id.slice(0, 8)}`,
+      status: "queued",
+      instructions: JSON.stringify({
+        ticket_id,
+        workspace_id: input.workspace_id,
+        turn_index: input.turn_index ?? null,
+        reason: "inflection",
+        kind: input.kind,
+        evidence: input.evidence,
+        superseded_direction_id: superseded.id,
+      }),
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    // The supersede already committed; a failed enqueue leaves the ticket without a live
+    // Direction. The caller (Phase-2 gate) will surface the error to its retry envelope so
+    // the session can be re-enqueued on the next attempt. We do NOT try to un-supersede — the
+    // DB partial UNIQUE guarantees the ticket has zero live rows, which is a valid recover-
+    // able state (the next inbound turn will re-enter the gate).
+    throw error;
+  }
+
+  return {
+    superseded: true,
+    enqueued: true,
+    superseded_direction_id: superseded.id,
+    job_id: (jobRow?.id as string) ?? null,
   };
 }
