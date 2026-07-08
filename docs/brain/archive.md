@@ -12,8 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Agent-coach auto-resolves a blameless box-outage grade batch instead of escalating to the CEO** · verified 2026-07-08 · → [[../libraries/agent-coaching#blameless-box-outage-auto-resolve-skip-coaching-no-ceo-escalation]]
 - **Harden the Fenn agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../recipes/build-box-setup#fenn-agents-durable-mandate]]
 - **Harden the Rafa agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../libraries/repair-agent]]
+- **Harden the Vera agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../libraries/spec-test-runs]]
 - **Prune stale build worktrees before worktree add (stop goal-build collisions)** · verified 2026-07-08 · → [[../libraries/builder-worker]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
@@ -22,6 +24,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Portal errors route to Sol first-touch, escalate to June only on rail-hit** · verified 2026-07-08 · → [[../libraries/portal__enqueue-sol-first-touch]]
 - **Portal remediation: add a frequency-route replay + self-resolved so retries-that-worked auto-close** · verified 2026-07-08 · → [[../libraries/portal__remediation]]
 - **Reese ignores goal-branch drift, and a confirmed reverse-drift lands in the CEO inbox** · verified 2026-07-08 · → [[../libraries/spec-drift]]
+- **Register monitored loop: playbook-compiler** · verified 2026-07-08 · → [[../inngest/playbook-compiler]]
+- **Register monitored loop: refund-settlement-reconcile** · verified 2026-07-08 · → [[../inngest/refund-settlement-reconcile]]
 - **Sol API-mode cheap execution over the Ticket Direction** · verified 2026-07-08 · → [[../libraries/ai-context]] · [[../libraries/model-picker]] · [[../inngest/unified-ticket-handler]] · [[../lifecycles/ticket-lifecycle]]
 - **Sol cost + CSAT rollups + Catherine-marker cohort compare** · verified 2026-07-08 · → [[../tables/tickets]] · [[../tables/sol_replay_runs]] · [[../libraries/action-executor]] · [[../recipes/backfill-ticket-ai-cost]] · [[../dashboard/tickets]]
 - **Inflection detector (drift + frustration) → re-session Sol** · verified 2026-07-08 · → [[../libraries/inflection-detector]] · [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
