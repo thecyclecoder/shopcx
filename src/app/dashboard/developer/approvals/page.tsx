@@ -270,9 +270,20 @@ export default function ApprovalsPage() {
 
   useEffect(() => {
     if (workspace.role !== "owner") return;
+    // cut-internal-egress-pooler-and-spec-rpcs Phase 3: visibility-guard — a backgrounded tab
+    // stops firing the ~15s approvals poll and refreshes on return-to-visible, so the routed
+    // Agents inbox doesn't shed egress when the operator has flipped to another tab. Approvals
+    // change on events, not routes, so deferring while hidden is safe. Mirrors the shipped
+    // sidebar reduce-calls pattern (src/app/dashboard/sidebar.tsx:347).
     load();
-    const t = setInterval(() => load(true), 15000);
-    return () => clearInterval(t);
+    const runPoll = () => { if (document.visibilityState === "visible") load(true); };
+    const onVisibility = () => { if (document.visibilityState === "visible") load(true); };
+    const t = setInterval(runPoll, 15000);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [workspace.role, load]);
 
   const counts = useMemo(() => {
