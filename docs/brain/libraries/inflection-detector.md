@@ -122,6 +122,7 @@ async function reSessionSol(
   ticket_id: string,
   input: {
     workspace_id: string;
+    channel: string; // ai_channel_config lookup for sol_max_resessions
     kind: "drift" | "frustration";
     evidence: InflectionEvidence;
     turn_index?: number;
@@ -131,13 +132,20 @@ async function reSessionSol(
   enqueued: boolean;
   superseded_direction_id: string | null;
   job_id: string | null;
+  cap_hit: boolean; // Phase 2 of sol-runaway-re-session-cap-guardrail
 }>;
 ```
 
-Two mutations, in order:
+Four mutations, gated on a cap check (Phase 2 of [[../specs/sol-runaway-re-session-cap-guardrail]]):
 
-1. **Supersede the live Direction** via [[./ticket-directions]] `superseDirection` (workspace-scoped compare-and-set on `superseded_at IS NULL`). If a racing caller stamped it first, `superseDirection` returns `null` — the router bails without enqueueing so we don't fan out a redundant `ticket-handle` session. The DB-level partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` on [[../tables/ticket_directions]] is a second belt guaranteeing exactly one live row per ticket at any moment.
-2. **Enqueue a new box session.** One `agent_jobs` row `kind='ticket-handle'`, `spec_slug='ticket-handle-<first 8 of ticket_id>'` (mirrors first-touch for worker routing uniformity), `status='queued'`, `instructions = JSON.stringify({ticket_id, workspace_id, turn_index, reason:'inflection', kind, evidence, superseded_direction_id})`. `runTicketHandleJob` reads `reason='inflection'` to know it's a bounce (vs `'first_touch'`) and links the new Direction back to `superseded_direction_id` in the ledger.
+1. **Load the live Direction + `ai_channel_config.sol_max_resessions`.** No live row → early return (`superseded:false`, `enqueued:false`, `cap_hit:false`) — the same "misfired caller" bail as before, now moved to the top so the cap check has a `resession_count` to read.
+2. **Cap check.** `sol_max_resessions IS NOT NULL AND resession_count >= sol_max_resessions` → **skip supersede AND agent_jobs insert**. Instead:
+   - `UPDATE tickets SET escalated_at=now(), escalated_to=null, escalation_reason='sol_resession_cap_hit'` — workspace-scoped compare-and-set + `.select('id')` so a cross-workspace ticket_id collision can't cross the boundary. Routine lane (`escalated_to IS NULL`) is picked up by [[../inngest/triage-escalations]] under the "AI Investigation" badge per [[../lifecycles/ticket-lifecycle]] § Escalation lifecycle.
+   - Stamp one `ticket_resolution_events` row with `reasoning='sol:cap-hit'` + `chosen={resession_count, sol_max_resessions, kind}` — Phase 3 of this spec reads that filter for the analytics tile + cs-director-digest.
+   - Return `cap_hit:true` (else branches all set `cap_hit:false`). `sol_max_resessions IS NULL` = uncapped — the cap branch NEVER fires regardless of `resession_count`.
+3. **Increment `resession_count`** on the live Direction via [[./ticket-directions]] `incrementResessionCount` — compare-and-set on `(id, workspace_id, superseded_at IS NULL)` + `.select('id')` so a racing supersede returns `null` and the router bails without double-counting.
+4. **Supersede the live Direction** via [[./ticket-directions]] `superseDirection` (workspace-scoped compare-and-set on `superseded_at IS NULL`). If a racing caller stamped it first, `superseDirection` returns `null` — the router bails without enqueueing so we don't fan out a redundant `ticket-handle` session. The DB-level partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` on [[../tables/ticket_directions]] is a second belt guaranteeing exactly one live row per ticket at any moment.
+5. **Enqueue a new box session.** One `agent_jobs` row `kind='ticket-handle'`, `spec_slug='ticket-handle-<first 8 of ticket_id>'` (mirrors first-touch for worker routing uniformity), `status='queued'`, `instructions = JSON.stringify({ticket_id, workspace_id, turn_index, reason:'inflection', kind, evidence, superseded_direction_id})`. `runTicketHandleJob` reads `reason='inflection'` to know it's a bounce (vs `'first_touch'`) and links the new Direction back to `superseded_direction_id` in the ledger.
 
 ### The router NEVER sends a customer-facing message
 

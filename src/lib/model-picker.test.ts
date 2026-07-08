@@ -142,6 +142,7 @@ function directionAuthoredHoursAgo(nowMs: number, ageHours: number, overrides: P
     authored_by: "sol_box_session",
     authored_at: new Date(nowMs - ageHours * 3600 * 1000).toISOString(),
     superseded_at: null,
+    resession_count: 0,
     ...overrides,
   };
 }

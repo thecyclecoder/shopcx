@@ -23,7 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { HAIKU_MODEL } from "@/lib/ai-models";
-import { superseDirection } from "@/lib/ticket-directions";
+import { getLiveDirection, incrementResessionCount, superseDirection } from "@/lib/ticket-directions";
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -417,6 +417,14 @@ export interface ReSessionResult {
   enqueued: boolean;
   superseded_direction_id: string | null;
   job_id: string | null;
+  /**
+   * Phase 2 of [[../specs/sol-runaway-re-session-cap-guardrail]]. `true` when the live
+   * Direction's `resession_count >= ai_channel_config.sol_max_resessions` — the router
+   * skipped both the supersede AND the agent_jobs insert and escalated the ticket to the
+   * routine lane instead. `false` on every other path (no live Direction · uncapped · below
+   * cap). `sol_max_resessions IS NULL` never triggers this branch (NULL = uncapped).
+   */
+  cap_hit: boolean;
 }
 
 export async function reSessionSol(
@@ -424,23 +432,137 @@ export async function reSessionSol(
   ticket_id: string,
   input: {
     workspace_id: string;
+    /**
+     * `ai_channel_config.channel` for this ticket — used to look up `sol_max_resessions`.
+     * Phase 2 of [[../specs/sol-runaway-re-session-cap-guardrail]] plumbed this through from
+     * `applyInflectionGate` so the cap check can fire per-channel.
+     */
+    channel: string;
     kind: "drift" | "frustration";
     evidence: InflectionEvidence;
     /** Optional — the resolution-events turn_index the newly-enqueued session should carry. */
     turn_index?: number;
   },
 ): Promise<ReSessionResult> {
-  // (1) supersede the live Direction. `superseDirection` is workspace-scoped and returns null
+  // (1) Load the live Direction (workspace-scoped) BEFORE any mutation so the cap-check can
+  // read `resession_count` off the row. When no live row exists (already superseded / never
+  // authored) the router bails cleanly — same behavior as the pre-Phase-2 supersede-null
+  // branch (a misfired caller must not fan out a redundant session).
+  const live = await getLiveDirection(admin, ticket_id, {
+    workspace_id: input.workspace_id,
+  });
+  if (!live) {
+    return {
+      superseded: false,
+      enqueued: false,
+      superseded_direction_id: null,
+      job_id: null,
+      cap_hit: false,
+    };
+  }
+
+  // (2) Load `ai_channel_config.sol_max_resessions` for (workspace, channel). NULL = uncapped
+  // per the parent goal's "never rewards ... but bounds re-sessions" language — the cap check
+  // NEVER fires when the column is NULL regardless of `resession_count`.
+  const { data: cfgRow } = await admin
+    .from("ai_channel_config")
+    .select("sol_max_resessions")
+    .eq("workspace_id", input.workspace_id)
+    .eq("channel", input.channel)
+    .maybeSingle();
+  const solMaxResessions =
+    (cfgRow as { sol_max_resessions: number | null } | null)?.sol_max_resessions ?? null;
+
+  // (3) Cap-hit branch: `sol_max_resessions IS NOT NULL AND resession_count >= sol_max_resessions`.
+  // Skip the supersede + agent_jobs insert; escalate the ticket to the routine lane
+  // (escalated_to=null, escalation_reason='sol_resession_cap_hit') so the box-escalation-triage
+  // sweep picks it up under the 'AI Investigation' badge. Stamp a ticket_resolution_events row
+  // with reasoning='sol:cap-hit' + evidence={resession_count, sol_max_resessions} so the
+  // Phase 3 analytics tile + the cs-director-digest have a durable read path.
+  if (solMaxResessions !== null && live.resession_count >= solMaxResessions) {
+    // Compare-and-set on the ticket: workspace_id-scoped + `.select('id')` per Learning #1
+    // so a cross-workspace ticket_id collision can't overwrite state and a zero-row transition
+    // (row missing / already re-scoped) is surfaced by the empty return rather than silently
+    // swallowed.
+    const { data: escalatedRows, error: escError } = await admin
+      .from("tickets")
+      .update({
+        escalated_at: new Date().toISOString(),
+        escalated_to: null,
+        escalation_reason: "sol_resession_cap_hit",
+      })
+      .eq("id", ticket_id)
+      .eq("workspace_id", input.workspace_id)
+      .select("id");
+    if (escError) throw escError;
+    const escalated = ((escalatedRows as Array<{ id: string }> | null) ?? []).length === 1;
+
+    // Ledger stamp — best-effort like the inflection-event insert in `applyInflectionGate`
+    // (a diagnostic write that must not wedge the escalate). turn_index is threaded from the
+    // caller (nullable — the ledger tolerates NULL turn_index for out-of-band stamps).
+    try {
+      await admin.from("ticket_resolution_events").insert({
+        workspace_id: input.workspace_id,
+        ticket_id,
+        turn_index: input.turn_index ?? null,
+        reasoning: "sol:cap-hit",
+        chosen: {
+          resession_count: live.resession_count,
+          sol_max_resessions: solMaxResessions,
+          kind: input.kind,
+        } as Record<string, unknown>,
+      });
+    } catch {
+      // Ledger is diagnostic — do not block the cap-hit escalate.
+    }
+
+    return {
+      superseded: false,
+      enqueued: false,
+      superseded_direction_id: null,
+      job_id: null,
+      cap_hit: escalated,
+    };
+  }
+
+  // (4) Below-cap branch (including `sol_max_resessions IS NULL` / uncapped). Increment
+  // `resession_count` on the LIVE row via compare-and-set BEFORE superseding, so the durable
+  // history is captured on the row that is about to be superseded. The compare-and-set
+  // (`.eq('id', live.id)` + `.is('superseded_at', null)` + workspace_id) returns null when a
+  // racing caller stamped the supersede first — in that case we do NOT enqueue (same
+  // "misfired caller" reasoning as the pre-Phase-2 null-supersede early return).
+  const incremented = await incrementResessionCount(admin, {
+    workspace_id: input.workspace_id,
+    direction_id: live.id,
+    from_count: live.resession_count,
+  });
+  if (incremented === null) {
+    return {
+      superseded: false,
+      enqueued: false,
+      superseded_direction_id: null,
+      job_id: null,
+      cap_hit: false,
+    };
+  }
+
+  // (5) supersede the live Direction. `superseDirection` is workspace-scoped and returns null
   // when there is no live row (already superseded / never authored) — do NOT enqueue in that
   // case (the caller misfired, and enqueueing anyway would fan out a redundant session).
   const superseded = await superseDirection(admin, ticket_id, {
     workspace_id: input.workspace_id,
   });
   if (!superseded) {
-    return { superseded: false, enqueued: false, superseded_direction_id: null, job_id: null };
+    return {
+      superseded: false,
+      enqueued: false,
+      superseded_direction_id: null,
+      job_id: null,
+      cap_hit: false,
+    };
   }
 
-  // (2) enqueue `kind='ticket-handle'`. spec_slug follows the first-touch pattern
+  // (6) enqueue `kind='ticket-handle'`. spec_slug follows the first-touch pattern
   // (`ticket-handle-<first 8 of ticket_id>`) so the worker's job routing stays uniform.
   // instructions.reason='inflection' is what runTicketHandleJob will read to know it's a
   // bounce (vs 'first_touch'); the payload carries the classifier kind + evidence + the
@@ -479,6 +601,7 @@ export async function reSessionSol(
     enqueued: true,
     superseded_direction_id: superseded.id,
     job_id: (jobRow?.id as string) ?? null,
+    cap_hit: false,
   };
 }
 
@@ -601,6 +724,7 @@ export async function applyInflectionGate(
 
   const reSession = await reSessionSol(input.admin, input.ticket_id, {
     workspace_id: input.workspace_id,
+    channel: input.channel,
     kind: verdict.kind,
     evidence: verdict.evidence,
     turn_index: turnIndex,

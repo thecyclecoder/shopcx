@@ -50,6 +50,7 @@ function makeDirection(overrides: Partial<TicketDirection> = {}): TicketDirectio
     authored_by: "sol_box_session",
     authored_at: "2026-07-07T12:00:00Z",
     superseded_at: null,
+    resession_count: 0,
     ...overrides,
   };
 }

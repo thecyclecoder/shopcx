@@ -61,6 +61,19 @@ Reads the live Direction for a ticket (`superseded_at IS NULL`), or `null` when 
 
 **Called by:** future cheap-execution dispatchers (Phase 3 lands the unified-ticket-handler branch that calls `getLiveDirection` and drives off `chosen_path` + `plan` + `guardrails` instead of re-running the full-context orchestrator prompt).
 
+### `incrementResessionCount` — function
+
+```ts
+async function incrementResessionCount(
+  admin: Admin,
+  input: { workspace_id: string; direction_id: string; from_count: number },
+): Promise<number | null>
+```
+
+Bumps `resession_count` on the LIVE Direction by 1. Phase 2 of [[../specs/sol-runaway-re-session-cap-guardrail]] — [[./inflection-detector]] `reSessionSol` calls this BEFORE the supersede so the incremented count is durably captured on the row that is about to be superseded. Compare-and-set on `(id = direction_id AND workspace_id = … AND superseded_at IS NULL)` + `.select('id')` — a racing supersede returns zero rows and this function returns `null` so the caller can bail without double-counting.
+
+**Called by:** [[./inflection-detector]] `reSessionSol` (below-cap branch). Returns the NEW count (`from_count + 1`) on success, or `null` when the compare-and-set found zero live rows (already superseded).
+
 ## Invariants
 
 - **One live row per ticket.** Enforced by the DB partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` — the SDK does NOT re-check in application code (a select-then-insert race defeats that; the DB is the authority). A `writeDirection` failure with `23505` = a live row already exists.
