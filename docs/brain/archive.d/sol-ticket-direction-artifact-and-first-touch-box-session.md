@@ -1,0 +1,1 @@
+- **Ticket Direction artifact + Sol first-touch box session (ack-then-session-output)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
