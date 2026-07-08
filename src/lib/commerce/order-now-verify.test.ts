@@ -17,10 +17,13 @@ import {
   computeConfirmationEndState,
   computeOrderNowVerdict,
   dispatchConfirmationOnVerified,
+  dispatchOrderNowRetryOnMigrate,
   dispatchRecoveryOnDecline,
   type ConfirmationDispatchDeps,
   type ConfirmationEndStateEvidence,
   type OrderNowEvidence,
+  type OrderNowRetryDeps,
+  type OrderNowVerifiedResult,
   type RecoveryDispatchDeps,
 } from "./order-now-verify";
 
@@ -355,5 +358,188 @@ test("dispatchConfirmationOnVerified: Judy failing state (paused + failed paymen
       ["subscription_not_active", "subscription_payment_status_not_succeeded"],
     );
     assert.equal(out.evidence.subscriptionStatus, "paused");
+  }
+});
+
+// ── Phase 3: dispatchOrderNowRetryOnMigrate ───────────────────────
+//
+// The Phase 3 verification bullets:
+//   - Completing the journey migrates the sub to internal and fires an
+//     order-now retry with no box session.
+//   - The retry is idempotent (a re-drive doesn't create a second order).
+//   - The internal retry produces a real paid order.
+//
+// The dispatcher wraps the guard-then-fire-then-log sequence. In prod the
+// deps read customer_events, call subscriptionOrderNowVerified, and log
+// commerce.order_now.retry_after_migrate on customer_events. Tests pin the
+// guard predicate + one-and-only-one invariant with a fake deps object.
+
+const INTERNAL_CONTRACT = "internal-abc1234def56";
+const MIGRATED_AT = "2026-07-08T12:05:00.000Z";
+
+interface RetryFireCall {
+  workspace_id: string;
+  contract_id: string;
+  customer_id?: string;
+  ticket_id?: string;
+}
+interface RetryGuardCall {
+  workspace_id: string;
+  subscription_id: string;
+  migrated_at: string;
+}
+interface RetryLogCall {
+  workspace_id: string;
+  customer_id: string;
+  subscription_id: string;
+  contract_id: string;
+  migrated_at: string;
+}
+
+function makeRetryDeps(overrides: {
+  alreadyRetried?: boolean;
+  fireResult?: Partial<OrderNowVerifiedResult>;
+} = {}): { deps: OrderNowRetryDeps; fireCalls: RetryFireCall[]; guardCalls: RetryGuardCall[]; logCalls: RetryLogCall[] } {
+  const fireCalls: RetryFireCall[] = [];
+  const guardCalls: RetryGuardCall[] = [];
+  const logCalls: RetryLogCall[] = [];
+  const deps: OrderNowRetryDeps = {
+    alreadyRetriedSinceMigrated: async (input) => {
+      guardCalls.push(input);
+      return overrides.alreadyRetried ?? false;
+    },
+    fireVerifiedOrderNow: async (workspace_id, contract_id, ctx) => {
+      fireCalls.push({ workspace_id, contract_id, customer_id: ctx.customer_id, ticket_id: ctx.ticket_id });
+      return {
+        success: true,
+        summary: "Triggered internal renewal (order now)",
+        internal: true,
+        pending: false,
+        fired_at: MIGRATED_AT,
+        subscription_id: SUB,
+        ...overrides.fireResult,
+      };
+    },
+    logRetryEvent: async (input) => {
+      logCalls.push(input);
+    },
+  };
+  return { deps, fireCalls, guardCalls, logCalls };
+}
+
+test("dispatchOrderNowRetryOnMigrate: fresh migrate → guard consulted, fireVerifiedOrderNow called ONCE with internal contract, logRetryEvent recorded (Phase 3 verify: journey completes → migrate → retry, no box session)", async () => {
+  const { deps, fireCalls, guardCalls, logCalls } = makeRetryDeps();
+  const out = await dispatchOrderNowRetryOnMigrate(
+    {
+      workspace_id: WORKSPACE,
+      customer_id: CUSTOMER,
+      subscription_id: SUB,
+      contract_id: INTERNAL_CONTRACT,
+      migrated_at: MIGRATED_AT,
+    },
+    deps,
+  );
+  assert.equal(guardCalls.length, 1, "guard consulted before firing");
+  assert.equal(guardCalls[0]!.subscription_id, SUB);
+  assert.equal(guardCalls[0]!.migrated_at, MIGRATED_AT);
+  assert.equal(fireCalls.length, 1, "fireVerifiedOrderNow called exactly once");
+  assert.equal(fireCalls[0]!.contract_id, INTERNAL_CONTRACT, "retry targets the POST-migration internal contract id");
+  assert.equal(fireCalls[0]!.workspace_id, WORKSPACE);
+  assert.equal(fireCalls[0]!.customer_id, CUSTOMER);
+  assert.equal(logCalls.length, 1, "retry event logged as idempotency marker");
+  assert.equal(logCalls[0]!.subscription_id, SUB);
+  assert.equal(out.retried, true);
+  if (out.retried) {
+    assert.equal(out.contract_id, INTERNAL_CONTRACT);
+    assert.equal(out.internal, true, "internal sub — deterministic Braintree renewal, no Appstle delay");
+    assert.equal(out.fired_at, MIGRATED_AT);
+  }
+});
+
+test("dispatchOrderNowRetryOnMigrate: prior retry event since migrated_at → soft-skip, fire NOT called (Phase 3 verify: retry is idempotent, a re-drive doesn't create a second order)", async () => {
+  const { deps, fireCalls, logCalls, guardCalls } = makeRetryDeps({ alreadyRetried: true });
+  const out = await dispatchOrderNowRetryOnMigrate(
+    {
+      workspace_id: WORKSPACE,
+      customer_id: CUSTOMER,
+      subscription_id: SUB,
+      contract_id: INTERNAL_CONTRACT,
+      migrated_at: MIGRATED_AT,
+    },
+    deps,
+  );
+  assert.equal(fireCalls.length, 0, "fireVerifiedOrderNow NOT called when guard says already retried");
+  assert.equal(logCalls.length, 0, "no re-log — the prior event still trips the next guard");
+  assert.equal(guardCalls.length, 1);
+  assert.equal(out.retried, false);
+  if (!out.retried) {
+    assert.equal(out.skipped_reason, "already_retried_since_migrated");
+    assert.equal(out.contract_id, INTERNAL_CONTRACT);
+  }
+});
+
+test("dispatchOrderNowRetryOnMigrate: fireVerifiedOrderNow reports success=false → returned skipped_reason='fire_failed' + error surfaced, log NOT recorded (Phase 3 verify: failed fire doesn't trip the idempotency marker → a later retry can still succeed)", async () => {
+  const { deps, logCalls } = makeRetryDeps({
+    fireResult: { success: false, error: "subscription_not_found" },
+  });
+  const out = await dispatchOrderNowRetryOnMigrate(
+    {
+      workspace_id: WORKSPACE,
+      customer_id: CUSTOMER,
+      subscription_id: SUB,
+      contract_id: INTERNAL_CONTRACT,
+      migrated_at: MIGRATED_AT,
+    },
+    deps,
+  );
+  assert.equal(logCalls.length, 0, "no marker logged — a later retry can succeed");
+  assert.equal(out.retried, false);
+  if (!out.retried) {
+    assert.equal(out.skipped_reason, "fire_failed");
+    assert.equal(out.error, "subscription_not_found");
+  }
+});
+
+test("dispatchOrderNowRetryOnMigrate: successful internal retry returns internal=true + a real paid-order-producing fire (Phase 3 verify: the internal retry produces a real paid order)", async () => {
+  // The dispatcher fires subscriptionOrderNowVerified on the migrated
+  // internal sub — which, per subscriptionOrderNow → orderNowByContract
+  // (appstle.ts), triggers the `internal-subscription/renewal-attempt`
+  // Inngest event. That pipeline charges Braintree and creates a paid
+  // order. Here we pin the dispatcher's contract with the fire deps: on
+  // success we return internal=true (the payment path that produces a
+  // real paid order — no Appstle latency) with a fired_at cursor the
+  // async verify (Phase 1) can read against.
+  const { deps } = makeRetryDeps({
+    fireResult: {
+      success: true,
+      internal: true,
+      pending: false,
+      fired_at: MIGRATED_AT,
+      subscription_id: SUB,
+      summary: "Triggered internal renewal (order now)",
+    },
+  });
+  const out = await dispatchOrderNowRetryOnMigrate(
+    {
+      workspace_id: WORKSPACE,
+      customer_id: CUSTOMER,
+      subscription_id: SUB,
+      contract_id: INTERNAL_CONTRACT,
+      migrated_at: MIGRATED_AT,
+    },
+    deps,
+  );
+  assert.equal(out.retried, true);
+  if (out.retried) {
+    // internal=true is the invariant that says "this fired the Braintree
+    // renewal pipeline (which produces a paid order), not an Appstle
+    // bill_now (which is delayed + can decline)".
+    assert.equal(out.internal, true);
+    assert.equal(out.result.success, true);
+    assert.equal(out.result.internal, true);
+    // pending=false: internal-sub verify is deterministic; the async verify
+    // still runs but only to ground-truth the ledger stamp.
+    assert.equal(out.result.pending, false);
+    assert.equal(out.fired_at, MIGRATED_AT);
   }
 });

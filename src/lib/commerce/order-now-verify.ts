@@ -542,6 +542,32 @@ export async function verifyConfirmationEndState(
   return { verdict: computeConfirmationEndState(evidence), evidence };
 }
 
+// ── Phase 3: journey complete → migrate → deterministic order-now retry ──
+//
+// When the update-payment-method journey completes, `vaultAndMigratePaymentMethod`
+// vaults the card and migrates the customer's Appstle subs onto internal (see
+// [[../libraries/vault-and-migrate-payment-method]]). At that point the sub is
+// INTERNAL — no Appstle latency, no vendor decline path — so we can retry the
+// original order-now DETERMINISTICALLY in plain Node (no box / Sol session).
+//
+// This lives on the commerce library (not journey-outcomes / dunning) so the
+// same dispatcher covers every migrate-on-recovery caller: the mini-site
+// journey submit path AND the portal's failed-payment magic-link flow (both
+// go through `vaultAndMigratePaymentMethod`).
+//
+// Idempotency (spec: "the retry can't double-charge"):
+//   1. Guard predicate: skip if a `commerce.order_now.retry_after_migrate`
+//      customer_events row exists for this subscription since `migrated_at`.
+//      One retry per (subscription, migrate) window.
+//   2. On successful fire, log the same customer_events row — so a re-drive of
+//      the same migrate call finds the guard tripped and soft-skips.
+//   3. `subscriptionOrderNowVerified` itself is idempotent at the Braintree
+//      renewal-attempt layer (Inngest dedupes on the event); the guard covers
+//      the outer caller pattern.
+//
+// The dispatcher is separated from the reader so tests can pin the guard +
+// fire behavior without spinning Supabase / Inngest.
+
 /** Outcome of the confirmation dispatcher — a typed report the Inngest fn
  *  writes into the terminal payload + uses to pick between `confirmed` and
  *  `drifted` for the ledger stamp. */
@@ -589,4 +615,149 @@ export async function dispatchConfirmationOnVerified(
     return { confirmed: true, evidence };
   }
   return { confirmed: false, failed_checks: verdict.failed_checks, evidence };
+}
+
+// ── Phase 3: order-now retry after migrate ─────────────────────────
+
+/** Outcome of the retry dispatcher — the caller (vaultAndMigratePaymentMethod)
+ *  aggregates one per migrated sub. */
+export type OrderNowRetryOutcome =
+  | { retried: true; contract_id: string; internal: boolean; fired_at: string; result: OrderNowVerifiedResult }
+  | { retried: false; contract_id: string; skipped_reason: string; error?: string };
+
+/** Overridable deps for testing the retry dispatcher without touching
+ *  Supabase / Inngest. Production callers omit the object and get the real
+ *  implementations. */
+export interface OrderNowRetryDeps {
+  /** Async predicate: has this subscription already been retried after the
+   *  given `migrated_at` cutoff? Prod = COUNT on customer_events. */
+  alreadyRetriedSinceMigrated: (input: {
+    workspace_id: string;
+    subscription_id: string;
+    migrated_at: string;
+  }) => Promise<boolean>;
+  /** Fire: the deterministic order-now retry. On the migrated (internal) sub
+   *  this fires the Braintree renewal-attempt event via subscriptionOrderNow
+   *  AND schedules the async verify. Returns the standard verified-result. */
+  fireVerifiedOrderNow: (
+    workspace_id: string,
+    contract_id: string,
+    ctx: OrderNowVerifyContext,
+  ) => Promise<OrderNowVerifiedResult>;
+  /** Log: record the retry so the idempotency guard on a re-drive finds it. */
+  logRetryEvent: (input: {
+    workspace_id: string;
+    customer_id: string;
+    subscription_id: string;
+    contract_id: string;
+    migrated_at: string;
+  }) => Promise<void>;
+}
+
+/**
+ * Prod deps — wired to the real customer_events count + subscriptionOrderNowVerified
+ * fire + logCustomerEvent write. Extracted so tests can swap any side.
+ */
+export function defaultOrderNowRetryDeps(): OrderNowRetryDeps {
+  return {
+    alreadyRetriedSinceMigrated: async ({ workspace_id, subscription_id, migrated_at }) => {
+      const admin = createAdminClient();
+      const { count } = await admin
+        .from("customer_events")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspace_id)
+        .eq("event_type", "commerce.order_now.retry_after_migrate")
+        .eq("properties->>subscription_id", subscription_id)
+        .gte("created_at", migrated_at);
+      return (count ?? 0) > 0;
+    },
+    fireVerifiedOrderNow: async (workspace_id, contract_id, ctx) => {
+      return subscriptionOrderNowVerified(workspace_id, contract_id, ctx);
+    },
+    logRetryEvent: async ({ workspace_id, customer_id, subscription_id, contract_id, migrated_at }) => {
+      const { logCustomerEvent } = await import("@/lib/customer-events");
+      await logCustomerEvent({
+        workspaceId: workspace_id,
+        customerId: customer_id,
+        eventType: "commerce.order_now.retry_after_migrate",
+        source: "payment_recovery",
+        summary: `Fired deterministic order-now retry on migrated internal sub ${contract_id}.`,
+        properties: { subscription_id, contract_id, migrated_at },
+      });
+    },
+  };
+}
+
+/**
+ * Dispatcher: fire the deterministic order-now retry on a freshly-migrated
+ * internal sub — Phase 3 of the spec. Guards on the retry-event idempotency
+ * marker so a re-drive of vaultAndMigratePaymentMethod doesn't double-charge.
+ * No box / Sol session — internal sub = immediate Braintree renewal via
+ * subscriptionOrderNow, verified end-state via the same async verify pipeline
+ * as any other order-now (Phase 1 → Phase 4).
+ */
+export async function dispatchOrderNowRetryOnMigrate(
+  input: {
+    workspace_id: string;
+    customer_id: string;
+    subscription_id: string;
+    /** Post-migration `subscriptions.shopify_contract_id` — the internal-*
+     *  id the renewal pipeline reads. */
+    contract_id: string;
+    /** Cutoff for the idempotency guard. Callers pass the migration's
+     *  `subscription.migrated` timestamp (or "now" for a fresh migrate). */
+    migrated_at: string;
+    /** For threading through to the verify's decline-branch recovery journey
+     *  (Phase 2) — the customer id the recovery email would target. */
+    ticket_id?: string;
+  },
+  deps: OrderNowRetryDeps = defaultOrderNowRetryDeps(),
+): Promise<OrderNowRetryOutcome> {
+  const already = await deps.alreadyRetriedSinceMigrated({
+    workspace_id: input.workspace_id,
+    subscription_id: input.subscription_id,
+    migrated_at: input.migrated_at,
+  });
+  if (already) {
+    return {
+      retried: false,
+      contract_id: input.contract_id,
+      skipped_reason: "already_retried_since_migrated",
+    };
+  }
+
+  const result = await deps.fireVerifiedOrderNow(input.workspace_id, input.contract_id, {
+    customer_id: input.customer_id,
+    ticket_id: input.ticket_id,
+  });
+  if (!result.success) {
+    return {
+      retried: false,
+      contract_id: input.contract_id,
+      skipped_reason: "fire_failed",
+      error: result.error,
+    };
+  }
+
+  // Log after a successful fire so a re-drive finds the guard tripped.
+  try {
+    await deps.logRetryEvent({
+      workspace_id: input.workspace_id,
+      customer_id: input.customer_id,
+      subscription_id: input.subscription_id,
+      contract_id: input.contract_id,
+      migrated_at: input.migrated_at,
+    });
+  } catch {
+    // Non-fatal: the fire has landed; a missing log still lets the customer
+    // see the recovered order. The next re-drive's guard just won't trip.
+  }
+
+  return {
+    retried: true,
+    contract_id: input.contract_id,
+    internal: result.internal,
+    fired_at: result.fired_at,
+    result,
+  };
 }
