@@ -666,6 +666,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // (a newly-added daily cron hasn't had its first tick yet — see control-tower-registered-not-firing-new-cron-grace).
   { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR, outputAssertion: "segment-coverage" },
+  {
+    id: "refund-settlement-reconcile",
+    kind: "cron",
+    owner: "platform",
+    label: "refund-settlement-reconcile",
+    description: "Auto-proposed monitored loop for the refund-settlement-reconcile cron (daily (15 6 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (15 6 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-07-08T08:15:04.399Z",
+  },
   // SMS Marketing Agent (Margo, under Iris/CMO) — daily cadence engine. personaKind surfaces it
   // as a worker under Iris on the org chart. registeredAt claims the new-cron grace (dormant until
   // sms_marketing_policy.active=true, so it fires the heartbeat but takes no send action yet).
@@ -677,6 +687,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 8 * DAY },
   { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
+  {
+    id: "playbook-compiler",
+    kind: "cron",
+    owner: "platform",
+    label: "playbook-compiler",
+    description: "Auto-proposed monitored loop for the playbook-compiler cron (weekly (0 12 * * 1)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "weekly (0 12 * * 1)",
+    livenessWindowMs: 8 * DAY,
+    registeredAt: "2026-07-08T08:15:04.473Z",
+  },
   // ─ Yearly cron (window ~370 days) ─
 
   // ── CEO's executive-assistant agent (owner=ceo) ─────────────────────────────
