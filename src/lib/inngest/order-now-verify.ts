@@ -1,11 +1,18 @@
 /**
- * Async-aware order-now verify — Phases 1 + 2 of docs/brain/specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry.md
+ * Async-aware order-now verify — Phases 1 + 2 + 4 of docs/brain/specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry.md
  *
  * Fired by `subscriptionOrderNowVerified` (and other order-now entry points)
  * after firing bill_now. Sleeps for the flavor-specific delay, reads the REAL
  * outcome from customer_events / subscriptions / orders, and:
  *
- *   - paid → stamps ticket_resolution_events verified_outcome='confirmed'.
+ *   - paid → Phase 4: Sol runs a lightweight end-state pass (paid order has
+ *     items + non-zero total, subscription is active + last_payment_status
+ *     succeeded) via `dispatchConfirmationOnVerified`. Only when the end
+ *     state is verified does the ledger stamp `confirmed` — the signal the
+ *     sibling `sol-outcome-claim-guard` send-guard reads to unblock the
+ *     customer confirmation reply (message-is-last). A failed end-state
+ *     check stamps `drifted` with the failed invariants, so the completion
+ *     gate escalates instead of Sol confirming a drifted account.
  *   - declined → fires the update-payment-method recovery journey EXACTLY
  *     ONCE via `dispatchRecoveryOnDecline` (Phase 2), then stamps
  *     verified_outcome='drifted'. The dispatcher's guard predicate
@@ -24,9 +31,11 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
+  dispatchConfirmationOnVerified,
   dispatchRecoveryOnDecline,
   scheduleOrderNowVerify,
   verifyOrderNowOutcome,
+  type ConfirmationDispatchOutcome,
   type OrderNowVerdict,
 } from "@/lib/commerce/order-now-verify";
 
@@ -96,11 +105,6 @@ export const orderNowVerify = inngest.createFunction(
       return { ok: true, verdict, rescheduled: true, attempt };
     }
 
-    // Terminal verdict (paid, declined, or unknown after MAX_ATTEMPTS).
-    // Unknown-terminal stamps as 'drifted' so the ledger row resolves
-    // rather than staying forever pending.
-    const outcomeForLedger = verdict === "paid" ? "confirmed" : "drifted";
-
     // Phase 2: on `declined`, hand the customer the update-payment-method
     // recovery journey. `dispatchRecoveryOnDecline` is a step.run so
     // Inngest deduplicates on retry, AND it consults its own confirming-
@@ -117,6 +121,32 @@ export const orderNowVerify = inngest.createFunction(
         });
       });
     }
+
+    // Phase 4: on `paid`, Sol runs the end-state pass BEFORE the ledger
+    // stamps `confirmed`. Only a verified end state (items present, non-zero
+    // total, sub active, last_payment_status='succeeded') unblocks the
+    // customer confirmation reply (via sol-outcome-claim-guard). A drifted
+    // end state downgrades the ledger to `drifted` with the failed checks —
+    // the completion gate escalates instead of Sol confirming a lie.
+    let confirmationOutcome: ConfirmationDispatchOutcome | null = null;
+    if (verdict === "paid") {
+      confirmationOutcome = await step.run("verify-end-state", async () => {
+        return dispatchConfirmationOnVerified({
+          workspace_id: data.workspace_id,
+          subscription_id: data.subscription_id,
+          fired_at: data.fired_at,
+        });
+      });
+    }
+
+    // Terminal verdict → ledger outcome. Paid + confirmed end state stamps
+    // `confirmed`; everything else (declined, unknown-terminal, paid but
+    // end-state drifted) stamps `drifted` so the message-is-last gate can't
+    // read a stale confirmation.
+    const outcomeForLedger =
+      verdict === "paid" && confirmationOutcome?.confirmed
+        ? "confirmed"
+        : "drifted";
 
     if (data.resolution_event_id) {
       await step.run("stamp-ledger", async () => {
@@ -135,6 +165,7 @@ export const orderNowVerify = inngest.createFunction(
       attempt,
       ticket_resolution_events_id: data.resolution_event_id,
       recovery: recoveryOutcome,
+      confirmation: confirmationOutcome,
     };
   },
 );

@@ -14,8 +14,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  computeConfirmationEndState,
   computeOrderNowVerdict,
+  dispatchConfirmationOnVerified,
   dispatchRecoveryOnDecline,
+  type ConfirmationDispatchDeps,
+  type ConfirmationEndStateEvidence,
   type OrderNowEvidence,
   type RecoveryDispatchDeps,
 } from "./order-now-verify";
@@ -196,5 +200,160 @@ test("dispatchRecoveryOnDecline: sendRecovery reports sent=false → returned sk
   if (!out.sent) {
     assert.equal(out.skipped_reason, "send_failed");
     assert.equal(out.error, "resend_not_configured");
+  }
+});
+
+// ── Phase 4: computeConfirmationEndState + dispatchConfirmationOnVerified ─
+//
+// The Phase 4 verification bullets:
+//   - The customer confirmation is sent only after a verified paid order
+//     exists.
+//   - Sol's confirmation asserts only the verified end state.
+//
+// The Judy failing-state (0a9e4d7f) motivating this phase: bill_now returned
+// success on the trigger ack, then Shopify rejected the charge — the sub
+// flipped `last_payment_status='failed'` and `subscription_not_active` /
+// dunning ensued, but the customer had already been told her order shipped.
+// Written test-first (coaching #8) — pin the failing state we won't confirm.
+
+function baseEndState(
+  overrides: Partial<ConfirmationEndStateEvidence> = {},
+): ConfirmationEndStateEvidence {
+  return {
+    paidOrderFound: true,
+    paidOrderLineItemsCount: 2,
+    paidOrderTotalCents: 4900,
+    subscriptionStatus: "active",
+    subscriptionLastPaymentStatus: "succeeded",
+    ...overrides,
+  };
+}
+
+test("computeConfirmationEndState: fully healthy paid order + active sub → ok=true, no failed checks", () => {
+  const verdict = computeConfirmationEndState(baseEndState());
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.failed_checks, []);
+});
+
+test("computeConfirmationEndState: Judy failing state (sub not active + last_payment_status='failed') → ok=false, both checks named (test-first, coaching #8)", () => {
+  const verdict = computeConfirmationEndState(baseEndState({
+    subscriptionStatus: "paused",
+    subscriptionLastPaymentStatus: "failed",
+  }));
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.failed_checks.includes("subscription_not_active"), "names sub not active");
+    assert.ok(
+      verdict.failed_checks.includes("subscription_payment_status_not_succeeded"),
+      "names the payment-status drift",
+    );
+  }
+});
+
+test("computeConfirmationEndState: no paid order found → ok=false, 'no_paid_order' named (defensive re-read caught a race)", () => {
+  const verdict = computeConfirmationEndState(baseEndState({
+    paidOrderFound: false,
+    paidOrderLineItemsCount: null,
+    paidOrderTotalCents: null,
+  }));
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.failed_checks.includes("no_paid_order"));
+  }
+});
+
+test("computeConfirmationEndState: paid order with zero line items → ok=false, 'paid_order_empty_line_items' named", () => {
+  const verdict = computeConfirmationEndState(baseEndState({
+    paidOrderLineItemsCount: 0,
+  }));
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.failed_checks.includes("paid_order_empty_line_items"));
+  }
+});
+
+test("computeConfirmationEndState: paid order with $0 total → ok=false, 'paid_order_zero_total' named", () => {
+  const verdict = computeConfirmationEndState(baseEndState({
+    paidOrderTotalCents: 0,
+  }));
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.failed_checks.includes("paid_order_zero_total"));
+  }
+});
+
+test("computeConfirmationEndState: cancelled sub → ok=false, 'subscription_not_active' named", () => {
+  const verdict = computeConfirmationEndState(baseEndState({
+    subscriptionStatus: "cancelled",
+  }));
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.failed_checks.includes("subscription_not_active"));
+  }
+});
+
+test("computeConfirmationEndState: last_payment_status null (unknown state) → ok=false, payment-status check fails (fail-closed — never confirm a state we haven't observed)", () => {
+  const verdict = computeConfirmationEndState(baseEndState({
+    subscriptionLastPaymentStatus: null,
+  }));
+  assert.equal(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.ok(verdict.failed_checks.includes("subscription_payment_status_not_succeeded"));
+  }
+});
+
+// ── dispatchConfirmationOnVerified ──
+
+function makeConfirmDeps(overrides: {
+  verdict?: "ok" | "drifted";
+  failed_checks?: string[];
+  evidence?: Partial<ConfirmationEndStateEvidence>;
+} = {}): { deps: ConfirmationDispatchDeps; calls: Array<{ workspace_id: string; subscription_id: string; fired_at: string }> } {
+  const calls: Array<{ workspace_id: string; subscription_id: string; fired_at: string }> = [];
+  const evidence = baseEndState(overrides.evidence);
+  const verdict = overrides.verdict === "drifted"
+    ? { ok: false as const, failed_checks: overrides.failed_checks ?? ["no_paid_order"] }
+    : { ok: true as const, failed_checks: [] as [] };
+  const deps: ConfirmationDispatchDeps = {
+    verifyEndState: async (input) => {
+      calls.push(input);
+      return { verdict, evidence };
+    },
+  };
+  return { deps, calls };
+}
+
+test("dispatchConfirmationOnVerified: ok end state → confirmed=true (Phase 4 verify bullet: send only after verified paid order)", async () => {
+  const { deps, calls } = makeConfirmDeps();
+  const out = await dispatchConfirmationOnVerified(
+    { workspace_id: WORKSPACE, subscription_id: SUB, fired_at: FIRED_AT },
+    deps,
+  );
+  assert.equal(out.confirmed, true);
+  if (out.confirmed) {
+    assert.equal(out.evidence.subscriptionStatus, "active");
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.subscription_id, SUB);
+  assert.equal(calls[0]!.fired_at, FIRED_AT);
+});
+
+test("dispatchConfirmationOnVerified: Judy failing state (paused + failed payment) → confirmed=false, failed_checks names both invariants (Phase 4 verify bullet: Sol asserts only the verified end state)", async () => {
+  const { deps } = makeConfirmDeps({
+    verdict: "drifted",
+    failed_checks: ["subscription_not_active", "subscription_payment_status_not_succeeded"],
+    evidence: { subscriptionStatus: "paused", subscriptionLastPaymentStatus: "failed" },
+  });
+  const out = await dispatchConfirmationOnVerified(
+    { workspace_id: WORKSPACE, subscription_id: SUB, fired_at: FIRED_AT },
+    deps,
+  );
+  assert.equal(out.confirmed, false);
+  if (!out.confirmed) {
+    assert.deepEqual(
+      out.failed_checks,
+      ["subscription_not_active", "subscription_payment_status_not_succeeded"],
+    );
+    assert.equal(out.evidence.subscriptionStatus, "paused");
   }
 });

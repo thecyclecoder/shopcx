@@ -407,3 +407,186 @@ export async function dispatchRecoveryOnDecline(
   }
   return { sent: true, ticket_id: res.ticketId, message_id: res.messageId };
 }
+
+// ── Phase 4: verified success → Sol confirms last ─────────────────
+//
+// A `paid` verdict from Phase 1 means the underlying payment landed — but the
+// spec's message-is-last invariant requires MORE than that before the customer
+// gets a confirmation reply. Sol's lightweight end-state pass verifies the
+// order actually reflects the customer's intent (items present, non-zero
+// total) and the subscription itself is HEALTHY (active, not paused/cancelled,
+// with a succeeded last-payment). Only then does the ledger stamp
+// `verified_outcome='confirmed'` — the signal the sibling
+// [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]]
+// send-guard (sol-outcome-claim-guard) reads to unblock the reply.
+//
+// If the end state fails (missing order, empty items, zero total, cancelled
+// sub, non-succeeded payment status) the ledger stamps `drifted` with the
+// failed checks recorded — Sol doesn't lie about the outcome, and the
+// downstream completion gate escalates the ticket to a human.
+//
+// The predicate is pure; the reader wraps a single subscriptions read + the
+// most-recent paid-order-since-fired_at read. The dispatcher composes them
+// with an overridable deps object so tests pin the failure branches without
+// spinning Supabase.
+
+/** Evidence for the end-state verification — the paid order details + the
+ *  subscription's health. */
+export interface ConfirmationEndStateEvidence {
+  /** True iff a paid order for this subscription created after `fired_at`
+   *  was found. Should already be true by the time the dispatcher runs
+   *  (Phase 1's verdict was `paid`) — but we re-read defensively because the
+   *  order row is the source of truth for items/total. */
+  paidOrderFound: boolean;
+  /** Number of line items on the paid order. Must be > 0 — an empty-cart
+   *  paid order is a bug we won't confirm. `null` when no order was found. */
+  paidOrderLineItemsCount: number | null;
+  /** `total_cents` on the paid order. Must be > 0 — a $0 order-now is not a
+   *  charge the customer authorised. `null` when no order was found. */
+  paidOrderTotalCents: number | null;
+  /** Current subscriptions.status — must be `active` for a healthy confirm.
+   *  A paused/cancelled sub after an order-now is a drift Sol can't just
+   *  paper over with a "your order shipped" message. */
+  subscriptionStatus: string | null;
+  /** Current subscriptions.last_payment_status — must be `succeeded`. A
+   *  `failed`/`skipped`/null status after a paid verdict means the account
+   *  state hasn't caught up (or worse, the paid order is unrelated). */
+  subscriptionLastPaymentStatus: string | null;
+}
+
+/** Verdict from the end-state predicate. `failed_checks` names each failed
+ *  invariant so the ledger stamp / escalation reason is human-readable. */
+export type ConfirmationEndStateVerdict =
+  | { ok: true; failed_checks: [] }
+  | { ok: false; failed_checks: string[] };
+
+/**
+ * Pure predicate mapping evidence → verdict. All checks are AND-ed — Sol only
+ * confirms when EVERY end-state invariant holds. Extracted so tests can pin
+ * the decision table without spinning Supabase:
+ *
+ * - `no_paid_order`: verdict was `paid` but the reader couldn't find the order
+ *   row (race / subscription-id mismatch). Confirming would be a false claim.
+ * - `paid_order_empty_line_items`: order exists but has zero line items.
+ * - `paid_order_zero_total`: order exists but total_cents ≤ 0.
+ * - `subscription_not_active`: sub is paused/cancelled — end state doesn't
+ *   match "your subscription order is on the way".
+ * - `subscription_payment_status_not_succeeded`: sub's last_payment_status
+ *   drifted (e.g., a billing-failure webhook landed after the paid signal).
+ */
+export function computeConfirmationEndState(
+  evidence: ConfirmationEndStateEvidence,
+): ConfirmationEndStateVerdict {
+  const failed: string[] = [];
+  if (!evidence.paidOrderFound) failed.push("no_paid_order");
+  if (
+    evidence.paidOrderLineItemsCount !== null
+    && evidence.paidOrderLineItemsCount <= 0
+  ) failed.push("paid_order_empty_line_items");
+  if (
+    evidence.paidOrderTotalCents !== null
+    && evidence.paidOrderTotalCents <= 0
+  ) failed.push("paid_order_zero_total");
+  if (evidence.subscriptionStatus !== "active") failed.push("subscription_not_active");
+  if (evidence.subscriptionLastPaymentStatus !== "succeeded") {
+    failed.push("subscription_payment_status_not_succeeded");
+  }
+  return failed.length === 0
+    ? { ok: true, failed_checks: [] }
+    : { ok: false, failed_checks: failed };
+}
+
+/**
+ * Read the end-state evidence (paid order + subscription health) and compute
+ * the verdict. Kept read-only so the dispatcher can call it inside a
+ * `step.run` without side-effects.
+ */
+export async function verifyConfirmationEndState(
+  admin: ReturnType<typeof createAdminClient>,
+  opts: {
+    workspace_id: string;
+    subscription_id: string;
+    fired_at: string;
+  },
+): Promise<{ verdict: ConfirmationEndStateVerdict; evidence: ConfirmationEndStateEvidence }> {
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, status, last_payment_status")
+    .eq("workspace_id", opts.workspace_id)
+    .eq("id", opts.subscription_id)
+    .maybeSingle();
+
+  const { data: order } = await admin
+    .from("orders")
+    .select("id, line_items, total_cents")
+    .eq("workspace_id", opts.workspace_id)
+    .eq("subscription_id", opts.subscription_id)
+    .eq("financial_status", "paid")
+    .gt("created_at", opts.fired_at)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const lineItems = Array.isArray(order?.line_items)
+    ? (order!.line_items as unknown[]).length
+    : null;
+
+  const evidence: ConfirmationEndStateEvidence = {
+    paidOrderFound: Boolean(order),
+    paidOrderLineItemsCount: order ? (lineItems ?? 0) : null,
+    paidOrderTotalCents: order ? ((order.total_cents as number | null) ?? 0) : null,
+    subscriptionStatus: (sub?.status as string | null) ?? null,
+    subscriptionLastPaymentStatus: (sub?.last_payment_status as string | null) ?? null,
+  };
+
+  return { verdict: computeConfirmationEndState(evidence), evidence };
+}
+
+/** Outcome of the confirmation dispatcher — a typed report the Inngest fn
+ *  writes into the terminal payload + uses to pick between `confirmed` and
+ *  `drifted` for the ledger stamp. */
+export type ConfirmationDispatchOutcome =
+  | { confirmed: true; evidence: ConfirmationEndStateEvidence }
+  | { confirmed: false; failed_checks: string[]; evidence: ConfirmationEndStateEvidence };
+
+/** Overridable deps for testing the confirmation dispatcher without touching
+ *  Supabase. Production callers omit the object and get the real reader. */
+export interface ConfirmationDispatchDeps {
+  verifyEndState: (input: {
+    workspace_id: string;
+    subscription_id: string;
+    fired_at: string;
+  }) => Promise<{ verdict: ConfirmationEndStateVerdict; evidence: ConfirmationEndStateEvidence }>;
+}
+
+/** Prod deps — wired to the real `verifyConfirmationEndState` reader. */
+export function defaultConfirmationDispatchDeps(): ConfirmationDispatchDeps {
+  return {
+    verifyEndState: async (input) => {
+      const admin = createAdminClient();
+      return verifyConfirmationEndState(admin, input);
+    },
+  };
+}
+
+/**
+ * Dispatcher: run Sol's lightweight end-state pass on a paid verdict. Returns
+ * a typed outcome the Inngest fn uses to decide `confirmed` vs `drifted` on
+ * the ledger stamp. Sol never lies — a failed end-state check means the
+ * customer confirmation is BLOCKED (message-is-last), the ledger records
+ * `drifted` with the failed checks, and the completion gate can escalate.
+ */
+export async function dispatchConfirmationOnVerified(
+  input: {
+    workspace_id: string;
+    subscription_id: string;
+    fired_at: string;
+  },
+  deps: ConfirmationDispatchDeps = defaultConfirmationDispatchDeps(),
+): Promise<ConfirmationDispatchOutcome> {
+  const { verdict, evidence } = await deps.verifyEndState(input);
+  if (verdict.ok) {
+    return { confirmed: true, evidence };
+  }
+  return { confirmed: false, failed_checks: verdict.failed_checks, evidence };
+}

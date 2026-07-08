@@ -4,7 +4,7 @@ Async-aware verification of an order-now / bill_now trigger — pause after firi
 
 **File:** `src/lib/commerce/order-now-verify.ts` · **Inngest fn:** `src/lib/inngest/order-now-verify.ts`
 
-Phases 1 + 2 of [[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]]. Derived from ticket 0a9e4d7f (Judy) — Appstle bill_now succeeded on the trigger ack, Shopify rejected the charge minutes later, the sub dropped into dunning, and the customer had already been told her order was on the way.
+Phases 1 + 2 + 4 of [[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]]. Derived from ticket 0a9e4d7f (Judy) — Appstle bill_now succeeded on the trigger ack, Shopify rejected the charge minutes later, the sub dropped into dunning, and the customer had already been told her order was on the way.
 
 ## Why
 
@@ -25,6 +25,10 @@ This library gates the ticket_resolution_events verdict on a REAL paid order:
 - `subscriptionOrderNowVerified(workspaceId, contractId, ctx)` — the direct-action wrapper. Fires bill_now AND schedules the verify. Returns `{ success, internal, pending, fired_at, subscription_id }`.
 - `dispatchRecoveryOnDecline(input, deps?)` — **Phase 2** — fires the update-payment-method recovery journey exactly once for a declined verdict. Confirming-predicate guard: soft-skips when a `dunning.recovery_email_sent` `customer_events` row exists for this customer since `fired_at` (dunning's billing-failure path may already have delivered). Wraps [[./payment-recovery-email]]. Overridable `deps` (`alreadySentSinceFiredAt`, `sendRecovery`) make the guard + delivery testable without Resend / Supabase.
 - `defaultRecoveryDispatchDeps()` — the production deps wiring (real `customer_events` count + `sendPaymentRecoveryEmail`). Extracted so tests swap either side cleanly.
+- `computeConfirmationEndState(evidence): { ok, failed_checks }` — **Phase 4** — pure predicate. Returns `ok: true` iff EVERY end-state invariant holds: paid order found, non-zero line items, non-zero total, sub status `active`, sub last_payment_status `succeeded`. Names each failed check so the ledger stamp / escalation reason is human-readable. AND semantics — Sol only confirms when the full state matches "your order is on the way".
+- `verifyConfirmationEndState(admin, opts)` — **Phase 4** — reader that hydrates `ConfirmationEndStateEvidence` from `subscriptions` + the most-recent paid `orders` row since `fired_at`, then calls the predicate. Returns `{ verdict, evidence }`.
+- `dispatchConfirmationOnVerified(input, deps?)` — **Phase 4** — runs the end-state pass on a `paid` verdict. Returns `{ confirmed: true, evidence }` when Sol clears the state, or `{ confirmed: false, failed_checks, evidence }` when a drift blocks the confirmation. The Inngest fn uses this to pick between `verified_outcome='confirmed'` (unblocks the customer reply via [[./sol-outcome-claim-guard]]) and `verified_outcome='drifted'` (the completion gate escalates — Sol doesn't lie about the outcome).
+- `defaultConfirmationDispatchDeps()` — the production deps wiring (real `verifyConfirmationEndState` against Supabase). Extracted so tests swap the reader cleanly.
 
 ## Verdict decision table
 
@@ -47,7 +51,7 @@ Paid signal wins over declined signal — a card rotation between fire and verif
 - **Phase 1 (landed):** async verify only — declined → stamp `drifted`.
 - **Phase 2 (landed):** decline branch triggers the update-payment-method recovery journey via `dispatchRecoveryOnDecline` → [[./payment-recovery-email]]. Guarded so exactly one delivery lands per (customer, fired_at) window even when dunning's billing-failure webhook is racing us.
 - **Phase 3:** journey completion migrates Appstle→internal ([[./vault-and-migrate-payment-method]]) and deterministically retries order-now on the internal sub.
-- **Phase 4:** verified paid order triggers a lightweight Sol pass and only then sends the customer confirmation (message-is-last).
+- **Phase 4 (landed):** paid verdict runs Sol's end-state pass (`dispatchConfirmationOnVerified`) — only when EVERY invariant holds (paid order with items + non-zero total, sub active + last_payment_status='succeeded') does the ledger stamp `confirmed` and unblock the customer confirmation reply via [[./sol-outcome-claim-guard]]. A drifted end state stamps `drifted` with the failed checks, so [[./outcome-completion-gate]] escalates instead of Sol confirming a lie (message-is-last).
 
 ## See also
 
