@@ -1,0 +1,1 @@
+- **A guard-block escalation reaches June's triage — it isn't left open with no review** · verified 2026-07-08 · → [[../libraries/cs-director]]

@@ -1,0 +1,1 @@
+- **Scope GoTrue /authorize 'Error creating flow state' browser-aborts into the transient class** · verified 2026-07-08 · → [[../libraries/control-tower]]
