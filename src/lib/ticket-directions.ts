@@ -287,6 +287,88 @@ export async function getLiveDirection(
 export const loadLiveDirection = getLiveDirection;
 
 /**
+ * message_sent → close. Phase 1 of
+ * [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
+ *
+ * Sol's first-touch box session ([[../inngest/unified-ticket-handler]] `runTicketHandleJob` in
+ * scripts/builder-worker.ts) sends a resolving reply through `deliverTicketMessage` but never
+ * closes the ticket — so it stays `open` and the [[ticket-analyzer]] closed-tickets-only sweep
+ * never enqueues Cora to grade it. This helper is the single, shared "message_sent → close"
+ * write mirroring the old handler's [[../inngest/unified-ticket-handler]] `setStatus` semantics
+ * (documented rule: "message_sent → close the ticket; next inbound reopens"), so the box lane
+ * and the Inngest lane close identically. NOT a parallel path — same six-field update:
+ * `status='closed'`, `closed_at=now`, `updated_at=now`, and clears the escalation triple so a
+ * previously-escalated-then-resolved ticket doesn't linger in the escalation view.
+ *
+ * Guarded by workspace_id (Learning #6 — the confirming predicate at the action point, not a
+ * coarser proxy): a cross-workspace ticket id can never authorize the close. Compare-and-set on
+ * `.eq('workspace_id', …).eq('id', …)`; the write is idempotent for the message_sent case (a
+ * racing close from a follow-up turn is a no-op — the row is already closed).
+ */
+export async function closeTicketOnResolvingReply(
+  admin: Admin,
+  opts: { workspace_id: string; ticket_id: string },
+): Promise<void> {
+  const now = new Date().toISOString();
+  await admin
+    .from("tickets")
+    .update({
+      status: "closed",
+      closed_at: now,
+      updated_at: now,
+      escalated_at: null,
+      escalated_to: null,
+      escalation_reason: null,
+    })
+    .eq("workspace_id", opts.workspace_id)
+    .eq("id", opts.ticket_id);
+}
+
+/**
+ * Post-execute action taxonomy for a Sol box-session turn — Phase 2 of
+ * [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
+ *
+ * Mirrors the old handler's `PostExecuteAction` shape in [[../inngest/unified-ticket-handler]]
+ * (documented rule: "message_sent → close; next inbound reopens"). Only `message_sent` closes;
+ * `escalated` / `status_managed` / `keep_open` all LEAVE the ticket open — a launched
+ * journey/playbook awaits the customer, a clarifying `needs_info` reply expects a follow-up, and
+ * a `needs_human` escalation waits on the CS Director. The classifier is the single, shared
+ * predicate the box lane's close decision drives from — no parallel taxonomy.
+ */
+export type SolBoxTurnAction = "message_sent" | "status_managed" | "keep_open" | "escalated";
+
+/**
+ * Classify a Sol box-session turn's outcome into the shared taxonomy.
+ *
+ *  - `chosen_path='stateless'` + `sendOk=true` → `message_sent` (a resolving reply — CLOSE).
+ *  - `chosen_path='stateless'` + `sendOk=false` → `keep_open` (send failed; the reply never
+ *    reached the customer, so the ticket must NOT close — a human retries via Improve).
+ *  - `chosen_path='needs_info'` → `keep_open` (a clarifying question; the customer's next inbound
+ *    is the resolution signal).
+ *  - `chosen_path='playbook'` / `chosen_path='journey'` → `status_managed` (the mechanism owns
+ *    the ticket's status from here; unified-ticket-handler's own paths decide when it closes).
+ *
+ * The `escalated` return is reserved for the caller's `needs_human` branch: Sol's box session
+ * returns `status:'needs_human'` BEFORE any Direction is written, so no `chosen_path` string is
+ * available at classification time — the caller stamps `escalated` from the branch itself. Kept
+ * on the taxonomy so tests and future call sites share one vocabulary.
+ *
+ * Pure predicate — no DB access, safe to unit-test.
+ */
+export function classifySolBoxTurnAction(input: {
+  chosen_path: string;
+  send_ok: boolean;
+}): SolBoxTurnAction {
+  if (input.chosen_path === "stateless") {
+    return input.send_ok ? "message_sent" : "keep_open";
+  }
+  if (input.chosen_path === "needs_info") return "keep_open";
+  if (input.chosen_path === "playbook" || input.chosen_path === "journey") return "status_managed";
+  // Unknown chosen_path — fail-safe to keep_open (never close a ticket on an unrecognized outcome).
+  return "keep_open";
+}
+
+/**
  * Bump `resession_count` on the live Direction for `ticket_id`. Phase 2 of
  * [[../specs/sol-runaway-re-session-cap-guardrail]] — the router (`reSessionSol`) calls this
  * BEFORE it supersedes the live row so the incremented count is captured on the row about to

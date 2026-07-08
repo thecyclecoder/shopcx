@@ -124,6 +124,26 @@ After the executor returns, the post-execute status block (`unified-ticket-handl
 
 Exception: if the action failed silently (e.g. Appstle call returned `{ success: false }`), the ticket stays open — Sonnet never tells the customer something was done unless [[../tables/customer_events]] confirms it. See [[../lifecycles/ai-multi-turn]] rule "Never fake confirmations."
 
+### Sol close-on-resolution
+
+Sol's first-touch box session (`runTicketHandleJob` in [[../../scripts/builder-worker]]) runs OUTSIDE the Phase-5 `postExecuteStatusAction` block above — it lands the Direction, sends the first_reply through [[../libraries/ticket-delivery]] `deliverTicketMessage`, and returns. Historically it never closed the ticket even when the reply was a resolving one, so the ticket stayed `open` and [[../libraries/ticket-analyzer]]'s closed-tickets-only sweep never enqueued Cora to grade it. Spec [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]] fixes this by mirroring Phase 5's `message_sent → close; next inbound reopens` taxonomy into the box lane — same rule, same effect, just applied at the box worker's send point instead of the Inngest handler's `case "message_sent"` block.
+
+The decision is driven from a single shared predicate — [[../libraries/ticket-directions]] `classifySolBoxTurnAction({ chosen_path, send_ok })` — mirroring [[../inngest/unified-ticket-handler]]'s `PostExecuteAction` shape. Only `message_sent` closes; every other outcome leaves the ticket `open`:
+
+| Sol outcome | Classifier verdict | Ticket state |
+|---|---|---|
+| `chosen_path='stateless'` + reply shipped | `message_sent` | **CLOSE** — `closeTicketOnResolvingReply` writes `status='closed' + closed_at=now()` (six-field update mirroring `setStatus`; clears the escalation triple) |
+| `chosen_path='stateless'` + send failed | `keep_open` | stays open — a human retries via Improve; a customer never saw the reply |
+| `chosen_path='needs_info'` | `keep_open` | stays open — a clarifying question; the customer's next inbound is the resolution signal |
+| `chosen_path='playbook'` | `status_managed` | stays open — the playbook owns state; [[../inngest/unified-ticket-handler]]'s own paths close it when the mechanism resolves |
+| `chosen_path='journey'` | `status_managed` | stays open — the journey owns state |
+| Sol returns `needs_human` | `escalated` (branch-stamped) | stays open — the box worker flips to `needs_attention` and (for portal errors) enqueues a June triage escalate |
+| unknown `chosen_path` | `keep_open` | stays open — **fail-safe**: unrecognized outcome NEVER authorizes a close |
+
+**Why close-on-resolution is what makes Cora fire.** [[../libraries/ticket-analyzer]] `enqueueTicketAnalyzeJob` is a closed-tickets-only sweep — the `ticket-analysis-cron` cron in [[../inngest/ticket-analysis-cron]] selects rows with `status='closed' AND closed_at IS NOT NULL AND closed_at <= (now - 30 min)` + tag `ai` + a live [[../tables/ticket_directions]] row (Sol handled it). Without the box-lane close, the row never meets the first predicate, and Cora silently never grades any Sol ticket. The 30-min `CORA_CLOSE_SETTLE_MS` settle lets the customer respond (`"thanks!"` / `"wait, one more thing"`) — a follow-up inbound reopens the ticket via the per-channel webhook reopen path (email `src/app/api/webhooks/email/route.ts`, SMS `src/app/api/webhooks/sms/route.ts`, widget `src/app/api/widget/[workspaceId]/messages/route.ts` — each recognizes `status === "closed"` and writes `status='open' + closed_at=null`).
+
+**Cross-links:** [[../libraries/ticket-directions]] · [[../libraries/ticket-analyzer]] · [[../inngest/ticket-analysis-cron]] · [[../inngest/unified-ticket-handler]] · [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
+
 ### Escalation lifecycle — set → visible → cleared
 
 Escalation (`tickets.escalated_at` / `escalated_to` / `escalation_reason`) is an **open-state** concept with three moments:

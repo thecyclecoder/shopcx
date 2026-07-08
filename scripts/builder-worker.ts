@@ -10736,15 +10736,42 @@ async function runTicketHandleJob(job: Job) {
           } else {
             const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
             const channel = (t?.channel as string | null) || "email";
+            let sendOk = false;
             try {
               const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
               await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+              sendOk = true;
             } catch (e) {
               // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
               // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
               // the job (the Direction is authored; a human can retry the reply from the Improve tab).
               const msg = e instanceof Error ? e.message : String(e);
               console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+            }
+            // ── Phase 1 + 2 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+            // Post-execute taxonomy match. Mirrors unified-ticket-handler's `PostExecuteAction`
+            // ("message_sent → close; keep_open + status_managed + escalated leave open; next
+            // inbound reopens"). classifySolBoxTurnAction is the shared predicate — never a bare
+            // `chosenPath === "stateless"` inline check (Learning #6: the confirming predicate at
+            // the action point, not a coarser proxy). The classifier factors sendOk into the
+            // decision so a failed send never closes; only `message_sent` reaches the close
+            // helper. `needs_info` → keep_open (clarifying question — customer's next inbound is
+            // the resolution signal); `journey` / `playbook` → status_managed (the mechanism owns
+            // status from here — unified-ticket-handler's own paths close it when the mechanism
+            // resolves). Verification #1: needs_info / journey / playbook / needs_human all stay
+            // open — pinned in src/lib/ticket-directions.test.ts.
+            const { classifySolBoxTurnAction, closeTicketOnResolvingReply } = await import(
+              "../src/lib/ticket-directions"
+            );
+            const solTurnAction = classifySolBoxTurnAction({ chosen_path: chosenPath, send_ok: sendOk });
+            if (solTurnAction === "message_sent") {
+              try {
+                await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
+              } catch (e) {
+                // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} close-on-resolving-reply failed (reply already shipped): ${msg}`);
+              }
             }
           }
         }
