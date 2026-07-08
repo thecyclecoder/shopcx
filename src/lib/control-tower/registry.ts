@@ -847,7 +847,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:fold", kind: "agent-kind", owner: "platform", agentKind: "fold", label: "Agent — fold", description: "Spec → brain fold batches.", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
   { id: "agent:product-seed", kind: "agent-kind", owner: "cmo", agentKind: "product-seed", label: "Agent — product seed", description: "Product none → published pipeline.", expectedCadence: "on demand", stuckThresholdMs: 90 * MIN },
   { id: "agent:spec-chat", kind: "agent-kind", owner: "platform", agentKind: "spec-chat", label: "Agent — spec chat", description: "Roadmap authoring-chat turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
-  { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", label: "Agent — ticket improve", description: "CX ticket-improve turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  // Sol — the first-touch ticket handler (Direction artifact + first reply). Her OWN worker card under
+  // June (CS Director). ticket-improve below is ALSO Sol's work → personaKind:'ticket-handle' MERGES it
+  // into this one Sol card (byPersona) instead of a standalone "Agent — ticket improve".
+  { id: "agent:ticket-handle", kind: "agent-kind", owner: "cs", agentKind: "ticket-handle", personaKind: "ticket-handle", label: "Sol — Ticket Handler", description: "First-touch ticket Direction + reply (Sol).", expectedCadence: "on an inbound ticket", stuckThresholdMs: 30 * MIN, registeredAt: "2026-07-08T00:00:00Z" },
+  { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", personaKind: "ticket-handle", label: "Agent — ticket improve", description: "CX ticket-improve turns (Sol).", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
   // Per-ticket QC-grader box lane (ticket-analyzer-becomes-box-agent-under-june Phase 1) — the
   // supervised agent under 💬 June (CS Director) that replaced the analyzer's direct fetch to
   // api.anthropic.com. Enqueued by ticket-analysis-cron; drained by scripts/builder-worker.ts →

@@ -86,7 +86,7 @@ const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
 // tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn. See
 // docs/brain/specs/sol-ticket-direction-artifact-and-first-touch-box-session.md.
 const TICKET_HANDLE_TIMEOUT_MS = 15 * 60 * 1000;
-const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
+const MAX_CONCURRENT = 10; // build/plan pool — the "everything currently happening" general pool. Real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; 5→8→10, watch box logs for Max 529/overloaded before pushing further). Director (platform-director) + customer-service (ticket-handle/ticket-analyze/cs-director-call) run in their OWN dedicated lanes below, so this pool never starves them.
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
@@ -163,11 +163,14 @@ const DEPLOY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // top-level Max `claude -p` (cs-director-call skill) per call. Reads the ticket + resolution events +
 // triage_runs row + customer/subs/orders (read-only via the same DB creds the triage lane uses) and
 // emits ONE JSON verdict { decision:'approve_remedy'|'author_spec'|'escalate_founder', reasoning,
-// remedy?, spec_seed? } that Phase 2's applyBoxCsDirectorCall (deterministic Node) will materialize.
-// The runner is Phase 1 — it stops at writing a `director_activity` row (kind='cs_director_call')
-// carrying the verdict JSON so the CEO can audit what the CS Director decided BEFORE the executor
-// wires up. Serialized so the hourly triage sweep never overlaps a call the CS Director is still
-// judging.
+// remedy?, spec_seed? } that `applyBoxCsDirectorCall` (deterministic Node, src/lib/cs-director.ts —
+// docs/brain/specs/cs-director-call-phase-2-executor-fires-june-verdicts.md) materializes into a
+// real action: approve_remedy → `executeSonnetDecision` + `deliverTicketMessage` (execute-then-
+// message rule); author_spec → the specs SDK chokepoint; escalate_founder → linkage-back for the
+// runner-minted CEO card. The runner records the verdict to a `director_activity` row
+// (kind='cs_director_call') as the audit trail, then hands the SAME normalized verdict to the
+// executor on the same turn — no CEO wait, no manual re-drive. Serialized so the hourly triage
+// sweep never overlaps a call the CS Director is still judging.
 const MAX_CS_DIRECTOR_CALL = 1;
 // One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
 // investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
@@ -10040,16 +10043,46 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
 // error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
+  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
+  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
+  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
   const base = await loadImproveBrief(ticketId);
-  const { data: ticket } = await db
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot (customer + merged identity, subscriptions with
+  // realized pricing + applied_discounts, orders w/ per-unit computed, active products, active
+  // policies) so Sol's Direction is grounded in the same numbers the deployed orchestrator sees —
+  // never a guess from improvised SQL. Best-effort: a missing customer / SDK read failure leaves
+  // the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  return cxBrief ? `${base}\n\n${cxBrief}` : base;
+}
+
+/**
+ * Build the CX SDK snapshot text block for a ticket. Resolves the ticket's workspace_id +
+ * customer_id, then calls the deterministic getCxBundle → formatCxBundle. Non-throwing:
+ * a null customer still emits the workspace's products + policies. A hard read failure
+ * leaves the block empty (the caller falls back to the base brief). Phase 1 of
+ * docs/brain/specs/cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-
+ * access-no-raw-sql.md.
+ */
+async function loadCxAgentSdkBrief(ticketId: string): Promise<string> {
+  const { data: t } = await db
     .from("tickets")
-    .select("workspace_id")
+    .select("workspace_id, customer_id")
     .eq("id", ticketId)
     .maybeSingle();
-  const workspaceId = (ticket as { workspace_id: string | null } | null)?.workspace_id ?? null;
-  if (!workspaceId) return base;
-  const policiesBlock = await loadActivePoliciesBlock(workspaceId);
-  return policiesBlock ? `${base}\n\n${policiesBlock}` : base;
+  if (!t?.workspace_id) return "";
+  try {
+    const { getCxBundle, formatCxBundle } = await import("../src/lib/cx-agent-sdk");
+    const bundle = await getCxBundle(
+      db,
+      t.workspace_id as string,
+      (t.customer_id as string | null) ?? null,
+    );
+    return formatCxBundle(bundle);
+  } catch {
+    return "";
+  }
 }
 
 // Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
@@ -10110,6 +10143,8 @@ async function runTicketHandleJob(job: Job) {
       `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
       brief,
       ``,
+      `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
+      `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
       `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
@@ -11998,22 +12033,29 @@ async function runDeployReviewJob(job: Job) {
 
 // ── Box-hosted CS Director hard-call lane (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1) ──
 // A kind='cs-director-call' job is ONE hard call the CS Director agent (💬 June) makes on an escalated
-// ticket the box-escalation-triage solver→skeptic sweep could NOT reach quorum on. Phase 2 of this spec
-// enqueues these from the no-quorum branch (replacing the current straight-to-founder path); Phase 1
-// (this file) wires the box worker lane end-to-end so a synthetic no-quorum triage_runs row → an
-// agent_jobs row of this kind → a Max `claude -p` (cs-director-call skill) that reads:
+// ticket the box-escalation-triage solver→skeptic sweep could NOT reach quorum on. Phase 2 of that spec
+// enqueues these from the no-quorum branch (replacing the current straight-to-founder path); this file
+// wires the box worker lane end-to-end so a no-quorum triage_runs row → an agent_jobs row of this
+// kind → a Max `claude -p` (cs-director-call skill) that reads:
 //   (a) the ticket + its ticket_messages,
 //   (b) all ticket_resolution_events rows for the ticket (the write-ahead ledger of every prior turn),
 //   (c) the triage_runs row that dispatched this call (solver/skeptic transcripts + no-quorum reasoning),
 //   (d) the linked customer + subscriptions + orders (read-only via commerce/*).
 // It emits ONE JSON verdict — { decision:'approve_remedy'|'author_spec'|'escalate_founder', reasoning,
-// remedy?, spec_seed? } — and the RUNNER (Phase 1) records it to `director_activity`
-// (action_kind='cs_director_call', director_function='cs') so the CEO/audit trail sees WHAT the CS
-// Director decided + WHY, BEFORE the mechanical actioner wires up. The MUTATOR that turns the verdict
-// into a shipped remedy / authored spec / founder escalation is Phase 2's applyBoxCsDirectorCall — this
-// runner deliberately stops at the audit row so a Phase-1 misfire never mutates prod.
-// Read-only against everything; the deterministic worker is the only mutator per the north star
-// (CEO → role agent → tool). See docs/brain/libraries/cs-director.md + docs/brain/tables/director_activity.md.
+// remedy?, spec_seed? } — the RUNNER records it to `director_activity`
+// (action_kind='cs_director_call', director_function='cs') as the audit trail (CEO sees WHAT the CS
+// Director decided + WHY), then IMMEDIATELY hands the SAME normalized verdict to the Phase-2 executor
+// `applyBoxCsDirectorCall` in src/lib/cs-director.ts
+// (docs/brain/specs/cs-director-call-phase-2-executor-fires-june-verdicts.md) — approve_remedy fires
+// via `executeSonnetDecision` and THEN delivers the customer message via `deliverTicketMessage`
+// (execute-then-message rule from derived-from ticket 115350d5); author_spec writes through the
+// specs SDK chokepoint; escalate_founder returns linkage-back for the CEO card the runner mints
+// downstream (single-writer per surface). Read-only against everything except the runner's own
+// writes (director_activity + internal note + ticket-state transition + CEO card) and the executor's
+// per-decision writes (executeSonnetDecision commerce side-effects + deliverTicketMessage + specs
+// SDK). The runner + executor together respect the deterministic-worker-is-the-only-mutator north
+// star (CEO → role agent → tool). See docs/brain/libraries/cs-director.md +
+// docs/brain/tables/director_activity.md.
 async function runCsDirectorCallClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "cs-director-call", sandbox: "max", timeout: CS_DIRECTOR_CALL_TIMEOUT_MS });
 }
@@ -12091,6 +12133,17 @@ async function loadCsDirectorCallBrief(
   const { loadTriageBrief } = await import("../src/lib/agent-todos/triage");
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
+
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot so June's verdict is grounded in the same shape Sol
+  // and Cora saw — customer + merged identity, subscriptions w/ realized pricing + discounts,
+  // orders w/ per-unit computed, active products, active policies. Best-effort — a missing
+  // customer / SDK read failure leaves the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  if (cxBrief) {
+    parts.push("");
+    parts.push(cxBrief);
+  }
 
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
   // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
@@ -12180,19 +12233,21 @@ async function loadCsDirectorCallBrief(
 
 function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): string {
   const roleLine = secondOpinion
-    ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`
-    : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`;
+    ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`
+    : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`;
   return [
     roleLine,
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
-    `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor will fire through executeSonnetDecision.`,
-    `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so Phase 2 authors it as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
-    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). Phase 2 surfaces both on a CEO dashboard notification so the founder can approve/adjust in one read.`,
+    `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
+    `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so the executor authors it via the specs SDK as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
+    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). The runner mints a CEO dashboard notification carrying both so the founder can approve/adjust in one read.`,
     ``,
     brief,
     ``,
-    `Investigate read-only (the improve-box-tools.ts read-only tools + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
+    `DETERMINISTIC READ-ONLY CX DATA — call the shared SDK for customer + merged identity, orders w/ per-unit, subscriptions w/ realized pricing + applied_discounts, active products, and active policies (never improvise SQL):`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
     `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs reasoning + recommended_remedy when a concrete action is nameable, reasoning alone when it isn't).`,
@@ -12251,12 +12306,32 @@ async function runCsDirectorCallJob(job: Job) {
       return;
     }
 
-    // Phase 1: record the verdict to `director_activity` (director_function='cs', action_kind=
-    // 'cs_director_call'). The CEO/audit trail now shows WHAT the CS Director decided + WHY, BEFORE
-    // Phase 2's applyBoxCsDirectorCall wires up. metadata carries the raw verdict JSON verbatim so
-    // Phase 2 can consume it without re-parsing the log_tail. spec_slug is the triage_run_id when
-    // present (the natural per-call anchor) — a spec-scoped audit slice is still meaningful even
-    // pre-Phase-2 since a `decision='author_spec'` verdict names the SpecSeed slug.
+    // Phase 1 of cs-director-third-rung-hard-calls-above-triage-quorum: record the verdict to
+    // `director_activity` (director_function='cs', action_kind='cs_director_call'). The CEO/audit
+    // trail shows WHAT the CS Director decided + WHY. `metadata` carries the raw verdict JSON
+    // verbatim so the Phase-2 executor consumes it without re-parsing the log_tail. `spec_slug` is
+    // the SpecSeed's slug on `author_spec` verdicts (the natural per-call anchor for that decision).
+    //
+    // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the metadata markers reflect
+    // Phase-2 execution (`phase: 2`, `autonomous: true`): `applyBoxCsDirectorCall` is called
+    // immediately after this record and materializes the verdict — approve_remedy fires via
+    // `executeSonnetDecision` and THEN delivers the customer message via `deliverTicketMessage`
+    // (execute-then-message); author_spec writes through the specs SDK chokepoint; escalate_founder
+    // resolves the linkage-back payload for the CEO card the runner mints downstream (single-writer
+    // per surface). Nothing here waits on the CEO to act — the routing + audit + execution all
+    // advance on the same turn.
+    let applyResult: {
+      ok: boolean;
+      handler?: string;
+      reason?: string;
+      needs_attention?: boolean;
+      error?: string;
+      message_delivered?: boolean;
+      // Phase 3 — cs-director-call-phase-2-executor-fires-june-verdicts § Phase 3 handler results.
+      spec_slug?: string;
+      linkage_ticket_id?: string | null;
+      linkage_triage_run_id?: string | null;
+    } = { ok: true, handler: "not_run" };
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -12280,16 +12355,45 @@ async function runCsDirectorCallJob(job: Job) {
           // Phase 2) carry the first review's id so the audit feed can pair the two verdicts.
           // Null on the default primary June review.
           second_opinion_of: secondOpinionOfRunId,
-          // autonomous:false — Phase 1 records only; Phase 2 flips true when the executor fires the
-          // in-leash remedy without asking the CEO. The audit shape stays consistent across the phases.
-          autonomous: false,
-          phase: 1,
+          // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor
+          // (`applyBoxCsDirectorCall` in src/lib/cs-director.ts) runs immediately after this record
+          // and materializes the verdict. `phase:2` reflects that the executor tier is in-chain;
+          // `autonomous:true` reflects that the runner hands the verdict to a deterministic mutator
+          // without waiting on the CEO. approve_remedy fires via `executeSonnetDecision` then
+          // delivers the customer message via `deliverTicketMessage`; author_spec writes through the
+          // specs SDK chokepoint; escalate_founder returns the linkage-back payload for the CEO
+          // card the runner mints downstream (single-writer per surface).
+          autonomous: true,
+          phase: 2,
         },
       });
     } catch (e) {
       // recordDirectorActivity is best-effort + never-throws, so this only catches a dynamic-import
       // failure. The verdict still lands on the log_tail so an operator can recover it.
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
+    }
+
+    // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor.
+    // Called ONCE per cs-director-call job, IMMEDIATELY after the director_activity audit record
+    // above so the mutator sees the SAME normalized verdict the audit trail carries.
+    // `applyBoxCsDirectorCall` routes `approve_remedy` / `author_spec` / `escalate_founder` to
+    // their per-decision handlers (see src/lib/cs-director.ts + docs/brain/libraries/cs-director.md
+    // § Phase-2 executor); any other value (a shape drift out of `normalizeCsDirectorVerdict`,
+    // which defensively falls back to `escalate_founder`) is a clean logged no-op. Never throws —
+    // a `{ ok:false, reason }` result surfaces on the job's `log_tail` without rolling back the
+    // completed job. Same never-throws contract `applyBoxDeployReview` uses.
+    try {
+      const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
+      applyResult = await applyBoxCsDirectorCall(db, job.id, verdict);
+      console.log(
+        `${tag} applyBoxCsDirectorCall → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${applyResult.reason ? ` reason=${applyResult.reason}` : ""}`,
+      );
+    } catch (e) {
+      // Defensive belt: the mutator swallows its own throws, so this only catches a dynamic-import
+      // failure or a truly unexpected re-throw. The audit row above is the primary trail; a stub-
+      // routing failure never rolls back the completed job.
+      console.warn(`${tag} applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
+      applyResult = { ok: false, reason: e instanceof Error ? e.message : String(e) };
     }
 
     // Phase 1 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — write
@@ -12520,8 +12624,26 @@ async function runCsDirectorCallJob(job: Job) {
       }
     }
 
+    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — surface which executor
+    // handler took the verdict on the log_tail (approve_remedy / author_spec / escalate_founder /
+    // noop) so an audit reader sees BOTH what June decided AND how the mutator routed it. Phase 2
+    // adds the `message_delivered` suffix so the log_tail shows whether the customer actually heard
+    // back on an approve_remedy verdict — the derived-from ticket 115350d5's original failure was a
+    // silent "verdict recorded but nothing shipped", and this line is the primary place a human
+    // scanning the queue sees WHAT actually happened.
+    // Phase 3 additions on the applyLine — surface the SDK spec_slug on author_spec verdicts + the
+    // resolved linkage on escalate_founder verdicts so an audit reader sees the executor's
+    // machine-readable output next to which handler took the routing.
+    const applyLine = `apply → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${
+      applyResult.reason ? ` · reason=${applyResult.reason}` : ""
+    }${applyResult.message_delivered != null ? ` · message_delivered=${applyResult.message_delivered}` : ""}${
+      applyResult.spec_slug ? ` · spec_slug=${applyResult.spec_slug}` : ""
+    }${applyResult.linkage_ticket_id ? ` · linkage_ticket=${applyResult.linkage_ticket_id.slice(0, 8)}` : ""}${
+      applyResult.linkage_triage_run_id ? ` · linkage_triage_run=${applyResult.linkage_triage_run_id.slice(0, 8)}` : ""
+    }${applyResult.needs_attention ? " · NEEDS_ATTENTION" : ""}`;
     const summary = [
       `decision=${verdict.decision}`,
+      applyLine,
       verdict.reasoning ? verdict.reasoning : "",
       verdict.remedy ? `remedy: ${JSON.stringify(verdict.remedy).slice(0, 400)}` : "",
       verdict.spec_seed ? `spec_seed: ${JSON.stringify(verdict.spec_seed).slice(0, 400)}` : "",
@@ -12535,6 +12657,24 @@ async function runCsDirectorCallJob(job: Job) {
       console.log(`${tag} verdict=${verdict.decision} (session errored — recorded + logged)`);
       return;
     }
+
+    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 2 — a failed remedy action
+    // (approve_remedy where executeSonnetDecision escalated / plan malformed / delivery threw)
+    // MUST park the job `needs_attention` so a human sees WHY on the queue. The customer never
+    // heard a false "we fixed it" (the executor's own send path was suppressed + we skipped
+    // deliverTicketMessage on failure — see handleApproveRemedy), and the audit row landed on the
+    // director_activity write above; parking `needs_attention` is what the derived-from ticket
+    // 115350d5 required so the escalation reaches an operator instead of dead-ending in the log.
+    if (applyResult.needs_attention) {
+      await update(job.id, {
+        status: "needs_attention",
+        error: applyResult.error ?? `cs-director-call ${verdict.decision} action failed — human review needed`,
+        log_tail: summary.slice(-2000),
+      });
+      console.warn(`${tag} verdict=${verdict.decision} — needs_attention (${applyResult.reason ?? "unspecified"})`);
+      return;
+    }
+
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision}`);
   } catch (e) {
@@ -12730,10 +12870,14 @@ function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | nul
 // worker's applyAnalyzerVerdict is the only writer. Bounded: a handful of targeted lookups per
 // grade, not open-ended. See the ticket-analyze skill for when to research vs. defer to the
 // low-confidence unverified handling.
-function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string): string {
+function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string, cxSdkBrief: string = ""): string {
   return [
     `You are Cora, the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director). Use the ticket-analyze skill (cwd is the repo root).`,
     `Score the AI's behavior in the conversation window below against the QC rubric. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `DETERMINISTIC READ-ONLY CX DATA — PREFERRED FIRST STOP. Every CX lookup goes through the shared read-only SDK; NEVER improvise SQL for these surfaces:`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `The bundle carries customer + merged identity, subscriptions w/ realized pricing + applied_discounts, orders w/ per-unit computed + variant title, active products (variants/flavors/pricing), and active sonnet_prompts policies — the SAME shape the deployed orchestrator sees.`,
     ``,
     `PRIMARY PATH — RESEARCH BEFORE FLAGGING (Phase 2). When the AI made a factual claim you can't confirm from the transcript (a variant/flavor, a per-unit price, a subscription state, a policy, a customer entitlement), verify it FIRST with the bounded read-only research CLI:`,
     `  npx tsx scripts/analyzer-research-tools.ts <tool> ${ticketId} [json_input]`,
@@ -12747,7 +12891,7 @@ function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string):
     ``,
     `--- USER TURN ---`,
     userMsg,
-    ``,
+    cxSdkBrief ? `\n${cxSdkBrief}\n` : ``,
     `Final message = ONLY one JSON object, no prose around it:`,
     `{"score":<integer 1-10>,"issues":[{"type":"<one of the issue types above>","description":"..."}],"action_items":[{"priority":"high|medium|low","description":"..."}],"summary":"<1-2 sentences>"}`,
   ].join("\n");
@@ -12786,8 +12930,15 @@ async function runTicketAnalyzeJob(job: Job) {
       return;
     }
 
+    // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+    // pull the deterministic CX SDK snapshot (customer + merged identity, subscriptions w/ realized
+    // pricing + applied_discounts, orders w/ per-unit computed, active products, active policies)
+    // so Cora starts every grade with the SAME numbers the deployed orchestrator sees. Best-effort:
+    // an SDK read failure leaves the snapshot empty and the grade still proceeds on the
+    // conversation-window + system rubric.
+    const cxSdkBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
     const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
-      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId), sid, REPO_DIR, cfg, job.id),
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId, cxSdkBrief), sid, REPO_DIR, cfg, job.id),
     );
     await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
@@ -15924,9 +16075,81 @@ async function repairLedger(windowMs: number): Promise<RepairLedgerEntry[]> {
   });
 }
 
+// build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: eagerly reap ORPHAN active
+// build rows for this spec whose heartbeat is stale (>= REAP_STALE_MS). A worker-restart / crash
+// leaves the row `building`/`claimed`/`queued_resume` even though its process is gone; the periodic
+// `reapStaleSessions` sweep would eventually catch it, but until then the row still counts as
+// "active" — so a re-enqueue for the same spec is BLOCKED (hasActiveBuildForSlug sees it) or, if the
+// stale-session sweep beats the enqueue by a hair, we end up with two live builds racing the same
+// `claude/build-<slug>`. Doing a slug-scoped reap right at the guard (and at build dispatch)
+// transitions the orphan to `failed` (terminal — the spec sanctions "terminal state OR queued_resume")
+// BEFORE the enqueue/claim proceeds, so at most one build ever holds `claude/build-<slug>`. Never
+// touches a row whose session is running in THIS worker process (`active` Map) — that's alive, not
+// orphaned. Never touches the caller's own job (excludeJobId) — the build path calls this with its
+// own id to avoid reaping itself. Best-effort: a reap-internal error is logged, never thrown.
+async function reapStaleSiblingBuildsForSlug(
+  slug: string,
+  opts: { excludeJobId?: string; activeMap?: Map<string, unknown>; tag?: string } = {},
+): Promise<{ reaped: number }> {
+  if (!slug) return { reaped: 0 };
+  const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
+  const tag = opts.tag ?? "[reap-sibling-builds]";
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("id, status, last_heartbeat_at, updated_at, claimed_at")
+      .eq("kind", "build")
+      .eq("spec_slug", slug)
+      .in("status", REAP_STALE_STATUSES as unknown as string[])
+      .or(`last_heartbeat_at.lt.${cutoff},and(last_heartbeat_at.is.null,updated_at.lt.${cutoff})`)
+      .limit(20);
+    const rows = (data ?? []) as Array<{ id: string; status: string; last_heartbeat_at: string | null; updated_at: string | null; claimed_at: string | null }>;
+    let reaped = 0;
+    for (const r of rows) {
+      if (opts.excludeJobId && r.id === opts.excludeJobId) continue; // never reap the caller's own job
+      if (opts.activeMap && opts.activeMap.has(r.id)) continue;      // never reap a live session in THIS process
+      // Compare-and-set: only transition if the row is STILL in the stale in-flight state we read.
+      // This closes a race where the row flipped to a terminal state (or another reaper beat us to it)
+      // between our SELECT and this UPDATE — bail on zero rows updated rather than silently overwriting.
+      const { data: updated, error: uErr } = await db
+        .from("agent_jobs")
+        .update({
+          status: "failed",
+          claimed_at: null,
+          claude_session_id: null,
+          claude_session_config_dir: null,
+          error: `orphan reaped by slug-scoped sibling-build guard — another build for ${slug} is proceeding; this row was ${r.status} with stale heartbeat`,
+          log_tail: `(reapStaleSiblingBuildsForSlug: heartbeat stale on status '${r.status}' — transitioned terminal so at most one build ever holds claude/build-${slug})`,
+        })
+        .eq("id", r.id)
+        .in("status", REAP_STALE_STATUSES as unknown as string[])
+        .select("id");
+      if (uErr) {
+        console.error(`${tag} reap update failed for ${r.id.slice(0, 8)}: ${uErr.message}`);
+        continue;
+      }
+      if (updated && updated.length) {
+        reaped++;
+        console.warn(`${tag} REAP orphan build ${slug} (job ${r.id.slice(0, 8)}) — was ${r.status} with stale heartbeat → failed (single-owner-per-branch invariant)`);
+      }
+    }
+    return { reaped };
+  } catch (e) {
+    console.error(`${tag} slug-scoped sibling reap failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+    return { reaped: 0 };
+  }
+}
+
 // Is a build for this spec slug already live (active build job OR an open claude/<slug>-* PR)? The
 // auto-build dedup guard — never enqueue a second build / open a 4th identical PR for one spec slug.
 async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; reason?: string }> {
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: reap stale orphans FIRST
+  // so a dead building/claimed row can't masquerade as active and (a) block a legitimate re-enqueue
+  // OR (b) end up co-live with a new build for the same spec. reapStaleSiblingBuildsForSlug flips
+  // any stale-heartbeat active build row for THIS slug to `failed` (terminal state per the spec —
+  // single-owner-per-branch invariant), so the .in(ACTIVE_BUILD_STATUSES) probe below reads the
+  // TRUE post-reap active-build set. Best-effort; a reap error just leaves the probe as-is.
+  await reapStaleSiblingBuildsForSlug(slug, { tag: "[hasActiveBuildForSlug]" });
   const { data: job } = await db
     .from("agent_jobs")
     .select("id")
@@ -20673,6 +20896,19 @@ async function dispatchJob(job: Job) {
   const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: single-owner-per-branch
+  // invariant — before this freshly-claimed build touches the worktree, transition ANY sibling
+  // active build row for the same slug whose heartbeat is stale to `failed`. A worker-restart
+  // orphan (dead `building`/`claimed`/`queued_resume` row) can otherwise co-exist with the row we
+  // just claimed, and both would try to push to `claude/build-<slug>` — the losing push is a
+  // non-fast-forward reject and the phase work strands (Phase 2's rebase-retry rescues MOST of
+  // these; this ensures the orphan row itself doesn't stay live). Excludes THIS job so we never
+  // reap ourselves. Heartbeat-stale filter (>= REAP_STALE_MS) means a live process's row (bumped
+  // every M minutes by runBoxSession) is never eligible — no risk of yanking a live sibling. Runs
+  // BEFORE the claim-gate + worktree add so a live-orphan collision is caught before any side
+  // effect. Best-effort: a reap-internal error just logs and proceeds.
+  if (slug) await reapStaleSiblingBuildsForSlug(slug, { excludeJobId: job.id, tag });
+
   // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
   // is AUTHORED + Vale-spec-review-PASSED + every blocked_by SHIPPED (all DERIVED via the brain-roadmap
   // rollup, never the stored specs.status column). On a hold we UN-CLAIM (status→queued, claimed_at→null)
@@ -20898,15 +21134,33 @@ async function dispatchJob(job: Job) {
         console.log(`${tag} ${slug} basing fresh spec branch on the goal branch (${freshBase}) so it sees merged dependencies — NEVER main`);
       }
     }
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 1: when the spec branch
+    // ALREADY exists on remote (an earlier phase pushed), do an EXPLICIT per-branch fetch so the
+    // local `origin/${branch}` ref is at the current remote tip — not whatever a sibling worker/
+    // parallel push may have superseded since the blanket `git fetch origin` at the top of runJob.
+    // The remoteHasBranch probe above uses `ls-remote` (remote-authoritative), but the follow-up
+    // `git worktree add -B ${branch} ${wt} origin/${branch}` resolves origin/${branch} LOCALLY —
+    // if a concurrent push happened between the initial fetch and the worktree add, origin/${branch}
+    // is stale (or entirely absent, when the branch was born after the fetch), so the phase would
+    // be built on a base older than the true remote tip and its follow-up push would be a
+    // non-fast-forward. Fetching the specific ref right before the worktree add closes the window
+    // between remoteHasBranch and base-resolution — the last-line defense (Phase 2's rebase-retry
+    // on non-ff push) still catches a concurrent push AFTER the worktree add.
+    if (remoteHasBranch) sh("git", ["fetch", "origin", branch]);
     const base = remoteHasBranch ? `origin/${branch}` : freshBase;
     const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
     if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
+    const baseSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim().slice(0, 8) || "?";
     console.log(
-      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : `created fresh from ${base}`}`,
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base} → ${baseSha})` : `created fresh from ${base} (→ ${baseSha})`}`,
     );
     await update(job.id, { spec_branch: branch });
   } else {
     removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
+    // Phase 1 (resume): same rebase-before-push protection — refresh the local origin/${branch} ref
+    // to the CURRENT remote tip before the worktree add, so a paused-then-resumed build that a sibling
+    // phase built on top of doesn't get based on the stale pre-pause tip.
+    sh("git", ["fetch", "origin", branch!]);
     let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
@@ -21611,10 +21865,60 @@ async function dispatchJob(job: Job) {
       await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
       return;
     }
-    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2: on a non-fast-forward
+    // push rejection (a sibling worker/phase pushed onto the same claude/build-<slug> after this
+    // build's worktree add), rebase onto the current remote tip and retry the push ONCE — the built
+    // phase commit is real work; a lost push here strands the spec mid-build and needs a human to
+    // re-kick (real: spec cx-box-agents-sol-cora-june-...-no-raw-sql, jobs a30ad1e5 pushed phase 1
+    // → a2520180 failed on non-ff and threw its phase away). Only a non-ff rejection is recoverable
+    // here; auth/network/other errors still mark the job failed with the original error. A rebase
+    // conflict fails to `needs_attention` (never a silent drop). Phase 1 (fetch+base on remote tip
+    // before the worktree add) closes the pre-build window; this is the last-line defense for the
+    // window between the worktree add and this push.
+    let push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
     if (push.code !== 0) {
-      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
-      return;
+      const combined = `${push.out}\n${push.err}`;
+      const isNonFastForward = /non-fast-forward|\(fetch first\)|rejected.*(fetch first|non-fast-forward)|Updates were rejected/i.test(combined);
+      if (isNonFastForward) {
+        console.warn(`${tag} non-fast-forward push on ${branch} — a sibling push moved the tip; fetching + rebasing + retrying once`);
+        const fetch = sh("git", ["fetch", "origin", branch!], { cwd: wt });
+        if (fetch.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed (non-fast-forward) and post-push fetch also failed",
+            log_tail: `push:\n${combined.slice(-1000)}\nfetch:\n${(fetch.out + fetch.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        const rebase = sh("git", ["rebase", `origin/${branch}`], { cwd: wt });
+        if (rebase.code !== 0) {
+          // Rebase conflict (or other rebase abort). Do NOT silently drop the phase — surface for a
+          // human. Abort the in-progress rebase so the worktree is left clean for the reap.
+          sh("git", ["rebase", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error: "phase push rebase-retry hit a conflict against the sibling push — cannot fast-forward without a merge decision",
+            log_tail: `push:\n${combined.slice(-800)}\nrebase:\n${(rebase.out + rebase.err).slice(-1000)}`.slice(-2000),
+          });
+          console.error(`${tag} rebase-retry CONFLICT on ${branch} — parked needs_attention (never silently dropped)`);
+          return;
+        }
+        const retryPush = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+        if (retryPush.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed after fetch+rebase retry",
+            log_tail: `push #1 (non-ff):\n${combined.slice(-600)}\nrebase: ok\npush #2:\n${(retryPush.out + retryPush.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        push = retryPush;
+        console.log(`${tag} rebase-retry SUCCESS on ${branch} — phase landed on top of the sibling push (no phase work lost)`);
+      } else {
+        // Genuine (non-recoverable) push error — auth / network / policy. Fail as before, don't retry.
+        await update(job.id, { status: "failed", error: "git push failed", log_tail: combined.slice(-2000) });
+        return;
+      }
     }
     // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
     // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best

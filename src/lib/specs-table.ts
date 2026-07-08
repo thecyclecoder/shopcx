@@ -215,6 +215,12 @@ export interface ListSpecsFilter {
   /** Pass `null` to filter to standalone specs (no milestone link), a uuid to filter to one milestone, or
    *  omit to ignore. */
   milestone_id?: string | null;
+  /** list-specs-with-phases-rpc — server-side scope filter passed to the `list_specs_with_phases` RPC.
+   *  `'active'` = boardable specs (`status IS NULL OR status <> 'folded'`); `'archived'` = folded specs;
+   *  `'all'` = every spec. Defaults to `'all'` so pre-RPC listSpecs semantics (folded-inclusive) are
+   *  preserved for the callers that need them (director-kpis, spec-dispose audits). Boardable readers
+   *  should prefer the [[getActiveSpecs]] wrapper. */
+  scope?: "active" | "archived" | "all";
 }
 
 interface SpecRowDb {
@@ -348,37 +354,49 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
 }
 
 /**
- * Every spec in a workspace, optionally filtered. Phases for each are joined in one extra round-trip and
- * grouped by `spec_id`. Sorted client-side by slug for a stable order.
+ * Every spec in a workspace, optionally filtered — sourced from the `list_specs_with_phases(uuid, text)`
+ * RPC (supabase/migrations/20261001120000_list_specs_with_phases_rpc.sql). The RPC does the specs+phases
+ * join SERVER-SIDE and streams `(spec jsonb, phases jsonb)` rows back, so no id array crosses the wire —
+ * retiring the interim `.in("spec_id", [ids])` batching that PR #1429 + #1430 landed to work around the
+ * ~16KB undici header cap (UND_ERR_HEADERS_OVERFLOW) once the workspace held a few hundred specs.
+ *
+ * `filter.scope` picks the server-side row set (`'active'` | `'archived'` | `'all'` — default `'all'` to
+ * preserve pre-RPC folded-inclusive semantics); the remaining `status` / `owner` / `milestone_id`
+ * filters are applied in-memory after the RPC returns and are cheap on the bounded result set. Sorted
+ * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
   const admin = createAdminClient();
-  let q = admin.from("specs").select(SPEC_COLUMNS).eq("workspace_id", workspaceId);
-  if (filter.status) q = q.eq("status", filter.status);
-  if (filter.owner) q = q.eq("owner", filter.owner);
-  if (filter.milestone_id !== undefined) {
-    q = filter.milestone_id === null ? q.is("milestone_id", null) : q.eq("milestone_id", filter.milestone_id);
-  }
-  const { data: specs, error } = await q;
+  const { data, error } = await admin.rpc("list_specs_with_phases", {
+    p_workspace_id: workspaceId,
+    p_scope: filter.scope ?? "all",
+  });
   if (error) throw error;
-  const specRows = (specs ?? []) as SpecRowDb[];
-  if (!specRows.length) return [];
-  const ids = specRows.map((s) => s.id);
-  const { data: phases, error: pErr } = await admin
-    .from("spec_phases")
-    .select(PHASE_COLUMNS)
-    .in("spec_id", ids)
-    .order("position", { ascending: true });
-  if (pErr) throw pErr;
-  const byId = new Map<string, SpecPhaseRow[]>();
-  for (const p of (phases ?? []) as SpecPhaseRow[]) {
-    const list = byId.get(p.spec_id) ?? [];
-    list.push(p);
-    byId.set(p.spec_id, list);
+  const rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  let out = rows.map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]));
+  if (filter.status) out = out.filter((r) => r.status === filter.status);
+  if (filter.owner) out = out.filter((r) => r.owner === filter.owner);
+  if (filter.milestone_id !== undefined) {
+    const wanted = filter.milestone_id;
+    out = wanted === null
+      ? out.filter((r) => r.milestone_id === null)
+      : out.filter((r) => r.milestone_id === wanted);
   }
-  return specRows
-    .map((s) => specRowFromDb(s, byId.get(s.id) ?? []))
-    .sort((a, b) => a.slug.localeCompare(b.slug));
+  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/** Every BOARDABLE spec — thin wrapper over [[listSpecs]] with `scope='active'`, i.e. `status IS NULL OR
+ *  status <> 'folded'` filtered server-side by the `list_specs_with_phases` RPC. Prefer this over
+ *  `listSpecs` on the board / pipeline / claim-gate readers that never want folded rows across the wire. */
+export async function getActiveSpecs(workspaceId: string): Promise<SpecRow[]> {
+  return listSpecs(workspaceId, { scope: "active" });
+}
+
+/** Every spec in a workspace, folded rows included — thin wrapper over [[listSpecs]] with `scope='all'`.
+ *  Same folded-inclusive set the pre-RPC `listSpecs()` returned; use this on readers that need the full
+ *  set (director-kpis owner attribution, spec-dispose audits, drift). */
+export async function getAllSpecs(workspaceId: string): Promise<SpecRow[]> {
+  return listSpecs(workspaceId, { scope: "all" });
 }
 
 /**
@@ -1238,14 +1256,18 @@ export async function listSpecPhaseAnomalies(workspaceId: string): Promise<SpecP
   if (!phaseRows.length) return { orphans, provenanceGaps };
 
   const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
-  const { data: liveSpecs, error: sErr } = await admin
-    .from("specs")
-    .select("id, slug, workspace_id, status")
-    .in("id", specIds);
-  if (sErr) throw sErr;
+  // Batch the `.in("id", …)` resolve so the URL can't overflow the 16KB header limit at scale
+  // (UND_ERR_HEADERS_OVERFLOW) — same guard as listSpecs above.
   const liveById = new Map<string, { slug: string; workspace_id: string; status: SpecStatus }>();
-  for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
-    liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
+  for (let i = 0; i < specIds.length; i += 200) {
+    const { data: liveSpecs, error: sErr } = await admin
+      .from("specs")
+      .select("id, slug, workspace_id, status")
+      .in("id", specIds.slice(i, i + 200));
+    if (sErr) throw sErr;
+    for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
+      liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
+    }
   }
 
   for (const p of phaseRows) {

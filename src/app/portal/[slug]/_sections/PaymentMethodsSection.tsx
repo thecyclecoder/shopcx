@@ -47,6 +47,12 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
   // When set, the add-card flow was deep-linked from a subscription: the new card
   // is pinned to THIS sub (not made default), then we return to it.
   const [forSub, setForSub] = useState<string | null>(null);
+  // Phase 3 — set when the deep-link came from the Phase 2 failed-payment
+  // block CTA on SubscriptionDetailScreen. The save opts into migration
+  // (so the Appstle sub becomes internal and the block clears) and the
+  // return leg carries `?retry=1` so the previously-blocked change-date /
+  // frequency mutation auto-replays in the same session.
+  const [retryOnSuccess, setRetryOnSuccess] = useState(false);
   // Recovery mode: arrived via the failed-payment magic link → default + migrate +
   // pin to all subs + Slack. Show a focused "update your card" experience.
   const [recover, setRecover] = useState(false);
@@ -78,6 +84,11 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
       startAdd();
     } else if (params.get("add") === "1") {
       setForSub(params.get("forSub"));
+      // Phase 3 — the failed-payment block CTA appends retryOnSuccess=1;
+      // it changes the save to migrate + return-with-retry so the blocked
+      // change-date / frequency action replays automatically once the sub
+      // is internal.
+      if (params.get("retryOnSuccess") === "1") setRetryOnSuccess(true);
       startAdd();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -106,9 +117,22 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
         // recover → default + migrate + pin to all subs + Slack (server-side).
-        // For a sub-scoped add: just vault (don't make default, don't migrate the
-        // book) — we pin it to that one sub next.
-        body: JSON.stringify({ paymentMethodNonce: nonce, deviceData, ...(recover ? { recover: true } : forSub ? { makeDefault: false, migrate: false } : {}) }),
+        // retryOnSuccess (Phase 3) → sub-scoped: don't change the customer's
+        // default, but DO migrate the book so this Appstle sub becomes internal
+        // and the Phase 1 failed-payment guard stops blocking. Plain forSub
+        // (no retryOnSuccess) → sub-scoped add from an already-internal sub's
+        // "+ Add a new card" — just vault, no migrate, no default change.
+        body: JSON.stringify({
+          paymentMethodNonce: nonce,
+          deviceData,
+          ...(recover
+            ? { recover: true }
+            : forSub
+              ? retryOnSuccess
+                ? { makeDefault: false, migrate: true }
+                : { makeDefault: false, migrate: false }
+              : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) { setTokenError(data?.message || data?.error || "Couldn't save the card."); return; }
@@ -123,13 +147,21 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
 
       if (forSub && data.payment_method_id) {
         // Pin the new card to the originating subscription, then return to it.
+        // In the retryOnSuccess branch the sub was just migrated to internal
+        // (via `migrate: true` above) so setSubscriptionPaymentMethod's
+        // `is_internal` guard passes.
         await fetch("/api/portal?route=setSubscriptionPaymentMethod", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
           body: JSON.stringify({ contractId: forSub, paymentMethodId: data.payment_method_id }),
         });
-        window.location.href = `/subscriptions/${forSub}`;
+        // Carry `?retry=1` on the return leg when the customer came from the
+        // failed-payment block CTA — SubscriptionDetailScreen reads it and
+        // replays the mutation (change-date / frequency) that was blocked
+        // before the detour, so the customer's original intent lands in one
+        // flow instead of forcing them to redo the click.
+        window.location.href = `/subscriptions/${forSub}${retryOnSuccess ? "?retry=1" : ""}`;
         return;
       }
 
