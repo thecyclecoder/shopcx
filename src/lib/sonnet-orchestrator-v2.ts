@@ -338,6 +338,31 @@ export type OrchestratorOrderLineForCompute = {
   total_cents?: number | null;
   line_total_cents?: number | null;
 };
+
+/**
+ * Phase 2 of docs/brain/specs/orchestrator-surfaces-line-item-variant-and-
+ * computed-per-unit-price.md — resolve the customer-facing variant/flavor
+ * for one order line item.
+ *
+ * Preference order:
+ *   1. `variant_title` stamped on the row (internal/amplifier orders).
+ *   2. `products.variants[].title` resolved via `variant_id` from a
+ *      pre-loaded map (Shopify-synced rows carry variant_id only — the
+ *      pre-fix render fell through to no variant at all here, forcing
+ *      Sonnet to infer 'Berry' from the product title).
+ *   3. `null` — nothing to surface; the render should omit the variant
+ *      parenthetical rather than emit an empty one.
+ */
+export function resolveLineVariantTitle(
+  line: { variant_title?: string | null; variant_id?: string | null },
+  variantTitleMap: Map<string, string>,
+): string | null {
+  const stamped = (line.variant_title || "").trim();
+  if (stamped) return stamped;
+  const vid = line.variant_id ? String(line.variant_id) : "";
+  const resolved = vid ? (variantTitleMap.get(vid) || "").trim() : "";
+  return resolved || null;
+}
 export function computeChargedLineTotals(
   order: {
     total_cents?: number | null;
@@ -1110,11 +1135,20 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       }
     }
     const msrpMap = new Map<string, number>(); // variant_id → MSRP cents
+    // Phase 2 of docs/brain/specs/orchestrator-surfaces-line-item-variant-
+    // and-computed-per-unit-price.md — resolve the variant title from
+    // products.variants[].title so Sonnet + the analyzer see 'Berry'
+    // instead of having to infer flavor from the product title. Shopify
+    // sync stamps `variant_id` on the stored line but not `variant_title`
+    // (only originalUnitPriceSet), so the model was left guessing.
+    const variantTitleMap = new Map<string, string>(); // variant_id → title
     if (variantIds.size > 0) {
       const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
       for (const p of products || []) {
-        for (const v of (p.variants as { id?: string; price_cents?: number }[] || [])) {
-          if (v.id && v.price_cents != null) msrpMap.set(String(v.id), v.price_cents);
+        for (const v of (p.variants as { id?: string; title?: string; price_cents?: number }[] || [])) {
+          if (!v.id) continue;
+          if (v.price_cents != null) msrpMap.set(String(v.id), v.price_cents);
+          if (v.title) variantTitleMap.set(String(v.id), v.title);
         }
       }
     }
@@ -1143,7 +1177,11 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
         const qty = i.quantity || 1;
         const perUnitCents = charged[idx].perUnitCents;
         const lineTotalCents = charged[idx].chargedTotalCents;
-        const titleFull = `${i.title || "?"}${i.variant_title ? ` (${i.variant_title})` : ""}`;
+        // Prefer a stamped variant_title (internal/amplifier orders carry
+        // it) then fall back to the resolved products.variants[].title
+        // for Shopify-synced lines whose row only carries variant_id.
+        const resolvedVariantTitle = resolveLineVariantTitle(i, variantTitleMap);
+        const titleFull = `${i.title || "?"}${resolvedVariantTitle ? ` (variant: ${resolvedVariantTitle})` : ""}`;
         const msrp = i.variant_id ? msrpMap.get(String(i.variant_id)) : undefined;
         if (msrp) {
           const standardCents = Math.round(msrp * 0.75);

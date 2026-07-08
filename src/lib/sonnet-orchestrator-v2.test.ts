@@ -11,6 +11,7 @@ import {
   warnOnMissingResolutionFields,
   resolutionSchemaAdoption,
   computeChargedLineTotals,
+  resolveLineVariantTitle,
   type SonnetDecision,
 } from "./sonnet-orchestrator-v2";
 
@@ -202,4 +203,43 @@ test("Phase 1 — 0-quantity line falls back to qty=1 to avoid divide-by-zero", 
   const lines = [{ quantity: 0, price_cents: 500 }];
   const [row] = computeChargedLineTotals(order, lines);
   assert.equal(Number.isFinite(row.perUnitCents), true, "per-unit must be finite even for a 0-qty line");
+});
+
+// ── Named failing state (Phase 2 of docs/brain/specs/orchestrator-surfaces
+// -line-item-variant-and-computed-per-unit-price.md) ────────────────────
+// The pre-fix Sleep Gummies line item arrived to Sonnet as `Sleep Gummies
+// x2` — no variant, no flavor — because the Shopify sync only stamps
+// `variant_id` on the row (`originalUnitPriceSet` + variant.id, but NOT
+// variant.title). The orchestrator was falling through to the empty-
+// variant branch and the model was inferring 'Berry' from the product
+// description. Asserted correct state: with the products.variants[].title
+// pre-loaded into the map, resolveLineVariantTitle returns 'Berry'.
+test("Phase 2 — Sleep Gummies: variant_id-only line resolves to 'Berry' via the products.variants map", () => {
+  const map = new Map<string, string>([["gid-sleep-berry", "Berry"]]);
+  const line = { title: "Sleep Gummies", variant_id: "gid-sleep-berry" };
+  assert.equal(resolveLineVariantTitle(line, map), "Berry");
+});
+
+test("Phase 2 — stamped variant_title on the row wins over the resolved map", () => {
+  const map = new Map<string, string>([["gid-x", "Vanilla (map-side)"]]);
+  const line = { variant_title: "Chocolate", variant_id: "gid-x" };
+  assert.equal(resolveLineVariantTitle(line, map), "Chocolate", "the row's stamped variant_title is the source of truth when present");
+});
+
+test("Phase 2 — variant_id with no products.variants match returns null (render omits parenthetical)", () => {
+  const map = new Map<string, string>();
+  const line = { variant_id: "gid-unknown" };
+  assert.equal(resolveLineVariantTitle(line, map), null);
+});
+
+test("Phase 2 — a blank/whitespace variant_title falls through to the resolved map", () => {
+  const map = new Map<string, string>([["gid-y", "Berry"]]);
+  const line = { variant_title: "   ", variant_id: "gid-y" };
+  assert.equal(resolveLineVariantTitle(line, map), "Berry", "an empty stamped variant_title should not shadow a real resolved title");
+});
+
+test("Phase 2 — line with no variant info at all returns null", () => {
+  const map = new Map<string, string>([["gid-x", "Berry"]]);
+  const line = {};
+  assert.equal(resolveLineVariantTitle(line, map), null);
 });
