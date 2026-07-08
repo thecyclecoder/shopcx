@@ -23,6 +23,14 @@ Server SDK for the durable **Direction artifact** Sol writes ONCE per ticket on 
 
 Extra keys are preserved (path-specific ad-hoc knobs Sol may add). The `playbook` gate is Phase 1 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] — the choice of which playbook to run moves inside Sol's first-touch box session, retiring the signal-based matcher for the Sol cohort in Phase 2. Cross-link: [[../playbooks/README]] lists the currently active playbook slugs.
 
+### `plan.launch_journey_slug` — standalone journey wedge
+
+Any `chosen_path` can also set `plan.launch_journey_slug` to a `journey_definitions.slug` — the worker will launch that journey via [[./journey-delivery]] `launchJourneyForTicket` with NO active playbook, and Sol's `first_reply` becomes the CTA lead-in. Phase 1 of [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]] pins the wedge: a **moved-customer save** ("I moved", "new address", "changed address", "cancel, I moved") is read as an address-update intent, not a cancel — Sol authors `chosen_path='stateless'` + `plan.launch_journey_slug='shipping-address'` so the standalone Confirm Shipping Address journey fires. On completion the internal-aware `update_shipping_address` handler (action-executor → [[./commerce-subscription]] `subscriptionUpdateShippingAddress`) branches internal vs Appstle and actually persists the new address to the active subscription with EasyPost validation. Do NOT use this to launch a journey that should be a playbook step — the standalone launch is the whole point of the wedge.
+
+The writer runs `validateLaunchJourneySlug` BEFORE the row lands: the slug must be a non-empty string AND resolve to an active `journey_definitions` row scoped to this workspace (`TicketDirectionPlanError` codes `journey_slug_not_string | journey_slug_unknown` with the slug echoed on the exception). Same "confirming predicate at the action point" pattern as the existing `playbook_slug` gate (learning #6).
+
+`resolveSolChosenJourney(admin, workspace_id, ticket_id)` — the worker's `runTicketHandleJob` calls this AFTER `writeDirection` succeeds to read the live Direction and decide whether to launch a standalone journey. Returns `{ journey_id, slug, name, trigger_intent }` when the live Direction names `plan.launch_journey_slug` AND the slug resolves; returns `null` on any precondition miss (no live Direction, no `launch_journey_slug`, or the slug does not resolve to an active row) so the worker falls through to the normal `first_reply` send.
+
 ## Exports
 
 ### `writeDirection` — function
@@ -107,6 +115,17 @@ Three durable rules the Sol first-touch box session lives under — all three ar
 
 Cross-links: [[../tables/policies]] · [[./sol-policy-bait-guard]] · [[../playbooks/README]] · [[../lifecycles/ticket-lifecycle]] · [[../functions/cs]].
 
+## Sol move-signal recognition (folded from [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]])
+
+The **moved-customer save** — Sol reads "I moved" / "new address" / "changed address" / "cancel, I moved" as an ADDRESS-UPDATE intent (not a cancel) whenever the customer has an active subscription. Direction shape Sol authors for the wedge:
+
+- `chosen_path='stateless'` + `plan.launch_journey_slug='shipping-address'` — the writer's `validateLaunchJourneySlug` gate confirms the slug points at an active row before the Direction lands.
+- The `first_reply` offers the address update in one line ("no problem — tap below and confirm your new address"); the worker's `resolveSolChosenJourney` → `launchJourneyForTicket` fires the standalone Confirm Shipping Address journey with the reply as the CTA lead-in.
+- The journey's completion route (`src/app/api/journey/[token]/complete/route.ts`) also calls [[./move-replacement-offer]] `offerMoveReplacementIfEligible` right after the address update lands — for an eligible moved customer with a recent shipped order, this posts an EXPLICIT $0-replacement offer stashed on `tickets.playbook_context.pending_move_replacement_offer` (never auto-granted; `acceptMoveReplacementOffer` re-asserts the pending state and fires the shared replacement path). Eligibility mirrors the refund playbook's Tier-1 bar (LTV ≥ $100 OR total_orders ≥ 3; recent = last 21 days) — a non-eligible / no-recent-order customer gets the address update WITHOUT the replacement offer (no unbacked promise).
+- Machine gate: [[./sol-move-dead-end-guard]] `assessSolMoveDeadEndRisk` runs on Sol's DRAFT `first_reply` right after the policy-bait guard and BEFORE the customer-facing send fires. A move + active subscription that terminates with "cancel-only" / "already shipped, can't redirect" (with no alternative offered) BLOCKS the send; a cancel-after-offer path that does NOT hand the self-service `cancel-subscription` journey also blocks. Same shape as [[./sol-policy-bait-guard]]: pure function, Direction stays durable, ticket routes to needs_human on block.
+
+Verification bullets from the spec (Phase 1 / 2 / 3) — the moved-customer save NEVER dead-ends as cancel while an active subscription exists; the address update actually persists (internal jsonb OR Appstle push); an eligible customer with a recent order is offered a $0 replacement to the validated new address; an explicit-cancel-after-offer is handed the self-service `cancel-subscription` journey (Sol never cancels for them).
+
 ---
 
-[[../README]] · [[../tables/ticket_directions]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
+[[../README]] · [[../tables/ticket_directions]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
