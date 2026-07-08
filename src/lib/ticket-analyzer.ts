@@ -254,8 +254,15 @@ SCORING (1-10):
   2-3 — bad: wrong info, broken promise, or customer clearly upset
   1 — catastrophic: the AI lied, broke a major promise, or insulted the customer
 
+RESEARCH-FIRST GRADING DISCIPLINE (Phase 2 of cora-gets-readonly-research-power-to-verify-claims-before-grading):
+When the AI's message contains a specific factual claim you cannot confirm from the transcript itself (a variant/flavor name, a per-unit price, a subscription state, a policy quote, a customer entitlement, an order line-item amount), the PRIMARY path is: verify it first with the bounded read-only research tools (product / order + line-item / subscription / customer / brain lookups) BEFORE flagging it.
+  • Claim VERIFIED CORRECT by research → NOT an 'inaccuracy' issue. Do not include it in issues. Do not apply the inaccuracy cap. Example: AI said "Berry"; get_product_nutrition confirms Berry is a real Superfoods flavor → cleared.
+  • Claim VERIFIED CONTRADICTED by research → a REAL 'inaccuracy' issue. Include it with a concrete description that cites what you looked up and what it returned. This is the case the inaccuracy hard cap is written for. Example: AI said "$47.99 per unit"; get_customer_account's orders block shows the line at $50.99 → kept.
+  • Claim research CANNOT SETTLE (tool returned nothing conclusive, the surface isn't documented, or the fact is outside the read-only research surface) → FALLBACK: do NOT emit an 'inaccuracy' issue on it. Do not score-cap or escalate on an unverified detail. If the surface is documented but the specific fact is missing, note it as 'kb_gap' (which does NOT force-escalate) instead of 'inaccuracy' (which does). Silence is better than a fabrication flag.
+The confidence guard (do not score-cap or escalate on an unverified detail) is the FALLBACK for the third case only. Research is the primary path.
+
 HARD CAPS:
-  • Any factual inaccuracy (wrong code, wrong date, wrong policy, hallucinated info) = max score 5
+  • Any RESEARCH-VERIFIED factual inaccuracy (wrong code, wrong date, wrong policy, hallucinated info that the read-only tools OR the transcript itself contradicts) = max score 5. An unverified suspicion does NOT trigger this cap — see the fallback above.
   • Any unkept promise ("I'll process your refund") with no matching action = max score 4
   • Any repeated identical response (>2 times) = max score 5
 

@@ -79,23 +79,39 @@ order number that the customer confirmed), when the claim is judgment-style ("th
 seller" is opinion, not a verifiable fact), or when you're grading a NON-inaccuracy dimension
 (tone, drift, escalation appropriateness) where the transcript itself is authoritative.
 
-## Grading
+## Grading — primary path + fallback (Phase 2)
 
 Follow the rubric + calibration rules + active policies exactly as they appear in your
 `--- GRADER SYSTEM ---` prompt. Apply the HARD CAPS in the rubric as written. The `ISSUE TYPES`
 list in the system prompt is the closed vocabulary — don't invent a new one.
 
+**PRIMARY PATH — verify before flagging, then grade the truth.** Research is the primary way
+you decide whether a claim is an inaccuracy. The order is: hit a claim you can't confirm from the
+transcript → run the tool → grade the truth the tool returned.
+
 - A claim you **verified correct** via research does NOT count as an inaccuracy. Do NOT include
-  it in `issues`.
+  it in `issues`. Do NOT apply the inaccuracy hard cap. Example: AI said "Berry" —
+  `get_product_nutrition` confirms Berry is a real Superfoods flavor → cleared, no issue.
 - A claim you **verified contradicted** via research counts as a real `inaccuracy` — include it
-  in `issues` with a concrete `description` citing what you looked up and what it said (e.g.
-  "AI said Berry — get_product_nutrition confirms Berry is a real Superfoods flavor, so this
-  is verified correct" or "AI said per-unit $47.99 — orders show $50.99 per unit, a real
-  reconciliation error").
-- A claim you could **neither confirm nor refute** with the tools above should NOT be flagged
-  as a fabrication. Fall through to the low-confidence unverified handling: leave it out of
-  `issues` (or note it as `kb_gap` if the research surface is documented but the specific fact
-  isn't).
+  in `issues` with a concrete `description` citing what you looked up and what it returned. This
+  is the case the inaccuracy hard cap is written for. Example: AI said "you paid $47.99 per unit"
+  — `get_customer_account` orders block shows the line at $50.99 per unit → kept, real
+  reconciliation error.
+
+**FALLBACK — the grading-confidence guard.** For a claim the research surface still cannot
+settle (tool returned nothing conclusive, the fact is outside the read-only surface, the
+documented policy doesn't cover this case): do NOT flag it as a fabrication. Do NOT emit an
+`inaccuracy` issue on it. Do NOT score-cap or force-escalate on an unverified detail. Prefer
+`kb_gap` if the research surface is documented but the specific fact is missing, or omit the
+claim from `issues` entirely — silence is better than a fabrication flag. This fallback is
+subordinate to the primary path; it exists ONLY for what the primary path can't settle, not as
+a substitute for research.
+
+**Verification (spec Phase 2, from the originating ticket's shape):** on a ticket where the AI
+mentions a "Berry" flavor AND a per-unit price, Cora runs `get_product_nutrition` and
+`get_customer_account`; if Berry appears in the product variants she does NOT flag the flavor,
+while she DOES flag a per-unit that the orders block contradicts; a claim she can neither
+confirm nor refute stays out of the fabrication list.
 
 ## Output protocol — ONE JSON object as your final message
 
