@@ -22,6 +22,15 @@
 --        admin (service_role) client only.
 
 -- ── 1. resolve_customer_link_group ───────────────────────────────────────────
+-- Drop first: prod already carries public.resolve_customer_link_group(uuid)
+-- returning `SETOF uuid` (probed live via pg_proc). CREATE OR REPLACE cannot
+-- change the return type (`SETOF uuid` → `uuid[]`), so without the drop the
+-- whole migration file rolls back in one transaction and public.ticket_users
+-- below never gets created. See docs/brain/specs/rpc-ify-aggregation-layer-
+-- fix-1000-row-truncation.md § "Fix 1 — resolve 2 pre-merge spec-test
+-- regressions" (check 9c861db9f14b0f4f).
+DROP FUNCTION IF EXISTS public.resolve_customer_link_group(uuid);
+
 CREATE OR REPLACE FUNCTION public.resolve_customer_link_group(
   p_customer_id uuid
 ) RETURNS uuid[]
