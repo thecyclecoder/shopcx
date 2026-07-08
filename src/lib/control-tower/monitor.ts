@@ -724,7 +724,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // callSonnetOrchestratorV2. Inbound traffic with 0 successful decision beats means
             // the per-ticket decision agent went silent (couldn't reply or act on anyone).
             //
-            // Three legitimate-bypass classes are subtracted because each one is an inbound
+            // Four legitimate-bypass classes are subtracted because each one is an inbound
             // customer message that, by design, will NOT produce an ai:orchestrator beat:
             //
             // (1) CSAT-reopen path (control-tower-ticket-decision-workprobe-scope): not every
@@ -752,18 +752,36 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     ai:orchestrator tile red. An active-playbook ticket has a designated handler
             //     that already owns the message.
             //
-            // A still-OPEN, no-playbook ticket with no beat keeps counting, so a genuine
-            // orchestrator outage (inbound traffic piling up on tickets nothing can close or
-            // hand to a playbook) still alerts; a normally-served ticket that the orchestrator
-            // closed has its own ok beat, so dropping it from the work count never manufactures
-            // a false negative.
+            // (4) Sol first-touch dispatch (ticket-decision-workprobe-exclude-sol-first-touch,
+            //     see sol-ticket-direction-artifact-and-first-touch-box-session): a first-touch
+            //     inbound on a channel with sol_first_touch_enabled=true is served by a Sol
+            //     ticket-handle agent_job — unified-ticket-handler.ts:498-522 acks the customer
+            //     and writes a ticket_resolution_events row with reasoning='sol_first_touch_ack',
+            //     then enqueues kind='ticket-handle' where the box authors the Direction + first
+            //     reply. callSonnetOrchestratorV2 never runs on that inbound so no ai:orchestrator
+            //     beat is emitted. On Superfoods every channel has the flag on, so a single quiet-
+            //     window Sol-first-touch inbound would flip the tile red on healthy traffic.
+            //     The ticket_resolution_events row is the durable server-side ground-truth ledger
+            //     of that dispatch (see docs/brain/tables/ticket_resolution_events.md).
             //
-            // All three exclusions are expressed as a single positive-match
-            // (closed OR csat:reopened OR active_playbook_id IS NOT NULL) subtraction — NULL-safe
-            // (tickets with NULL/empty tags or NULL active_playbook_id still count) and
-            // overlap-free (a csat:reopened ticket that later closes is counted once, not
-            // double-subtracted), unlike a negated array filter.
-            const [allRes, excludedRes] = await Promise.all([
+            // A still-OPEN, no-playbook, no-Sol-first-touch ticket with no beat keeps counting,
+            // so a genuine orchestrator outage (inbound traffic piling up on tickets nothing can
+            // close or hand to a playbook / Sol) still alerts; a normally-served ticket that the
+            // orchestrator closed has its own ok beat, so dropping it from the work count never
+            // manufactures a false negative.
+            //
+            // The first three exclusions are expressed as a single positive-match on the
+            // tickets row (closed OR csat:reopened OR active_playbook_id IS NOT NULL) —
+            // NULL-safe (tickets with NULL/empty tags or NULL active_playbook_id still count)
+            // and overlap-free (a csat:reopened ticket that later closes is counted once, not
+            // double-subtracted). The Sol-first-touch class lives on a sibling table
+            // (ticket_resolution_events), so it runs as a parallel query joining
+            // ticket_messages → tickets → ticket_resolution_events(reasoning='sol_first_touch_ack').
+            // Overlap between the two exclusion sets (e.g. a Sol-first-touch ticket that later
+            // closed) can double-subtract, which is safe: it only lowers the work count further,
+            // never inflates it, so the tile still can't false-fire idle_while_work — and a
+            // genuinely orchestrator-owned ticket sits in neither set, so no false negatives.
+            const [allRes, excludedRes, solFirstTouchRes] = await Promise.all([
               admin
                 .from("ticket_messages")
                 .select("id", { count: "exact", head: true })
@@ -777,8 +795,18 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .or("status.eq.closed,tags.cs.{csat:reopened},active_playbook_id.not.is.null", { referencedTable: "tickets" }),
+              admin
+                .from("ticket_messages")
+                .select("id, tickets!inner(id, ticket_resolution_events!inner(id))", { count: "exact", head: true })
+                .eq("direction", "inbound")
+                .eq("author_type", "customer")
+                .gte("created_at", sinceIso)
+                .eq("tickets.ticket_resolution_events.reasoning", "sol_first_touch_ack"),
             ]);
-            return Math.max(0, (allRes.count ?? 0) - (excludedRes.count ?? 0));
+            return Math.max(
+              0,
+              (allRes.count ?? 0) - (excludedRes.count ?? 0) - (solFirstTouchRes.count ?? 0),
+            );
           }
           default:
             return 0;

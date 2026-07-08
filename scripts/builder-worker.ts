@@ -652,6 +652,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "media-buyer",
   "media-buyer-grade",
   "ticket-analyze",
+  "ticket-handle",
   "prompt-review",
   "playbook-compile",
 ]);

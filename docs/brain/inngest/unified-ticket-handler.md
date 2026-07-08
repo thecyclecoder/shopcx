@@ -20,6 +20,12 @@ Inside the `resolve` step (right after the ticket row load) the handler short-ci
 
 The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
 
+## Step 2b — Sol first-touch dispatch
+
+Phase 3 of [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] + Phase 1 of [[../specs/sol-first-touch-ack-only-on-chat-not-async-channels]] (chat-only ack). When the event is `is_new_ticket=true` AND [[../tables/ai_channel_config]] has `sol_first_touch_enabled=true` for the ticket's channel AND no agent is involved (`agent_intervened` / `assigned_to` / `escalated_to` all null) AND fraud didn't block (fraud gate runs first), the handler enqueues an `agent_jobs` row (`kind='ticket-handle'`, `instructions = {ticket_id, workspace_id, turn_index, reason:'first_touch'}`) that runs [[../functions/cs|Sol]]'s box session on Max via the box worker's `runTicketHandleJob` (see [[../libraries/ticket-directions]] for the `writeDirection` SDK Sol calls). The inline Sonnet Step 2e path below is **skipped for this turn**.
+
+**The first-touch ack is chat-only:** On `channel === 'chat'` (customer waiting live) the handler ALSO ships a short holding message via the standard `send()` wrapper right now — customer sees a response within seconds, `ticket_resolution_events.shipped_at` is stamped on turn 1, Sol's real reply arrives on turn 2. On async channels (email/sms/portal/meta_dm) the ack send AND its `ticket_resolution_events` ack row are **skipped** — a redundant "we'll get back to you" is noise when Sol's substantive real reply is what the customer will next see; Sol authors turn 1 directly and her real reply is the sole first-touch customer message. Every subsequent cheap-execution turn reads the durable [[../tables/ticket_directions]] row Sol authored instead of re-running full-context reasoning — the M1 spine of [[../goals/sol-ticket-direction-then-cheap-execution]]. Default is **off** (`sol_first_touch_enabled=false`); rollout is opt-in per workspace+channel.
+
 ## Step 3.97 — Pre-ship inflection gate ([[../libraries/inflection-detector]])
 
 Between the inbound-message handling (§ 3.9x) and either the playbook short-circuit (§ 3.98) OR the Sonnet orchestrator (§ 4), the `sol-inflection-gate` step calls [[../libraries/inflection-detector]] `applyInflectionGate` to decide whether the drafted reply should ship. Phase 2 + Phase 4 (Fix 1) of [[../specs/sol-drift-frustration-detector-and-re-session-router]].

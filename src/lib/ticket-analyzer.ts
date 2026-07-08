@@ -231,6 +231,60 @@ interface MessageRow {
 }
 
 /**
+ * The static rubric body (scoring bands + severity-aware hard caps) exported for
+ * test-time assertion without a DB. The severity-aware caps implement
+ * `escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed`
+ * Phase 1: a minor accuracy/style note on an otherwise-correct resolution
+ * caps at ~7 (good-enough band), NOT the ≤5 severe band. Only a factual
+ * inaccuracy that actually FAILED the customer (misled them, wrong action
+ * taken, wrong refund amount) hits the ≤5 cap.
+ */
+export const GRADER_RUBRIC_BODY = `EVALUATION DIMENSIONS (most damaging first):
+  1. Action ↔ Message Consistency — did the AI claim it did something it didn't actually do? (e.g. "I cancelled your subscription" with no cancel action attached)
+  2. Accuracy — did the AI give wrong information? See SURFACE-BOUNDED GRADING below: only a claim that CONTRADICTS the surface you were given counts as an inaccuracy. A specific claim that is simply absent from your surface is unverified, not wrong.
+  3. Intent Resolution — did the AI actually solve what the customer asked, or sidestep / route them elsewhere unnecessarily?
+  4. Rule Compliance — did the AI follow our internal routing rules (cancels go to journey, LOYALTY codes use apply_loyalty_coupon, no phone callback promises, etc.)?
+  5. Tone / Empathy — robotic boilerplate, sales-y framing, reflexive apologies for things we communicated upfront, repeating context unnecessarily?
+  6. Conversation Drift / Loops — did the AI repeat itself, ask for info already in the thread, forget earlier turns?
+  7. Escalation Appropriateness — escalated when capable / kept trying past competence / handled correctly?
+  8. Customer Signal — positive close ("thanks!") = good. Frustration markers / repeat asks / "speak to human" / threats = bad.
+  9. Context Respect — did the AI honor grandfathered pricing / VIP status / agent-intervened threads / crisis enrollment?
+  10. Resolution Efficiency — simple ask in 1 turn vs 5 turns?
+
+SURFACE-BOUNDED GRADING (READ THIS CAREFULLY — you grade the AI against the data the AI actually had, not against gaps in YOUR own surface):
+  You see a conversation window plus whatever context blocks are attached (agent guidance, playbook context, policies, calibration rules). You do NOT see the full product catalog, the full KB, every SKU/variant/flavor, the full order line, or the customer's full history. When the AI makes a specific claim (a product variant name, a flavor, a shipping window, a KB detail, a per-unit price, a cadence, etc.), triage it into one of these three buckets:
+    A. CONTRADICTS your surface — the claim disagrees with a fact that IS on your surface. Example: the AI says the per-unit was $30 but the surface shows the customer was charged $25/unit, or the AI cites policy X but the CURRENT POLICIES block above says policy Y. → This is an inaccuracy. Tag it \`inaccuracy\`. HARD CAPS apply.
+    B. CONFIRMED by your surface — the claim matches a fact on your surface. → Not an issue at all; do not flag.
+    C. ABSENT from your surface — the claim is specific and non-vague, but nothing on your surface either confirms OR contradicts it. Example: the AI names a product variant/flavor the order-line data in your surface doesn't include; the AI cites a shipping detail the surface didn't attach. You cannot tell whether it's right or wrong. → This is UNVERIFIED. If it seems worth noting for a human reviewer, tag it \`unverified_from_surface\` with a description that says exactly what claim you couldn't verify and why (e.g. "claim about variant 'Vanilla' — order-line variant name is not in the surface"). NEVER call it an \`inaccuracy\`, NEVER call it a fabrication/hallucination, and it does NOT cap the score.
+  The core rule: absence-from-your-surface is a limit of YOUR context, not evidence the AI lied. Grade the AI against what the AI had, not against what YOU had.
+
+SCORING (1-10):
+  10 — flawless: accurate, actions matched, problem solved, customer happy
+  8-9 — solid: minor tone/efficiency issues but resolved correctly
+  6-7 — acceptable: handled but some friction or minor gaps — INCLUDING a resolved ticket with a minor accuracy/style note that did not mislead or fail the customer
+  4-5 — mediocre: noticeable issues, partial resolution, customer unsure, OR a factual inaccuracy that misled the customer or led to a wrong action
+  2-3 — bad: wrong info, broken promise, or customer clearly upset
+  1 — catastrophic: the AI lied, broke a major promise, or insulted the customer
+
+RESEARCH-FIRST GRADING DISCIPLINE (Phase 2 of cora-gets-readonly-research-power-to-verify-claims-before-grading):
+When the AI's message contains a specific factual claim you cannot confirm from the transcript itself (a variant/flavor name, a per-unit price, a subscription state, a policy quote, a customer entitlement, an order line-item amount), the PRIMARY path is: verify it first with the bounded read-only research tools (product / order + line-item / subscription / customer / brain lookups) BEFORE flagging it.
+  • Claim VERIFIED CORRECT by research → NOT an 'inaccuracy' issue. Do not include it in issues. Do not apply the inaccuracy cap. Example: AI said "Berry"; get_product_nutrition confirms Berry is a real Superfoods flavor → cleared.
+  • Claim VERIFIED CONTRADICTED by research → a REAL 'inaccuracy' issue. Include it with a concrete description that cites what you looked up and what it returned. This is the case the inaccuracy hard cap is written for. Example: AI said "$47.99 per unit"; get_customer_account's orders block shows the line at $50.99 → kept.
+  • Claim research CANNOT SETTLE (tool returned nothing conclusive, the surface isn't documented, or the fact is outside the read-only research surface) → FALLBACK: do NOT emit an 'inaccuracy' issue on it. Do not score-cap or escalate on an unverified detail. If the surface is documented but the specific fact is missing, note it as 'kb_gap' (which does NOT force-escalate) instead of 'inaccuracy' (which does). Silence is better than a fabrication flag.
+The confidence guard (do not score-cap or escalate on an unverified detail) is the FALLBACK for the third case only. Research is the primary path.
+
+HARD CAPS (severity-aware — cap on real customer harm, NOT on a minor style note on an otherwise-correct resolution):
+  • A RESEARCH-VERIFIED factual inaccuracy that FAILED the customer (misled them, wrong policy quoted that changed the outcome, wrong refund amount, wrong action taken, or a hallucinated fact the customer relied on that the read-only tools OR the transcript/surface itself contradicts) = max score 5. Bucket C (unverified_from_surface) and unverified suspicions do NOT trigger this cap — see the RESEARCH-FIRST GRADING DISCIPLINE fallback above.
+  • A minor accuracy/style note on an otherwise-correct resolution (small phrasing imperfection, a slightly awkward paraphrase of a policy the customer still understood, a minor wording nit that did NOT mislead or change the outcome) = max score 7 — this is a good-enough resolution with a coaching note, NOT a failure; do NOT drop this into the ≤5 band
+  • Any unkept promise ("I'll process your refund") with no matching action = max score 4
+  • Any repeated identical response (>2 times) = max score 5
+
+Decision rule for the accuracy caps: ask "did this inaccuracy actually fail the customer, or is the ticket resolved and the note is a coaching-only imperfection?" If the ticket is resolved and the customer was not misled or harmed, the minor-note cap (7) applies — not the failed-customer cap (5).
+
+ISSUE TYPES (use these exact strings):
+  inaccuracy, unverified_from_surface, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation`;
+
+/**
  * Build the grader system prompt. Includes the static rubric + any
  * approved grader_prompts (calibration rules learned from admin overrides).
  */
@@ -271,47 +325,7 @@ ${currentDateContext()}
 
 You will be shown a window of messages from a single ticket. Grade ONLY the AI agent's behavior in this window. Do not grade human agent messages or system messages.
 
-EVALUATION DIMENSIONS (most damaging first):
-  1. Action ↔ Message Consistency — did the AI claim it did something it didn't actually do? (e.g. "I cancelled your subscription" with no cancel action attached)
-  2. Accuracy — did the AI give wrong information? See SURFACE-BOUNDED GRADING below: only a claim that CONTRADICTS the surface you were given counts as an inaccuracy. A specific claim that is simply absent from your surface is unverified, not wrong.
-  3. Intent Resolution — did the AI actually solve what the customer asked, or sidestep / route them elsewhere unnecessarily?
-  4. Rule Compliance — did the AI follow our internal routing rules (cancels go to journey, LOYALTY codes use apply_loyalty_coupon, no phone callback promises, etc.)?
-  5. Tone / Empathy — robotic boilerplate, sales-y framing, reflexive apologies for things we communicated upfront, repeating context unnecessarily?
-  6. Conversation Drift / Loops — did the AI repeat itself, ask for info already in the thread, forget earlier turns?
-  7. Escalation Appropriateness — escalated when capable / kept trying past competence / handled correctly?
-  8. Customer Signal — positive close ("thanks!") = good. Frustration markers / repeat asks / "speak to human" / threats = bad.
-  9. Context Respect — did the AI honor grandfathered pricing / VIP status / agent-intervened threads / crisis enrollment?
-  10. Resolution Efficiency — simple ask in 1 turn vs 5 turns?
-
-SURFACE-BOUNDED GRADING (READ THIS CAREFULLY — you grade the AI against the data the AI actually had, not against gaps in YOUR own surface):
-  You see a conversation window plus whatever context blocks are attached (agent guidance, playbook context, policies, calibration rules). You do NOT see the full product catalog, the full KB, every SKU/variant/flavor, the full order line, or the customer's full history. When the AI makes a specific claim (a product variant name, a flavor, a shipping window, a KB detail, a per-unit price, a cadence, etc.), triage it into one of these three buckets:
-    A. CONTRADICTS your surface — the claim disagrees with a fact that IS on your surface. Example: the AI says the per-unit was $30 but the surface shows the customer was charged $25/unit, or the AI cites policy X but the CURRENT POLICIES block above says policy Y. → This is an inaccuracy. Tag it \`inaccuracy\`. HARD CAPS apply.
-    B. CONFIRMED by your surface — the claim matches a fact on your surface. → Not an issue at all; do not flag.
-    C. ABSENT from your surface — the claim is specific and non-vague, but nothing on your surface either confirms OR contradicts it. Example: the AI names a product variant/flavor the order-line data in your surface doesn't include; the AI cites a shipping detail the surface didn't attach. You cannot tell whether it's right or wrong. → This is UNVERIFIED. If it seems worth noting for a human reviewer, tag it \`unverified_from_surface\` with a description that says exactly what claim you couldn't verify and why (e.g. "claim about variant 'Vanilla' — order-line variant name is not in the surface"). NEVER call it an \`inaccuracy\`, NEVER call it a fabrication/hallucination, and it does NOT cap the score.
-  The core rule: absence-from-your-surface is a limit of YOUR context, not evidence the AI lied. Grade the AI against what the AI had, not against what YOU had.
-
-SCORING (1-10):
-  10 — flawless: accurate, actions matched, problem solved, customer happy
-  8-9 — solid: minor tone/efficiency issues but resolved correctly
-  6-7 — acceptable: handled but some friction or minor gaps
-  4-5 — mediocre: noticeable issues, partial resolution, customer unsure
-  2-3 — bad: wrong info, broken promise, or customer clearly upset
-  1 — catastrophic: the AI lied, broke a major promise, or insulted the customer
-
-RESEARCH-FIRST GRADING DISCIPLINE (Phase 2 of cora-gets-readonly-research-power-to-verify-claims-before-grading):
-When the AI's message contains a specific factual claim you cannot confirm from the transcript itself (a variant/flavor name, a per-unit price, a subscription state, a policy quote, a customer entitlement, an order line-item amount), the PRIMARY path is: verify it first with the bounded read-only research tools (product / order + line-item / subscription / customer / brain lookups) BEFORE flagging it.
-  • Claim VERIFIED CORRECT by research → NOT an 'inaccuracy' issue. Do not include it in issues. Do not apply the inaccuracy cap. Example: AI said "Berry"; get_product_nutrition confirms Berry is a real Superfoods flavor → cleared.
-  • Claim VERIFIED CONTRADICTED by research → a REAL 'inaccuracy' issue. Include it with a concrete description that cites what you looked up and what it returned. This is the case the inaccuracy hard cap is written for. Example: AI said "$47.99 per unit"; get_customer_account's orders block shows the line at $50.99 → kept.
-  • Claim research CANNOT SETTLE (tool returned nothing conclusive, the surface isn't documented, or the fact is outside the read-only research surface) → FALLBACK: do NOT emit an 'inaccuracy' issue on it. Do not score-cap or escalate on an unverified detail. If the surface is documented but the specific fact is missing, note it as 'kb_gap' (which does NOT force-escalate) instead of 'inaccuracy' (which does). Silence is better than a fabrication flag.
-The confidence guard (do not score-cap or escalate on an unverified detail) is the FALLBACK for the third case only. Research is the primary path.
-
-HARD CAPS:
-  • Any RESEARCH-VERIFIED factual inaccuracy (wrong code, wrong date, wrong policy, hallucinated info that the read-only tools OR the transcript/surface itself contradicts, a number that doesn't reconcile to the surfaced total) = max score 5. Bucket C (unverified_from_surface) and unverified suspicions do NOT trigger this cap — see the RESEARCH-FIRST GRADING DISCIPLINE fallback above.
-  • Any unkept promise ("I'll process your refund") with no matching action = max score 4
-  • Any repeated identical response (>2 times) = max score 5
-
-ISSUE TYPES (use these exact strings):
-  inaccuracy, unverified_from_surface, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation${rulesBlock}${policyBlock}
+${GRADER_RUBRIC_BODY}${rulesBlock}${policyBlock}
 
 OUTPUT (JSON only, no prose around it):
 {
@@ -1039,6 +1053,84 @@ function guidanceHasNoEscalateDirective(guidanceBlock: string): boolean {
   return NO_ESCALATE_DIRECTIVE.test(guidanceBlock);
 }
 
+export type EscalationAction = "escalate_with_message" | "escalate_silent" | "none";
+
+export interface EscalationDecisionInput {
+  /** The grader's 1–10 score for this window. */
+  score: number;
+  /** True when the grader flagged a `SEVERE_ISSUE_TYPES` class (inaccuracy /
+   *  false_promise / broken_action) and the inaccuracy-only positive-close
+   *  override did NOT suppress it. */
+  hasSevereIssue: boolean;
+  /** True when a customer message in the window carries a threat/actionable
+   *  keyword (chargeback, BBB, "speak to human", etc.). */
+  customerThreat: boolean;
+  /** True when `hasCleanPositiveClose` confirms the ticket's most recent
+   *  lifecycle event is a positive close with no reopen note and no
+   *  unanswered inbound after it. */
+  positivelyClosed: boolean;
+  /** Pre-computed `(hasSevereIssue || customerThreat)` with the pinned
+   *  directive + inaccuracy-only overrides folded in. When true the
+   *  severity / actionability trigger fires unconditionally (silent
+   *  escalation). */
+  forceEscalate: boolean;
+}
+
+/**
+ * Pure escalation decision predicate — the heart of
+ * `escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed`
+ * Phase 2. Escalation keys on SEVERITY (a severe issue class) or
+ * ACTIONABILITY (an unresolved / mishandled customer / a threat keyword),
+ * NOT a raw middling score. A cleanly positively closed ticket with no
+ * severe issue class and no customer-threat is not an actionable customer
+ * situation — the score, however low, is a coaching note and MUST NOT fire
+ * a reopen/escalate (no cs-director-call). A severe issue class or an
+ * unresolved / threatening customer still auto-escalates exactly as before.
+ *
+ * Kept pure and exported so the test suite can pin the predicate without
+ * a DB. The DB-backed `applySeverityActions` wrapper computes each input
+ * (severe-issue set, threat keywords, positive-close scan, forceEscalate
+ * with directive + inaccuracy-only overrides folded in) and hands them
+ * here; the escalation tier is decided in one place.
+ */
+export function decideEscalationAction(
+  input: EscalationDecisionInput,
+): { action: EscalationAction; reason: string } {
+  const { score, hasSevereIssue, customerThreat, positivelyClosed, forceEscalate } = input;
+
+  if (forceEscalate) {
+    return {
+      action: "escalate_silent",
+      reason: "severity or actionable-customer trigger (forceEscalate) — silent escalation",
+    };
+  }
+
+  if (positivelyClosed && !hasSevereIssue && !customerThreat) {
+    return {
+      action: "none",
+      reason:
+        "resolved ticket with only a minor quality note (positively closed, no severe issue class, no customer-threat) — escalation keys on severity/actionability, not the raw score; stays closed for coaching only",
+    };
+  }
+
+  if (score <= 5) {
+    return {
+      action: "escalate_with_message",
+      reason: "actionable customer + low score — escalate with customer message",
+    };
+  }
+  if (score === 6) {
+    return {
+      action: "escalate_silent",
+      reason: "actionable customer + score 6 — escalate silently",
+    };
+  }
+  return {
+    action: "none",
+    reason: "score in the good-enough band and no severity/actionability trigger — no action",
+  };
+}
+
 async function applySeverityActions(
   admin: Admin,
   ticketId: string,
@@ -1090,6 +1182,12 @@ async function applySeverityActions(
     return CUSTOMER_ESCALATION_KEYWORDS.some(k => matchesEscalationKeyword(txt, k));
   });
 
+  // Precompute once — the positive-close state is read by three downstream
+  // gates (sole-unverified override, inaccuracy-only override, and the
+  // Phase 2 severity/actionability gate below). One DB scan; three
+  // decisions.
+  const positivelyClosed = await hasCleanPositiveClose(admin, ticketId);
+
   // ── Sole-unverified-from-surface positive-close override ──
   // Phase 2 of cora-grades-against-ai-data-surface. When the analyzer's
   // ONLY flag is `unverified_from_surface` (a Phase 1 grader tag for a
@@ -1106,18 +1204,15 @@ async function applySeverityActions(
   // customerThreat still always wins so a resolved ticket where the
   // customer threatened chargeback/BBB/etc. escalates as before.
   const soleUnverifiedFromSurface = analysisIssuesAreSoleUnverifiedFromSurface(issues);
-  if (soleUnverifiedFromSurface && !customerThreat) {
-    const positivelyClosed = await hasCleanPositiveClose(admin, ticketId);
-    if (positivelyClosed) {
-      await admin.from("ticket_messages").insert({
-        ticket_id: ticketId,
-        direction: "outbound",
-        visibility: "internal",
-        author_type: "system",
-        body: `[Auto-Analysis] Score ${score}/10 — sole flag is 'unverified_from_surface' (a claim the grader could not verify from its own context, but did not contradict). The ticket is cleanly positively closed and there is no customer-threat keyword; skipping any reopen/escalate. An unverified detail on a resolved ticket is not an actionable customer situation and must not fire a cs-director-call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
-      });
-      return;
-    }
+  if (soleUnverifiedFromSurface && !customerThreat && positivelyClosed) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — sole flag is 'unverified_from_surface' (a claim the grader could not verify from its own context, but did not contradict). The ticket is cleanly positively closed and there is no customer-threat keyword; skipping any reopen/escalate. An unverified detail on a resolved ticket is not an actionable customer situation and must not fire a cs-director-call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
   }
 
   // ── Inaccuracy-only positive-close override (ticket 9a6e53d9) ──
@@ -1136,10 +1231,8 @@ async function applySeverityActions(
     severeTypes.has("inaccuracy") &&
     !severeTypes.has("false_promise") &&
     !severeTypes.has("broken_action");
-  let suppressInaccuracyEscalation = false;
-  if (hasSevereIssue && onlyInaccuracySevere && !customerThreat && score >= 7) {
-    suppressInaccuracyEscalation = await hasCleanPositiveClose(admin, ticketId);
-  }
+  const suppressInaccuracyEscalation =
+    hasSevereIssue && onlyInaccuracySevere && !customerThreat && score >= 7 && positivelyClosed;
 
   // ── Human directive beats the overrides ──
   // A pinned agent guidance note containing an explicit "do not escalate"
@@ -1165,16 +1258,19 @@ async function applySeverityActions(
     !directiveSuppressesEscalation &&
     ((hasSevereIssue && !suppressInaccuracyEscalation) || customerThreat);
 
-  // Decide tier
-  // ≤5: escalate + customer message
-  // 6 OR forceEscalate at any score: escalate silent (NO customer message)
-  // 7+ without force: nothing
-  let action: "escalate_with_message" | "escalate_silent" | "none" = "none";
-  if (score <= 5) {
-    action = "escalate_with_message";
-  } else if (score === 6 || forceEscalate) {
-    action = "escalate_silent";
-  }
+  // Decide tier via the pure predicate. Escalation keys on SEVERITY (a
+  // severe issue class) or ACTIONABILITY (unresolved customer / threat),
+  // NOT a raw middling score — a cleanly positively closed ticket with no
+  // severe issue and no customer-threat is a coaching-only note, not a
+  // June call. See decideEscalationAction() above and
+  // escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed.
+  const { action } = decideEscalationAction({
+    score,
+    hasSevereIssue,
+    customerThreat,
+    positivelyClosed,
+    forceEscalate,
+  });
 
   // ── Research & Heal hook ──
   // Severe issues (false_promise / broken_action) are the prime case for
@@ -1213,6 +1309,31 @@ async function applySeverityActions(
       visibility: "internal",
       author_type: "system",
       body: `[Auto-Analysis] Score ${score}/10 — an 'inaccuracy'-typed issue would normally force-escalate, but skipped: it was the only severe-issue trigger (no false_promise/broken_action), the score is ≥7, and the ticket is cleanly positively closed. Not re-opening a happy, well-resolved ticket over cosmetic phrasing. Regression guard for ticket 9a6e53d9. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+  }
+
+  // ── Phase 2 severity/actionability gate audit note ──
+  // Log the coaching-only decision when the Phase 2 gate suppressed a
+  // reopen/escalate that would have fired under the old raw-score policy
+  // (score ≤6 on a cleanly positively closed ticket with no severe issue
+  // and no customer-threat). Skip the log at score ≥7 (unchanged baseline)
+  // and skip when the inaccuracy-only override already logged its own note
+  // above (avoid double-audits on the same ticket).
+  // escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed.
+  const phase2SuppressedNote =
+    action === "none" &&
+    positivelyClosed &&
+    !hasSevereIssue &&
+    !customerThreat &&
+    !suppressInaccuracyEscalation &&
+    score <= 6;
+  if (phase2SuppressedNote) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — ticket is cleanly positively closed with no severe issue class (inaccuracy/false_promise/broken_action) and no customer-threat keyword; not reopening or escalating. Auto-escalation keys on severity or an actionable customer situation, not a raw middling score — a minor quality note on a resolved ticket is coaching material, not a June call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
     });
   }
 

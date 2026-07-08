@@ -1,0 +1,1 @@
+- **Cora investigates once, ~30 min after Sol handles + closes a ticket — never re-investigates a settled ticket** · verified 2026-07-08 · → [[../libraries/ticket-analyzer]] + [[../lifecycles/ai-analysis]]

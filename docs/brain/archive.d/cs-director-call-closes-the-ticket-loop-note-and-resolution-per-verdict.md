@@ -1,0 +1,1 @@
+- **A CS Director review closes the ticket loop — internal note + resolution — not just the engineering loop** · verified 2026-07-08 · → [[../libraries/cs-director]] · [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../lifecycles/ticket-lifecycle]]
