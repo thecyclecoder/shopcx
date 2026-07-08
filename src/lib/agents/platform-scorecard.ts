@@ -725,11 +725,19 @@ const approvalsUntouchedPct: MetricDef = {
  * via agent-grader computeAgentRollup (the same last-ROLLUP_WINDOW rollup the coaching loop reads — NOT
  * a second source of truth). value = the fleet mean (mean of the per-worker averages); detail carries
  * the per-worker breakdown (average + prior + drop + count) so a slipping worker is visible. prior =
- * the mean of the per-worker prior-window averages, so the fleet trend has a delta.
+ * the mean of the per-worker prior-window averages, so the fleet trend has a delta. Current-state
+ * metric (`currentState: true` — a rolling last-`ROLLUP_WINDOW` point read of `agent_action_grades`,
+ * NOT a windowed aggregate bound to the snapshot date): prior comes from the prior stored snapshot,
+ * and [[kpi-review]] `auditAllKpis` / `auditKpi` SKIP it — between the snapshot write and the
+ * ground-truth re-read, a grading write lands and rotates the top-`ROLLUP_WINDOW` window, so the
+ * diff surfaces as moving-target noise, not engine drift. Repair Agent verdict on signature
+ * `loop:kpi_drift:worker_grade_rollup:weekly` (same false-positive class as `lane_utilization` /
+ * `loop_health` / `needs_attention`).
  */
 const workerGradeRollup: MetricDef = {
   key: "worker_grade_rollup",
   unit: "grade",
+  currentState: true,
   compute: async (ctx) => {
     const { admin, workspaceId } = ctx;
     const byWorker: Record<string, { average: number | null; prior: number | null; drop: number | null; count: number }> = {};
@@ -1010,12 +1018,20 @@ const deployReliability: MetricDef = {
  * director_decision_grades.grade (1–10) split by `dimension ∈ auto-approval｜goal-escort` — the same
  * shape `computeDirectorGradeReport` reads. `value` = the blended mean across both dimensions;
  * `detail.by_dimension` carries each dimension's mean + count. When no grades land in-window we
- * surface `detail.no_data=true` (value=0) so the UI shows "no data yet".
+ * surface `detail.no_data=true` (value=0) so the UI shows "no data yet". Current-state metric
+ * (`currentState: true` — a point read of the current `director_decision_grades` rows in the
+ * cadence window, NOT a windowed aggregate bound to the snapshot date): prior comes from the prior
+ * stored snapshot, and [[kpi-review]] `auditAllKpis` / `auditKpi` SKIP it — a new director grade
+ * lands between the snapshot write and the ground-truth re-read and shifts the blended mean, so the
+ * diff surfaces as moving-target noise, not engine drift. Same false-positive class as
+ * `worker_grade_rollup` (and the peer point-read metrics `lane_utilization` / `loop_health` /
+ * `needs_attention`).
  */
 const DIRECTOR_GRADE_DIMENSIONS = ["auto-approval", "goal-escort"] as const;
 const directorCallGrade: MetricDef = {
   key: "director_call_grade",
   unit: "grade",
+  currentState: true,
   compute: async (ctx) => {
     const { admin, workspaceId, curr, prev } = ctx;
     const meanFor = async (w: MetricWindow["curr"]): Promise<{ blended: number | null; byDim: Record<string, { mean: number | null; count: number }>; total: number }> => {
