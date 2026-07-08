@@ -39,7 +39,7 @@ Written by Sol's box session (`runTicketHandleJob` — Phase 2 wire-in of the pa
 
 ## Read paths
 
-- **Phase 2 executor** — walks `listRequiredOutcomes(admin, ticket_id)` and, per row, fires the action + verifies. Stamps `resolution_event_id` back to the [[ticket_resolution_events]] row it authored.
+- **Phase 2 executor — [[../libraries/honor-required-outcomes]]** — walks `listRequiredOutcomes(admin, ticket_id)` and, per row, fires the action via `directActionHandlers` + verifies via `verifyActionInDB` and marks the row `verified` or `failed`. Stamps `resolution_event_id` back to the [[ticket_resolution_events]] row it authored.
 - **Phase 3 send guard** — before a customer-facing message ships, checks that every outcome the message asserts is backed by a row with `status='verified'`. An unbacked claim is BLOCKED (ledger stamp `verified_outcome='unbacked'`) and rewritten to the truthful state.
 - **Phase 4 completion gate** — a ticket cannot auto-resolve while `hasUnverifiedOutcomes` is true; escalations name the specific unfinished items via `countOutcomesByStatus`.
 

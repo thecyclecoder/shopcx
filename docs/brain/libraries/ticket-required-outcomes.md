@@ -30,7 +30,7 @@ See [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verifi
 Phase 1 lands the SDK; callers wire in as later phases land:
 
 - **Sol's box session** (`scripts/builder-worker.ts` → `runTicketHandleJob`, via `src/lib/ticket-directions.ts`) — Phase 2 wire-in of the parent spec will call `writeRequiredOutcomes` at Direction-authoring time.
-- **`src/lib/action-executor.ts` `executeSonnetDecision`** — Phase 2 wire-in will walk `listRequiredOutcomes` and stamp `done` / `verified` / `failed` as the actions land.
+- **`src/lib/action-executor.ts` `executeSonnetDecision`** — Phase 2 shipped as [[honor-required-outcomes]] — the honor step walks `listRequiredOutcomes` and stamps `done` / `verified` / `failed` via the CAS transitions on this SDK before any reply is composed.
 - **`src/lib/sol-policy-bait-guard.ts` `assessSolReplyBaitRisk`** — Phase 3 wire-in will extend the guard beyond bait risk to reject any claim whose backing outcome row isn't `verified`.
 - **`src/inngest/unified-ticket-handler.ts`** — Phase 4 wire-in will read `hasUnverifiedOutcomes` before auto-resolving a ticket; a non-empty checklist keeps the ticket in-progress or escalates naming the unfinished items via `countOutcomesByStatus`.
 
