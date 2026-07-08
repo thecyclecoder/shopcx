@@ -2546,6 +2546,41 @@ function removeWorktreeForBranch(branch: string) {
   sh("git", ["worktree", "prune"]);
 }
 
+// builder-worktree-prune-before-add: idempotent PATH-side precondition for `git worktree add <wt>`.
+// The wedge this fixes (2026-07-08 media-buyer-sensor-trust-probe): the target dir
+// /home/builder/builds/build-<slug> pre-existed as an orphan (only tsconfig.tsbuildinfo inside; NOT a
+// registered worktree) from a crashed prior attempt. The bare `git worktree remove --force <wt>` was a
+// no-op (nothing to remove), and the follow-up `git worktree add` failed with "'<wt>' already exists".
+// removeWorktreeForBranch (branch-side) doesn't help — the branch was never held, only the DIR was
+// orphaned on disk.
+//
+// The heal is what a human would do: prune stale admin entries first (a registered worktree whose dir
+// was manually deleted still shows up in `git worktree list` — prune reconciles), then if <wt> IS a
+// registered worktree, force-remove it, else if the dir just exists on disk (orphan), rm -rf it. Never
+// throws — best-effort cleanup. SAFETY: reuses the removeWorktreeDir BUILDS_DIR guard, so an errant
+// call with wt === REPO_DIR (or any non-BUILDS_DIR path) refuses and returns.
+function ensureWorktreeSlotFree(wt: string) {
+  const resolved = resolve(wt);
+  if (resolved !== BUILDS_DIR && !resolved.startsWith(BUILDS_DIR + "/")) {
+    console.error(`[worktree] ensureWorktreeSlotFree REFUSING ${resolved} — only build worktrees under ${BUILDS_DIR} may be freed.`);
+    return;
+  }
+  // 1) Reconcile admin state with disk state (a registered worktree whose dir was manually deleted
+  //    still lists — prune clears it; a stale entry pointing at <wt> would otherwise interfere).
+  sh("git", ["worktree", "prune"]);
+  // 2) If <wt> IS a registered worktree, force-remove it (drops admin entry + best-effort dir remove).
+  const held = listWorktrees().some((e) => resolve(e.path) === resolved);
+  if (held) {
+    removeWorktreeDir(resolved); // handles remove + rm-rf, with the BUILDS_DIR guard
+  } else if (existsSync(resolved)) {
+    // 3) Orphan directory on disk (not a registered worktree) — nuke it so `git worktree add` doesn't
+    //    fail with "'<wt>' already exists". Guarded above; only BUILDS_DIR paths reach here.
+    sh("rm", ["-rf", resolved]);
+  }
+  // 4) One more prune — a `remove` we just did may have left an admin entry if the dir was gone.
+  sh("git", ["worktree", "prune"]);
+}
+
 // box-primary-checkout-branch-wedge-self-heal (Phase 1): assert the PRIMARY checkout (REPO_DIR) is on
 // main + clean, and AUTO-HEAL it if not — as a precondition before any build's `git worktree add -B`.
 //
@@ -19977,7 +20012,13 @@ async function dispatchJob(job: Job) {
   // when the row's spec_branch is missing — never fall through to a "null" branch. (#980 fixed the cwd half of
   // the chained resume, which unmasked this branch half.)
   let branch = job.spec_branch || (slug ? `claude/build-${slug}` : job.spec_branch);
-  sh("git", ["worktree", "remove", "--force", wt]); // clear any leftover from a crashed run
+  // builder-worktree-prune-before-add: clear ANY leftover at <wt> — a registered worktree from a
+  // crashed run OR an ORPHAN directory on disk (the 2026-07-08 media-buyer-sensor-trust-probe wedge:
+  // a lingering builds/build-<slug>/ containing only tsconfig.tsbuildinfo, not tracked by git, made
+  // the bare `git worktree remove --force` a no-op and the follow-up `worktree add` fail with
+  // "'<wt>' already exists"). ensureWorktreeSlotFree prunes admin state, then removes the worktree
+  // OR rm-rf's the orphan dir, guarded to BUILDS_DIR.
+  ensureWorktreeSlotFree(wt);
   if (!isResume) {
     // ── M1: branch-accumulation model (spec-goal-branch-pm-flow) ──────────────────────────────
     // A spec's phases accumulate on ONE PERSISTENT per-spec branch — `claude/build-${slug}` (no
