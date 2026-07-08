@@ -179,6 +179,15 @@ const LOG_QUERIES: LogQuery[] = [
       if (isForeignGoTrueAuthLogNoise(str(row.msg), str(row.event_message))) return null;
       const severity = str(row.severity) || "error";
       const message = str(row.msg) || str(row.event_message) || "auth error";
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` handler timing
+      // out on its Postgres backend ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]]).
+      // Foreign-owned surface, no lever from our side; the transient-recur window still
+      // escalated the chronic saturation (Control Tower `supabase-logs:9f39fe11dd105b2a`,
+      // 39 occurrences across 6 days). Narrowly gated to the exact
+      // `Unhandled server error: context deadline exceeded` phrase so any actionable
+      // GoTrue class (invalid JWT, rate limit, dial failure on other paths) still
+      // surfaces. Mirrors the `api` mapRow's `isForeignGoTrueEdgeNoise` drop above.
+      if (isForeignGoTrueAuthLogNoise(message)) return null;
       return {
         keyParts: ["auth", severity, message],
         title: `auth ${severity}: ${message}`,

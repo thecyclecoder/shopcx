@@ -432,6 +432,59 @@ test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate lim
   assert.equal(isTransientSupabaseLogNoise("auth", { severity: "error", message: null }), false);
 });
 
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-context-deadline-us) ──
+// Supabase's own GoTrue `/user` handler timing out on its Postgres backend, arriving on the
+// auth_logs feed. Foreign-owned surface, no lever from our side; the transient-recur window
+// escalated the chronic saturation (supabase-logs:9f39fe11dd105b2a). Drop AT CAPTURE — exact
+// phrase only so `context canceled` / `dial ... i/o timeout` / `invalid JWT` stay unaffected.
+
+test("isForeignGoTrueAuthLogNoise drops the exact phrase (case + whitespace insensitive)", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: context deadline exceeded"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("unhandled server error: context deadline exceeded"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: context deadline exceeded  "), true);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / dial / invalid JWT / rate-limit)", () => {
+  // The browser-abort sibling — still routed through the transient class.
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+  // Postgres reachability failures — dial-canceled + dial i/o timeout.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: operation was canceled)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    false,
+  );
+  // Actionable GoTrue errors — must still surface / page on first sighting.
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
+});
+
+test("isForeignGoTrueAuthLogNoise returns false on empty/nullish", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise(null), false);
+  assert.equal(isForeignGoTrueAuthLogNoise(undefined), false);
+  assert.equal(isForeignGoTrueAuthLogNoise(""), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("   "), false);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a longer/prefixed variant (postgres/api kinds unaffected — different shapes)", () => {
+  // A postgres statement-timeout row + an api 5xx row carry different phrasing and go
+  // through their own kind branches — nothing here would drop them by accident. The
+  // helper is purely a msg-string exact-match, so a non-equal string is always kept.
+  assert.equal(isForeignGoTrueAuthLogNoise("statement timeout"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("api 502 GET /rest/v1/loop_heartbeats"), false);
+  // A longer/embedded variant — the exact-match contract keeps it (only the bare phrase drops).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("prefix Unhandled server error: context deadline exceeded suffix"),
+    false,
+  );
+});
+
 test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "" }), false);
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: null }), false);
