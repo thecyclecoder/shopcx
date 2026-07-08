@@ -27,6 +27,8 @@ recent tickets → grader → ticket_analyses
 - Runs each through a grader prompt (configured per workspace at [[../tables/grader_prompts]]) using Claude Opus.
 - Writes [[../tables/ticket_analyses]] with grade, summary, suggested fix.
 
+**Verify-before-flagging (Cora's research-first grading).** The `ticket-analyze` box session (Cora) is allowed a **bounded set of read-only research lookups** (product / order + line-item / subscription / customer / brain) to verify a claim she cannot confirm from the transcript **before** grading it. A claim verified correct is NOT an `inaccuracy`; a claim verified contradicted IS a real `inaccuracy` with the tool result cited; a claim research still cannot settle falls through to the low-confidence **unverified-detail guard** (no score-cap, no force-escalate on unverified claims — prefer `kb_gap` or omit). Research is the PRIMARY path; the confidence guard is the FALLBACK. The lookups are capped per grade (`ANALYZER_RESEARCH_CAP`, default 8) and the research path performs **no writes** — the analyzer's only write remains its verdict, applied by `applyAnalyzerVerdict`. See [[../libraries/ticket-analyzer]] § Research CLI and [[../specs/cora-gets-readonly-research-power-to-verify-claims-before-grading]].
+
 ### Phase 2 — pattern surfacing
 
 The same nightly job aggregates the analyses:

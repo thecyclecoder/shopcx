@@ -58,6 +58,15 @@ Tools (all read-only, all delegate to the shared executor `src/lib/improve-tools
 want to verify against the current documented policy. Brain-first per the house rule — read the
 relevant `docs/brain/` page before grepping `src/`.
 
+**The research CLI is capped (Phase 3).** A hard per-grade lookup counter (`ANALYZER_RESEARCH_CAP`,
+default **8**) refuses further calls once you've spent your budget on this ticket. The CLI writes
+your running count to stderr on each call (`[analyzer-research] N/CAP lookups this grade`) so you
+can see how close you are. When the cap is hit, don't retry — grade the truth from what you've
+already learned, and for any claim you still can't settle **fall through to the low-confidence
+unverified handling** (do NOT emit `inaccuracy` on it; prefer `kb_gap` or omit). This is the
+"targeted, not open-ended" discipline the spec enforces — a grade that burns through the cap is
+a grade that's investigating instead of grading.
+
 ## When to research
 
 Research when the AI made a claim you'd otherwise flag as an inaccuracy, but you don't have
