@@ -20898,15 +20898,33 @@ async function dispatchJob(job: Job) {
         console.log(`${tag} ${slug} basing fresh spec branch on the goal branch (${freshBase}) so it sees merged dependencies — NEVER main`);
       }
     }
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 1: when the spec branch
+    // ALREADY exists on remote (an earlier phase pushed), do an EXPLICIT per-branch fetch so the
+    // local `origin/${branch}` ref is at the current remote tip — not whatever a sibling worker/
+    // parallel push may have superseded since the blanket `git fetch origin` at the top of runJob.
+    // The remoteHasBranch probe above uses `ls-remote` (remote-authoritative), but the follow-up
+    // `git worktree add -B ${branch} ${wt} origin/${branch}` resolves origin/${branch} LOCALLY —
+    // if a concurrent push happened between the initial fetch and the worktree add, origin/${branch}
+    // is stale (or entirely absent, when the branch was born after the fetch), so the phase would
+    // be built on a base older than the true remote tip and its follow-up push would be a
+    // non-fast-forward. Fetching the specific ref right before the worktree add closes the window
+    // between remoteHasBranch and base-resolution — the last-line defense (Phase 2's rebase-retry
+    // on non-ff push) still catches a concurrent push AFTER the worktree add.
+    if (remoteHasBranch) sh("git", ["fetch", "origin", branch]);
     const base = remoteHasBranch ? `origin/${branch}` : freshBase;
     const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
     if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
+    const baseSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim().slice(0, 8) || "?";
     console.log(
-      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : `created fresh from ${base}`}`,
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base} → ${baseSha})` : `created fresh from ${base} (→ ${baseSha})`}`,
     );
     await update(job.id, { spec_branch: branch });
   } else {
     removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
+    // Phase 1 (resume): same rebase-before-push protection — refresh the local origin/${branch} ref
+    // to the CURRENT remote tip before the worktree add, so a paused-then-resumed build that a sibling
+    // phase built on top of doesn't get based on the stale pre-pause tip.
+    sh("git", ["fetch", "origin", branch!]);
     let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
