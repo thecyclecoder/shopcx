@@ -1,0 +1,1 @@
+- **Harden the Fenn agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../recipes/build-box-setup#fenn-agents-durable-mandate]]

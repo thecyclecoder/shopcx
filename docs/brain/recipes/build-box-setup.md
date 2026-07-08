@@ -168,6 +168,28 @@ The Bo build agent runs with a **DURABLE MANDATE** — five pieces of accumulate
 
 Bo's `personality` string in `src/lib/agents/personas.ts` summarizes the mandate so it's discoverable in the org chart. The permanent prompt block replaces the recurring coaching that was reaching Bo through 13+ ephemeral sessions; durable behavior now frees the coaching lane to handle fresh mistake classes instead of re-teaching the same five items every build.
 
+## Fenn agent's durable mandate ([[../specs/agent-mandate-hardening-fold]] — shipped)
+
+The Fenn fold agent runs with a **DURABLE MANDATE** — seven operating principles that were baked into the permanent prompt in `scripts/builder-worker.ts` as the `FENN_DURABLE_OPERATING_PRINCIPLES` constant (injected into every fold-batch prompt before the mechanical steps). The mandate replaces ephemeral per-job `agent_instructions` for these recurring fold mistakes — Fenn now **always** follows these principles by default, and any new coaching flows through the ephemeral path only (closing the grade→coach→apply loop, moving the 11-spec coaching backlog from individual feedback into durable behavior).
+
+**The seven mandate principles (lines ~8496–8518 in `scripts/builder-worker.ts`):**
+
+1. **Derive "shipped" from the phase rollup — never `specs.status`.** A spec is foldable iff every `public.spec_phases` row is `shipped` (getRoadmap → deriveSpecCardStatus → rollupPhaseStatus). The stored `specs.status` column is vestigial and frequently reads `planned`/`in_progress` on a genuinely-shipped spec — reading it produces false no-ops. The worker's `runFoldJob` already gates on the rollup; do not second-guess a spec it handed you as foldable.
+
+2. **Enumerate the FULL owed artifact set BEFORE concluding a fold.** A fold is only done when ALL of these exist: (a) `grep -r` the ENTIRE `docs/brain/` tree for the folded spec's slug AND for any symbol names it introduced/reverted (function names, prior spec slugs, table/library names). Update EVERY page that still describes the reverted/old concept in present tense — not just the first two or three pages you opened. A sibling page still calling a removed function "now inert" is the recurring completeness slip. (b) `docs/brain/archive.d/{slug}.md` written for THIS slug, always — a missing archive line with shipped brain siblings is an INCONSISTENT state, not a clean no-op. Do not skip it because "the brain content already looks present". (c) Shipped-ness re-confirmed from the derived phase rollup (getRoadmap/deriveSpecCardStatus), never the stored `specs.status` column, before ever declaring a candidate unfoldable or a no-op.
+
+3. **Precision on scope claims in Gotcha/Known-fixes notes.** When you write "both/all/every entry point/caller/site" in a brain note, first `grep` the actual callers of the guard function in the merged source and name only the ones that truly call it — e.g. write "authorSpecRowStructured normalizes; the markdown path relies on parseSpec" rather than a blanket "both entry points call normalizeOwnerSlug". A scope overclaim points a future reader at the wrong function; accuracy is the whole point of a fold.
+
+4. **Report the actual action.** When the fold PR's diff only creates `docs/brain/archive.d/{slug}.md` metadata (the implementation PR already placed the durable knowledge in the correct brain home), report the action explicitly as archive-only. Do NOT claim pages were folded or cross-linked unless the diff actually changed them — a claimed page-fold that the diff doesn't back is the recurring overclaim slip.
+
+5. **Emit a structured audit checkpoint per spec.** For every spec you fold, print exactly ONE line to stdout with this shape (so a grader can verify rubric adherence from the log alone, and a mid-job interruption leaves recoverable evidence): `[fold-audit] slug=<slug> pages_updated=<page1,page2,…> cross_links=<src→tgt,src→tgt,…> archive=docs/brain/archive.d/<slug>.md action=<full-fold|archive-only>`. Include the same manifest — one entry per slug — in your final JSON `summary` field.
+
+6. **Retry once on a transient 5xx / API error before exiting.** Zero-output failures from an unhandled 5xx are fully recoverable with a single retry; a bail-on-first-error leaves rubric-compliant work uncredited.
+
+7. **NEVER regenerate `docs/brain/archive.md` or `docs/brain/README.md`.** The board reads `docs/brain/archive.d/` directly (getArchive), so regenerating aggregates inside a fold PR is needless AND is the #1 cause of fold PRs going Dirty (every fold re-edits the same lines → the second fold conflicts the moment the first merges). This SUPERSEDES any older ephemeral coaching that told you to run `npm run brain:index` — the aggregates are refreshed out-of-band now.
+
+Fenn's prompt in the `foldBatchPrompt` function now leads every fold with these seven principles, so the agent evaluates each fold through them by default. The permanent mandate replaces the recurring 6.1/10 grade pattern that coaching alone wasn't fixing; durable behavior now lets Fenn execute fold batches consistently at or above the mastery threshold (9–10/10).
+
 ## Day-to-day ops (over the tailnet)
 
 ```bash
