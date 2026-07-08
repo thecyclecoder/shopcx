@@ -82,14 +82,19 @@ const GRADER_MODEL = SONNET_MODEL;
 const TERMINAL_JOB_STATUSES = new Set(["completed", "merged", "failed", "needs_attention"]);
 
 /**
- * Grader-result `reason`s that mean a benign in-flight race, NOT a grader defect — mirrors the
- * director-grader's INFLIGHT_SKIP_REASONS. `not_concluded` happens when director triage re-queues a
- * job (needs_attention → queued) between the sweep snapshot and gradeAgentAction's re-fetch;
- * `job_not_found` is the same shape one step further (the row was already finalized + collected).
- * Both are expected during normal director churn and must stay silent — only true grader errors
- * (grader_http_429, parse_failed, …) should hit console.error and surface in the Vercel error feed.
+ * Grader-result `reason`s that mean a benign in-flight race OR a blameless-infra skip, NOT a grader
+ * defect — mirrors the director-grader's INFLIGHT_SKIP_REASONS. `not_concluded` happens when director
+ * triage re-queues a job (needs_attention → queued) between the sweep snapshot and gradeAgentAction's
+ * re-fetch; `job_not_found` is the same shape one step further (the row was already finalized +
+ * collected). `blameless_infra_failure` (grader-treats-infra-outage-failures-as-blameless Phase 2)
+ * marks a job that failed for a bounded outage/infra reason — the CLI's Max-account credentials
+ * evicted mid-run, a Max-cap park, a 0-token dead session, a session that died without a parseable
+ * verdict, a DB-down author-write fallout — NEVER a worker judgment slip, so no grade is written
+ * and no coach signal fires. All THREE are expected during normal director churn / an outage window
+ * and must stay silent — only true grader errors (grader_http_429, parse_failed, …) should hit
+ * console.error and surface in the Vercel error feed.
  */
-const AGENT_INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "job_not_found"]);
+export const AGENT_INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "job_not_found", "blameless_infra_failure"]);
 
 /** The standing performance window — last N graded jobs per worker (the spec's locked config). */
 export const ROLLUP_WINDOW = 10;
@@ -178,6 +183,142 @@ export const INFRA_CANCEL_ERR_RE = /runaway|zombie|cancelled|stale-session|sessi
 export function isInfraCancelledError(err: string | null | undefined): boolean {
   return typeof err === "string" && err.length > 0 && INFRA_CANCEL_ERR_RE.test(err);
 }
+
+// ── isBlamelessInfraFailure — the outage/infra skip predicate ────────────────────────────────────
+// grader-treats-infra-outage-failures-as-blameless-not-low-grades Phase 1.
+//
+// An INFRA/outage failure is NOT a worker judgment mistake. 2026-07-08 incident: the Claude CLI's
+// Max-account credentials evicted mid-run, so every worker's next `claude -p` returned an outage
+// error ("authentication_failed" / "Not logged in" / "Please run /login") with 0 tokens spent.
+// The grader (which reads only the job row) treated every one as a 1-2/10 real failure, the
+// coach's low-grade window filled with the outage, and each cycle re-parked needs_attention
+// coaching that never had a real coachable signature — perpetual re-parking off an outage that
+// had already resolved. This predicate teaches the grader to SKIP the job entirely (no low grade
+// written) and the coach to EXCLUDE it from its low-grade window, so an outage burst can't poison
+// the rollup or ping the CEO on a repeat.
+//
+// Signatures — the concrete outage classes seen on 2026-07-08:
+//   (a) CLI-auth outage — "authentication_failed" / "Not logged in" / "Please run /login". The
+//       Max account's credentials evicted mid-run; every next claude -p failed at auth.
+//   (b) 0-token dead session — input+output tokens both zero AND the blob says the session
+//       produced no output (never reached the model). Not a worker slip — the session died before
+//       judgment.
+//   (c) Max-cap park — "all Max accounts capped" / "usage limit reached ... all Max accounts
+//       capped". The box parked the job blocked_on_usage awaiting reset.
+//   (d) No-parseable-verdict — "no parseable decisions" / "no parseable verdict" / "no parseable
+//       learning". A session ended before producing a verdict the worker code could parse;
+//       usually the CLI crashed mid-run.
+//   (e) DB-down author-write fallout — "silent author-write fallout" / "did not persist to
+//       public.specs". The Supabase pooler stalled during the spec-author write.
+//
+// CONSERVATIVE — a parseable-but-wrong verdict is NEVER blameless. A worker that DID reach its
+// judgment layer and made a bad call is exactly what the grader/coach loop exists to catch. We
+// mirror agent-coaching.ts's WORKER_ATTRIBUTABLE_MARKERS: if the blob says "wrong disposition",
+// "misdiagnosed", "false-positive", … the job is worker-attributable regardless of what other
+// signature co-occurs. This protects against the false-negative direction (accidentally masking
+// a real slip); the false-positive direction (grading an outage) is what we're fixing.
+//
+// Reused from BOTH the grader (Phase 2 — skip the job, write no grade row) and the coach (Phase
+// 3 — exclude blameless jobs from the low-grade window so the coach never parks needs_attention
+// on an outage burst).
+export const BLAMELESS_INFRA_FAILURE_PATTERNS: { key: string; pattern: RegExp }[] = [
+  // (a) CLI-auth outage
+  { key: "cli_auth_failed", pattern: /authentication[_ ]failed/i },
+  { key: "cli_not_logged_in", pattern: /not logged in/i },
+  { key: "cli_login_prompt", pattern: /please\s*(run|use|log\s*in).{0,20}\/?login/i },
+  // (c) Max-cap park
+  { key: "all_max_accounts_capped", pattern: /all\s+max\s+accounts\s+capped/i },
+  // (d) session died with no parseable verdict / decisions / learning
+  { key: "no_parseable_verdict", pattern: /no\s+parseable\s+verdict/i },
+  { key: "no_parseable_decisions", pattern: /no\s+parseable\s+decisions/i },
+  { key: "no_parseable_learning", pattern: /no\s+parseable\s+learning/i },
+  // (e) DB-down author-write fallout
+  { key: "silent_author_write_fallout", pattern: /silent\s+author-write\s+fallout/i },
+  { key: "did_not_persist_specs", pattern: /did\s+not\s+persist\s+to\s+public\.specs/i },
+];
+
+/** Concrete WORKER-attributable markers: strings that PROVE the failure reflected the worker's
+ *  own judgment (a wrong verdict / a misdiagnosis / a false-positive), so a co-occurring outage
+ *  signature can't mask a coachable slip. Mirrors agent-coaching.ts's WORKER_ATTRIBUTABLE_MARKERS
+ *  — same conservative direction: protect against masking a real slip, never against catching an
+ *  outage. */
+const BLAMELESS_INFRA_WORKER_MARKERS: RegExp[] = [
+  /wrong\s+(disposition|verdict|call|route|choice)/i,
+  /mis(-|)?diagnosed|misjudged|missed a real/i,
+  /false[- ]positive|false[- ]negative/i,
+];
+
+/** Sub-signature (b): "0-token dead session" — input+output tokens both zero AND the blob
+ *  carries a "no output"/"empty response"/"session ended" style marker. Requires BOTH so that a
+ *  fresh unmetered job (tokens still null/0 but no error) is never classified as blameless — a
+ *  clean success with a null cost is common. */
+const NO_OUTPUT_SIGNATURE_RE = /no\s+output|empty\s+session|empty\s+response|session\s+ended\s+with\s+no|dead\s+session|0[- ]token/i;
+
+export interface BlamelessInfraJobShape {
+  /** agent_jobs.error — the failure reason the worker code stamped. */
+  error?: string | null;
+  /** agent_jobs.log_tail — the last N lines of the session's stdout/stderr. */
+  log_tail?: string | null;
+  /** Total input tokens consumed by the session (from ai_token_usage rollup, or the worker's own
+   *  end-of-run stamp). Null/undefined = unknown, treated as unmetered (never blameless off this
+   *  signal alone). */
+  input_tokens?: number | null;
+  /** Total output tokens produced by the session. Null/undefined = unknown. */
+  output_tokens?: number | null;
+}
+
+/**
+ * Does this concluded agent_jobs row reflect an INFRA/outage failure the grader should SKIP (no
+ * low grade written) and the coach should EXCLUDE from its low-grade window? Conservative — if
+ * the blob carries a worker-attributable marker (wrong verdict, misdiagnosed, false-positive,
+ * …), the job is NEVER blameless even when an outage signature also matches. Pure fn — no DB /
+ * IO — so the deployed grader + the local unit tests exercise the same code.
+ */
+export function isBlamelessInfraFailure(job: BlamelessInfraJobShape): boolean {
+  const blob = `${job.error ?? ""}\n${job.log_tail ?? ""}`;
+  // Worker-attributable markers ALWAYS win — a real slip that co-occurred with an outage is
+  // still coachable. Guarding against the false-negative direction (masking a real slip).
+  for (const p of BLAMELESS_INFRA_WORKER_MARKERS) if (p.test(blob)) return false;
+  // (a) / (c) / (d) / (e) — a concrete outage signature in the error/log_tail.
+  for (const s of BLAMELESS_INFRA_FAILURE_PATTERNS) if (s.pattern.test(blob)) return true;
+  // (b) 0-token dead session — tokens zero AND the blob confirms no output. Requires the
+  // "no output"/"empty response" marker so an unmetered clean success isn't misclassified.
+  const inTok = Number(job.input_tokens ?? 0);
+  const outTok = Number(job.output_tokens ?? 0);
+  if (inTok === 0 && outTok === 0 && NO_OUTPUT_SIGNATURE_RE.test(blob)) return true;
+  return false;
+}
+
+/** Which concrete blameless-infra signature (a-e) does this job match, if any? Returns the
+ *  matched pattern's `key` (e.g. "cli_auth_failed") so the reconcile can stamp a per-row audit
+ *  string. Returns null for the (b) 0-token dead session — that path has no textual signature
+ *  key (it's a numeric+text conjunction), and null for a genuine worker slip. Same worker-
+ *  attributable-marker override as `isBlamelessInfraFailure`. */
+export function matchedBlamelessInfraSignatureKey(job: BlamelessInfraJobShape): string | null {
+  const blob = `${job.error ?? ""}\n${job.log_tail ?? ""}`;
+  for (const p of BLAMELESS_INFRA_WORKER_MARKERS) if (p.test(blob)) return null;
+  for (const s of BLAMELESS_INFRA_FAILURE_PATTERNS) if (s.pattern.test(blob)) return s.key;
+  const inTok = Number(job.input_tokens ?? 0);
+  const outTok = Number(job.output_tokens ?? 0);
+  if (inTok === 0 && outTok === 0 && NO_OUTPUT_SIGNATURE_RE.test(blob)) return "zero_token_dead_session";
+  return null;
+}
+
+/** The reasoning-field marker the reconcile stamps onto a neutralized grade row, so the audit
+ *  trail preserves the ORIGINAL grade + reasoning + which blameless signature matched. Idempotent:
+ *  a reconcile pass skips any row whose reasoning already carries this prefix. */
+export const BLAMELESS_INFRA_RECONCILE_MARKER = "[BLAMELESS_INFRA]";
+
+/** Is this agent_action_grades row IN the coach's low-grade window? Pure JS mirror of the SQL
+ *  filter — `grade IS NOT NULL AND grade < COACH_LOW_ROLLUP`. A blameless-reconciled row has
+ *  grade=NULL and is naturally excluded (both here and in the Supabase query), which is the
+ *  mechanism that stops the coach from re-parking needs_attention on an already-neutralized
+ *  outage burst. Exercised by the Phase 3 verification unit test. */
+export function isInCoachLowGradeWindow(row: { grade: number | null }): boolean {
+  if (row.grade === null || row.grade === undefined) return false;
+  return row.grade < COACH_LOW_ROLLUP;
+}
+
 /** Coaching trigger: rollup below this, OR a drop larger than DROP_THRESHOLD vs the prior window. */
 export const COACH_LOW_ROLLUP = 7;
 export const DROP_THRESHOLD = 1.5;
@@ -453,6 +594,11 @@ export async function applyBoxGrade(opts: { agentJobId: string; grade: number; r
 
   if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
   if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
+  // grader-treats-infra-outage-failures-as-blameless Phase 2: defensive guard — the box-hosted
+  // grader session SHOULD skip a blameless-infra job before calling applyBoxGrade, but if a stale
+  // box session (pre-fix, or a race) hands us one anyway we still refuse to write a 1-10 grade
+  // for it. Same reason string + AGENT_INFLIGHT_SKIP_REASONS silencing as gradeAgentAction.
+  if (isBlamelessInfraFailure(job)) return { ok: false, reason: "blameless_infra_failure" };
 
   const { data: existing } = await admin
     .from("agent_action_grades")
@@ -470,6 +616,134 @@ export async function applyBoxGrade(opts: { agentJobId: string; grade: number; r
     usage: { input_tokens: 0, output_tokens: 0 },
     modelOverride: BOX_GRADE_MODEL,
   });
+}
+
+// ── reconcile the 2026-07-08 blameless-infra grade poison ───────────────────────────────────────────
+//
+// grader-treats-infra-outage-failures-as-blameless Phase 3 (part 2). Phases 1+2 stop NEW poison from
+// landing in agent_action_grades. This one-time idempotent reconcile NEUTRALIZES the low grades that
+// ALREADY hit the store during the 2026-07-08 outage window — so the current coach re-park loop
+// clears immediately instead of dragging the outage grades through the rollup for a full window.
+//
+// Neutralization mechanism: set the row's grade to NULL and prefix its reasoning with
+//   `[BLAMELESS_INFRA][<sig-key>] originally graded N/10 — <old reasoning>`.
+// The NULL grade is what excludes the row from the coach's low-grade window (`.lt("grade", 7)` +
+// the explicit `.not("grade", "is", null)`) AND from computeAgentRollup (also `.not("grade", "is",
+// null)`), so no query needs to change. The original grade + reasoning are preserved in the audit
+// prefix, and the marker prefix makes re-runs idempotent (already-marked rows are skipped).
+//
+// Guards (baked into the WHERE clause AND repeated in the UPDATE for compare-and-set semantics —
+// the coaching #5 rail):
+//   • workspace_id matches (never a cross-workspace write)
+//   • graded_by !== 'human' (a human override is the CEO's call — never overwritten)
+//   • grade IS NOT NULL AND grade < COACH_LOW_ROLLUP (only a LOW row we're neutralizing)
+//   • reasoning does NOT already start with BLAMELESS_INFRA_RECONCILE_MARKER (idempotent — a
+//     second pass over the same window is a no-op)
+// The join to agent_jobs is what fires the isBlamelessInfraFailure predicate — we NEVER neutralize
+// a low grade whose underlying job doesn't match a blameless signature (a real slip stays coachable).
+
+export interface ReconcileBlamelessMatch {
+  gradeId: string;
+  agentJobId: string;
+  agentKind: string;
+  matchedSignature: string;
+  oldGrade: number | null;
+}
+
+export interface ReconcileBlamelessResult {
+  considered: number;
+  matched: number;
+  applied: number;
+  dryRun: boolean;
+  details: ReconcileBlamelessMatch[];
+}
+
+/** One-time idempotent reconcile of blameless-infra grade poison. Dry-run by default —
+ *  { apply: true } performs the neutralization. Bounded to the last `windowDays` (default 30) so a
+ *  fresh workspace + a routine re-run stays cheap. Never mutates a human-overridden grade. */
+export async function reconcileBlamelessGradePoison(opts: {
+  workspaceId: string;
+  admin?: Admin;
+  apply?: boolean;
+  windowDays?: number;
+}): Promise<ReconcileBlamelessResult> {
+  const admin = opts.admin ?? createAdminClient();
+  const apply = opts.apply === true;
+  const windowDays = opts.windowDays ?? 30;
+  const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  // Recent LOW grades that (i) still carry a 1-10 score (never a re-reconciled row), (ii) are NOT
+  // a human override, and (iii) do NOT already carry the BLAMELESS_INFRA_RECONCILE_MARKER prefix
+  // (idempotency). The `unlike` guard is what makes a second pass a no-op — the marker prefix on
+  // the reasoning field never comes off, so we can safely re-run the reconcile any time.
+  const { data: rows } = await admin
+    .from("agent_action_grades")
+    .select("id, agent_job_id, agent_kind, grade, reasoning, graded_by, created_at")
+    .eq("workspace_id", opts.workspaceId)
+    .neq("graded_by", "human")
+    .not("grade", "is", null)
+    .lt("grade", COACH_LOW_ROLLUP)
+    .gte("created_at", sinceIso)
+    .not("reasoning", "ilike", `${BLAMELESS_INFRA_RECONCILE_MARKER}%`)
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const gradeRows =
+    (rows as Array<{
+      id: string;
+      agent_job_id: string;
+      agent_kind: string;
+      grade: number | null;
+      reasoning: string | null;
+      graded_by: string;
+      created_at: string;
+    }>) ?? [];
+  if (!gradeRows.length) return { considered: 0, matched: 0, applied: 0, dryRun: !apply, details: [] };
+
+  // Batch-fetch the underlying agent_jobs error/log_tail so we can fire isBlamelessInfraFailure
+  // per row without a per-grade round-trip.
+  const jobIds = Array.from(new Set(gradeRows.map((r) => r.agent_job_id)));
+  const { data: jobs } = await admin
+    .from("agent_jobs")
+    .select("id, error, log_tail")
+    .in("id", jobIds);
+  const jobById = new Map<string, { id: string; error: string | null; log_tail: string | null }>();
+  for (const j of (jobs as Array<{ id: string; error: string | null; log_tail: string | null }>) ?? []) {
+    jobById.set(j.id, j);
+  }
+
+  const details: ReconcileBlamelessMatch[] = [];
+  let applied = 0;
+  for (const g of gradeRows) {
+    const job = jobById.get(g.agent_job_id);
+    if (!job) continue; // the job was deleted mid-reconcile — safe to skip
+    const key = matchedBlamelessInfraSignatureKey(job);
+    if (!key) continue; // not a blameless-infra signature → leave the grade alone (a real slip)
+    details.push({
+      gradeId: g.id,
+      agentJobId: g.agent_job_id,
+      agentKind: g.agent_kind,
+      matchedSignature: key,
+      oldGrade: g.grade,
+    });
+    if (!apply) continue;
+
+    // Neutralize — compare-and-set on every guard so an async DB shift between our read and this
+    // write can't clobber a fresh human override or a row someone else already reconciled.
+    const oldPrefix = `${BLAMELESS_INFRA_RECONCILE_MARKER}[${key}] originally graded ${g.grade}/10`;
+    const newReasoning = `${oldPrefix} — ${g.reasoning ?? ""}`.slice(0, 4000);
+    const nowIso = new Date().toISOString();
+    const { data: upd } = await admin
+      .from("agent_action_grades")
+      .update({ grade: null, reasoning: newReasoning, updated_at: nowIso })
+      .eq("id", g.id)
+      .eq("workspace_id", opts.workspaceId)
+      .neq("graded_by", "human")
+      .not("grade", "is", null)
+      .lt("grade", COACH_LOW_ROLLUP)
+      .select("id");
+    if ((upd as Array<{ id: string }> | null)?.length) applied++;
+  }
+  return { considered: gradeRows.length, matched: details.length, applied, dryRun: !apply, details };
 }
 
 // ── grade one concluded worker action ───────────────────────────────────────────────────────────────
@@ -491,6 +765,14 @@ export async function gradeAgentAction(opts: { agentJobId: string; admin?: Admin
   if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
   // Not gradeable until the action has actually concluded.
   if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
+  // grader-treats-infra-outage-failures-as-blameless Phase 2: an outage/infra failure is NEVER a
+  // worker judgment mistake — the CLI's Max-account credentials evicted, a Max-cap park, a 0-token
+  // dead session, a "no parseable verdict" session that died, or the DB-down "silent author-write
+  // fallout" all reflect INFRA state, not what the worker decided. Return early with the
+  // `blameless_infra_failure` skip reason (silenced by AGENT_INFLIGHT_SKIP_REASONS so the sweep
+  // doesn't console.error) and write NO agent_action_grades row. A blameless failure MUST NEVER
+  // become a 1-10 grade — that was the 2026-07-08 poison that perpetually re-parked needs_attention.
+  if (isBlamelessInfraFailure(job)) return { ok: false, reason: "blameless_infra_failure" };
 
   const { data: existing } = await admin
     .from("agent_action_grades")
@@ -1066,11 +1348,19 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
   // The low-graded recent actions that prompted the slip — the coaching material the box session will
   // read. Pass the agent_action_grades row ids (`source_grade_id` on the resulting coaching_log row) +
   // the agent_job_ids so the box coach lane can git-show each merged diff.
+  //
+  // grader-treats-infra-outage-failures-as-blameless Phase 3: EXPLICITLY exclude
+  // reconcileBlamelessGradePoison-cleared rows (grade=NULL after neutralization) from the coach's
+  // low-grade window so an outage burst that's already been reconciled can't re-park needs_attention
+  // on the next cycle. `.lt("grade", 7)` alone excludes NULL by SQL semantics; the extra
+  // `.not("grade", "is", null)` documents the invariant + defends against a future ORM that treats
+  // NULL differently. Same rationale as the `.not("grade", "is", null)` on computeAgentRollup.
   const { data: lows } = await admin
     .from("agent_action_grades")
     .select("id, grade, reasoning, spec_slug, agent_job_id")
     .eq("workspace_id", opts.workspaceId)
     .eq("agent_kind", opts.agentKind)
+    .not("grade", "is", null)
     .lt("grade", COACH_LOW_ROLLUP)
     .order("created_at", { ascending: false })
     .limit(ROLLUP_WINDOW);
