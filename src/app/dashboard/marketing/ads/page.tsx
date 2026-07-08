@@ -76,6 +76,13 @@ export default function AdsLandingPage() {
           <p className="mt-1 text-xs text-zinc-500">Competitor/category ad skeletons + the cross-brand pattern matrix.</p>
         </Link>
         <Link
+          href="/dashboard/marketing/ads/shadow-reviews"
+          className="rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Shadow reviews</h2>
+          <p className="mt-1 text-xs text-zinc-500">Concur or dissent on Media Buyer plans while the policy is on shadow mode.</p>
+        </Link>
+        <Link
           href="/dashboard/settings/ad-tool"
           className="rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
         >
