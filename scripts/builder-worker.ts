@@ -12128,6 +12128,10 @@ async function runCsDirectorCallJob(job: Job) {
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
         spec_seed: verdict.spec_seed ?? null,
+        // Phase 3 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-
+        // recommendation — thread June's suggested remedy through the internal note so the ticket
+        // thread carries the SAME recommendation the CEO card carries. Silent when absent.
+        recommended_remedy: verdict.recommended_remedy ?? null,
       });
       const { error: noteErr } = await db.from("ticket_messages").insert({
         ticket_id: ticketId,
