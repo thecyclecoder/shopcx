@@ -20,6 +20,19 @@ Inside the `resolve` step (right after the ticket row load) the handler short-ci
 
 The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
 
+## Step 3.97 — Pre-ship inflection gate ([[../libraries/inflection-detector]])
+
+Between the inbound-message handling (§ 3.9x) and either the playbook short-circuit (§ 3.98) OR the Sonnet orchestrator (§ 4), the `sol-inflection-gate` step calls [[../libraries/inflection-detector]] `applyInflectionGate` to decide whether the drafted reply should ship. Phase 2 + Phase 4 (Fix 1) of [[../specs/sol-drift-frustration-detector-and-re-session-router]].
+
+- **kind='none'** — the newest customer message still fits the live [[../tables/ticket_directions]] intent (or no Direction has been authored). The step returns and the pipeline falls through to the playbook short-circuit / Sonnet orchestrator dispatch exactly as today.
+- **kind='drift' | 'frustration'** — the drafted reply is HELD (no `ticket_messages` outbound row for this turn — the gate returns BEFORE Sonnet/playbook runs, so no reply is even drafted). One [[../tables/ticket_resolution_events]] row is staged with `reasoning='sol:inflection-<kind>'` and the classifier `evidence` blob stashed in the jsonb `chosen` column. On `frustration` AND `ai_channel_config.sol_frustration_holding_message_enabled !== false` (migration-default `true`), the standard `sendWithDelay` wrapper sends a short "we're looking into that for you" inline holding message so the customer knows they were heard. Then [[../libraries/inflection-detector]] `reSessionSol` supersedes the live Direction (compare-and-set) and enqueues a new `agent_jobs` row `kind='ticket-handle'` `instructions.reason='inflection'` for the box worker's `runTicketHandleJob` to author a fresh Direction. Drift bounces are silent by design.
+
+Gate placement is BEFORE Sonnet so we don't pay for a Sonnet draft that we would immediately drop — the observable behavior (no reply, `sol:inflection` ledger row) is identical.
+
+Playbook-active tickets still enter this gate. `applyInflectionGate` reads `tickets.active_playbook_id` and passes `isPlaybookActive` to `detectInflection`; the detector's Stage-1 drift path is SKIPPED mid-playbook (the playbook drives the reply, not Direction alignment), but the frustration regex catalog still fires — so a mid-playbook "refund now" bounces to re-session per the spec.
+
+Guards (coaching #1/#2 pattern): `reSessionSol` wraps `superseDirection`'s workspace-scoped compare-and-set (so a racing caller can't fan out a duplicate ticket-handle session), the DB partial UNIQUE on ticket_directions is a second belt, the ledger stage is best-effort (a diagnostic-substrate failure MUST NOT block the bounce), and the holding-message send is doubly-gated (kind==='frustration' AND the config column true).
+
 ## Step 2e — Sonnet orchestrator (Direction-scoped user block)
 
 The `sonnet-orchestrate` step (Step 2e in the pipeline) loads the live [[../tables/ticket_directions]] row for the ticket via [[../libraries/ticket-directions]] `loadLiveDirection` BEFORE the picker + orchestrator call — Phases 2/3/5-Fix-1 of [[../specs/sol-cheap-execution-over-ticket-direction]]. Two things branch off it:
