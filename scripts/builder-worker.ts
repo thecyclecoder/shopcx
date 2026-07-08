@@ -3892,11 +3892,33 @@ async function runDbHealthJob(job: Job) {
 // exempt) ride the job's instructions. This runner only materializes the CHOSEN fix spec to main + queues
 // its build on the owner's tap (Register → land the MONITORED_LOOPS entry · Intentionally-unmonitored →
 // add the INTENTIONALLY_UNMONITORED_CRONS exemption). The agent NEVER silently edits registry.ts.
+//
+// agent-mandate-hardening-coverage-register bake-in (2026-07): the 9 accumulated coaching points that
+// didn't stick as ephemeral agent_instructions are now baked into the mandate here:
+//   1. Spec authoring goes through public.specs via markNewSpecInReview → authorSpecRowFromMarkdown
+//      (the specs-table SDK). NEVER a `docs/brain/specs/{slug}.md` file/commit — the box has no such
+//      writable checkout and the write fails silently, leaving the coverage gap unresolved. "The
+//      database is the spec" (CLAUDE.md hard rule).
+//   2. After the SDK author call, RE-READ the row via specs-table.getSpec — treat `getSpec === null`
+//      as an author failure even when markNewSpecInReview returned without throwing (silent no-op
+//      protection). Only enqueue the build + mark the job completed if the row actually landed.
+//   3. Wrap the whole materialize-spec → verify → enqueue-build block in try/catch. On ANY failure:
+//      surface a CONCRETE error string that names the failed step (author / getSpec re-read / build
+//      enqueue) + the underlying error message; retry the author path ONCE (transient DB blips); on
+//      the second failure, park needs_attention with the diagnosis AND the renderEntrySnippet from
+//      instructions.entry so the owner has a one-tap remediation path. Never let a MissingVerification
+//      throw escape as a generic "agent produced no verdict" backstop, and never park with a bare
+//      one-word error — a coverage gap left with no explanation reads as unresolved-and-abandoned.
+//   4. When the underlying entry falls through to inferOwner's low-confidence platform placeholder
+//      (see coverage-register-agent.ts inferOwner returning null on unknown ids), the description
+//      already flags "REQUIRES OWNER CONFIRMATION" — no additional gate needed here; the owner sees
+//      the warning in the fix spec body before tapping Build.
 async function runCoverageRegisterJob(job: Job) {
   const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
   let instr: {
     signature?: string;
     loop_id?: string;
+    entry?: unknown;
     register_spec_slug?: string;
     register_spec_body?: string;
     exempt_spec_slug?: string;
@@ -3910,6 +3932,19 @@ async function runCoverageRegisterJob(job: Job) {
   const signature = instr.signature || job.spec_slug;
   const loopId = instr.loop_id || signature.replace("coverage-register:", "");
 
+  // Render the inferred MONITORED_LOOPS entry snippet from instructions.entry (baked at enqueue time).
+  // Included in every diagnostic error surface below so a materialize failure carries a one-tap manual-
+  // paste remediation path — never a naked "needs_attention" with nothing for the owner to act on.
+  const renderInferredSnippet = async (): Promise<string> => {
+    try {
+      if (!instr.entry) return "";
+      const { renderEntrySnippet } = await import("../src/lib/coverage-register-agent");
+      return renderEntrySnippet(instr.entry as Parameters<typeof renderEntrySnippet>[0]);
+    } catch {
+      return "";
+    }
+  };
+
   const action = (job.pending_actions || []).find((a) => a.type === "coverage_register");
   if (action && (action.status === "approved" || action.status === "declined")) {
     if (action.status === "approved") {
@@ -3918,7 +3953,9 @@ async function runCoverageRegisterJob(job: Job) {
       const specBody = register ? instr.register_spec_body : instr.exempt_spec_body;
       const what = register ? "register entry" : "intentionally-unmonitored exemption";
       if (!specSlug || !specBody) {
-        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: `owner ${what} → missing spec body for ${loopId}`.slice(-2000) });
+        const snippet = await renderInferredSnippet();
+        const tail = `owner ${what} → missing spec body for ${loopId}${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
+        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
         console.warn(`${tag} owner ${what} → missing spec body`);
         return;
       }
@@ -3932,11 +3969,55 @@ async function runCoverageRegisterJob(job: Job) {
         return;
       }
       if (!validateSpecBody(specSlug, specBody, signature)) {
-        await update(job.id, { status: "needs_attention", error: "empty spec body", pending_actions: job.pending_actions, log_tail: `owner ${what} → refused to author empty spec ${specSlug} to public.specs`.slice(-2000) });
+        const snippet = await renderInferredSnippet();
+        const tail = `owner ${what} → refused to author empty spec ${specSlug} to public.specs${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
+        await update(job.id, { status: "needs_attention", error: "empty spec body", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
         console.warn(`${tag} owner ${what} → empty spec body`);
         return;
       }
-      await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
+
+      // Coaching bake-in: guarded author → verify → enqueue. Any failure surfaces a specific diagnosis
+      // (which step, which error) + the inferred-entry snippet for one-tap manual paste. One retry on
+      // the author path for transient DB blips before parking needs_attention.
+      const { getSpec: getSpecFromDb } = await import("../src/lib/specs-table");
+      const materializeAndVerify = async (): Promise<{ ok: true } | { ok: false; step: "author" | "verify"; error: string }> => {
+        try {
+          await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
+        } catch (e) {
+          return { ok: false, step: "author", error: e instanceof Error ? e.message : String(e) };
+        }
+        try {
+          const row = await getSpecFromDb(job.workspace_id, specSlug);
+          if (!row) return { ok: false, step: "verify", error: `getSpec(${specSlug}) returned null after markNewSpecInReview — the row did not land in public.specs (silent no-op)` };
+        } catch (e) {
+          return { ok: false, step: "verify", error: e instanceof Error ? e.message : String(e) };
+        }
+        return { ok: true };
+      };
+
+      let outcome = await materializeAndVerify();
+      if (!outcome.ok) {
+        console.warn(`${tag} owner ${what} → ${outcome.step} failed once: ${outcome.error} — retrying`);
+        outcome = await materializeAndVerify();
+      }
+      if (!outcome.ok) {
+        const snippet = await renderInferredSnippet();
+        const diagnosis = `coverage-register spec authoring failed at step '${outcome.step}' for ${specSlug}: ${outcome.error}`;
+        const remediation = snippet
+          ? ` — one-tap manual remediation: paste this entry into src/lib/control-tower/registry.ts MONITORED_LOOPS and open a PR:\n${snippet}`
+          : ` — inspect job instructions.entry and paste the inferred MONITORED_LOOPS entry into src/lib/control-tower/registry.ts manually`;
+        action.status = "failed";
+        action.result = diagnosis;
+        await update(job.id, {
+          status: "needs_attention",
+          error: diagnosis.slice(-500),
+          pending_actions: job.pending_actions,
+          log_tail: `owner ${what} → ${diagnosis}${remediation}`.slice(-2000),
+        });
+        console.warn(`${tag} owner ${what} → ${diagnosis}`);
+        return;
+      }
+
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
         spec_slug: specSlug,
@@ -3945,8 +4026,25 @@ async function runCoverageRegisterJob(job: Job) {
         created_by: job.created_by,
         instructions: `Build from coverage-register agent (${what} for loop ${loopId}). Follow the spec exactly — a small src/lib/control-tower/registry.ts edit; tsc-clean; open a PR.`,
       });
-      action.status = error ? "failed" : "done";
-      action.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${specSlug}`;
+      if (error) {
+        const snippet = await renderInferredSnippet();
+        const diagnosis = `coverage-register build enqueue failed for ${specSlug}: ${error.message}`;
+        const remediation = snippet
+          ? ` — the spec row IS in public.specs; the FAILING step was queuing the build. Re-queue via /dashboard/roadmap (single-tap) or manually paste:\n${snippet}`
+          : ` — the spec row IS in public.specs; the FAILING step was queuing the build. Re-queue via /dashboard/roadmap.`;
+        action.status = "failed";
+        action.result = diagnosis;
+        await update(job.id, {
+          status: "needs_attention",
+          error: diagnosis.slice(-500),
+          pending_actions: job.pending_actions,
+          log_tail: `owner ${what} → ${diagnosis}${remediation}`.slice(-2000),
+        });
+        console.warn(`${tag} owner ${what} → ${diagnosis}`);
+        return;
+      }
+      action.status = "done";
+      action.result = `queued build for ${specSlug}`;
       await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner ${what} → ${action.result}`.slice(-2000) });
       console.log(`${tag} owner ${what} → ${action.result}`);
     } else {
