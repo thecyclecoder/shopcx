@@ -20,11 +20,23 @@ Verification runs **first** on the raw body: `verifyGithubWebhook(rawBody, X-Hub
 
 1. Verify signature → parse → read `X-GitHub-Event`.
 2. **Relevance filter** — `dirtyRelevant` = a `push` to `refs/heads/main` or a `pull_request` open/synchronize/reopen/ready; `mergeRelevant` = those PLUS `check_suite`/`check_run` completed or `status` success (the events that flip a PR to READY). Neither → acked `{ok, skipped}` with no work.
-3. `detectAndEnqueueDirtyPrs()` (when `dirtyRelevant`) — list open `claude/*` PRs → check each `mergeable` (polled) → enqueue ONE deduped `pr-resolve` job per newly-`CONFLICTING` PR.
-4. `autoMergeReadyPrs()` (when `mergeRelevant`, in its own try so it can't block the dirty gate) — squash-merge + delete branch ONE READY `claude/*` PR (serialized, sync-aware, kill-switched). See [[../libraries/github-pr-resolve]].
-5. Respond `{ok, checked, conflicting, enqueued, prs[], autoMerge}`.
+3. **ACK GitHub immediately** with `{ok, deferred: true}`. The four gates below run in `after()` on the same Lambda invocation, wall-clock-bounded to 250s (see **ACK-fast + bounded after()** below).
+4. `detectAndEnqueueDirtyPrs()` (when `dirtyRelevant`) — list open `claude/*` PRs → check each `mergeable` (polled) → enqueue ONE deduped `pr-resolve` job per newly-`CONFLICTING` PR.
+5. `autoMergeReadyPrs()` (when `mergeRelevant`, in its own try so it can't block the dirty gate) — squash-merge + delete branch ONE READY `claude/*` PR (serialized, sync-aware, kill-switched). See [[../libraries/github-pr-resolve]].
+6. Gate B — `promoteEligibleSpecsToGoalBranch()` ([[../libraries/agent-jobs]], [[../specs/spec-goal-branch-pm-flow]] M4) — merge every promote-eligible spec branch onto its `goal/{slug}` branch.
+7. Gate C — `promoteCompleteGoalsToMain()` ([[../libraries/agent-jobs]], [[../specs/spec-goal-branch-pm-flow]] M5) — atomic goal→main merge + shipped-stamp for every COMPLETE + GREEN goal branch.
 
 The box worker's `pr-resolve` lane (`runPrResolveJob`, [[../recipes/build-box-setup]]) then claims each resolve job and does the merge + resolve + tsc-gate + push (or rebuild-on-main / surface-to-owner). The auto-merge gate, by contrast, performs the merge inline in the webhook (one REST call) — no worker.
+
+### ACK-fast + bounded `after()`
+
+Each of the four gates lists every open `claude/*` PR and makes per-candidate GitHub REST calls (fetch mergeable, per-member spec-eligibility, `/merges`). On a busy build board the combined work exceeded Vercel's 300s Lambda cap in the response path, killing the delivery mid-fanout and re-feeding the Runtime Timeout as a `level=error` log back through the Vercel log drain (self-feeding via [[vercel-log-drain]]). The handler now:
+
+- ACKs GitHub with `{ok, deferred: true}` the moment the event passes HMAC + ping + relevance (GitHub only needs the ACK — it redelivers on failure).
+- Runs the four gates inside `after(async () => { ... })` from `next/server`. `after()` runs on the SAME Lambda invocation, so it still counts against the 300s cap.
+- Wall-clock-bounds the callback to **250_000 ms** (50s under the cap): before each gate, if `Date.now() - started > 250_000`, warn with `[github-webhook] after() deadline hit, deferring %d gate(s)` and return. Any deferred gate is a no-op for this invocation; the next GitHub event OR the box worker's platform-director standing pass (which re-runs these exact gates) picks it up. Each gate keeps its own try/catch so a failure in one still lets the others run.
+
+Same shape as the [[vercel-log-drain]] webhook (PR #1472) — both webhooks share one bounded-fanout pattern and one place to reason about the Vercel cap.
 
 ## Setup
 
@@ -38,3 +50,4 @@ Configure a repository webhook on `thecyclecoder/shopcx` → payload URL `https:
 - **Idempotent.** `push` + `synchronize` can both fire for the same change; `enqueuePrResolveJob` dedupes one active job per PR. Auto-merge is naturally idempotent (a merged PR is no longer open/clean) and serialized (one merge per pass).
 - **Auto-merge kill-switch + sync-aware.** Gate A no-ops while `workspaces.auto_merge_enabled === false` or an Inngest [[../tables/sync_jobs|sync]] is active (a deploy would reap it). Registered in the [[../libraries/control-tower]] as the `auto-merge-gate` reactive loop — every pass beats, every merged PR # is in `produced` + the log.
 - **Security pass on every merge.** A merged `claude/*` build runs [[../libraries/agent-jobs]] `applyMergedBuildEffects`, which fires the per-diff security pass ([[../libraries/security-agent]] `enqueueSecurityReviewJob`, deduped by merge SHA) — the supervisor on the auto-merge proxy ([[../specs/security-dependency-agent]] Phase 1).
+- **300s Vercel cap → `after()` + 250s deadline.** The response path only does HMAC + JSON + relevance + ACK; the four gates run inside `after()` on the same invocation, wall-clock-bounded to 250s. A deferred gate is picked up by the next event or the box worker's standing pass — see **ACK-fast + bounded `after()`** above.
