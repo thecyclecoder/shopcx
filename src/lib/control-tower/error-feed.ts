@@ -721,6 +721,54 @@ export function isTransientUndiciHeadersTimeout(message: string | null | undefin
   return text.includes("HeadersTimeoutError") || text.includes("UND_ERR_HEADERS_TIMEOUT");
 }
 
+/**
+ * Transient Supabase-edge Cloudflare 5xx HTML body noise — the vercel-drain sibling to
+ * `isTransientUndiciHeadersTimeout` / `isTransientSupabaseLogNoise`, factored here so the
+ * vercel-logs route can reuse it
+ * ([[../specs/error-feed-drop-supabase-edge-html-body-noise-reland]] — re-land of PR #1115
+ * after a false-positive Reva revert on 2026-07-04; this classifier is a pure text-matcher
+ * on incoming Vercel-drain logs with zero runtime side-effect, so the 07/04 cron-freshness
+ * signals Reva correlated with the deploy cannot have been causally caused by it — both the
+ * stale crons and this classifier sit downstream of the same 07/04 Supabase edge outage).
+ *
+ * When Supabase's edge is momentarily unreachable, its Cloudflare tier returns a `521 Web
+ * server is down` HTML error page instead of the usual JSON. supabase-js reports that back
+ * as an error whose message IS the raw HTML body, and callers like
+ * `computePlatformScorecard` throw with a message like
+ * `platform_scorecard_snapshots upsert failed: ? <!DOCTYPE html>...supabase.co | 521: Web
+ * server is`. The scorecard cron catches this and moves on, and the next daily beat
+ * idempotently heals via the done-guard + `(workspace_id, metric_key, cadence,
+ * snapshot_date)` upsert — nothing is broken. Minting a fresh OPEN paged incident + repair
+ * fan-out for a single such log churns Platform owners on a healthy loop that already
+ * recovered (Control Tower `vercel:a0844c1b5be72bb7` / `vercel:848a7b6d02c1e88c`).
+ *
+ * `true` ONLY when the message carries BOTH the `<!DOCTYPE html>` marker AND a Supabase-
+ * edge-Cloudflare signature (`supabase.co` alongside a Cloudflare 5xx status word: `Web
+ * server` / `521` / `522` / `523` / `524`) — the exact and only shape the Cloudflare edge
+ * emits for this class. A supabase-js JSON error (`PostgrestError` / `code`/`hint`/`details`
+ * payload) stays captured / paged; a bare `<!DOCTYPE html>` HTML-parse failure from an
+ * unrelated upstream carries no `supabase.co` marker and stays captured / paged too.
+ *
+ * Wired in `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which
+ * auto-resolves a first sighting (recorded for visibility, NOT paged, no repair fan-out)
+ * and escalates to a real open+page ONLY if the SAME signature recurs within
+ * `TRANSIENT_RECUR_WINDOW_MS` — so a one-off edge blip is dropped while a chronic Supabase
+ * outage (would recur every beat) still surfaces.
+ */
+export function isTransientSupabaseEdgeHtmlBody(message: string | null | undefined): boolean {
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.includes("<!DOCTYPE html>")) return false;
+  if (!text.includes("supabase.co")) return false;
+  return (
+    text.includes("Web server") ||
+    text.includes("521") ||
+    text.includes("522") ||
+    text.includes("523") ||
+    text.includes("524")
+  );
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */

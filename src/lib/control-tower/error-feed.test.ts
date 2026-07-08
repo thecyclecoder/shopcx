@@ -23,6 +23,7 @@ import {
   isTransientInngestTransportError,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
+  isTransientSupabaseEdgeHtmlBody,
   isTransientSupabaseLogNoise,
   isTransientUndiciHeadersTimeout,
 } from "./error-feed";
@@ -1043,4 +1044,90 @@ test("isInngestStepWrappedNonErrorLog returns false on empty / nullish message",
   assert.equal(isInngestStepWrappedNonErrorLog("   ", "/api/inngest"), false);
   // No `at …` frame at all — not a stack; not this class.
   assert.equal(isInngestStepWrappedNonErrorLog("Error: [object Object]", "/api/inngest"), false);
+});
+
+// ── isTransientSupabaseEdgeHtmlBody (error-feed-drop-supabase-edge-html-body-noise-reland) ──
+// Supabase's edge momentarily unreachable → Cloudflare returns a `521 Web server is down`
+// HTML error page instead of JSON. supabase-js surfaces that raw HTML as an error message,
+// and callers like `computePlatformScorecard` throw with a message like
+// `... upsert failed: ? <!DOCTYPE html>...supabase.co | 521: Web server is`. The next daily
+// beat idempotently heals via the done-guard + snapshot upsert. Classifying it transient
+// auto-resolves a first sighting (recorded, not paged); a chronic edge outage would recur
+// within the window and still surface. The false positive that opened Control Tower
+// `vercel:a0844c1b5be72bb7` (and its sibling `vercel:848a7b6d02c1e88c`). Re-land of PR #1115
+// after a false-positive Reva revert on 2026-07-04.
+
+test("isTransientSupabaseEdgeHtmlBody matches the vercel:a0844c1b5be72bb7 521 HTML body blob", () => {
+  const blob = `platform_scorecard_snapshots upsert failed: ? <!DOCTYPE html>
+<html lang="en-US">
+<head><title>supabase.co | 521: Web server is down</title></head>
+<body>...supabase.co | 521: Web server is down...</body>
+</html>`;
+  assert.equal(isTransientSupabaseEdgeHtmlBody(blob), true);
+});
+
+test("isTransientSupabaseEdgeHtmlBody matches each Cloudflare 5xx status word (521-524 / 'Web server')", () => {
+  for (const marker of ["Web server", "521", "522", "523", "524"]) {
+    assert.equal(
+      isTransientSupabaseEdgeHtmlBody(
+        `caller failed: <!DOCTYPE html> ... project.supabase.co ... ${marker} ...`,
+      ),
+      true,
+      `marker=${marker}`,
+    );
+  }
+});
+
+test("isTransientSupabaseEdgeHtmlBody KEEPS a real supabase-js JSON error (PostgrestError shape)", () => {
+  // A structured supabase-js error is a real bug (constraint, RLS, bad payload) — stay
+  // captured / paged on first sighting. No `<!DOCTYPE html>` in these shapes.
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `{ code: '23505', message: 'duplicate key value violates unique constraint', details: null, hint: null }`,
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `PostgrestError: JWT expired (code=PGRST301) — supabase.co /rest/v1/customers`,
+    ),
+    false,
+  );
+});
+
+test("isTransientSupabaseEdgeHtmlBody KEEPS a bare <!DOCTYPE html> with no supabase.co marker", () => {
+  // An HTML-parse failure from an UNRELATED upstream (Shopify page, Meta login wall, our
+  // own 500 page) also carries `<!DOCTYPE html>`. Without the `supabase.co` marker it's not
+  // the supabase-edge class — stay captured / paged so a genuinely unrelated HTML-body bug
+  // still surfaces.
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `<!DOCTYPE html><html><head><title>521: Web server is down</title></head></html>`,
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `Unexpected HTML from shopify.com/admin: <!DOCTYPE html> ... 502 Bad Gateway ...`,
+    ),
+    false,
+  );
+});
+
+test("isTransientSupabaseEdgeHtmlBody KEEPS a supabase.co HTML body WITHOUT a Cloudflare 5xx marker", () => {
+  // A 4xx / auth-wall HTML body from the supabase edge (e.g. 403 / rate limit page) is a
+  // real classify-and-look failure, not the transient CF 5xx class.
+  assert.equal(
+    isTransientSupabaseEdgeHtmlBody(
+      `<!DOCTYPE html> ... project.supabase.co ... 403 Forbidden ...`,
+    ),
+    false,
+  );
+});
+
+test("isTransientSupabaseEdgeHtmlBody returns false on empty / nullish input", () => {
+  assert.equal(isTransientSupabaseEdgeHtmlBody(null), false);
+  assert.equal(isTransientSupabaseEdgeHtmlBody(undefined), false);
+  assert.equal(isTransientSupabaseEdgeHtmlBody(""), false);
+  assert.equal(isTransientSupabaseEdgeHtmlBody("   "), false);
 });
