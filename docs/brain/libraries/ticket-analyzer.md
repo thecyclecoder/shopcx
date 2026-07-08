@@ -6,6 +6,31 @@ Per-ticket AI analysis: sentiment, intent, summary, suggested action. Runs as a 
 
 **Supervision:** [[../functions/cs]] owns escalation triage quality. The analyzer runs on the box lane ([[../recipes/build-box-setup]]), with every verdict recorded to [[../tables/director_activity]] (`director_function='cs'`, `action_kind='analyzed_ticket'`), and the kind graded by the CS director's sweep ([[../libraries/agent-grader]] — June's gradeable kinds include `'ticket-analyze'`). Reasoning from each session is surfaced alongside the grade.
 
+## Trigger contract — Sol-handled, 30-min settle, once per cycle
+
+Cora is a **post-handling QC grader**, not an every-30-min re-scanner. She analyzes a ticket **exactly once per Sol handling cycle**, and never re-investigates a settled or June-decided ticket without new customer activity. This contract is enforced entirely inside [[../inngest/ticket-analysis-cron]]'s `find-tickets` step (the pure predicate `passesCoraSelectionGate`, pinned by `src/lib/inngest/ticket-analysis-cron.gate.test.ts`) so the box lane sees only tickets that pass every gate. Implements [[../specs/cora-only-investigates-after-sol-handles-and-ticket-closed-30min-no-reinvestigation]].
+
+A ticket is selected only when **all four** hold:
+
+1. **Sol has handled it.** There is a **LIVE** [[../tables/ticket_directions]] row (`superseded_at IS NULL`) written by Sol's first-touch box session ([[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]]). No Direction → dropped. Cora never grades a ticket Sol hasn't taken.
+2. **The ticket has been closed for ≥ 30 minutes.** `closed_at IS NOT NULL AND closed_at <= (now − 30 min)` (constant `CORA_CLOSE_SETTLE_MS` in the cron). This SQL-floor is applied at the source, so tickets still in the settle window are never even loaded — Cora never grades an in-flight window a customer might still say "thanks!" to.
+3. **Cora hasn't already graded THIS handling cycle.** Dedup on the live Direction's `authored_at`: a `tickets.last_analyzed_at >= direction.authored_at` means we already ran once for this handling → skip. A stale `last_analyzed_at` from a **prior** cycle is fine — Cora re-grades the new cycle. (One grade per handling; N handlings on a ticket → up to N grades.)
+4. **June (CS Director) hasn't already decided THIS handling cycle.** Any [[../tables/director_activity]] row with `action_kind='cs_director_call'` + `metadata.ticket_id=<t>` + `created_at >= direction.authored_at` → skip. June's verdict is the last word on the current handling; Cora doesn't re-grade a ticket the director already ruled on.
+
+**No re-investigation of a settled ticket.** A June-decided closed ticket stays closed to Cora **forever on its own** — no updated_at bump, no dashboard nudge, no downstream write can re-open it to her. Re-eligibility only comes back through the natural Sol re-handling loop:
+
+```
+customer replies (new inbound)
+  → Sol re-handles the ticket (superseDirection + writeDirection, new authored_at)
+  → orchestrator closes it again (new closed_at)
+  → 30-minute settle
+  → Cora grades the NEW cycle once
+```
+
+Once Sol re-authors, `direction.authored_at` advances **past** every prior June decision and every prior `last_analyzed_at`, so the Phase-1 and Phase-2 checks naturally re-permit exactly one fresh grade per new handling. The stamp-on-slip guard in the cron (`tickets.last_analyzed_at = now()` on every skip except `already_in_flight`) ensures the cron never re-selects the same skipped ticket on the next tick.
+
+This contract retires the loose pre-2026-07 rule ("re-analyze whenever `last_analyzed_at < updated_at`"): a Sol-uncovered updated_at bump (a new tag, an audit note, a merged tickets row) can no longer pull Cora back into a settled ticket, and a `cs-director-call` verdict closes the loop cleanly instead of re-tripping the close → analyze → reopen → close cycle June was hired to end.
+
 ## Box-agent supervision
 
 The analyzer is now a supervised box-session agent. `scripts/builder-worker.ts → runTicketAnalyzeJob` claims each `kind='ticket-analyze'` job, loads the ticket + guidance context, runs ONE Max session with `buildSystemPrompt` + `buildUserPrompt`, parses the JSON verdict via `parseAnalysis`, then calls `applySeverityActions` to write the outcome. Records to [[../tables/director_activity]] on completion (`actor='ticket-analyze:box-session'`, `action_kind='analyzed_ticket'`, `spec_slug=ticket_id`, `reason`, `metadata: { score, severity, issues, escalated?, ai_messages }`). Existin gates (do_not_reply skip, ai_disabled / analyzer_locked respect, force-override rules) are preserved in the dispatch path.
