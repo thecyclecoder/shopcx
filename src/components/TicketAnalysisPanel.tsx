@@ -18,6 +18,12 @@ interface AnalysisData {
   window_end: string;
   created_at: string;
   trigger: string | null;
+  // ticket-cost-distinguishes-max-subscription-from-real-api-spend Phase 1/3: whether the
+  // analyzer run that produced this row was billed against the Max subscription (a box lane —
+  // $0 marginal, no fabricated dollar figure) or against the paid API (real per-token bill).
+  // Null on historical rows (unknown) → we treat as Max for display purposes since the analyzer
+  // has run on Max exclusively since Phase 1 of ticket-analyzer-becomes-box-agent-under-june.
+  billing_source: "max" | "api" | null;
 }
 
 interface AnalysisResponse {
@@ -152,8 +158,18 @@ export function TicketAnalysisPanel({ ticketId }: { ticketId: string }) {
           >
             Override score
           </button>
+          {/*
+            The analysis cost figure is the REAL marginal (paid-API) dollar cost — a Max box run
+            contributes $0 and shows a subtle 'on Max' indicator so the reader sees why the
+            analysis line is $0 (subscription proxy, no per-token bill) rather than wondering if
+            the metering broke. Mirrors [[fleet-cost]]'s apiBilled contract at the UI layer.
+            ticket-cost-distinguishes-max-subscription-from-real-api-spend Phase 3.
+          */}
           <div className="text-[10px] text-zinc-400">
-            ${(data.cost.total_cents / 100).toFixed(4)} (conv ${(data.cost.conversation_cents / 100).toFixed(4)} + analysis ${(data.cost.analysis_cents / 100).toFixed(4)})
+            ${(data.cost.total_cents / 100).toFixed(4)} (conv ${(data.cost.conversation_cents / 100).toFixed(4)} + analysis ${(data.cost.analysis_cents / 100).toFixed(4)}
+            {a.billing_source !== "api" && (
+              <span className="ml-1 text-zinc-500" title="Analyzer ran on the Max subscription — $0 marginal cost. Only the box-down API fallback records a real dollar figure.">· on Max (subscription)</span>
+            )})
           </div>
         </div>
       </div>
