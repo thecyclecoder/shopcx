@@ -1,0 +1,1 @@
+- **Cora gets read-only research power to verify a claim before grading it** · verified 2026-07-08 · → [[../libraries/ticket-analyzer]] § Research CLI
