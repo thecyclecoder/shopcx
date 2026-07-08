@@ -617,6 +617,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "goal-fold",
   "product-seed",
   "ticket-improve",
+  "ticket-handle",
   "spec-chat",
   "triage-escalations",
   "spec-test",
@@ -12402,15 +12403,23 @@ function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | nul
 
 // The prompt the box session sees: the pre-built system rubric (calibration rules + policies +
 // current-date context) followed by the pre-built user turn (window + guidance + playbook context +
-// conversation) prepareAnalyzerRun already assembled. The session's ONLY job is to return the JSON
-// verdict — no investigation, no tool calls, no Read/Grep. Kept intentionally spare (mirrors the
-// prior inline Anthropic call's shape) so the box lane's grade is equivalent to the pre-conversion
-// scores (spec Phase 1 verification: "A replay of recent tickets yields equivalent scores/severity
-// actions").
-function ticketAnalyzePrompt(system: string, userMsg: string): string {
+// conversation) prepareAnalyzerRun already assembled. Cora may VERIFY a claim she can't confirm
+// from the transcript using the bounded read-only research CLI (scripts/analyzer-research-tools.ts)
+// + Claude Code's Read/Grep against docs/brain/ — Phase 1 of
+// cora-gets-readonly-research-power-to-verify-claims-before-grading.md. She never mutates; the
+// worker's applyAnalyzerVerdict is the only writer. Bounded: a handful of targeted lookups per
+// grade, not open-ended. See the ticket-analyze skill for when to research vs. defer to the
+// low-confidence unverified handling.
+function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string): string {
   return [
-    `You are the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director), Phase 1 of docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md.`,
-    `Score the AI's behavior in the conversation window below against the QC rubric. Do NOT investigate — no Read/Grep/tool use is needed; grade only what the transcript shows. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    `You are Cora, the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director). Use the ticket-analyze skill (cwd is the repo root).`,
+    `Score the AI's behavior in the conversation window below against the QC rubric. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `RESEARCH BEFORE FLAGGING — when the AI made a factual claim you can't confirm from the transcript (a variant/flavor, a per-unit price, a subscription state, a policy, a customer entitlement), verify it FIRST with the bounded read-only research CLI:`,
+    `  npx tsx scripts/analyzer-research-tools.ts <tool> ${ticketId} [json_input]`,
+    `  Tools: get_customer_account (subs + orders with real per-unit line-item prices + loyalty), get_product_knowledge, get_product_nutrition (per-variant flavors — json_input {"query":"..."}), get_returns, get_ticket_analysis.`,
+    `Brain/policy read: Read/Grep docs/brain/ directly. All read-only — you NEVER mutate; the worker is the only writer.`,
+    `A claim verified CORRECT is NOT an issue (don't flag it). A claim contradicted by real data IS a real inaccuracy (flag with concrete evidence). A claim research can neither confirm nor refute falls through to low-confidence unverified handling (do NOT force-flag it — the grading-confidence guard is the fallback). Keep it bounded — a handful of targeted lookups per grade, not open-ended.`,
     ``,
     `--- GRADER SYSTEM (rubric + calibration rules + active policies) ---`,
     system,
@@ -12457,7 +12466,7 @@ async function runTicketAnalyzeJob(job: Job) {
     }
 
     const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
-      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg), sid, REPO_DIR, cfg, job.id),
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId), sid, REPO_DIR, cfg, job.id),
     );
     await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
