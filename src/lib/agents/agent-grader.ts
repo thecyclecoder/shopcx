@@ -202,7 +202,7 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   "coverage-register": { name: "Cole", criteria: "correct registry entry / exemption · no real coverage gap missed" },
   monitor: { name: "Tao", criteria: "accurate alerts (signal not noise) · caught real stalls" },
   plan: { name: "Pia", criteria: "sound decomposition · correct `blocked_by` · no orphan specs" },
-  "product-seed": { name: "Sol", criteria: "product correctly seeded · page built · orderable" },
+  "product-seed": { name: "Piper", criteria: "product correctly seeded · page built · orderable" },
   "spec-chat": { name: "Sage", criteria: "accurate, grounded answers · correct DB spec authoring on finalize (writes the throwaway scratch buffer under docs/brain/specs/ that the worker parses and authors to `public.specs` + `public.spec_phases` via the author-spec SDK's `upsertSpec` — the .md is a transport buffer in a worktree the worker discards, NEVER a committed spec file and NEVER the source of truth) · read-only honored" },
   "dev-ask": { name: "Dex", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
   "security-review": { name: "Vault", criteria: "real vulnerabilities caught (not noise) · correct severity · no false-positives on safe diffs · a sound, actionable fix when flagged · produced a parseable verdict" },
