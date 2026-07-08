@@ -52,7 +52,7 @@ async function getBrand(workspaceId: string, resendDomain: string): Promise<{
   };
 }
 
-interface OrderLineLike {
+export interface OrderLineLike {
   title: string;
   variant_title?: string | null;
   quantity: number;
@@ -64,9 +64,10 @@ interface OrderLineLike {
   is_gift?: boolean;
   image_url?: string | null;
   sku?: string | null;
+  product_id?: string | null;
 }
 
-interface AddressLike {
+export interface AddressLike {
   first_name?: string;
   last_name?: string;
   address1?: string;
@@ -77,7 +78,7 @@ interface AddressLike {
   country_code?: string;
 }
 
-interface OrderForEmail {
+export interface OrderForEmail {
   id: string;
   order_number: string;
   email: string;
@@ -464,7 +465,7 @@ export async function sendOrderConfirmationEmail(opts: {
    *  treatment on subscribing orders. When omitted we don't show a
    *  strikethrough. */
   shippingValueCents?: number | null;
-}): Promise<{ success: boolean; error?: string }> {
+}): Promise<{ success: boolean; error?: string; resendEmailId?: string }> {
   try {
     const client = await getResendClient(opts.workspaceId, opts.order.email);
     if (!client) return { success: false, error: "resend_not_configured_or_blocked" };
@@ -599,7 +600,7 @@ export async function sendOrderConfirmationEmail(opts: {
       brand,
     });
 
-    const { error } = await client.resend.emails.send({
+    const { data, error } = await client.resend.emails.send({
       from: `${brand.brandName} <${brand.fromEmail}>`,
       to: order.email,
       // Reply-to is workspace-configured (Settings → Transactional
@@ -611,7 +612,11 @@ export async function sendOrderConfirmationEmail(opts: {
       html,
     });
     if (error) return { success: false, error: error.message };
-    return { success: true };
+    // Phase 3 — return the Resend id so the queued sender
+    // (Phase 4) can stamp `orders.order_confirmation_email_id` +
+    // `order_confirmation_sent_at` on the order and drive the
+    // Resend-events pipeline (`/api/webhooks/resend-events`).
+    return { success: true, resendEmailId: data?.id };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
