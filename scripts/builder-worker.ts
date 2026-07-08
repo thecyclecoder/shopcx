@@ -10022,6 +10022,14 @@ async function runTicketHandleJob(job: Job) {
       // outcome the policy disallows (e.g. offering coffee-subscription returns when returns aren't
       // accepted). Absence of a clearly-applicable policy is not permission — it is needs_human.
       `POLICY REVIEW IS MANDATORY. Before you choose a chosen_path or draft the first_reply, review the CURRENT POLICIES block above (re-fetch live via get_policies if unsure) and reason AGAINST them for the customer's ask. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
+      // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // Tell Sol her DRAFT reply is machine-validated (src/lib/sol-policy-bait-guard.ts) before it
+      // sends. A reply that (a) promises a remedy while your context_summary declares the ask
+      // out-of-policy, or (b) stacks multiple returns/refunds in one turn (the 87ce35a1 coffee-
+      // return incident) is BLOCKED — the customer never sees it, and a human re-drafts via
+      // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
+      // pass the guard; the block is only for baited promises.
+      `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket routes to needs_human. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
@@ -10137,19 +10145,37 @@ async function runTicketHandleJob(job: Job) {
       // dispatcher will already have inserted the ack ticket_resolution_events row, so this send stamps
       // the next-turn's row. Best-effort in the sense that a first_reply-less Direction (rare) still
       // lands cleanly — the ticket just doesn't get a Sol reply here.
+      //
+      // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // MACHINE-VALIDATE the DRAFT reply against Sol's own policy verdict BEFORE the send fires. A
+      // reply that promises an out-of-policy remedy — or stacks multiple returns/refunds in one turn
+      // (the 87ce35a1 coffee-return incident: Sol offered TWO returns after acknowledging renewals
+      // aren't returnable) — is blocked here. Direction stays durable (Sol's reasoning is preserved
+      // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
+      // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
       if (firstReply) {
-        const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-        const channel = (t?.channel as string | null) || "email";
-        try {
-          const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-          await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-        } catch (e) {
-          // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-          // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-          // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-          const msg = e instanceof Error ? e.message : String(e);
-          console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+        const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
+        const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
+        if (bait.ok === false) {
+          const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+          const channel = (t?.channel as string | null) || "email";
+          try {
+            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+          } catch (e) {
+            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          }
         }
       }
 

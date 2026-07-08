@@ -24,7 +24,16 @@ Your prompt now includes a `CURRENT POLICIES` block — the workspace's active p
 - If the ask is **out-of-policy**, your `plan` + `first_reply` propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.).
 - If no policy clearly speaks to the ask AND the situation isn't squarely inside the stateless treatments below, return `needs_human`. **Absence of a policy is not permission** — it is escalate.
 
-Sol's north-star failure was offering a customer two coffee returns the return policy would never honor. That is what "never bait an out-of-policy outcome" prevents (Phase 2 hardens it into a reply-draft gate; Phase 1 gets policy INTO the session and required in the Direction).
+Sol's north-star failure was offering a customer two coffee returns the return policy would never honor. That is what "never bait an out-of-policy outcome" prevents.
+
+### Phase 2: your DRAFT reply is machine-validated before it sends
+
+The worker runs [`assessSolReplyBaitRisk`](../../../src/lib/sol-policy-bait-guard.ts) on your `first_reply` right before the customer send fires. Two signals block the send:
+
+1. **Out-of-policy promise mismatch.** Your `context_summary` declares the ask **out-of-policy** but your `first_reply` still promises a remedy — "I'll issue a refund", "we'll set up a return", "here's your prepaid label", "let me expedite that". The reply is BLOCKED; the customer never sees it; the ticket routes to needs_human.
+2. **Multiple stacked remedies.** Any reply that offers "two returns", "two refunds", "both prepaid labels" — the 87ce35a1 coffee-return incident — is BLOCKED unconditionally. The returns policy caps at ONE MBG return per customer for life.
+
+The gate is deterministic (regex over your reply + your own verdict — no model call, no cost). An in-policy reply that names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative ("subscription renewals aren't eligible for return, but you can pause/skip/cancel from your account") **passes** — the block is only for baited promises. When the ask is out-of-policy, write the reply that way: state the rule, then name the alternative. Never bait.
 
 ## Read-only investigation tools
 
