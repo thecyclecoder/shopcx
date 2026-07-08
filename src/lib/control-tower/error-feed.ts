@@ -410,7 +410,7 @@ export function isTransientClientNetworkAbort(
  */
 export function isTransientSupabaseLogNoise(
   kind: "postgres" | "auth" | "api",
-  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown },
+  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown; eventMessage?: unknown },
 ): boolean {
   if (kind === "api") {
     // Edge/gateway 5xx — saturation collateral; the recur window catches a chronic 5xx.
@@ -459,21 +459,44 @@ export function isTransientSupabaseLogNoise(
     // the `dial ... i/o timeout` shape too. Recur-window escalation still applies: a chronic
     // dial-timeout spike (a real upstream outage) recurs inside the window and pages.
     const msg = String(ctx.message ?? "").toLowerCase();
-    if (!msg.trim()) return false;
-    return (
-      msg.includes("context canceled") ||
-      msg.includes("context deadline exceeded") ||
-      msg.includes("operation was canceled") ||
-      /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
-      /\bdial\b[^\n]*i\/o timeout/.test(msg) ||
+    // The same browser-abort marker ALSO surfaces on GoTrue's /authorize (PKCE flow-state)
+    // path where the marker lives INSIDE event_message JSON's `error` field instead of the
+    // top-level `msg` — msg is only `500: Error creating flow state` and the real cause
+    // (`context canceled`, `operation was canceled`, etc.) is buried in the JSON blob
+    // ([[../specs/error-feed-scope-supabase-authorize-flow-state-context-cance]] — Control
+    // Tower signature `supabase-logs:a30ffe4489dd6ffb`). Defensively JSON-parse eventMessage
+    // (bad JSON is a no-op — msg-only path still applies) and fold its inner `error` string
+    // into the same regex/substring set below so a user closing the Google-login tab stops
+    // minting page-worthy incidents. A real /authorize failure whose inner error is NOT a
+    // browser-abort marker (e.g. `invalid JWT`, `signature mismatch`, non-abort 5xx) still
+    // pages on first sighting.
+    let innerError = "";
+    if (typeof ctx.eventMessage === "string" && ctx.eventMessage.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(ctx.eventMessage);
+        if (parsed && typeof parsed === "object" && "error" in parsed) {
+          const err = (parsed as { error: unknown }).error;
+          if (typeof err === "string") innerError = err.toLowerCase();
+        }
+      } catch {
+        // Defensive: malformed / non-JSON event_message — no-op, fall back to msg-only.
+      }
+    }
+    if (!msg.trim() && !innerError.trim()) return false;
+    const isAbortShape = (s: string): boolean =>
+      s.includes("context canceled") ||
+      s.includes("context deadline exceeded") ||
+      s.includes("operation was canceled") ||
+      /\bdial\b[^\n]*\bcanceled\b/.test(s) ||
+      /\bdial\b[^\n]*i\/o timeout/.test(s) ||
       // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
       // load: `504: Processing this request timed out, please retry after a moment.` Same
       // transient class as the context-deadline shape above (restore of the reverted
       // error-feed-scope-supabase-auth-504-gateway-timeout-transient — falsely rolled back
       // 2026-07-04). A one-off pages nobody; a chronic 504 spike (a real outage) recurs and
       // still surfaces. Invalid JWT / rate-limit / signature mismatch remain first-sight pages.
-      msg.includes("processing this request timed out")
-    );
+      s.includes("processing this request timed out");
+    return isAbortShape(msg) || (innerError.length > 0 && isAbortShape(innerError));
   }
   return false;
 }
