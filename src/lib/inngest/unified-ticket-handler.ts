@@ -26,6 +26,8 @@ import { retrieveContext } from "@/lib/rag";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
+import { isAutomatedInbound } from "@/lib/automated-sender";
+import { decideOutreachRoute } from "@/lib/outreach-route";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
@@ -1067,6 +1069,52 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
+    // ── 1a2. AUTOMATED-SENDER PRE-FILTER (zero AI, skip the classifier) ──
+    // Phase 2 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
+    // Ahead of the classify-bucket Haiku step below, run a deterministic pre-filter over the
+    // inbound's from-address + body. Automated no-reply senders (TestFlight, App Store receipts,
+    // mailer daemons, GitHub notifications, …) and messages carrying unambiguous automated-
+    // notification markers ("please do not reply to this email", "this mailbox is not monitored")
+    // are closed + tagged `outreach` here, WITHOUT invoking the Haiku classifier or any other AI
+    // call — the whole point of Phase 2 is that this subclass costs zero AI dollars.
+    //
+    // Conservative on purpose (verification bullet 2 — no false positive on a genuine customer):
+    // isAutomatedInbound rejects anything ambiguous. Human brand-collab outreach that doesn't
+    // trip these deterministic patterns falls through to the (cheap Haiku) classifier and is
+    // caught by Phase 1's `msgType === "outreach"` short-circuit at § 1c. See automated-sender.ts
+    // for the exact predicate + automated-sender.test.ts for the pinned behavior.
+    //
+    // st.custEmail equals the inbound From address on email tickets — the email webhook
+    // (src/app/api/webhooks/email/route.ts) creates/looks up the customers row from the sender's
+    // email, so the customer row's email column IS the sender. Non-email channels have no
+    // notion of an automated sender and pass through (isAutomatedSender(null) === false).
+    //
+    // Phase 3 refactor: both this pre-classifier site and the post-classifier site at § 1c
+    // dispatch through the pure `decideOutreachRoute` predicate (src/lib/outreach-route.ts).
+    // The four verification tests in outreach-route.test.ts pin THAT function's routing, so
+    // the shipped handler runs the same predicate the tests exercise — coaching #1's named-
+    // symbol acceptance token instead of a docstring-only description of the invariant.
+    const preClassifierOutreachRoute = decideOutreachRoute({
+      isNew,
+      senderEmail: st.custEmail,
+      body: msg,
+      solFirstTouchEnabled: cfg.sol_first_touch_enabled,
+      agentAssigned,
+    });
+    if (preClassifierOutreachRoute.kind === "pre_filter_close") {
+      await step.run("outreach-automated-sender-pre-filter", async () => {
+        await addTicketTag(tid, "cls:outreach");
+        await addTicketTag(tid, "outreach");
+        await setStatus(admin, tid, cfg.auto_resolve);
+        await sysNote(
+          admin,
+          tid,
+          `[System] Automated-sender pre-filter tripped (sender=${st.custEmail || "(none)"}) — deterministically closed, no AI response, classify-bucket skipped (zero AI cost).`,
+        );
+      });
+      return { status: "outreach_automated_sender_pre_filter" };
+    }
+
     // ── 1b. Three-bucket classification: account / general / outreach ──
     // - account = needs customer data (refund, cancel, order status, etc.)
     // - general = product/policy info questions answerable without account data
@@ -1108,6 +1156,36 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     if (isNew) {
       await addTicketTag(tid, `cls:${msgType}`);
       if (msgType === "outreach") await addTicketTag(tid, "outreach");
+    }
+
+    // ── 1c. OUTREACH DETERMINISTIC CLOSE ──
+    // Phase 1 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
+    // Outreach = brand-collab / UGC / partnership / cold sales pitch. Never a customer-service
+    // request, so we don't reply and — critically — don't enqueue Sol's ticket-handle box session
+    // (a Max-tier handling session costs real money per ticket). Close deterministically here,
+    // BEFORE the account-path email flow (~1119), the auto-link-by-identity step (~1885), the Sol
+    // first-touch dispatch (~1919), the inflection gate (~1994), and the Sonnet orchestrator
+    // (~2242) — every paid downstream lane is bypassed by the early return. The classifier tag +
+    // `outreach` tag were already stamped at ~1108. Both dispatch gates below ALSO check
+    // msgType !== "outreach" as belt-and-suspenders so a future refactor that moves this
+    // short-circuit can't accidentally leak an outreach ticket into a paid handling session.
+    //
+    // Phase 3: dispatch through `decideOutreachRoute` with `classifierBucket = msgType` so
+    // this site runs the same predicate the four Phase-3 verification tests pin.
+    const postClassifierOutreachRoute = decideOutreachRoute({
+      isNew,
+      senderEmail: st.custEmail,
+      body: msg,
+      classifierBucket: msgType,
+      solFirstTouchEnabled: cfg.sol_first_touch_enabled,
+      agentAssigned,
+    });
+    if (postClassifierOutreachRoute.kind === "classifier_close") {
+      await step.run("outreach-deterministic-close", async () => {
+        await setStatus(admin, tid, cfg.auto_resolve);
+        await sysNote(admin, tid, "[System] Outreach — deterministically closed, no AI response.");
+      });
+      return { status: "outreach_deterministic_close" };
     }
 
     let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
@@ -1916,7 +1994,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // bullet 3); (3) !agentAssigned — a human is already handling this ticket, don't step on their
     // toes (agent_intervened / assigned_to / escalated_to all set agentAssigned above). Fraud is
     // already handled — a fraud-blocked ticket returned above at line ~1730 (verification bullet 4).
-    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned) {
+    // msgType !== "outreach" belt-and-suspenders (Phase 1 of the outreach-deterministic-close
+    // spec): the primary short-circuit at § 1c already returned above, so this gate only fires
+    // for account/general — but pinning the classifier bucket into the dispatch predicate itself
+    // means a future refactor that moves the short-circuit block can't silently leak an outreach
+    // ticket into a Max-tier ticket-handle session.
+    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned && msgType !== "outreach") {
       const isChatChannel = st.ch === "chat";
       const acked = await step.run("sol-first-touch-ack", async () => {
         if (await newerActivity(admin, tid, t0)) return false;
@@ -2238,6 +2321,15 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
+    //
+    // msgType !== "outreach" belt-and-suspenders (Phase 1 of the outreach-deterministic-close
+    // spec): the primary short-circuit at § 1c already returned above for outreach tickets, so a
+    // fall-through to here means account/general. The explicit guard pins the classifier bucket
+    // into this parallel dispatch lane's predicate so outreach can NEVER reach a paid Sonnet/Opus
+    // turn via any refactor that reorders the upstream blocks.
+    if (isNew && msgType === "outreach") {
+      return { status: "outreach_deterministic_close_guard" };
+    }
     {
       const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
       const { executeSonnetDecision } = await import("@/lib/action-executor");
