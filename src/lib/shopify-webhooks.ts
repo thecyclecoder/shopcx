@@ -770,6 +770,21 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         data: { workspace_id: workspaceId, customer_id: customerId },
       }).catch(() => {});
     }
+
+    // Order-confirmation email (Klaviyo replacement — Phase 4 of the
+    // shopify-order-confirmation-emails spec). Fire-and-forget through
+    // Inngest so the daily 50–100 subscription-renewal burst is
+    // throttled (concurrency:5 + throttle:8/s) instead of hammering
+    // Resend from the webhook path. Gated on `isNewOrder` + `paid`
+    // financial status so we only send on a brand-new paid order;
+    // the handler is idempotent on `orders.order_confirmation_email_id`
+    // so a webhook retry is safe.
+    if (savedOrder && (payload.financial_status as string) === "paid") {
+      inngest.send({
+        name: "order/confirmation.requested",
+        data: { workspaceId, orderId: savedOrder.id },
+      }).catch(() => {});
+    }
   }
 
   // Duplicate order detection: check for multiple paid orders on the same subscription within 7 days
