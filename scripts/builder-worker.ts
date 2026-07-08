@@ -163,11 +163,14 @@ const DEPLOY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // top-level Max `claude -p` (cs-director-call skill) per call. Reads the ticket + resolution events +
 // triage_runs row + customer/subs/orders (read-only via the same DB creds the triage lane uses) and
 // emits ONE JSON verdict { decision:'approve_remedy'|'author_spec'|'escalate_founder', reasoning,
-// remedy?, spec_seed? } that Phase 2's applyBoxCsDirectorCall (deterministic Node) will materialize.
-// The runner is Phase 1 — it stops at writing a `director_activity` row (kind='cs_director_call')
-// carrying the verdict JSON so the CEO can audit what the CS Director decided BEFORE the executor
-// wires up. Serialized so the hourly triage sweep never overlaps a call the CS Director is still
-// judging.
+// remedy?, spec_seed? } that `applyBoxCsDirectorCall` (deterministic Node, src/lib/cs-director.ts —
+// docs/brain/specs/cs-director-call-phase-2-executor-fires-june-verdicts.md) materializes into a
+// real action: approve_remedy → `executeSonnetDecision` + `deliverTicketMessage` (execute-then-
+// message rule); author_spec → the specs SDK chokepoint; escalate_founder → linkage-back for the
+// runner-minted CEO card. The runner records the verdict to a `director_activity` row
+// (kind='cs_director_call') as the audit trail, then hands the SAME normalized verdict to the
+// executor on the same turn — no CEO wait, no manual re-drive. Serialized so the hourly triage
+// sweep never overlaps a call the CS Director is still judging.
 const MAX_CS_DIRECTOR_CALL = 1;
 // One CS-director call: read the ticket brief (messages, subs, orders, resolution-events history) +
 // investigate read-only + emit one JSON verdict. Minutes — same ballpark as a triage solver pass.
@@ -11998,22 +12001,29 @@ async function runDeployReviewJob(job: Job) {
 
 // ── Box-hosted CS Director hard-call lane (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1) ──
 // A kind='cs-director-call' job is ONE hard call the CS Director agent (💬 June) makes on an escalated
-// ticket the box-escalation-triage solver→skeptic sweep could NOT reach quorum on. Phase 2 of this spec
-// enqueues these from the no-quorum branch (replacing the current straight-to-founder path); Phase 1
-// (this file) wires the box worker lane end-to-end so a synthetic no-quorum triage_runs row → an
-// agent_jobs row of this kind → a Max `claude -p` (cs-director-call skill) that reads:
+// ticket the box-escalation-triage solver→skeptic sweep could NOT reach quorum on. Phase 2 of that spec
+// enqueues these from the no-quorum branch (replacing the current straight-to-founder path); this file
+// wires the box worker lane end-to-end so a no-quorum triage_runs row → an agent_jobs row of this
+// kind → a Max `claude -p` (cs-director-call skill) that reads:
 //   (a) the ticket + its ticket_messages,
 //   (b) all ticket_resolution_events rows for the ticket (the write-ahead ledger of every prior turn),
 //   (c) the triage_runs row that dispatched this call (solver/skeptic transcripts + no-quorum reasoning),
 //   (d) the linked customer + subscriptions + orders (read-only via commerce/*).
 // It emits ONE JSON verdict — { decision:'approve_remedy'|'author_spec'|'escalate_founder', reasoning,
-// remedy?, spec_seed? } — and the RUNNER (Phase 1) records it to `director_activity`
-// (action_kind='cs_director_call', director_function='cs') so the CEO/audit trail sees WHAT the CS
-// Director decided + WHY, BEFORE the mechanical actioner wires up. The MUTATOR that turns the verdict
-// into a shipped remedy / authored spec / founder escalation is Phase 2's applyBoxCsDirectorCall — this
-// runner deliberately stops at the audit row so a Phase-1 misfire never mutates prod.
-// Read-only against everything; the deterministic worker is the only mutator per the north star
-// (CEO → role agent → tool). See docs/brain/libraries/cs-director.md + docs/brain/tables/director_activity.md.
+// remedy?, spec_seed? } — the RUNNER records it to `director_activity`
+// (action_kind='cs_director_call', director_function='cs') as the audit trail (CEO sees WHAT the CS
+// Director decided + WHY), then IMMEDIATELY hands the SAME normalized verdict to the Phase-2 executor
+// `applyBoxCsDirectorCall` in src/lib/cs-director.ts
+// (docs/brain/specs/cs-director-call-phase-2-executor-fires-june-verdicts.md) — approve_remedy fires
+// via `executeSonnetDecision` and THEN delivers the customer message via `deliverTicketMessage`
+// (execute-then-message rule from derived-from ticket 115350d5); author_spec writes through the
+// specs SDK chokepoint; escalate_founder returns linkage-back for the CEO card the runner mints
+// downstream (single-writer per surface). Read-only against everything except the runner's own
+// writes (director_activity + internal note + ticket-state transition + CEO card) and the executor's
+// per-decision writes (executeSonnetDecision commerce side-effects + deliverTicketMessage + specs
+// SDK). The runner + executor together respect the deterministic-worker-is-the-only-mutator north
+// star (CEO → role agent → tool). See docs/brain/libraries/cs-director.md +
+// docs/brain/tables/director_activity.md.
 async function runCsDirectorCallClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "cs-director-call", sandbox: "max", timeout: CS_DIRECTOR_CALL_TIMEOUT_MS });
 }
@@ -12180,15 +12190,15 @@ async function loadCsDirectorCallBrief(
 
 function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): string {
   const roleLine = secondOpinion
-    ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`
-    : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via the existing worker path (digest / dashboard_notifications for escalate_founder; the third-rung mutator wires up remedy/spec-seed application on the same JSON). You NEVER mutate anything from here.`;
+    ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`
+    : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`;
   return [
     roleLine,
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
-    `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor will fire through executeSonnetDecision.`,
-    `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so Phase 2 authors it as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
-    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). Phase 2 surfaces both on a CEO dashboard notification so the founder can approve/adjust in one read.`,
+    `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
+    `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so the executor authors it via the specs SDK as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
+    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). The runner mints a CEO dashboard notification carrying both so the founder can approve/adjust in one read.`,
     ``,
     brief,
     ``,
@@ -12257,13 +12267,14 @@ async function runCsDirectorCallJob(job: Job) {
     // verbatim so the Phase-2 executor consumes it without re-parsing the log_tail. `spec_slug` is
     // the SpecSeed's slug on `author_spec` verdicts (the natural per-call anchor for that decision).
     //
-    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — the metadata markers now
-    // reflect Phase-2 execution (`phase: 2`, `autonomous: true`): `applyBoxCsDirectorCall` is called
-    // immediately after this record and the mutator is in-chain. Phase 1 of that spec is scaffold-
-    // only — its per-decision handlers currently STUB the action (approve_remedy →
-    // `executeSonnetDecision` + `deliverTicketMessage` in Phase 2; author_spec → specs SDK in
-    // Phase 3; escalate_founder → the runner already mints the CEO card here, so the executor stub
-    // logs and defers) — but the routing contract exists and the audit contract advances.
+    // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the metadata markers reflect
+    // Phase-2 execution (`phase: 2`, `autonomous: true`): `applyBoxCsDirectorCall` is called
+    // immediately after this record and materializes the verdict — approve_remedy fires via
+    // `executeSonnetDecision` and THEN delivers the customer message via `deliverTicketMessage`
+    // (execute-then-message); author_spec writes through the specs SDK chokepoint; escalate_founder
+    // resolves the linkage-back payload for the CEO card the runner mints downstream (single-writer
+    // per surface). Nothing here waits on the CEO to act — the routing + audit + execution all
+    // advance on the same turn.
     let applyResult: {
       ok: boolean;
       handler?: string;
@@ -12299,12 +12310,14 @@ async function runCsDirectorCallJob(job: Job) {
           // Phase 2) carry the first review's id so the audit feed can pair the two verdicts.
           // Null on the default primary June review.
           second_opinion_of: secondOpinionOfRunId,
-          // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — the Phase-2 executor
-          // scaffold (`applyBoxCsDirectorCall` in src/lib/cs-director.ts) is wired below and runs
-          // immediately after this record; `phase:2` reflects that the executor tier is in-chain,
-          // `autonomous:true` reflects that the runner now hands the verdict to a deterministic
-          // mutator without waiting on the CEO to act. Phase 1 of that spec ships the scaffold with
-          // stub handlers; Phase 2/3 wire the actual remedy / spec / escalation writes.
+          // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor
+          // (`applyBoxCsDirectorCall` in src/lib/cs-director.ts) runs immediately after this record
+          // and materializes the verdict. `phase:2` reflects that the executor tier is in-chain;
+          // `autonomous:true` reflects that the runner hands the verdict to a deterministic mutator
+          // without waiting on the CEO. approve_remedy fires via `executeSonnetDecision` then
+          // delivers the customer message via `deliverTicketMessage`; author_spec writes through the
+          // specs SDK chokepoint; escalate_founder returns the linkage-back payload for the CEO
+          // card the runner mints downstream (single-writer per surface).
           autonomous: true,
           phase: 2,
         },
@@ -12315,14 +12328,15 @@ async function runCsDirectorCallJob(job: Job) {
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
     }
 
-    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — the executor scaffold. Called
-    // ONCE per cs-director-call job, IMMEDIATELY after the Phase-1 audit record above so the
-    // mutator sees the SAME normalized verdict the audit trail carries. `applyBoxCsDirectorCall`
-    // routes `approve_remedy` / `author_spec` / `escalate_founder` to their per-decision handlers;
-    // any other value (a shape drift out of `normalizeCsDirectorVerdict`, which defensively falls
-    // back to `escalate_founder`) is a clean logged no-op. Never throws — a `{ ok:false, reason }`
-    // result surfaces on the job's `log_tail` without rolling back the completed job. Same
-    // never-throws contract `applyBoxDeployReview` uses.
+    // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor.
+    // Called ONCE per cs-director-call job, IMMEDIATELY after the director_activity audit record
+    // above so the mutator sees the SAME normalized verdict the audit trail carries.
+    // `applyBoxCsDirectorCall` routes `approve_remedy` / `author_spec` / `escalate_founder` to
+    // their per-decision handlers (see src/lib/cs-director.ts + docs/brain/libraries/cs-director.md
+    // § Phase-2 executor); any other value (a shape drift out of `normalizeCsDirectorVerdict`,
+    // which defensively falls back to `escalate_founder`) is a clean logged no-op. Never throws —
+    // a `{ ok:false, reason }` result surfaces on the job's `log_tail` without rolling back the
+    // completed job. Same never-throws contract `applyBoxDeployReview` uses.
     try {
       const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
       applyResult = await applyBoxCsDirectorCall(db, job.id, verdict);
