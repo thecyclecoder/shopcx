@@ -33,6 +33,18 @@ Playbook-active tickets still enter this gate. `applyInflectionGate` reads `tick
 
 Guards (coaching #1/#2 pattern): `reSessionSol` wraps `superseDirection`'s workspace-scoped compare-and-set (so a racing caller can't fan out a duplicate ticket-handle session), the DB partial UNIQUE on ticket_directions is a second belt, the ledger stage is best-effort (a diagnostic-substrate failure MUST NOT block the bounce), and the holding-message send is doubly-gated (kind==='frustration' AND the config column true).
 
+## Step 2d — Sol-chosen vs signal-matched playbook dispatch
+
+Phase 2 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] moves playbook selection inside Sol's first-touch box session for the Sol cohort. `routeExec` § 2 now branches on the live [[../tables/ticket_directions]] row BEFORE the deterministic matcher fires:
+
+- **§ 2a — Sol-chosen path** ([[../libraries/ticket-directions]] `resolveSolChosenPlaybook`). Non-null return only when: live Direction exists (`superseded_at IS NULL`), `chosen_path='playbook'`, `plan.playbook_slug` is a non-empty string, `tickets.active_playbook_id IS NULL` (this is a START not a follow-up turn — [[../specs/sol-cheap-execution-over-ticket-direction]] Phase 4's `Step 3.98` short-circuit already owns "still running"), and the slug resolves to a live `public.playbooks` row for the ticket's workspace. On a hit, [[../libraries/playbook-executor]] `startPlaybook` is called with `seed_context = plan.playbook_seed_context` so the executor's step 0 doesn't re-derive the ids Sol already picked. Ledger stamp: `ticket_resolution_events.reasoning = 'sol:session-chose-playbook:{slug}'` (best-effort — the send never fails on a ledger error).
+- **§ 2b — Signal-matched path** (existing `matchPlaybookScored` → `applyDeferThreshold` → `matchPlaybook` chain). Ledger stamp on a hit: `ticket_resolution_events.reasoning = 'sol:matcher-chose-playbook:{slug}'` where `slug` is the resolved `playbooks.slug` for the matched row (falls back to the sanitized name if the row hasn't been backfilled yet). The two prefixes reference the same identifier space so Phase 4's analytics tile can split by source without a heuristic classifier.
+
+Guards (learning #2 pattern — confirming predicate at the action point):
+- Direction read is workspace-scoped (`workspace_id = ?`) — a cross-workspace ticket-id collision cannot dispatch.
+- Playbook slug lookup is workspace-scoped — the same slug in another workspace does NOT authorize the dispatch.
+- `active_playbook_id IS NULL` gate on the ticket — a ticket mid-playbook stays on its existing branch (the Step 3.98 short-circuit handles follow-up turns).
+
 ## Step 2e — Sonnet orchestrator (Direction-scoped user block)
 
 The `sonnet-orchestrate` step (Step 2e in the pipeline) loads the live [[../tables/ticket_directions]] row for the ticket via [[../libraries/ticket-directions]] `loadLiveDirection` BEFORE the picker + orchestrator call — Phases 2/3/5-Fix-1 of [[../specs/sol-cheap-execution-over-ticket-direction]]. Two things branch off it:

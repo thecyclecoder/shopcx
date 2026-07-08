@@ -13,6 +13,28 @@ type Admin = SupabaseClient;
 
 export type TicketDirectionPath = "playbook" | "stateless" | "needs_info";
 
+/**
+ * Shape Sol writes into `ticket_directions.plan` — path-specific but pinned so the writer can
+ * gate the field validity before the row lands. Phase 1 of
+ * [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] retires the
+ * signal-based playbook matcher for the Sol cohort: playbook selection becomes a Direction
+ * field (`playbook_slug`) chosen by full-context reasoning at first-touch. Extra keys are
+ * preserved (path-specific ad-hoc knobs Sol may add — see the ticket-handle skill's guardrail
+ * examples), but the validator below rejects a `playbook` chosen_path that omits `playbook_slug`
+ * or points at a slug that does not exist in `public.playbooks` for this workspace.
+ */
+export interface TicketDirectionPlan {
+  /** Present when `chosen_path='playbook'` — the slug of the playbook Sol chose. */
+  playbook_slug?: string;
+  /** Present when `chosen_path='playbook'` — order/subscription ids the playbook needs on step 0. */
+  playbook_seed_context?: Record<string, unknown>;
+  /** Present when `chosen_path='stateless'` — usually `"send_stateless_reply"`. */
+  action?: string;
+  /** Present when `chosen_path='needs_info'` — the concrete list of missing pieces to ask for. */
+  needs?: unknown[];
+  [k: string]: unknown;
+}
+
 export interface TicketDirection {
   id: string;
   workspace_id: string;
@@ -20,7 +42,7 @@ export interface TicketDirection {
   intent: string;
   context_summary: string;
   chosen_path: TicketDirectionPath;
-  plan: Record<string, unknown>;
+  plan: TicketDirectionPlan;
   guardrails: Record<string, unknown>;
   authored_by: string;
   authored_at: string;
@@ -32,6 +54,30 @@ export interface TicketDirection {
    * the cap check (`>= ai_channel_config.sol_max_resessions`) can fire.
    */
   resession_count: number;
+}
+
+/**
+ * Typed validation error raised by {@link writeDirection} when the input plan does not satisfy
+ * the path-specific contract (playbook chose but no slug, unknown slug for the workspace, …).
+ * The error carries a stable `code` so callers can render user-legible diagnostics without
+ * string-matching on `message`.
+ */
+export class TicketDirectionPlanError extends Error {
+  readonly code:
+    | "playbook_slug_missing"
+    | "playbook_slug_unknown"
+    | "playbook_slug_not_string";
+  readonly slug?: string;
+  constructor(
+    code: TicketDirectionPlanError["code"],
+    message: string,
+    opts?: { slug?: string },
+  ) {
+    super(message);
+    this.name = "TicketDirectionPlanError";
+    this.code = code;
+    this.slug = opts?.slug;
+  }
 }
 
 const COLS =
@@ -51,11 +97,13 @@ export async function writeDirection(
     intent: string;
     context_summary: string;
     chosen_path: TicketDirectionPath;
-    plan?: Record<string, unknown>;
+    plan?: TicketDirectionPlan;
     guardrails?: Record<string, unknown>;
     authored_by?: string;
   },
 ): Promise<TicketDirection> {
+  const plan: TicketDirectionPlan = input.plan ?? {};
+  await validatePlanForPath(admin, input.workspace_id, input.chosen_path, plan);
   const { data, error } = await admin
     .from("ticket_directions")
     .insert({
@@ -64,7 +112,7 @@ export async function writeDirection(
       intent: input.intent,
       context_summary: input.context_summary,
       chosen_path: input.chosen_path,
-      plan: input.plan ?? {},
+      plan,
       guardrails: input.guardrails ?? {},
       authored_by: input.authored_by ?? "sol_box_session",
     })
@@ -72,6 +120,58 @@ export async function writeDirection(
     .single();
   if (error) throw error;
   return data as TicketDirection;
+}
+
+/**
+ * Path-specific plan validator — Phase 1 of
+ * [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]]. When Sol commits
+ * a ticket to a `playbook` chosen_path, she MUST name the target playbook by slug
+ * (`plan.playbook_slug`); the writer confirms the slug exists in `public.playbooks` for the
+ * ticket's workspace before the row lands, so downstream cheap-execution can dispatch it without
+ * re-running the deterministic matcher. Applies re-assertion of the read-time precondition
+ * (learning #2 — the write's guarantee is the confirming predicate, not a coarser proxy):
+ * an unknown slug bails HERE, not at the executor step 0.
+ *
+ * Stateless / needs_info are shape-only (no cross-table lookup). Extra plan keys are preserved
+ * (Sol may add path-specific ad-hoc context — see the ticket-handle skill), but a `playbook`
+ * chosen_path with a missing / non-string / unknown slug throws {@link TicketDirectionPlanError}
+ * with the slug echoed on the exception so the caller (runTicketHandleJob → the worker) can
+ * surface it verbatim in the box-session log.
+ */
+async function validatePlanForPath(
+  admin: Admin,
+  workspace_id: string,
+  chosen_path: TicketDirectionPath,
+  plan: TicketDirectionPlan,
+): Promise<void> {
+  if (chosen_path !== "playbook") return;
+  const rawSlug = plan.playbook_slug;
+  if (rawSlug === undefined || rawSlug === null) {
+    throw new TicketDirectionPlanError(
+      "playbook_slug_missing",
+      "chosen_path='playbook' requires plan.playbook_slug",
+    );
+  }
+  if (typeof rawSlug !== "string" || rawSlug.length === 0) {
+    throw new TicketDirectionPlanError(
+      "playbook_slug_not_string",
+      "plan.playbook_slug must be a non-empty string",
+    );
+  }
+  const { data, error } = await admin
+    .from("playbooks")
+    .select("id")
+    .eq("workspace_id", workspace_id)
+    .eq("slug", rawSlug)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    throw new TicketDirectionPlanError(
+      "playbook_slug_unknown",
+      `plan.playbook_slug='${rawSlug}' does not match any playbook in this workspace`,
+      { slug: rawSlug },
+    );
+  }
 }
 
 /**
@@ -141,6 +241,66 @@ export const loadLiveDirection = getLiveDirection;
  * increment, `.select('id')` returns zero rows and we return `null` so the caller can bail
  * without double-counting.
  */
+/**
+ * Sol-chosen playbook resolver — Phase 2 of
+ * [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]].
+ *
+ * unified-ticket-handler's `routeExec` calls this BEFORE the deterministic matcher
+ * (matchPlaybookScored → applyDeferThreshold → matchPlaybook). Returns non-null only when Sol's
+ * live Direction names a playbook AND the ticket is not already running one AND the slug
+ * resolves to a live playbook row scoped to this workspace — in that case the caller runs
+ * startPlaybook(seed_context) and stamps `ticket_resolution_events.reasoning`
+ * `'sol:session-chose-playbook:{slug}'`. When any of those preconditions fails (no live
+ * Direction, chosen_path is stateless/needs_info, active_playbook_id already set — a follow-up
+ * turn that the shortcircuit path handles — or the slug doesn't resolve), returns null and the
+ * caller falls through to the existing signal-matched path (`'sol:matcher-chose-playbook:...'`).
+ *
+ * Guards mirror learning #2 (confirming predicate at the action point, not a coarser proxy):
+ *   - Workspace scope re-asserted on both the Direction read and the playbook lookup so a
+ *     cross-workspace slug or a mis-authored Direction on a foreign ticket cannot dispatch.
+ *   - `active_playbook_id IS NULL` gates the START; a ticket mid-playbook stays on its existing
+ *     path (the shortcircuit already covers "still running" — cf. Phase 4 of
+ *     [[../specs/sol-cheap-execution-over-ticket-direction]]).
+ *   - The playbook lookup uses `.maybeSingle()` — a `null` result throws no error; the caller
+ *     just falls through, so a Direction that names a retired-in-DB slug degrades gracefully.
+ */
+export async function resolveSolChosenPlaybook(
+  admin: Admin,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<{ playbook_id: string; slug: string; seed_context: Record<string, unknown> } | null> {
+  const direction = await getLiveDirection(admin, ticket_id, { workspace_id });
+  if (!direction) return null;
+  if (direction.chosen_path !== "playbook") return null;
+  const slug = direction.plan.playbook_slug;
+  if (typeof slug !== "string" || slug.length === 0) return null;
+
+  const { data: ticketRow, error: ticketErr } = await admin
+    .from("tickets")
+    .select("active_playbook_id")
+    .eq("workspace_id", workspace_id)
+    .eq("id", ticket_id)
+    .maybeSingle();
+  if (ticketErr) throw ticketErr;
+  const activePbId = (ticketRow as { active_playbook_id: string | null } | null)?.active_playbook_id ?? null;
+  if (activePbId) return null;
+
+  const { data: pb, error: pbErr } = await admin
+    .from("playbooks")
+    .select("id")
+    .eq("workspace_id", workspace_id)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (pbErr) throw pbErr;
+  if (!pb) return null;
+
+  const seed = direction.plan.playbook_seed_context;
+  const seed_context =
+    seed && typeof seed === "object" && !Array.isArray(seed) ? (seed as Record<string, unknown>) : {};
+
+  return { playbook_id: (pb as { id: string }).id, slug, seed_context };
+}
+
 export async function incrementResessionCount(
   admin: Admin,
   input: { workspace_id: string; direction_id: string; from_count: number },
