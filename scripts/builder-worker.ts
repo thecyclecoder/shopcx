@@ -10030,6 +10030,14 @@ async function runTicketHandleJob(job: Job) {
       // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
       // pass the guard; the block is only for baited promises.
       `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket routes to needs_human. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
+      // Phase 3 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // Sol MUST resolve a concrete existing playbook_slug when chosen_path='playbook' — the
+      // writer rejects a missing / empty / whitespace-only / unknown slug with typed errors
+      // (playbook_slug_missing / _not_string / _unknown — src/lib/ticket-directions.ts:validatePlanForPath).
+      // The honest path when NO playbook matches is chosen_path='stateless', not "playbook"
+      // with an empty slug — the writer will fail the Direction otherwise, and the ticket
+      // burns the box turn.
+      `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,

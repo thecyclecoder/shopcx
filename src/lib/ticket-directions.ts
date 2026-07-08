@@ -152,10 +152,16 @@ async function validatePlanForPath(
       "chosen_path='playbook' requires plan.playbook_slug",
     );
   }
-  if (typeof rawSlug !== "string" || rawSlug.length === 0) {
+  // Phase 3 of [[../../docs/brain/specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]:
+  // trim + length-check so a WHITESPACE-only slug (Sol trying to satisfy the field without
+  // a real match) throws the same typed rejection an empty slug does. Sol's honest-stateless
+  // rule is "no playbook match → chosen_path='stateless'"; a "   " slug is the anti-pattern
+  // the rule exists to prevent, and lumping it in with playbook_slug_unknown would read as
+  // "we don't have that playbook" downstream rather than the truer "you didn't pick one".
+  if (typeof rawSlug !== "string" || rawSlug.trim().length === 0) {
     throw new TicketDirectionPlanError(
       "playbook_slug_not_string",
-      "plan.playbook_slug must be a non-empty string",
+      "plan.playbook_slug must be a non-empty, non-whitespace string — no playbook match means chosen_path='stateless', never 'playbook' with an empty slug",
     );
   }
   const { data, error } = await admin
