@@ -8488,6 +8488,35 @@ async function runFoldQueueReaperJob(): Promise<void> {
   }
 }
 
+// Fenn's DURABLE operating principles — baked into the fold mandate by
+// agent-mandate-hardening-fold (rolled up from 11 rounds of coaching that never stuck when it was
+// only stored in `agent_instructions`). These are PERMANENT: they ride every fold-batch prompt
+// regardless of what the ephemeral coaching layer says. Each principle names the recurring slip it
+// prevents so a future reader can judge edge cases instead of blindly following the rule.
+const FENN_DURABLE_OPERATING_PRINCIPLES: string[] = [
+  `## Fenn's durable operating principles (permanent — obey before every fold decision)`,
+  `These are baked into your mandate. They are what "fold well" MEANS for you — not one-off coaching. When any principle here conflicts with older transient guidance, THIS section wins.`,
+  ``,
+  `1. **Derive "shipped" from the phase rollup — never \`specs.status\`.** A spec is foldable iff every \`public.spec_phases\` row is \`shipped\` (getRoadmap → deriveSpecCardStatus → rollupPhaseStatus). The stored \`specs.status\` column is vestigial and frequently reads \`planned\`/\`in_progress\` on a genuinely-shipped spec — reading it produces false no-ops. The worker's \`runFoldJob\` already gates on the rollup; do not second-guess a spec it handed you as foldable.`,
+  ``,
+  `2. **Enumerate the FULL owed artifact set BEFORE concluding a fold.** A fold is only done when ALL of these exist:`,
+  `   a. \`grep -r\` the ENTIRE \`docs/brain/\` tree for the folded spec's slug AND for any symbol names it introduced/reverted (function names, prior spec slugs, table/library names). Update EVERY page that still describes the reverted/old concept in present tense — not just the first two or three pages you opened. A sibling page still calling a removed function "now inert" is the recurring completeness slip.`,
+  `   b. \`docs/brain/archive.d/{slug}.md\` written for THIS slug, always — a missing archive line with shipped brain siblings is an INCONSISTENT state, not a clean no-op. Do not skip it because "the brain content already looks present".`,
+  `   c. Shipped-ness re-confirmed from the derived phase rollup (getRoadmap/deriveSpecCardStatus), never the stored \`specs.status\` column, before ever declaring a candidate unfoldable or a no-op.`,
+  ``,
+  `3. **Precision on scope claims in Gotcha/Known-fixes notes.** When you write "both/all/every entry point/caller/site" in a brain note, first \`grep\` the actual callers of the guard function in the merged source and name only the ones that truly call it — e.g. write "authorSpecRowStructured normalizes; the markdown path relies on parseSpec" rather than a blanket "both entry points call normalizeOwnerSlug". A scope overclaim points a future reader at the wrong function; accuracy is the whole point of a fold.`,
+  ``,
+  `4. **Report the actual action.** When the fold PR's diff only creates \`docs/brain/archive.d/{slug}.md\` metadata (the implementation PR already placed the durable knowledge in the correct brain home), report the action explicitly as archive-only. Do NOT claim pages were folded or cross-linked unless the diff actually changed them — a claimed page-fold that the diff doesn't back is the recurring overclaim slip.`,
+  ``,
+  `5. **Emit a structured audit checkpoint per spec.** For every spec you fold, print exactly ONE line to stdout with this shape (so a grader can verify rubric adherence from the log alone, and a mid-job interruption leaves recoverable evidence):`,
+  `     \`[fold-audit] slug=<slug> pages_updated=<page1,page2,…> cross_links=<src→tgt,src→tgt,…> archive=docs/brain/archive.d/<slug>.md action=<full-fold|archive-only>\``,
+  `   Include the same manifest — one entry per slug — in your final JSON \`summary\` field.`,
+  ``,
+  `6. **Retry once on a transient 5xx / API error before exiting.** Zero-output failures from an unhandled 5xx are fully recoverable with a single retry; a bail-on-first-error leaves rubric-compliant work uncredited.`,
+  ``,
+  `7. **NEVER regenerate \`docs/brain/archive.md\` or \`docs/brain/README.md\`.** The board reads \`docs/brain/archive.d/\` directly (getArchive), so regenerating aggregates inside a fold PR is needless AND is the #1 cause of fold PRs going Dirty (every fold re-edits the same lines → the second fold conflicts the moment the first merges). This SUPERSEDES any older ephemeral coaching that told you to run \`npm run brain:index\` — the aggregates are refreshed out-of-band now.`,
+];
+
 function foldBatchPrompt(slugs: string[]): string {
   // spec-fold-from-db-row Phase 1: the spec BODY now lives in `public.specs` + `public.spec_phases`;
   // the worker materializes each row to a gitignored `.box/spec-{slug}.md` (the same shape `build-spec`
@@ -8500,24 +8529,29 @@ function foldBatchPrompt(slugs: string[]): string {
   return [
     `BATCH FOLD-BUILD — fold these owner-verified, shipped specs into the brain and retire them, all in ONE branch. The owner has confirmed each works in production. This is DOCS-ONLY: do NOT rebuild or change any product code.`,
     ``,
+    // agent-mandate-hardening-fold Phase 1 — durable operating principles ride EVERY fold-batch
+    // prompt, ahead of the mechanical steps, so Fenn evaluates each fold through them by default.
+    ...FENN_DURABLE_OPERATING_PRINCIPLES,
+    ``,
     `Spec bodies come from \`public.specs\` + \`public.spec_phases\` (the DB row, per [[spec-fold-from-db-row]]). The worker materialized a read-only copy of each under \`.box/spec-{slug}.md\` (gitignored, regenerated each dispatch) — read those files; do NOT read \`docs/brain/specs/{slug}.md\` (it may not exist post-spec-readers-from-db-retire-parser).`,
     ``,
     `Specs to fold:`,
     slugList,
     ``,
     `For EACH spec above, follow docs/brain/project-management.md "Folding a shipped spec into the brain":`,
-    `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page).`,
+    `1. Confirm the spec's durable knowledge is already folded into its permanent brain homes (the relevant lifecycles/ table(s)/ libraries/ inngest/ integrations/ dashboard/ recipes/ pages, each with a "Status / open work" block where applicable). If anything is missing, fold it now and cross-link it (3-5 wikilinks, linked FROM at least one existing page). Apply principle 2 — enumerate the FULL owed artifact set (grep the whole \`docs/brain/\` tree for the slug + its symbols) before declaring this step done.`,
     `2. Create docs/brain/archive.d/{slug}.md containing EXACTLY ONE line — the per-spec archive entry. archive.md is GENERATED from this directory, so NEVER hand-edit docs/brain/archive.md. Use exactly this shape:`,
     `     - **<the spec's real title>** · verified <today's date — run \`date +%F\`> · → [[lifecycles/<the feature's primary lifecycle or brain home slug>]]`,
     `3. If \`docs/brain/specs/{slug}.md\` exists, \`git rm docs/brain/specs/{slug}.md\` (git history + the DB row are the immutable archive). If it does NOT exist (newly-authored specs post-spec-readers-from-db-retire-parser have no .md), skip the rm — the DB row carries the body and the worker flips its status to \`folded\` after this PR opens.`,
+    `4. Emit the per-spec audit checkpoint line described in principle 5 immediately after finishing the spec's fold, so partial work is recoverable and the outcome is auditable.`,
     ``,
     `Then ONCE for the whole batch:`,
-    `4. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md. The board reads docs/brain/archive.d/ directly (getArchive), so committing the regenerated aggregates inside a fold PR is needless AND the #1 cause of fold PRs going Dirty — every fold re-edits the same archive.md/README lines, so a second fold conflicts the moment the first merges. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), any git-rm'd legacy spec file(s), and the brain pages you folded into. The aggregates are refreshed out-of-band.`,
-    `5. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
+    `5. Do NOT run brain-index.mjs, and do NOT modify docs/brain/archive.md or docs/brain/README.md — see principle 7. Your PR should touch ONLY: the per-spec docs/brain/archive.d/{slug}.md file(s), any git-rm'd legacy spec file(s), and the brain pages you folded into. The aggregates are refreshed out-of-band.`,
+    `6. \`npx tsc --noEmit\` (should be a no-op — docs only).`,
     ``,
     `If you cannot determine where a spec's knowledge belongs (no obvious lifecycle/brain home), do NOT guess: still fold the others, and surface that one as a needs_input question naming the slug.`,
     ``,
-    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage legacy spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: …"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
+    `Worker protocol: do NOT run git commit/push or open a PR (the worker owns version control); \`git rm\` to stage legacy spec deletions is fine. Final message = ONLY one JSON object: {"status":"completed","summary":"folded N specs: <per-slug manifest matching principle 5>"} | {"status":"needs_input","questions":[{"id","q"}]}.`,
   ].join("\n");
 }
 
