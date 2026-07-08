@@ -35,8 +35,25 @@ type Admin = ReturnType<typeof createAdminClient>;
 // applyAnalyzerVerdict when the box lane knows it).
 const GRADER_MODEL = SONNET_MODEL;
 
-// "Severe issue" types that force escalation regardless of overall score
-const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broken_action"]);
+// "Severe issue" types that force escalation regardless of overall score.
+// Deliberately does NOT include `unverified_from_surface` — a claim the AI
+// stated that is CORRECT per the underlying product/record but ABSENT from
+// the analyzer's own surface (order-line data, KB slice, etc.) is not a
+// fabrication and must not force a re-open. Phase 1 of
+// docs/brain/specs/cora-grades-against-ai-data-surface-no-false-fabrication-on-unseen-facts.md.
+export const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broken_action"]);
+
+/**
+ * Issue type reserved for grader findings that flag a specific AI claim
+ * (product variant, flavor, SKU shape, KB detail, …) which the grader
+ * cannot verify from the surface it was given but which also does NOT
+ * CONTRADICT anything on that surface. Distinct from `inaccuracy`
+ * (surface-contradicting) so the score cap + severe-issue force-escalate
+ * paths never fire on gaps in the analyzer's own context. Consumed by
+ * downstream escalation logic in Phase 2. Phase 1 of
+ * docs/brain/specs/cora-grades-against-ai-data-surface-no-false-fabrication-on-unseen-facts.md.
+ */
+export const UNVERIFIED_FROM_SURFACE_ISSUE_TYPE = "unverified_from_surface";
 
 // The system note emitted on a clean AI positive close
 // (src/lib/inngest/unified-ticket-handler.ts:1593). The real note appends
@@ -236,7 +253,7 @@ You will be shown a window of messages from a single ticket. Grade ONLY the AI a
 
 EVALUATION DIMENSIONS (most damaging first):
   1. Action ↔ Message Consistency — did the AI claim it did something it didn't actually do? (e.g. "I cancelled your subscription" with no cancel action attached)
-  2. Accuracy — did the AI give wrong information, hallucinate codes/dates/policies, or fabricate facts?
+  2. Accuracy — did the AI give wrong information? See SURFACE-BOUNDED GRADING below: only a claim that CONTRADICTS the surface you were given counts as an inaccuracy. A specific claim that is simply absent from your surface is unverified, not wrong.
   3. Intent Resolution — did the AI actually solve what the customer asked, or sidestep / route them elsewhere unnecessarily?
   4. Rule Compliance — did the AI follow our internal routing rules (cancels go to journey, LOYALTY codes use apply_loyalty_coupon, no phone callback promises, etc.)?
   5. Tone / Empathy — robotic boilerplate, sales-y framing, reflexive apologies for things we communicated upfront, repeating context unnecessarily?
@@ -245,6 +262,13 @@ EVALUATION DIMENSIONS (most damaging first):
   8. Customer Signal — positive close ("thanks!") = good. Frustration markers / repeat asks / "speak to human" / threats = bad.
   9. Context Respect — did the AI honor grandfathered pricing / VIP status / agent-intervened threads / crisis enrollment?
   10. Resolution Efficiency — simple ask in 1 turn vs 5 turns?
+
+SURFACE-BOUNDED GRADING (READ THIS CAREFULLY — you grade the AI against the data the AI actually had, not against gaps in YOUR own surface):
+  You see a conversation window plus whatever context blocks are attached (agent guidance, playbook context, policies, calibration rules). You do NOT see the full product catalog, the full KB, every SKU/variant/flavor, the full order line, or the customer's full history. When the AI makes a specific claim (a product variant name, a flavor, a shipping window, a KB detail, a per-unit price, a cadence, etc.), triage it into one of these three buckets:
+    A. CONTRADICTS your surface — the claim disagrees with a fact that IS on your surface. Example: the AI says the per-unit was $30 but the surface shows the customer was charged $25/unit, or the AI cites policy X but the CURRENT POLICIES block above says policy Y. → This is an inaccuracy. Tag it \`inaccuracy\`. HARD CAPS apply.
+    B. CONFIRMED by your surface — the claim matches a fact on your surface. → Not an issue at all; do not flag.
+    C. ABSENT from your surface — the claim is specific and non-vague, but nothing on your surface either confirms OR contradicts it. Example: the AI names a product variant/flavor the order-line data in your surface doesn't include; the AI cites a shipping detail the surface didn't attach. You cannot tell whether it's right or wrong. → This is UNVERIFIED. If it seems worth noting for a human reviewer, tag it \`unverified_from_surface\` with a description that says exactly what claim you couldn't verify and why (e.g. "claim about variant 'Vanilla' — order-line variant name is not in the surface"). NEVER call it an \`inaccuracy\`, NEVER call it a fabrication/hallucination, and it does NOT cap the score.
+  The core rule: absence-from-your-surface is a limit of YOUR context, not evidence the AI lied. Grade the AI against what the AI had, not against what YOU had.
 
 SCORING (1-10):
   10 — flawless: accurate, actions matched, problem solved, customer happy
@@ -255,12 +279,12 @@ SCORING (1-10):
   1 — catastrophic: the AI lied, broke a major promise, or insulted the customer
 
 HARD CAPS:
-  • Any factual inaccuracy (wrong code, wrong date, wrong policy, hallucinated info) = max score 5
+  • Any SURFACE-CONTRADICTING factual inaccuracy (wrong code, wrong date, wrong policy, a number that doesn't reconcile to the surfaced total) = max score 5. Bucket C (unverified_from_surface) does NOT trigger this cap.
   • Any unkept promise ("I'll process your refund") with no matching action = max score 4
   • Any repeated identical response (>2 times) = max score 5
 
 ISSUE TYPES (use these exact strings):
-  inaccuracy, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation${rulesBlock}${policyBlock}
+  inaccuracy, unverified_from_surface, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation${rulesBlock}${policyBlock}
 
 OUTPUT (JSON only, no prose around it):
 {
