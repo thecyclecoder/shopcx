@@ -21,6 +21,7 @@ Written by Sol's box session (`runTicketHandleJob` — Phase 2) via `src/lib/tic
 | `authored_by` | `text` | — | default `'sol_box_session'` — surfaced for the rare non-Sol author (a founder-authored override) |
 | `authored_at` | `timestamptz` | — | default `now()` — stamped at insert |
 | `superseded_at` | `timestamptz` | ✓ | NULL = live row; non-NULL = a later inflection superseded this Direction. Compare-and-set from `superseDirection` (Phase 2) |
+| `resession_count` | `integer` | — | default `0` — per-ticket re-session counter. Incremented on every router-driven supersede + fresh Sol dispatch (Phase 2 of [[../specs/sol-runaway-re-session-cap-guardrail]]). Compared against [[ai_channel_config]].`sol_max_resessions` — when the count reaches the cap the router escalates the ticket to the routine lane instead of dispatching another Sol session. Zero on the first Direction; N after N re-sessions |
 
 **Indexes:**
 - `(workspace_id, ticket_id, authored_at DESC)` — the per-ticket "latest Direction" read (spec Phase 1 verification).
@@ -52,6 +53,8 @@ Service-role only (RLS enabled with no policies). Every write goes through `crea
 ## Migration
 
 `supabase/migrations/20260925120000_ticket_directions.sql` (apply: `npx tsx scripts/apply-ticket-directions-migration.ts`). Idempotent — creates the `ticket_direction_path` enum (DO-guarded), the table, both indexes (`(workspace_id, ticket_id, authored_at DESC)` + the partial UNIQUE on `ticket_id WHERE superseded_at IS NULL`), and enables RLS with no policies.
+
+`supabase/migrations/20260930120000_sol_resession_cap.sql` (apply: `npx tsx scripts/apply-sol-resession-cap-migration.ts`) — adds `resession_count integer NOT NULL DEFAULT 0` (Phase 1 of [[../specs/sol-runaway-re-session-cap-guardrail]]). Idempotent (ADD COLUMN IF NOT EXISTS).
 
 ---
 
