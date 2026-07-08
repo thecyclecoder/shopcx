@@ -141,6 +141,66 @@ export interface CxBundle {
   policies: CxPolicy[];
 }
 
+// ── Actionable outcomes catalog (Phase 1 of sol-dispatch-matches-journey-playbook-workflow) ───
+
+/**
+ * A journey the workspace has ACTIVE that matches a resolved intent. Sol names the slug on the
+ * Direction (`plan.journey_slug` — see [[../libraries/ticket-directions]]) so Phase 2's cheap-
+ * execution turn can APPLY it via `launchJourneyForTicket` — never a freeform "click below" reply.
+ */
+export interface CxActionableJourney {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  trigger_intent: string;
+  channels: string[];
+  priority: number;
+}
+
+/**
+ * A playbook the workspace has ACTIVE that matches a resolved intent. Sol names the slug on the
+ * Direction (`plan.playbook_slug` — see [[../libraries/ticket-directions]]) so Phase 2's cheap-
+ * execution turn can start it via `startPlaybook` / `executePlaybookStep`.
+ */
+export interface CxActionablePlaybook {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  trigger_intents: string[];
+  priority: number;
+}
+
+/**
+ * A workflow the workspace has ENABLED whose `trigger_tag` matches the resolved intent. Rendered
+ * to Sol so a workflow-shaped intent (order_tracking / cancel_request / …) surfaces alongside
+ * the journey + playbook catalog.
+ */
+export interface CxActionableWorkflow {
+  id: string;
+  name: string;
+  template: string;
+  trigger_tag: string;
+  channels: string[];
+}
+
+/**
+ * The full deterministic catalog of matched mechanisms for one intent in one workspace — the
+ * shape `listActionableOutcomes` returns. An empty catalog (no matches on any of the three
+ * axes) is Sol's signal that the correct Direction is `chosen_path='stateless'` (an AI reply);
+ * a non-empty catalog is Sol's signal to name a specific `journey_slug` / `playbook_slug` on
+ * the Direction so the mechanism is APPLIED, not merely described.
+ */
+export interface CxActionableOutcomes {
+  workspace_id: string;
+  intent: string;
+  channel: string | null;
+  journeys: CxActionableJourney[];
+  playbooks: CxActionablePlaybook[];
+  workflows: CxActionableWorkflow[];
+}
+
 // ── Getters ───────────────────────────────────────────────────────────────────
 
 const RECENT_ORDER_DAYS = 180;
@@ -446,6 +506,144 @@ export async function getCxBundle(
   };
 }
 
+/**
+ * Deterministic READ-ONLY catalog reader — Phase 1 of
+ * [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]].
+ *
+ * Returns the workspace's ACTIVE journeys / playbooks / workflows whose trigger matches
+ * `intent`, so Sol's first-touch box session ([[../libraries/ticket-directions]] `writeDirection`)
+ * can record the specific matched mechanism on the Direction — `chosen_path='journey'` +
+ * `plan.journey_slug=<slug>` or `chosen_path='playbook'` + `plan.playbook_slug=<slug>` — instead
+ * of composing a freeform reply that references a CTA it never launched. An empty catalog is
+ * Sol's signal that the correct Direction is `chosen_path='stateless'` (an AI reply); a
+ * non-empty catalog is her signal to name a slug so Phase 2 can APPLY the mechanism.
+ *
+ * Matching:
+ *   - Journeys ([[../tables/journey_definitions]]): `is_active=true` AND
+ *     `lower(trigger_intent) = lower(intent)` — scalar text column.
+ *   - Playbooks ([[../tables/playbooks]]): `is_active=true` AND intent is a case-insensitive
+ *     member of `trigger_intents[]` — text[] column. Case-insensitivity is applied in-memory
+ *     after the workspace filter, following the same pattern the deployed orchestrator uses
+ *     (sonnet-orchestrator-v2 + playbook-executor); the catalog per workspace is small so this
+ *     is O(#playbooks) not a scan.
+ *   - Workflows ([[../tables/workflows]]): `enabled=true` AND `lower(trigger_tag) = lower(intent)`.
+ *
+ * Optional `opts.channel` narrows journeys + workflows to those whose `channels[]` includes the
+ * ticket's channel; when omitted (or when a mechanism's `channels[]` is empty), the mechanism
+ * passes. Read-only; scoped to `workspaceId` on every query (learning #6 — the workspace scope
+ * is re-asserted on the write, not inferred). Empty result is a valid, non-error outcome — Sol
+ * treats it as "no active mechanism for this intent" and picks `stateless`.
+ */
+export async function listActionableOutcomes(
+  admin: Admin,
+  workspaceId: string,
+  intent: string,
+  opts?: { channel?: string | null },
+): Promise<CxActionableOutcomes> {
+  const norm = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
+  const target = norm(intent);
+  const channel = opts?.channel ? String(opts.channel) : null;
+  const channelNorm = channel ? channel.toLowerCase() : null;
+
+  const empty: CxActionableOutcomes = {
+    workspace_id: workspaceId,
+    intent,
+    channel,
+    journeys: [],
+    playbooks: [],
+    workflows: [],
+  };
+  if (!target) return empty;
+
+  const channelMatches = (channels: string[] | null | undefined): boolean => {
+    if (!channelNorm) return true;
+    const arr = channels ?? [];
+    if (arr.length === 0) return true;
+    return arr.some((c) => (c ?? "").toLowerCase() === channelNorm);
+  };
+
+  const [journeyRes, playbookRes, workflowRes] = await Promise.all([
+    admin
+      .from("journey_definitions")
+      .select("id, slug, name, description, trigger_intent, channels, priority")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .order("priority", { ascending: false }),
+    admin
+      .from("playbooks")
+      .select("id, slug, name, description, trigger_intents, priority")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .order("priority", { ascending: false }),
+    admin
+      .from("workflows")
+      .select("id, name, template, trigger_tag, channels")
+      .eq("workspace_id", workspaceId)
+      .eq("enabled", true),
+  ]);
+
+  const journeyRows = (journeyRes.data ?? []) as Array<{
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+    trigger_intent: string | null;
+    channels: string[] | null;
+    priority: number | null;
+  }>;
+  const journeys: CxActionableJourney[] = journeyRows
+    .filter((j) => norm(j.trigger_intent) === target)
+    .filter((j) => channelMatches(j.channels))
+    .map((j) => ({
+      id: j.id,
+      slug: j.slug,
+      name: j.name,
+      description: j.description,
+      trigger_intent: j.trigger_intent ?? "",
+      channels: j.channels ?? [],
+      priority: j.priority ?? 0,
+    }));
+
+  const playbookRows = (playbookRes.data ?? []) as Array<{
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+    trigger_intents: string[] | null;
+    priority: number | null;
+  }>;
+  const playbooks: CxActionablePlaybook[] = playbookRows
+    .filter((p) => (p.trigger_intents ?? []).some((ti) => norm(ti) === target))
+    .map((p) => ({
+      id: p.id,
+      slug: p.slug,
+      name: p.name,
+      description: p.description,
+      trigger_intents: p.trigger_intents ?? [],
+      priority: p.priority ?? 0,
+    }));
+
+  const workflowRows = (workflowRes.data ?? []) as Array<{
+    id: string;
+    name: string;
+    template: string | null;
+    trigger_tag: string | null;
+    channels: string[] | null;
+  }>;
+  const workflows: CxActionableWorkflow[] = workflowRows
+    .filter((w) => norm(w.trigger_tag) === target)
+    .filter((w) => channelMatches(w.channels))
+    .map((w) => ({
+      id: w.id,
+      name: w.name,
+      template: w.template ?? "",
+      trigger_tag: w.trigger_tag ?? "",
+      channels: w.channels ?? [],
+    }));
+
+  return { workspace_id: workspaceId, intent, channel, journeys, playbooks, workflows };
+}
+
 // ── Formatting ────────────────────────────────────────────────────────────────
 
 const DOLLARS = (cents: number | null | undefined) =>
@@ -511,6 +709,45 @@ export function formatCxProducts(products: CxProduct[]): string {
     lines.push(`  - ${p.title ?? "(untitled)"} · ${variants || "(no variants)"}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Plain-text rendering of the actionable-outcomes catalog Phase 1's Sol-brief can embed. Empty
+ * catalog is rendered explicitly ("no matching mechanism") so the Direction author sees "pick
+ * chosen_path='stateless'" as the correct call rather than fabricating a slug.
+ */
+export function formatActionableOutcomes(o: CxActionableOutcomes): string {
+  const parts: string[] = [
+    `ACTIONABLE OUTCOMES for intent="${o.intent}"${o.channel ? ` channel=${o.channel}` : ""}:`,
+  ];
+  if (o.journeys.length === 0 && o.playbooks.length === 0 && o.workflows.length === 0) {
+    parts.push("  (no matching active mechanism — Direction should be chosen_path='stateless')");
+    return parts.join("\n");
+  }
+  if (o.journeys.length) {
+    parts.push("  Journeys:");
+    for (const j of o.journeys) {
+      const desc = j.description ? ` — ${j.description.slice(0, 80)}` : "";
+      const chs = j.channels.length ? ` [channels: ${j.channels.join(", ")}]` : "";
+      parts.push(`    - ${j.slug} (${j.name})${chs}${desc}`);
+    }
+  }
+  if (o.playbooks.length) {
+    parts.push("  Playbooks:");
+    for (const p of o.playbooks) {
+      const desc = p.description ? ` — ${p.description.slice(0, 80)}` : "";
+      const ints = p.trigger_intents.length ? ` [intents: ${p.trigger_intents.join(", ")}]` : "";
+      parts.push(`    - ${p.slug} (${p.name})${ints}${desc}`);
+    }
+  }
+  if (o.workflows.length) {
+    parts.push("  Workflows:");
+    for (const w of o.workflows) {
+      const chs = w.channels.length ? ` [channels: ${w.channels.join(", ")}]` : "";
+      parts.push(`    - ${w.name} template=${w.template} trigger_tag=${w.trigger_tag}${chs}`);
+    }
+  }
+  return parts.join("\n");
 }
 
 export function formatCxPolicies(policies: CxPolicy[]): string {

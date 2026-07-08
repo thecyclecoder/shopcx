@@ -25,6 +25,14 @@ interface FakePlaybook {
   name: string;
 }
 
+interface FakeJourney {
+  id: string;
+  workspace_id: string;
+  slug: string;
+  name: string;
+  is_active: boolean;
+}
+
 interface FakeDirectionRow {
   id: string;
   workspace_id: string;
@@ -42,17 +50,19 @@ interface FakeDirectionRow {
 
 interface SeedInput {
   playbooks?: FakePlaybook[];
+  journeys?: FakeJourney[];
   nextDirectionId?: string;
 }
 
 function makeAdmin(seed: SeedInput = {}) {
   const state = {
     playbooks: (seed.playbooks ?? []).map((p) => ({ ...p })),
+    journeys: (seed.journeys ?? []).map((j) => ({ ...j })),
     directions: [] as FakeDirectionRow[],
   };
   let nextDirectionId = seed.nextDirectionId ?? "dir-generated";
 
-  function makePlaybookBuilder() {
+  function makeRowLookupBuilder<T extends Record<string, unknown>>(rows: T[]) {
     const filters: Record<string, unknown> = {};
     const builder = {
       select(_cols: string) {
@@ -63,9 +73,9 @@ function makeAdmin(seed: SeedInput = {}) {
         return builder;
       },
       maybeSingle() {
-        const match = state.playbooks.find((p) => {
+        const match = rows.find((p) => {
           for (const [k, v] of Object.entries(filters)) {
-            if ((p as unknown as Record<string, unknown>)[k] !== v) return false;
+            if ((p as Record<string, unknown>)[k] !== v) return false;
           }
           return true;
         });
@@ -109,7 +119,9 @@ function makeAdmin(seed: SeedInput = {}) {
 
   const admin = {
     from(table: string) {
-      if (table === "playbooks") return makePlaybookBuilder();
+      if (table === "playbooks") return makeRowLookupBuilder(state.playbooks as unknown as Array<Record<string, unknown>>);
+      if (table === "journey_definitions")
+        return makeRowLookupBuilder(state.journeys as unknown as Array<Record<string, unknown>>);
       if (table === "ticket_directions") return makeDirectionInsertBuilder();
       throw new Error(`unexpected table: ${table}`);
     },
@@ -297,6 +309,173 @@ test("chosen_path='playbook' + whitespace-only slug → rejected with playbook_s
     (err: unknown) => {
       assert.ok(err instanceof TicketDirectionPlanError);
       assert.equal(err.code, "playbook_slug_not_string");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// journey_slug validator — Phase 1 of
+// docs/brain/specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta.md.
+// The writer confirms plan.journey_slug points at a live is_active journey in this workspace so
+// downstream cheap-execution can APPLY the journey (launchJourneyForTicket), not describe it.
+// ──────────────────────────────────────────────────────────────────────
+
+test("chosen_path='journey' + no plan.journey_slug → rejected with typed error", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      { id: "j-1", workspace_id: WS, slug: "cancel_subscription", name: "Cancel Subscription", is_active: true },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "cancel_subscription",
+        context_summary: "customer wants to cancel",
+        chosen_path: "journey",
+        plan: {},
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_missing");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("chosen_path='journey' + unknown slug → rejected with slug echoed", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      { id: "j-1", workspace_id: WS, slug: "cancel_subscription", name: "Cancel Subscription", is_active: true },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "cancel_subscription",
+        context_summary: "customer wants to cancel",
+        chosen_path: "journey",
+        plan: { journey_slug: "cancel_madeup" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_unknown");
+      assert.equal(err.slug, "cancel_madeup");
+      assert.match(err.message, /cancel_madeup/);
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("chosen_path='journey' + inactive journey slug → rejected as unknown (is_active gate)", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      { id: "j-1", workspace_id: WS, slug: "retired_journey", name: "Retired Journey", is_active: false },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "retired",
+        context_summary: "customer wants a retired flow",
+        chosen_path: "journey",
+        plan: { journey_slug: "retired_journey" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_unknown");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("chosen_path='journey' + known active slug → row is inserted with plan intact", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "j-1",
+        workspace_id: WS,
+        slug: "cancel_subscription",
+        name: "Cancel Subscription",
+        is_active: true,
+      },
+    ],
+    nextDirectionId: "dir-journey",
+  });
+  const row = await writeDirection(admin, {
+    workspace_id: WS,
+    ticket_id: TID,
+    intent: "cancel_subscription",
+    context_summary: "customer wants to cancel",
+    chosen_path: "journey",
+    plan: { journey_slug: "cancel_subscription" },
+  });
+  assert.equal(row.id, "dir-journey");
+  assert.equal(row.chosen_path, "journey");
+  assert.equal(row.plan.journey_slug, "cancel_subscription");
+  assert.equal(state.directions.length, 1);
+});
+
+test("chosen_path='journey' + slug matches only a DIFFERENT workspace → rejected", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "j-other",
+        workspace_id: "00000000-0000-0000-0000-00000000ws2",
+        slug: "cancel_subscription",
+        name: "Cancel Subscription",
+        is_active: true,
+      },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "cancel_subscription",
+        context_summary: "customer wants to cancel",
+        chosen_path: "journey",
+        plan: { journey_slug: "cancel_subscription" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_unknown");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("chosen_path='journey' + whitespace-only slug → rejected with journey_slug_not_string", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      { id: "j-1", workspace_id: WS, slug: "cancel_subscription", name: "Cancel", is_active: true },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "cancel",
+        context_summary: "customer wants to cancel",
+        chosen_path: "journey",
+        plan: { journey_slug: "   " },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_not_string");
       return true;
     },
   );
