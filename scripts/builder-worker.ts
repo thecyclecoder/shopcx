@@ -12449,6 +12449,30 @@ async function loadCsDirectorCallBrief(
     parts.push(cxBrief);
   }
 
+  // Phase 1 of cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-
+  // escalation — for the ticket's customer, evaluate every active playbook's tier-exception ladder
+  // (thresholds pulled verbatim from the playbook_exceptions rows) and its disqualifier list
+  // (previous_exception / has_chargeback / has_chargeback_on_order) so June sees whether the
+  // customer clears a Tier-1 / Tier-2 offer BEFORE deciding escalate_founder. If eligible_for_offer
+  // is true on the matching playbook, the correct verdict is approve_remedy routing back into the
+  // playbook's offer_exception step — NOT escalate_founder (the motivating case is ticket
+  // 87ce35a1: a $1569-LTV / 19-order customer escalated for an out-of-policy renewal refund the
+  // Refund playbook's tiers were designed to save). Best-effort — a load failure returns an
+  // empty snapshot so the base brief still renders.
+  try {
+    const { loadPlaybookTierEligibility, formatPlaybookTierBrief } = await import("../src/lib/cs-director-playbook-tier-eligibility");
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    const { evaluations, stats } = await loadPlaybookTierEligibility(db, workspaceId, ticketRow?.customer_id ?? null);
+    parts.push(formatPlaybookTierBrief(evaluations, stats));
+  } catch (e) {
+    parts.push("");
+    parts.push(`PLAYBOOK EXCEPTION-TIER ELIGIBILITY: read failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
   // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
   // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
@@ -12546,6 +12570,8 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
     `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so the executor authors it via the specs SDK as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
     `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). The runner mints a CEO dashboard notification carrying both so the founder can approve/adjust in one read.`,
+    ``,
+    `TIER-LADDER-BEFORE-ESCALATION RULE (cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-escalation Phase 1): BEFORE emitting escalate_founder on an out-of-policy refund/return, consult the PLAYBOOK EXCEPTION-TIER ELIGIBILITY section of the brief. If ANY matching playbook shows \`eligible_for_offer=true\` (customer clears ≥1 tier AND no disqualifier is active), the correct verdict is approve_remedy that routes back into the playbook's offer_exception step (the sanctioned Tier-1 store_credit_return or Tier-2 refund_return SAVE) — NOT escalate_founder. escalate_founder is reserved for: clears NO tier, a disqualifier applies, or a genuine policy/authority gap the playbook can't resolve (e.g. a full refund past the CS ceiling, an identity merge, a storyline call). Motivating case: ticket 87ce35a1 was escalated for an out-of-policy renewal refund on a $1569-LTV / 19-order customer the Refund playbook's Tier-1/Tier-2 was designed to save. Cite the specific tier (\`Tier N "<exception_name>" → <resolution_type>\`) in your \`reasoning\` when you route back into the ladder so the audit trail shows the sanctioned save you picked.`,
     ``,
     brief,
     ``,
