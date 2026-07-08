@@ -16683,6 +16683,84 @@ async function runAgentCoachJob(job: Job) {
   const rollupDrop = typeof instr.rollup_drop === "number" ? instr.rollup_drop : null;
   const openCount = typeof instr.open_coaching_count === "number" ? instr.open_coaching_count : 0;
 
+  // ── agent-coach-auto-resolves-blameless-box-outage Phase 2 — auto-resolve BEFORE running the box ──
+  // A batch whose low grades came 100% from a box-level infra outage (Claude CLI auth eviction / breaker
+  // trip / identical box error across every action) is NOT a worker mistake. Coaching it is noise; parking
+  // the job `needs_attention` mints a CEO card every cycle while the outage grades age out. The classifier
+  // (Phase 1) inspects EACH low grade's grader reasoning + underlying agent_jobs.error / log_tail; if all
+  // match a box signature AND none carries a worker-attributable marker, we auto-resolve here with a
+  // `blameless_outage` audit row (or dedup to an existing one within BLAMELESS_OUTAGE_DEDUP_MS) — the
+  // coach job is marked `completed`, never `needs_attention`, and the CEO gets no dashboard_notification.
+  // The batch with even ONE genuine worker slip falls through to the existing coach → route → escalate path
+  // untouched.
+  const { classifyBlamelessOutageBatch, decideBlamelessOutageOutcome, BLAMELESS_OUTAGE_DEDUP_MS } =
+    await import("../src/lib/agents/agent-coaching");
+  const lows = grades.map((g) => {
+    const j = jobsById.get(g.agent_job_id);
+    return {
+      gradeId: g.id,
+      gradeReasoning: g.reasoning,
+      jobError: j?.error ?? null,
+      jobLogTail: j?.log_tail ?? null,
+    };
+  });
+  const verdict = classifyBlamelessOutageBatch(lows);
+  const dedupSinceIso = new Date(Date.now() - BLAMELESS_OUTAGE_DEDUP_MS).toISOString();
+  const { data: recentBlamelessRows } = await a
+    .from("agent_coaching_log")
+    .select("id, created_at")
+    .eq("workspace_id", job.workspace_id)
+    .eq("agent_kind", agentKind)
+    .eq("kind", "blameless_outage")
+    .gte("created_at", dedupSinceIso)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  const recentAudit = ((recentBlamelessRows as { id: string; created_at: string }[] | null) ?? [])
+    .map((r) => ({ id: r.id, createdAt: r.created_at }));
+  const outcome = decideBlamelessOutageOutcome(verdict, recentAudit);
+  if (outcome.action === "record_blameless_outage") {
+    const coachFn = typeof instr.fn === "string" && instr.fn ? instr.fn : "platform";
+    const { data: audit } = await a
+      .from("agent_coaching_log")
+      .insert({
+        workspace_id: job.workspace_id,
+        agent_kind: agentKind,
+        coached_by: coachFn,
+        error_class: `blameless-outage:${outcome.dominantSignature}`,
+        triggering_pattern:
+          `all ${grades.length} low grade(s) matched the box-level ${outcome.dominantSignature} signature — no worker-attributable content`,
+        old_instruction: null,
+        new_instruction: "",
+        reasoning: outcome.reason,
+        instruction_id: null,
+        source_activity_ids: grades.map((g) => g.id),
+        attempt: 1,
+        // Open vocab (no CHECK constraint on kind — see supabase/migrations/20260703120000_worker_coaching.sql).
+        kind: "blameless_outage",
+        // Nothing to re-check on an outage; mark it stuck so the pending re-check sweep never touches it.
+        recheck_status: "stuck",
+      })
+      .select("id")
+      .single();
+    const auditId = (audit as { id: string } | null)?.id ?? "?";
+    await update(job.id, {
+      status: "completed",
+      log_tail:
+        `blameless-outage auto-resolved (${outcome.dominantSignature}) — no coaching, no CEO escalation; audit=${auditId}`.slice(-2000),
+    });
+    console.log(`${tag} blameless-outage auto-resolved (${outcome.dominantSignature}); audit=${auditId}`);
+    return;
+  }
+  if (outcome.action === "auto_resolve_deduped") {
+    await update(job.id, {
+      status: "completed",
+      log_tail:
+        `blameless-outage deduped — existing audit ${outcome.existingId} within ${Math.round(BLAMELESS_OUTAGE_DEDUP_MS / 3600000)}h; no new card`.slice(-2000),
+    });
+    console.log(`${tag} blameless-outage deduped (existing audit ${outcome.existingId})`);
+    return;
+  }
+
   const prompt = [
     `You are Ada (the box's Platform/DevOps Director) on Max, coaching your worker ${rubric.name} (the \`${agentKind}\` worker) using the agent-coach skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator.`,
     ``,
