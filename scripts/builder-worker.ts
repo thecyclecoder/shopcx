@@ -9933,11 +9933,52 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // Load the same read-only context brief the improve lane uses, so Sol's first turn sees the ticket +
 // customer + last analysis exactly the way the founder does. Best-effort — a missing customer or
 // analysis is fine; the brief still surfaces the messages.
+//
+// Phase 1 of [[sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]
+// APPENDS the workspace's active policies (returns / refunds / consumable / subscription
+// returnability / exception ceilings) so Sol's first-touch reasons AGAINST the actual rulebook
+// before choosing an outcome — the same policy text the analyzer + orchestrator already read
+// (docs/brain/tables/policies.md). Without this block, Sol offered coffee returns the return policy
+// disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
+// error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
-  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
-  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
-  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
-  return loadImproveBrief(ticketId);
+  const base = await loadImproveBrief(ticketId);
+  const { data: ticket } = await db
+    .from("tickets")
+    .select("workspace_id")
+    .eq("id", ticketId)
+    .maybeSingle();
+  const workspaceId = (ticket as { workspace_id: string | null } | null)?.workspace_id ?? null;
+  if (!workspaceId) return base;
+  const policiesBlock = await loadActivePoliciesBlock(workspaceId);
+  return policiesBlock ? `${base}\n\n${policiesBlock}` : base;
+}
+
+// Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
+// baked into Sol's turn-1 prompt. Same select shape sonnet-orchestrator-v2 uses at :465, and the
+// same block header ("CURRENT POLICIES") the analyzer prompt uses at ticket-analyzer.ts:262 —
+// keeping the header consistent means Sol reasons about "policy" the same way every other layer
+// does. Returns "" on empty / on error (the brief is still useful without it; the prompt below
+// still hard-requires policy review regardless — an empty block means Sol must fetch via
+// get_policies or fall through to needs_human rather than guess).
+async function loadActivePoliciesBlock(workspaceId: string): Promise<string> {
+  try {
+    const { data, error } = await db
+      .from("policies")
+      .select("slug, name, internal_summary")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug");
+    if (error || !data || !data.length) return "";
+    const rows = data as Array<{ slug: string; name: string; internal_summary: string | null }>;
+    return [
+      "--- CURRENT POLICIES (the rulebook — your Direction MUST reflect these; NEVER propose or bait an outcome outside them) ---",
+      ...rows.map((p) => `## ${p.name} (slug: ${p.slug})\n${(p.internal_summary || "(no internal_summary)").trim()}`),
+    ].join("\n\n");
+  } catch {
+    return "";
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -9972,8 +10013,15 @@ async function runTicketHandleJob(job: Job) {
       brief,
       ``,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
-      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis). You may also Read/Grep the brain + src/ and WebSearch.`,
+      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
+      ``,
+      // Phase 1 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // REQUIRE policy review before Sol commits. The CURRENT POLICIES block in the brief above is the
+      // rulebook; get_policies re-fetches it live. Sol MUST reason against it and NEVER bait an
+      // outcome the policy disallows (e.g. offering coffee-subscription returns when returns aren't
+      // accepted). Absence of a clearly-applicable policy is not permission — it is needs_human.
+      `POLICY REVIEW IS MANDATORY. Before you choose a chosen_path or draft the first_reply, review the CURRENT POLICIES block above (re-fetch live via get_policies if unsure) and reason AGAINST them for the customer's ask. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,

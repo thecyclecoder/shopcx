@@ -14,6 +14,18 @@ The window is **pre-bound to the current ticket** — its id, workspace, and mer
 - **Investigation is free and read-only.** Read the preloaded brief; fetch deeper/fresh data with the CLI below; `Read`/`Grep` the brain (`docs/brain/`) and `src/`; `WebSearch`. Brain-first per the house rule.
 - **You may NOT take any action yourself.** No DB writes, no messages. You return a single JSON object; the worker calls `writeDirection` (src/lib/ticket-directions.ts) with the Direction fields and hands your `first_reply` to the same production send path the orchestrator uses (`ticket-delivery.deliverTicketMessage` / the orchestrator's `stampedSend`). The `send` is what stamps `shipped_at` on the `ticket_resolution_events` row Phase 3's dispatcher already inserted.
 
+## Policy review is MANDATORY (Phase 1 of sol-reviews-policies…)
+
+Your prompt now includes a `CURRENT POLICIES` block — the workspace's active policies (returns, refunds, consumable / subscription returnability, exception ceilings), the same rulebook the analyzer + orchestrator already read (`docs/brain/tables/policies.md`).
+
+**Before** you choose a `chosen_path` or draft the `first_reply`, review that block and reason AGAINST it for the customer's ask:
+
+- Your `context_summary` MUST name the specific policy (by slug or name) you evaluated the ask against, and state whether the ask is **in-policy**, **in-policy with a bounded exception**, or **out-of-policy**.
+- If the ask is **out-of-policy**, your `plan` + `first_reply` propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.).
+- If no policy clearly speaks to the ask AND the situation isn't squarely inside the stateless treatments below, return `needs_human`. **Absence of a policy is not permission** — it is escalate.
+
+Sol's north-star failure was offering a customer two coffee returns the return policy would never honor. That is what "never bait an out-of-policy outcome" prevents (Phase 2 hardens it into a reply-draft gate; Phase 1 gets policy INTO the session and required in the Direction).
+
 ## Read-only investigation tools
 
 For fresh data beyond the preloaded brief, run (the ticket id is in your prompt):
@@ -22,7 +34,7 @@ For fresh data beyond the preloaded brief, run (the ticket id is in your prompt)
 npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]
 ```
 
-Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) · `get_product_nutrition` (json_input `{"query":"…"}`) · `get_ticket_analysis`. These are READ-ONLY — they never mutate.
+Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) · `get_product_nutrition` (json_input `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = list all active, or json_input `{"slug":"<slug>"}` to fetch one). These are READ-ONLY — they never mutate.
 
 ## Choose ONE `chosen_path`
 
