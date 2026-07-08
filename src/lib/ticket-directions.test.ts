@@ -272,6 +272,37 @@ test("chosen_path='playbook' + non-string slug → rejected with playbook_slug_n
   assert.equal(state.directions.length, 0);
 });
 
+// Phase 3 of [[../../docs/brain/specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]:
+// tighten the empty-slug rejection to also cover a whitespace-only string. Sol's north-star rule
+// on the no-playbook-match case is "chosen_path='stateless' — never claim playbook with an empty
+// slug" — a whitespace-only slug is morally empty (Sol trying to satisfy the field without a
+// real match). The writer must reject it with the same typed code the empty case throws, so a
+// downstream caller can render one diagnostic instead of routing through the workspace lookup
+// (which would surface it as playbook_slug_unknown and read as "we don't have that playbook"
+// rather than the truer "you didn't pick one").
+test("chosen_path='playbook' + whitespace-only slug → rejected with playbook_slug_not_string (Phase 3 honest-stateless invariant)", async () => {
+  const { admin, state } = makeAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "refund",
+        context_summary: "customer wants refund",
+        chosen_path: "playbook",
+        plan: { playbook_slug: "   " },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "playbook_slug_not_string");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
 // ──────────────────────────────────────────────────────────────────────
 // resolveSolChosenPlaybook — Phase 2 of
 // docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.

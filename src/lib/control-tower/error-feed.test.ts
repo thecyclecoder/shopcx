@@ -288,6 +288,70 @@ test("isTransientSupabaseLogNoise scopes GoTrue 504 gateway-timeout as transient
   );
 });
 
+test("isTransientSupabaseLogNoise scopes /authorize browser-abort via event_message.error (supabase-logs:a30ffe4489dd6ffb)", () => {
+  // On GoTrue's /authorize (PKCE flow_state), the browser-abort marker lives INSIDE the
+  // event_message JSON's `error` field — the top-level msg is only `500: Error creating
+  // flow state` and never mentions the abort itself. Fold the inner `error` into the same
+  // browser-abort set as msg so a user closing the Google-login tab mid-OAuth stops
+  // minting page-worthy incidents
+  // ([[../specs/error-feed-scope-supabase-authorize-flow-state-context-cance]]).
+  const eventMessage = JSON.stringify({
+    action: "authorize",
+    error: "context canceled",
+    method: "GET",
+    path: "/authorize",
+    status: 500,
+  });
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", {
+      severity: "error",
+      message: "500: Error creating flow state",
+      eventMessage,
+    }),
+    true,
+  );
+});
+
+test("isTransientSupabaseLogNoise KEEPS a real /authorize error inside event_message (invalid JWT still pages)", () => {
+  // A genuine authorize failure whose event_message.error is NOT a browser-abort marker
+  // (e.g. `invalid JWT`, `signature mismatch`, non-abort 5xx) must still page on first
+  // sighting — only the abort shapes are folded into the transient class.
+  const eventMessage = JSON.stringify({
+    action: "authorize",
+    error: "invalid JWT: unable to parse or verify signature",
+    method: "GET",
+    path: "/authorize",
+    status: 401,
+  });
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", {
+      severity: "error",
+      message: "401: invalid JWT",
+      eventMessage,
+    }),
+    false,
+  );
+});
+
+test("isTransientSupabaseLogNoise tolerates a bad/non-JSON event_message (falls back to msg-only)", () => {
+  // A malformed event_message (not JSON, or JSON without an `error` field) must be a no-op —
+  // the msg-only path still applies. Neither of these should throw, and neither should flip
+  // a non-abort msg into transient.
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "invalid JWT", eventMessage: "not-json-at-all" }),
+    false,
+  );
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "invalid JWT", eventMessage: JSON.stringify({ noise: true }) }),
+    false,
+  );
+  // And an abort marker in msg STILL scopes even when event_message is garbage.
+  assert.equal(
+    isTransientSupabaseLogNoise("auth", { severity: "error", message: "context canceled", eventMessage: "not-json" }),
+    true,
+  );
+});
+
 // ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──
 // Supabase's own /auth/v1/user 504 on edge_logs — foreign-owned surface, no lever from us.
 // The transient class still recurred inside TRANSIENT_RECUR_WINDOW_MS and escalated on
@@ -444,9 +508,25 @@ test("isForeignGoTrueAuthLogNoise drops the exact phrase (case + whitespace inse
   assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: context deadline exceeded  "), true);
 });
 
-test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / invalid JWT / rate-limit)", () => {
-  // The browser-abort sibling — still routed through the transient class.
-  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-timeout-context-canceled) ──
+// Shape (e): msg-only mirror of shape (a) — GoTrue's outer-request-timeout wrapper firing on
+// its Postgres backend (`timeout:` prefix in Go's error phrasing). Foreign-owned surface,
+// no lever from our side; the transient recur-window empirically failed to absorb the
+// ~2/day cadence (supabase-logs:c9eb05fd1d3fb82c, 15 occ / 7 days). Drop AT CAPTURE — the
+// exact phrase only so plain `context canceled` (real browser-abort noise, still transient)
+// is untouched.
+
+test("isForeignGoTrueAuthLogNoise drops the exact 'timeout: context canceled' phrase (case + whitespace insensitive)", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("unhandled server error: timeout: context canceled"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: timeout: context canceled  "), true);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (plain context canceled / invalid JWT / rate-limit)", () => {
+  // The browser-abort sibling WITHOUT the `timeout:` prefix — a real client-goes-away signal
+  // on other paths (including /authorize). Still routed through the transient class.
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: context canceled"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
   // Actionable GoTrue errors — must still surface / page on first sighting.
   assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
   assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
@@ -557,6 +637,46 @@ test("isForeignGoTrueAuthLogNoise KEEPS a longer/prefixed variant (postgres/api 
     isForeignGoTrueAuthLogNoise("prefix Unhandled server error: context deadline exceeded suffix"),
     false,
   );
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-unable-to-fetch-rec) ──
+// GoTrue's `/user` SELECT-on-auth.users emits `Unhandled server error: unable to fetch
+// records: context canceled` when the parent HTTP request context dies mid-query — normal
+// browser behavior (tab close, navigation away, React StrictMode double-mount aborting an
+// in-flight `supabase.auth.getUser()`). Already routed through the transient class via the
+// `context canceled` substring, but the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS`
+// and paged a Platform owner on a healthy loop (supabase-logs:f5b02a707c3d4e49). Drop AT
+// CAPTURE — exact phrase only so a plain `context canceled` on any non-/user path stays
+// transient via `isTransientSupabaseLogNoise`.
+
+test("isForeignGoTrueAuthLogNoise drops the exact 'unable to fetch records: context canceled' phrase (case + whitespace insensitive)", () => {
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("Unhandled server error: unable to fetch records: context canceled"),
+    true,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("unhandled server error: unable to fetch records: context canceled"),
+    true,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("  Unhandled server error: unable to fetch records: context canceled  "),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a plain 'context canceled' on a non-/user path (still routed through the transient class)", () => {
+  // A plain `context canceled` on a different path — NOT the exact (d) or (e) phrase, so
+  // still captured. `isTransientSupabaseLogNoise('auth', …)` still tags it transient.
+  assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
+  // A longer/embedded variant of the exact (d) phrase — the exact-match contract keeps it.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "prefix Unhandled server error: unable to fetch records: context canceled suffix",
+    ),
+    false,
+  );
+  // Actionable GoTrue errors still surface / page on first sighting.
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
 });
 
 test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {

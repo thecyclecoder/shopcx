@@ -36,17 +36,18 @@ Window is 1 hour so we have buffer + can amortize across the hour evenly via con
 
 ## Internal scheduler — Phase 2: line item resolution
 
-Pricing is **derived, never baked**. The renewal calls the pricing engine
+Pricing is **derived, never baked** — **unless** the sub carries a configured grandfathered lock, in which case that lock is authoritative. The renewal calls the pricing engine
 ([[../libraries/pricing]] · `resolveSubscriptionPricing`), which is the single
 source of truth shared with the portal display. For each due sub:
 
 1. **Resolve each line** from `subscription.items` JSONB — items are catalog
-   **references** (variant + product UUIDs, quantity), not prices.
+   **references** (variant + product UUIDs, quantity), not prices — unless the item carries a lock (see below).
 2. **Derive the price per line** = `base × (1 − quantity-break%) × (1 − S&S%)`,
    where `base` = `items[].price_override_cents` (grandfathered lock) ?? catalog
    `product_variants.price_cents`, the break is the **mix-and-match** tier for the
    total quantity sharing the line's [[../tables/pricing_rules]], and S&S is the
    rule's `subscribe_discount_pct` (else `workspaces.subscription_discount_pct`).
+   **When an item carries a post-discount lock (`price_cents` set, no `price_override_cents`), rule decomposition is SKIPPED and `unit = price_cents` verbatim** — the sub's own configured per-unit is the authoritative renewal price. See the renewal-price contract in [[../libraries/pricing]] § The principle. This is what protects a grandfathered customer whose catalog price has since risen from silently being charged the current standard.
 3. **Snapshot** the engine's per-line charged prices onto the order's line items
    (an order is a historical record, so it bakes the price; the sub never does).
 4. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon
@@ -66,6 +67,19 @@ source of truth shared with the portal display. For each due sub:
    rate. **Protection** line if
    `shipping_protection_added=true` (passthrough; excluded from the discountable
    product subtotal). **Compute pre-tax total**.
+
+## Internal scheduler — Phase 2.5: overcharge guard (fail-safe)
+
+Belt & suspenders to the configured-lock contract above. After line-item resolution and **before** coupon resolution / Avalara commit / pending-transaction insert / Braintree sale, the renewal calls [[../libraries/subscription-renewal-guard]] `checkRenewalOverchargeGuard(items, pricing.lines)`. Per product line, it compares the engine's computed `unit_cents` against that item's configured ceiling — `price_cents` if set, else `price_override_cents`, else uncapped (live-catalog opt-in). Gifts (unit $0 by design) and shipping protection (flag-billed, not a catalog line) never contribute.
+
+If **any** product line's computed unit exceeds its ceiling — a divergence between what the engine computed and what the sub is configured for — the renewal is **HELD**:
+
+- `emitRenewalOutcomeHeartbeat("skipped_other")` — outcome accounted for in Control Tower's distribution beats.
+- [[../tables/customer_events]] `subscription.renewal_held_overcharge_guard` — subscription_id, reason (`overcharge_above_configured`), computed vs configured totals, offending lines.
+- Return `{ skipped: true, reason: "overcharge_guard_held" }` — the charge is **NEVER** submitted to Braintree at the higher amount.
+- `next_billing_date` is **intentionally NOT advanced** — a fix + re-run picks the sub back up on the next daily cron tick.
+
+Why this exists: with the Phase 1 engine change (`price_cents` / `price_override_cents` flow through as the authoritative unit), a grandfathered customer's rate should never be exceeded — but if a future repricing regression reintroduces catalog decomposition on a locked line, this guard catches it before the customer is charged. Fail-safe: a grandfathered customer is never silently overcharged.
 
 ## Internal scheduler — Phase 3: tax quote
 
@@ -163,6 +177,16 @@ Cancelled subs migrate too (using the local row when Appstle is unreadable). The
 
 **Comp migration (no-PM path).** `migrateContractToInternalComp(workspaceId, contractId, { compNote })` ([[migrate-to-internal]]) flips **one** Appstle contract → internal **comp** sub **without** the billable-PM requirement (a comp sub never charges, so "must be billable" doesn't apply). Reuses translate-lines + cancel-contract, then sets `comp=true` + `comp_note` + every item `price_override_cents=0` (base $0), preserving items/cadence/next date and the `customer_id` (no billable reassignment). **No `migration_audit` is recorded** — the 8-check audit's `card_pinned` check expects a billable card a comp sub deliberately lacks.
 
+### Failed-payment mutation block is **Appstle-only** — an internal sub is NOT blocked
+
+A **failed payment blocks mutations only on an Appstle contract.** Appstle's API rejects edits (change-date, frequency, quantity) on a contract whose last charge failed — the customer must update their payment method or cancel first. That block is real and Appstle-side.
+
+**An internal sub is NOT subject to that block.** `subscriptions.last_payment_status='failed'` on an `is_internal=true` sub is just a status flag — often a **stale** one (a prior Appstle-era decline that never cleared, or a transient failure whose next renewal already paid). The internal renewal engine ([[../inngest/internal-subscription-renewals]]) charges the pinned card on its own schedule and routes real failures through [[dunning]] independently of this flag. **Mutating an internal sub — including moving `next_billing_date` via [[../libraries/commerce-sdk]] `subscriptionUpdateNextBillingDate` — succeeds regardless of `last_payment_status`.** Verified live: sub `e1d4f32b` (`internal-d0bd95b7651b493b`), `last_payment_status='failed'`, date moved Oct 1 → Oct 6 → `{success:true}`, flag untouched.
+
+**Bug (open):** the portal guards in `src/lib/portal/handlers/change-date.ts` and `handlers/frequency.ts` reject on `last_payment_status === 'failed'` **without checking `is_internal`** — so they over-block **internal** subs that the mutation layer would happily update, surfacing to the customer as a `payment_failed_update_blocked` / "Unrecognized portal error" and an escalated portal ticket (seen on ticket `115350d5`, sub `e1d4f32b`). The guard's origin (ticket `52a0a618`) was a genuine Appstle case; it just over-applies. Fix: exempt internal subs from these guards (Appstle branch keeps the block). Tracked by spec `portal-failed-payment-block-exempts-internal-subs`.
+
+**The migration lifecycle this hangs off** (how a blocked Appstle sub becomes an unblocked internal one): the customer hits the Appstle mutation block on a failed-payment contract → **updates their payment method** (portal add-card / recovery link) → the card is **Braintree-vaulted** (`src/lib/vault-and-migrate-payment-method.ts`) → that capture **triggers `migrateCustomerAppstleSubsToInternal`** (Migration path above) → the contract flips `is_internal=true` and is now billed by the internal engine → **mutations are available** (no Appstle block, and — per the bug above — should not be blocked by our portal guard either). So the correct remedy for a customer stuck behind the block is *update the card* (which migrates + unblocks), never "clear the flag" (there is no flag to clear — it's a mutation gate, not a stored lock).
+
 ## Pause / resume / skip — both paths
 
 Customer-facing mutations are unified:
@@ -187,6 +211,14 @@ These rules are non-obvious and a wrong move charges the customer immediately at
 - **Billing-date slot is `08:00:00Z`** (store midnight Pacific). A bare `YYYY-MM-DD` becomes `T00:00:00Z` and Appstle snaps it a day early (asked 06-15, got 06-14). Pass the full `...T08:00:00Z`.
 - **`"UserGeneratedError: The subscription contract has changed"` (HTTP 400) is transient** — it fires when a follow-up edit lands before a prior mutation (e.g. a quantity change) has settled. Retry once the contract settles.
 - **The DB lags Appstle.** `subscriptions.items` / `subscriptions.next_billing_date` sync asynchronously and can show stale values right after a mutation — **verify against a live Appstle contract fetch**, not the local row.
+
+## Failed-payment mutation block is Appstle-only
+
+Shipped ([[../specs/portal-failed-payment-block-exempts-internal-and-offers-inline-card-update]], derived from ticket 115350d5 on sub `e1d4f32b` / `internal-d0bd95b7651b493b`). The portal's change-date + frequency handlers rejected on `last_payment_status='failed'` **without** checking `is_internal`, over-blocking internal subs whose mutation would in fact succeed (proven live: the same sub's date moved Oct 1 → Oct 6 with `{success:true}` and the flag untouched). The block only makes sense for **Appstle** contracts, where Shopify owns the charge and the card must be replaced upstream before a modification can safely land.
+
+**Guard** ([[../libraries/portal__handlers__change-date]] + [[../libraries/portal__handlers__frequency]] via `shouldBlockForFailedPayment` in `src/lib/portal/failed-payment-guard.ts`): the predicate returns `true` **only** for `{is_internal: false, last_payment_status: 'failed'}`. Internal subs pass through regardless of the flag; Appstle subs with a healthy last payment also pass through. The single `resolveSub`-returned row carries both fields, so the handler doesn't re-query `subscriptions`. Unit-tested in `src/lib/portal/failed-payment-guard.test.ts`.
+
+**Portal recovery UX** ([[customer-portal]] § Payment methods · Failed-payment block recovery). When the block correctly fires (Appstle sub, genuine failure), the real-portal detail screen renders an inline **"Update payment method"** primary CTA on the error overlay — no dead-end text. The customer's in-flight mutation is stashed in `sessionStorage` under the sub's **UUID** (invariant across migration; keying by `contract.id` would break because `migrateContractToInternal` rewrites `shopify_contract_id` to `internal-<hex>`). The CTA deep-links to `/payment-methods?add=1&forSub=<uuid>&retryOnSuccess=1`; the payment section vaults the card with `migrate: true` so [[migrate-to-internal]] sweeps the sub onto internal rails synchronously, then pins the new card via `setSubscriptionPaymentMethod` (its `is_internal` guard now passes) and redirects back with `?retry=1`. The subscription-detail screen consumes the marker, replays the pending change-date / frequency mutation through the top-level action overlay, and refreshes the contract — the customer's original intent completes in one flow. The Shopify-extension portal is sunset and out of scope.
 
 ## When dunning meets a charge
 
@@ -213,6 +245,7 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 |---|---|
 | `src/lib/internal-subscription.ts` | Internal scheduler core |
 | `src/lib/inngest/internal-subscription-renewals.ts` | Hourly cron |
+| `src/lib/subscription-renewal-guard.ts` | Pre-charge overcharge guard (fail-safe) |
 | `src/lib/appstle.ts` | Appstle helpers with is_internal short-circuit |
 | `src/lib/integrations/braintree.ts` | Gateway + transaction.sale + refund + void |
 | `src/lib/avalara.ts` | Tax client |
@@ -238,6 +271,10 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 - Per `feedback_no_double_billing_framing` memory: customer comms must not frame parallel-sub charges as "double billing." That rule lives in sonnet_prompts, not in this lifecycle — but flag it for anyone touching billing UX.
 
 **Subscription overcharge remediation** ([[../specs/subscription-overcharge-remediation]], [[../libraries/subscription-overcharge]]): detection signal `{charged, expected, delta, dropped_base}` surfaced into the orchestrator + escalation-triage; remediation = partial_refund(delta) → restore grandfathered base (Appstle heal / internal `price_override_cents`, never migrate-to-internal) → customer_reply. `update_line_item_price` direct action now routes internal subs.
+
+**Failed-payment mutation block scoped to Appstle + inline card-update recovery** ([[../specs/portal-failed-payment-block-exempts-internal-and-offers-inline-card-update]], derived from ticket 115350d5 on sub `e1d4f32b`). The change-date + frequency portal guards now key on `is_internal` — the block only fires for Appstle contracts with `last_payment_status='failed'` ([[../libraries/portal__handlers__change-date]] + [[../libraries/portal__handlers__frequency]] via `shouldBlockForFailedPayment`). When the block DOES apply, the real portal renders an inline "Update payment method" CTA that migrates the sub to internal via [[migrate-to-internal]], pins the new card, and auto-replays the previously-blocked mutation — the customer's original intent lands in one flow instead of a text dead-end. See § Failed-payment mutation block is Appstle-only above.
+
+**Renewal charges the sub's configured (grandfathered) price** ([[../specs/subscription-renewal-honors-configured-grandfathered-price-never-bills-standard]], derived from ticket 5402b5d4). The engine honors `items[].price_cents` as an authoritative post-discount lock (Phase 1), and a pre-charge overcharge guard ([[../libraries/subscription-renewal-guard]]) holds any renewal whose computed unit exceeds the sub's configured ceiling before it reaches Braintree (Phase 2). Contract: **a renewal's per-unit is the sub's configured line price + `applied_discounts` — never the product's current standard catalog price**; a computed amount exceeding the configured total is **held** (not billed), `next_billing_date` is not advanced, and a `subscription.renewal_held_overcharge_guard` [[../tables/customer_events]] row is logged for review.
 
 **Recent activity:**
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents (touches transactions)

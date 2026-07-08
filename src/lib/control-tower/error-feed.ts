@@ -410,7 +410,7 @@ export function isTransientClientNetworkAbort(
  */
 export function isTransientSupabaseLogNoise(
   kind: "postgres" | "auth" | "api",
-  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown },
+  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown; eventMessage?: unknown },
 ): boolean {
   if (kind === "api") {
     // Edge/gateway 5xx — saturation collateral; the recur window catches a chronic 5xx.
@@ -459,21 +459,44 @@ export function isTransientSupabaseLogNoise(
     // the `dial ... i/o timeout` shape too. Recur-window escalation still applies: a chronic
     // dial-timeout spike (a real upstream outage) recurs inside the window and pages.
     const msg = String(ctx.message ?? "").toLowerCase();
-    if (!msg.trim()) return false;
-    return (
-      msg.includes("context canceled") ||
-      msg.includes("context deadline exceeded") ||
-      msg.includes("operation was canceled") ||
-      /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
-      /\bdial\b[^\n]*i\/o timeout/.test(msg) ||
+    // The same browser-abort marker ALSO surfaces on GoTrue's /authorize (PKCE flow-state)
+    // path where the marker lives INSIDE event_message JSON's `error` field instead of the
+    // top-level `msg` — msg is only `500: Error creating flow state` and the real cause
+    // (`context canceled`, `operation was canceled`, etc.) is buried in the JSON blob
+    // ([[../specs/error-feed-scope-supabase-authorize-flow-state-context-cance]] — Control
+    // Tower signature `supabase-logs:a30ffe4489dd6ffb`). Defensively JSON-parse eventMessage
+    // (bad JSON is a no-op — msg-only path still applies) and fold its inner `error` string
+    // into the same regex/substring set below so a user closing the Google-login tab stops
+    // minting page-worthy incidents. A real /authorize failure whose inner error is NOT a
+    // browser-abort marker (e.g. `invalid JWT`, `signature mismatch`, non-abort 5xx) still
+    // pages on first sighting.
+    let innerError = "";
+    if (typeof ctx.eventMessage === "string" && ctx.eventMessage.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(ctx.eventMessage);
+        if (parsed && typeof parsed === "object" && "error" in parsed) {
+          const err = (parsed as { error: unknown }).error;
+          if (typeof err === "string") innerError = err.toLowerCase();
+        }
+      } catch {
+        // Defensive: malformed / non-JSON event_message — no-op, fall back to msg-only.
+      }
+    }
+    if (!msg.trim() && !innerError.trim()) return false;
+    const isAbortShape = (s: string): boolean =>
+      s.includes("context canceled") ||
+      s.includes("context deadline exceeded") ||
+      s.includes("operation was canceled") ||
+      /\bdial\b[^\n]*\bcanceled\b/.test(s) ||
+      /\bdial\b[^\n]*i\/o timeout/.test(s) ||
       // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
       // load: `504: Processing this request timed out, please retry after a moment.` Same
       // transient class as the context-deadline shape above (restore of the reverted
       // error-feed-scope-supabase-auth-504-gateway-timeout-transient — falsely rolled back
       // 2026-07-04). A one-off pages nobody; a chronic 504 spike (a real outage) recurs and
       // still surfaces. Invalid JWT / rate-limit / signature mismatch remain first-sight pages.
-      msg.includes("processing this request timed out")
-    );
+      s.includes("processing this request timed out");
+    return isAbortShape(msg) || (innerError.length > 0 && isAbortShape(innerError));
   }
   return false;
 }
@@ -524,7 +547,7 @@ export function isForeignGoTrueEdgeNoise(
  * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
  * passes just the message), the 504 shape needs the request JSON.
  *
- * Three distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
+ * Five distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
  * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
  * owner in a loop they can't fix):
  *
@@ -548,12 +571,35 @@ export function isForeignGoTrueEdgeNoise(
  *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
  *      `dial ... (i/o timeout | operation was canceled)` phrase.
  *
- * Narrowly gated so everything actionable still surfaces / pages on first sight: `context
- * canceled` (browser-abort) + a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE
- * host (a real Postgres pooler on our side — not the `host=localhost user=supabase_auth_admin`
- * GoTrue-internal shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`,
- * rate limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504
- * on `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
+ *  (d) `/user` SELECT-on-auth.users browser-abort passthrough
+ *      ([[../specs/error-feed-drop-supabase-gotrue-auth-log-unable-to-fetch-rec]],
+ *      `supabase-logs:f5b02a707c3d4e49`, 8 occ / 4 days) — when the parent HTTP request
+ *      context dies mid-query on GoTrue's `/user` SELECT-on-`auth.users` path (browser tab
+ *      closed, navigation away, React StrictMode double-mount aborting an in-flight
+ *      `supabase.auth.getUser()`), GoTrue emits the EXACT phrase `Unhandled server error:
+ *      unable to fetch records: context canceled` (case-insensitive, trimmed). Already
+ *      routed through `isTransientSupabaseLogNoise` via the `context canceled` substring,
+ *      but the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS` on a healthy loop, so
+ *      the transient class isn't enough — drop AT CAPTURE. The phrase is unique to
+ *      GoTrue's SELECT-on-`auth.users` code path; nothing in OUR code can emit it.
+ *
+ *  (e) outer-request-timeout ([[../specs/error-feed-drop-supabase-gotrue-timeout-context-canceled]],
+ *      `supabase-logs:c9eb05fd1d3fb82c`, 15 occ / 7 days) — msg-only mirror of shape (a):
+ *      the trimmed + lowercased msg equals `unhandled server error: timeout: context canceled`.
+ *      The `timeout:` prefix is Go's phrasing for GoTrue's own outer-request-timeout wrapper
+ *      firing on its Postgres backend (same foreign-owned saturation class as (a); we hold
+ *      zero levers on Supabase's managed auth service, and the transient recur-window
+ *      empirically fails to absorb the ~2/day cadence). Narrowly gated to the exact phrase
+ *      so plain `context canceled` (real browser-abort noise, still transient) is untouched.
+ *
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: a plain
+ * `context canceled` on a non-/user path (any msg other than the exact (d) or (e) phrase)
+ * stays transient via `isTransientSupabaseLogNoise`; a `dial ... i/o timeout` /
+ * `dial ... canceled` on a REMOTE host (a real Postgres pooler on our side — not the
+ * `host=localhost user=supabase_auth_admin` GoTrue-internal shape) stays transient too;
+ * `invalid JWT`, rate limits, signature mismatches, a 504 on `/token` / `/admin`, a
+ * non-504 5xx, or a 504 on `/user` with a non-GET (mutation) method all carry different
+ * shapes and stay captured.
  */
 export function isForeignGoTrueAuthLogNoise(
   msg: string | null | undefined,
@@ -562,6 +608,12 @@ export function isForeignGoTrueAuthLogNoise(
   // (a) context-deadline shape — msg-only, exact phrase.
   const text = (msg ?? "").trim().toLowerCase();
   if (text === "unhandled server error: context deadline exceeded") return true;
+  // (d) /user SELECT-on-auth.users browser-abort — msg-only, exact phrase.
+  if (text === "unhandled server error: unable to fetch records: context canceled") return true;
+  // (e) outer-request-timeout shape — msg-only mirror of (a), gated on the exact phrase
+  // (the `timeout:` prefix is GoTrue's outer-timeout wrapper; plain `context canceled`
+  // stays transient).
+  if (text === "unhandled server error: timeout: context canceled") return true;
   // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
   const m = (msg ?? "").trimStart();
   if (m.startsWith("504: Processing this request timed out")) {

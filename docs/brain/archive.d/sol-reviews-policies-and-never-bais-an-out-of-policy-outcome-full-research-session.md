@@ -1,0 +1,1 @@
+- **Sol always reviews policy and never bais a customer toward an out-of-policy outcome** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]

@@ -86,7 +86,7 @@ const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
 // tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn. See
 // docs/brain/specs/sol-ticket-direction-artifact-and-first-touch-box-session.md.
 const TICKET_HANDLE_TIMEOUT_MS = 15 * 60 * 1000;
-const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
+const MAX_CONCURRENT = 10; // build/plan pool — the "everything currently happening" general pool. Real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; 5→8→10, watch box logs for Max 529/overloaded before pushing further). Director (platform-director) + customer-service (ticket-handle/ticket-analyze/cs-director-call) run in their OWN dedicated lanes below, so this pool never starves them.
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
@@ -3892,11 +3892,33 @@ async function runDbHealthJob(job: Job) {
 // exempt) ride the job's instructions. This runner only materializes the CHOSEN fix spec to main + queues
 // its build on the owner's tap (Register → land the MONITORED_LOOPS entry · Intentionally-unmonitored →
 // add the INTENTIONALLY_UNMONITORED_CRONS exemption). The agent NEVER silently edits registry.ts.
+//
+// agent-mandate-hardening-coverage-register bake-in (2026-07): the 9 accumulated coaching points that
+// didn't stick as ephemeral agent_instructions are now baked into the mandate here:
+//   1. Spec authoring goes through public.specs via markNewSpecInReview → authorSpecRowFromMarkdown
+//      (the specs-table SDK). NEVER a `docs/brain/specs/{slug}.md` file/commit — the box has no such
+//      writable checkout and the write fails silently, leaving the coverage gap unresolved. "The
+//      database is the spec" (CLAUDE.md hard rule).
+//   2. After the SDK author call, RE-READ the row via specs-table.getSpec — treat `getSpec === null`
+//      as an author failure even when markNewSpecInReview returned without throwing (silent no-op
+//      protection). Only enqueue the build + mark the job completed if the row actually landed.
+//   3. Wrap the whole materialize-spec → verify → enqueue-build block in try/catch. On ANY failure:
+//      surface a CONCRETE error string that names the failed step (author / getSpec re-read / build
+//      enqueue) + the underlying error message; retry the author path ONCE (transient DB blips); on
+//      the second failure, park needs_attention with the diagnosis AND the renderEntrySnippet from
+//      instructions.entry so the owner has a one-tap remediation path. Never let a MissingVerification
+//      throw escape as a generic "agent produced no verdict" backstop, and never park with a bare
+//      one-word error — a coverage gap left with no explanation reads as unresolved-and-abandoned.
+//   4. When the underlying entry falls through to inferOwner's low-confidence platform placeholder
+//      (see coverage-register-agent.ts inferOwner returning null on unknown ids), the description
+//      already flags "REQUIRES OWNER CONFIRMATION" — no additional gate needed here; the owner sees
+//      the warning in the fix spec body before tapping Build.
 async function runCoverageRegisterJob(job: Job) {
   const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
   let instr: {
     signature?: string;
     loop_id?: string;
+    entry?: unknown;
     register_spec_slug?: string;
     register_spec_body?: string;
     exempt_spec_slug?: string;
@@ -3910,6 +3932,19 @@ async function runCoverageRegisterJob(job: Job) {
   const signature = instr.signature || job.spec_slug;
   const loopId = instr.loop_id || signature.replace("coverage-register:", "");
 
+  // Render the inferred MONITORED_LOOPS entry snippet from instructions.entry (baked at enqueue time).
+  // Included in every diagnostic error surface below so a materialize failure carries a one-tap manual-
+  // paste remediation path — never a naked "needs_attention" with nothing for the owner to act on.
+  const renderInferredSnippet = async (): Promise<string> => {
+    try {
+      if (!instr.entry) return "";
+      const { renderEntrySnippet } = await import("../src/lib/coverage-register-agent");
+      return renderEntrySnippet(instr.entry as Parameters<typeof renderEntrySnippet>[0]);
+    } catch {
+      return "";
+    }
+  };
+
   const action = (job.pending_actions || []).find((a) => a.type === "coverage_register");
   if (action && (action.status === "approved" || action.status === "declined")) {
     if (action.status === "approved") {
@@ -3918,7 +3953,9 @@ async function runCoverageRegisterJob(job: Job) {
       const specBody = register ? instr.register_spec_body : instr.exempt_spec_body;
       const what = register ? "register entry" : "intentionally-unmonitored exemption";
       if (!specSlug || !specBody) {
-        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: `owner ${what} → missing spec body for ${loopId}`.slice(-2000) });
+        const snippet = await renderInferredSnippet();
+        const tail = `owner ${what} → missing spec body for ${loopId}${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
+        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
         console.warn(`${tag} owner ${what} → missing spec body`);
         return;
       }
@@ -3932,11 +3969,55 @@ async function runCoverageRegisterJob(job: Job) {
         return;
       }
       if (!validateSpecBody(specSlug, specBody, signature)) {
-        await update(job.id, { status: "needs_attention", error: "empty spec body", pending_actions: job.pending_actions, log_tail: `owner ${what} → refused to author empty spec ${specSlug} to public.specs`.slice(-2000) });
+        const snippet = await renderInferredSnippet();
+        const tail = `owner ${what} → refused to author empty spec ${specSlug} to public.specs${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
+        await update(job.id, { status: "needs_attention", error: "empty spec body", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
         console.warn(`${tag} owner ${what} → empty spec body`);
         return;
       }
-      await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
+
+      // Coaching bake-in: guarded author → verify → enqueue. Any failure surfaces a specific diagnosis
+      // (which step, which error) + the inferred-entry snippet for one-tap manual paste. One retry on
+      // the author path for transient DB blips before parking needs_attention.
+      const { getSpec: getSpecFromDb } = await import("../src/lib/specs-table");
+      const materializeAndVerify = async (): Promise<{ ok: true } | { ok: false; step: "author" | "verify"; error: string }> => {
+        try {
+          await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
+        } catch (e) {
+          return { ok: false, step: "author", error: e instanceof Error ? e.message : String(e) };
+        }
+        try {
+          const row = await getSpecFromDb(job.workspace_id, specSlug);
+          if (!row) return { ok: false, step: "verify", error: `getSpec(${specSlug}) returned null after markNewSpecInReview — the row did not land in public.specs (silent no-op)` };
+        } catch (e) {
+          return { ok: false, step: "verify", error: e instanceof Error ? e.message : String(e) };
+        }
+        return { ok: true };
+      };
+
+      let outcome = await materializeAndVerify();
+      if (!outcome.ok) {
+        console.warn(`${tag} owner ${what} → ${outcome.step} failed once: ${outcome.error} — retrying`);
+        outcome = await materializeAndVerify();
+      }
+      if (!outcome.ok) {
+        const snippet = await renderInferredSnippet();
+        const diagnosis = `coverage-register spec authoring failed at step '${outcome.step}' for ${specSlug}: ${outcome.error}`;
+        const remediation = snippet
+          ? ` — one-tap manual remediation: paste this entry into src/lib/control-tower/registry.ts MONITORED_LOOPS and open a PR:\n${snippet}`
+          : ` — inspect job instructions.entry and paste the inferred MONITORED_LOOPS entry into src/lib/control-tower/registry.ts manually`;
+        action.status = "failed";
+        action.result = diagnosis;
+        await update(job.id, {
+          status: "needs_attention",
+          error: diagnosis.slice(-500),
+          pending_actions: job.pending_actions,
+          log_tail: `owner ${what} → ${diagnosis}${remediation}`.slice(-2000),
+        });
+        console.warn(`${tag} owner ${what} → ${diagnosis}`);
+        return;
+      }
+
       const { error } = await db.from("agent_jobs").insert({
         workspace_id: job.workspace_id,
         spec_slug: specSlug,
@@ -3945,8 +4026,25 @@ async function runCoverageRegisterJob(job: Job) {
         created_by: job.created_by,
         instructions: `Build from coverage-register agent (${what} for loop ${loopId}). Follow the spec exactly — a small src/lib/control-tower/registry.ts edit; tsc-clean; open a PR.`,
       });
-      action.status = error ? "failed" : "done";
-      action.result = error ? `build enqueue failed: ${error.message}` : `queued build for ${specSlug}`;
+      if (error) {
+        const snippet = await renderInferredSnippet();
+        const diagnosis = `coverage-register build enqueue failed for ${specSlug}: ${error.message}`;
+        const remediation = snippet
+          ? ` — the spec row IS in public.specs; the FAILING step was queuing the build. Re-queue via /dashboard/roadmap (single-tap) or manually paste:\n${snippet}`
+          : ` — the spec row IS in public.specs; the FAILING step was queuing the build. Re-queue via /dashboard/roadmap.`;
+        action.status = "failed";
+        action.result = diagnosis;
+        await update(job.id, {
+          status: "needs_attention",
+          error: diagnosis.slice(-500),
+          pending_actions: job.pending_actions,
+          log_tail: `owner ${what} → ${diagnosis}${remediation}`.slice(-2000),
+        });
+        console.warn(`${tag} owner ${what} → ${diagnosis}`);
+        return;
+      }
+      action.status = "done";
+      action.result = `queued build for ${specSlug}`;
       await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `owner ${what} → ${action.result}`.slice(-2000) });
       console.log(`${tag} owner ${what} → ${action.result}`);
     } else {
@@ -9933,6 +10031,14 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // Load the same read-only context brief the improve lane uses, so Sol's first turn sees the ticket +
 // customer + last analysis exactly the way the founder does. Best-effort — a missing customer or
 // analysis is fine; the brief still surfaces the messages.
+//
+// Phase 1 of [[sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]
+// APPENDS the workspace's active policies (returns / refunds / consumable / subscription
+// returnability / exception ceilings) so Sol's first-touch reasons AGAINST the actual rulebook
+// before choosing an outcome — the same policy text the analyzer + orchestrator already read
+// (docs/brain/tables/policies.md). Without this block, Sol offered coffee returns the return policy
+// disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
+// error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
   // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
   // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
@@ -9976,6 +10082,33 @@ async function loadCxAgentSdkBrief(ticketId: string): Promise<string> {
   }
 }
 
+// Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
+// baked into Sol's turn-1 prompt. Same select shape sonnet-orchestrator-v2 uses at :465, and the
+// same block header ("CURRENT POLICIES") the analyzer prompt uses at ticket-analyzer.ts:262 —
+// keeping the header consistent means Sol reasons about "policy" the same way every other layer
+// does. Returns "" on empty / on error (the brief is still useful without it; the prompt below
+// still hard-requires policy review regardless — an empty block means Sol must fetch via
+// get_policies or fall through to needs_human rather than guess).
+async function loadActivePoliciesBlock(workspaceId: string): Promise<string> {
+  try {
+    const { data, error } = await db
+      .from("policies")
+      .select("slug, name, internal_summary")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug");
+    if (error || !data || !data.length) return "";
+    const rows = data as Array<{ slug: string; name: string; internal_summary: string | null }>;
+    return [
+      "--- CURRENT POLICIES (the rulebook — your Direction MUST reflect these; NEVER propose or bait an outcome outside them) ---",
+      ...rows.map((p) => `## ${p.name} (slug: ${p.slug})\n${(p.internal_summary || "(no internal_summary)").trim()}`),
+    ].join("\n\n");
+  } catch {
+    return "";
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parseSolFinalJson(text: string): any | null {
   const parsed = parseStatus(text);
@@ -10010,8 +10143,31 @@ async function runTicketHandleJob(job: Job) {
       `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
       `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
-      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis). You may also Read/Grep the brain + src/ and WebSearch.`,
+      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
+      ``,
+      // Phase 1 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // REQUIRE policy review before Sol commits. The CURRENT POLICIES block in the brief above is the
+      // rulebook; get_policies re-fetches it live. Sol MUST reason against it and NEVER bait an
+      // outcome the policy disallows (e.g. offering coffee-subscription returns when returns aren't
+      // accepted). Absence of a clearly-applicable policy is not permission — it is needs_human.
+      `POLICY REVIEW IS MANDATORY. Before you choose a chosen_path or draft the first_reply, review the CURRENT POLICIES block above (re-fetch live via get_policies if unsure) and reason AGAINST them for the customer's ask. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
+      // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // Tell Sol her DRAFT reply is machine-validated (src/lib/sol-policy-bait-guard.ts) before it
+      // sends. A reply that (a) promises a remedy while your context_summary declares the ask
+      // out-of-policy, or (b) stacks multiple returns/refunds in one turn (the 87ce35a1 coffee-
+      // return incident) is BLOCKED — the customer never sees it, and a human re-drafts via
+      // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
+      // pass the guard; the block is only for baited promises.
+      `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket routes to needs_human. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
+      // Phase 3 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // Sol MUST resolve a concrete existing playbook_slug when chosen_path='playbook' — the
+      // writer rejects a missing / empty / whitespace-only / unknown slug with typed errors
+      // (playbook_slug_missing / _not_string / _unknown — src/lib/ticket-directions.ts:validatePlanForPath).
+      // The honest path when NO playbook matches is chosen_path='stateless', not "playbook"
+      // with an empty slug — the writer will fail the Direction otherwise, and the ticket
+      // burns the box turn.
+      `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
@@ -10127,19 +10283,37 @@ async function runTicketHandleJob(job: Job) {
       // dispatcher will already have inserted the ack ticket_resolution_events row, so this send stamps
       // the next-turn's row. Best-effort in the sense that a first_reply-less Direction (rare) still
       // lands cleanly — the ticket just doesn't get a Sol reply here.
+      //
+      // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // MACHINE-VALIDATE the DRAFT reply against Sol's own policy verdict BEFORE the send fires. A
+      // reply that promises an out-of-policy remedy — or stacks multiple returns/refunds in one turn
+      // (the 87ce35a1 coffee-return incident: Sol offered TWO returns after acknowledging renewals
+      // aren't returnable) — is blocked here. Direction stays durable (Sol's reasoning is preserved
+      // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
+      // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
       if (firstReply) {
-        const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-        const channel = (t?.channel as string | null) || "email";
-        try {
-          const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-          await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-        } catch (e) {
-          // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-          // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-          // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-          const msg = e instanceof Error ? e.message : String(e);
-          console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+        const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
+        const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
+        if (bait.ok === false) {
+          const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+          const channel = (t?.channel as string | null) || "email";
+          try {
+            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+          } catch (e) {
+            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          }
         }
       }
 
@@ -15806,9 +15980,81 @@ async function repairLedger(windowMs: number): Promise<RepairLedgerEntry[]> {
   });
 }
 
+// build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: eagerly reap ORPHAN active
+// build rows for this spec whose heartbeat is stale (>= REAP_STALE_MS). A worker-restart / crash
+// leaves the row `building`/`claimed`/`queued_resume` even though its process is gone; the periodic
+// `reapStaleSessions` sweep would eventually catch it, but until then the row still counts as
+// "active" — so a re-enqueue for the same spec is BLOCKED (hasActiveBuildForSlug sees it) or, if the
+// stale-session sweep beats the enqueue by a hair, we end up with two live builds racing the same
+// `claude/build-<slug>`. Doing a slug-scoped reap right at the guard (and at build dispatch)
+// transitions the orphan to `failed` (terminal — the spec sanctions "terminal state OR queued_resume")
+// BEFORE the enqueue/claim proceeds, so at most one build ever holds `claude/build-<slug>`. Never
+// touches a row whose session is running in THIS worker process (`active` Map) — that's alive, not
+// orphaned. Never touches the caller's own job (excludeJobId) — the build path calls this with its
+// own id to avoid reaping itself. Best-effort: a reap-internal error is logged, never thrown.
+async function reapStaleSiblingBuildsForSlug(
+  slug: string,
+  opts: { excludeJobId?: string; activeMap?: Map<string, unknown>; tag?: string } = {},
+): Promise<{ reaped: number }> {
+  if (!slug) return { reaped: 0 };
+  const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
+  const tag = opts.tag ?? "[reap-sibling-builds]";
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("id, status, last_heartbeat_at, updated_at, claimed_at")
+      .eq("kind", "build")
+      .eq("spec_slug", slug)
+      .in("status", REAP_STALE_STATUSES as unknown as string[])
+      .or(`last_heartbeat_at.lt.${cutoff},and(last_heartbeat_at.is.null,updated_at.lt.${cutoff})`)
+      .limit(20);
+    const rows = (data ?? []) as Array<{ id: string; status: string; last_heartbeat_at: string | null; updated_at: string | null; claimed_at: string | null }>;
+    let reaped = 0;
+    for (const r of rows) {
+      if (opts.excludeJobId && r.id === opts.excludeJobId) continue; // never reap the caller's own job
+      if (opts.activeMap && opts.activeMap.has(r.id)) continue;      // never reap a live session in THIS process
+      // Compare-and-set: only transition if the row is STILL in the stale in-flight state we read.
+      // This closes a race where the row flipped to a terminal state (or another reaper beat us to it)
+      // between our SELECT and this UPDATE — bail on zero rows updated rather than silently overwriting.
+      const { data: updated, error: uErr } = await db
+        .from("agent_jobs")
+        .update({
+          status: "failed",
+          claimed_at: null,
+          claude_session_id: null,
+          claude_session_config_dir: null,
+          error: `orphan reaped by slug-scoped sibling-build guard — another build for ${slug} is proceeding; this row was ${r.status} with stale heartbeat`,
+          log_tail: `(reapStaleSiblingBuildsForSlug: heartbeat stale on status '${r.status}' — transitioned terminal so at most one build ever holds claude/build-${slug})`,
+        })
+        .eq("id", r.id)
+        .in("status", REAP_STALE_STATUSES as unknown as string[])
+        .select("id");
+      if (uErr) {
+        console.error(`${tag} reap update failed for ${r.id.slice(0, 8)}: ${uErr.message}`);
+        continue;
+      }
+      if (updated && updated.length) {
+        reaped++;
+        console.warn(`${tag} REAP orphan build ${slug} (job ${r.id.slice(0, 8)}) — was ${r.status} with stale heartbeat → failed (single-owner-per-branch invariant)`);
+      }
+    }
+    return { reaped };
+  } catch (e) {
+    console.error(`${tag} slug-scoped sibling reap failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+    return { reaped: 0 };
+  }
+}
+
 // Is a build for this spec slug already live (active build job OR an open claude/<slug>-* PR)? The
 // auto-build dedup guard — never enqueue a second build / open a 4th identical PR for one spec slug.
 async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; reason?: string }> {
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: reap stale orphans FIRST
+  // so a dead building/claimed row can't masquerade as active and (a) block a legitimate re-enqueue
+  // OR (b) end up co-live with a new build for the same spec. reapStaleSiblingBuildsForSlug flips
+  // any stale-heartbeat active build row for THIS slug to `failed` (terminal state per the spec —
+  // single-owner-per-branch invariant), so the .in(ACTIVE_BUILD_STATUSES) probe below reads the
+  // TRUE post-reap active-build set. Best-effort; a reap error just leaves the probe as-is.
+  await reapStaleSiblingBuildsForSlug(slug, { tag: "[hasActiveBuildForSlug]" });
   const { data: job } = await db
     .from("agent_jobs")
     .select("id")
@@ -20555,6 +20801,19 @@ async function dispatchJob(job: Job) {
   const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: single-owner-per-branch
+  // invariant — before this freshly-claimed build touches the worktree, transition ANY sibling
+  // active build row for the same slug whose heartbeat is stale to `failed`. A worker-restart
+  // orphan (dead `building`/`claimed`/`queued_resume` row) can otherwise co-exist with the row we
+  // just claimed, and both would try to push to `claude/build-<slug>` — the losing push is a
+  // non-fast-forward reject and the phase work strands (Phase 2's rebase-retry rescues MOST of
+  // these; this ensures the orphan row itself doesn't stay live). Excludes THIS job so we never
+  // reap ourselves. Heartbeat-stale filter (>= REAP_STALE_MS) means a live process's row (bumped
+  // every M minutes by runBoxSession) is never eligible — no risk of yanking a live sibling. Runs
+  // BEFORE the claim-gate + worktree add so a live-orphan collision is caught before any side
+  // effect. Best-effort: a reap-internal error just logs and proceeds.
+  if (slug) await reapStaleSiblingBuildsForSlug(slug, { excludeJobId: job.id, tag });
+
   // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
   // is AUTHORED + Vale-spec-review-PASSED + every blocked_by SHIPPED (all DERIVED via the brain-roadmap
   // rollup, never the stored specs.status column). On a hold we UN-CLAIM (status→queued, claimed_at→null)
@@ -20780,15 +21039,33 @@ async function dispatchJob(job: Job) {
         console.log(`${tag} ${slug} basing fresh spec branch on the goal branch (${freshBase}) so it sees merged dependencies — NEVER main`);
       }
     }
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 1: when the spec branch
+    // ALREADY exists on remote (an earlier phase pushed), do an EXPLICIT per-branch fetch so the
+    // local `origin/${branch}` ref is at the current remote tip — not whatever a sibling worker/
+    // parallel push may have superseded since the blanket `git fetch origin` at the top of runJob.
+    // The remoteHasBranch probe above uses `ls-remote` (remote-authoritative), but the follow-up
+    // `git worktree add -B ${branch} ${wt} origin/${branch}` resolves origin/${branch} LOCALLY —
+    // if a concurrent push happened between the initial fetch and the worktree add, origin/${branch}
+    // is stale (or entirely absent, when the branch was born after the fetch), so the phase would
+    // be built on a base older than the true remote tip and its follow-up push would be a
+    // non-fast-forward. Fetching the specific ref right before the worktree add closes the window
+    // between remoteHasBranch and base-resolution — the last-line defense (Phase 2's rebase-retry
+    // on non-ff push) still catches a concurrent push AFTER the worktree add.
+    if (remoteHasBranch) sh("git", ["fetch", "origin", branch]);
     const base = remoteHasBranch ? `origin/${branch}` : freshBase;
     const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
     if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
+    const baseSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim().slice(0, 8) || "?";
     console.log(
-      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : `created fresh from ${base}`}`,
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base} → ${baseSha})` : `created fresh from ${base} (→ ${baseSha})`}`,
     );
     await update(job.id, { spec_branch: branch });
   } else {
     removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
+    // Phase 1 (resume): same rebase-before-push protection — refresh the local origin/${branch} ref
+    // to the CURRENT remote tip before the worktree add, so a paused-then-resumed build that a sibling
+    // phase built on top of doesn't get based on the stale pre-pause tip.
+    sh("git", ["fetch", "origin", branch!]);
     let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
@@ -21493,10 +21770,60 @@ async function dispatchJob(job: Job) {
       await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
       return;
     }
-    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2: on a non-fast-forward
+    // push rejection (a sibling worker/phase pushed onto the same claude/build-<slug> after this
+    // build's worktree add), rebase onto the current remote tip and retry the push ONCE — the built
+    // phase commit is real work; a lost push here strands the spec mid-build and needs a human to
+    // re-kick (real: spec cx-box-agents-sol-cora-june-...-no-raw-sql, jobs a30ad1e5 pushed phase 1
+    // → a2520180 failed on non-ff and threw its phase away). Only a non-ff rejection is recoverable
+    // here; auth/network/other errors still mark the job failed with the original error. A rebase
+    // conflict fails to `needs_attention` (never a silent drop). Phase 1 (fetch+base on remote tip
+    // before the worktree add) closes the pre-build window; this is the last-line defense for the
+    // window between the worktree add and this push.
+    let push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
     if (push.code !== 0) {
-      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
-      return;
+      const combined = `${push.out}\n${push.err}`;
+      const isNonFastForward = /non-fast-forward|\(fetch first\)|rejected.*(fetch first|non-fast-forward)|Updates were rejected/i.test(combined);
+      if (isNonFastForward) {
+        console.warn(`${tag} non-fast-forward push on ${branch} — a sibling push moved the tip; fetching + rebasing + retrying once`);
+        const fetch = sh("git", ["fetch", "origin", branch!], { cwd: wt });
+        if (fetch.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed (non-fast-forward) and post-push fetch also failed",
+            log_tail: `push:\n${combined.slice(-1000)}\nfetch:\n${(fetch.out + fetch.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        const rebase = sh("git", ["rebase", `origin/${branch}`], { cwd: wt });
+        if (rebase.code !== 0) {
+          // Rebase conflict (or other rebase abort). Do NOT silently drop the phase — surface for a
+          // human. Abort the in-progress rebase so the worktree is left clean for the reap.
+          sh("git", ["rebase", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error: "phase push rebase-retry hit a conflict against the sibling push — cannot fast-forward without a merge decision",
+            log_tail: `push:\n${combined.slice(-800)}\nrebase:\n${(rebase.out + rebase.err).slice(-1000)}`.slice(-2000),
+          });
+          console.error(`${tag} rebase-retry CONFLICT on ${branch} — parked needs_attention (never silently dropped)`);
+          return;
+        }
+        const retryPush = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+        if (retryPush.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed after fetch+rebase retry",
+            log_tail: `push #1 (non-ff):\n${combined.slice(-600)}\nrebase: ok\npush #2:\n${(retryPush.out + retryPush.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        push = retryPush;
+        console.log(`${tag} rebase-retry SUCCESS on ${branch} — phase landed on top of the sibling push (no phase work lost)`);
+      } else {
+        // Genuine (non-recoverable) push error — auth / network / policy. Fail as before, don't retry.
+        await update(job.id, { status: "failed", error: "git push failed", log_tail: combined.slice(-2000) });
+        return;
+      }
     }
     // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
     // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best

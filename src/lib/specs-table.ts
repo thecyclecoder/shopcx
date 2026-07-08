@@ -364,14 +364,23 @@ export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {
   const specRows = (specs ?? []) as SpecRowDb[];
   if (!specRows.length) return [];
   const ids = specRows.map((s) => s.id);
-  const { data: phases, error: pErr } = await admin
-    .from("spec_phases")
-    .select(PHASE_COLUMNS)
-    .in("spec_id", ids)
-    .order("position", { ascending: true });
-  if (pErr) throw pErr;
+  // Batch the `.in("spec_id", …)` phase read so the PostgREST request URL never exceeds the ~16KB HTTP
+  // header limit (UND_ERR_HEADERS_OVERFLOW). Once the workspace held a few hundred specs, a single
+  // `.in("spec_id", [all ids])` overflowed and threw on every listSpecs call — which wedged the
+  // spec-review enqueue reaper + every getSpec/roadmap read that funnels through here. Each spec's
+  // phases all fall in one batch, so per-spec position ordering is preserved by the grouping below.
+  const phases: SpecPhaseRow[] = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data, error: pErr } = await admin
+      .from("spec_phases")
+      .select(PHASE_COLUMNS)
+      .in("spec_id", ids.slice(i, i + 200))
+      .order("position", { ascending: true });
+    if (pErr) throw pErr;
+    if (data) phases.push(...(data as SpecPhaseRow[]));
+  }
   const byId = new Map<string, SpecPhaseRow[]>();
-  for (const p of (phases ?? []) as SpecPhaseRow[]) {
+  for (const p of phases as SpecPhaseRow[]) {
     const list = byId.get(p.spec_id) ?? [];
     list.push(p);
     byId.set(p.spec_id, list);
@@ -1238,14 +1247,18 @@ export async function listSpecPhaseAnomalies(workspaceId: string): Promise<SpecP
   if (!phaseRows.length) return { orphans, provenanceGaps };
 
   const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
-  const { data: liveSpecs, error: sErr } = await admin
-    .from("specs")
-    .select("id, slug, workspace_id, status")
-    .in("id", specIds);
-  if (sErr) throw sErr;
+  // Batch the `.in("id", …)` resolve so the URL can't overflow the 16KB header limit at scale
+  // (UND_ERR_HEADERS_OVERFLOW) — same guard as listSpecs above.
   const liveById = new Map<string, { slug: string; workspace_id: string; status: SpecStatus }>();
-  for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
-    liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
+  for (let i = 0; i < specIds.length; i += 200) {
+    const { data: liveSpecs, error: sErr } = await admin
+      .from("specs")
+      .select("id, slug, workspace_id, status")
+      .in("id", specIds.slice(i, i + 200));
+    if (sErr) throw sErr;
+    for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
+      liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
+    }
   }
 
   for (const p of phaseRows) {

@@ -96,6 +96,16 @@ Bumps `resession_count` on the LIVE Direction by 1. Phase 2 of [[../specs/sol-ru
 - **Compare-and-set on supersede.** `superseDirection`'s write is `.eq("ticket_id", …).is("superseded_at", null)` — a racing supersede returns zero rows and the caller sees `null` (learning #1 — re-assert the read-time precondition in the write itself).
 - **Service-role only.** Every export takes `admin: SupabaseClient` — RLS is on with no policies, so a non-service-role read/write is rejected at the DB. Never call from client code.
 
+## Sol operating rules (folded from [[../specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]])
+
+Three durable rules the Sol first-touch box session lives under — all three are enforced at the Direction layer, not left to the prompt alone. Derived-from-ticket 87ce35a1 (Sol offered a customer two coffee-subscription returns the return policy would never honor).
+
+1. **Policy review is mandatory.** The Sol prompt is bundled with a `CURRENT POLICIES` block from [[../tables/policies]] (`is_active + superseded_by IS NULL`, same shape sonnet-orchestrator-v2 and ticket-analyzer already read), and `get_policies` re-fetches it live. `context_summary` MUST name the specific policy (by slug or name) Sol evaluated the ask against, and state whether the ask is **in-policy**, **in-policy with a bounded exception**, or **out-of-policy**. Absence of a clearly-applicable policy is not permission — it is `needs_human`.
+2. **Never bait or promise an out-of-policy outcome.** Sol's DRAFT `first_reply` is machine-validated by [[./sol-policy-bait-guard]] (`assessSolReplyBaitRisk`) before the send fires: (a) if `context_summary` declares the ask out-of-policy but the reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"), the send is BLOCKED; (b) any reply that stacks multiple returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). Direction stays durable, but a human re-drafts via the Improve tab.
+3. **Real playbook or honest stateless.** `chosen_path='playbook'` requires `plan.playbook_slug` to be a non-empty, non-whitespace, workspace-existing slug — `validatePlanForPath` throws `playbook_slug_missing` / `playbook_slug_not_string` / `playbook_slug_unknown` otherwise. When NO playbook matches the ask, Sol chooses `chosen_path='stateless'` (or `'needs_info'` when a specific piece blocks the reply). Faking the field with `""`, `"   "`, or an invented slug is the anti-pattern the writer rejects — the honest path is a different `chosen_path`, never a playbook path without a resolvable slug.
+
+Cross-links: [[../tables/policies]] · [[./sol-policy-bait-guard]] · [[../playbooks/README]] · [[../lifecycles/ticket-lifecycle]] · [[../functions/cs]].
+
 ---
 
 [[../README]] · [[../tables/ticket_directions]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
