@@ -23,6 +23,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **A CS Director review closes the ticket loop — internal note + resolution — not just the engineering loop** · verified 2026-07-08 · → [[../libraries/cs-director]] · [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../lifecycles/ticket-lifecycle]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
+- **Escalation keys on real severity, not a middling score — a resolved ticket with a minor issue stays closed** · verified 2026-07-08 · → [[../lifecycles/ai-analysis]]
 - **Growth Director analytical brief** · verified 2026-07-08 · → [[../libraries/growth-director-analytical-brief]]
 - **KPI audit: flag worker_grade_rollup + director_call_grade as current-state point reads** · verified 2026-07-08 · → [[../libraries/platform-scorecard]] · [[../libraries/kpi-review]]
 - **A one-off spec that depends on goal-internal work blocks on the goal, not the member spec** · verified 2026-07-08 · → [[../project-management]] · [[../libraries/brain-roadmap]] · [[../lifecycles/spec-goal-branch-pm-flow]]
@@ -40,6 +41,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Playbook selection becomes a Sol session decision, not a signal match** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../inngest/unified-ticket-handler]] · [[../dashboard/tickets]]
 - **Ticket Direction artifact + Sol first-touch box session (ack-then-session-output)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
 - **Ticket cost counts only real API spend, not Max box sessions — across Sol, Cora, and June** · verified 2026-07-08 · → [[../libraries/ticket-analyzer#max-vs-api-ticket-cost--0-marginal-for-a-box-lane]] · [[../libraries/ai-usage#gotchas]] · [[../libraries/fleet-cost#apibilled-is-the-contract-other-surfaces-reuse--do-not-invent-a-parallel-concept]]
+- **Control Tower — exclude Sol first-touch dispatch from the ai:orchestrator work probe** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Ticket UI shows the escalation went to June (with her avatar), not 'AI Routine'** · verified 2026-07-08 · → [[../dashboard/tickets__id]] § Escalate details
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]

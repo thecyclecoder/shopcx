@@ -1,0 +1,1 @@
+- **Escalation keys on real severity, not a middling score — a resolved ticket with a minor issue stays closed** · verified 2026-07-08 · → [[../lifecycles/ai-analysis]]
