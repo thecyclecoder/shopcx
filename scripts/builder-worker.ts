@@ -9955,9 +9955,9 @@ async function runTicketHandleJob(job: Job) {
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>"}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
-      `See the ticket-handle skill for chosen_path + plan + guardrails shape.`,
+      `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
 
     const { resultText, isError, raw, usage, model, configDir: handleDir } = await runBoxLane(
@@ -9970,11 +9970,46 @@ async function runTicketHandleJob(job: Job) {
 
     if (parsed?.status === "needs_human") {
       const reason = String(parsed.reason || "Sol punted to a human — no reason given.");
+      // ── Phase 3 of portal-errors-route-to-sol-first-escalate-to-june-on-rail ──
+      // Sol's rail-hit on a portal-error first-touch escalates the ticket to June's triage-
+      // escalation lane (escalated_at set, escalated_to null, escalation_reason names the rail).
+      // The [[../src/lib/inngest/triage-escalations]] cron picks up the routine-owned escalate on
+      // its next tick and enqueues a cs-director-call — the third-rung escalation ladder Sol now
+      // occupies the first rung of for portal errors. The escalate helper is a compare-and-set
+      // (workspace_id-scoped + .is('escalated_at', null) + .select('id')): a ticket that was
+      // already escalated by a prior sol_resession_cap_hit / auto-heal escalate keeps that reason
+      // (Learning #2 — refuse to overwrite the existing state). Non-portal ticket-handle jobs
+      // (first_touch / inflection) stay on the existing needs_attention path — the rail-hit
+      // escalate is portal-only.
+      let escalationLine = "";
+      if (params.reason === "portal_error") {
+        const { escalateSolPortalRailHit } = await import("../src/lib/portal/escalate-sol-rail-hit");
+        try {
+          const out = await escalateSolPortalRailHit(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            sol_reason: parsed.reason ? String(parsed.reason) : "",
+          });
+          if (out.escalated) {
+            escalationLine = `Portal rail-hit → June triage: ${out.reason}\n`;
+            console.log(`${tag} portal rail-hit: escalated ticket ${ticketId} to June (${out.reason})`);
+          } else {
+            escalationLine = `Portal rail-hit escalate no-op: ${out.reason}\n`;
+            console.warn(`${tag} portal rail-hit escalate no-op (${out.reason}) for ticket ${ticketId}`);
+          }
+        } catch (e) {
+          // Never wedge the job status on an escalate failure — the needs_attention lane below
+          // still captures the punt so the CS Director can look. Surface the error for grep-ability.
+          const msg = e instanceof Error ? e.message : String(e);
+          escalationLine = `Portal rail-hit escalate failed: ${msg}\n`;
+          console.warn(`${tag} portal rail-hit escalate failed for ticket ${ticketId}: ${msg}`);
+        }
+      }
       await update(job.id, {
         status: "needs_attention",
         needs_attention_class: "sol_needs_human",
         error: reason,
-        log_tail: `Sol needs_human: ${reason}\n\n${raw.slice(-1800)}`.slice(-2000),
+        log_tail: `Sol needs_human: ${reason}\n${escalationLine}\n${raw.slice(-1800)}`.slice(-2000),
       });
       return;
     }
@@ -10046,6 +10081,46 @@ async function runTicketHandleJob(job: Job) {
           // the job (the Direction is authored; a human can retry the reply from the Improve tab).
           const msg = e instanceof Error ? e.message : String(e);
           console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      // ── Phase 2 of portal-errors-route-to-sol-first-escalate-to-june-on-rail ──
+      // Dual output: on a portal-error first-touch (params.reason === 'portal_error') Sol MAY
+      // return a `proposed_spec` field when she judges the error has a structural code cause. The
+      // worker (the only mutator) authors the spec on the Roadmap via authorSpecRowStructured
+      // (owner=cs, autoBuild=false, Derived-from-ticket ref — same shape improve-plan-executor
+      // uses for ticket-derived CS specs). A one-off / self-inflicted portal error yields no
+      // proposed_spec (validate returns null) and no spec noise. Guarded on reason=portal_error
+      // so a non-portal ticket-handle (first_touch / inflection) can't smuggle a spec through.
+      if (params.reason === "portal_error") {
+        const { validateSolProposedSpec, authorSolProposedPortalErrorSpec } = await import(
+          "../src/lib/portal/sol-proposed-spec"
+        );
+        const proposedRaw = (parsed as { proposed_spec?: unknown }).proposed_spec;
+        const proposedSpec = validateSolProposedSpec(proposedRaw);
+        if (proposedSpec) {
+          try {
+            const authorOutcome = await authorSolProposedPortalErrorSpec(
+              workspaceId,
+              ticketId,
+              proposedSpec,
+            );
+            if (authorOutcome.authored) {
+              const anchor = authorOutcome.anchoredMandateSlug
+                ? ` — anchored to CS mandate "${authorOutcome.anchoredMandateHeading ?? authorOutcome.anchoredMandateSlug}" (cs#${authorOutcome.anchoredMandateSlug})` +
+                  (authorOutcome.anchoredBy === "auto" ? " [auto]" : "")
+                : "";
+              console.log(`${tag} portal-error dual-output: spec authored ${authorOutcome.slug} (owner=cs)${anchor}`);
+            } else {
+              console.warn(`${tag} portal-error dual-output: authorSpecRowStructured returned false for ${authorOutcome.slug}`);
+            }
+          } catch (e) {
+            // A failed spec author does NOT unwind the Direction or the customer reply — the
+            // spec is an ADDITIONAL output on top of the customer fix. Surface the error in
+            // log_tail so it's grep-able but complete the job.
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`${tag} portal-error dual-output: spec author failed (customer fix already delivered): ${msg}`);
+          }
         }
       }
 

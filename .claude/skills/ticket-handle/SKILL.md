@@ -47,6 +47,27 @@ Sol picks `guardrails` — the constraints downstream cheap-execution MUST respe
 }
 ```
 
+## Portal-error dual output — optional `proposed_spec`
+
+When the job's `reason` is `portal_error` (Phase 1 of [[../../docs/brain/specs/portal-errors-route-to-sol-first-escalate-to-june-on-rail]] wires the portal intake to open a ticket-handle job with that reason), your first-touch is a **dual output**:
+
+- **ALWAYS produce the customer-facing remediation** in `direction` + `first_reply` — same shape as any first-touch. Correct the account / order / portal state, guide the customer.
+- **ADDITIONALLY, when the portal error has a STRUCTURAL CODE CAUSE**, add a top-level `proposed_spec` field. The worker will author a `planned` roadmap row (owner=cs, `**Derived-from-ticket:** \`<ticket-id>\`` in the summary, autoBuild=false) so the code fix gets commissioned — the same CS ticket-derived-product-fixes path Improve uses.
+
+**Judge structural vs. one-off.** Include `proposed_spec` when the error is:
+
+- a **product / infrastructure gap** — the portal offered an action the code can't complete (unhandled Appstle state, missing route replay, mis-typed payload, mis-classified transient error, first-order gate racing another mutation, …)
+- a **UI regression** — the portal UI let a customer submit something the invariants forbid (validation should have gated it)
+- a **recurring class of failure** (grep the brain / this codebase to sanity-check it isn't an already-tracked spec)
+
+**Omit `proposed_spec`** when the error is:
+
+- a **one-off customer state** — a stale token, a coincidental Appstle transient the healer will replay, a customer-side network blip
+- a **self-inflicted** action (the customer typed something into a form field they shouldn't have)
+- **already tracked** by an in-flight/planned spec you found on the brain
+
+Silence is a real signal — one-off portal errors should NOT get spec noise. When in doubt about "structural vs. one-off", err on the side of OMITTING; the human can still commission a spec from the Roadmap.
+
 ## Output protocol — ONE JSON object as your final message
 
 ```json
@@ -59,9 +80,18 @@ Sol picks `guardrails` — the constraints downstream cheap-execution MUST respe
     "plan": { ... path-specific shape (see above) ... },
     "guardrails": { ... bounded proxies (see above) ... }
   },
-  "first_reply": "<plain-text customer-facing reply, mirror the customer's language, no markdown, no 'Sol' signature — the personality layer adds Suzie/Julie>"
+  "first_reply": "<plain-text customer-facing reply, mirror the customer's language, no markdown, no 'Sol' signature — the personality layer adds Suzie/Julie>",
+  "proposed_spec": {
+    "slug": "<kebab-case; will be sanitized>",
+    "title": "<board title>",
+    "intent": "<plain-language WHY / customer impact>",
+    "problem": "<plain-language PROBLEM / structural code cause>",
+    "mandate": "<optional CS-function mandate slug (see docs/brain/functions/cs.md)>"
+  }
 }
 ```
+
+The `proposed_spec` field is OPTIONAL — omit it entirely on a one-off portal error, or when the job's `reason` is not `portal_error` (only portal-error tickets carry the dual-output rule; the worker guards on it, so smuggling a spec through on a non-portal first-touch is a no-op anyway).
 
 **Do not** include an `id`, `authored_by`, or `authored_at` — the worker fills those in. **Do not** include markdown or an assistant signature in `first_reply` — the CLAUDE.md invariant is plain text max 2 sentences per paragraph, and the personality layer adds Suzie/Julie downstream. **Do not** reference the string "Sol" in `first_reply` (Phase 3's verification checks that).
 
