@@ -4,7 +4,7 @@ Async-aware verification of an order-now / bill_now trigger — pause after firi
 
 **File:** `src/lib/commerce/order-now-verify.ts` · **Inngest fn:** `src/lib/inngest/order-now-verify.ts`
 
-Phase 1 of [[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]]. Derived from ticket 0a9e4d7f (Judy) — Appstle bill_now succeeded on the trigger ack, Shopify rejected the charge minutes later, the sub dropped into dunning, and the customer had already been told her order was on the way.
+Phases 1 + 2 of [[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]]. Derived from ticket 0a9e4d7f (Judy) — Appstle bill_now succeeded on the trigger ack, Shopify rejected the charge minutes later, the sub dropped into dunning, and the customer had already been told her order was on the way.
 
 ## Why
 
@@ -23,6 +23,8 @@ This library gates the ticket_resolution_events verdict on a REAL paid order:
 - `verifyOrderNowOutcome(admin, opts)` — reads the evidence from customer_events / subscriptions / orders and calls the predicate. Returns `{ verdict, evidence }`.
 - `scheduleOrderNowVerify(input)` — fires the Inngest event with the flavor-specific delay + attempt counter. Extracted so callers that fire order-now their own way (portal handlers) can still schedule the verify.
 - `subscriptionOrderNowVerified(workspaceId, contractId, ctx)` — the direct-action wrapper. Fires bill_now AND schedules the verify. Returns `{ success, internal, pending, fired_at, subscription_id }`.
+- `dispatchRecoveryOnDecline(input, deps?)` — **Phase 2** — fires the update-payment-method recovery journey exactly once for a declined verdict. Confirming-predicate guard: soft-skips when a `dunning.recovery_email_sent` `customer_events` row exists for this customer since `fired_at` (dunning's billing-failure path may already have delivered). Wraps [[./payment-recovery-email]]. Overridable `deps` (`alreadySentSinceFiredAt`, `sendRecovery`) make the guard + delivery testable without Resend / Supabase.
+- `defaultRecoveryDispatchDeps()` — the production deps wiring (real `customer_events` count + `sendPaymentRecoveryEmail`). Extracted so tests swap either side cleanly.
 
 ## Verdict decision table
 
@@ -42,8 +44,8 @@ Paid signal wins over declined signal — a card rotation between fire and verif
 
 ## Phase sequencing
 
-- **Phase 1 (this page):** async verify only — declined → stamp `drifted`, no journey trigger.
-- **Phase 2:** decline branch triggers the update-payment-method journey ([[./add-payment-method-journey-builder]]).
+- **Phase 1 (landed):** async verify only — declined → stamp `drifted`.
+- **Phase 2 (landed):** decline branch triggers the update-payment-method recovery journey via `dispatchRecoveryOnDecline` → [[./payment-recovery-email]]. Guarded so exactly one delivery lands per (customer, fired_at) window even when dunning's billing-failure webhook is racing us.
 - **Phase 3:** journey completion migrates Appstle→internal ([[./vault-and-migrate-payment-method]]) and deterministically retries order-now on the internal sub.
 - **Phase 4:** verified paid order triggers a lightweight Sol pass and only then sends the customer confirmation (message-is-last).
 
@@ -51,6 +53,7 @@ Paid signal wins over declined signal — a card rotation between fire and verif
 
 - [[./commerce__subscription]] — the underlying `subscriptionOrderNow` fire.
 - [[./appstle]] — `orderNowByContract` + why Appstle is delayed.
+- [[./payment-recovery-email]] — magic-link recovery email + tagged closed ticket the Phase 2 decline branch dispatches.
 - [[../tables/ticket_resolution_events]] — the write-ahead ledger this library stamps.
 - [[../lifecycles/subscription-billing]] · [[../lifecycles/dunning]] — the flows this library integrates with.
 - [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] — the sibling message-is-last spec (Phase 4 integration point).

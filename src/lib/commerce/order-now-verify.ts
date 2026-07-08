@@ -298,3 +298,112 @@ export async function subscriptionOrderNowVerified(
     subscription_id: sub.id as string,
   };
 }
+
+// ── Phase 2: decline → update-payment-method journey ──────────────
+//
+// When the async verify lands a `declined` verdict, hand the customer a
+// self-service recovery link (`sendPaymentRecoveryEmail` — magic link →
+// update card → migrate + reactivate + charge). This is the deterministic
+// hand-off called out by the spec (no false "it shipped" message goes out;
+// message-is-last).
+//
+// Guarded so we fire exactly once per (customer, fired_at) window even when
+// dunning's billing-failure webhook ALSO delivers the recovery email:
+//   - Missing customer_id → soft-skip (no target).
+//   - A `dunning.recovery_email_sent` customer_events row for this customer
+//     since fired_at → soft-skip (already delivered by dunning or a prior
+//     verify attempt).
+//
+// The confirming-predicate guard is the read-then-write pattern:
+//   1. Count customer_events since fired_at (fresh read).
+//   2. Only insert the send if the count is zero.
+// Race between two verify runs in the same window is still possible; the
+// blast radius is a duplicate recovery email, which is idempotent from the
+// customer's POV (same magic link, same recovery ticket tag).
+
+/** Outcome of the decline → recovery dispatcher. */
+export type RecoveryDispatchOutcome =
+  | { sent: true; ticket_id?: string; message_id?: string }
+  | { sent: false; skipped_reason: string; error?: string };
+
+/** Overridable deps for testing the decline dispatcher without touching
+ *  Resend / Supabase. Production callers omit the object and get the real
+ *  implementations. */
+export interface RecoveryDispatchDeps {
+  /** Async predicate: has a recovery email already gone out to this
+   *  customer since fired_at? Prod = COUNT on customer_events. */
+  alreadySentSinceFiredAt: (input: {
+    workspace_id: string;
+    customer_id: string;
+    fired_at: string;
+  }) => Promise<boolean>;
+  /** Delivery: fires the magic-link recovery email + tagged closed ticket. */
+  sendRecovery: (
+    workspace_id: string,
+    customer_id: string,
+    opts?: { subscriptionId?: string },
+  ) => Promise<{ sent: boolean; ticketId?: string; messageId?: string; error?: string }>;
+}
+
+/**
+ * Prod deps — wired to the real customer_events count + payment-recovery-email.
+ * Extracted so tests can swap either side.
+ */
+export function defaultRecoveryDispatchDeps(): RecoveryDispatchDeps {
+  return {
+    alreadySentSinceFiredAt: async ({ workspace_id, customer_id, fired_at }) => {
+      const admin = createAdminClient();
+      const { count } = await admin
+        .from("customer_events")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", workspace_id)
+        .eq("customer_id", customer_id)
+        .eq("event_type", "dunning.recovery_email_sent")
+        .gt("created_at", fired_at);
+      return (count ?? 0) > 0;
+    },
+    sendRecovery: async (workspace_id, customer_id, opts) => {
+      const { sendPaymentRecoveryEmail } = await import("@/lib/payment-recovery-email");
+      return sendPaymentRecoveryEmail(workspace_id, customer_id, opts);
+    },
+  };
+}
+
+/**
+ * Dispatcher: fire the update-payment-method recovery journey once for a
+ * declined order-now verdict. Idempotent per (customer, fired_at) window.
+ *
+ * Extracted from the Inngest function so the guard predicate + delivery is
+ * unit-testable — the Inngest fn is a thin adapter that wires event-data +
+ * `defaultRecoveryDispatchDeps()`.
+ */
+export async function dispatchRecoveryOnDecline(
+  input: {
+    workspace_id: string;
+    subscription_id: string;
+    customer_id: string | null;
+    fired_at: string;
+  },
+  deps: RecoveryDispatchDeps = defaultRecoveryDispatchDeps(),
+): Promise<RecoveryDispatchOutcome> {
+  if (!input.customer_id) {
+    return { sent: false, skipped_reason: "no_customer_id" };
+  }
+
+  const already = await deps.alreadySentSinceFiredAt({
+    workspace_id: input.workspace_id,
+    customer_id: input.customer_id,
+    fired_at: input.fired_at,
+  });
+  if (already) {
+    return { sent: false, skipped_reason: "already_sent_since_fired_at" };
+  }
+
+  const res = await deps.sendRecovery(input.workspace_id, input.customer_id, {
+    subscriptionId: input.subscription_id,
+  });
+  if (!res.sent) {
+    return { sent: false, skipped_reason: "send_failed", error: res.error };
+  }
+  return { sent: true, ticket_id: res.ticketId, message_id: res.messageId };
+}

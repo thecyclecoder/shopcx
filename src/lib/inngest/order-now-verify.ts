@@ -1,14 +1,16 @@
 /**
- * Async-aware order-now verify — Phase 1 of docs/brain/specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry.md
+ * Async-aware order-now verify — Phases 1 + 2 of docs/brain/specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry.md
  *
  * Fired by `subscriptionOrderNowVerified` (and other order-now entry points)
  * after firing bill_now. Sleeps for the flavor-specific delay, reads the REAL
- * outcome from customer_events / subscriptions / orders, and stamps the
- * ticket_resolution_events row with the verdict:
+ * outcome from customer_events / subscriptions / orders, and:
  *
- *   - paid  → verified_outcome='confirmed'
- *   - declined → verified_outcome='drifted'  (Phase 2 hooks the recovery
- *     journey trigger onto this branch)
+ *   - paid → stamps ticket_resolution_events verified_outcome='confirmed'.
+ *   - declined → fires the update-payment-method recovery journey EXACTLY
+ *     ONCE via `dispatchRecoveryOnDecline` (Phase 2), then stamps
+ *     verified_outcome='drifted'. The dispatcher's guard predicate
+ *     (`dunning.recovery_email_sent` since fired_at) prevents a double-send
+ *     when the billing-failure webhook's dunning cycle already delivered.
  *   - unknown → re-schedule one more time (attempt+1, capped at 3); the
  *     third unknown stamps 'drifted' so the ledger row terminally resolves.
  *
@@ -22,6 +24,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
+  dispatchRecoveryOnDecline,
   scheduleOrderNowVerify,
   verifyOrderNowOutcome,
   type OrderNowVerdict,
@@ -98,6 +101,23 @@ export const orderNowVerify = inngest.createFunction(
     // rather than staying forever pending.
     const outcomeForLedger = verdict === "paid" ? "confirmed" : "drifted";
 
+    // Phase 2: on `declined`, hand the customer the update-payment-method
+    // recovery journey. `dispatchRecoveryOnDecline` is a step.run so
+    // Inngest deduplicates on retry, AND it consults its own confirming-
+    // predicate guard (`dunning.recovery_email_sent` since fired_at) so
+    // dunning's billing-failure path can't be double-emailed with ours.
+    let recoveryOutcome: unknown = null;
+    if (verdict === "declined") {
+      recoveryOutcome = await step.run("send-recovery-journey", async () => {
+        return dispatchRecoveryOnDecline({
+          workspace_id: data.workspace_id,
+          subscription_id: data.subscription_id,
+          customer_id: data.customer_id,
+          fired_at: data.fired_at,
+        });
+      });
+    }
+
     if (data.resolution_event_id) {
       await step.run("stamp-ledger", async () => {
         await stampResolutionOutcome(
@@ -114,6 +134,7 @@ export const orderNowVerify = inngest.createFunction(
       terminal: true,
       attempt,
       ticket_resolution_events_id: data.resolution_event_id,
+      recovery: recoveryOutcome,
     };
   },
 );
