@@ -1897,12 +1897,17 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     }
 
     // ── 3.95 SOL FIRST-TOUCH DISPATCH ──
-    // Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session. When the workspace has
-    // opted the channel into Sol's first-touch box session AND this is a fresh ticket (is_new_ticket)
-    // AND no agent is already involved AND fraud didn't block above, we invert the cost curve:
-    // ship a short ack RIGHT NOW (so the customer sees a response within seconds), enqueue a
-    // top-level Max session for Sol to author the durable Direction + the real first customer-facing
-    // reply, then RETURN — the inline Sonnet Step 2e path below is skipped for this turn.
+    // Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session, plus Phase 1 of
+    // sol-first-touch-ack-only-on-chat-not-async-channels (the ack is chat-only). When the
+    // workspace has opted the channel into Sol's first-touch box session AND this is a fresh
+    // ticket (is_new_ticket) AND no agent is already involved AND fraud didn't block above, we
+    // enqueue a top-level Max session for Sol to author the durable Direction + the real first
+    // customer-facing reply, then RETURN — the inline Sonnet Step 2e path below is skipped for
+    // this turn. On CHAT (customer waiting live), we ALSO ship a short ack RIGHT NOW so the
+    // customer sees a response within seconds; on async channels (email/sms/portal/meta_dm),
+    // Sol's real reply arriving minutes later IS the first-touch message — a redundant "we'll
+    // get back to you" is noise, so we skip both the ack send AND its ticket_resolution_events
+    // ack row.
     //
     // Guards, in order (learning #2 — compare-and-set + narrow the enumeration source before
     // mutating): (1) is_new_ticket must be true — a reply on an existing ticket falls through to
@@ -1912,10 +1917,17 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // toes (agent_intervened / assigned_to / escalated_to all set agentAssigned above). Fraud is
     // already handled — a fraud-blocked ticket returned above at line ~1730 (verification bullet 4).
     if (isNew && cfg.sol_first_touch_enabled && !agentAssigned) {
+      const isChatChannel = st.ch === "chat";
       const acked = await step.run("sol-first-touch-ack", async () => {
         if (await newerActivity(admin, tid, t0)) return false;
-        await sendFirstTouchAck(admin, wsId, tid, st.ch, cfg.sandbox);
-        await sysNote(admin, tid, `[System] Sol first-touch: ack sent — dispatching kind='ticket-handle' agent_jobs.`);
+        if (isChatChannel) {
+          await sendFirstTouchAck(admin, wsId, tid, st.ch, cfg.sandbox);
+          await sysNote(admin, tid, `[System] Sol first-touch: ack sent — dispatching kind='ticket-handle' agent_jobs.`);
+        } else {
+          // Async channel: skip the ack entirely (no send, no ticket_resolution_events ack row).
+          // Sol's real reply from the enqueued ticket-handle job is the sole first-touch message.
+          await sysNote(admin, tid, `[System] Sol first-touch: ack skipped (channel=${st.ch}, chat-only) — dispatching kind='ticket-handle' agent_jobs.`);
+        }
         return true;
       });
 
@@ -1924,10 +1936,11 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         // ticket + this turn's reason, and Sol's runTicketHandleJob re-guards on the required
         // Direction fields before it calls writeDirection — so a mis-formed session never lands a
         // partial-UNIQUE-violating row on ticket_directions. `turn_index` is not the ticket-messages
-        // turn — it's the resolution-events turn index (2 = the ack was turn 1, Sol's real reply
-        // will be turn 2), included for downstream observability.
+        // turn — it's the resolution-events turn index. On chat: ack was turn 1, Sol authors turn 2.
+        // On async channels: no ack — Sol authors turn 1 (her real reply is the sole first-touch
+        // customer message).
         await step.run("sol-first-touch-enqueue", async () => {
-          const turnIndex = 2; // ack = 1; Sol authors turn 2 via executeSonnetDecision → stageResolutionEvent
+          const turnIndex = isChatChannel ? 2 : 1; // chat: ack=1, Sol=2; async: Sol=1 (no ack)
           // No ticket_id column on agent_jobs — the shape is workspace_id + spec_slug + kind +
           // instructions (JSON with the per-kind payload). runTicketHandleJob parses ticket_id +
           // workspace_id from the instructions blob (mirrors ticket-improve's params-in-JSON pattern).
