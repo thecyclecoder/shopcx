@@ -3030,7 +3030,18 @@ async function readDrainControl(): Promise<{ draining: boolean; requestedAtSha: 
 // (claimed_at is null OR claimed_at <= now())), so a `false` result means nothing is claimable and
 // no lane is ever starved. Fails OPEN: a read error returns null ⇒ the caller polls all lanes as
 // normal, so a transient DB hiccup never stalls the build queue.
+//
+// cut-internal-egress-pooler-and-spec-rpcs Phase 1: prefer the shared pg pool (bypasses the
+// PostgREST `set_config` preamble + auth churn — the top-driver reduction) and fall through to
+// supabase-js when the pool is unavailable or the query fails. Same fail-open contract.
 async function hasClaimableJob(): Promise<boolean | null> {
+  try {
+    const { hasClaimableAgentJob } = await import("../src/lib/pg-pool");
+    const pooled = await hasClaimableAgentJob();
+    if (pooled !== null) return pooled;
+  } catch {
+    /* pool import/query failed — fall through to supabase-js */
+  }
   try {
     const { data, error } = await db
       .from("agent_jobs")
@@ -23301,13 +23312,26 @@ async function main() {
       // must never break the poll loop (self-update just runs its usual paths on the next tick).
       let forceForUnknownKind: string | null = null;
       try {
-        const { data: queuedKindRows } = await db
-          .from("agent_jobs")
-          .select("kind")
-          .in("status", ["queued", "queued_resume"]);
-        for (const r of ((queuedKindRows as { kind: string | null }[] | null) ?? [])) {
-          const k = r?.kind;
-          if (k && !KNOWN_JOB_KINDS.has(k as Job["kind"])) {
+        // cut-internal-egress-pooler-and-spec-rpcs Phase 1: prefer the shared pg pool — the
+        // supabase-js path pulled EVERY queued row and did the DISTINCT in JS (a top rows-shipped
+        // driver on a busy queue). Pool path pushes the DISTINCT to Postgres. Fall through to the
+        // supabase-js path if the pool is unavailable (fail-open — never breaks self-update).
+        let kinds: string[] | null = null;
+        try {
+          const { queuedAgentJobKinds } = await import("../src/lib/pg-pool");
+          kinds = await queuedAgentJobKinds();
+        } catch { /* fall through to supabase-js */ }
+        if (kinds === null) {
+          const { data: queuedKindRows } = await db
+            .from("agent_jobs")
+            .select("kind")
+            .in("status", ["queued", "queued_resume"]);
+          kinds = ((queuedKindRows as { kind: string | null }[] | null) ?? [])
+            .map((r) => r?.kind)
+            .filter((k): k is string => typeof k === "string" && !!k);
+        }
+        for (const k of kinds) {
+          if (!KNOWN_JOB_KINDS.has(k as Job["kind"])) {
             forceForUnknownKind = k;
             break;
           }

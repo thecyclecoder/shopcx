@@ -44,13 +44,21 @@ export default function RegressionsPage() {
 
   useEffect(() => {
     if (workspace.role !== "owner") return;
+    // cut-internal-egress-pooler-and-spec-rpcs Phase 3: visibility-guard the 8s tick — a
+    // backgrounded tab stops the fan-out and refreshes on return-to-visible. Widened from
+    // the shipped sidebar reduce-calls pattern (src/app/dashboard/sidebar.tsx:347) — the
+    // existing focus listener already refreshed on tab return, this narrows the tick.
     load();
-    const interval = setInterval(() => load(true), 8000);
+    const runPoll = () => { if (document.visibilityState === "visible") load(true); };
+    const interval = setInterval(runPoll, 8000);
     const onFocus = () => load(true);
+    const onVisibility = () => { if (document.visibilityState === "visible") load(true); };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       clearInterval(interval);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [load, workspace.role]);
 
