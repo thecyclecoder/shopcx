@@ -25,6 +25,54 @@ export default async function executeToolCallImprove(
   workspaceId: string,
   ticket: Ticket,
 ): Promise<string> {
+  // Admin-side tool: active policies for this workspace. Doesn't need a
+  // customer resolved — policies are the workspace's rulebook. Phase 1 of
+  // [[../../docs/brain/specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]
+  // gives Sol read-only research over the policies table so her Direction
+  // reflects what the workspace actually allows (returns, refunds,
+  // consumable / subscription returnability, exception ceilings) instead of
+  // guessing. Optional `input.slug` narrows to one policy; the argless form
+  // lists every active policy. Returns internal_summary (the rule-body the
+  // grader / orchestrator already reads via sonnet-orchestrator-v2:465) so
+  // Sol reasons against the same text every other layer sees.
+  if (name === "get_policies") {
+    const admin = createAdminClient();
+    const slugInput = typeof input.slug === "string" ? input.slug.trim() : "";
+    let q = admin
+      .from("policies")
+      .select("slug, name, customer_summary, internal_summary, updated_at")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug");
+    if (slugInput) q = q.eq("slug", slugInput);
+    const { data, error } = await q;
+    if (error) return `get_policies failed: ${error.message}`;
+    const rows = (data ?? []) as Array<{
+      slug: string;
+      name: string;
+      customer_summary: string | null;
+      internal_summary: string | null;
+      updated_at: string;
+    }>;
+    if (!rows.length) {
+      return slugInput
+        ? `No active policy matches slug='${slugInput}' in this workspace.`
+        : "No active policies in this workspace.";
+    }
+    return rows
+      .map((p) =>
+        [
+          `## ${p.name} (slug: ${p.slug})`,
+          p.internal_summary ? p.internal_summary.trim() : "(no internal_summary)",
+          p.customer_summary ? `\nCustomer-facing summary:\n${p.customer_summary.trim()}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      )
+      .join("\n\n");
+  }
+
   // Admin-side tool: latest ticket analysis. Doesn't need a customer
   // resolved (some analyses run on tickets without customers).
   if (name === "get_ticket_analysis") {

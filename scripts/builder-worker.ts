@@ -9933,11 +9933,52 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // Load the same read-only context brief the improve lane uses, so Sol's first turn sees the ticket +
 // customer + last analysis exactly the way the founder does. Best-effort — a missing customer or
 // analysis is fine; the brief still surfaces the messages.
+//
+// Phase 1 of [[sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]
+// APPENDS the workspace's active policies (returns / refunds / consumable / subscription
+// returnability / exception ceilings) so Sol's first-touch reasons AGAINST the actual rulebook
+// before choosing an outcome — the same policy text the analyzer + orchestrator already read
+// (docs/brain/tables/policies.md). Without this block, Sol offered coffee returns the return policy
+// disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
+// error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
-  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
-  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
-  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
-  return loadImproveBrief(ticketId);
+  const base = await loadImproveBrief(ticketId);
+  const { data: ticket } = await db
+    .from("tickets")
+    .select("workspace_id")
+    .eq("id", ticketId)
+    .maybeSingle();
+  const workspaceId = (ticket as { workspace_id: string | null } | null)?.workspace_id ?? null;
+  if (!workspaceId) return base;
+  const policiesBlock = await loadActivePoliciesBlock(workspaceId);
+  return policiesBlock ? `${base}\n\n${policiesBlock}` : base;
+}
+
+// Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
+// baked into Sol's turn-1 prompt. Same select shape sonnet-orchestrator-v2 uses at :465, and the
+// same block header ("CURRENT POLICIES") the analyzer prompt uses at ticket-analyzer.ts:262 —
+// keeping the header consistent means Sol reasons about "policy" the same way every other layer
+// does. Returns "" on empty / on error (the brief is still useful without it; the prompt below
+// still hard-requires policy review regardless — an empty block means Sol must fetch via
+// get_policies or fall through to needs_human rather than guess).
+async function loadActivePoliciesBlock(workspaceId: string): Promise<string> {
+  try {
+    const { data, error } = await db
+      .from("policies")
+      .select("slug, name, internal_summary")
+      .eq("workspace_id", workspaceId)
+      .eq("is_active", true)
+      .is("superseded_by", null)
+      .order("slug");
+    if (error || !data || !data.length) return "";
+    const rows = data as Array<{ slug: string; name: string; internal_summary: string | null }>;
+    return [
+      "--- CURRENT POLICIES (the rulebook — your Direction MUST reflect these; NEVER propose or bait an outcome outside them) ---",
+      ...rows.map((p) => `## ${p.name} (slug: ${p.slug})\n${(p.internal_summary || "(no internal_summary)").trim()}`),
+    ].join("\n\n");
+  } catch {
+    return "";
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -9972,8 +10013,31 @@ async function runTicketHandleJob(job: Job) {
       brief,
       ``,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
-      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis). You may also Read/Grep the brain + src/ and WebSearch.`,
+      `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
+      ``,
+      // Phase 1 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // REQUIRE policy review before Sol commits. The CURRENT POLICIES block in the brief above is the
+      // rulebook; get_policies re-fetches it live. Sol MUST reason against it and NEVER bait an
+      // outcome the policy disallows (e.g. offering coffee-subscription returns when returns aren't
+      // accepted). Absence of a clearly-applicable policy is not permission — it is needs_human.
+      `POLICY REVIEW IS MANDATORY. Before you choose a chosen_path or draft the first_reply, review the CURRENT POLICIES block above (re-fetch live via get_policies if unsure) and reason AGAINST them for the customer's ask. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
+      // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // Tell Sol her DRAFT reply is machine-validated (src/lib/sol-policy-bait-guard.ts) before it
+      // sends. A reply that (a) promises a remedy while your context_summary declares the ask
+      // out-of-policy, or (b) stacks multiple returns/refunds in one turn (the 87ce35a1 coffee-
+      // return incident) is BLOCKED — the customer never sees it, and a human re-drafts via
+      // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
+      // pass the guard; the block is only for baited promises.
+      `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket routes to needs_human. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
+      // Phase 3 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // Sol MUST resolve a concrete existing playbook_slug when chosen_path='playbook' — the
+      // writer rejects a missing / empty / whitespace-only / unknown slug with typed errors
+      // (playbook_slug_missing / _not_string / _unknown — src/lib/ticket-directions.ts:validatePlanForPath).
+      // The honest path when NO playbook matches is chosen_path='stateless', not "playbook"
+      // with an empty slug — the writer will fail the Direction otherwise, and the ticket
+      // burns the box turn.
+      `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
@@ -10089,19 +10153,37 @@ async function runTicketHandleJob(job: Job) {
       // dispatcher will already have inserted the ack ticket_resolution_events row, so this send stamps
       // the next-turn's row. Best-effort in the sense that a first_reply-less Direction (rare) still
       // lands cleanly — the ticket just doesn't get a Sol reply here.
+      //
+      // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
+      // MACHINE-VALIDATE the DRAFT reply against Sol's own policy verdict BEFORE the send fires. A
+      // reply that promises an out-of-policy remedy — or stacks multiple returns/refunds in one turn
+      // (the 87ce35a1 coffee-return incident: Sol offered TWO returns after acknowledging renewals
+      // aren't returnable) — is blocked here. Direction stays durable (Sol's reasoning is preserved
+      // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
+      // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
       if (firstReply) {
-        const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-        const channel = (t?.channel as string | null) || "email";
-        try {
-          const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-          await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-        } catch (e) {
-          // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-          // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-          // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-          const msg = e instanceof Error ? e.message : String(e);
-          console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+        const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
+        const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
+        if (bait.ok === false) {
+          const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+          const channel = (t?.channel as string | null) || "email";
+          try {
+            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+          } catch (e) {
+            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          }
         }
       }
 

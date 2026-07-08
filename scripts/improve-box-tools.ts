@@ -38,6 +38,13 @@ const READ_TOOLS = new Set([
   "get_crisis_status",
   "get_dunning_status",
   "get_ticket_analysis",
+  // Phase 1 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome:
+  // active-policy lookup so Sol can confirm what is allowed BEFORE proposing an
+  // outcome (returns / refunds / consumable / subscription returnability /
+  // exception ceilings). Read-only against `public.policies` (is_active,
+  // superseded_by IS NULL). Optional json_input `{"slug":"<slug>"}` narrows to
+  // one policy; the argless form lists every active policy for the workspace.
+  "get_policies",
 ]);
 
 async function main() {
