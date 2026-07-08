@@ -41,6 +41,13 @@ export interface TicketAnalysisRow {
   cost_cents: number;
   trigger: string | null;
   ai_message_count: number;
+  /**
+   * Whether the analyzer run that produced THIS row was billed against the Max subscription
+   * (a box lane, $0 marginal) or against a real per-token API bill (the deployed analyzer's
+   * fallback path). Null on historical rows (unknown). Mirrors the apiBilled flag on
+   * [[fleet-cost]] recordAgentJobCost — 'max' ↔ apiBilled=false, 'api' ↔ apiBilled=true.
+   */
+  billing_source: "max" | "api" | null;
   created_at: string;
 }
 
@@ -61,6 +68,15 @@ export interface InsertAnalysisInput {
   /** 'auto_close' | 'manual_close' | 'reopen_close' | 'manual' — same enum ticket_analyses.trigger takes. */
   trigger: string;
   aiMessageCount: number;
+  /**
+   * True when the analyzer run was billed against the paid API (deployed-analyzer fallback path
+   * when the box is down); false when it ran on the Max subscription box lane. Mirrors the
+   * apiBilled flag on [[fleet-cost]] recordAgentJobCost so the SAME contract flows all the way
+   * into `ticket_analyses.billing_source` — we NEVER invent a parallel concept. Undefined =
+   * historical/unknown; the row is persisted with `billing_source: null` so the honest "we
+   * didn't record it" tag is preserved (not retroactively mislabelled as either lane).
+   */
+  apiBilled?: boolean;
 }
 
 /**
@@ -88,6 +104,12 @@ export async function insertAnalysis(input: InsertAnalysisInput): Promise<{ id: 
       cost_cents: input.costCents,
       trigger: input.trigger,
       ai_message_count: input.aiMessageCount,
+      billing_source:
+        input.apiBilled === undefined
+          ? null
+          : input.apiBilled
+          ? "api"
+          : "max",
     })
     .select("id")
     .single();

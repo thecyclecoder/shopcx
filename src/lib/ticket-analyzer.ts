@@ -697,6 +697,14 @@ export interface AnalyzerBoxRunUsage {
   cache_creation_tokens?: number;
   cache_read_tokens?: number;
   model?: string | null;
+  /**
+   * True when this analyzer run was billed against the paid API (deployed-analyzer fallback
+   * when the box is down); false when it ran on the Max subscription box lane. Mirrors the
+   * apiBilled contract on [[fleet-cost]] recordAgentJobCost — the SAME signal, plumbed into
+   * `ticket_analyses.billing_source`. Undefined = the caller didn't record it; the row is
+   * persisted with `billing_source: null` (honest unknown, not retroactively mislabelled).
+   */
+  apiBilled?: boolean;
 }
 
 /**
@@ -779,6 +787,7 @@ export async function applyAnalyzerVerdict(
     costCents: costCents,
     trigger: prepared.trigger,
     aiMessageCount: prepared.aiMessageCount,
+    apiBilled: usage?.apiBilled,
   });
   if (insertErr) {
     console.warn(`[ticket-analyzer] insertAnalysis failed (${prepared.ticketId}): ${insertErr}`);
