@@ -444,25 +444,99 @@ test("isForeignGoTrueAuthLogNoise drops the exact phrase (case + whitespace inse
   assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: context deadline exceeded  "), true);
 });
 
-test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / dial / invalid JWT / rate-limit)", () => {
+test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / invalid JWT / rate-limit)", () => {
   // The browser-abort sibling — still routed through the transient class.
   assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
-  // Postgres reachability failures — dial-canceled + dial i/o timeout.
+  // Actionable GoTrue errors — must still surface / page on first sighting.
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-localhost-dial-time) ──
+// GoTrue → its own localhost Postgres can't finish the dial before its own dial timer
+// fires (i/o timeout) or the parent context dies mid-dial (operation was canceled). Foreign
+// infrastructure, no lever from our side; chronic recur (7 occ / 9h) escalated the transient
+// allowlist entry (supabase-logs:0ca9220a8f0d2405). Drop AT CAPTURE — narrow markers gate the
+// drop to Supabase-internal dialing so a real dial failure against OUR remote pooler still pages.
+
+test("isForeignGoTrueAuthLogNoise drops the localhost dial i/o timeout shape", () => {
   assert.equal(
     isForeignGoTrueAuthLogNoise(
-      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: operation was canceled)",
+      "Unhandled server error: failed to connect to `host=localhost user=supabase_auth_admin database=postgres`: dial error (dial tcp [::1]:5432: i/o timeout)",
     ),
-    false,
+    true,
   );
+  // Sibling phrasing without backticks — still drops.
   assert.equal(
     isForeignGoTrueAuthLogNoise(
       "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
     ),
+    true,
+  );
+  // Leading whitespace still drops (trimStart applies).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "  Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise drops the localhost dial 'operation was canceled' sibling", () => {
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to `host=localhost user=supabase_auth_admin database=postgres`: dial error (dial tcp [::1]:5432: operation was canceled)",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: dial error (dial tcp [::1]:5432: operation was canceled)",
+    ),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a remote-pooler dial failure (no host=localhost / no supabase_auth_admin marker)", () => {
+  // A real Postgres pooler on OUR side — different host and user, still transient (retryable
+  // reachability blip) but NOT dropped at capture. `isTransientSupabaseLogNoise` covers it.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=db.superfoods.co user=postgres database=postgres: dial error (dial tcp 10.0.0.5:5432: i/o timeout)",
+    ),
     false,
   );
-  // Actionable GoTrue errors — must still surface / page on first sighting.
-  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
-  assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
+  // Right shape, wrong user (some other Supabase-internal role) — still keeps.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=postgres database=postgres: dial error (dial tcp [::1]:5432: i/o timeout)",
+    ),
+    false,
+  );
+  // Right shape, wrong host (a real pooler hostname) but supabase_auth_admin user — still
+  // keeps (localhost marker is REQUIRED — this is what pins the shape to internal dialing).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=db.internal user=supabase_auth_admin database=postgres: dial error (dial tcp 10.0.0.5:5432: i/o timeout)",
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS the localhost prefix without a dial timeout phrase", () => {
+  // A different failure mode against the same host — real auth-admin outage still pages.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: FATAL: password authentication failed",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "Unhandled server error: failed to connect to host=localhost user=supabase_auth_admin database=postgres: connection refused",
+    ),
+    false,
+  );
 });
 
 test("isForeignGoTrueAuthLogNoise returns false on empty/nullish", () => {

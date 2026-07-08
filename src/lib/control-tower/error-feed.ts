@@ -524,7 +524,7 @@ export function isForeignGoTrueEdgeNoise(
  * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
  * passes just the message), the 504 shape needs the request JSON.
  *
- * Two distinct GoTrue-saturation signatures, EITHER of which drops (both surfaced as
+ * Three distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
  * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
  * owner in a loop they can't fix):
  *
@@ -538,11 +538,22 @@ export function isForeignGoTrueEdgeNoise(
  *      `504: Processing this request timed out` AND the request JSON (`eventMessage`) carries
  *      BOTH `"path":"/user"` AND `"method":"GET"`.
  *
+ *  (c) localhost dial-timeout ([[../specs/error-feed-drop-supabase-gotrue-auth-log-localhost-dial-time]],
+ *      `supabase-logs:0ca9220a8f0d2405`, 7 occ / 9h) — GoTrue's `/user` handler can't reach
+ *      its own local Postgres inside its dial timer and emits `Unhandled server error:
+ *      failed to connect to \`host=localhost user=supabase_auth_admin database=postgres\`:
+ *      dial error (dial tcp [::1]:5432: i/o timeout | operation was canceled)`. Msg starts
+ *      with `Unhandled server error: failed to connect to` AND contains BOTH the
+ *      `host=localhost` and `user=supabase_auth_admin` markers (the unambiguous GoTrue →
+ *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
+ *      `dial ... (i/o timeout | operation was canceled)` phrase.
+ *
  * Narrowly gated so everything actionable still surfaces / pages on first sight: `context
- * canceled` (browser-abort) + `dial ... i/o timeout` / `dial ... canceled` (Postgres
- * reachability) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`, rate
- * limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504 on
- * `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
+ * canceled` (browser-abort) + a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE
+ * host (a real Postgres pooler on our side — not the `host=localhost user=supabase_auth_admin`
+ * GoTrue-internal shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`,
+ * rate limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504
+ * on `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
  */
 export function isForeignGoTrueAuthLogNoise(
   msg: string | null | undefined,
@@ -556,6 +567,20 @@ export function isForeignGoTrueAuthLogNoise(
   if (m.startsWith("504: Processing this request timed out")) {
     const em = eventMessage ?? "";
     if (em.includes('"path":"/user"') && em.includes('"method":"GET"')) return true;
+  }
+  // (c) localhost dial-timeout shape — GoTrue → its own localhost Postgres, dial timer fires
+  // before the TCP handshake completes (i/o timeout) or the parent context dies mid-dial
+  // (operation was canceled). The `host=localhost` + `user=supabase_auth_admin` markers
+  // together pin this to Supabase-internal dialing; a dial failure against OUR remote
+  // Postgres pooler carries different host/user markers and is kept (still transient).
+  const lower = m.toLowerCase();
+  if (
+    lower.startsWith("unhandled server error: failed to connect to") &&
+    lower.includes("host=localhost") &&
+    lower.includes("user=supabase_auth_admin") &&
+    /\bdial\b[^\n]*(?:i\/o timeout|operation was canceled)/.test(lower)
+  ) {
+    return true;
   }
   return false;
 }
