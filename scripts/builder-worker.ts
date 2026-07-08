@@ -10500,6 +10500,12 @@ async function runTicketHandleJob(job: Job) {
             : {};
         outcomeItems.push({ kind, description, target_ids: targetIds, expected_db_state: expected });
       }
+      // Phase 1 of secure-sol-required-outcomes-dispatch: fail-CLOSED on any insert / validation
+      // failure so a customer-influenced model JSON can never produce a shipped reply while its
+      // outcomes never landed. The prior implementation silently swallowed the insert error and
+      // let the send flow through the outcome-claim-guard's kind-specific patterns only — leaving
+      // a novel-kind claim un-scanned and shipping the false promise.
+      let honorBlockLine: string | null = null;
       if (outcomeItems.length > 0) {
         try {
           await writeRequiredOutcomes(db, {
@@ -10509,13 +10515,12 @@ async function runTicketHandleJob(job: Job) {
             items: outcomeItems,
           });
         } catch (e) {
-          // A required_outcomes insert failure does NOT unwind the Direction — the ledger is durable
-          // substrate. Surface the error in log_tail so it's grep-able but continue: with zero rows
-          // written, the honor step is a no-op and the outcome-claim guard downstream will block any
-          // send that CLAIMS an unverified outcome (Judy 0a9e4d7f's failure mode) via
-          // assertClaimsBackedByOutcomes.
           const msg = e instanceof Error ? e.message : String(e);
-          console.warn(`${tag} writeRequiredOutcomes failed (Direction still authored): ${msg}`);
+          honorBlockLine = `Sol reply BLOCKED by required-outcomes insert failure: ${msg}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${honorBlockLine}`);
+          await update(job.id, {
+            log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
         }
       }
 
@@ -10525,16 +10530,25 @@ async function runTicketHandleJob(job: Job) {
       // loudly) FIRST — the reply-drafting step is NOT reached while any item is pending. A failed
       // item routes the ticket to needs_human naming the unfinished item (Judy 0a9e4d7f: bag/credit
       // would fire OR fail loudly here — never a reply promising them while neither ran).
-      let honorBlockLine: string | null = null;
-      if (outcomeItems.length > 0) {
+      if (outcomeItems.length > 0 && honorBlockLine === null) {
         const { data: tCustomer } = await db
           .from("tickets")
-          .select("customer_id, channel")
+          .select("customer_id, channel, workspace_id")
           .eq("id", ticketId)
-          .single();
+          .eq("workspace_id", workspaceId)
+          .maybeSingle();
         const customerId = (tCustomer?.customer_id as string | null) ?? null;
         const honorChannel = (tCustomer?.channel as string | null) || "email";
-        if (!customerId) {
+        if (!tCustomer) {
+          // The ticket disappeared / cross-workspace mismatch. Block hard — every downstream mutator
+          // is workspace-scoped and would silently no-op, but the reply-drafting step would still
+          // ship. Fail closed.
+          honorBlockLine = `Sol reply BLOCKED: ticket ${ticketId} not found in workspace ${workspaceId}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${honorBlockLine}`);
+          await update(job.id, {
+            log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else if (!customerId) {
           // No linked customer — the executor can't dispatch a customer-scoped action. Block the
           // reply so an unverifiable claim can't ship; the Improve tab picks up the ticket.
           honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; a human re-drafts via Improve.`;
@@ -10543,13 +10557,46 @@ async function runTicketHandleJob(job: Job) {
             log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
           });
         } else {
+          // Phase 1 of secure-sol-required-outcomes-dispatch: VALIDATE every outcome's kind against
+          // the allowlist AND re-read every referenced subscription/order/product by
+          // (workspace_id, customer_id) BEFORE the honor step's shared-executor dispatch. A
+          // prompt-injected required_outcomes item pointing at another customer's contract_id lands
+          // here as subscription_customer_mismatch — the send is blocked, the honor step never runs.
+          try {
+            const { validateRequiredOutcomes } = await import("../src/lib/required-outcomes-validator");
+            const verdict = await validateRequiredOutcomes({
+              admin: db,
+              workspace_id: workspaceId,
+              ticket_id: ticketId,
+              customer_id: customerId,
+              items: outcomeItems,
+            });
+            if (verdict.ok === false) {
+              honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: ${verdict.reason}. Direction authored; a human re-drafts via Improve.`;
+              console.warn(`${tag} ${honorBlockLine}`);
+              await update(job.id, {
+                log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+              });
+            }
+          } catch (e) {
+            // Validator blew up — fail closed. The message-is-last invariant treats any
+            // uncertainty as unverified.
+            const msg = e instanceof Error ? e.message : String(e);
+            honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: validator threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${honorBlockLine}`);
+            await update(job.id, {
+              log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          }
+        }
+        if (honorBlockLine === null) {
           try {
             const { honorRequiredOutcomes } = await import("../src/lib/honor-required-outcomes");
             const honor = await honorRequiredOutcomes({
               admin: db,
               workspace_id: workspaceId,
               ticket_id: ticketId,
-              customer_id: customerId,
+              customer_id: customerId!,
               channel: honorChannel,
               // Real production dispatchers — the box worker has admin creds and this is the
               // very step the spec's Phase 2 verification names ("re-running Judy's scenario

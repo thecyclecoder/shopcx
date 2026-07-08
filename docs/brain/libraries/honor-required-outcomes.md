@@ -40,7 +40,7 @@ The `decideOutcome` verify-runs-AFTER-dispatch order and the "verify is skipped 
 
 Phase 2 lands the SDK; wire-in sites land as later phases:
 
-- **Sol's box session** (`scripts/builder-worker.ts` → `runTicketHandleJob`) — will invoke `honorRequiredOutcomes` between Direction-authoring and reply-drafting.
+- **Sol's box session** (`scripts/builder-worker.ts` → `runTicketHandleJob`) — invokes `honorRequiredOutcomes` between Direction-authoring and reply-drafting. Gated by [[required-outcomes-validator]] `validateRequiredOutcomes` (Phase 1 of [[../specs/secure-sol-required-outcomes-dispatch]]): an outcome pointing at another customer's `contract_id` / a disallowed kind is rejected BEFORE this SDK is called, so the honor step never dispatches on an unscoped identifier.
 - **[[action-executor]] `executeSonnetDecision`** — Phase 3 wire-in will call `replyGateBlocked` at every reply-composition site (Sol box reply, playbook/journey, macro/kb/ai_response, workflow, clarification) and refuse to compose a reply while `blocked===true`.
 - **[[sol-policy-bait-guard]]** — Phase 3 extends `assessSolReplyBaitRisk` beyond bait risk to also refuse a reply whose claims are unbacked by verified rows.
 - **`src/inngest/unified-ticket-handler.ts`** — Phase 4 completion gate uses `honorRequiredOutcomes` on the resolve step and `hasUnverifiedOutcomes` on the auto-close step.
