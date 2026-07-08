@@ -1,0 +1,1 @@
+- **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
