@@ -32,6 +32,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Anti-runaway cap on Sol re-sessions (frustration-always-bounces bounded)** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../lifecycles/ticket-lifecycle]] · [[../libraries/cs-director-digest]] · [[../dashboard/tickets]]
 - **Playbook selection becomes a Sol session decision, not a signal match** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../inngest/unified-ticket-handler]] · [[../dashboard/tickets]]
 - **Ticket Direction artifact + Sol first-touch box session (ack-then-session-output)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
+- **Ticket cost counts only real API spend, not Max box sessions — across Sol, Cora, and June** · verified 2026-07-08 · → [[../libraries/ticket-analyzer#max-vs-api-ticket-cost--0-marginal-for-a-box-lane]] · [[../libraries/ai-usage#gotchas]] · [[../libraries/fleet-cost#apibilled-is-the-contract-other-surfaces-reuse--do-not-invent-a-parallel-concept]]
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]
 - **Verify billing-interval on Appstle upstream_timeout, mirroring the 504 branch** · verified 2026-07-07 · → [[../libraries/appstle]]
