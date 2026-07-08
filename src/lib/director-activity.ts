@@ -41,6 +41,12 @@ export type DirectorActionKind =
   | "spec_review_needs_fix" // checklist failed (mangled phases / missing owner / parent / verification / blockers / db-companion) — diagnosis recorded; spec stays in_review.
   // spec-review-agent Phase 3 — Vale narrowed to QUALITY ONLY; one verdict per in_review spec.
   | "spec_review_passed" // well-formed (CHECKLIST cleared) → flags.vale_pass=true; spec stays in_review for Ada's disposition lane.
+  // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the passed-but-unstamped reconciler
+  // ([[../libraries/agents-spec-review]] `runValeReviewPassReconciler`) healed a legacy spec that had a
+  // `spec_review_passed` activity row from a prior pass but a NULL `specs.vale_review_passed_at` (dropped by
+  // the pre-Phase-1 best-effort mirror path). One row per spec healed; metadata:
+  // { actor:'reconciler:vale-review-passed-flag', stamped_at, source_activity_id?, autonomous:true }.
+  | "healed_review_passed_flag"
   // spec-review-agent Phase 3 — Ada's director-disposition lane (autonomous, with asymmetric check vs the
   // author's `flags.intended_status`). One row per Vale-passed spec she disposes.
   | "spec_dispose_same" // suggestion == decision (planned→planned OR deferred→deferred) — autonomous flip, applied silently.

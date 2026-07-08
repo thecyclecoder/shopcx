@@ -66,6 +66,22 @@ Best-effort + idempotent — re-running the same verdict produces the same end s
 
 On a `pass` the applier now runs `assertDurableReviewPassStamp(workspaceId, slug)` AFTER `markSpecCardValePassed` and BEFORE the `spec_review_passed` `director_activity` write. It re-reads `specs.vale_review_passed_at`; if NULL (the dual-write inside `upsertCardState` silently dropped it — the outer `try/catch` swallows all errors as best-effort), it forces a **compare-and-set** direct UPDATE to `now()`. The write is NOT swallowed — a failure THROWS and the outer try/catch turns the whole apply into `ok:false`, so the audit row is **never** recorded on a pass without a durable stamp. This is the invariant: `activity_row(spec_review_passed) ⇒ specs.vale_review_passed_at IS NOT NULL`. Idempotent — an already-stamped row returns immediately after a single SELECT. Covers the `spec-dispose.ts:141-148` author-intent fallback transitively, because Ada's disposition NEVER consumes `vale_review_passed_at` (unlike `vale_pass` — see [[spec-card-state]] `SpecCardFlags.vale_review_passed` doc), so once the invariant holds at pass time it survives disposition into `planned`/`shipped` unchanged.
 
+### `runValeReviewPassReconciler(admin, workspaceId): Promise<{scanned, healed, skipped, failed}>`
+
+**spec-review-pass-always-stamps-review-passed-flag Phase 2** — the "passed-but-unstamped" self-heal reconciler. Fixes the LEGACY residue that Phase 1's invariant guard eliminates going FORWARD: specs that already carry a `spec_review_passed` `director_activity` row from a prior pass but whose `specs.vale_review_passed_at` is NULL (dropped by the pre-Phase-1 mirror path). Reads every non-folded spec with `vale_review_passed_at IS NULL`; per candidate, looks up `director_activity(action_kind='spec_review_passed', spec_slug=slug)` — if the evidence row exists, stamps `specs.vale_review_passed_at = now()` via the narrow [[specs-table]] SDK writer `stampSpecValeReviewPassed` (compare-and-set on NULL; does NOT re-populate the transient `vale_pass` flag on an already-disposed spec) and records ONE `healed_review_passed_flag` `director_activity` audit row citing the source activity id. Skips specs with NO `spec_review_passed` evidence — the reconciler heals residue, it never invents a pass. Best-effort per-spec: a failure on one slug bumps `failed` and moves on; the sweep never throws. Idempotent by construction: an already-stamped row cannot re-enter the candidate cohort (the selector's `IS NULL` filter is the gate).
+
+### `reconcileValeReviewPassStampFor(admin, workspaceId, slug): Promise<'healed'|'skipped'|'no_spec'>`
+
+**Claim-adjacent single-slug variant.** Called inline from the claim-time build gate (`scripts/builder-worker.ts` `evaluateClaimTimeBuildGate`) right before the `card.valeReviewPassed !== true` leg, so a build whose only holding condition is a missing durable stamp proceeds without a hold (Phase 2 verification: "assert the reconciler stamps it (and its build proceeds)"). Same invariant + evidence contract as the sweep: heal ONLY when `director_activity(action_kind='spec_review_passed')` exists; NEVER invent a pass. Returns `healed` when the compare-and-set stamped the row (the claim-gate re-releases the build in the same tick), `skipped` when the row was already stamped OR no evidence row exists, `no_spec` when the row is missing. Throws on DB errors — the claim-gate catches + logs and falls through to the existing hold path.
+
+Wire points (periodic sweep):
+
+- `scripts/builder-worker.ts` `runSpecReviewJob` — tails after `runAdaDispositionSweep` in BOTH the no-pending branch and the reviewed branch, so the ~30s per-spec review cadence drains legacy residue for the whole workspace on every cadence.
+- `scripts/builder-worker.ts` standing spec-review backstop — tails the disposition sweep on the periodic director standing pass so residue heals even for a workspace with no fresh Vale work.
+- `scripts/builder-worker.ts` `evaluateClaimTimeBuildGate` (claim-adjacent) — the single-slug variant fires in-band for THIS spec before the durable-stamp check, so a legacy-residue build proceeds on the same claim tick.
+
+Never touches a spec without a `spec_review_passed` `director_activity` row — a genuinely unpassed spec (fresh authoring, needs_fix, or a legacy row whose pass never landed the activity write either) is LEFT unstamped and correctly held by the claim-gate + Vale's queue selector.
+
 ## Verdict types
 
 ```ts
@@ -87,6 +103,7 @@ The agent stamps one of these `action_kind` values per spec ([[../tables/directo
 
 - `spec_review_passed` — well-formed (CHECKLIST cleared) → `flags.vale_pass=true`; spec stays in_review for Ada's disposition lane. vale-reasons-the-disposition Phase 1 — when the pass carried a `disposition` + `disposition_reason`, both are recorded on the row's `metadata.vale_disposition` + `metadata.vale_disposition_reason` (the same reason surfaces on `specs.vale_disposition_reason` for Ada's sweep + CEO surfaces).
 - `spec_review_needs_fix` — checklist failed (the `defects[]` list lives on the row's `metadata`).
+- `healed_review_passed_flag` — spec-review-pass-always-stamps-review-passed-flag Phase 2 self-heal. The reconciler found a spec with a `spec_review_passed` row but a NULL `specs.vale_review_passed_at` (pre-Phase-1 mirror residue) and stamped the durable flag. Metadata carries `actor:'reconciler:vale-review-passed-flag'`, `stamped_at`, `source_activity_id`, and `source_activity_created_at`.
 - (legacy) `spec_review_approved` / `spec_review_deferred` — pre-Phase-3 Vale also routed planned/deferred; the writers are no longer emitted, but the enum values are retained for ledger continuity.
 
 ## Callers

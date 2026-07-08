@@ -325,3 +325,142 @@ export async function applySpecReviewDecision(
     return { ok: false, reason: msg };
   }
 }
+
+/**
+ * spec-review-pass-always-stamps-review-passed-flag Phase 2 — the "passed-but-unstamped" self-heal
+ * reconciler. Fixes the LEGACY residue Phase 1's invariant guard eliminates going FORWARD:
+ * specs that already have a `spec_review_passed` `director_activity` row from a prior pass but
+ * whose `specs.vale_review_passed_at` is NULL — because the pre-Phase-1 code swallowed the mirror
+ * dual-write's error silently and still recorded the activity row.
+ *
+ * Symptoms of the residue class: the spec is invisible to Vale's queue selector (`vale_pass IS NULL`
+ * may still be true post-consumption — the passed marker was consumed by Ada, the durable one never
+ * landed) yet the claim-time build gate ALSO reads `specs.vale_review_passed_at`, so the spec's
+ * build is held indefinitely. The Phase-1 fix stops NEW passes from producing this state; the
+ * reconciler heals the existing rows.
+ *
+ * Contract:
+ *  - Read every `public.specs` row with `vale_review_passed_at IS NULL` and `status !== 'folded'`.
+ *  - For each, look up `director_activity` for a `spec_review_passed` row on the same slug (the
+ *    load-bearing evidence — never touch a spec with NO such row: it may be a genuinely never-passed
+ *    spec still in Vale's queue).
+ *  - If a `spec_review_passed` row exists: stamp `specs.vale_review_passed_at = now()` via the
+ *    narrow SDK writer (`stampSpecValeReviewPassed` — compare-and-set on NULL so a racing writer
+ *    isn't clobbered; DOES NOT touch the transient `vale_pass` flag, so an already-disposed spec's
+ *    consumed flags stay consumed). Record ONE `healed_review_passed_flag` director_activity heal
+ *    row with metadata citing the source activity id + the newly-stamped timestamp.
+ *  - Otherwise: skip. Never invent a pass that didn't happen.
+ *
+ * Best-effort per-spec: a failure on one slug increments `failed` and moves on; the sweep never
+ * throws. Returns per-branch counts for the caller's log line. Idempotent: an already-stamped row
+ * cannot re-enter the pool (the selector's `IS NULL` filter is the gate).
+ *
+ * Callers (the trigger surface, per the spec's "periodic or claim-adjacent" language):
+ *  - PERIODIC — tailed off `runSpecReviewJob` (both no-pending + reviewed paths in
+ *    `scripts/builder-worker.ts`), so the ~30s per-spec review cadence carries a sweep with it. Also
+ *    fired from the standing spec-review backstop next to `runAdaDispositionSweep`.
+ *  - CLAIM-ADJACENT — `reconcileValeReviewPassStampFor` heals a SINGLE slug in-band from the
+ *    claim-time build gate right before the `card.valeReviewPassed !== true` check, so a build
+ *    whose only holding condition is the missing stamp proceeds without a hold.
+ */
+export interface ValeReviewPassReconcilerResult {
+  scanned: number;
+  healed: number;
+  skipped: number;
+  failed: number;
+}
+
+export async function runValeReviewPassReconciler(
+  admin: Admin,
+  workspaceId: string,
+): Promise<ValeReviewPassReconcilerResult> {
+  // The cohort is small (only NULL-stamp specs) — SDK read (pm-db-agent-toolkit).
+  const rows = await listSpecs(workspaceId);
+  const candidates = rows.filter((r) => r.status !== "folded" && r.vale_review_passed_at == null);
+  let healed = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const r of candidates) {
+    try {
+      const outcome = await reconcileValeReviewPassStampFor(admin, workspaceId, r.slug);
+      if (outcome === "healed") healed++;
+      else skipped++;
+    } catch (err) {
+      failed++;
+      console.warn(
+        `[spec-review] runValeReviewPassReconciler ${r.slug} failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  return { scanned: candidates.length, healed, skipped, failed };
+}
+
+/**
+ * Heal a SINGLE slug (claim-adjacent). Returns:
+ *  - `healed`  — the spec had a `spec_review_passed` activity row and we stamped `vale_review_passed_at`.
+ *  - `skipped` — no `spec_review_passed` activity row exists (never passed), OR the row was already
+ *    stamped by a racing writer between our read and write. Either way, invariant preserved.
+ *  - `no_spec` — the specs row doesn't exist for this slug (nothing to heal).
+ *
+ * Never throws on a DB read/write error — bubbles it up to the caller (the sweep swallows, the
+ * claim-gate logs + continues to the existing valeReviewPassed check).
+ */
+export async function reconcileValeReviewPassStampFor(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+): Promise<"healed" | "skipped" | "no_spec"> {
+  // 1) Read the specs row — if the durable stamp is already non-null OR the row is missing, nothing to do.
+  const specRow = await getSpec(workspaceId, slug);
+  if (!specRow) return "no_spec";
+  if (specRow.vale_review_passed_at) return "skipped"; // already durably stamped — nothing to heal.
+
+  // 2) Read the evidence: a `spec_review_passed` `director_activity` row for THIS slug. Absent → the
+  //    spec never actually passed review; leave `vale_review_passed_at` NULL so Vale's queue picks it
+  //    up (or the claim-gate holds it, correctly). We ONLY heal specs with proven-passed evidence.
+  const { data: activityRows, error: readErr } = await admin
+    .from("director_activity")
+    .select("id, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("action_kind", "spec_review_passed")
+    .order("created_at", { ascending: true })
+    .limit(1);
+  if (readErr) throw new Error(`reconcile-vale-review-passed read failed for ${slug}: ${readErr.message}`);
+  const evidence = (activityRows ?? [])[0];
+  if (!evidence) return "skipped"; // no spec_review_passed evidence — do NOT invent a pass.
+
+  // 3) Stamp via the narrow SDK writer (compare-and-set on `vale_review_passed_at IS NULL`). Uses
+  //    stampSpecValeReviewPassed (not markSpecCardValePassed) because we must NOT re-populate the
+  //    transient `vale_pass` flag on a spec whose Ada-disposition already consumed it — that would
+  //    create a phantom "awaiting disposition" state for a spec Ada already handled.
+  const stamped = await stampSpecValeReviewPassed(workspaceId, slug);
+  if (!stamped) {
+    // 0 rows patched: a racing writer beat us to it. Verify the invariant holds; if the row still
+    // shows NULL something is wrong (bail — the sweep's failed counter picks it up).
+    const after = await getSpec(workspaceId, slug);
+    if (after && after.vale_review_passed_at == null) {
+      throw new Error(`reconcile-vale-review-passed: ${slug} still NULL after compare-and-set — invariant broken`);
+    }
+    return "skipped";
+  }
+
+  // 4) Audit — one heal row so the ledger reflects the reconciler's action.
+  const stampedAt = new Date().toISOString();
+  await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: "platform",
+    actionKind: "healed_review_passed_flag",
+    specSlug: slug,
+    reason: `Reconciler: spec had a spec_review_passed director_activity row but a NULL specs.vale_review_passed_at; stamped now() so the claim-time build gate + Vale's queue selector see the durable pass.`,
+    metadata: {
+      actor: "reconciler:vale-review-passed-flag",
+      stamped_at: stampedAt,
+      source_activity_id: evidence.id ?? null,
+      source_activity_created_at: evidence.created_at ?? null,
+      autonomous: true,
+    },
+  });
+  return "healed";
+}
