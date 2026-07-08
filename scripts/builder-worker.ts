@@ -617,6 +617,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "goal-fold",
   "product-seed",
   "ticket-improve",
+  "ticket-handle",
   "spec-chat",
   "triage-escalations",
   "spec-test",

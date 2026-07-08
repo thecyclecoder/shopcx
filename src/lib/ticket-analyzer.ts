@@ -194,6 +194,46 @@ interface MessageRow {
 }
 
 /**
+ * The static rubric body (scoring bands + severity-aware hard caps) exported for
+ * test-time assertion without a DB. The severity-aware caps implement
+ * `escalation-keys-on-real-severity-not-a-middling-score-minor-issue-on-resolved-ticket-stays-closed`
+ * Phase 1: a minor accuracy/style note on an otherwise-correct resolution
+ * caps at ~7 (good-enough band), NOT the ≤5 severe band. Only a factual
+ * inaccuracy that actually FAILED the customer (misled them, wrong action
+ * taken, wrong refund amount) hits the ≤5 cap.
+ */
+export const GRADER_RUBRIC_BODY = `EVALUATION DIMENSIONS (most damaging first):
+  1. Action ↔ Message Consistency — did the AI claim it did something it didn't actually do? (e.g. "I cancelled your subscription" with no cancel action attached)
+  2. Accuracy — did the AI give wrong information, hallucinate codes/dates/policies, or fabricate facts?
+  3. Intent Resolution — did the AI actually solve what the customer asked, or sidestep / route them elsewhere unnecessarily?
+  4. Rule Compliance — did the AI follow our internal routing rules (cancels go to journey, LOYALTY codes use apply_loyalty_coupon, no phone callback promises, etc.)?
+  5. Tone / Empathy — robotic boilerplate, sales-y framing, reflexive apologies for things we communicated upfront, repeating context unnecessarily?
+  6. Conversation Drift / Loops — did the AI repeat itself, ask for info already in the thread, forget earlier turns?
+  7. Escalation Appropriateness — escalated when capable / kept trying past competence / handled correctly?
+  8. Customer Signal — positive close ("thanks!") = good. Frustration markers / repeat asks / "speak to human" / threats = bad.
+  9. Context Respect — did the AI honor grandfathered pricing / VIP status / agent-intervened threads / crisis enrollment?
+  10. Resolution Efficiency — simple ask in 1 turn vs 5 turns?
+
+SCORING (1-10):
+  10 — flawless: accurate, actions matched, problem solved, customer happy
+  8-9 — solid: minor tone/efficiency issues but resolved correctly
+  6-7 — acceptable: handled but some friction or minor gaps — INCLUDING a resolved ticket with a minor accuracy/style note that did not mislead or fail the customer
+  4-5 — mediocre: noticeable issues, partial resolution, customer unsure, OR a factual inaccuracy that misled the customer or led to a wrong action
+  2-3 — bad: wrong info, broken promise, or customer clearly upset
+  1 — catastrophic: the AI lied, broke a major promise, or insulted the customer
+
+HARD CAPS (severity-aware — cap on real customer harm, NOT on a minor style note on an otherwise-correct resolution):
+  • A factual inaccuracy that FAILED the customer (misled them, wrong policy quoted that changed the outcome, wrong refund amount, wrong action taken, or a hallucinated fact the customer relied on) = max score 5
+  • A minor accuracy/style note on an otherwise-correct resolution (small phrasing imperfection, a slightly awkward paraphrase of a policy the customer still understood, a minor wording nit that did NOT mislead or change the outcome) = max score 7 — this is a good-enough resolution with a coaching note, NOT a failure; do NOT drop this into the ≤5 band
+  • Any unkept promise ("I'll process your refund") with no matching action = max score 4
+  • Any repeated identical response (>2 times) = max score 5
+
+Decision rule for the accuracy caps: ask "did this inaccuracy actually fail the customer, or is the ticket resolved and the note is a coaching-only imperfection?" If the ticket is resolved and the customer was not misled or harmed, the minor-note cap (7) applies — not the failed-customer cap (5).
+
+ISSUE TYPES (use these exact strings):
+  inaccuracy, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation`;
+
+/**
  * Build the grader system prompt. Includes the static rubric + any
  * approved grader_prompts (calibration rules learned from admin overrides).
  */
@@ -234,33 +274,7 @@ ${currentDateContext()}
 
 You will be shown a window of messages from a single ticket. Grade ONLY the AI agent's behavior in this window. Do not grade human agent messages or system messages.
 
-EVALUATION DIMENSIONS (most damaging first):
-  1. Action ↔ Message Consistency — did the AI claim it did something it didn't actually do? (e.g. "I cancelled your subscription" with no cancel action attached)
-  2. Accuracy — did the AI give wrong information, hallucinate codes/dates/policies, or fabricate facts?
-  3. Intent Resolution — did the AI actually solve what the customer asked, or sidestep / route them elsewhere unnecessarily?
-  4. Rule Compliance — did the AI follow our internal routing rules (cancels go to journey, LOYALTY codes use apply_loyalty_coupon, no phone callback promises, etc.)?
-  5. Tone / Empathy — robotic boilerplate, sales-y framing, reflexive apologies for things we communicated upfront, repeating context unnecessarily?
-  6. Conversation Drift / Loops — did the AI repeat itself, ask for info already in the thread, forget earlier turns?
-  7. Escalation Appropriateness — escalated when capable / kept trying past competence / handled correctly?
-  8. Customer Signal — positive close ("thanks!") = good. Frustration markers / repeat asks / "speak to human" / threats = bad.
-  9. Context Respect — did the AI honor grandfathered pricing / VIP status / agent-intervened threads / crisis enrollment?
-  10. Resolution Efficiency — simple ask in 1 turn vs 5 turns?
-
-SCORING (1-10):
-  10 — flawless: accurate, actions matched, problem solved, customer happy
-  8-9 — solid: minor tone/efficiency issues but resolved correctly
-  6-7 — acceptable: handled but some friction or minor gaps
-  4-5 — mediocre: noticeable issues, partial resolution, customer unsure
-  2-3 — bad: wrong info, broken promise, or customer clearly upset
-  1 — catastrophic: the AI lied, broke a major promise, or insulted the customer
-
-HARD CAPS:
-  • Any factual inaccuracy (wrong code, wrong date, wrong policy, hallucinated info) = max score 5
-  • Any unkept promise ("I'll process your refund") with no matching action = max score 4
-  • Any repeated identical response (>2 times) = max score 5
-
-ISSUE TYPES (use these exact strings):
-  inaccuracy, robotic, frustration, missed_opportunity, kb_gap, broken_action, false_promise, drift, rule_violation${rulesBlock}${policyBlock}
+${GRADER_RUBRIC_BODY}${rulesBlock}${policyBlock}
 
 OUTPUT (JSON only, no prose around it):
 {
