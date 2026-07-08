@@ -34,9 +34,16 @@ Egress-guard read — mirrors the exact predicate `claim_agent_job` uses (`statu
 ### `queuedAgentJobKinds(): Promise<string[] | null>`
 DISTINCT kinds across all queued/queued_resume rows. Feeds the self-update "unknown-queued-kind" probe. Pool path pushes the DISTINCT to Postgres (rows-shipped drop); `null` on failure → caller falls back to the supabase-js path (which pulls all rows + DISTINCTs in JS).
 
+### `getSpecWithPhases<S, P>(workspaceId, slug): Promise<{ spec, phases } | null | undefined>`
+Server-side single-spec + phases join via the `public.get_spec_with_phases(uuid, text)` RPC ([[../specs/cut-internal-egress-pooler-and-spec-rpcs]] Phase 2, sibling of `list_specs_with_phases`). One pooled query — no PostgREST preamble, no auth churn, no two-round-trip `.from()` fan-out. Return contract:
+- `{ spec, phases }` on match
+- `null` when the slug does not exist (empty result)
+- `undefined` when the pool is unavailable / the query errored — the [[specs-table]] `getSpec` caller MUST treat this as "fall back to the supabase-js RPC path".
+
 ## Consumers
 
 - `scripts/builder-worker.ts` — `hasClaimableJob()` and the self-update queued-kind probe. Both wrap the pool path in a try + fall-through to the pre-existing supabase-js path when `null` is returned. Same fail-open contract as before.
+- [[specs-table]] `getSpec` — prefers the pooled `getSpecWithPhases` call, falls through to `admin.rpc('get_spec_with_phases', ...)` on pool unavailability. Same fail-open contract; SpecRow shape byte-identical to the pre-Phase-2 path.
 
 ## Verification / measurement
 
@@ -44,4 +51,4 @@ DISTINCT kinds across all queued/queued_resume rows. Feeds the self-update "unkn
 
 ## Notes for later phases
 
-Phases 2 (spec-read RPCs) and 3 (dashboard consolidation RPC) can layer on this helper for their pooled read paths where a request originates in a runtime that already has pooler creds (i.e. the box worker or an Inngest step). The dashboards must continue to reach Supabase over PostgREST/RLS — never expose `getPgPool()` from a client component.
+Phase 3 (dashboard consolidation RPC) can layer on this helper for its pooled read path where a request originates in a runtime that already has pooler creds (i.e. the box worker or an Inngest step). The dashboards must continue to reach Supabase over PostgREST/RLS — never expose `getPgPool()` from a client component.

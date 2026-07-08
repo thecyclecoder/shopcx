@@ -165,3 +165,28 @@ export async function queuedAgentJobKinds(): Promise<string[] | null> {
   for (const r of rows) if (r.kind) kinds.push(r.kind);
   return kinds;
 }
+
+/**
+ * Server-side `specs` + `spec_phases` join for a single (workspace, slug) — calls the
+ * `public.get_spec_with_phases(uuid, text)` RPC through the pool (one round-trip, no
+ * `set_config` preamble). Mirrors the shape supabase-js returns from the same RPC so
+ * the caller can dispatch either path off the same handler.
+ *
+ * Returns:
+ *   - `{ spec, phases }` on match
+ *   - `null` on no-such-slug (empty result)
+ *   - `undefined` on pool unavailable / query error (caller falls back to supabase-js)
+ */
+export async function getSpecWithPhases<S = unknown, P = unknown>(
+  workspaceId: string,
+  slug: string,
+): Promise<{ spec: S; phases: P[] } | null | undefined> {
+  const rows = await pgQuery<{ spec: S; phases: P[] | null }>(
+    `SELECT spec, phases FROM public.get_spec_with_phases($1::uuid, $2::text)`,
+    [workspaceId, slug],
+  );
+  if (rows === null) return undefined;
+  const row = rows[0];
+  if (!row || !row.spec) return null;
+  return { spec: row.spec, phases: (row.phases ?? []) as P[] };
+}
