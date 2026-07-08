@@ -822,6 +822,26 @@ export const directActionHandlers: Record<
     return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
   },
 
+  /**
+   * order_now — customer-facing name for bill_now. The portal handler
+   * (src/lib/portal/handlers/order-now.ts) and portal/mutation-guard.ts
+   * both name the same capability "order_now", so it is the natural
+   * emission for Sol / the orchestrator when a customer says "ship it
+   * now" / "send today". Without this key, an `order_now` emission
+   * landed on the "Unknown action type" branch and the LLM rationalized
+   * the miss as "no bill_now action exists for non-emergency requests"
+   * (ticket 0a9e4d7f, Judy). Same flavor-aware subscriptionOrderNow
+   * implementation as bill_now — both routes charge the current upcoming
+   * order; the schedule advances by one cycle after the charge. Covered
+   * by the selective-clarify irreversible set below so a low-confidence
+   * emission gets a confirm-first turn before the charge fires.
+   */
+  order_now: async (ctx, p) => {
+    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
+    if (!p.contract_id) return { success: false, error: "order_now missing contract_id" };
+    return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
+  },
+
   add_item: async (ctx, p) => {
     const { subAddItem } = await import("@/lib/subscription-items");
     const r = await subAddItem(ctx.workspaceId, p.contract_id!, p.variant_id!, p.quantity || 1);
