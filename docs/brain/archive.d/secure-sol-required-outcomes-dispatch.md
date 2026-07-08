@@ -1,0 +1,1 @@
+- **Secure Sol Required Outcomes Dispatch** · verified 2026-07-08 · → [[../libraries/required-outcomes-validator]]
