@@ -136,3 +136,45 @@ export function deriveEffectiveBlockers(
   }
   return out;
 }
+
+/**
+ * one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 2 —
+ * the auto-queue-on-goal-unblock predicate (pure). "Given a spec card whose blockedBy has been
+ * resolved by [[../brain-roadmap]] `resolveBlockedBy`, is `goalSlug` its LAST uncleared blocker —
+ * so the moment `goals.main_merge_sha` was just stamped, this card is now enqueue-eligible?"
+ *
+ * TRUE when ALL of:
+ *   - The card is not opted out of auto-build (`autoBuild !== false`).
+ *   - The card is not already shipped (`status !== "shipped"`).
+ *   - The card's resolved blockedBy CONTAINS at least one goal blocker on `goalSlug` (kind==="goal",
+ *     slug===goalSlug). Without this, the card has no relationship to THIS goal — the ship of
+ *     `goalSlug` doesn't unblock it.
+ *   - Every blocker in the card's resolved blockedBy is `cleared: true`. Because Phase 1's
+ *     `resolveBlockedBy` keys the goal blocker's `cleared` on `goals.main_merge_sha`, this is
+ *     automatically true for the goal blocker on `goalSlug` once the stamp lands; and it demands
+ *     every OTHER blocker is independently cleared too (a card blocked on two goals unblocks only
+ *     when BOTH ship).
+ *
+ * FALSE otherwise. The predicate is BOTH the "is this card blocked-on-goalSlug?" test AND the
+ * "is every blocker now cleared?" test — the caller doesn't need to combine multiple predicates.
+ *
+ * Pure. Consumed by the async fan-out `autoQueueUnblockedByGoal` in [[../agent-jobs]] — called
+ * from `promoteCompleteGoalsToMain` right after `stampGoalPromotedToMain` succeeds.
+ */
+export interface DependentCardForGoalUnblock {
+  slug: string;
+  autoBuild?: boolean;
+  status: string;
+  blockedBy: readonly { slug: string; cleared: boolean; kind?: "spec" | "goal" }[];
+}
+
+export function isReadyForGoalUnblock(
+  card: DependentCardForGoalUnblock,
+  goalSlug: string,
+): boolean {
+  if (card.autoBuild === false) return false;
+  if (card.status === "shipped") return false;
+  const mentionsGoal = card.blockedBy.some((b) => b.kind === "goal" && b.slug === goalSlug);
+  if (!mentionsGoal) return false;
+  return card.blockedBy.every((b) => b.cleared);
+}

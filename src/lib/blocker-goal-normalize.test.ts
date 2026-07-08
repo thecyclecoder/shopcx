@@ -13,6 +13,8 @@ import assert from "node:assert/strict";
 import {
   deriveEffectiveBlocker,
   deriveEffectiveBlockers,
+  isReadyForGoalUnblock,
+  type DependentCardForGoalUnblock,
   type GoalMembership,
 } from "./blocker-goal-normalize";
 
@@ -135,4 +137,99 @@ test("self-block (a spec blocking itself) stays a spec blocker — the read path
     goalMap,
   );
   assert.equal(eff.kind, "spec");
+});
+
+// ─── Phase 2 — auto-queue-on-goal-unblock predicate (isReadyForGoalUnblock) ───────────────────────
+
+/** Card shape helper — the SpecCard subset the Phase 2 predicate reads. */
+function card(
+  slug: string,
+  overrides: Partial<DependentCardForGoalUnblock> = {},
+): DependentCardForGoalUnblock {
+  return {
+    slug,
+    status: "planned",
+    blockedBy: [],
+    ...overrides,
+  };
+}
+
+test("Phase 2 verification: a standalone spec blocked on goal G stays blocked while G.main_merge_sha is null (goal blocker not cleared)", () => {
+  // The named failing state: every member of G is on the goal branch, but main_merge_sha is null —
+  // so resolveBlockedBy leaves the goal blocker `cleared:false`. The predicate MUST refuse the
+  // enqueue.
+  const dep = card("outside-standalone", {
+    blockedBy: [{ slug: "goal-g", cleared: false, kind: "goal" }],
+  });
+  assert.equal(
+    isReadyForGoalUnblock(dep, "goal-g"),
+    false,
+    "goal main_merge_sha null → goal blocker uncleared → dependent stays blocked",
+  );
+});
+
+test("Phase 2 verification: the moment G.main_merge_sha is set (goal blocker becomes cleared) the dependent is ready to auto-queue", () => {
+  // Same card, now the goal blocker is `cleared:true` (resolveBlockedBy keyed it on
+  // goals.main_merge_sha which just got stamped). The predicate MUST accept the enqueue.
+  const dep = card("outside-standalone", {
+    blockedBy: [{ slug: "goal-g", cleared: true, kind: "goal" }],
+  });
+  assert.equal(isReadyForGoalUnblock(dep, "goal-g"), true);
+});
+
+test("Phase 2: a dependent blocked on BOTH goal G (just shipped) AND a still-uncleared external spec stays blocked", () => {
+  // Multi-blocker case — the goal-ship clears its own leg but the sibling spec-slug blocker is still
+  // in flight. The dependent MUST stay blocked (only every-cleared is enqueue-eligible).
+  const dep = card("outside-standalone", {
+    blockedBy: [
+      { slug: "goal-g", cleared: true, kind: "goal" },
+      { slug: "still-uncleared-spec", cleared: false, kind: "spec" },
+    ],
+  });
+  assert.equal(isReadyForGoalUnblock(dep, "goal-g"), false);
+});
+
+test("Phase 2: a card that names a DIFFERENT goal (not `goalSlug`) is not selected — the fan-out is scoped to the ship that just happened", () => {
+  const dep = card("outside-standalone", {
+    blockedBy: [{ slug: "goal-h", cleared: true, kind: "goal" }],
+  });
+  assert.equal(
+    isReadyForGoalUnblock(dep, "goal-g"),
+    false,
+    "unrelated goal's ship must not fan-out this card",
+  );
+});
+
+test("Phase 2: a card with autoBuild=false is opted out — never auto-queued even when every blocker is cleared", () => {
+  const dep = card("outside-standalone", {
+    autoBuild: false,
+    blockedBy: [{ slug: "goal-g", cleared: true, kind: "goal" }],
+  });
+  assert.equal(isReadyForGoalUnblock(dep, "goal-g"), false);
+});
+
+test("Phase 2: an already-shipped card is never re-queued (idempotent guard)", () => {
+  const dep = card("outside-standalone", {
+    status: "shipped",
+    blockedBy: [{ slug: "goal-g", cleared: true, kind: "goal" }],
+  });
+  assert.equal(isReadyForGoalUnblock(dep, "goal-g"), false);
+});
+
+test("Phase 2: a card with no blockedBy is not selected — the fan-out only re-releases blocked-on-THIS-goal cards", () => {
+  const dep = card("outside-standalone", { blockedBy: [] });
+  assert.equal(
+    isReadyForGoalUnblock(dep, "goal-g"),
+    false,
+    "no goal blocker → no relationship to this goal → not our concern",
+  );
+});
+
+test("Phase 2: a spec-slug blocker (kind:'spec') on `goal-g` doesn't count as a goal blocker — the discriminant matters", () => {
+  // Edge case: a raw spec-slug blocker whose slug HAPPENS to be `goal-g`. Without the kind
+  // discriminant, we'd falsely treat this as a goal blocker. The predicate MUST require kind==="goal".
+  const dep = card("outside-standalone", {
+    blockedBy: [{ slug: "goal-g", cleared: true, kind: "spec" }],
+  });
+  assert.equal(isReadyForGoalUnblock(dep, "goal-g"), false);
 });
