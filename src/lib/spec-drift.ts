@@ -1254,6 +1254,162 @@ async function syncReverseDriftRows(workspaceId: string, suspects: { slug: strin
   }
 }
 
+// ── CEO inbox routing for confirmed reverse-drift (reese-goal-aware-drift Phase 2) ─────────────
+//
+// Before this phase a confirmed reverse-drift only reached the CEO as a director-board message —
+// easy to miss when the board scrolls or the founder isn't looking at it. The board post STAYS
+// (the CS/DevOps rooms still need the visibility), but each confirmed reverse-drift ALSO surfaces
+// as an actionable CEO inbox item — the `dashboard_notifications` `agent_approval_request` shape
+// every other escalate_founder card uses (author-spec.ts:979, fleet-spend-governor.ts:321), so it
+// appears alongside the founder's other approvals with the spec + phase + missing-code detail.
+//
+// De-dupe: a stable per-(workspace, spec, phase) `dedupe_key` — a persistent drift row bumps the
+// existing card's title/body/metadata but never mints a new one. Mirrors the fleet-spend-governor
+// pattern (one OPEN breach per lane at a time; the next pass just refreshes the snapshot).
+
+export interface ReverseDriftInboxInput {
+  workspaceId: string;
+  specSlug: string;
+  /** 0-based phase index (matches spec_drift.phase_index and the /api/roadmap/spec-drift surface). */
+  phaseIndex: number;
+  phaseTitle: string;
+  /** The missing-code detail (from the drift row's `detail` or the session/pre-filter reasoning). */
+  detail: string;
+  /** The spec_drift.id this inbox card gates — audit trail + deep-link back to the drift row. */
+  driftRowId: string;
+}
+
+export interface ReverseDriftInboxRow {
+  title: string;
+  body: string;
+  link: string;
+  metadata: {
+    routed_to_function: string;
+    raised_by_function: string;
+    escalated_by_director: string;
+    escalation_kind: string;
+    escalation_reason: string;
+    dedupe_key: string;
+    spec_slug: string;
+    phase_index: number;
+    phase_title: string;
+    drift_row_id: string;
+    deep_link: string;
+    autonomous: boolean;
+  };
+}
+
+/**
+ * Stable per-(workspace, spec, phase) dedupe key. A re-surfaced same drift row — same (workspace,
+ * slug, phase_index) — yields the same key, so the inbox emitter finds the existing OPEN card and
+ * refreshes it instead of minting a duplicate. Pure — testable without DB or GitHub.
+ */
+export function reverseDriftDedupeKey(args: {
+  workspaceId: string;
+  specSlug: string;
+  phaseIndex: number;
+}): string {
+  return `spec-drift-reverse:${args.workspaceId}:${args.specSlug}:${args.phaseIndex}`;
+}
+
+/**
+ * Pure builder for the CEO inbox row surfacing ONE confirmed reverse-drift. Returns the
+ * `dashboard_notifications` row shape (title/body/link/metadata) that the emitter inserts.
+ *
+ * Testable without DB: same inputs → same title/body/metadata (dedupe_key deterministic from
+ * workspace+slug+phase). The escalation_kind `spec_drift_reverse` distinguishes this card from
+ * every other escalate_founder card in the CEO approvals feed.
+ */
+export function buildReverseDriftInboxRow(input: ReverseDriftInboxInput): ReverseDriftInboxRow {
+  const { workspaceId, specSlug, phaseIndex, phaseTitle, detail, driftRowId } = input;
+  const dedupe_key = reverseDriftDedupeKey({ workspaceId, specSlug, phaseIndex });
+  const title = `Reverse-drift: ${specSlug} P${phaseIndex + 1} (${phaseTitle}) — code missing from main`.slice(0, 200);
+  const body = `Reese confirmed ${specSlug} P${phaseIndex + 1} (${phaseTitle}) is marked SHIPPED in the DB but its code is NOT on main. ${detail} Decide: rebuild the phase, confirm an intentional revert, or downgrade the phase status.`.slice(0, 4000);
+  const link = "/dashboard/roadmap";
+  return {
+    title,
+    body,
+    link,
+    metadata: {
+      routed_to_function: "ceo",
+      raised_by_function: "platform",
+      escalated_by_director: "platform",
+      escalation_kind: "spec_drift_reverse",
+      escalation_reason: detail.slice(0, 2000),
+      dedupe_key,
+      spec_slug: specSlug,
+      phase_index: phaseIndex,
+      phase_title: phaseTitle,
+      drift_row_id: driftRowId,
+      deep_link: link,
+      autonomous: true,
+    },
+  };
+}
+
+/**
+ * Emit ONE confirmed reverse-drift as a CEO inbox item (`dashboard_notifications` type
+ * `agent_approval_request` — the shape every other escalate_founder card uses). Idempotent under
+ * a persistent drift row: if an OPEN card with the same dedupe_key already exists, we bump its
+ * title/body/metadata but insert nothing new (the verification's "does not create a duplicate
+ * inbox item" contract). A dismissed card is NOT counted as open — the founder dismissing the
+ * card + Reese re-confirming the same drift is a legitimate re-surface, so a new card mints.
+ *
+ * Compare-and-set on the update (mirrors the read predicate) so a concurrent dismiss can't be
+ * clobbered by a late re-surface: workspace + type + dedupe + still-not-dismissed. Returns
+ * `{ emitted, reSurfaced }` so the caller can log which path fired. Best-effort — a Supabase
+ * error is logged upstream + returned as `emitted:false, reSurfaced:false` (the board post
+ * still ran and the drift row stays open for the next pass).
+ */
+export async function emitReverseDriftInboxItem(
+  admin: ReturnType<typeof createAdminClient>,
+  input: ReverseDriftInboxInput,
+): Promise<{ emitted: boolean; reSurfaced: boolean; error?: string }> {
+  const { workspaceId } = input;
+  const row = buildReverseDriftInboxRow(input);
+  const dedupe = row.metadata.dedupe_key;
+
+  // De-dupe read: an OPEN (undismissed) same-dedupe_key notification already represents this
+  // drift row. Never a bare row-exists match — narrow by (workspace, type, dedupe_key, dismissed).
+  const { data: open } = await admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("type", "agent_approval_request")
+    .eq("metadata->>dedupe_key", dedupe)
+    .eq("dismissed", false)
+    .limit(1);
+  if ((open ?? []).length > 0) {
+    const existing = (open as Array<{ id: string }>)[0];
+    // Compare-and-set: re-assert the read-time predicate on the update. A concurrent dismiss
+    // between the read and the write flips `dismissed=true` and this update matches zero rows —
+    // safer than a bare `.eq("id", existing.id)` update that would resurrect a dismissed card.
+    const { error: updErr } = await admin
+      .from("dashboard_notifications")
+      .update({ title: row.title, body: row.body, metadata: row.metadata })
+      .eq("id", existing.id)
+      .eq("workspace_id", workspaceId)
+      .eq("type", "agent_approval_request")
+      .eq("metadata->>dedupe_key", dedupe)
+      .eq("dismissed", false);
+    if (updErr) return { emitted: false, reSurfaced: false, error: updErr.message };
+    return { emitted: false, reSurfaced: true };
+  }
+
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: workspaceId,
+    type: "agent_approval_request",
+    title: row.title,
+    body: row.body,
+    link: row.link,
+    metadata: row.metadata,
+    read: false,
+    dismissed: false,
+  });
+  if (error) return { emitted: false, reSurfaced: false, error: error.message };
+  return { emitted: true, reSurfaced: false };
+}
+
 /** Open spec-drift rows for a workspace (newest-bumped first) — the Control Tower's "Spec drift" surface. */
 export async function getOpenSpecDrift(workspaceId: string): Promise<SpecDriftRow[]> {
   const admin = createAdminClient();

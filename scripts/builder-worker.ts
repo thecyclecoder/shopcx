@@ -4363,7 +4363,11 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   const rows = await sd.getOpenSpecDrift(job.workspace_id);
   if (!rows.length) return "drift: none open";
   const CAP = 5;
-  const confirmed: string[] = []; // confirmed reverse-drift (DB shipped, code genuinely gone) → escalated
+  // reese-goal-aware-drift Phase 2 — carry the row shape so each confirmed reverse-drift can be
+  // surfaced BOTH on the director board (existing message) AND as a CEO inbox item (new). Keeping
+  // the same struct through the whole pass avoids re-deriving spec_slug/phase_index/title downstream.
+  interface ConfirmedEntry { specSlug: string; phaseIndex: number; phaseTitle: string; detail: string; driftRowId: string; reason: string }
+  const confirmed: ConfirmedEntry[] = []; // confirmed reverse-drift (DB shipped, code genuinely gone) → escalated
   let reviewed = 0;
   let dedupSkipped = 0;
   let autoResolved = 0;
@@ -4410,7 +4414,14 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
     if (prefilter?.verdict === "code-missing") {
       // High-confidence revert: escalate immediately without a session. The row stays open + surfaces to
       // the CEO exactly like the session's code-missing verdict does; the dedup ledger prevents re-firing.
-      confirmed.push(`${row.spec_slug} P${row.phase_index + 1}: ${prefilter.reasoning.slice(0, 180)}`);
+      confirmed.push({
+        specSlug: row.spec_slug,
+        phaseIndex: row.phase_index,
+        phaseTitle: row.phase_title,
+        detail: row.detail,
+        driftRowId: row.id,
+        reason: prefilter.reasoning.slice(0, 180),
+      });
       sessionsSaved++;
       try {
         await recordDirectorActivity(db, {
@@ -4457,7 +4468,14 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
         } else if (sessionVerdict === "code-missing") {
           // Genuine reverse-drift: a shipped spec's code vanished. Surface to the CEO — keep the row open +
           // escalate (the CEO decides: re-merge, intentional revert, or downgrade). Never auto-mutate status.
-          confirmed.push(`${item.row.spec_slug} P${item.row.phase_index + 1}: ${sessionReason.slice(0, 180)}`);
+          confirmed.push({
+            specSlug: item.row.spec_slug,
+            phaseIndex: item.row.phase_index,
+            phaseTitle: item.row.phase_title,
+            detail: item.row.detail,
+            driftRowId: item.row.id,
+            reason: sessionReason.slice(0, 180),
+          });
         }
         // unsure / missing-from-batch → leave the row open for the next pass (still deduped by the ledger).
       } catch (e) {
@@ -4479,8 +4497,29 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
   if (confirmed.length) {
     try {
       const { postDirectorMessage } = await import("../src/lib/agents/director-board");
-      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `⚠️ Reese caught DB-vs-code drift — ${confirmed.length} spec phase(s) marked SHIPPED in the DB but their code is GONE from main (possible bad/reverted merge):\n${confirmed.map((c) => `• ${c}`).join("\n")}`, kind: "update", mentions: ["ceo"], metadata: { spec_drift_supervise: true, reverse_drift: true } });
+      await postDirectorMessage({ workspaceId: job.workspace_id, author: "director", authorFunction: "platform", body: `⚠️ Reese caught DB-vs-code drift — ${confirmed.length} spec phase(s) marked SHIPPED in the DB but their code is GONE from main (possible bad/reverted merge):\n${confirmed.map((c) => `• ${c.specSlug} P${c.phaseIndex + 1}: ${c.reason}`).join("\n")}`, kind: "update", mentions: ["ceo"], metadata: { spec_drift_supervise: true, reverse_drift: true } });
     } catch { /* best-effort */ }
+    // reese-goal-aware-drift Phase 2 — additionally surface each confirmed reverse-drift as a CEO
+    // inbox item on the same `dashboard_notifications` `agent_approval_request` surface every other
+    // escalate_founder card uses (author-spec.ts:979, fleet-spend-governor.ts:321). De-dupe: a stable
+    // per-(workspace, spec, phase) key means a persistent drift row refreshes the existing OPEN card
+    // instead of minting a duplicate every ~30-min pass (the verification's "does not create a
+    // duplicate inbox item" contract). Best-effort per-entry — a Supabase error on one item never
+    // blocks the rest, and the board post (above) already ran.
+    for (const c of confirmed) {
+      try {
+        await sd.emitReverseDriftInboxItem(db, {
+          workspaceId: job.workspace_id,
+          specSlug: c.specSlug,
+          phaseIndex: c.phaseIndex,
+          phaseTitle: c.phaseTitle,
+          detail: c.detail,
+          driftRowId: c.driftRowId,
+        });
+      } catch (e) {
+        console.error(`${tag} drift-supervise inbox emit ${c.specSlug} P${c.phaseIndex + 1} failed (continuing):`, e instanceof Error ? e.message : e);
+      }
+    }
   }
   const saveNote = sessionsSaved ? `, saved ${sessionsSaved} session(s) (${autoResolved} auto-resolved by pre-filter)` : "";
   const dedupNote = dedupSkipped ? `, dedup-skipped ${dedupSkipped}` : "";
