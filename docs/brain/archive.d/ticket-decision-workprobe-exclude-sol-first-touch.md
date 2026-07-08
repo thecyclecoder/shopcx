@@ -1,0 +1,1 @@
+- **Control Tower — exclude Sol first-touch dispatch from the ai:orchestrator work probe** · verified 2026-07-08 · → [[../libraries/control-tower]]

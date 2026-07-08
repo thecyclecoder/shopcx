@@ -28,6 +28,15 @@ export interface CsDirectorNoteInput {
   reasoning: string;
   remedy?: Record<string, unknown> | null;
   spec_seed?: Record<string, unknown> | null;
+  /**
+   * Phase 3 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation —
+   * June's OPTIONAL suggested remedy on an `escalate_founder` verdict (RemedyPlan-shaped: kind +
+   * summary). When present, the note surfaces it verbatim as a "Recommended remedy: …" line so the
+   * ticket thread carries the SAME recommendation the CEO card carries — the CS agent reading the
+   * ticket sees the concrete recommended action, not just the reasoning. Distinct from `remedy`
+   * (which is the AUTO-APPLY plan on `approve_remedy`).
+   */
+  recommended_remedy?: Record<string, unknown> | null;
 }
 
 const DECISION_LABEL: Record<CsDirectorDecision, string> = {
@@ -70,6 +79,23 @@ function summarizeEscalateFounder(reasoning: string): string {
 }
 
 /**
+ * Phase 3 — render June's SUGGESTED remedy line for an escalate_founder note. Returns null when
+ * the recommendation is absent OR the object carries no usable kind + summary (an empty object is
+ * "no recommendation", not a fallback line — keeps the ticket thread quiet when June intentionally
+ * omitted a concrete recommendation). Kept structurally aligned with `summarizeRecommendedRemedy`
+ * on the CEO card builder so the ticket thread and the CEO card carry the same shape.
+ */
+function summarizeRecommendedRemedy(remedy: Record<string, unknown> | null | undefined): string | null {
+  if (!remedy) return null;
+  const kind = pickString(remedy, "kind") ?? pickString(remedy, "type") ?? pickString(remedy, "action");
+  const summary = pickString(remedy, "summary") ?? pickString(remedy, "description") ?? pickString(remedy, "reason");
+  if (kind && summary) return `Recommended remedy (${kind}): ${summary}`;
+  if (summary) return `Recommended remedy: ${summary}`;
+  if (kind) return `Recommended remedy: ${kind}`;
+  return null;
+}
+
+/**
  * Compose the internal-note body for a CS-Director verdict. The line shape is stable so the CS
  * agent can eyeball a ticket thread and immediately see who ruled, what the decision was, why,
  * and the concrete output. The Phase-1 verification bullet asserts each verdict shape lands.
@@ -78,17 +104,23 @@ export function buildCsDirectorVerdictNote(verdict: CsDirectorNoteInput): string
   const reasoning = normalizeReasoning(verdict.reasoning);
   const header = `[CS Director review] Reviewer: June (CS Director) · Decision: ${DECISION_LABEL[verdict.decision]}`;
   const reasoningLine = `Reasoning: ${reasoning}`;
-  let outputLine: string;
+  const lines: string[] = [header, reasoningLine];
   switch (verdict.decision) {
     case "author_spec":
-      outputLine = summarizeSpecSeed(verdict.spec_seed);
+      lines.push(summarizeSpecSeed(verdict.spec_seed));
       break;
     case "approve_remedy":
-      outputLine = summarizeRemedy(verdict.remedy);
+      lines.push(summarizeRemedy(verdict.remedy));
       break;
-    case "escalate_founder":
-      outputLine = summarizeEscalateFounder(reasoning);
+    case "escalate_founder": {
+      lines.push(summarizeEscalateFounder(reasoning));
+      // Phase 3 — surface June's suggested remedy on the ticket thread so it carries the SAME
+      // recommendation the CEO card carries. Silent when June did not name one (the note stays
+      // Phase-1-shaped for a policy/storyline judgment call).
+      const recommendedLine = summarizeRecommendedRemedy(verdict.recommended_remedy);
+      if (recommendedLine) lines.push(recommendedLine);
       break;
+    }
   }
-  return [header, reasoningLine, outputLine].join("\n");
+  return lines.join("\n");
 }
