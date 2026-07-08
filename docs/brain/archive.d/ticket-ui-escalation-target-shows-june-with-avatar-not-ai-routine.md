@@ -1,0 +1,1 @@
+- **Ticket UI shows the escalation went to June (with her avatar), not 'AI Routine'** · verified 2026-07-08 · → [[../dashboard/tickets__id]] § Escalate details
