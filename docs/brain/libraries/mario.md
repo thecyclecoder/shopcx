@@ -67,4 +67,4 @@ Every OTHER silence (last event was `build_done` and no `phase_shipped` in 30min
 
 ## Related
 
-[[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../goals/mario-pipeline-plumbing]] · [[../tables/mario_thresholds]] · [[../tables/spec_timecard_events]] · [[./spec-timecards]] · [[./brain-roadmap]] · [[./specs-table]] · [[./agent-jobs]] · [[../inngest/mario-stall-cron]]
+[[../functions/platform]] (Mario's org home — reports to Ada under the platform function's charge list; org placement wired in [[../../src/lib/agents/personas.ts]] `PERSONAS['mario']` + [[../../src/lib/control-tower/registry.ts]] `MONITORED_LOOPS`) · [[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../goals/mario-pipeline-plumbing]] · [[../tables/mario_thresholds]] · [[../tables/spec_timecard_events]] · [[./spec-timecards]] · [[./brain-roadmap]] · [[./specs-table]] · [[./agent-jobs]] · [[../inngest/mario-stall-cron]]
