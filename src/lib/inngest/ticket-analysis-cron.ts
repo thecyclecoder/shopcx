@@ -19,16 +19,25 @@
  * Replaces the old nightly batch (ai-nightly-analysis.ts).
  *
  * Phase 1 of docs/brain/specs/cora-only-investigates-after-sol-handles-and-ticket-closed-30min-no-reinvestigation:
- * Cora only analyzes a ticket once, after Sol has handled it (there's a LIVE ticket_directions
- * row) AND its closed_at is >= 30 min ago AND we haven't already analyzed it for THIS Sol
- * handling cycle (dedup on the live Direction's `authored_at`). See {@link passesCoraSelectionGate}.
+ * Cora only analyzes a ticket once, after Sol has handled it AND its closed_at is >= 30 min ago
+ * AND we haven't already analyzed it for THIS Sol handling cycle. See {@link passesCoraSelectionGate}.
  *
  * Phase 2 of the same spec: a ticket that already has a `cs_director_call` decision from June
- * FOR THE CURRENT HANDLING CYCLE (`director_activity.created_at >= direction.authored_at`) is
- * ALSO excluded — Cora never re-investigates a June-decided ticket on its own. Re-eligibility
- * naturally requires a subsequent Sol handling (a new close): once Sol re-authors the Direction,
- * `direction.authored_at` advances past the prior June decision timestamp and the ticket falls
- * back into the Phase-1 30-min-settle gate for the NEW handling cycle.
+ * FOR THE CURRENT HANDLING CYCLE is ALSO excluded — Cora never re-investigates a June-decided
+ * ticket on its own. Re-eligibility naturally requires a subsequent Sol handling (a new close):
+ * once Sol re-handles, `tickets.sol_handled_at` advances past the prior June decision timestamp
+ * and the ticket falls back into the 30-min-settle gate for the NEW handling cycle.
+ *
+ * Phase 2 of docs/brain/specs/cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence.md:
+ * The 'Sol handled this ticket' signal is now the DETERMINISTIC `tickets.sol_handled_at` column
+ * — stamped by the worker (scripts/builder-worker.ts runTicketHandleJob) on the box session's
+ * terminal COMPLETED state via `createAdminClient()`, NOT by Sol's mid-session `writeDirection`
+ * insert. Under a DB outage the mid-session Direction insert could silently drop (observed on
+ * the first ~6-7 Sol-handled tickets), hiding "Sol responded" from the prior direction-existence
+ * gate and starving Cora of tickets to grade. `sol_handled_at` is written by the harness after
+ * Sol's plan resolves, so the signal is decoupled from the fallible per-turn insert. The 'ai'
+ * tag stays as a coarse cheap pre-filter; `sol_handled_at` is the authoritative Sol-handled
+ * signal. Per-cycle dedup + the June-decided guard now compare against `sol_handled_at`.
  */
 
 import { inngest } from "./client";
@@ -44,49 +53,56 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 export const CORA_CLOSE_SETTLE_MS = 30 * 60 * 1000;
 
 /**
- * Pure predicate for the Phase 1 + Phase 2 gate — pinned in a unit test without a DB so the
- * rule is reviewable in isolation.
+ * Pure predicate for the Cora selection gate — pinned in a unit test without a DB so the rule
+ * is reviewable in isolation.
  *
  * Cora selects a ticket for analysis only when:
- *   1. Sol has handled it — there is a LIVE `ticket_directions` row (authored_at is known).
+ *   1. Sol has handled it — `tickets.sol_handled_at` is set. The worker stamps this at the box
+ *      session's terminal COMPLETED state, so an in-session `writeDirection` failure can't
+ *      hide the fact that Sol handled the ticket (Phase 2 of
+ *      cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence).
  *   2. The ticket has been closed_at >= {@link CORA_CLOSE_SETTLE_MS} ago (the 30-min settle).
- *   3. It has NOT already been analyzed for THIS Sol handling cycle — dedup on the live
- *      Direction's `authored_at` (a `last_analyzed_at` at-or-after the Direction's authored_at
- *      means we already graded this handling and must skip; a stale `last_analyzed_at` from a
- *      prior handling is fine — Cora may re-grade the new cycle).
- *   4. Phase 2 — June (CS Director) has NOT already decided this handling cycle. A
- *      `cs_director_call` `director_activity` row for this ticket with
- *      `created_at >= direction.authored_at` closes this cycle to Cora; the ticket becomes
- *      re-eligible only after Sol re-authors the Direction (a new inbound + Sol re-handle +
- *      close), which advances `direction.authored_at` past every prior June decision.
+ *   3. It has NOT already been analyzed for THIS Sol handling cycle — dedup on
+ *      `sol_handled_at` (a `last_analyzed_at` at-or-after `sol_handled_at` means we already
+ *      graded this handling and must skip; a stale `last_analyzed_at` from a prior handling is
+ *      fine — Cora may re-grade the new cycle).
+ *   4. June (CS Director) has NOT already decided this handling cycle. A `cs_director_call`
+ *      `director_activity` row for this ticket with `created_at >= sol_handled_at` closes this
+ *      cycle to Cora; the ticket becomes re-eligible only after Sol re-handles (a new inbound
+ *      + Sol re-handle + close), which advances `sol_handled_at` past every prior June
+ *      decision timestamp.
  *
  * Returns true when the ticket passes; false when any gate fails. The cron caller applies
  * `.stamp last_analyzed_at on the skip so a later updated_at bump can't re-select the same row.
  */
 export function passesCoraSelectionGate(
-  ticket: { closed_at: string | null; last_analyzed_at: string | null },
-  direction: { authored_at: string } | null,
+  ticket: {
+    closed_at: string | null;
+    last_analyzed_at: string | null;
+    sol_handled_at: string | null;
+  },
   now: Date,
   latestJuneDecidedAt: string | null = null,
 ): boolean {
-  if (!direction) return false;
+  if (!ticket.sol_handled_at) return false;
   if (!ticket.closed_at) return false;
   const closedMs = new Date(ticket.closed_at).getTime();
   if (Number.isNaN(closedMs)) return false;
   if (now.getTime() - closedMs < CORA_CLOSE_SETTLE_MS) return false;
-  const authoredMs = new Date(direction.authored_at).getTime();
+  const solHandledMs = new Date(ticket.sol_handled_at).getTime();
+  if (Number.isNaN(solHandledMs)) return false;
   if (ticket.last_analyzed_at) {
     const analyzedMs = new Date(ticket.last_analyzed_at).getTime();
-    if (!Number.isNaN(analyzedMs) && !Number.isNaN(authoredMs) && analyzedMs >= authoredMs) {
+    if (!Number.isNaN(analyzedMs) && analyzedMs >= solHandledMs) {
       return false;
     }
   }
-  // Phase 2 — June already decided this handling cycle → skip. A June decision from a PRIOR
-  // cycle (decided_at < direction.authored_at) is fine: Sol re-authored past it, this is a new
-  // cycle that hasn't been decided yet.
+  // June already decided this handling cycle → skip. A June decision from a PRIOR cycle
+  // (decided_at < sol_handled_at) is fine: Sol re-handled past it, this is a new cycle that
+  // hasn't been decided yet.
   if (latestJuneDecidedAt) {
     const decidedMs = new Date(latestJuneDecidedAt).getTime();
-    if (!Number.isNaN(decidedMs) && !Number.isNaN(authoredMs) && decidedMs >= authoredMs) {
+    if (!Number.isNaN(decidedMs) && decidedMs >= solHandledMs) {
       return false;
     }
   }
@@ -131,11 +147,12 @@ export const ticketAnalysisCron = inngest.createFunction(
       // never grades an in-flight window (the customer might still reply "thanks!").
       const settleCutoff = new Date(Date.now() - CORA_CLOSE_SETTLE_MS).toISOString();
       const { data } = await admin.from("tickets")
-        .select("id, workspace_id, last_analyzed_at, updated_at, closed_at, tags, analyzer_locked")
+        .select("id, workspace_id, last_analyzed_at, updated_at, closed_at, tags, analyzer_locked, sol_handled_at")
         .eq("status", "closed")
         .eq("analyzer_locked", false)
         .contains("tags", ["ai"])
         .not("closed_at", "is", null)
+        .not("sol_handled_at", "is", null)
         .lte("closed_at", settleCutoff)
         .gte("updated_at", cutoff)
         .order("updated_at", { ascending: false })
@@ -148,27 +165,21 @@ export const ticketAnalysisCron = inngest.createFunction(
         closed_at: string | null;
         tags: string[] | null;
         analyzer_locked: boolean | null;
+        sol_handled_at: string | null;
       }>;
       if (!candidates.length) return [];
 
-      // Load the LIVE ticket_directions rows in one batch — this is the "Sol-handled" signal +
-      // the per-handling-cycle dedup key. A ticket without a live Direction is dropped: Cora
-      // only investigates AFTER Sol has handled. Dedup is `last_analyzed_at >= authored_at` →
-      // already graded THIS handling cycle → skip.
-      const ids = candidates.map(t => t.id);
-      const { data: dirRows } = await admin.from("ticket_directions")
-        .select("ticket_id, authored_at")
-        .in("ticket_id", ids)
-        .is("superseded_at", null);
-      const directionByTicket = new Map<string, { authored_at: string }>(
-        (dirRows || []).map(d => [d.ticket_id as string, { authored_at: d.authored_at as string }]),
-      );
+      // The "Sol handled this ticket" signal is now the deterministic `tickets.sol_handled_at`
+      // column, stamped by the worker on box-session completion (Phase 1 of
+      // cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence). No
+      // more per-run join against ticket_directions — an in-session `writeDirection` failure
+      // no longer starves Cora of Sol-handled tickets to grade.
 
-      // Phase 2 — the June-decided lookup. Load every `cs_director_call` `director_activity` row
-      // scoped to the candidate workspaces since the 7-day cutoff; per candidate ticket, keep the
-      // MAX(created_at). The predicate then compares that vs the Direction's authored_at — a
-      // June decision inside the current cycle (decided_at >= authored_at) → skip; a June
-      // decision in a prior cycle stays inert because Sol re-authored past it.
+      // The June-decided lookup. Load every `cs_director_call` `director_activity` row scoped
+      // to the candidate workspaces since the 7-day cutoff; per candidate ticket, keep the
+      // MAX(created_at). The predicate then compares that vs `sol_handled_at` — a June
+      // decision inside the current cycle (decided_at >= sol_handled_at) → skip; a June
+      // decision in a prior cycle stays inert because Sol re-handled past it.
       const uniqueWorkspaces = Array.from(new Set(candidates.map(t => t.workspace_id)));
       const { data: verdictRows } = await admin.from("director_activity")
         .select("metadata, created_at, workspace_id")
@@ -186,8 +197,11 @@ export const ticketAnalysisCron = inngest.createFunction(
       const now = new Date();
       const needs = candidates.filter(t =>
         passesCoraSelectionGate(
-          { closed_at: t.closed_at, last_analyzed_at: t.last_analyzed_at },
-          directionByTicket.get(t.id) ?? null,
+          {
+            closed_at: t.closed_at,
+            last_analyzed_at: t.last_analyzed_at,
+            sol_handled_at: t.sol_handled_at,
+          },
           now,
           juneByTicket.get(t.id) ?? null,
         ),
