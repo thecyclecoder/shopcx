@@ -47,6 +47,7 @@ global row exists per workspace (partial unique index `iteration_policies_one_ac
 | `per_account_daily_budget_delta_ceiling_cents` | `bigint` | — | run-wide budget-change ceiling |
 | `min_budget_floor_cents` | `bigint` | ✓ | never scale an object below this (null = no floor) |
 | `never_pause_object_ids` | `text[]` | — | never fully pause these objects (default `{}`) |
+| `mode` | `text` | — | `shadow` \| `armed` (CHECK, default `shadow`) — freshly activated versions ALWAYS start `shadow` (read-only branch — plan only, no [[iteration_actions]] / [[ad_publish_jobs]] writes). A separate flip surface (spec `media-buyer-armed-flip-surface`) moves a version to `armed` after human review. Migration `20260708021500_iteration_policies_mode.sql`. |
 | `activated_by` | `uuid` | ✓ | → `auth.users`.id (who flipped pending → active) |
 | `activated_at` | `timestamptz` | ✓ | activation time |
 | `superseded_by` | `uuid` | ✓ | → [[iteration_policies]].id (the version that replaced this) |
@@ -66,6 +67,15 @@ global row exists per workspace (partial unique index `iteration_policies_one_ac
 activating a new version sets the prior active row to `superseded`
 (`superseded_by`/`superseded_at`). Field design (`created_by='agent'`) allows the
 Growth Director to self-author + self-activate later with no migration.
+
+**Shadow-default invariant (media-buyer-shadow-mode Phase 1).** Every freshly
+authored + activated version starts `mode='shadow'` — the media-buyer runtime
+computes the plan but writes ZERO [[iteration_actions]] / [[ad_publish_jobs]]
+rows, emitting `*_shadow` [[director_activity]] rows instead so a human can
+concur/dissent before the loop moves budget. The flip to `mode='armed'` is a
+separate, audited surface (spec `media-buyer-armed-flip-surface`). Existing
+`status='active'` rows backfilled to `armed` on the migration so the pre-shadow
+armed workspaces keep their runtime behavior.
 
 ## Consumers
 

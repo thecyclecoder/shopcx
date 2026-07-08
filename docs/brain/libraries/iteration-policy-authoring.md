@@ -21,6 +21,15 @@ human`) collapses to the DB's `agent | human` CHECK (`director → agent` — th
 director is an agent) so the column constraint stays satisfied; the actor label
 is recorded by the matching [[director-activity]] row.
 
+**Shadow-default (media-buyer-shadow-mode Phase 1).** `IterationPolicyDraft`
+carries an optional `mode: 'shadow' | 'armed'`; omitting it lands the row
+`mode='shadow'` (the DB's column default matches so a `null`/absent field is
+safe). The flip to `armed` is a separate, audited surface — this authoring path
+never mints an armed policy silently. A calibrated re-tune (see
+[[../recipes/media-buyer-per-cohort-iteration-policy-calibration]]) re-enters
+shadow by design, so a human/director confirms the new thresholds before budget
+moves.
+
 ### `activateIterationPolicy(admin, { workspaceId, policyId, activatedBy })` → `Promise<{ activated, supersededPolicyId, version }>`
 Flip `pending → active`, supersede the prior active row via `superseded_by` +
 `superseded_at`. The partial unique index
@@ -59,7 +68,8 @@ envelope).
 
 ### Types
 `IterationPolicyDraft` (the typed thresholds, one-to-one with the non-id/non-status
-columns), `PolicyActor` (`director | human`),
+columns, including `mode?: IterationPolicyMode` — omit ⇒ `shadow`),
+`IterationPolicyMode` (`shadow | armed`), `PolicyActor` (`director | human`),
 `AuthorIterationPolicyInput | Result`, `ActivateIterationPolicyInput | Result`,
 `SpendRailGuardDecision` (the `allow|refuse` discriminated union),
 `SpendRailObservation`, `SpendRailRefusalMetadata`.
