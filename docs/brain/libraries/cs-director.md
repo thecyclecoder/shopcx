@@ -24,6 +24,17 @@ Two-gate pattern shared with [[platform-director]] + [[growth-director]]: a **st
 - **Runtime guard.** Until [[../tables/function_autonomy]] `('cs','cs-director')` is `live + autonomous`, the CS Director is **dormant**: the router never enqueues a `cs-director` job and every downstream surface no-ops. Phase 2 of this spec seeds the `function_autonomy` row at the **safest available leash** ("dormant" / the enum's `off` label) so the seat exists but nothing acts autonomously until the CEO flips it live.
 - **Always escalates** (never auto-approves): destructive/irreversible actions, a non-binary multi-CHOICE decision, a customer-refund action that exceeds the CS refund ceiling, a proposed `sonnet_prompts` / `grader_prompts` change with high blast radius, or anything the read-only investigation cannot confirm sound. Escalations route to the CEO via `escalateApprovalRequestToCeo` (the same plumbing Ada + Max use).
 
+### Escalation-source-agnostic triage — every escalated ticket routes to June
+
+June's triage covers **every** routine-owned escalated ticket, regardless of what escalated it. The eligibility gate is ticket-level only — `escalated_at` set, `escalated_to` null, `status` not archived/closed — and does NOT read `escalation_reason`. That means:
+
+- **Orchestrator escalations** (`src/lib/action-executor.ts` `escalateTicket` — journey-not-found, holding-promise, self-heal failures, verify-failed action bundles) → June-review candidate.
+- **Analyzer / severity-rail escalations** ([[ticket-analyzer]] `applySeverityActions` — severe issue class or unresolved customer situation) → June-review candidate.
+- **Playbook guard-block escalations** (`action-executor.ts` `claimGuardBlocksInlineSend` — `blocked_unbacked_claim:*` for a cancel / pause / skip / swap effect the reply asserted without a matching action) → June-review candidate on the same terms.
+- **Workflow-executor escalations** (`src/lib/workflow-executor.ts` no-quorum path) and **portal remediation** (`src/lib/portal/remediation.ts`) → June-review candidate.
+
+The invariant is pinned in code by the pure predicate [`passesJuneReviewSelection`](../../../src/lib/inngest/triage-escalations.ts) (unit-tested in `src/lib/inngest/triage-escalations.selection.test.ts`) and defensively re-applied on the fetched row-set in `triage-escalations-cron` so a future SQL edit can't quietly leak an ineligible ticket or silently source-filter a real one. Derived-from-ticket 472310cc-f35f-4631-8e3a-11d7ee7b585f — a `blocked_unbacked_claim` escalation that sat open + escalated with zero `triage_runs` — is the failing state this contract exists to prevent ([[../specs/guard-block-escalations-reach-junes-triage-not-left-unreviewed]]).
+
 ### Phase 1 — the `cs-director-call` box lane (third rung of the escalation ladder)
 
 [[../specs/cs-director-third-rung-hard-calls-above-triage-quorum]] Phase 1 wires the runtime seat for the escalation-ladder placement above. A `kind='cs-director-call'` `agent_jobs` row is claimed by the box worker's `cs-director-call` lane (`scripts/builder-worker.ts` `runCsDirectorCallJob`, concurrency-1, gated on the Claude-down breaker), which runs a top-level Max `claude -p` (the `cs-director-call` skill) against the ticket. The session's brief bakes in:
