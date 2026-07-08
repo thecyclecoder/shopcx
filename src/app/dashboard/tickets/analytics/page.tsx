@@ -23,6 +23,13 @@ interface SelectiveClarify {
   target: number;
 }
 
+interface PlaybookSelectionSplit {
+  window_days: number;
+  total_session_chosen: number;
+  total_matcher_chosen: number;
+  per_slug: Record<string, { session_chosen: number; matcher_chosen: number }>;
+}
+
 interface SolCostStats { count: number; median_cents: number; p95_cents: number }
 interface SolCostCsat { count: number; avg: number | null }
 interface SolCost {
@@ -50,6 +57,8 @@ function AnalyticsInner() {
   const [error, setError] = useState<string | null>(null);
   const [solCost, setSolCost] = useState<SolCost | null>(null);
   const [solCostError, setSolCostError] = useState<string | null>(null);
+  const [split, setSplit] = useState<PlaybookSelectionSplit | null>(null);
+  const [splitError, setSplitError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -67,6 +76,13 @@ function AnalyticsInner() {
       })
       .then((d) => { if (alive) setSolCost(d as SolCost); })
       .catch((e: unknown) => { if (alive) setSolCostError(e instanceof Error ? e.message : "load failed"); });
+    void fetch("/api/tickets/analytics/playbook-selection-split")
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.json();
+      })
+      .then((d) => { if (alive) setSplit(d as PlaybookSelectionSplit); })
+      .catch((e: unknown) => { if (alive) setSplitError(e instanceof Error ? e.message : "load failed"); });
     return () => { alive = false; };
   }, []);
 
@@ -127,6 +143,95 @@ function AnalyticsInner() {
         )}
         {!data && !error && (
           <p className="mt-2 text-xs text-zinc-400">Loading…</p>
+        )}
+      </div>
+
+      {/* Session-chosen vs signal-matched playbook selection — Phase 4 of
+          docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+          Reads /api/tickets/analytics/playbook-selection-split, which aggregates
+          ticket_resolution_events.reasoning prefixed with 'sol:session-chose-playbook:' vs
+          'sol:matcher-chose-playbook:' over the last 7 days. The tile renders totals + a
+          top-5-slug split so we can watch Sol's session-based selection displace the
+          deterministic matcher as the flag rolls out. */}
+      <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-baseline justify-between">
+          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            Playbook selection <span className="text-zinc-400">(session-chosen vs signal-matched, 7d)</span>
+          </p>
+          {split && (
+            <span className="text-[10px] text-zinc-500">
+              session {split.total_session_chosen.toLocaleString()} · matcher {split.total_matcher_chosen.toLocaleString()}
+            </span>
+          )}
+        </div>
+        {splitError && (
+          <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">Couldn&apos;t load ({splitError}).</p>
+        )}
+        {!split && !splitError && (
+          <p className="mt-2 text-xs text-zinc-400">Loading…</p>
+        )}
+        {split && (
+          <>
+            <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+              <div className="rounded border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900 dark:bg-emerald-950">
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Session-chosen (Sol)</p>
+                <p className="mt-0.5 font-mono text-2xl text-zinc-800 dark:text-zinc-200">
+                  {split.total_session_chosen.toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950">
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Signal-matched (matcher)</p>
+                <p className="mt-0.5 font-mono text-2xl text-zinc-800 dark:text-zinc-200">
+                  {split.total_matcher_chosen.toLocaleString()}
+                </p>
+              </div>
+            </div>
+            {(() => {
+              const top = Object.entries(split.per_slug)
+                .map(([slug, counts]) => ({
+                  slug,
+                  session_chosen: counts.session_chosen,
+                  matcher_chosen: counts.matcher_chosen,
+                  total: counts.session_chosen + counts.matcher_chosen,
+                }))
+                .sort((a, b) => b.total - a.total)
+                .slice(0, 5);
+              if (top.length === 0) {
+                return (
+                  <p className="mt-3 text-[10px] text-zinc-500">
+                    No session-chosen or signal-matched playbook starts in the last {split.window_days} days.
+                  </p>
+                );
+              }
+              return (
+                <div className="mt-3">
+                  <p className="text-[10px] uppercase tracking-wide text-zinc-500">Top 5 slugs</p>
+                  <table className="mt-1 w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[10px] uppercase text-zinc-500">
+                        <th className="py-1 pr-2 font-normal">Slug</th>
+                        <th className="py-1 pr-2 text-right font-normal">Session</th>
+                        <th className="py-1 pr-2 text-right font-normal">Matcher</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {top.map((row) => (
+                        <tr key={row.slug} className="border-t border-zinc-100 dark:border-zinc-800">
+                          <td className="py-1 pr-2 font-mono text-zinc-700 dark:text-zinc-300">{row.slug}</td>
+                          <td className="py-1 pr-2 text-right font-mono text-zinc-800 dark:text-zinc-200">
+                            {row.session_chosen.toLocaleString()}
+                          </td>
+                          <td className="py-1 pr-2 text-right font-mono text-zinc-800 dark:text-zinc-200">
+                            {row.matcher_chosen.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </>
         )}
       </div>
 

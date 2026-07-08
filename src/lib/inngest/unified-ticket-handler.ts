@@ -149,6 +149,27 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
   };
 }
 
+/**
+ * Phase 3 of docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+ * Reads `ai_channel_config.sol_playbook_selection_active` for (workspace, channel). Defaults to
+ * false so an unconfigured channel or a workspace pre-migration takes the safe rollout stance
+ * (the deterministic matcher still owns the playbook start). Scoped by workspace_id + channel so
+ * a cross-workspace / cross-channel row cannot authorize the branch.
+ */
+async function isSolPlaybookSelectionActive(
+  admin: Admin,
+  wsId: string,
+  ch: string,
+): Promise<boolean> {
+  const { data } = await admin
+    .from("ai_channel_config")
+    .select("sol_playbook_selection_active")
+    .eq("workspace_id", wsId)
+    .eq("channel", ch)
+    .maybeSingle();
+  return (data as { sol_playbook_selection_active?: boolean } | null)?.sol_playbook_selection_active ?? false;
+}
+
 async function loadPersonality(admin: Admin, pid: string | null) {
   if (!pid) return null;
   const { data } = await admin.from("ai_personalities")
@@ -2480,15 +2501,21 @@ async function routeExec(
   if (hasCust && !social) {
     // ── 2a. SOL-CHOSEN PLAYBOOK ──
     // Phase 2 of docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
-    // When Sol's live Direction names a playbook slug at first-touch AND the ticket is not
-    // already running one, the deterministic matcher stays quiet — we resolve the slug against
-    // public.playbooks (workspace-scoped) and dispatch directly. The reasoning stamp on
-    // ticket_resolution_events splits by source ('sol:session-chose-playbook:{slug}' vs
-    // 'sol:matcher-chose-playbook:{slug}') so Phase 4's analytics tile can measure the shift.
-    // If resolveSolChosenPlaybook returns null (no live Direction, stateless/needs_info,
-    // active_playbook_id already set, or slug unknown), we fall through to the matcher unchanged.
+    // Gated by Phase 3's per-channel flag `ai_channel_config.sol_playbook_selection_active`
+    // (default false — safe-rollout stance). When true AND Sol's live Direction names a playbook
+    // slug at first-touch AND the ticket is not already running one, the deterministic matcher
+    // stays quiet — we resolve the slug against public.playbooks (workspace-scoped) and dispatch
+    // directly. When the flag is false the resolver is short-circuited BEFORE the DB reads so
+    // rollout can decouple Sol authoring Directions (sol_first_touch_enabled=true) from Sol
+    // OWNING the dispatch (sol_playbook_selection_active=true).
+    // The reasoning stamp on ticket_resolution_events splits by source
+    // ('sol:session-chose-playbook:{slug}' vs 'sol:matcher-chose-playbook:{slug}') so Phase 4's
+    // analytics tile can measure the shift. If the flag is off OR resolveSolChosenPlaybook
+    // returns null (no live Direction, stateless/needs_info, active_playbook_id already set,
+    // or slug unknown), we fall through to the matcher unchanged.
+    const solSelectionActive = await isSolPlaybookSelectionActive(admin, wsId, ch);
     const { resolveSolChosenPlaybook } = await import("@/lib/ticket-directions");
-    const solChoice = await resolveSolChosenPlaybook(admin, wsId, tid);
+    const solChoice = solSelectionActive ? await resolveSolChosenPlaybook(admin, wsId, tid) : null;
     if (solChoice) {
       const { data: pbName } = await admin
         .from("playbooks").select("name").eq("id", solChoice.playbook_id).maybeSingle();
