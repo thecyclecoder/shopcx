@@ -38,6 +38,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Sol cost + CSAT rollups + Catherine-marker cohort compare** · verified 2026-07-08 · → [[../tables/tickets]] · [[../tables/sol_replay_runs]] · [[../libraries/action-executor]] · [[../recipes/backfill-ticket-ai-cost]] · [[../dashboard/tickets]]
 - **Inflection detector (drift + frustration) → re-session Sol** · verified 2026-07-08 · → [[../libraries/inflection-detector]] · [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
 - **The Sol first-touch acknowledgement fires only on chat, not on email/SMS/portal/other channels** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
+- **Sol always reviews policy and never bais a customer toward an out-of-policy outcome** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
 - **Anti-runaway cap on Sol re-sessions (frustration-always-bounces bounded)** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../lifecycles/ticket-lifecycle]] · [[../libraries/cs-director-digest]] · [[../dashboard/tickets]]
 - **Playbook selection becomes a Sol session decision, not a signal match** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../inngest/unified-ticket-handler]] · [[../dashboard/tickets]]
 - **Ticket Direction artifact + Sol first-touch box session (ack-then-session-output)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]

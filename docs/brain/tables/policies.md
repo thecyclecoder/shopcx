@@ -74,4 +74,4 @@ Three durable rules (folded from [[../specs/sol-reviews-policies-and-never-bais-
 
 ---
 
-[[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
+[[../README]] · [[../libraries/ticket-directions]] · [[../libraries/sol-policy-bait-guard]] · [[../../CLAUDE]] · [[../../DATABASE]]
