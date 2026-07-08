@@ -1,0 +1,1 @@
+- **An escalate_founder verdict reliably reaches the CEO inbox with a diagnosis + recommended remedy** · verified 2026-07-08 · → [[../libraries/cs-director]] · [[../libraries/cs-director-escalate-founder-card]] · [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../lifecycles/ticket-lifecycle]]
