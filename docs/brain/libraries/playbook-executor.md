@@ -58,6 +58,14 @@ Pure state machine for the `check_vaulted_pm` step wired by the assisted-purchas
 
 ### `CheckVaultedPmDecision` — type
 
+### `decidePauseSubscriptionStep` — function
+
+```ts
+function decidePauseSubscriptionStep(subscription: Subscription): 'advance' | 'execute_pause'
+```
+
+Pure decision function for the `pause_subscription` step in the Refund playbook. Given a subscription, returns `advance` (no action) if the subscription is already `cancelled`, or `execute_pause` if the subscription is active/paused and should be paused. Exported so unit tests can pin the decision logic without a live subscription. If the identified subscription is cancelled, there's nothing to pause — skipping the step removes the unbacked-pause-claim block that was dead-ending the playbook run in escalation.
+
 ## Callers
 
 - `src/lib/inngest/unified-ticket-handler.ts`
