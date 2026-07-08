@@ -1,0 +1,1 @@
+- **Build worker: fetch + rebase-retry on a non-fast-forward push so a phase build is never lost to a branch race** · verified 2026-07-08 · → [[lifecycles/spec-goal-branch-pm-flow]]
