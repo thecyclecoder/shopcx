@@ -9970,11 +9970,46 @@ async function runTicketHandleJob(job: Job) {
 
     if (parsed?.status === "needs_human") {
       const reason = String(parsed.reason || "Sol punted to a human — no reason given.");
+      // ── Phase 3 of portal-errors-route-to-sol-first-escalate-to-june-on-rail ──
+      // Sol's rail-hit on a portal-error first-touch escalates the ticket to June's triage-
+      // escalation lane (escalated_at set, escalated_to null, escalation_reason names the rail).
+      // The [[../src/lib/inngest/triage-escalations]] cron picks up the routine-owned escalate on
+      // its next tick and enqueues a cs-director-call — the third-rung escalation ladder Sol now
+      // occupies the first rung of for portal errors. The escalate helper is a compare-and-set
+      // (workspace_id-scoped + .is('escalated_at', null) + .select('id')): a ticket that was
+      // already escalated by a prior sol_resession_cap_hit / auto-heal escalate keeps that reason
+      // (Learning #2 — refuse to overwrite the existing state). Non-portal ticket-handle jobs
+      // (first_touch / inflection) stay on the existing needs_attention path — the rail-hit
+      // escalate is portal-only.
+      let escalationLine = "";
+      if (params.reason === "portal_error") {
+        const { escalateSolPortalRailHit } = await import("../src/lib/portal/escalate-sol-rail-hit");
+        try {
+          const out = await escalateSolPortalRailHit(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            sol_reason: parsed.reason ? String(parsed.reason) : "",
+          });
+          if (out.escalated) {
+            escalationLine = `Portal rail-hit → June triage: ${out.reason}\n`;
+            console.log(`${tag} portal rail-hit: escalated ticket ${ticketId} to June (${out.reason})`);
+          } else {
+            escalationLine = `Portal rail-hit escalate no-op: ${out.reason}\n`;
+            console.warn(`${tag} portal rail-hit escalate no-op (${out.reason}) for ticket ${ticketId}`);
+          }
+        } catch (e) {
+          // Never wedge the job status on an escalate failure — the needs_attention lane below
+          // still captures the punt so the CS Director can look. Surface the error for grep-ability.
+          const msg = e instanceof Error ? e.message : String(e);
+          escalationLine = `Portal rail-hit escalate failed: ${msg}\n`;
+          console.warn(`${tag} portal rail-hit escalate failed for ticket ${ticketId}: ${msg}`);
+        }
+      }
       await update(job.id, {
         status: "needs_attention",
         needs_attention_class: "sol_needs_human",
         error: reason,
-        log_tail: `Sol needs_human: ${reason}\n\n${raw.slice(-1800)}`.slice(-2000),
+        log_tail: `Sol needs_human: ${reason}\n${escalationLine}\n${raw.slice(-1800)}`.slice(-2000),
       });
       return;
     }
