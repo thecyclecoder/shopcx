@@ -66,31 +66,37 @@ export async function GET(
   }));
 
   // ── 2. AI-handled tickets in window ──
-  const { data: aiTickets, count: aiTicketCount } = await admin
-    .from("tickets")
-    .select("id, channel, tags, escalated_at", { count: "exact" })
-    .eq("workspace_id", workspaceId)
-    .contains("tags", ["ai"])
-    .gte("created_at", since);
-
-  // Tag counts (j:*, pb:*, w:*, dunning:*, crisis*, link, wb, ai:fix, agent, jo:*)
+  // Phase 1 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+  // Prior code fetched every AI ticket + tallied tags / channel / escalation in
+  // JS — PostgREST's 1000-row cap silently truncated the source set, so every
+  // sub-bucket was wrong on any busy workspace. Server-side aggregate now.
+  const { data: aiAggRows } = await admin.rpc("ai_ticket_analytics", {
+    p_workspace: workspaceId,
+    p_since: since,
+  });
+  const aiAgg = (Array.isArray(aiAggRows) ? aiAggRows[0] : aiAggRows) as {
+    ai_ticket_count: number | string | null;
+    escalated: number | string | null;
+    chat_count: number | string | null;
+    email_count: number | string | null;
+    tag_buckets: Record<string, number> | null;
+    ticket_ids: string[] | null;
+  } | null;
+  const numOrZero = (v: number | string | null | undefined) =>
+    v === null || v === undefined ? 0 : Number(v) || 0;
+  const aiTicketCount = numOrZero(aiAgg?.ai_ticket_count);
+  const escalated = numOrZero(aiAgg?.escalated);
+  const chatCount = numOrZero(aiAgg?.chat_count);
+  const emailCount = numOrZero(aiAgg?.email_count);
   const tagBuckets: Record<string, number> = {};
-  let escalated = 0;
-  let chatCount = 0;
-  let emailCount = 0;
-  for (const t of aiTickets || []) {
-    if (t.escalated_at) escalated++;
-    if (t.channel === "chat") chatCount++;
-    else if (t.channel === "email") emailCount++;
-    for (const tag of (t.tags as string[]) || []) {
-      tagBuckets[tag] = (tagBuckets[tag] || 0) + 1;
-    }
+  for (const [k, v] of Object.entries(aiAgg?.tag_buckets ?? {})) {
+    tagBuckets[k] = Number(v) || 0;
   }
 
   // ── 3. Sonnet decision-type counts (parse system internal notes) ──
   // Pattern: "[System] Sonnet: <action_type> — <reasoning>"
   // Plus "Action completed: <summary>" for actual direct-action runs.
-  const ticketIdList = (aiTickets || []).map(t => t.id);
+  const ticketIdList = aiAgg?.ticket_ids ?? [];
   const decisionCounts: Record<string, number> = {};
   const actionCounts: Record<string, number> = {};
 
@@ -278,7 +284,7 @@ export async function GET(
       date: latest?.created_at?.slice(0, 10) || null,
     },
     totals: {
-      ai_tickets: aiTicketCount || 0,
+      ai_tickets: aiTicketCount,
       escalated,
       escalation_rate_pct: aiTicketCount ? Math.round((escalated / aiTicketCount) * 100) : 0,
       chat: chatCount,

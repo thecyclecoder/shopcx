@@ -58,16 +58,6 @@ function percentile(sorted: number[], p: number): number {
   return sorted[idx];
 }
 
-function costStats(values: number[]): { count: number; median_cents: number; p95_cents: number } {
-  if (values.length === 0) return { count: 0, median_cents: 0, p95_cents: 0 };
-  const sorted = [...values].sort((a, b) => a - b);
-  return {
-    count: sorted.length,
-    median_cents: percentile(sorted, 0.5),
-    p95_cents: percentile(sorted, 0.95),
-  };
-}
-
 export async function GET(req: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -91,67 +81,60 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const windowDaysRaw = url.searchParams.get("window_days");
   const windowDays = windowDaysRaw ? Math.max(1, Math.min(365, parseInt(windowDaysRaw, 10) || 30)) : 30;
-  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // Tickets in window with their cost + csat.
-  const { data: tickets } = await admin
-    .from("tickets")
-    .select("id, ai_cost_cents, csat_score")
-    .eq("workspace_id", workspaceId)
-    .gte("created_at", since)
-    .is("merged_into", null);
-  const ticketRows = (tickets ?? []) as Array<{ id: string; ai_cost_cents: number | string | null; csat_score: number | null }>;
+  // Phase 1 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+  // The prior code fetched every window ticket + its ticket_directions rows and
+  // computed the percentile / cohort split in JS — PostgREST's 1000-row cap
+  // silently truncated the source set on any busy workspace. Server-side now.
+  const { data: rpcRows } = await admin.rpc("analytics_sol_cost", {
+    p_workspace: workspaceId,
+    p_window_days: windowDays,
+  });
+  const agg = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as {
+    overall_count: number | string | null;
+    overall_median_cents: number | string | null;
+    overall_p95_cents: number | string | null;
+    pre_sol_count: number | string | null;
+    pre_sol_median_cents: number | string | null;
+    pre_sol_p95_cents: number | string | null;
+    sol_count: number | string | null;
+    sol_median_cents: number | string | null;
+    sol_p95_cents: number | string | null;
+    pre_sol_csat_count: number | string | null;
+    pre_sol_csat_avg: number | string | null;
+    sol_csat_count: number | string | null;
+    sol_csat_avg: number | string | null;
+    resessions: Array<{ supersede_count: number; tickets: number }> | null;
+  } | null;
 
-  const ticketIds = ticketRows.map((t) => t.id);
-  // Which of these tickets have at least one ticket_directions row?
-  // Also fetch supersede-count histogram: count rows per ticket where superseded_at IS NOT NULL.
-  const directionsByTicket = new Map<string, { hasAny: boolean; supersededCount: number }>();
-  if (ticketIds.length > 0) {
-    const { data: dirRows } = await admin
-      .from("ticket_directions")
-      .select("ticket_id, superseded_at")
-      .eq("workspace_id", workspaceId)
-      .in("ticket_id", ticketIds);
-    for (const row of (dirRows ?? []) as Array<{ ticket_id: string; superseded_at: string | null }>) {
-      const entry = directionsByTicket.get(row.ticket_id) ?? { hasAny: false, supersededCount: 0 };
-      entry.hasAny = true;
-      if (row.superseded_at !== null) entry.supersededCount += 1;
-      directionsByTicket.set(row.ticket_id, entry);
-    }
-  }
+  const num = (v: number | string | null | undefined) =>
+    v === null || v === undefined ? 0 : (typeof v === "string" ? Number(v) : v) || 0;
+  const numOrNull = (v: number | string | null | undefined) =>
+    v === null || v === undefined ? null : Number(v);
 
-  const preSolCosts: number[] = [];
-  const solCosts: number[] = [];
-  const allCosts: number[] = [];
-  let preSolCsatSum = 0, preSolCsatN = 0;
-  let solCsatSum = 0, solCsatN = 0;
-  const resessionHistogram = new Map<number, number>();
-
-  for (const t of ticketRows) {
-    const cents = Number(t.ai_cost_cents ?? 0) || 0;
-    allCosts.push(cents);
-    const dir = directionsByTicket.get(t.id);
-    const isSol = !!dir?.hasAny;
-    if (isSol) {
-      solCosts.push(cents);
-      if (t.csat_score !== null && Number.isFinite(t.csat_score)) {
-        solCsatSum += t.csat_score;
-        solCsatN += 1;
-      }
-      const bucket = dir?.supersededCount ?? 0;
-      resessionHistogram.set(bucket, (resessionHistogram.get(bucket) ?? 0) + 1);
-    } else {
-      preSolCosts.push(cents);
-      if (t.csat_score !== null && Number.isFinite(t.csat_score)) {
-        preSolCsatSum += t.csat_score;
-        preSolCsatN += 1;
-      }
-    }
-  }
-
-  const resessions = [...resessionHistogram.entries()]
-    .map(([supersede_count, tickets]) => ({ supersede_count, tickets }))
-    .sort((a, b) => a.supersede_count - b.supersede_count);
+  const overallStats = {
+    count: num(agg?.overall_count),
+    median_cents: num(agg?.overall_median_cents),
+    p95_cents: num(agg?.overall_p95_cents),
+  };
+  const preSolStats = {
+    count: num(agg?.pre_sol_count),
+    median_cents: num(agg?.pre_sol_median_cents),
+    p95_cents: num(agg?.pre_sol_p95_cents),
+  };
+  const solStats = {
+    count: num(agg?.sol_count),
+    median_cents: num(agg?.sol_median_cents),
+    p95_cents: num(agg?.sol_p95_cents),
+  };
+  const preSolCsatN = num(agg?.pre_sol_csat_count);
+  const solCsatN = num(agg?.sol_csat_count);
+  const preSolCsatAvg = numOrNull(agg?.pre_sol_csat_avg);
+  const solCsatAvg = numOrNull(agg?.sol_csat_avg);
+  const resessions = (agg?.resessions ?? []).map((r) => ({
+    supersede_count: Number(r.supersede_count) || 0,
+    tickets: Number(r.tickets) || 0,
+  }));
 
   // Phase 3 of sol-runaway-re-session-cap-guardrail — cap-hit tile data.
   // Fixed 7-day window (per spec), workspace-scoped, filtered on the router-authored
@@ -265,18 +248,18 @@ export async function GET(req: Request) {
     catherine_baseline_cents: CATHERINE_BASELINE_CENTS,
     shadow_baseline_cents: shadowBaselineCents,
     cost: {
-      overall: costStats(allCosts),
-      pre_sol: costStats(preSolCosts),
-      sol: costStats(solCosts),
+      overall: overallStats,
+      pre_sol: preSolStats,
+      sol: solStats,
     },
     csat: {
       pre_sol: {
         count: preSolCsatN,
-        avg: preSolCsatN > 0 ? preSolCsatSum / preSolCsatN : null,
+        avg: preSolCsatN > 0 ? preSolCsatAvg : null,
       },
       sol: {
         count: solCsatN,
-        avg: solCsatN > 0 ? solCsatSum / solCsatN : null,
+        avg: solCsatN > 0 ? solCsatAvg : null,
       },
     },
     resessions,

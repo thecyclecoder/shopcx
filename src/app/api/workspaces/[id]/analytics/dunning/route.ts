@@ -17,16 +17,17 @@ export async function GET(
 
   // Run all queries in parallel
   const [
-    cyclesRes,
+    cycleStatsRes,
     failuresRes,
     errorCodesRes,
     terminalCancelsRes,
     recentFailuresRes,
   ] = await Promise.all([
-    // Active dunning cycles by status
-    admin.from("dunning_cycles")
-      .select("status, terminal_error_code")
-      .eq("workspace_id", workspaceId),
+    // Phase 1 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+    // Prior code fetched every dunning_cycle row in the workspace + six JS
+    // .filter().length passes — PostgREST truncated at 1000 rows so every count
+    // (and the recovery-rate math) was wrong on any workspace with >1000 cycles.
+    admin.rpc("dunning_cycle_status_counts", { p_workspace: workspaceId }),
 
     // All payment failures for error code distribution (last 90 days).
     // result='failed' only — exclude pending (submitted, awaiting webhook) +
@@ -64,16 +65,26 @@ export async function GET(
       .limit(200),
   ]);
 
-  // Aggregate cycle statuses
-  const cycles = cyclesRes.data || [];
+  // Aggregate cycle statuses (SQL GROUP BY)
+  const cycleAgg = (Array.isArray(cycleStatsRes.data) ? cycleStatsRes.data[0] : cycleStatsRes.data) as {
+    total: number | string | null;
+    active: number | string | null;
+    retrying: number | string | null;
+    skipped: number | string | null;
+    recovered: number | string | null;
+    exhausted: number | string | null;
+    terminal: number | string | null;
+  } | null;
+  const n = (v: number | string | null | undefined) =>
+    v === null || v === undefined ? 0 : Number(v) || 0;
   const cycleStats = {
-    active: cycles.filter(c => ["active", "rotating"].includes(c.status)).length,
-    retrying: cycles.filter(c => c.status === "retrying").length,
-    skipped: cycles.filter(c => c.status === "skipped").length,
-    recovered: cycles.filter(c => c.status === "recovered").length,
-    exhausted: cycles.filter(c => c.status === "exhausted").length,
-    terminal: cycles.filter(c => c.status === "exhausted" && c.terminal_error_code).length,
-    total: cycles.length,
+    active: n(cycleAgg?.active),
+    retrying: n(cycleAgg?.retrying),
+    skipped: n(cycleAgg?.skipped),
+    recovered: n(cycleAgg?.recovered),
+    exhausted: n(cycleAgg?.exhausted),
+    terminal: n(cycleAgg?.terminal),
+    total: n(cycleAgg?.total),
   };
 
   // Aggregate error codes from initial failures
