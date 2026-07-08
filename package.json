@@ -29,6 +29,7 @@
     "test:cleo-blueprint": "tsx --test src/lib/cleo-blueprint.test.ts",
     "test:usage-snapshots": "tsx --test src/lib/usage-snapshots.test.ts",
     "test:box-failed-supersede": "tsx --test src/lib/box-failed-supersede.test.ts",
+    "test:box-lane-group-sections": "tsx --test src/lib/box-lane-group-sections.test.ts",
     "test:sonnet-orchestrator": "tsx --test src/lib/sonnet-orchestrator-v2.test.ts",
     "test:serialize-goal-member-build-dispatch": "tsx --test src/lib/serialize-goal-member-build-dispatch.test.ts",
     "test:goal-member-pr-redrive": "tsx --test src/lib/goal-member-pr-redrive.test.ts",
