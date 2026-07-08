@@ -1,0 +1,1 @@
+- **June's review over the handling + the analyzer's grade becomes the escalation triage — retire the solver/skeptic quorum** · verified 2026-07-07 · → [[../lifecycles/ticket-lifecycle]]
