@@ -130,3 +130,31 @@ test("phase2 skip: June-decided this cycle beats a stale last_analyzed_at pass",
     false,
   );
 });
+
+// ── Phase 2 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+// Verification #3: a Sol-closed ticket is enqueued for ticket-analyze (Cora grades it). This
+// pins the end-to-end shape by exercising `passesCoraSelectionGate` with the exact row shape
+// Sol's Phase-1 close produces: status='closed', closed_at=now, a live Direction written when
+// Sol authored the first-touch. After the 30-min settle, Cora selects the ticket. Without the
+// Phase-1 close (status='open', closed_at=null), Cora never selects it — which is the whole
+// motivation for this spec.
+
+test("sol-closes-spec: a Sol-closed ticket (closed_at 31min ago + live Direction) PASSES the gate → Cora enqueues", () => {
+  // Sol's box session wrote the Direction, sent the resolving reply, and the Phase-1 close
+  // helper set closed_at. 31 min later Cora's 30-min cron sweep selects the ticket.
+  const solAuthoredAt = minutesAgo(45); // Sol wrote the Direction 45 min ago
+  const solClosedAt = minutesAgo(31); // Sol closed 31 min ago (just past the 30-min settle)
+  const ticket = { closed_at: iso(solClosedAt), last_analyzed_at: null };
+  const direction = { authored_at: iso(solAuthoredAt) };
+  assert.equal(passesCoraSelectionGate(ticket, direction, NOW, null), true);
+});
+
+test("sol-closes-spec: same ticket BEFORE Phase-1 close landed (closed_at=null) is SKIPPED → Cora never enqueues", () => {
+  // This is the exact bug the spec fixes: a Sol turn that sent a resolving reply but never
+  // closed the ticket leaves closed_at=null, so Cora's gate rejects it forever. This test
+  // proves the pre-Phase-1 regression state (Cora silent on unclosed Sol tickets).
+  const solAuthoredAt = minutesAgo(45);
+  const ticket = { closed_at: null, last_analyzed_at: null };
+  const direction = { authored_at: iso(solAuthoredAt) };
+  assert.equal(passesCoraSelectionGate(ticket, direction, NOW, null), false);
+});

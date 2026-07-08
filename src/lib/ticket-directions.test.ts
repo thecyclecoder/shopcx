@@ -21,6 +21,7 @@ import {
   TicketDirectionPlanError,
   resolveSolChosenPlaybook,
   closeTicketOnResolvingReply,
+  classifySolBoxTurnAction,
 } from "./ticket-directions";
 
 interface FakePlaybook {
@@ -754,4 +755,68 @@ test("closeTicketOnResolvingReply is scoped by workspace_id + id (a cross-worksp
   const c = captured();
   assert.ok(c, "update must fire");
   assert.deepEqual(c!.filters, { workspace_id: WS, id: TID });
+});
+
+// ── Phase 2 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+// classifySolBoxTurnAction is the shared taxonomy predicate mirroring the old handler's
+// `PostExecuteAction`. These tests pin each disposition against the spec's Verification #1:
+// "A Sol turn that escalates, launches a journey/playbook awaiting the customer, or asks a
+// clarifying question leaves the ticket open (not closed)." Only `message_sent` closes.
+
+test("classifySolBoxTurnAction: chosen_path='stateless' + send_ok=true → message_sent (CLOSE)", () => {
+  const action = classifySolBoxTurnAction({ chosen_path: "stateless", send_ok: true });
+  assert.equal(action, "message_sent");
+});
+
+test("classifySolBoxTurnAction: chosen_path='stateless' + send_ok=false → keep_open (send failed, ticket must NOT close)", () => {
+  // A stateless resolving reply that failed to ship must NOT close the ticket — the customer
+  // never saw the resolution, so a human retries via Improve while the ticket stays open.
+  const action = classifySolBoxTurnAction({ chosen_path: "stateless", send_ok: false });
+  assert.equal(action, "keep_open");
+});
+
+test("classifySolBoxTurnAction: chosen_path='needs_info' → keep_open (a clarifying question, no resolution)", () => {
+  // Spec bullet: "keep_open (a clarifying question, no resolution)". The customer's next inbound
+  // is the resolution signal, not this turn.
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "needs_info", send_ok: true }), "keep_open");
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "needs_info", send_ok: false }), "keep_open");
+});
+
+test("classifySolBoxTurnAction: chosen_path='playbook' → status_managed (playbook owns state, leave open)", () => {
+  // Spec bullet: "status_managed (a journey/playbook already owns the status — awaiting the
+  // customer)". unified-ticket-handler's own paths decide when the playbook resolves the ticket.
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "playbook", send_ok: true }), "status_managed");
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "playbook", send_ok: false }), "status_managed");
+});
+
+test("classifySolBoxTurnAction: chosen_path='journey' → status_managed (journey owns state, leave open)", () => {
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "journey", send_ok: true }), "status_managed");
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "journey", send_ok: false }), "status_managed");
+});
+
+test("classifySolBoxTurnAction: unknown chosen_path → keep_open (fail-safe; never close on unrecognized outcome)", () => {
+  // A prompt-injected / typo'd chosen_path must NEVER default to closing the ticket. The
+  // classifier fails safe to keep_open so the ticket stays visible for a human to review.
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "", send_ok: true }), "keep_open");
+  assert.equal(classifySolBoxTurnAction({ chosen_path: "unknown", send_ok: true }), "keep_open");
+});
+
+// ── Verification #1: only `message_sent` closes ──
+// Pinned as an explicit set-membership check across every disposition so a future taxonomy
+// widening (e.g. a new chosen_path) cannot silently start closing tickets it shouldn't.
+test("classifySolBoxTurnAction: only 'message_sent' closes; every other outcome leaves the ticket open", () => {
+  const paths = ["stateless", "needs_info", "playbook", "journey", "unknown"];
+  const sends = [true, false];
+  for (const chosen_path of paths) {
+    for (const send_ok of sends) {
+      const action = classifySolBoxTurnAction({ chosen_path, send_ok });
+      const shouldClose = action === "message_sent";
+      const isResolvingReply = chosen_path === "stateless" && send_ok === true;
+      assert.equal(
+        shouldClose,
+        isResolvingReply,
+        `chosen_path='${chosen_path}' send_ok=${send_ok} → action='${action}' — CLOSE authorization must be exactly (stateless AND send_ok)`,
+      );
+    }
+  }
 });

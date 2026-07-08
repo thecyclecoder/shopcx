@@ -10748,20 +10748,24 @@ async function runTicketHandleJob(job: Job) {
               const msg = e instanceof Error ? e.message : String(e);
               console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
             }
-            // ── Phase 1 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
-            // message_sent → close. Mirrors the old unified-ticket-handler `setStatus`
-            // ("message_sent → close the ticket; next inbound reopens"). A `chosen_path='stateless'`
-            // Direction that shipped its resolving reply is Sol's message_sent case — close the
-            // ticket so Cora's closed-tickets-only ticket-analyzer sweep can grade it. Guards
-            // (Learning #6 — confirming predicate at the action point):
-            //   (a) sendOk — never close on a failed send; the Direction is durable and a human
-            //       can retry via Improve, but the ticket stays open until a reply actually lands.
-            //   (b) chosenPath === "stateless" — the ONLY chosen_path this phase closes on.
-            //       `needs_info` is a clarifying question (keep open — Phase 2), `playbook` /
-            //       `journey` are status_managed (a mechanism owns state — Phase 2).
-            if (sendOk && chosenPath === "stateless") {
+            // ── Phase 1 + 2 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+            // Post-execute taxonomy match. Mirrors unified-ticket-handler's `PostExecuteAction`
+            // ("message_sent → close; keep_open + status_managed + escalated leave open; next
+            // inbound reopens"). classifySolBoxTurnAction is the shared predicate — never a bare
+            // `chosenPath === "stateless"` inline check (Learning #6: the confirming predicate at
+            // the action point, not a coarser proxy). The classifier factors sendOk into the
+            // decision so a failed send never closes; only `message_sent` reaches the close
+            // helper. `needs_info` → keep_open (clarifying question — customer's next inbound is
+            // the resolution signal); `journey` / `playbook` → status_managed (the mechanism owns
+            // status from here — unified-ticket-handler's own paths close it when the mechanism
+            // resolves). Verification #1: needs_info / journey / playbook / needs_human all stay
+            // open — pinned in src/lib/ticket-directions.test.ts.
+            const { classifySolBoxTurnAction, closeTicketOnResolvingReply } = await import(
+              "../src/lib/ticket-directions"
+            );
+            const solTurnAction = classifySolBoxTurnAction({ chosen_path: chosenPath, send_ok: sendOk });
+            if (solTurnAction === "message_sent") {
               try {
-                const { closeTicketOnResolvingReply } = await import("../src/lib/ticket-directions");
                 await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
               } catch (e) {
                 // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.

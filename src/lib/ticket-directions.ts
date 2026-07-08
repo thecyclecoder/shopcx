@@ -325,6 +325,50 @@ export async function closeTicketOnResolvingReply(
 }
 
 /**
+ * Post-execute action taxonomy for a Sol box-session turn — Phase 2 of
+ * [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
+ *
+ * Mirrors the old handler's `PostExecuteAction` shape in [[../inngest/unified-ticket-handler]]
+ * (documented rule: "message_sent → close; next inbound reopens"). Only `message_sent` closes;
+ * `escalated` / `status_managed` / `keep_open` all LEAVE the ticket open — a launched
+ * journey/playbook awaits the customer, a clarifying `needs_info` reply expects a follow-up, and
+ * a `needs_human` escalation waits on the CS Director. The classifier is the single, shared
+ * predicate the box lane's close decision drives from — no parallel taxonomy.
+ */
+export type SolBoxTurnAction = "message_sent" | "status_managed" | "keep_open" | "escalated";
+
+/**
+ * Classify a Sol box-session turn's outcome into the shared taxonomy.
+ *
+ *  - `chosen_path='stateless'` + `sendOk=true` → `message_sent` (a resolving reply — CLOSE).
+ *  - `chosen_path='stateless'` + `sendOk=false` → `keep_open` (send failed; the reply never
+ *    reached the customer, so the ticket must NOT close — a human retries via Improve).
+ *  - `chosen_path='needs_info'` → `keep_open` (a clarifying question; the customer's next inbound
+ *    is the resolution signal).
+ *  - `chosen_path='playbook'` / `chosen_path='journey'` → `status_managed` (the mechanism owns
+ *    the ticket's status from here; unified-ticket-handler's own paths decide when it closes).
+ *
+ * The `escalated` return is reserved for the caller's `needs_human` branch: Sol's box session
+ * returns `status:'needs_human'` BEFORE any Direction is written, so no `chosen_path` string is
+ * available at classification time — the caller stamps `escalated` from the branch itself. Kept
+ * on the taxonomy so tests and future call sites share one vocabulary.
+ *
+ * Pure predicate — no DB access, safe to unit-test.
+ */
+export function classifySolBoxTurnAction(input: {
+  chosen_path: string;
+  send_ok: boolean;
+}): SolBoxTurnAction {
+  if (input.chosen_path === "stateless") {
+    return input.send_ok ? "message_sent" : "keep_open";
+  }
+  if (input.chosen_path === "needs_info") return "keep_open";
+  if (input.chosen_path === "playbook" || input.chosen_path === "journey") return "status_managed";
+  // Unknown chosen_path — fail-safe to keep_open (never close a ticket on an unrecognized outcome).
+  return "keep_open";
+}
+
+/**
  * Bump `resession_count` on the live Direction for `ticket_id`. Phase 2 of
  * [[../specs/sol-runaway-re-session-cap-guardrail]] — the router (`reSessionSol`) calls this
  * BEFORE it supersedes the live row so the incremented count is captured on the row about to
