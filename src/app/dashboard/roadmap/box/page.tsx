@@ -68,6 +68,13 @@ interface AccountsSnapshot {
   events: AccountEvent[];
   codex?: AccountSlot | null; // the second runtime (box-codex-runner) — null when Codex is disabled
 }
+// build-box-page-reflects-real-per-lane-group-usage Phase 2 — per-group cap map from the heartbeat.
+// The page renders each named group as its own LaneRowGrid, filtered by the group's kind-set against
+// the group's cap. Null on legacy heartbeat rows (the page then falls back to the old build_lanes /
+// fold_lanes single-pool render).
+interface LaneGroups {
+  [group: string]: { cap: number; kinds: string[] };
+}
 interface Worker {
   running_sha: string | null;
   status: string;
@@ -77,6 +84,7 @@ interface Worker {
   started_at: string | null;
   build_lanes: number;
   fold_lanes: number;
+  lane_groups: LaneGroups | null;
   lanes: LaneRow[];
   accounts: AccountsSnapshot | null;
 }
@@ -114,6 +122,19 @@ interface PreviewBuildOverride {
   reason: string | null;
   fetched_at: string | null;
 }
+
+// build-box-page-reflects-real-per-lane-group-usage Phase 3 — display order + human labels for the
+// lane groups the heartbeat emits. Keys mirror the LANE_GROUPS map in scripts/builder-worker.ts;
+// an unknown group key falls back to its raw key so a new group added on the box shows up without
+// a page-side update.
+const LANE_GROUP_ORDER = ["build_plan", "customer_service", "director", "fold", "other"];
+const LANE_GROUP_LABELS: Record<string, string> = {
+  build_plan: "Build / plan lanes",
+  customer_service: "Customer service lanes",
+  director: "Director lanes",
+  fold: "Fold lane",
+  other: "Other lanes",
+};
 
 // Route a FAILED job to where you'd look at / rebuild it (a failure isn't an approval — see the paused
 // section below, which routes to the routed inbox). SAFE-BY-DEFAULT (a NEW agent kind can never 404 here):
@@ -651,6 +672,28 @@ export default function BoxPage() {
   }
 
   const stale = worker ? workerStale(worker) : true;
+  // build-box-page-reflects-real-per-lane-group-usage Phase 3 — render each lane group against its
+  // OWN cap and its OWN kind-set (from the heartbeat's lane_groups map — single source of truth).
+  // The pre-existing `buildLanes = lanes.filter(kind !== 'fold')` lumped every non-fold kind
+  // (customer service + director + build + …) into ONE bucket rendered against build_lanes, so a
+  // build pool at 10 with a CS lane + a director lane could show "13/10 in use". Each group here
+  // filters worker.lanes by the group's kind-set, and the LaneRowGrid can no longer overflow its
+  // group's cap. When lane_groups is null (a legacy heartbeat row), fall back to the old single-
+  // pool render so nothing regresses on an old box.
+  const laneGroupSections = worker?.lane_groups
+    ? LANE_GROUP_ORDER
+        .filter((key) => worker.lane_groups && worker.lane_groups[key])
+        .map((key) => {
+          const g = worker.lane_groups![key];
+          const kindSet = new Set(g.kinds);
+          return {
+            key,
+            label: LANE_GROUP_LABELS[key] ?? key,
+            cap: g.cap,
+            lanes: (worker.lanes ?? []).filter((l) => kindSet.has(l.kind)),
+          };
+        })
+    : null;
   const buildLanes = (worker?.lanes ?? []).filter((l) => l.kind !== "fold");
   const foldLanes = (worker?.lanes ?? []).filter((l) => l.kind === "fold");
 
@@ -761,8 +804,24 @@ export default function BoxPage() {
           {/* Lane grid + per-account Max load */}
           <div className="space-y-5">
             {worker.accounts && <AccountsPanel accounts={worker.accounts} />}
-            <LaneRowGrid label="Build / plan lanes" total={worker.build_lanes} lanes={buildLanes} />
-            <LaneRowGrid label="Fold lane" total={worker.fold_lanes} lanes={foldLanes} />
+            {laneGroupSections ? (
+              // build-box-page-reflects-real-per-lane-group-usage Phase 3 — one LaneRowGrid per
+              // lane group, driven from worker.lane_groups (Build/plan · Customer service · Director
+              // · Fold · Other). Each grid shows in-use/cap for its OWN kinds against the group's
+              // OWN cap — no more "13/10 in use" from lumping every non-fold kind into build_lanes.
+              laneGroupSections.map((section) =>
+                section.cap > 0 || section.lanes.length > 0 ? (
+                  <LaneRowGrid key={section.key} label={section.label} total={section.cap} lanes={section.lanes} />
+                ) : null,
+              )
+            ) : (
+              // Legacy fallback for a heartbeat row written before lane_groups existed — same single-
+              // pool render as before, no regression on an older box.
+              <>
+                <LaneRowGrid label="Build / plan lanes" total={worker.build_lanes} lanes={buildLanes} />
+                <LaneRowGrid label="Fold lane" total={worker.fold_lanes} lanes={foldLanes} />
+              </>
+            )}
           </div>
 
           {/* Jobs in queue — a faces-attached log of what's lined up behind the active lanes (queued-jobs-log) */}

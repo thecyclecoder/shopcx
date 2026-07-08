@@ -2898,6 +2898,53 @@ function derivePhase(instructions: string | null | undefined): string | null {
   const m = /\bPhase\s+(\d+)\b/i.exec(instructions);
   return m ? `Phase ${m[1]}` : null;
 }
+// build-box-page-reflects-real-per-lane-group-usage Phase 1: the box worker runs each kind in its
+// OWN dedicated lane with its own cap (MAX_CONCURRENT for the build/plan pool, MAX_TICKET_HANDLE +
+// MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL for customer service, MAX_PLATFORM_DIRECTOR +
+// MAX_DIRECTOR_COACH for director, MAX_FOLD for fold, everything else in a bag of small
+// concurrency-1/2 lanes). The pre-existing scalar build_lanes/fold_lanes only carried two of those
+// caps, which is why /dashboard/roadmap/box could render nonsense like "13/10 in use" — it lumped
+// every non-fold in-flight lane against the build/plan pool cap. LANE_GROUPS is the FULL per-group
+// cap picture, emitted verbatim into the heartbeat row's `lane_groups` jsonb column each tick so
+// the page + BoxChip can render each group against its OWN cap (and its OWN kind-set). Kinds MUST
+// stay in sync with the poll-loop count* helpers below (countPlatformDirector groups
+// platform-director + director-bounce-back + growth-director; countFold groups fold + goal-fold; …).
+const LANE_GROUPS = {
+  build_plan: {
+    cap: MAX_CONCURRENT,
+    kinds: ["build", "plan"] as const,
+  },
+  customer_service: {
+    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL,
+    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call"] as const,
+  },
+  director: {
+    cap: MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH,
+    kinds: ["platform-director", "director-bounce-back", "growth-director", "director-coach"] as const,
+  },
+  fold: {
+    cap: MAX_FOLD,
+    kinds: ["fold", "goal-fold"] as const,
+  },
+  other: {
+    cap:
+      MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST + MAX_SPEC_REVIEW +
+      MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
+      MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
+      MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
+      MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE +
+      MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
+      MAX_PROPOSED_MODEL_TIER,
+    kinds: [
+      "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test", "spec-review",
+      "migration-fix", "deploy-review", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
+      "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
+      "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
+      "media-buyer-grade", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
+    ] as const,
+  },
+} as const;
 async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
   // reconcile-per-account-in-flight-count (Phase 2): heal the free-running load counter to the ground-truth
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
@@ -2913,8 +2960,12 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       status,
       active_builds: activeBuilds,
       detail: detail ?? null,
-      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
-      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
+      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling) — kept for back-compat
+      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane) — kept for back-compat
+      // build-box-page-reflects-real-per-lane-group-usage Phase 1 — per-group caps so the page can
+      // render each lane group against its OWN cap instead of lumping every non-fold kind into the
+      // build/plan pool. Kind-sets mirror the poll-loop count* helpers.
+      lane_groups: LANE_GROUPS,
       lanes, // [{ kind, job_id, spec_slug, since, phase }] for every in-flight lane this tick
       // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2): surfaces how each
       // account's quota is burning + an all-capped state to the box-health view + Control Tower box tile.
