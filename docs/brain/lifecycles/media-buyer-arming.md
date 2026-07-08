@@ -2,9 +2,11 @@
 
 The owner-vetoable flip that moves a workspace's Media Buyer cohort from `iteration_policies.mode='shadow'` (audit-only) to `mode='armed'` (executor may act) — and the symmetric disarm the owner uses to yank it back. Encodes the [[../goals/autonomous-media-buyer-supervision]] M3 "autonomous ad-spend stays human-vetoable" requirement as a real API + audit surface, not a raw SQL invitation.
 
-Phase 1 of [[../specs/media-buyer-armed-flip-surface]]; blocked-by the deterministic arming-gate ([[../specs/media-buyer-arming-gate]]) that authors the [[../tables/media_buyer_arming_authorization]] rows this route reads.
+Phases 1 + 2 of [[../specs/media-buyer-armed-flip-surface]]; blocked-by the deterministic arming-gate ([[../specs/media-buyer-arming-gate]]) that authors the [[../tables/media_buyer_arming_authorization]] rows this route reads.
 
-**Code:** `src/app/api/growth/media-buyer/arm/route.ts` (POST) · [[../libraries/approval-router]] `resolveApproverLive('growth')` · [[../tables/iteration_policies]] `mode` column · [[../tables/media_buyer_arming_authorization]] · [[../tables/director_activity]] via [[../libraries/director-activity]] `recordDirectorActivity`.
+**Code:**
+- Phase 1 API: `src/app/api/growth/media-buyer/arm/route.ts` (POST) · [[../libraries/approval-router]] `resolveApproverLive('growth')` · [[../tables/iteration_policies]] `mode` column · [[../tables/media_buyer_arming_authorization]] · [[../tables/director_activity]] via [[../libraries/director-activity]] `recordDirectorActivity`.
+- Phase 2 tile: `src/app/dashboard/growth/media-buyer/page.tsx` (client `MediaBuyerCohortsPage`) · `src/app/dashboard/growth/media-buyer/layout.tsx` (Suspense boundary for cacheComponents) · read via `src/app/api/growth/media-buyer/cohorts/route.ts` (GET). Owner-role member sees Arm / Disarm buttons; Arm is enabled ONLY when the newest authorization is `allowed=true` AND `expires_at > now()`. Non-owner members see the same tile read-only (buttons hidden).
 
 ## The three transitions
 
