@@ -10222,9 +10222,20 @@ async function runTicketHandleJob(job: Job) {
       // with an empty slug — the writer will fail the Direction otherwise, and the ticket
       // burns the box turn.
       `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
+      // Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+      // MESSAGE-IS-LAST. Any concrete outcome your first_reply CLAIMS (added a bag, applied a
+      // credit, issued a refund, created a return, cancelled a subscription, …) MUST also appear
+      // as a structured required_outcomes item so the honor step can fire + verify it BEFORE the
+      // send. Judy 0a9e4d7f: the reply claimed bag+credit while neither action ran. The worker
+      // (a) writes each required_outcomes item to the DB, (b) runs the honor step (dispatches +
+      // verifies via the shared action executor), (c) only THEN allows the reply to send. An item
+      // that fails to verify blocks the send. When your first_reply makes NO concrete claim (a
+      // needs_info question, a bare informational reply), return required_outcomes:[] — the honor
+      // step is a no-op and the reply flows normally.
+      `REQUIRED OUTCOMES — the structured 'what'. For every concrete outcome your first_reply CLAIMS (or promises to make happen), also emit a required_outcomes entry with {kind:'<action_type>', description:'<one-line human summary>', target_ids:{…the ids the executor needs: contract_id, order_id, product_id, coupon_code, amount_cents…}, expected_db_state:{…the DB predicate that would prove it done…}}. The worker fires each entry via the shared action executor (directActionHandlers[kind]) and verifies against the DB BEFORE your first_reply sends — an unverifiable entry BLOCKS the send. Emit the outcomes in the order they should run. If your first_reply makes no concrete claim (a question, an informational answer, a policy explanation), return required_outcomes:[] — the honor step is a no-op.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"required_outcomes":[{"kind":"…","description":"…","target_ids":{…},"expected_db_state":{…}}],"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
@@ -10310,8 +10321,9 @@ async function runTicketHandleJob(job: Job) {
       const guardrails = (d.guardrails && typeof d.guardrails === "object" ? d.guardrails : {}) as Record<string, unknown>;
 
       const { writeDirection } = await import("../src/lib/ticket-directions");
+      let directionId: string | null = null;
       try {
-        await writeDirection(db, {
+        const directionRow = await writeDirection(db, {
           workspace_id: workspaceId,
           ticket_id: ticketId,
           intent,
@@ -10321,6 +10333,7 @@ async function runTicketHandleJob(job: Job) {
           guardrails,
           // authored_by default = 'sol_box_session' (the SDK default; matches the Phase 3 verification)
         });
+        directionId = directionRow.id;
       } catch (e) {
         // The partial-UNIQUE on ticket_id WHERE superseded_at IS NULL enforces the one-live-row
         // invariant — a re-dispatched job on the same ticket that already has a live Direction fails
@@ -10329,6 +10342,125 @@ async function runTicketHandleJob(job: Job) {
         const msg = e instanceof Error ? e.message : String(e);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
+      }
+
+      // ── Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified ──
+      // Phase 1 wire-in: persist Sol's required_outcomes — the structured "what" behind the reply.
+      // Every concrete outcome the first_reply CLAIMS is stored as an individually-checkable row
+      // (kind + description + target_ids + expected_db_state, status='pending') so the honor step
+      // can dispatch it AND the send guards can gate on verified state. Sol's prompt requires the
+      // array; an omitted / non-array field is treated as [] (no claims → no rows → honor step is
+      // a no-op → reply flows normally).
+      const { writeRequiredOutcomes } = await import("../src/lib/ticket-required-outcomes");
+      const rawOutcomes = Array.isArray((parsed as { required_outcomes?: unknown }).required_outcomes)
+        ? ((parsed as { required_outcomes: unknown[] }).required_outcomes as unknown[])
+        : [];
+      const outcomeItems: Array<{
+        kind: string;
+        description: string;
+        target_ids?: Record<string, unknown>;
+        expected_db_state?: Record<string, unknown>;
+      }> = [];
+      for (const it of rawOutcomes) {
+        if (!it || typeof it !== "object") continue;
+        const o = it as {
+          kind?: unknown;
+          description?: unknown;
+          target_ids?: unknown;
+          expected_db_state?: unknown;
+        };
+        const kind = typeof o.kind === "string" ? o.kind.trim() : "";
+        const description = typeof o.description === "string" ? o.description.trim() : "";
+        if (!kind || !description) continue;
+        const targetIds =
+          o.target_ids && typeof o.target_ids === "object" && !Array.isArray(o.target_ids)
+            ? (o.target_ids as Record<string, unknown>)
+            : {};
+        const expected =
+          o.expected_db_state && typeof o.expected_db_state === "object" && !Array.isArray(o.expected_db_state)
+            ? (o.expected_db_state as Record<string, unknown>)
+            : {};
+        outcomeItems.push({ kind, description, target_ids: targetIds, expected_db_state: expected });
+      }
+      if (outcomeItems.length > 0) {
+        try {
+          await writeRequiredOutcomes(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            direction_id: directionId,
+            items: outcomeItems,
+          });
+        } catch (e) {
+          // A required_outcomes insert failure does NOT unwind the Direction — the ledger is durable
+          // substrate. Surface the error in log_tail so it's grep-able but continue: with zero rows
+          // written, the honor step is a no-op and the outcome-claim guard downstream will block any
+          // send that CLAIMS an unverified outcome (Judy 0a9e4d7f's failure mode) via
+          // assertClaimsBackedByOutcomes.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} writeRequiredOutcomes failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      // Phase 2 wire-in: HONOR every required_outcome BEFORE composing/sending the customer reply.
+      // The honor step walks each row in authored order, dispatches the action via the shared
+      // directActionHandlers, and verifies via verifyActionInDB. Actions run to completion (or fail
+      // loudly) FIRST — the reply-drafting step is NOT reached while any item is pending. A failed
+      // item routes the ticket to needs_human naming the unfinished item (Judy 0a9e4d7f: bag/credit
+      // would fire OR fail loudly here — never a reply promising them while neither ran).
+      let honorBlockLine: string | null = null;
+      if (outcomeItems.length > 0) {
+        const { data: tCustomer } = await db
+          .from("tickets")
+          .select("customer_id, channel")
+          .eq("id", ticketId)
+          .single();
+        const customerId = (tCustomer?.customer_id as string | null) ?? null;
+        const honorChannel = (tCustomer?.channel as string | null) || "email";
+        if (!customerId) {
+          // No linked customer — the executor can't dispatch a customer-scoped action. Block the
+          // reply so an unverifiable claim can't ship; the Improve tab picks up the ticket.
+          honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${honorBlockLine}`);
+          await update(job.id, {
+            log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          try {
+            const { honorRequiredOutcomes } = await import("../src/lib/honor-required-outcomes");
+            const honor = await honorRequiredOutcomes({
+              admin: db,
+              workspace_id: workspaceId,
+              ticket_id: ticketId,
+              customer_id: customerId,
+              channel: honorChannel,
+              // Real production dispatchers — the box worker has admin creds and this is the
+              // very step the spec's Phase 2 verification names ("re-running Judy's scenario
+              // executes bag/credit (or fails loudly) BEFORE any reply exists").
+              sandbox: false,
+            });
+            if (!honor.all_verified) {
+              const failedNames =
+                [...honor.failed_items, ...honor.carried_forward_failed]
+                  .map((f) => `${f.kind}:${f.description}${f.failed_reason ? ` (${f.failed_reason})` : ""}`)
+                  .join(" | ") || "(none named)";
+              honorBlockLine = `Sol reply BLOCKED by honor step: ${honor.failed_items.length} failed / ${honor.carried_forward_failed.length} carried-forward. Failed: ${failedNames}. Direction authored; a human re-drafts via Improve.`;
+              console.warn(`${tag} ${honorBlockLine}`);
+              await update(job.id, {
+                log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+              });
+            }
+          } catch (e) {
+            // Honor step blew up — block the send. A message-is-last invariant is that we NEVER
+            // ship a claim we couldn't verify; erroring is the same as unverified from the send
+            // gate's perspective.
+            const msg = e instanceof Error ? e.message : String(e);
+            honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${honorBlockLine}`);
+            await update(job.id, {
+              log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          }
+        }
       }
 
       // Ship the first customer-facing reply through the SAME production delivery sink the orchestrator
@@ -10346,7 +10478,10 @@ async function runTicketHandleJob(job: Job) {
       // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
       // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
-      if (firstReply) {
+      // The honor step above sets honorBlockLine when a required_outcome failed to verify — the
+      // message-is-last invariant refuses to compose OR send a reply when any promise is unbacked.
+      // The Direction is still durable; the ticket routes to needs_human via the Improve tab.
+      if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
         if (bait.ok === false) {
