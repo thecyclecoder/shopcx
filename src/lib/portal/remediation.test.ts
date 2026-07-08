@@ -13,7 +13,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyPortalFailure, type FailureContext } from "./remediation";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { classifyPortalFailure, healPortalAction, type FailureContext } from "./remediation";
 
 const ctx = (error: string, extra: Partial<FailureContext> = {}): FailureContext => ({
   route: "removeLineItem",
@@ -64,4 +65,52 @@ test("transient Appstle operation lock → retry (not dismiss)", () => {
 test("a genuinely unrecognized error still → human", () => {
   const r = classifyPortalFailure(ctx("some brand new appstle failure mode"));
   assert.equal(r.disposition, "human");
+});
+
+// ── healPortalAction: frequency route case (portal-remediation-frequency-route-replay spec) ──
+//
+// Before Phase 1, `ctx.route === "frequency"` fell through to the default branch
+// and returned `unsupported: true`, so remediatePortalTicket escalated a
+// transiently-failing frequency change to a human even when the customer's own
+// retry already landed it. Assert the case is now recognized (no `unsupported`
+// flag) so the branch reaches the appstle replay whose same-value no-op guard
+// closes the ticket on a change that already applied. The three cases below hit
+// the payload-validation guards before any Appstle call, so the admin arg is
+// never touched — cast to a stub instead of standing up a real Supabase mock.
+const stubAdmin = null as unknown as SupabaseClient;
+
+test("healPortalAction — frequency route with a missing contractId is recognized (not unsupported)", async () => {
+  const r = await healPortalAction(stubAdmin, "ws_1", {
+    route: "frequency",
+    error: "",
+    status: null,
+    payload: { interval: "MONTH", intervalCount: 2 },
+  });
+  assert.equal(r.success, false);
+  assert.equal(r.unsupported, undefined, "must reach the frequency branch, not the default `unsupported` fallback");
+  assert.match(r.error || "", /contractId/i);
+});
+
+test("healPortalAction — frequency route with a missing intervalCount is recognized (not unsupported)", async () => {
+  const r = await healPortalAction(stubAdmin, "ws_1", {
+    route: "frequency",
+    error: "",
+    status: null,
+    payload: { contractId: "gid://shopify/SubscriptionContract/1", interval: "MONTH" },
+  });
+  assert.equal(r.success, false);
+  assert.equal(r.unsupported, undefined);
+  assert.match(r.error || "", /intervalCount/i);
+});
+
+test("healPortalAction — frequency route with an invalid interval is recognized (not unsupported)", async () => {
+  const r = await healPortalAction(stubAdmin, "ws_1", {
+    route: "frequency",
+    error: "",
+    status: null,
+    payload: { contractId: "gid://shopify/SubscriptionContract/1", interval: "fortnight", intervalCount: 1 },
+  });
+  assert.equal(r.success, false);
+  assert.equal(r.unsupported, undefined);
+  assert.match(r.error || "", /interval/i);
 });

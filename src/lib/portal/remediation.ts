@@ -23,7 +23,7 @@
  * `portal-action-healer` cron, so behaviour is identical.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { appstleUpdateNextBillingDate } from "@/lib/appstle";
+import { appstleUpdateNextBillingDate, appstleUpdateBillingInterval } from "@/lib/appstle";
 
 const PORTAL_FAIL_TAG = "portal-action-failed";
 // Route slugs the portal uses for a cancel (see src/lib/portal/handlers/index.ts).
@@ -203,6 +203,27 @@ export async function healPortalAction(
         .eq("shopify_contract_id", contractId);
       const label = new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
       return { success: true, detail: `next order date set to ${label}` };
+    }
+    case "frequency": {
+      // Mirror the changedate shape: replay the same appstle call the portal
+      // handler makes. appstleUpdateBillingInterval has a same-value no-op guard
+      // (subscriptions.billing_interval + count already match → returns success
+      // without hitting Appstle), so a replay of a change that already landed is
+      // harmless and closes the ticket instead of escalating a transient failure
+      // whose retry the customer already completed themselves.
+      const contractId = String(ctx.payload?.contractId || "");
+      const intervalRaw = String(ctx.payload?.interval || "").toUpperCase();
+      const intervalCount = Number(ctx.payload?.intervalCount || 0);
+      if (!contractId) return { success: false, error: "missing contractId in payload" };
+      if (!intervalCount || !Number.isFinite(intervalCount)) {
+        return { success: false, error: "missing intervalCount in payload" };
+      }
+      if (intervalRaw !== "DAY" && intervalRaw !== "WEEK" && intervalRaw !== "MONTH" && intervalRaw !== "YEAR") {
+        return { success: false, error: `invalid interval "${String(ctx.payload?.interval ?? "")}" (expected DAY/WEEK/MONTH/YEAR)` };
+      }
+      const r = await appstleUpdateBillingInterval(workspaceId, contractId, intervalRaw, intervalCount);
+      if (!r.success) return { success: false, error: r.error || "frequency update failed" };
+      return { success: true, detail: `frequency set to every ${intervalCount} ${intervalRaw.toLowerCase()}(s)` };
     }
     default:
       return { success: false, unsupported: true, error: `no replay implemented for route "${ctx.route}"` };
