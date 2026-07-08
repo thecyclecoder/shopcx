@@ -17,11 +17,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   AGENT_INFLIGHT_SKIP_REASONS,
+  BLAMELESS_INFRA_RECONCILE_MARKER,
   GRADE_BATCH_CAP,
   GRADE_CADENCE_MS,
   applyBoxGrade,
   isBlamelessInfraFailure,
+  isInCoachLowGradeWindow,
   isInfraCancelledError,
+  matchedBlamelessInfraSignatureKey,
+  reconcileBlamelessGradePoison,
   selectGradingBatch,
   withinGradeCadence,
   type UngradedJob,
@@ -412,4 +416,257 @@ test("AGENT_INFLIGHT_SKIP_REASONS: silences the sweep on the blameless-infra ski
   // A TRUE grader error must NOT be silenced — it still surfaces in the Vercel error feed.
   assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("parse_failed"), false);
   assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("grader_http_429"), false);
+});
+
+// ── Phase 3: coach ignores blameless history + self-heal reconcile ───────────────────────────────
+//
+// (1) The coach's low-grade window must EXCLUDE a reconciled blameless grade — its neutralized
+//     state (grade=NULL) doesn't satisfy `< COACH_LOW_ROLLUP`, so `isInCoachLowGradeWindow` returns
+//     false. This is what stops an already-cleared outage burst from re-parking needs_attention.
+// (2) reconcileBlamelessGradePoison identifies + neutralizes the 2026-07-08 poison IDEMPOTENTLY —
+//     dry-run flags matches, apply neutralizes them, a re-run over the same window is a no-op
+//     (already-marked rows are skipped), and a real worker slip stays untouched.
+
+test("matchedBlamelessInfraSignatureKey: returns the concrete pattern key that matched", () => {
+  assert.equal(matchedBlamelessInfraSignatureKey({ error: "authentication_failed — creds expired" }), "cli_auth_failed");
+  assert.equal(matchedBlamelessInfraSignatureKey({ error: "usage limit reached — all Max accounts capped (parked)" }), "all_max_accounts_capped");
+  assert.equal(matchedBlamelessInfraSignatureKey({ error: "no parseable verdict returned after 3 attempts" }), "no_parseable_verdict");
+  assert.equal(matchedBlamelessInfraSignatureKey({ error: "silent author-write fallout — spec did not persist" }), "silent_author_write_fallout");
+  // (b) 0-token dead session — non-textual conjunction → the reserved key.
+  assert.equal(
+    matchedBlamelessInfraSignatureKey({ input_tokens: 0, output_tokens: 0, log_tail: "session ended with no output" }),
+    "zero_token_dead_session",
+  );
+  // Worker-attributable and clean paths → null.
+  assert.equal(matchedBlamelessInfraSignatureKey({ error: "regression: false-positive dismissal of a real bug" }), null);
+  assert.equal(matchedBlamelessInfraSignatureKey({ error: "tsc failed: 3 type errors" }), null);
+  assert.equal(matchedBlamelessInfraSignatureKey({}), null);
+});
+
+test("isInCoachLowGradeWindow: a reconciled blameless row (grade=NULL) is EXCLUDED — coach window count drops", () => {
+  // The three-shape mirror of the SQL filter (`.not("grade", "is", null).lt("grade", 7)`) —
+  // asserts the coach's low-grade window count excludes a blameless-reconciled grade AND that a
+  // genuine low grade stays in the window.
+  const rows = [
+    { grade: 3 as number | null },  // genuine low grade → IN window
+    { grade: null as number | null }, // reconciled blameless → EXCLUDED
+    { grade: 8 as number | null },  // strong grade → EXCLUDED (above threshold)
+    { grade: 2 as number | null },  // genuine low grade → IN window
+  ];
+  const inWindow = rows.filter(isInCoachLowGradeWindow);
+  assert.equal(inWindow.length, 2);
+  assert.deepEqual(inWindow.map((r) => r.grade), [3, 2]);
+  // Verifies the spec's "coach window count excludes blameless jobs" invariant.
+});
+
+/** Reconcile fake admin — captures reads + writes over agent_action_grades + agent_jobs, so the
+ *  reconcile's plan-then-apply flow is exercised end-to-end without a real Supabase. */
+type ReconcileWrite = { table: string; op: "update"; payload: Record<string, unknown>; matchedId?: string };
+function makeReconcileAdmin(opts: {
+  grades: Array<{ id: string; workspace_id: string; agent_job_id: string; agent_kind: string; grade: number | null; reasoning: string | null; graded_by: string; created_at: string }>;
+  jobs: Array<{ id: string; error: string | null; log_tail: string | null }>;
+  workspaceId: string;
+}): { admin: unknown; writes: ReconcileWrite[]; getGrades: () => typeof opts.grades } {
+  const state = opts.grades.map((g) => ({ ...g }));
+  const writes: ReconcileWrite[] = [];
+  const admin = {
+    from(table: string) {
+      const filters: Array<{ kind: string; args: unknown[] }> = [];
+      const chain = {
+        select: (_cols?: string) => chain,
+        eq: (col: string, val: unknown) => { filters.push({ kind: "eq", args: [col, val] }); return chain; },
+        neq: (col: string, val: unknown) => { filters.push({ kind: "neq", args: [col, val] }); return chain; },
+        lt: (col: string, val: unknown) => { filters.push({ kind: "lt", args: [col, val] }); return chain; },
+        gte: (col: string, val: unknown) => { filters.push({ kind: "gte", args: [col, val] }); return chain; },
+        is: (col: string, val: unknown) => { filters.push({ kind: "is", args: [col, val] }); return chain; },
+        not: (col: string, op: string, val: unknown) => { filters.push({ kind: `not_${op}`, args: [col, val] }); return chain; },
+        in: (col: string, vals: unknown[]) => { filters.push({ kind: "in", args: [col, vals] }); return chain; },
+        order: (_col: string, _opts?: unknown) => chain,
+        limit: (_n: number) => chain,
+        maybeSingle: async () => ({ data: null }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        then: undefined as any, // never a promise unless awaited via .select / update pipeline
+        // Read path — the reconcile awaits the whole builder as a promise on the SELECT
+        update(payload: Record<string, unknown>) {
+          const updateFilters = filters.slice();
+          const buildChain = () => {
+            const c: Record<string, unknown> = {};
+            const rebuild = (): Record<string, unknown> => c;
+            c.eq = (col: string, val: unknown) => { updateFilters.push({ kind: "eq", args: [col, val] }); return rebuild(); };
+            c.neq = (col: string, val: unknown) => { updateFilters.push({ kind: "neq", args: [col, val] }); return rebuild(); };
+            c.lt = (col: string, val: unknown) => { updateFilters.push({ kind: "lt", args: [col, val] }); return rebuild(); };
+            c.not = (col: string, op: string, val: unknown) => { updateFilters.push({ kind: `not_${op}`, args: [col, val] }); return rebuild(); };
+            c.select = (_c?: string) => Promise.resolve({ data: (() => {
+              // Apply the filters + mutate state.
+              const row = state.find((r) => {
+                for (const f of updateFilters) {
+                  if (f.kind === "eq" && (r as Record<string, unknown>)[f.args[0] as string] !== f.args[1]) return false;
+                  if (f.kind === "neq" && (r as Record<string, unknown>)[f.args[0] as string] === f.args[1]) return false;
+                  if (f.kind === "lt") {
+                    const v = (r as Record<string, unknown>)[f.args[0] as string];
+                    if (typeof v !== "number" || !(v < (f.args[1] as number))) return false;
+                  }
+                  if (f.kind === "not_is") {
+                    const col = f.args[0] as string;
+                    const arg = f.args[1];
+                    if (arg === null && (r as Record<string, unknown>)[col] === null) return false;
+                  }
+                }
+                return true;
+              });
+              if (!row) return [];
+              Object.assign(row, payload);
+              writes.push({ table, op: "update", payload, matchedId: row.id });
+              return [{ id: row.id }];
+            })() });
+            return c;
+          };
+          return buildChain();
+        },
+      };
+      // Terminal read: the reconcile awaits the builder — we return the filtered rows.
+      const asPromise = new Promise<{ data: unknown[] }>((resolve) => {
+        setImmediate(() => {
+          if (table === "agent_action_grades") {
+            const rows = state.filter((r) => {
+              for (const f of filters) {
+                if (f.kind === "eq" && (r as Record<string, unknown>)[f.args[0] as string] !== f.args[1]) return false;
+                if (f.kind === "neq" && (r as Record<string, unknown>)[f.args[0] as string] === f.args[1]) return false;
+                if (f.kind === "lt") {
+                  const v = (r as Record<string, unknown>)[f.args[0] as string];
+                  if (typeof v !== "number" || !(v < (f.args[1] as number))) return false;
+                }
+                if (f.kind === "gte") {
+                  const v = (r as Record<string, unknown>)[f.args[0] as string];
+                  if (typeof v !== "string" || !(v >= (f.args[1] as string))) return false;
+                }
+                if (f.kind === "not_is") {
+                  const col = f.args[0] as string;
+                  const arg = f.args[1];
+                  if (arg === null && (r as Record<string, unknown>)[col] === null) return false;
+                }
+                if (f.kind === "not_ilike") {
+                  const col = f.args[0] as string;
+                  const pattern = f.args[1] as string;
+                  const v = (r as Record<string, unknown>)[col];
+                  if (typeof v === "string") {
+                    // support prefix-marker pattern like `[BLAMELESS_INFRA]%` — anchor at start.
+                    if (pattern.endsWith("%")) {
+                      const prefix = pattern.slice(0, -1);
+                      if (v.startsWith(prefix)) return false;
+                    } else if (v === pattern) return false;
+                  }
+                }
+              }
+              return true;
+            });
+            resolve({ data: rows });
+          } else if (table === "agent_jobs") {
+            // in() filter matches on id
+            const idsFilter = filters.find((f) => f.kind === "in" && f.args[0] === "id");
+            const ids = new Set((idsFilter?.args[1] as unknown[]) ?? []);
+            resolve({ data: opts.jobs.filter((j) => ids.has(j.id)) });
+          } else {
+            resolve({ data: [] });
+          }
+        });
+      });
+      (chain as unknown as { then: unknown }).then = asPromise.then.bind(asPromise);
+      return chain;
+    },
+  };
+  return { admin, writes, getGrades: () => state };
+}
+
+test("reconcileBlamelessGradePoison: dry-run identifies blameless grades WITHOUT writing", async () => {
+  const { admin, writes } = makeReconcileAdmin({
+    workspaceId: "ws-1",
+    grades: [
+      { id: "g1", workspace_id: "ws-1", agent_job_id: "j1", agent_kind: "build", grade: 2, reasoning: "build failed", graded_by: "agent", created_at: "2026-07-08T12:00:00Z" },
+      { id: "g2", workspace_id: "ws-1", agent_job_id: "j2", agent_kind: "build", grade: 4, reasoning: "tsc failed", graded_by: "agent", created_at: "2026-07-08T12:05:00Z" },
+    ],
+    jobs: [
+      { id: "j1", error: "authentication_failed — credentials evicted", log_tail: null },
+      { id: "j2", error: "tsc failed: 3 type errors", log_tail: null },
+    ],
+  });
+  const res = await reconcileBlamelessGradePoison({ workspaceId: "ws-1", admin: admin as never, apply: false });
+  assert.equal(res.dryRun, true);
+  assert.equal(res.considered, 2);
+  assert.equal(res.matched, 1); // only g1 (j1 is blameless-infra)
+  assert.equal(res.applied, 0); // dry-run writes nothing
+  assert.equal(writes.length, 0);
+  assert.equal(res.details[0].gradeId, "g1");
+  assert.equal(res.details[0].matchedSignature, "cli_auth_failed");
+  assert.equal(res.details[0].oldGrade, 2);
+});
+
+test("reconcileBlamelessGradePoison: apply neutralizes matched rows AND leaves the real slip untouched", async () => {
+  const { admin, writes, getGrades } = makeReconcileAdmin({
+    workspaceId: "ws-1",
+    grades: [
+      { id: "g1", workspace_id: "ws-1", agent_job_id: "j1", agent_kind: "build", grade: 2, reasoning: "build failed", graded_by: "agent", created_at: "2026-07-08T12:00:00Z" },
+      { id: "g2", workspace_id: "ws-1", agent_job_id: "j2", agent_kind: "build", grade: 4, reasoning: "tsc failed", graded_by: "agent", created_at: "2026-07-08T12:05:00Z" },
+    ],
+    jobs: [
+      { id: "j1", error: "authentication_failed — credentials evicted", log_tail: null },
+      { id: "j2", error: "tsc failed: 3 type errors", log_tail: null },
+    ],
+  });
+  const res = await reconcileBlamelessGradePoison({ workspaceId: "ws-1", admin: admin as never, apply: true });
+  assert.equal(res.applied, 1);
+  assert.equal(res.matched, 1);
+  assert.equal(writes.length, 1);
+  const updated = writes[0];
+  assert.equal(updated.matchedId, "g1");
+  assert.equal((updated.payload as { grade: number | null }).grade, null); // neutralized
+  const newReasoning = (updated.payload as { reasoning: string }).reasoning;
+  assert.ok(newReasoning.startsWith(BLAMELESS_INFRA_RECONCILE_MARKER)); // audit prefix
+  assert.ok(newReasoning.includes("cli_auth_failed")); // matched signature
+  assert.ok(newReasoning.includes("originally graded 2/10")); // original grade preserved
+  // The real-slip row was NOT touched.
+  const finalG2 = getGrades().find((g) => g.id === "g2");
+  assert.equal(finalG2?.grade, 4);
+});
+
+test("reconcileBlamelessGradePoison: never touches a HUMAN-overridden grade", async () => {
+  const { admin, writes } = makeReconcileAdmin({
+    workspaceId: "ws-1",
+    grades: [
+      // A blameless-infra shaped row that a HUMAN already overrode — must be left alone.
+      { id: "g-human", workspace_id: "ws-1", agent_job_id: "j-human", agent_kind: "build", grade: 2, reasoning: "CEO override", graded_by: "human", created_at: "2026-07-08T12:00:00Z" },
+    ],
+    jobs: [{ id: "j-human", error: "authentication_failed", log_tail: null }],
+  });
+  const res = await reconcileBlamelessGradePoison({ workspaceId: "ws-1", admin: admin as never, apply: true });
+  assert.equal(res.considered, 0); // the human grade was filtered out at read time
+  assert.equal(res.matched, 0);
+  assert.equal(res.applied, 0);
+  assert.equal(writes.length, 0);
+});
+
+test("reconcileBlamelessGradePoison: a re-run over the same window is IDEMPOTENT (already-marked rows skipped)", async () => {
+  const { admin, writes } = makeReconcileAdmin({
+    workspaceId: "ws-1",
+    grades: [
+      {
+        id: "g1",
+        workspace_id: "ws-1",
+        agent_job_id: "j1",
+        agent_kind: "build",
+        // grade already NULL (a previous reconcile pass neutralized it)
+        grade: null,
+        reasoning: `${BLAMELESS_INFRA_RECONCILE_MARKER}[cli_auth_failed] originally graded 2/10 — build failed`,
+        graded_by: "agent",
+        created_at: "2026-07-08T12:00:00Z",
+      },
+    ],
+    jobs: [{ id: "j1", error: "authentication_failed", log_tail: null }],
+  });
+  const res = await reconcileBlamelessGradePoison({ workspaceId: "ws-1", admin: admin as never, apply: true });
+  // The `grade IS NOT NULL` guard alone would skip a re-run (grade is already null); belt-and-
+  // suspenders, the marker-prefix guard would also skip it. Either way: considered=0, applied=0.
+  assert.equal(res.considered, 0);
+  assert.equal(res.applied, 0);
+  assert.equal(writes.length, 0);
 });
