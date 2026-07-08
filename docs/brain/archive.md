@@ -12,10 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Harden the Fenn agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../recipes/build-box-setup#fenn-agents-durable-mandate]]
 - **Harden the Rafa agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../libraries/repair-agent]]
 - **Prune stale build worktrees before worktree add (stop goal-build collisions)** · verified 2026-07-08 · → [[../libraries/builder-worker]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
+- **KPI audit: flag worker_grade_rollup + director_call_grade as current-state point reads** · verified 2026-07-08 · → [[../libraries/platform-scorecard]] · [[../libraries/kpi-review]]
 - **A one-off spec that depends on goal-internal work blocks on the goal, not the member spec** · verified 2026-07-08 · → [[../project-management]] · [[../libraries/brain-roadmap]] · [[../lifecycles/spec-goal-branch-pm-flow]]
 - **Portal remediation: add a frequency-route replay + self-resolved so retries-that-worked auto-close** · verified 2026-07-08 · → [[../libraries/portal__remediation]]
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]

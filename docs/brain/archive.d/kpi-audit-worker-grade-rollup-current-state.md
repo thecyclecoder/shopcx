@@ -1,0 +1,1 @@
+- **KPI audit: flag worker_grade_rollup + director_call_grade as current-state point reads** · verified 2026-07-08 · → [[../libraries/platform-scorecard]] · [[../libraries/kpi-review]]
