@@ -547,7 +547,7 @@ export function isForeignGoTrueEdgeNoise(
  * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
  * passes just the message), the 504 shape needs the request JSON.
  *
- * Four distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
+ * Five distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
  * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
  * owner in a loop they can't fix):
  *
@@ -583,24 +583,23 @@ export function isForeignGoTrueEdgeNoise(
  *      the transient class isn't enough — drop AT CAPTURE. The phrase is unique to
  *      GoTrue's SELECT-on-`auth.users` code path; nothing in OUR code can emit it.
  *
- *  (e) timeout-context-canceled ([[../specs/error-feed-drop-supabase-gotrue-auth-log-timeout-context-cancel]],
- *      `supabase-logs:c9eb05fd1d3fb82c`) — GoTrue's `/user` handler surfaces a request whose
- *      read timer fires AFTER the parent context was already canceled (the Go idiom for a
- *      browser abort racing GoTrue's own read timer) with the EXACT phrase `Unhandled server
- *      error: timeout: context canceled` (case-insensitive, trimmed). The prior fix scoped
- *      the raw `context canceled` substring as transient via `isTransientSupabaseLogNoise`,
- *      but the chronic saturation cadence recurred inside `TRANSIENT_RECUR_WINDOW_MS` and
- *      escalated on every cycle. The narrow exact-phrase drop leaves the raw `context
- *      canceled` substring on any OTHER GoTrue message (a real browser-abort on `/token` /
- *      `/admin` / etc.) still routed through the transient classifier.
+ *  (e) outer-request-timeout ([[../specs/error-feed-drop-supabase-gotrue-timeout-context-canceled]],
+ *      `supabase-logs:c9eb05fd1d3fb82c`, 15 occ / 7 days) — msg-only mirror of shape (a):
+ *      the trimmed + lowercased msg equals `unhandled server error: timeout: context canceled`.
+ *      The `timeout:` prefix is Go's phrasing for GoTrue's own outer-request-timeout wrapper
+ *      firing on its Postgres backend (same foreign-owned saturation class as (a); we hold
+ *      zero levers on Supabase's managed auth service, and the transient recur-window
+ *      empirically fails to absorb the ~2/day cadence). Narrowly gated to the exact phrase
+ *      so plain `context canceled` (real browser-abort noise, still transient) is untouched.
  *
- * Narrowly gated so everything actionable still surfaces / pages on first sight: the raw
- * `context canceled` substring on a non-exact-shape GoTrue message (browser-abort elsewhere)
- * plus a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE host (a real Postgres
- * pooler on our side — not the `host=localhost user=supabase_auth_admin` GoTrue-internal
- * shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`, rate limits,
- * signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504 on `/user`
- * with a non-GET (mutation) method all carry different shapes and stay captured.
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: a plain
+ * `context canceled` on a non-/user path (any msg other than the exact (d) or (e) phrase)
+ * stays transient via `isTransientSupabaseLogNoise`; a `dial ... i/o timeout` /
+ * `dial ... canceled` on a REMOTE host (a real Postgres pooler on our side — not the
+ * `host=localhost user=supabase_auth_admin` GoTrue-internal shape) stays transient too;
+ * `invalid JWT`, rate limits, signature mismatches, a 504 on `/token` / `/admin`, a
+ * non-504 5xx, or a 504 on `/user` with a non-GET (mutation) method all carry different
+ * shapes and stay captured.
  */
 export function isForeignGoTrueAuthLogNoise(
   msg: string | null | undefined,
@@ -609,14 +608,11 @@ export function isForeignGoTrueAuthLogNoise(
   // (a) context-deadline shape — msg-only, exact phrase.
   const text = (msg ?? "").trim().toLowerCase();
   if (text === "unhandled server error: context deadline exceeded") return true;
-  // (d) /user SELECT-on-auth.users browser-abort — msg-only, exact phrase. The phrase is
-  // unique to GoTrue's SELECT-on-auth.users code path (nothing in OUR code emits it), so an
-  // exact-match drop cannot swallow an actionable error; a plain `context canceled` on any
-  // other path carries a different msg and still routes through the transient class.
+  // (d) /user SELECT-on-auth.users browser-abort — msg-only, exact phrase.
   if (text === "unhandled server error: unable to fetch records: context canceled") return true;
-  // (e) timeout-context-canceled shape — msg-only, exact phrase. The sibling of (a): a
-  // browser-abort racing GoTrue's own read timer against its Postgres backend. Exact-match
-  // only so the raw `context canceled` substring on other GoTrue surfaces stays transient.
+  // (e) outer-request-timeout shape — msg-only mirror of (a), gated on the exact phrase
+  // (the `timeout:` prefix is GoTrue's outer-timeout wrapper; plain `context canceled`
+  // stays transient).
   if (text === "unhandled server error: timeout: context canceled") return true;
   // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
   const m = (msg ?? "").trimStart();
@@ -935,6 +931,14 @@ export function feedLoopId(source: ErrorSource): string {
 // storming the table into DB-saturation 500s (signature supabase-logs:6f16957ed72e1f38).
 const FEED_BEAT_MIN_INTERVAL_MS = 60_000;
 const lastFeedBeatAt = new Map<string, number>();
+// Bounded client-side timeout on the record_feed_beat RPC. Under Vercel drain firehose bursts the
+// Supabase gateway occasionally holds a same-minute racer past its edge deadline and returns a 504
+// that the vercel-drain feed then re-ingests — a self-echoing error signature about the very beat
+// the RPC exists to observe (Control Tower `supabase-logs:0356e510f43cf142`). 3s is well above p99
+// for a one-line ON CONFLICT DO NOTHING and well under the gateway deadline, so the timer only
+// ever trips on a genuinely stuck response and cuts the 504 off before it can self-feed
+// ([[../specs/record-feed-beat-bounded-client-timeout-no-hung-liveness-rpc]]).
+const FEED_BEAT_RPC_TIMEOUT_MS = 3_000;
 
 export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admin): Promise<void> {
   const loopId = feedLoopId(source);
@@ -942,17 +946,39 @@ export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admi
   // Fast path: this warm instance beat for this source < 1 min ago → skip (no DB call).
   const lastLocal = lastFeedBeatAt.get(loopId) ?? 0;
   if (now - lastLocal < FEED_BEAT_MIN_INTERVAL_MS) return;
-  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs.
+  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs. This
+  // ALSO makes the bounded-timeout path below safe to swallow silently: if the RPC is aborted
+  // at 3s we've already done the "one call per warm instance per minute" bookkeeping, so the
+  // next call within 60s fast-paths regardless, and the DB's UNIQUE partial index
+  // `loop_heartbeats_feed_minute_uidx` already guarantees at-most-one same-minute row across
+  // cold instances — a swallowed timeout can't corrupt liveness state.
   lastFeedBeatAt.set(loopId, now);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FEED_BEAT_RPC_TIMEOUT_MS);
   try {
     const admin = adminClient ?? createAdminClient();
     // Atomic cross-instance throttle: the DB collapses every same-minute racer to one row. A
     // burst that all gets past the fast path (cold/concurrent instances) no-ops at the DB
     // instead of all inserting — no read-then-write race, no insert storm.
-    const { error } = await admin.rpc("record_feed_beat", { p_loop_id: loopId });
-    if (error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, error.message);
+    //
+    // Bounded client-side timeout: race the RPC against a 3s AbortController timer (the same
+    // pattern used in packing-slip-message.ts / claude-health.ts / meta-product-match.ts). A
+    // best-effort liveness beat must never monopolize a serverless invocation for a minute or
+    // fabricate a 504 error signature about itself; on timeout resolve as a silent no-op —
+    // NOT a console.warn, a timeout is expected best-effort behaviour, not an error to
+    // surface. The existing warn path stays for genuine non-timeout RPC errors.
+    const raced = await Promise.race<{ kind: "rpc"; error: { message: string } | null } | { kind: "timeout" }>([
+      admin.rpc("record_feed_beat", { p_loop_id: loopId }).then((r) => ({ kind: "rpc", error: r.error })),
+      new Promise((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve({ kind: "timeout" }), { once: true });
+      }),
+    ]);
+    if (raced.kind === "timeout") return; // silent no-op — see comment above
+    if (raced.error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, raced.error.message);
   } catch (e) {
     console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, e instanceof Error ? e.message : e);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
