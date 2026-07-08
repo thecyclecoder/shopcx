@@ -1,0 +1,1 @@
+- **Sol closes a ticket on a resolving reply (so Cora grades it)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
