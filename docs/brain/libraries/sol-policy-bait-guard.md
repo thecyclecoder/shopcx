@@ -44,4 +44,6 @@ Run: `npx tsx --test src/lib/sol-policy-bait-guard.test.ts`
 
 ---
 
-[[../README]] · [[./ticket-directions]] · [[../tables/policies]] · [[../specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]] · [[../functions/cs]] · [[../../CLAUDE]]
+**Sibling guard:** [[sol-outcome-claim-guard]] — the send guard also runs a claim-vs-DB check that blocks a reply asserting an outcome whose backing [[../tables/ticket_required_outcomes]] row is not `status='verified'`. Both guards fire in sequence at the same builder-worker wire-in point (policy-bait first, outcome-claim second); a block from either routes to the Improve tab.
+
+[[../README]] · [[./ticket-directions]] · [[sol-outcome-claim-guard]] · [[../tables/policies]] · [[../tables/ticket_required_outcomes]] · [[../specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]] · [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] · [[../functions/cs]] · [[../../CLAUDE]]

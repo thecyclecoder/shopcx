@@ -10305,17 +10305,43 @@ async function runTicketHandleJob(job: Job) {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
           });
         } else {
-          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-          const channel = (t?.channel as string | null) || "email";
-          try {
-            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-          } catch (e) {
-            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-            const msg = e instanceof Error ? e.message : String(e);
-            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          // Phase 3 of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+          // the MESSAGE-IS-LAST send guard. After the policy-bait guard passes, check that every
+          // outcome the DRAFT reply CLAIMS (adding a bag, applying a credit, issuing a refund, …)
+          // is backed by a ticket_required_outcomes row with status='verified'. Judy 0a9e4d7f's
+          // failure was exactly this — the reply promised bag+credit while neither action had
+          // actually run. Fail-open on unknown kinds (a novel action can't over-block a legit
+          // reply); every match against an unverified row blocks the send and routes to the
+          // Improve tab (same needs_human path the policy-bait guard uses).
+          const { assertClaimsBackedByOutcomes } = await import("../src/lib/sol-outcome-claim-guard");
+          const claimVerdict = await assertClaimsBackedByOutcomes({
+            admin: db,
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            message: firstReply,
+          });
+          if (claimVerdict.ok === false) {
+            const claimSummary = claimVerdict.blocked_claims
+              .map((c) => `${c.kind}[status=${c.current_status}]:${JSON.stringify(c.matched_phrase.slice(0, 60))}`)
+              .join(" | ");
+            const blockLine = `Sol reply BLOCKED by outcome-claim guard: ${claimVerdict.reason}. Claims: ${claimSummary}. Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${blockLine}`);
+            await update(job.id, {
+              log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          } else {
+            const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+            const channel = (t?.channel as string | null) || "email";
+            try {
+              const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+              await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+            } catch (e) {
+              // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+              // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+              // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+              const msg = e instanceof Error ? e.message : String(e);
+              console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+            }
           }
         }
       }
