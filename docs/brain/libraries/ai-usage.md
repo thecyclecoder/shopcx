@@ -47,7 +47,7 @@ function usageCostCents(model: string, row: { input_tokens: number; output_token
 
 ## Gotchas
 
-_None documented._
+- **`ai_token_usage` is the API-BILLED ledger; a Max box lane must NOT write to it.** Every consumer that sums rows here (`/api/tickets/[id]/analysis`, `stampTicketAiCost` → `tickets.ai_cost_cents` via `add_ticket_ai_cost`, `rollupFleetCost`'s runtime-AI fold, workspace + developer usage analytics) turns those tokens into a real dollar figure via `usageCostCents`. So a Max-lane emitter (`applyAnalyzerVerdict` when `usage.apiBilled === false`) skips `logAiUsage` entirely — the tokens are already recorded as a subscription proxy on [[../tables/agent_job_costs]] via [[fleet-cost]] `recordAgentJobCost`. Only the paid-API path (deployed-analyzer fallback when the box is down) contributes to `ai_token_usage`. Same honesty invariant [[fleet-cost]]'s file header names — apiBilled is the ONE contract that says "real dollar cost", every surface reads it the same way. See `docs/brain/specs/ticket-cost-distinguishes-max-subscription-from-real-api-spend.md`.
 
 ---
 
