@@ -2440,6 +2440,16 @@ async function update(id: string, patch: Record<string, unknown>) {
   // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
   const finalPatch = { ...patch, updated_at: new Date().toISOString() };
   const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
+  // spec-timecard-chokepoint-instrumentation Phase 4 — wait-span tracking. When this update() is a
+  // status transition, read the current status BEFORE the write to detect entry into and exit from
+  // a wait region ({needs_input, needs_approval, blocked_on_dependency, blocked_on_usage}). A
+  // transition BETWEEN two wait statuses does NOT emit — the ledger treats an unbroken wait as
+  // one continuous span (only the entry marker and the exit marker are recorded). Reads are cheap
+  // (`.eq('id',…).maybeSingle()` on the primary key) + gated on `attemptedStatus`, so a heartbeat-
+  // only patch pays nothing. Best-effort throughout.
+  const pendingWaitTransition = attemptedStatus
+    ? await resolvePendingWaitTransition(id, attemptedStatus, patch.pending_actions)
+    : null;
   await writeAgentJobsUpdateWithRetry(
     async () => {
       // Supabase-js resolves this awaited chain to { data, error, status, statusText }. The
@@ -2464,6 +2474,146 @@ async function update(id: string, patch: Record<string, unknown>) {
       console.warn(`[needs-attention-classify] background classify failed for ${id}:`, e instanceof Error ? e.message : e),
     );
   }
+  // spec-timecard-chokepoint-instrumentation Phase 4 — emit the wait_entered / wait_exited event the
+  // pre-write read decided on, AFTER the row's status write succeeded. Skipped when the row didn't
+  // change wait-region (a wait→wait or non-wait→non-wait transition). Best-effort — the emitter
+  // itself catches SDK insert / import failures. Fire-and-forget so the write chokepoint returns
+  // immediately.
+  if (pendingWaitTransition) {
+    void emitTimecard({
+      workspace_id: pendingWaitTransition.workspace_id,
+      spec_slug: pendingWaitTransition.spec_slug,
+      phase_index: null,
+      event_kind: pendingWaitTransition.kind,
+      actor: "worker",
+      wait_kind: pendingWaitTransition.wait_kind,
+      waiting_on: pendingWaitTransition.waiting_on,
+      metadata: { job_id: id, ...(pendingWaitTransition.extra ?? {}) },
+    });
+  }
+}
+
+// spec-timecard-chokepoint-instrumentation Phase 4 — the pre-write half of the wait-span guard. Given
+// an agent_jobs row's id + the destination status the update() is about to write, reads the CURRENT
+// status/workspace/spec_slug (bounded by the primary key, one .maybeSingle() lookup) and decides:
+//
+//   • entering a wait — destination ∈ WAIT_STATUSES and current status is NOT already a wait. Emit
+//     `wait_entered` with wait_kind=<destination> and a derived waiting_on: workspace owner's
+//     display_name for needs_input/needs_approval; a dependency slug from pending_actions/blocked_by
+//     for blocked_on_dependency; the literal 'max-usage' for blocked_on_usage.
+//   • exiting a wait — destination is `queued_resume` and current status IS a wait. Emit
+//     `wait_exited` with wait_kind=<current wait status being exited>.
+//   • wait → wait (needs_input → needs_approval, etc.) — return null: the ledger records one
+//     continuous span, not double-emission per hop.
+//
+// Any read/lookup failure returns null so the write chokepoint proceeds cleanly. Only spec-slug-
+// bearing rows emit (a triage-escalations sweep with spec_slug=null is skipped).
+const WAIT_STATUSES: ReadonlySet<string> = new Set([
+  "needs_input",
+  "needs_approval",
+  "blocked_on_dependency",
+  "blocked_on_usage",
+]);
+
+type PendingWaitTransition = {
+  kind: "wait_entered" | "wait_exited";
+  wait_kind: string;
+  waiting_on: string | null;
+  workspace_id: string;
+  spec_slug: string;
+  extra?: Record<string, unknown>;
+};
+
+async function resolvePendingWaitTransition(
+  jobId: string,
+  destinationStatus: string,
+  patchPendingActions: unknown,
+): Promise<PendingWaitTransition | null> {
+  const isEntering = WAIT_STATUSES.has(destinationStatus);
+  const isExiting = destinationStatus === "queued_resume";
+  if (!isEntering && !isExiting) return null;
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, status, pending_actions")
+      .eq("id", jobId)
+      .maybeSingle();
+    const row = data as {
+      workspace_id: string;
+      spec_slug: string | null;
+      status: string;
+      pending_actions: unknown;
+    } | null;
+    if (!row || !row.spec_slug) return null; // spec-less rows (per-workspace sweeps) never emit
+    if (isEntering) {
+      if (WAIT_STATUSES.has(row.status)) return null; // wait → wait: no double-emit
+      const waiting_on = await deriveWaitingOn(
+        row.workspace_id,
+        destinationStatus,
+        patchPendingActions ?? row.pending_actions,
+      );
+      return {
+        kind: "wait_entered",
+        wait_kind: destinationStatus,
+        waiting_on,
+        workspace_id: row.workspace_id,
+        spec_slug: row.spec_slug,
+      };
+    }
+    // isExiting → queued_resume; only emit when leaving a wait region.
+    if (!WAIT_STATUSES.has(row.status)) return null;
+    return {
+      kind: "wait_exited",
+      wait_kind: row.status,
+      waiting_on: null,
+      workspace_id: row.workspace_id,
+      spec_slug: row.spec_slug,
+    };
+  } catch (e) {
+    console.warn(`[timecards] wait-transition preread failed for job ${jobId}: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+// spec-timecard-chokepoint-instrumentation Phase 4 — derive the `waiting_on` party the wait_entered
+// event records for later fold-into-a-span rendering.
+//   • needs_input / needs_approval → the workspace owner's display_name (they're the party the wait
+//     is on). Falls back to null if the lookup fails or the owner has no display_name set.
+//   • blocked_on_dependency → the dependency slug carried on pending_actions (if present) — the
+//     Claude-breaker path uses this too, and the caller records the breaker cause in `error`.
+//     Falls back to null when nothing structured is present.
+//   • blocked_on_usage → the literal 'max-usage' sentinel (the wait is on the Max account rotation).
+async function deriveWaitingOn(
+  workspaceId: string,
+  destinationStatus: string,
+  pendingActionsInput: unknown,
+): Promise<string | null> {
+  if (destinationStatus === "blocked_on_usage") return "max-usage";
+  if (destinationStatus === "needs_input" || destinationStatus === "needs_approval") {
+    try {
+      const { data: owner } = await db
+        .from("workspace_members")
+        .select("display_name")
+        .eq("workspace_id", workspaceId)
+        .eq("role", "owner")
+        .maybeSingle();
+      const name = (owner as { display_name?: string | null } | null)?.display_name ?? null;
+      return name && name.trim() ? name : null;
+    } catch {
+      return null;
+    }
+  }
+  if (destinationStatus === "blocked_on_dependency") {
+    // Best-effort dependency-slug extraction: check pending_actions for a structured hint. Callers
+    // that carry a `dependency_slug` or `blocked_by` field surface it here; otherwise null.
+    const actions = Array.isArray(pendingActionsInput) ? (pendingActionsInput as Array<Record<string, unknown>>) : [];
+    for (const a of actions) {
+      const dep = (a?.dependency_slug ?? a?.blocked_by ?? a?.spec_slug ?? null) as string | null | undefined;
+      if (typeof dep === "string" && dep.trim()) return dep;
+    }
+    return null;
+  }
+  return null;
 }
 
 /**
