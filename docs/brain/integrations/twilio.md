@@ -75,6 +75,14 @@ Used for storefront passwordless auth + portal verification. `src/lib/twilio-ver
 - `src/lib/inngest/marketing-text.ts` — Send pipeline
 - `src/app/api/validate-phone/route.ts` — Lookup v2 endpoint
 
+## Founder alerts (transactional, out-of-band)
+
+Some situations need a text to the FOUNDER, not the customer — Amplifier exposes no cancel API, so when Sol classifies a still-cancellable renewal as `crisis_swap_rejected` we ask the founder to log in and cancel it manually before it ships. Founder alerts reuse [[../libraries/god-mode]] `resolveFounderPhone` for the destination (`workspaces.god_mode_sms_number` → `GOD_MODE_FOUNDER_PHONE` env fallback) and `sendSMS` above for delivery, but their idempotency ledger + disposition vocabulary live in the emitter itself so they don't leak into god-mode's approval-nudge state machine.
+
+| Emitter | When | Body |
+|---|---|---|
+| `src/lib/commerce/founder-cancel-sms.ts` `sendFounderCancelAmplifierSMS` | Sol's crisis-swap-rejected remedy fires ([[../specs/sol-crisis-swap-rejected-full-refund-and-sms-founder-to-cancel-amplifier-order]] Phase 2), the order is not yet `amplifier_status === 'Shipped'`, and no prior founder-cancel SMS has been logged for this order in `customer_events`. Best-effort, never-throws. | `please try to cancel order {order_number} in Amplifier before it ships` |
+
 ## Related
 
 [[../tables/sms_campaigns]] · [[../tables/sms_campaign_recipients]] · [[../tables/sms_send_candidates]] · [[../tables/sms_marketing_inbound]] · [[../tables/marketing_shortlinks]] · [[../tables/marketing_shortlink_clicks]] · [[../tables/auth_otp_sessions]] · [[../inngest/marketing-text]]
