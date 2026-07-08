@@ -1,0 +1,1 @@
+- **Retry and surface failed agent_jobs worker updates** · verified 2026-07-08 · → [[../libraries/agent-jobs-update-retry]]
