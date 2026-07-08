@@ -481,3 +481,130 @@ export async function reSessionSol(
     job_id: (jobRow?.id as string) ?? null,
   };
 }
+
+// ── Phase 2/4: pre-ship gate composed helper ──────────────────────────────────
+
+/**
+ * `applyInflectionGate` — the composed pre-ship gate the Inngest pipeline calls between
+ * (i) the inbound-message handling and (ii) either the playbook short-circuit or the Sonnet
+ * orchestrator. Composes `detectInflection` + ledger stage + optional holding-message send +
+ * `reSessionSol` in the order the spec's verification bullets pin. Extracted from
+ * unified-ticket-handler so the wire-in behavior can be unit-tested against an admin stub
+ * without booting the whole Inngest function.
+ *
+ * Contract:
+ *   - kind='none' → returns `{kind:'none'}` and no side effects; the caller falls through to
+ *     the existing dispatch (playbook short-circuit OR Sonnet).
+ *   - kind='drift'|'frustration' → stages one `ticket_resolution_events` row with
+ *     `reasoning='sol:inflection-<kind>'` (evidence in `chosen` jsonb), then on frustration
+ *     AND `sol_frustration_holding_message_enabled !== false` sends a short inline holding
+ *     message via the injected `sendHoldingMessage` callback, then calls `reSessionSol`.
+ *     The caller drops the drafted reply and returns without dispatching.
+ */
+export interface ApplyInflectionGateInput {
+  admin: SupabaseClient;
+  workspace_id: string;
+  ticket_id: string;
+  channel: string;
+  newestMessage: string;
+  aiTurnLimit: number;
+  solFrustrationHoldingMessageEnabled: boolean;
+  /** Injected send callback — the caller provides its own send wrapper (sendWithDelay + sandbox). */
+  sendHoldingMessage: (channel: string, body: string) => Promise<void>;
+  /** Injected only for tests; production uses the real Haiku transport. */
+  haiku?: HaikuVerdictFn;
+}
+
+export interface ApplyInflectionGateResult {
+  kind: InflectionKind;
+  turn_index: number | null;
+  holdingMessageSent: boolean;
+  reSession: ReSessionResult | null;
+  ledgerStaged: boolean;
+}
+
+export async function applyInflectionGate(
+  input: ApplyInflectionGateInput,
+): Promise<ApplyInflectionGateResult> {
+  const { loadLiveDirection } = await import("@/lib/ticket-directions");
+  const liveDirection = await loadLiveDirection(input.admin, input.ticket_id, {
+    workspace_id: input.workspace_id,
+  });
+
+  const { data: recent } = await input.admin
+    .from("ticket_resolution_events")
+    .select("reasoning, turn_index")
+    .eq("workspace_id", input.workspace_id)
+    .eq("ticket_id", input.ticket_id)
+    .order("turn_index", { ascending: false })
+    .limit(3);
+  const recentRows = ((recent as Array<{ reasoning: string | null; turn_index: number }> | null) ?? []);
+  const recentTurns = recentRows.map((r) => ({ reasoning: r.reasoning ?? null }));
+  const priorTop = recentRows[0]?.turn_index ?? 0;
+  const turnIndex = priorTop + 1;
+
+  const { data: tickRow } = await input.admin
+    .from("tickets")
+    .select("active_playbook_id, playbook_exceptions_used, updated_at")
+    .eq("workspace_id", input.workspace_id)
+    .eq("id", input.ticket_id)
+    .maybeSingle();
+  const isPlaybookActive = !!((tickRow?.active_playbook_id as string | null) ?? null);
+  const playbookExceptionsIncrementedSinceDirection = !!(
+    liveDirection &&
+    tickRow &&
+    ((tickRow.playbook_exceptions_used as number | null) ?? 0) > 0 &&
+    tickRow.updated_at &&
+    new Date(tickRow.updated_at as string) > new Date(liveDirection.authored_at)
+  );
+
+  const verdict = await detectInflection({
+    direction: liveDirection
+      ? { intent: liveDirection.intent, authored_at: liveDirection.authored_at }
+      : null,
+    newestMessage: input.newestMessage,
+    recentTurns,
+    turnIndex,
+    aiTurnLimit: input.aiTurnLimit,
+    isPlaybookActive,
+    playbookExceptionsIncrementedSinceDirection,
+    haiku: input.haiku,
+  });
+
+  if (verdict.kind === "none") {
+    return { kind: "none", turn_index: turnIndex, holdingMessageSent: false, reSession: null, ledgerStaged: false };
+  }
+
+  let ledgerStaged = false;
+  try {
+    await input.admin.from("ticket_resolution_events").insert({
+      workspace_id: input.workspace_id,
+      ticket_id: input.ticket_id,
+      turn_index: turnIndex,
+      reasoning: `sol:inflection-${verdict.kind}`,
+      chosen: verdict.evidence as unknown as Record<string, unknown>,
+    });
+    ledgerStaged = true;
+  } catch {
+    // Ledger is diagnostic — a failed insert must NOT block the bounce.
+  }
+
+  let holdingMessageSent = false;
+  if (verdict.kind === "frustration" && input.solFrustrationHoldingMessageEnabled) {
+    try {
+      await input.sendHoldingMessage(input.channel, "We're looking into that for you.");
+      holdingMessageSent = true;
+    } catch {
+      // Holding-message send failure must not block the bounce.
+    }
+  }
+
+  const reSession = await reSessionSol(input.admin, input.ticket_id, {
+    workspace_id: input.workspace_id,
+    kind: verdict.kind,
+    evidence: verdict.evidence,
+    turn_index: turnIndex,
+  });
+
+  return { kind: verdict.kind, turn_index: turnIndex, holdingMessageSent, reSession, ledgerStaged };
+}

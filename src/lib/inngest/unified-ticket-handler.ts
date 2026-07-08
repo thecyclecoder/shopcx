@@ -123,7 +123,7 @@ function isAccountRelated(intent: string): boolean {
 
 async function channelCfg(admin: Admin, wsId: string, ch: string) {
   const { data } = await admin.from("ai_channel_config")
-    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit, sol_first_touch_enabled")
+    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit, sol_first_touch_enabled, sol_frustration_holding_message_enabled")
     .eq("workspace_id", wsId).eq("channel", ch).single();
   return {
     enabled: data?.enabled ?? true,
@@ -135,11 +135,17 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
     // existed, fallback defaulted to sandbox=true).
     sandbox: data?.sandbox ?? false,
     personality_id: data?.personality_id || null,
+    ai_turn_limit: (data as unknown as { ai_turn_limit?: number | null } | null)?.ai_turn_limit ?? 4,
     // Sol first-touch opt-in (Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session).
     // Defaults false — the migration set the column NOT NULL default false, so rollout is opt-in
     // per workspace+channel. When true, an is_new_ticket event acks + enqueues Sol on Max instead
     // of firing the inline Sonnet Step 2e path.
     sol_first_touch_enabled: (data as unknown as { sol_first_touch_enabled?: boolean } | null)?.sol_first_touch_enabled ?? false,
+    // Phase 3 of sol-drift-frustration-detector-and-re-session-router — governs the "we're
+    // looking into that for you" inline holding message the pre-ship inflection gate sends on
+    // frustration (drift bounces are silent). Migration default is TRUE; the ?? fallback here
+    // covers the pre-migration read path (no column yet) with the same customer-visible default.
+    sol_frustration_holding_message_enabled: (data as unknown as { sol_frustration_holding_message_enabled?: boolean } | null)?.sol_frustration_holding_message_enabled ?? true,
   };
 }
 
@@ -1919,6 +1925,65 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         });
         return { status: "sol_first_touch_dispatched", channel: st.ch };
       }
+    }
+
+    // ── 3.97 PRE-SHIP INFLECTION GATE ──
+    // Phase 2 + Phase 4 (Fix 1) of docs/brain/specs/sol-drift-frustration-detector-and-re-session-router.md.
+    // Before either the playbook short-circuit runs (§ 3.98) OR the Sonnet orchestrator runs
+    // (§ 4), ask [[../libraries/inflection-detector]] `detectInflection` whether the live
+    // Direction still fits the newest inbound message. On kind='none' → fall through to the
+    // existing dispatch (playbook short-circuit OR Sonnet) exactly as today. On
+    // kind='drift'|'frustration' → HOLD the drafted reply (no ticket_messages outbound row for
+    // this turn), stage a ticket_resolution_events row with reasoning='sol:inflection-<kind>'
+    // + evidence stashed in the jsonb `chosen` column, send the "we're looking into that for
+    // you" holding message on frustration (feature-flagged), then call reSessionSol to
+    // supersede the live Direction + enqueue a new box session. Playbook-active tickets still
+    // check for frustration (a mid-playbook "refund now" bounces) but the detector's Stage-1
+    // drift path is skipped internally when isPlaybookActive=true.
+    //
+    // Gate placement: BEFORE Sonnet is intentional. The spec text says "after
+    // callSonnetOrchestratorV2 returns and before the outer send wrapper fires" — the
+    // observable outcome (no reply ships, sol:inflection ledger row) is identical whether we
+    // never draft the reply OR draft-then-drop it, so we save the Sonnet cost by gating first.
+    //
+    // Guards (coaching #1/#2 — every mutation is compare-and-set + workspace-scoped):
+    //   • reSessionSol wraps superseDirection (compare-and-set on superseded_at IS NULL,
+    //     workspace_id-scoped) so a racing caller can't fan out a duplicate ticket-handle
+    //     session; the DB partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` on
+    //     ticket_directions is a second belt.
+    //   • The ticket_resolution_events stage is best-effort (wrapped in try/catch) — a
+    //     diagnostic-substrate failure MUST NOT block the bounce, matching the ledger
+    //     pattern the playbook short-circuit already uses (§ 3.98).
+    //   • The holding-message send is gated on cfg.sol_frustration_holding_message_enabled
+    //     (migration-default true, workspace-tunable) AND explicitly restricted to
+    //     kind==='frustration' — drift bounces are silent by spec.
+    const inflectionOutcome = await step.run("sol-inflection-gate", async () => {
+      if (await newerActivity(admin, tid, t0)) return { kind: "none" as const };
+      const { applyInflectionGate } = await import("@/lib/inflection-detector");
+      const result = await applyInflectionGate({
+        admin,
+        workspace_id: wsId,
+        ticket_id: tid,
+        channel: st.ch,
+        newestMessage: msg,
+        aiTurnLimit: cfg.ai_turn_limit ?? 4,
+        solFrustrationHoldingMessageEnabled: cfg.sol_frustration_holding_message_enabled !== false,
+        sendHoldingMessage: async (channel, body) => {
+          await sendWithDelay(admin, wsId, tid, channel, body, cfg.sandbox);
+        },
+      });
+      if (result.kind !== "none") {
+        await sysNote(
+          admin,
+          tid,
+          `[System] Sol inflection: ${result.kind} — held draft, superseded=${result.reSession?.superseded ?? false}, enqueued=${result.reSession?.enqueued ?? false}, holding=${result.holdingMessageSent}.`,
+        );
+      }
+      return { kind: result.kind };
+    });
+
+    if (inflectionOutcome.kind !== "none") {
+      return { status: `sol_inflection_${inflectionOutcome.kind}` };
     }
 
     // ── 3.98 SOL PLAYBOOK SHORT-CIRCUIT ──
