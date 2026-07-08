@@ -1921,6 +1921,105 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
     }
 
+    // ── 3.98 SOL PLAYBOOK SHORT-CIRCUIT ──
+    // Phase 4 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md. When Sol
+    // committed the ticket to a playbook at first-touch (live Direction chosen_path='playbook')
+    // AND the playbook is still running (tickets.active_playbook_id NOT NULL), we drive this
+    // follow-up turn directly through executePlaybookStep and SKIP the Sonnet orchestrator —
+    // a zero-cost, deterministic turn instead of paying for another Sonnet/Opus decision.
+    //
+    // Guards (learning #2 — narrow before mutating):
+    //  (1) loadLiveDirection returns non-null AND superseded_at is null — the Direction is
+    //      still authoritative for this ticket. maybeSingle() under the DB partial-UNIQUE
+    //      makes multi-live-row states impossible; a mis-authored Direction just returns null.
+    //  (2) chosen_path === "playbook" — a stateless/needs_info Direction falls through to the
+    //      Sonnet path so those turns can still take the Phase-3 Haiku route.
+    //  (3) tickets.active_playbook_id IS NOT NULL AND the ticket row is scoped by workspace —
+    //      the playbook was completed or its exception limit was exhausted → NO short-circuit,
+    //      fall through to the orchestrator (spec bullet 2: the assembleDirectionContext path
+    //      Phase 2 wires; until Phase 2 ships, the fall-through is the existing Sonnet path).
+    //
+    // Ledger: stage a ticket_resolution_events row with reasoning='sol:playbook-shortcircuit',
+    // then CAS shipped_at (learning #1) — same stage → send → stamp pattern as sendFirstTouchAck.
+    // Ledger writes are best-effort — a diagnostic-substrate failure MUST NOT block the send.
+    const solPlaybookShortCircuit = await step.run("sol-playbook-shortcircuit-check", async () => {
+      const { loadLiveDirection } = await import("@/lib/ticket-directions");
+      const direction = await loadLiveDirection(admin, tid, { workspace_id: wsId });
+      if (!direction || direction.superseded_at) return null;
+      if (direction.chosen_path !== "playbook") return null;
+      const { data: ticketRow } = await admin
+        .from("tickets")
+        .select("active_playbook_id")
+        .eq("workspace_id", wsId)
+        .eq("id", tid)
+        .maybeSingle();
+      const activePlaybookId = (ticketRow?.active_playbook_id as string | null) ?? null;
+      if (!activePlaybookId) return null;
+      return { direction_id: direction.id, active_playbook_id: activePlaybookId };
+    });
+
+    if (solPlaybookShortCircuit) {
+      const shortCircuitOutcome = await step.run("sol-playbook-shortcircuit-execute", async () => {
+        if (await newerActivity(admin, tid, t0)) return { skipped: true as const };
+
+        // Stage a ticket_resolution_events row for THIS zero-Sonnet turn. turn_index =
+        // count(prior rows) + 1 (cheap under the (workspace_id, ticket_id, turn_index)
+        // index), same rule Sol's ack + the orchestrator use. reasoning is the exact
+        // spec-verification string 'sol:playbook-shortcircuit' so cost analytics can
+        // count zero-cost short-circuited turns without a heuristic classifier.
+        let resolutionEventId: string | null = null;
+        try {
+          const { count } = await admin
+            .from("ticket_resolution_events")
+            .select("id", { count: "exact", head: true })
+            .eq("ticket_id", tid);
+          const turnIndex = (count ?? 0) + 1;
+          const { data: row } = await admin
+            .from("ticket_resolution_events")
+            .insert({
+              workspace_id: wsId,
+              ticket_id: tid,
+              turn_index: turnIndex,
+              reasoning: "sol:playbook-shortcircuit",
+            })
+            .select("id")
+            .single();
+          resolutionEventId = (row as { id: string } | null)?.id ?? null;
+        } catch {
+          // Ledger is diagnostic — a failed insert must NOT block the customer-facing send.
+        }
+
+        // Run the playbook step. Same call the pipeline's `2. Playbook` block uses (line
+        // ~2340); the short-circuit is just an earlier entry — one effector, two entry paths.
+        const result = await executePlaybookStep(wsId, tid, msg, pers);
+        if (result.systemNote) await sysNote(admin, tid, result.systemNote);
+        if (result.response) await sendWithDelay(admin, wsId, tid, st.ch, result.response, cfg.sandbox);
+
+        // Compare-and-set shipped_at (learning #1 — re-assert the read-time invariant on
+        // the write itself). Compound key includes workspace_id + is-null so a racing
+        // stamp cannot overwrite the first-ship timestamp.
+        if (resolutionEventId) {
+          try {
+            await admin
+              .from("ticket_resolution_events")
+              .update({ shipped_at: new Date().toISOString() })
+              .eq("id", resolutionEventId)
+              .eq("workspace_id", wsId)
+              .is("shipped_at", null);
+          } catch {
+            // Never fail the short-circuit turn because the ledger stamp failed.
+          }
+        }
+
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return { skipped: false as const, action: result.action, hasResponse: !!result.response };
+      });
+
+      if (!shortCircuitOutcome.skipped) {
+        return { status: "sol_playbook_shortcircuit", action: shortCircuitOutcome.action };
+      }
+    }
+
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
