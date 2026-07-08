@@ -55,6 +55,26 @@ export const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broke
  */
 export const UNVERIFIED_FROM_SURFACE_ISSUE_TYPE = "unverified_from_surface";
 
+/**
+ * Pure predicate — does the analyzer's issues array carry NO signal other
+ * than one-or-more `unverified_from_surface` notes? True only when the
+ * array is non-empty AND every entry is typed `unverified_from_surface`.
+ * The escalation gate in `applySeverityActions` reads this to short-circuit
+ * the reopen/escalate path on a positively-closed ticket — an unverified
+ * detail on a resolved ticket is not an actionable customer situation, so
+ * it must NOT trigger a cs-director-call. A genuine `inaccuracy` /
+ * `false_promise` / `broken_action` (mixed set or alone) still returns
+ * false so the existing severe-issue force-escalate path fires as before.
+ * Phase 2 of
+ * docs/brain/specs/cora-grades-against-ai-data-surface-no-false-fabrication-on-unseen-facts.md.
+ */
+export function analysisIssuesAreSoleUnverifiedFromSurface(
+  issues: Array<{ type: string }>,
+): boolean {
+  if (!issues.length) return false;
+  return issues.every((i) => i.type === UNVERIFIED_FROM_SURFACE_ISSUE_TYPE);
+}
+
 // The system note emitted on a clean AI positive close
 // (src/lib/inngest/unified-ticket-handler.ts:1593). The real note appends
 // "Active playbook cleared." — we match the stable prefix as a substring so
@@ -1024,6 +1044,36 @@ async function applySeverityActions(
     const txt = (m.body_clean || cleanEmailBody(m.body || "")).toLowerCase();
     return CUSTOMER_ESCALATION_KEYWORDS.some(k => matchesEscalationKeyword(txt, k));
   });
+
+  // ── Sole-unverified-from-surface positive-close override ──
+  // Phase 2 of cora-grades-against-ai-data-surface. When the analyzer's
+  // ONLY flag is `unverified_from_surface` (a Phase 1 grader tag for a
+  // claim the grader could not verify from its own context — e.g. the AI
+  // named a product variant/flavor the order-line data on the analyzer's
+  // surface didn't include, but nothing on the surface contradicted it),
+  // an escalate-to-June is not justified on its own. If the ticket is
+  // cleanly positively closed AND there's no customer-threat keyword,
+  // short-circuit the reopen/escalate path entirely and log a
+  // non-actionable audit note. A genuine surface-contradicting inaccuracy
+  // (mixed with the unverified note, or alone) still routes through the
+  // usual severe-issue force-escalate path — the predicate flips false
+  // the moment any non-`unverified_from_surface` issue appears.
+  // customerThreat still always wins so a resolved ticket where the
+  // customer threatened chargeback/BBB/etc. escalates as before.
+  const soleUnverifiedFromSurface = analysisIssuesAreSoleUnverifiedFromSurface(issues);
+  if (soleUnverifiedFromSurface && !customerThreat) {
+    const positivelyClosed = await hasCleanPositiveClose(admin, ticketId);
+    if (positivelyClosed) {
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `[Auto-Analysis] Score ${score}/10 — sole flag is 'unverified_from_surface' (a claim the grader could not verify from its own context, but did not contradict). The ticket is cleanly positively closed and there is no customer-threat keyword; skipping any reopen/escalate. An unverified detail on a resolved ticket is not an actionable customer situation and must not fire a cs-director-call. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+      });
+      return;
+    }
+  }
 
   // ── Inaccuracy-only positive-close override (ticket 9a6e53d9) ──
   // A grader can tag a harmless closing phrase (e.g. "your loyalty points
