@@ -178,3 +178,30 @@ export function isReadyForGoalUnblock(
   if (!mentionsGoal) return false;
   return card.blockedBy.every((b) => b.cleared);
 }
+
+/**
+ * one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 3 —
+ * the ONE shared enqueue-time blocked predicate every build-enqueue path must apply. Given a spec
+ * card whose blockedBy has been resolved by [[../brain-roadmap]] `resolveBlockedBy` (Phase 1
+ * goal-normalization + Phase 2 `cleared`-keyed-on-`goals.main_merge_sha`), returns TRUE iff ANY
+ * blocker is still uncleared → the enqueue chokepoint MUST refuse.
+ *
+ * The invariant: EVERY enqueue path (queueRoadmapBuild's blocker gate, enqueueBuildIfDue's
+ * one-in-flight guard, `autoQueueUnblockedBy` / `autoQueueUnblockedByGoal` fan-outs, the
+ * platform-director autobuild sweeps at platform-director.ts:630/729/879/1213/3342/3934) reads
+ * from `resolveBlockedBy`'s output — so a goal blocker on a goal whose `main_merge_sha` is null
+ * carries `cleared:false` and this predicate returns TRUE. This is the Phase 3 guarantee: an
+ * outside dependent is NEVER claimed while its goal is off `main`.
+ *
+ * Kept as a NAMED predicate (rather than an inline `.some(!cleared)`) so a Phase 3 unit test can
+ * pin the invariant AND future callers have a single point of extension if the definition ever
+ * needs to change (e.g. a per-blocker override or a debug reason).
+ *
+ * Pure. Consumers today keep their inline `.some((b) => !b.cleared)` (kept for grep parity + zero
+ * churn); this predicate documents + tests the invariant they share.
+ */
+export function isSpecEnqueueBlocked(
+  card: { blockedBy: readonly { cleared: boolean }[] },
+): boolean {
+  return card.blockedBy.some((b) => !b.cleared);
+}

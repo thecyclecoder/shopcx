@@ -14,6 +14,7 @@ import {
   deriveEffectiveBlocker,
   deriveEffectiveBlockers,
   isReadyForGoalUnblock,
+  isSpecEnqueueBlocked,
   type DependentCardForGoalUnblock,
   type GoalMembership,
 } from "./blocker-goal-normalize";
@@ -232,4 +233,52 @@ test("Phase 2: a spec-slug blocker (kind:'spec') on `goal-g` doesn't count as a 
     blockedBy: [{ slug: "goal-g", cleared: true, kind: "spec" }],
   });
   assert.equal(isReadyForGoalUnblock(dep, "goal-g"), false);
+});
+
+// ─── Phase 3 — shared enqueue-blocked predicate (isSpecEnqueueBlocked) ────────────────────────────
+
+test("Phase 3 verification: the shared enqueue-time predicate refuses an outside dep while its goal blocker is uncleared (main_merge_sha null)", () => {
+  // The exact shape resolveBlockedBy produces for the outside-dep-on-goal case when the goal is off
+  // main: kind:'goal', cleared:false. The predicate every enqueue path applies (queueRoadmapBuild
+  // via getSpecBlockers, enqueueBuildIfDue, the platform-director autobuild sweeps at
+  // platform-director.ts:630/729/879/1213/3342/3934) reads this — MUST return true → the enqueue
+  // chokepoint refuses; the dependent is never claimed while the goal is off main.
+  const dep = {
+    blockedBy: [{ slug: "goal-g", cleared: false, kind: "goal" as const }],
+  };
+  assert.equal(
+    isSpecEnqueueBlocked(dep),
+    true,
+    "outside dep with an uncleared goal blocker must NOT reach the enqueue chokepoint",
+  );
+});
+
+test("Phase 3 verification: the moment goals.main_merge_sha lands (the goal blocker flips cleared:true) the enqueue predicate allows the build", () => {
+  const dep = {
+    blockedBy: [{ slug: "goal-g", cleared: true, kind: "goal" as const }],
+  };
+  assert.equal(
+    isSpecEnqueueBlocked(dep),
+    false,
+    "outside dep unblocks the instant the goal ships — the shared predicate stops refusing",
+  );
+});
+
+test("Phase 3: mixed blockers — a cleared goal blocker + an uncleared external spec blocker still refuses (the invariant is ANY-uncleared, not goal-cleared)", () => {
+  const dep = {
+    blockedBy: [
+      { slug: "goal-g", cleared: true, kind: "goal" as const },
+      { slug: "other-spec", cleared: false, kind: "spec" as const },
+    ],
+  };
+  assert.equal(
+    isSpecEnqueueBlocked(dep),
+    true,
+    "a still-uncleared sibling blocker keeps the enqueue chokepoint refusing even after the goal ships",
+  );
+});
+
+test("Phase 3: no blockers at all → the shared predicate allows the enqueue (no false-positive block)", () => {
+  const dep = { blockedBy: [] };
+  assert.equal(isSpecEnqueueBlocked(dep), false);
 });

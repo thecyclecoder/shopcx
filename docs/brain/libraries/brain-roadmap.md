@@ -64,12 +64,22 @@ Functions still read from markdown: `docs/brain/functions/{slug}.md` with `**Own
 
 ## `blockedBy` — spec build prerequisites ([[../specs/spec-blockers]])
 
-`SpecCard.blockedBy: { slug, title, status, cleared }[]` — the specs that must ship before this one can be built. `specs.blocked_by` (from the DB) provides the raw slugs; **`resolveBlockedBy` fills `title`/`status`/`cleared` against the live spec set**:
+`SpecCard.blockedBy: { slug, title, status, cleared, kind?, memberSpecSlug? }[]` — the specs (or goals) that must ship before this one can be built. `specs.blocked_by` (from the DB) provides the raw slugs; **`resolveBlockedBy` fills `title`/`status`/`cleared` against the live spec set + goal-membership map**:
 
 - **`cleared`** is `true` when the blocking spec's derived `status` is `shipped`, **or** the slug is no longer a live spec at all (archived/folded or dangling). A prerequisite already on `main` never permanently blocks.
 - Uncleared (`planned`/`in_progress`) = still blocking.
 - **`getSpecBlockers(slug)`** → the resolved `blockedBy[]` for one spec. What the enqueue gate ([[roadmap-actions]] `queueRoadmapBuild`) checks before inserting a build row.
 - **`SpecCard.autoBuild?: boolean`** (spec-blockers Phase 2 auto-queue) — `specs.auto_build` (DB column, boolean). When `false` the spec is **never** auto-queued as its last blocker clears; **manual Build is unaffected**.
+
+### Goal-blocker rule ([[../specs/one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec]])
+
+A standalone (outside) spec that depends on work inside a goal declares (or normalizes to) a blocker on the **goal**, not on the goal's member spec. `resolveBlockedBy` rewrites the outside dependent's raw `blocked_by` entry to a `kind:"goal"` blocker whose `slug` is the goal's slug (`title` = goal title; `memberSpecSlug` preserves the original raw spec slug for round-tripping through the author-spec re-author path). See [[blocker-goal-normalize]] `deriveEffectiveBlocker` for the pure rule.
+
+**Clear predicate.** A `kind:"goal"` blocker is `cleared:true` iff `goals.main_merge_sha` is set — the atomic goal→main promotion happened. A goal whose members are all accumulated on `goal/{slug}` but has not yet atomic-promoted to main leaves the outside dependent BLOCKED (its member specs aren't on main yet). The instant `stampGoalPromotedToMain` writes `main_merge_sha`, the goal blocker flips cleared and the reactive auto-queue [[agent-jobs]] `autoQueueUnblockedByGoal` (fired from `promoteCompleteGoalsToMain` right after `applyGoalPromotionEffects`) enqueues every outside dependent whose LAST uncleared blocker was that goal.
+
+**Goal-mates unchanged.** When the dependent AND the blocker are members of the SAME goal, the blocker stays `kind:"spec"` — the intra-goal serializer ([[agent-jobs]] `sequencePromoteCandidates` + `areSpecsGoalMates`) still orders it against `specs.goal_branch_sha`. Goal-mate dependencies do NOT flow through the goal-blocker rule.
+
+**Invariant.** EVERY enqueue path applies the SAME `.some((b) => !b.cleared)` predicate (queueRoadmapBuild's blocker gate, `enqueueBuildIfDue`, `autoQueueUnblockedBy` / `autoQueueUnblockedByGoal`, the platform-director autobuild sweeps). A named point-of-truth `isSpecEnqueueBlocked(card)` lives in [[blocker-goal-normalize]] with the Phase 3 tests that pin the invariant — so an outside dependent is **never** claimed while its goal is off `main`.
 
 ## Callers
 
