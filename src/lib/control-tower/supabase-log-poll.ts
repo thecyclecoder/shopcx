@@ -195,7 +195,12 @@ const LOG_QUERIES: LogQuery[] = [
         // Auth errors mostly page on first sighting; the helper narrowly scopes GoTrue's
         // `context canceled` / `context deadline exceeded` (browser-abort noise) into the
         // transient class so ordinary page navigations don't mint incidents.
-        transient: isTransientSupabaseLogNoise("auth", { message }),
+        // Pass event_message through so the auth branch can also inspect the inner `error`
+        // field for browser-abort markers on the /authorize (PKCE flow-state) shape whose
+        // top-level msg is only `500: Error creating flow state` — the real cause lives in
+        // event_message JSON ([[../specs/error-feed-scope-supabase-authorize-flow-state-context-cance]],
+        // Control Tower signature `supabase-logs:a30ffe4489dd6ffb`).
+        transient: isTransientSupabaseLogNoise("auth", { message, eventMessage: str(row.event_message) }),
       };
     },
   },
