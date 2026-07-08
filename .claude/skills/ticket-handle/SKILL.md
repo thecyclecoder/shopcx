@@ -55,6 +55,21 @@ The Direction commits the ticket to one of three treatment paths for the cheap-e
 
 Pick the path with the **smallest correct blast radius**. A `playbook` when a `stateless` reply would do is over-commit; a `stateless` reply when the situation actually needs `needs_info` is guessing.
 
+### Standalone journey launch — `plan.launch_journey_slug`
+
+Any `chosen_path` can also set `plan.launch_journey_slug` (a `journey_definitions.slug`) — the worker will launch that journey via `launchJourneyForTicket` **with no active playbook**, and your `first_reply` becomes the CTA lead-in. Use this when the smallest correct treatment is a **journey-driven customer action** and there is no playbook you'd rather run.
+
+Phase 1 of [[docs/brain/specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend.md]] pins the wedge case: a customer signaling a MOVE — "I moved", "new address", "changed address", "I've relocated", or even "cancel, I moved" — is an **address-update intent**, not a cancel. When the customer has an active subscription:
+
+- Choose `chosen_path: "stateless"` with `plan.launch_journey_slug: "shipping-address"`.
+- Your `first_reply` offers the address update in one line ("no problem — tap below and confirm your new address") — do not translate the move into a cancel and do not dead-end with "already shipped, can't redirect".
+- The Confirm Shipping Address journey completes via the internal-aware `update_shipping_address` handler that actually persists the new address on the active subscription (internal contract → local jsonb; Appstle contract → Appstle push), with EasyPost validation. You do NOT need to run the address change yourself; the journey completion fires it.
+- Do NOT dispatch this as a playbook step (there the address only routes a replacement — it does not persist to the subscription). Standalone launch is the whole point of this Phase.
+
+If the customer explicitly insists on cancel AFTER the move-save offer, that's the honest-cancel path — a Phase 3 concern of the spec — not Phase 1. Phase 1 is: recognize the move, offer the save.
+
+The writer validates `launch_journey_slug` before the Direction lands — a slug that does not resolve to an active `journey_definitions` row in this workspace throws a typed `journey_slug_unknown` / `journey_slug_not_string` error (the box-session log surfaces the slug verbatim). Omit the field when no standalone journey should launch.
+
 ### Phase 3: honest stateless when no playbook matches
 
 If NO playbook clearly matches the ask, choose `chosen_path='stateless'` (or `'needs_info'` when a specific missing piece blocks the reply). **Never** return `chosen_path='playbook'` with an empty, whitespace-only, or invented `plan.playbook_slug` to satisfy the field — the writer rejects the Direction (`playbook_slug_missing` / `playbook_slug_not_string` / `playbook_slug_unknown`) and this box turn burns for nothing.
@@ -104,7 +119,7 @@ Silence is a real signal — one-off portal errors should NOT get spec noise. Wh
     "intent": "<one-line distilled customer intent>",
     "context_summary": "<short prose summary of the merged customer + subscription + order context you read>",
     "chosen_path": "playbook" | "stateless" | "needs_info",
-    "plan": { ... path-specific shape (see above) ... },
+    "plan": { ... path-specific shape (see above); may also carry `launch_journey_slug` for a standalone-journey launch (e.g. move → `"shipping-address"`) ... },
     "guardrails": { ... bounded proxies (see above) ... }
   },
   "first_reply": "<plain-text customer-facing reply, mirror the customer's language, no markdown, no 'Sol' signature — the personality layer adds Suzie/Julie>",

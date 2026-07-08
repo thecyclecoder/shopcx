@@ -10681,17 +10681,58 @@ async function runTicketHandleJob(job: Job) {
               log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
             });
           } else {
-            const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+            const { data: t } = await db.from("tickets").select("channel, customer_id").eq("id", ticketId).single();
             const channel = (t?.channel as string | null) || "email";
+            const customerIdForJourney = (t?.customer_id as string | null) ?? null;
+
+            // Phase 1 of docs/brain/specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend.md:
+            // when Sol's Direction names a STANDALONE journey via plan.launch_journey_slug (the
+            // move → shipping-address case is the wedge — 'I moved' / 'new address' / 'changed
+            // address' / 'cancel, I moved' → slug='shipping-address'), route the customer-facing
+            // output through launchJourneyForTicket instead of the plain reply send. The resolver
+            // re-asserts workspace + is_active at the action point (learning #6 — confirming
+            // predicate at the write, not a coarser proxy) so a Direction that names a retired
+            // slug degrades gracefully back to the plain send. NO active playbook is started, so
+            // the journey's completion routes through the internal-aware update_shipping_address
+            // handler (action-executor → commerce/subscription subscriptionUpdateShippingAddress,
+            // internal vs Appstle branch) rather than being consumed as a playbook step. Guards
+            // above (bait / claim / honor) still ran against firstReply — the customer output is
+            // a CTA carrying that reply as the leadIn, so the invariants hold.
+            let launchedStandaloneJourney = false;
             try {
-              const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-              await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+              const { resolveSolChosenJourney } = await import("../src/lib/ticket-directions");
+              const journeyChoice = await resolveSolChosenJourney(db, workspaceId, ticketId);
+              if (journeyChoice && customerIdForJourney) {
+                const { launchJourneyForTicket } = await import("../src/lib/journey-delivery");
+                const launched = await launchJourneyForTicket({
+                  workspaceId,
+                  ticketId,
+                  customerId: customerIdForJourney,
+                  journeyId: journeyChoice.journey_id,
+                  journeyName: journeyChoice.name,
+                  triggerIntent: journeyChoice.trigger_intent,
+                  channel,
+                  leadIn: firstReply,
+                  ctaText: journeyChoice.name,
+                });
+                launchedStandaloneJourney = launched === true;
+              }
             } catch (e) {
-              // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-              // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-              // the job (the Direction is authored; a human can retry the reply from the Improve tab).
               const msg = e instanceof Error ? e.message : String(e);
-              console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+              console.warn(`${tag} standalone journey launch failed (Direction still authored, falling through to plain reply): ${msg}`);
+            }
+
+            if (!launchedStandaloneJourney) {
+              try {
+                const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+                await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+              } catch (e) {
+                // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+                // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+                // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+              }
             }
           }
         }

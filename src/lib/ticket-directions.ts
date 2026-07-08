@@ -32,6 +32,24 @@ export interface TicketDirectionPlan {
   action?: string;
   /** Present when `chosen_path='needs_info'` — the concrete list of missing pieces to ask for. */
   needs?: unknown[];
+  /**
+   * Optional across all chosen_paths — the slug of a STANDALONE journey_definitions row Sol
+   * wants launched (via [[../libraries/journey-delivery]] `launchJourneyForTicket`) with NO
+   * active playbook. Phase 1 of
+   * [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]]:
+   * a move signal ('I moved', 'new address', 'changed address', 'cancel, I moved') is treated
+   * as an address-update intent, and Sol sets `launch_journey_slug: 'shipping-address'` so the
+   * standalone Confirm Shipping Address journey fires — its completion routes to the
+   * internal-aware `update_shipping_address` handler (action-executor → commerce/subscription
+   * `subscriptionUpdateShippingAddress`, which branches internal vs Appstle) with EasyPost
+   * validation, actually persisting the change to the active subscription. Do NOT set this
+   * when the journey should instead be a step of a playbook — a `playbook` chosen_path drives
+   * the playbook itself, and its own executor decides when to launch a journey step. The
+   * writer validates that the slug resolves to a live `journey_definitions` row for this
+   * workspace before the Direction lands (mirrors the `playbook_slug` gate — same
+   * confirming-predicate pattern).
+   */
+  launch_journey_slug?: string;
   [k: string]: unknown;
 }
 
@@ -66,7 +84,9 @@ export class TicketDirectionPlanError extends Error {
   readonly code:
     | "playbook_slug_missing"
     | "playbook_slug_unknown"
-    | "playbook_slug_not_string";
+    | "playbook_slug_not_string"
+    | "journey_slug_not_string"
+    | "journey_slug_unknown";
   readonly slug?: string;
   constructor(
     code: TicketDirectionPlanError["code"],
@@ -144,38 +164,85 @@ async function validatePlanForPath(
   chosen_path: TicketDirectionPath,
   plan: TicketDirectionPlan,
 ): Promise<void> {
-  if (chosen_path !== "playbook") return;
-  const rawSlug = plan.playbook_slug;
-  if (rawSlug === undefined || rawSlug === null) {
-    throw new TicketDirectionPlanError(
-      "playbook_slug_missing",
-      "chosen_path='playbook' requires plan.playbook_slug",
-    );
+  if (chosen_path === "playbook") {
+    const rawSlug = plan.playbook_slug;
+    if (rawSlug === undefined || rawSlug === null) {
+      throw new TicketDirectionPlanError(
+        "playbook_slug_missing",
+        "chosen_path='playbook' requires plan.playbook_slug",
+      );
+    }
+    // Phase 3 of [[../../docs/brain/specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]:
+    // trim + length-check so a WHITESPACE-only slug (Sol trying to satisfy the field without
+    // a real match) throws the same typed rejection an empty slug does. Sol's honest-stateless
+    // rule is "no playbook match → chosen_path='stateless'"; a "   " slug is the anti-pattern
+    // the rule exists to prevent, and lumping it in with playbook_slug_unknown would read as
+    // "we don't have that playbook" downstream rather than the truer "you didn't pick one".
+    if (typeof rawSlug !== "string" || rawSlug.trim().length === 0) {
+      throw new TicketDirectionPlanError(
+        "playbook_slug_not_string",
+        "plan.playbook_slug must be a non-empty, non-whitespace string — no playbook match means chosen_path='stateless', never 'playbook' with an empty slug",
+      );
+    }
+    const { data, error } = await admin
+      .from("playbooks")
+      .select("id")
+      .eq("workspace_id", workspace_id)
+      .eq("slug", rawSlug)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      throw new TicketDirectionPlanError(
+        "playbook_slug_unknown",
+        `plan.playbook_slug='${rawSlug}' does not match any playbook in this workspace`,
+        { slug: rawSlug },
+      );
+    }
   }
-  // Phase 3 of [[../../docs/brain/specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]]:
-  // trim + length-check so a WHITESPACE-only slug (Sol trying to satisfy the field without
-  // a real match) throws the same typed rejection an empty slug does. Sol's honest-stateless
-  // rule is "no playbook match → chosen_path='stateless'"; a "   " slug is the anti-pattern
-  // the rule exists to prevent, and lumping it in with playbook_slug_unknown would read as
-  // "we don't have that playbook" downstream rather than the truer "you didn't pick one".
-  if (typeof rawSlug !== "string" || rawSlug.trim().length === 0) {
+  await validateLaunchJourneySlug(admin, workspace_id, plan);
+}
+
+/**
+ * Journey-slug plan validator — Phase 1 of
+ * [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]].
+ * When Sol names a standalone journey to launch (`plan.launch_journey_slug`), the writer
+ * re-asserts the read-time precondition BEFORE the row lands (learning #6 — the confirming
+ * predicate lives at the action point, not a coarser proxy): the slug must be a non-empty
+ * string AND must resolve to an active `journey_definitions` row scoped to this workspace.
+ * A missing / non-string / whitespace-only value throws `journey_slug_not_string`; a slug
+ * that doesn't resolve throws `journey_slug_unknown` with the slug echoed on the exception so
+ * the caller (runTicketHandleJob → the worker) can surface it verbatim in the box-session log
+ * instead of letting the row land with a slug the launcher can't dispatch.
+ *
+ * Applies to ALL chosen_paths — a stateless reply that also launches the address-update
+ * journey (Phase 1's expected shape) still routes through this gate.
+ */
+async function validateLaunchJourneySlug(
+  admin: Admin,
+  workspace_id: string,
+  plan: TicketDirectionPlan,
+): Promise<void> {
+  if (plan.launch_journey_slug === undefined || plan.launch_journey_slug === null) return;
+  const raw = plan.launch_journey_slug;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
     throw new TicketDirectionPlanError(
-      "playbook_slug_not_string",
-      "plan.playbook_slug must be a non-empty, non-whitespace string — no playbook match means chosen_path='stateless', never 'playbook' with an empty slug",
+      "journey_slug_not_string",
+      "plan.launch_journey_slug must be a non-empty, non-whitespace string — omit the field when no standalone journey should launch",
     );
   }
   const { data, error } = await admin
-    .from("playbooks")
+    .from("journey_definitions")
     .select("id")
     .eq("workspace_id", workspace_id)
-    .eq("slug", rawSlug)
+    .eq("slug", raw)
+    .eq("is_active", true)
     .maybeSingle();
   if (error) throw error;
   if (!data) {
     throw new TicketDirectionPlanError(
-      "playbook_slug_unknown",
-      `plan.playbook_slug='${rawSlug}' does not match any playbook in this workspace`,
-      { slug: rawSlug },
+      "journey_slug_unknown",
+      `plan.launch_journey_slug='${raw}' does not match any active journey_definitions row in this workspace`,
+      { slug: raw },
     );
   }
 }
@@ -305,6 +372,61 @@ export async function resolveSolChosenPlaybook(
     seed && typeof seed === "object" && !Array.isArray(seed) ? (seed as Record<string, unknown>) : {};
 
   return { playbook_id: (pb as { id: string }).id, slug, seed_context };
+}
+
+/**
+ * Sol-chosen STANDALONE journey resolver — Phase 1 of
+ * [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]].
+ *
+ * The `runTicketHandleJob` worker calls this AFTER `writeDirection` succeeds to decide whether
+ * the Direction Sol just authored asks for a STANDALONE journey to be launched (no active
+ * playbook) — the specific move → address-update case is the wedge. Returns non-null only
+ * when the live Direction names `plan.launch_journey_slug` AND the slug resolves to an active
+ * `journey_definitions` row scoped to this workspace — in that case the worker calls
+ * `launchJourneyForTicket` with the row (using Sol's `first_reply` as the leadIn and the
+ * journey's name as the CTA label). When any of those preconditions fails (no live Direction,
+ * no `launch_journey_slug`, or the slug does not resolve), returns null and the worker
+ * proceeds with the normal customer-facing `first_reply` send.
+ *
+ * Guards mirror learning #6 (confirming predicate at the action point, not a coarser proxy):
+ *   - Workspace scope re-asserted on both the Direction read and the journey lookup so a
+ *     cross-workspace slug or a mis-authored Direction on a foreign ticket cannot dispatch.
+ *   - The journey lookup uses `.maybeSingle()` — a `null` result throws no error; the caller
+ *     just falls through, so a Direction that names an inactive/retired-in-DB slug degrades
+ *     gracefully rather than exploding the worker.
+ */
+export async function resolveSolChosenJourney(
+  admin: Admin,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<{
+  journey_id: string;
+  slug: string;
+  name: string;
+  trigger_intent: string;
+} | null> {
+  const direction = await getLiveDirection(admin, ticket_id, { workspace_id });
+  if (!direction) return null;
+  const slug = direction.plan.launch_journey_slug;
+  if (typeof slug !== "string" || slug.trim().length === 0) return null;
+
+  const { data, error } = await admin
+    .from("journey_definitions")
+    .select("id, name, trigger_intent")
+    .eq("workspace_id", workspace_id)
+    .eq("slug", slug)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+
+  const row = data as { id: string; name: string; trigger_intent: string | null };
+  return {
+    journey_id: row.id,
+    slug,
+    name: row.name,
+    trigger_intent: (row.trigger_intent ?? slug).trim() || slug,
+  };
 }
 
 export async function incrementResessionCount(
