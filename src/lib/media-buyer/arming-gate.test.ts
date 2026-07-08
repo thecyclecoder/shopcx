@@ -25,6 +25,7 @@ import {
   MIN_AGREEMENT_RATE,
   MIN_CONSECUTIVE_GREEN_TRUST,
   isoWeekLabel,
+  upsertAuthorization,
   type ShadowReviewInput,
   type TrustSnapshotInput,
 } from "./arming-gate";
@@ -220,4 +221,139 @@ test("isoWeekLabel — 2026-07-08 lands in ISO week 28", () => {
 
 test("isoWeekLabel — Monday 2026-01-05 is week 02", () => {
   assert.equal(isoWeekLabel(new Date("2026-01-05T00:00:00Z")), "2026-W02");
+});
+
+// ── upsertAuthorization: pins the Fix-2 select-then-write pattern ───────────
+// The composite unique on media_buyer_arming_authorization is an EXPRESSION index
+// (coalesce(meta_ad_account_id::text, '')), which Supabase-js's `.upsert(...,{onConflict})`
+// can't target. Fix 2 replaced the shipped upsert with a manual select-then-write —
+// these tests lock the branch structure so we don't regress back to a broken onConflict.
+
+type Op = { kind: "select" | "insert" | "update"; table: string; filters: string[]; row?: unknown };
+
+function buildMockAdmin(opts: {
+  existingRow?: { id: string } | null;
+  insertReturns?: Array<{ id: string }>;
+  updateReturns?: Array<{ id: string }>;
+}) {
+  const ops: Op[] = [];
+  const state = {
+    existing: opts.existingRow ?? null,
+    inserted: opts.insertReturns ?? [{ id: "arm_inserted" }],
+    updated: opts.updateReturns ?? [{ id: "arm_updated" }],
+  };
+  const makeBuilder = (op: Op) => {
+    const b: any = {
+      eq(col: string, val: unknown) {
+        op.filters.push(`eq:${col}=${String(val)}`);
+        return b;
+      },
+      is(col: string, val: unknown) {
+        op.filters.push(`is:${col}=${String(val)}`);
+        return b;
+      },
+      select(_cols: string) {
+        return b;
+      },
+      async maybeSingle() {
+        if (op.kind === "select") return { data: state.existing, error: null };
+        return { data: null, error: null };
+      },
+      then(resolve: (v: unknown) => unknown) {
+        if (op.kind === "insert") return resolve({ data: state.inserted, error: null });
+        if (op.kind === "update") return resolve({ data: state.updated, error: null });
+        return resolve({ data: null, error: null });
+      },
+    };
+    return b;
+  };
+  const admin: any = {
+    from(table: string) {
+      return {
+        select(_cols: string) {
+          const op: Op = { kind: "select", table, filters: [] };
+          ops.push(op);
+          return makeBuilder(op);
+        },
+        insert(row: unknown) {
+          const op: Op = { kind: "insert", table, filters: [], row };
+          ops.push(op);
+          return makeBuilder(op);
+        },
+        update(row: unknown) {
+          const op: Op = { kind: "update", table, filters: [], row };
+          ops.push(op);
+          return makeBuilder(op);
+        },
+      };
+    },
+  };
+  return { admin, ops };
+}
+
+const CANON_ARGS = {
+  workspaceId: "ws_1",
+  isoWeek: "2026-W28",
+  allowed: true,
+  reasons: [] as import("./arming-gate").ArmingGateReason[],
+  metrics: {
+    reviewed: 25,
+    concurred: 24,
+    agreementRate: 0.96,
+    consecutiveGreen: 8,
+    cacLtvRatio: 3.5,
+    targetCacLtv: DEFAULT_BLENDED_CAC_LTV_TARGET,
+  },
+  evaluatedAt: "2026-07-08T12:00:00Z",
+  expiresAt: "2026-07-15T12:00:00Z",
+};
+
+test("upsertAuthorization — no existing row + non-null account → INSERT with .eq('meta_ad_account_id', <id>) on the SELECT", async () => {
+  const { admin, ops } = buildMockAdmin({ existingRow: null });
+  const id = await upsertAuthorization(admin, {
+    ...CANON_ARGS,
+    metaAdAccountId: "act_42",
+  });
+  assert.equal(id, "arm_inserted");
+  // First op: SELECT with workspace + iso_week + eq on meta_ad_account_id.
+  const select = ops[0];
+  assert.equal(select.kind, "select");
+  assert.equal(select.table, "media_buyer_arming_authorization");
+  assert.ok(select.filters.includes("eq:workspace_id=ws_1"));
+  assert.ok(select.filters.includes("eq:iso_week=2026-W28"));
+  assert.ok(select.filters.includes("eq:meta_ad_account_id=act_42"));
+  // Second op: INSERT (no update since existingRow=null).
+  const insert = ops[1];
+  assert.equal(insert.kind, "insert");
+  assert.equal((insert.row as { meta_ad_account_id: string }).meta_ad_account_id, "act_42");
+});
+
+test("upsertAuthorization — no existing row + null account → INSERT with .is('meta_ad_account_id', null) on the SELECT", async () => {
+  const { admin, ops } = buildMockAdmin({ existingRow: null });
+  const id = await upsertAuthorization(admin, {
+    ...CANON_ARGS,
+    metaAdAccountId: null,
+  });
+  assert.equal(id, "arm_inserted");
+  const select = ops[0];
+  assert.equal(select.kind, "select");
+  assert.ok(select.filters.includes("is:meta_ad_account_id=null"));
+  assert.ok(!select.filters.some((f) => f.startsWith("eq:meta_ad_account_id")));
+  assert.equal(ops[1].kind, "insert");
+});
+
+test("upsertAuthorization — existing row → UPDATE by id, workspace-scoped, .select('id') assertion", async () => {
+  const { admin, ops } = buildMockAdmin({ existingRow: { id: "arm_existing" } });
+  const id = await upsertAuthorization(admin, {
+    ...CANON_ARGS,
+    metaAdAccountId: "act_42",
+  });
+  assert.equal(id, "arm_existing");
+  // Second op should be UPDATE (not INSERT), scoped by id + workspace_id.
+  const update = ops[1];
+  assert.equal(update.kind, "update");
+  assert.ok(update.filters.includes("eq:id=arm_existing"), `filters were ${update.filters.join(",")}`);
+  assert.ok(update.filters.includes("eq:workspace_id=ws_1"));
+  // No INSERT op at all — regression guard against the old onConflict path.
+  assert.ok(!ops.some((o) => o.kind === "insert"));
 });

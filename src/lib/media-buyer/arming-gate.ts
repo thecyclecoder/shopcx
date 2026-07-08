@@ -428,7 +428,7 @@ async function loadTrustSnapshots(
     .map((r) => ({ snapshotDate: r.snapshot_date, band: r.band }));
 }
 
-async function upsertAuthorization(
+export async function upsertAuthorization(
   admin: Admin,
   args: {
     workspaceId: string;
@@ -441,27 +441,64 @@ async function upsertAuthorization(
     expiresAt: string;
   },
 ): Promise<string | null> {
-  const { data, error } = await admin
+  const row = {
+    workspace_id: args.workspaceId,
+    meta_ad_account_id: args.metaAdAccountId,
+    iso_week: args.isoWeek,
+    allowed: args.allowed,
+    reasons: { reasons: args.reasons, metrics: args.metrics },
+    evaluated_at: args.evaluatedAt,
+    expires_at: args.expiresAt,
+  };
+
+  // The composite unique on (workspace_id, coalesce(meta_ad_account_id::text, ''), iso_week)
+  // is an EXPRESSION index — Postgres can't accept it as an ON CONFLICT column list, and
+  // Supabase-js can't pass expressions in `onConflict`. Same reasoning as
+  // media-buyer/sensor-trust-probe.ts:393-435: manual select-then-write compare-and-set.
+  //   1) SELECT the row for (workspace, coalesce(account,''), iso_week). At most one hit by
+  //      the unique index. Non-null account uses `.eq`, null uses `.is` so PostgREST folds
+  //      `meta_ad_account_id IS NULL` correctly (matching the COALESCE-to-'' bucket).
+  //   2) If it exists → UPDATE by id (workspace-scoped) with `.select("id")` asserting
+  //      exactly one row transitioned. Otherwise INSERT with the same assertion.
+  const selectQ = admin
     .from("media_buyer_arming_authorization")
-    .upsert(
-      {
-        workspace_id: args.workspaceId,
-        meta_ad_account_id: args.metaAdAccountId,
-        iso_week: args.isoWeek,
-        allowed: args.allowed,
-        reasons: { reasons: args.reasons, metrics: args.metrics },
-        evaluated_at: args.evaluatedAt,
-        expires_at: args.expiresAt,
-      },
-      { onConflict: "workspace_id,meta_ad_account_id,iso_week" },
-    )
     .select("id")
-    .maybeSingle();
-  if (error) {
-    console.warn(`[arming-gate] media_buyer_arming_authorization upsert failed: ${error.message}`);
+    .eq("workspace_id", args.workspaceId)
+    .eq("iso_week", args.isoWeek);
+  const { data: existing } = args.metaAdAccountId
+    ? await selectQ.eq("meta_ad_account_id", args.metaAdAccountId).maybeSingle()
+    : await selectQ.is("meta_ad_account_id", null).maybeSingle();
+
+  if (existing && (existing as { id: string }).id) {
+    const id = (existing as { id: string }).id;
+    const { data: updated, error: updErr } = await admin
+      .from("media_buyer_arming_authorization")
+      .update({
+        allowed: row.allowed,
+        reasons: row.reasons,
+        evaluated_at: row.evaluated_at,
+        expires_at: row.expires_at,
+      })
+      .eq("id", id)
+      .eq("workspace_id", args.workspaceId)
+      .select("id");
+    if (updErr) {
+      console.warn(`[arming-gate] media_buyer_arming_authorization update failed: ${updErr.message}`);
+      return null;
+    }
+    return Array.isArray(updated) && updated.length === 1 ? id : null;
+  }
+
+  const { data: inserted, error: insErr } = await admin
+    .from("media_buyer_arming_authorization")
+    .insert(row)
+    .select("id");
+  if (insErr) {
+    console.warn(`[arming-gate] media_buyer_arming_authorization insert failed: ${insErr.message}`);
     return null;
   }
-  return (data as { id: string } | null)?.id ?? null;
+  const insertedRows = inserted as Array<{ id: string }> | null;
+  return Array.isArray(insertedRows) && insertedRows.length === 1 ? insertedRows[0].id : null;
 }
 
 // ── Diagnosis + dedupe ────────────────────────────────────────────────────────
