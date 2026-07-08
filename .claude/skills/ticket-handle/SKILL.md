@@ -70,6 +70,30 @@ If the customer explicitly insists on cancel AFTER the move-save offer, that's t
 
 The writer validates `launch_journey_slug` before the Direction lands — a slug that does not resolve to an active `journey_definitions` row in this workspace throws a typed `journey_slug_unknown` / `journey_slug_not_string` error (the box-session log surfaces the slug verbatim). Omit the field when no standalone journey should launch.
 
+### Phase 3: never dead-end a move as cancel; honest cancel after the offer
+
+Phase 3 of [[docs/brain/specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend.md]] pins two invariants on your reply for MOVED customers with an ACTIVE subscription — both machine-enforced by the worker's `assessSolMoveDeadEndRisk` guard right before the send fires (`src/lib/sol-move-dead-end-guard.ts`). A reply that trips either signal is BLOCKED; the Direction stays durable and the ticket routes to needs_human via the Improve tab.
+
+**1) A move + active subscription is a SAVE, never a cancel-only dead-end.** Even when the last order already shipped and cannot be redirected, the reply MUST:
+
+- Offer the address update on future shipments (Phase 1's `launch_journey_slug: "shipping-address"` wedge), OR
+- Offer a $0 replacement to the newly-validated address (Phase 2 — for eligible customers), OR
+- (Only when the customer has explicitly asked to cancel) hand the self-service cancel journey per §2 below.
+
+**Forbidden reply shapes** (the guard blocks these):
+- "we'll cancel your subscription" / "your only option is to cancel" / "I've cancelled your subscription"
+- "already shipped, can't redirect" WITHOUT an alternative (address update / replacement / self-service cancel)
+- "nothing we can do" as a terminal
+
+An acknowledgment that pairs the truth with the save path passes ("That order already shipped and I can't redirect it, but I can update your subscription address so all future shipments go to your new place — tap below to confirm.").
+
+**2) Honest cancel after the offer — customer cancels themselves.** If, after the move-save offer, the customer INSISTS on cancel ("I still want to cancel", "no thanks, cancel it"), your Direction hands the self-service Cancel Subscription journey:
+
+- `chosen_path: "stateless"` + `plan.launch_journey_slug: "cancel-subscription"`
+- `first_reply` hands the link ("Got it — you can cancel your subscription yourself in a couple of taps. Here's the link.") — NEVER a first-person "I've cancelled it" or "your subscription has been cancelled" (Sol never cancels FOR the customer on this path; the guard blocks any such reply).
+
+**3) Acknowledge the already-shipped order honestly.** You may say "that specific shipment already left and can't be redirected" — the customer deserves the truth. But that acknowledgment must be part of a save path, never the whole reply. Pair it with the address update / replacement / self-service cancel handoff.
+
 ### Phase 3: honest stateless when no playbook matches
 
 If NO playbook clearly matches the ask, choose `chosen_path='stateless'` (or `'needs_info'` when a specific missing piece blocks the reply). **Never** return `chosen_path='playbook'` with an empty, whitespace-only, or invented `plan.playbook_slug` to satisfy the field — the writer rejects the Direction (`playbook_slug_missing` / `playbook_slug_not_string` / `playbook_slug_unknown`) and this box turn burns for nothing.

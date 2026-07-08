@@ -10660,8 +10660,58 @@ async function runTicketHandleJob(job: Job) {
       if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
+        // ── Phase 3 of sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend ──
+        // Machine gate the move-dead-end invariant BEFORE the send fires. When Sol's Direction
+        // signals a MOVE and the customer has an ACTIVE subscription, the reply MUST NOT
+        // terminate with a cancel-only or "already shipped, can't redirect" dead-end — the
+        // customer must always be offered an alternative (address update / $0 replacement /
+        // self-service cancel journey). The check is workspace-scoped by ticket_id + the
+        // customer_id already threaded on the ticket; a fetch of any single active subscription
+        // for the customer is enough (`.limit(1)`), and a null customer_id fails-open (the
+        // downstream customer_id-scoped mutations already can't dispatch).
+        let hasActiveSubscription = false;
+        try {
+          const { data: t0 } = await db
+            .from("tickets")
+            .select("customer_id")
+            .eq("id", ticketId)
+            .eq("workspace_id", workspaceId)
+            .maybeSingle();
+          const custIdForGuard = (t0?.customer_id as string | null) ?? null;
+          if (custIdForGuard) {
+            const { data: activeSub } = await db
+              .from("subscriptions")
+              .select("id")
+              .eq("workspace_id", workspaceId)
+              .eq("customer_id", custIdForGuard)
+              .eq("status", "active")
+              .limit(1)
+              .maybeSingle();
+            hasActiveSubscription = !!activeSub;
+          }
+        } catch (e) {
+          // Fail-open: a probe error means the move guard degrades to no-op; the bait guard
+          // still fires. Better than blocking a legitimate reply because a diagnostic read
+          // hiccupped.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} move-dead-end guard subscription probe failed (guard falls through): ${msg}`);
+        }
+        const { assessSolMoveDeadEndRisk } = await import("../src/lib/sol-move-dead-end-guard");
+        const moveGuard = assessSolMoveDeadEndRisk({
+          intent,
+          contextSummary,
+          plan,
+          firstReply,
+          hasActiveSubscription,
+        });
         if (bait.ok === false) {
           const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else if (moveGuard.ok === false) {
+          const blockLine = `Sol reply BLOCKED by move-dead-end guard [${moveGuard.kind}]: ${moveGuard.reason}. Matched phrase: ${JSON.stringify(moveGuard.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
           console.warn(`${tag} ${blockLine}`);
           await update(job.id, {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
