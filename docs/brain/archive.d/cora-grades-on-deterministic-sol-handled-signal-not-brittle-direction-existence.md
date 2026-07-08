@@ -1,0 +1,1 @@
+- **Cora Grades on a Deterministic Sol-Handled Signal (Not the Brittle Direction-Existence Gate)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
