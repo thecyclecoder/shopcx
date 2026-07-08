@@ -142,14 +142,20 @@ test("e2e (1): a Sol stateless resolving reply → ticket closed → Cora select
   assert.equal(typeof state.ticket.closed_at, "string");
   assert.ok(!Number.isNaN(Date.parse(state.ticket.closed_at as string)), "closed_at must be a real timestamp");
 
-  // Step 3: 31 min later, Cora's cron sweeps closed tickets. The gate takes the ticket row +
-  // the live Direction it holds. The Sol-close puts the ticket into the gate's candidate set;
-  // the live Direction proves Sol handled it; the 30-min settle has passed.
-  const solAuthoredAt = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // Sol authored 1h ago
+  // Step 3: 31 min later, Cora's cron sweeps closed tickets. The gate takes the ticket row —
+  // the Sol-close puts the ticket into the gate's candidate set; the deterministic
+  // `sol_handled_at` stamp (Phase 1 of cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence,
+  // written by the worker on box-session completion) proves Sol handled it; the 30-min settle
+  // has passed. NO live ticket_directions row is required — that's the whole point of the
+  // Phase 2 gate rewrite (Direction insert can fail silently under a DB outage).
+  const solHandledAt = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // worker stamped 1h ago
   const now = new Date(Date.now() + CORA_CLOSE_SETTLE_MS + 60 * 1000); // 31 min after close
   const passes = passesCoraSelectionGate(
-    { closed_at: state.ticket.closed_at, last_analyzed_at: null },
-    { authored_at: solAuthoredAt },
+    {
+      closed_at: state.ticket.closed_at,
+      last_analyzed_at: null,
+      sol_handled_at: solHandledAt,
+    },
     now,
     null, // no June decision this cycle
   );

@@ -10817,6 +10817,30 @@ async function runTicketHandleJob(job: Job) {
         }
       }
 
+      // ── Phase 1 of cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence ──
+      // Deterministic Sol-handled stamp — the HARNESS-CONTROLLED signal Cora's feeder consumes in
+      // Phase 2 (ticket-analysis-cron passesCoraSelectionGate). The mid-session writeDirection call
+      // can fail silently under DB outage (observed on the first ~6-7 Sol-handled tickets), which
+      // hides "Sol responded" from the direction-existence gate. Stamp tickets.sol_handled_at =
+      // now() here at the box session's terminal COMPLETED state via the admin client — a
+      // deterministic write independent of Sol's Direction insert. Idempotent (a re-dispatched
+      // Sol turn on the same ticket advances the stamp to the latest handling). Best-effort only:
+      // a stamp failure does NOT unwind the completed reply/close/direction — surface the error
+      // for grep-ability and continue, mirroring the send/close/spec-author fall-throughs above.
+      try {
+        const { error: stampErr } = await db
+          .from("tickets")
+          .update({ sol_handled_at: new Date().toISOString() })
+          .eq("id", ticketId)
+          .eq("workspace_id", workspaceId);
+        if (stampErr) {
+          console.warn(`${tag} sol_handled_at stamp failed: ${stampErr.message}`);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`${tag} sol_handled_at stamp threw: ${msg}`);
+      }
+
       await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
       return;
     }
