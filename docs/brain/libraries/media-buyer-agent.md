@@ -90,6 +90,8 @@ The Growth Director (or a human) activates a conservative policy via `scripts/se
 
 **Conservative seed values** — 1.5× ROAS floor · 3.0× scale trigger · +15% step (cap 25%) · $100 pause min-spend · $10 per-pass account motion ceiling · 24h per-object cooldown.
 
+**Per-cohort calibration** ([[../specs/media-buyer-per-cohort-iteration-policy-calibration]]) replaces the hardcoded 1.5×/3.0× seed with a **data-derived per-cohort proposal**: [[media-buyer-policy-calibrator]] `runMediaBuyerPolicyCalibration` reads each cohort's realized ROAS + spend distribution (30d) + recent account spend (7d) and authors a `pending` [[../tables/iteration_policies]] row at `version = prior_max+1` with a rationale citing every quantile. The runner is gated on a `green` [[../tables/media_buyer_sensor_trust]] snapshot — a `yellow`/`red`/missing snapshot defers via a `media_buyer_calibration_deferred` [[../tables/director_activity]] row (never activates). Activation stays with the Growth Director (via `propose_policy_activation`) — the calibrator NEVER flips `status='active'`. The Growth Director's `buildGrowthDirectorBrief` already surfaces the new pending version under `iterationPolicies` proposals (see [[growth-director]]).
+
 ## Test-cohort defaults contract
 
 For the replenish path to actually insert `ad_publish_jobs` rows, the [[../tables/media_buyer_test_cohorts]] row needs its Phase-2 default publish targets set: `default_meta_account_id`, `default_meta_page_id`, `default_meta_instagram_user_id`. Migration `20260707130000_media_buyer_test_cohorts_publish_targets.sql` adds them (all NULLABLE). Without them, replenish is deferred with `media_buyer_replenish_missing_config` — the plan still emits the replenish action, the runner just doesn't fire the publish.
