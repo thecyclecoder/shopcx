@@ -677,6 +677,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 8 * DAY },
   { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
+  {
+    id: "playbook-compiler",
+    kind: "cron",
+    owner: "platform",
+    label: "playbook-compiler",
+    description: "Auto-proposed monitored loop for the playbook-compiler cron (weekly (0 12 * * 1)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "weekly (0 12 * * 1)",
+    livenessWindowMs: 8 * DAY,
+    registeredAt: "2026-07-08T08:15:04.473Z",
+  },
   // ─ Yearly cron (window ~370 days) ─
 
   // ── CEO's executive-assistant agent (owner=ceo) ─────────────────────────────
