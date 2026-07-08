@@ -1,0 +1,1 @@
+- **Drop Supabase GoTrue /user 'unable to fetch records: context canceled' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]

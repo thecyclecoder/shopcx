@@ -86,7 +86,7 @@ const IMPROVE_TIMEOUT_MS = 15 * 60 * 1000;
 // tools). Minutes, not the 90-min seed ceiling — same ballpark as a ticket-improve turn. See
 // docs/brain/specs/sol-ticket-direction-artifact-and-first-touch-box-session.md.
 const TICKET_HANDLE_TIMEOUT_MS = 15 * 60 * 1000;
-const MAX_CONCURRENT = 8; // build/plan pool — real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; bumped 5→8, watch box logs for Max 529/overloaded before pushing further)
+const MAX_CONCURRENT = 10; // build/plan pool — the "everything currently happening" general pool. Real ceiling is Max rate limits, not the box (CCX33 8-core/30GB sits at ~14% load / 6% RAM with the old 5; 5→8→10, watch box logs for Max 529/overloaded before pushing further). Director (platform-director) + customer-service (ticket-handle/ticket-analyze/cs-director-call) run in their OWN dedicated lanes below, so this pool never starves them.
 // Fold-builds run in their OWN concurrency-1 lane (fold-build-batching Phase 2): a fold edits the shared
 // index files (archive.md / README counts → now generated), so it must never race a feature build.
 const MAX_FOLD = 1;
@@ -15924,9 +15924,81 @@ async function repairLedger(windowMs: number): Promise<RepairLedgerEntry[]> {
   });
 }
 
+// build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: eagerly reap ORPHAN active
+// build rows for this spec whose heartbeat is stale (>= REAP_STALE_MS). A worker-restart / crash
+// leaves the row `building`/`claimed`/`queued_resume` even though its process is gone; the periodic
+// `reapStaleSessions` sweep would eventually catch it, but until then the row still counts as
+// "active" — so a re-enqueue for the same spec is BLOCKED (hasActiveBuildForSlug sees it) or, if the
+// stale-session sweep beats the enqueue by a hair, we end up with two live builds racing the same
+// `claude/build-<slug>`. Doing a slug-scoped reap right at the guard (and at build dispatch)
+// transitions the orphan to `failed` (terminal — the spec sanctions "terminal state OR queued_resume")
+// BEFORE the enqueue/claim proceeds, so at most one build ever holds `claude/build-<slug>`. Never
+// touches a row whose session is running in THIS worker process (`active` Map) — that's alive, not
+// orphaned. Never touches the caller's own job (excludeJobId) — the build path calls this with its
+// own id to avoid reaping itself. Best-effort: a reap-internal error is logged, never thrown.
+async function reapStaleSiblingBuildsForSlug(
+  slug: string,
+  opts: { excludeJobId?: string; activeMap?: Map<string, unknown>; tag?: string } = {},
+): Promise<{ reaped: number }> {
+  if (!slug) return { reaped: 0 };
+  const cutoff = new Date(Date.now() - REAP_STALE_MS).toISOString();
+  const tag = opts.tag ?? "[reap-sibling-builds]";
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("id, status, last_heartbeat_at, updated_at, claimed_at")
+      .eq("kind", "build")
+      .eq("spec_slug", slug)
+      .in("status", REAP_STALE_STATUSES as unknown as string[])
+      .or(`last_heartbeat_at.lt.${cutoff},and(last_heartbeat_at.is.null,updated_at.lt.${cutoff})`)
+      .limit(20);
+    const rows = (data ?? []) as Array<{ id: string; status: string; last_heartbeat_at: string | null; updated_at: string | null; claimed_at: string | null }>;
+    let reaped = 0;
+    for (const r of rows) {
+      if (opts.excludeJobId && r.id === opts.excludeJobId) continue; // never reap the caller's own job
+      if (opts.activeMap && opts.activeMap.has(r.id)) continue;      // never reap a live session in THIS process
+      // Compare-and-set: only transition if the row is STILL in the stale in-flight state we read.
+      // This closes a race where the row flipped to a terminal state (or another reaper beat us to it)
+      // between our SELECT and this UPDATE — bail on zero rows updated rather than silently overwriting.
+      const { data: updated, error: uErr } = await db
+        .from("agent_jobs")
+        .update({
+          status: "failed",
+          claimed_at: null,
+          claude_session_id: null,
+          claude_session_config_dir: null,
+          error: `orphan reaped by slug-scoped sibling-build guard — another build for ${slug} is proceeding; this row was ${r.status} with stale heartbeat`,
+          log_tail: `(reapStaleSiblingBuildsForSlug: heartbeat stale on status '${r.status}' — transitioned terminal so at most one build ever holds claude/build-${slug})`,
+        })
+        .eq("id", r.id)
+        .in("status", REAP_STALE_STATUSES as unknown as string[])
+        .select("id");
+      if (uErr) {
+        console.error(`${tag} reap update failed for ${r.id.slice(0, 8)}: ${uErr.message}`);
+        continue;
+      }
+      if (updated && updated.length) {
+        reaped++;
+        console.warn(`${tag} REAP orphan build ${slug} (job ${r.id.slice(0, 8)}) — was ${r.status} with stale heartbeat → failed (single-owner-per-branch invariant)`);
+      }
+    }
+    return { reaped };
+  } catch (e) {
+    console.error(`${tag} slug-scoped sibling reap failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+    return { reaped: 0 };
+  }
+}
+
 // Is a build for this spec slug already live (active build job OR an open claude/<slug>-* PR)? The
 // auto-build dedup guard — never enqueue a second build / open a 4th identical PR for one spec slug.
 async function hasActiveBuildForSlug(slug: string): Promise<{ active: boolean; reason?: string }> {
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: reap stale orphans FIRST
+  // so a dead building/claimed row can't masquerade as active and (a) block a legitimate re-enqueue
+  // OR (b) end up co-live with a new build for the same spec. reapStaleSiblingBuildsForSlug flips
+  // any stale-heartbeat active build row for THIS slug to `failed` (terminal state per the spec —
+  // single-owner-per-branch invariant), so the .in(ACTIVE_BUILD_STATUSES) probe below reads the
+  // TRUE post-reap active-build set. Best-effort; a reap error just leaves the probe as-is.
+  await reapStaleSiblingBuildsForSlug(slug, { tag: "[hasActiveBuildForSlug]" });
   const { data: job } = await db
     .from("agent_jobs")
     .select("id")
@@ -20673,6 +20745,19 @@ async function dispatchJob(job: Job) {
   const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
+  // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: single-owner-per-branch
+  // invariant — before this freshly-claimed build touches the worktree, transition ANY sibling
+  // active build row for the same slug whose heartbeat is stale to `failed`. A worker-restart
+  // orphan (dead `building`/`claimed`/`queued_resume` row) can otherwise co-exist with the row we
+  // just claimed, and both would try to push to `claude/build-<slug>` — the losing push is a
+  // non-fast-forward reject and the phase work strands (Phase 2's rebase-retry rescues MOST of
+  // these; this ensures the orphan row itself doesn't stay live). Excludes THIS job so we never
+  // reap ourselves. Heartbeat-stale filter (>= REAP_STALE_MS) means a live process's row (bumped
+  // every M minutes by runBoxSession) is never eligible — no risk of yanking a live sibling. Runs
+  // BEFORE the claim-gate + worktree add so a live-orphan collision is caught before any side
+  // effect. Best-effort: a reap-internal error just logs and proceeds.
+  if (slug) await reapStaleSiblingBuildsForSlug(slug, { excludeJobId: job.id, tag });
+
   // claim-time-build-gate: the FIRST thing a freshly-claimed build does — refuse the claim unless the spec
   // is AUTHORED + Vale-spec-review-PASSED + every blocked_by SHIPPED (all DERIVED via the brain-roadmap
   // rollup, never the stored specs.status column). On a hold we UN-CLAIM (status→queued, claimed_at→null)
@@ -20898,15 +20983,33 @@ async function dispatchJob(job: Job) {
         console.log(`${tag} ${slug} basing fresh spec branch on the goal branch (${freshBase}) so it sees merged dependencies — NEVER main`);
       }
     }
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 1: when the spec branch
+    // ALREADY exists on remote (an earlier phase pushed), do an EXPLICIT per-branch fetch so the
+    // local `origin/${branch}` ref is at the current remote tip — not whatever a sibling worker/
+    // parallel push may have superseded since the blanket `git fetch origin` at the top of runJob.
+    // The remoteHasBranch probe above uses `ls-remote` (remote-authoritative), but the follow-up
+    // `git worktree add -B ${branch} ${wt} origin/${branch}` resolves origin/${branch} LOCALLY —
+    // if a concurrent push happened between the initial fetch and the worktree add, origin/${branch}
+    // is stale (or entirely absent, when the branch was born after the fetch), so the phase would
+    // be built on a base older than the true remote tip and its follow-up push would be a
+    // non-fast-forward. Fetching the specific ref right before the worktree add closes the window
+    // between remoteHasBranch and base-resolution — the last-line defense (Phase 2's rebase-retry
+    // on non-ff push) still catches a concurrent push AFTER the worktree add.
+    if (remoteHasBranch) sh("git", ["fetch", "origin", branch]);
     const base = remoteHasBranch ? `origin/${branch}` : freshBase;
     const add = sh("git", ["worktree", "add", "-B", branch, wt, base]);
     if (add.code !== 0) throw new Error(`worktree add failed (base ${base}): ${add.err.slice(0, 300)}`);
+    const baseSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim().slice(0, 8) || "?";
     console.log(
-      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base})` : `created fresh from ${base}`}`,
+      `${tag} spec branch ${branch} — ${remoteHasBranch ? `extending existing tip (${base} → ${baseSha})` : `created fresh from ${base} (→ ${baseSha})`}`,
     );
     await update(job.id, { spec_branch: branch });
   } else {
     removeWorktreeForBranch(branch!); // kills "already used by worktree" on resume — re-establish the tree cleanly
+    // Phase 1 (resume): same rebase-before-push protection — refresh the local origin/${branch} ref
+    // to the CURRENT remote tip before the worktree add, so a paused-then-resumed build that a sibling
+    // phase built on top of doesn't get based on the stale pre-pause tip.
+    sh("git", ["fetch", "origin", branch!]);
     let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
@@ -21611,10 +21714,60 @@ async function dispatchJob(job: Job) {
       await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
       return;
     }
-    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2: on a non-fast-forward
+    // push rejection (a sibling worker/phase pushed onto the same claude/build-<slug> after this
+    // build's worktree add), rebase onto the current remote tip and retry the push ONCE — the built
+    // phase commit is real work; a lost push here strands the spec mid-build and needs a human to
+    // re-kick (real: spec cx-box-agents-sol-cora-june-...-no-raw-sql, jobs a30ad1e5 pushed phase 1
+    // → a2520180 failed on non-ff and threw its phase away). Only a non-ff rejection is recoverable
+    // here; auth/network/other errors still mark the job failed with the original error. A rebase
+    // conflict fails to `needs_attention` (never a silent drop). Phase 1 (fetch+base on remote tip
+    // before the worktree add) closes the pre-build window; this is the last-line defense for the
+    // window between the worktree add and this push.
+    let push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
     if (push.code !== 0) {
-      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
-      return;
+      const combined = `${push.out}\n${push.err}`;
+      const isNonFastForward = /non-fast-forward|\(fetch first\)|rejected.*(fetch first|non-fast-forward)|Updates were rejected/i.test(combined);
+      if (isNonFastForward) {
+        console.warn(`${tag} non-fast-forward push on ${branch} — a sibling push moved the tip; fetching + rebasing + retrying once`);
+        const fetch = sh("git", ["fetch", "origin", branch!], { cwd: wt });
+        if (fetch.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed (non-fast-forward) and post-push fetch also failed",
+            log_tail: `push:\n${combined.slice(-1000)}\nfetch:\n${(fetch.out + fetch.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        const rebase = sh("git", ["rebase", `origin/${branch}`], { cwd: wt });
+        if (rebase.code !== 0) {
+          // Rebase conflict (or other rebase abort). Do NOT silently drop the phase — surface for a
+          // human. Abort the in-progress rebase so the worktree is left clean for the reap.
+          sh("git", ["rebase", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error: "phase push rebase-retry hit a conflict against the sibling push — cannot fast-forward without a merge decision",
+            log_tail: `push:\n${combined.slice(-800)}\nrebase:\n${(rebase.out + rebase.err).slice(-1000)}`.slice(-2000),
+          });
+          console.error(`${tag} rebase-retry CONFLICT on ${branch} — parked needs_attention (never silently dropped)`);
+          return;
+        }
+        const retryPush = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+        if (retryPush.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed after fetch+rebase retry",
+            log_tail: `push #1 (non-ff):\n${combined.slice(-600)}\nrebase: ok\npush #2:\n${(retryPush.out + retryPush.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        push = retryPush;
+        console.log(`${tag} rebase-retry SUCCESS on ${branch} — phase landed on top of the sibling push (no phase work lost)`);
+      } else {
+        // Genuine (non-recoverable) push error — auth / network / policy. Fail as before, don't retry.
+        await update(job.id, { status: "failed", error: "git push failed", log_tail: combined.slice(-2000) });
+        return;
+      }
     }
     // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
     // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best
