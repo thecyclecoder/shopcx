@@ -8,12 +8,14 @@ See [[../playbooks/README]] for the full data model and [[../playbooks/README]] 
 
 ## Active playbooks
 
-| Playbook | Trigger intents | Description |
-|---|---|---|
-| [[refund]] | refund_request, return_request, money_back, 30_day_guarantee, unwanted_charge, subscription_dispute, charged_without_permission, unauthorized_charge | Handles customers who were charged for a subscription renewal they didn't expect or want |
-| [[replacement-order]] | missing_items, not_received, damaged_items, where_is_my_order, expired_items | Order replacement for delivery errors, missing/damaged items, wrong addresses |
+| Playbook | Slug (`playbooks.slug`) | Trigger intents | Description |
+|---|---|---|---|
+| [[refund]] | `refund` | refund_request, return_request, money_back, 30_day_guarantee, unwanted_charge, subscription_dispute, charged_without_permission, unauthorized_charge | Handles customers who were charged for a subscription renewal they didn't expect or want |
+| [[replacement-order]] | `replacement-order` | missing_items, not_received, damaged_items, where_is_my_order, expired_items | Order replacement for delivery errors, missing/damaged items, wrong addresses |
 
 The Missing / Lost Order playbook exists in the DB (`is_active=false`) — folded into [[replacement-order]].
+
+**Slug column.** Every playbook row carries a `slug` (URL-safe identifier, unique per workspace). Sol names it on the Direction (`ticket_directions.plan.playbook_slug`) when she picks `chosen_path='playbook'` at first-touch — the writer at [[../libraries/ticket-directions]] `writeDirection` looks it up and rejects unknown slugs there, not at executor step 0. See [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] Phase 1.
 
 ## Data model
 

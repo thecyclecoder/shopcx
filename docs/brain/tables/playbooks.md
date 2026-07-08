@@ -11,6 +11,7 @@ Customer-service playbooks (e.g. unwanted_charge_subscription_dispute). Discover
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `name` | `text` | — |  |
+| `slug` | `text` | — | URL-safe identifier, unique per workspace. Sol writes it on `ticket_directions.plan.playbook_slug` when she picks `chosen_path='playbook'` at first-touch — the writer at [[../libraries/ticket-directions]] `writeDirection` looks it up before the Direction lands, so an unknown slug is rejected there (not at executor step 0). Backfilled from `name` (`lower(name)` → non-alnum → `-`, trimmed) in `20260708120000_playbooks_slug.sql`. See [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] Phase 1. |
 | `description` | `text` | ✓ |  |
 | `trigger_intents` | `text[]` | — | default: `'{}'` |
 | `trigger_patterns` | `text[]` | — | default: `'{}'` |
@@ -59,6 +60,7 @@ const { count } = await admin.from("playbooks")
 ## Gotchas
 
 - Discoverable by Sonnet via name OR any entry in `trigger_intents[]` (case-insensitive).
+- `slug` is the stable identifier Sol names on the Direction (`plan.playbook_slug`) — the deterministic matcher / manual-apply route still key off `id`. Unique per workspace via `playbooks_workspace_slug_key`; the writer at [[../libraries/ticket-directions]] `writeDirection` treats an unknown slug as a typed rejection, not a silent no-op.
 
 ---
 

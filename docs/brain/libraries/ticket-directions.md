@@ -7,7 +7,20 @@ Server SDK for the durable **Direction artifact** Sol writes ONCE per ticket on 
 ## Types
 
 - `TicketDirectionPath = "playbook" | "stateless" | "needs_info"` — the three treatment paths Sol can commit the ticket to on first touch. `playbook` drives an existing playbook; `stateless` is a single stateless reply; `needs_info` asks the customer for a specific missing piece before any action.
-- `TicketDirection` — the full row: `{ id, workspace_id, ticket_id, intent, context_summary, chosen_path, plan, guardrails, authored_by, authored_at, superseded_at }`. `plan` + `guardrails` are `Record<string, unknown>` (path-specific shapes; see the spec).
+- `TicketDirection` — the full row: `{ id, workspace_id, ticket_id, intent, context_summary, chosen_path, plan, guardrails, authored_by, authored_at, superseded_at, resession_count }`. `guardrails` is `Record<string, unknown>` (Sol picks the bounded proxies; hitting a rail = escalate — see [[../../CLAUDE]] § North star). `plan` is the typed `TicketDirectionPlan` (see plan-shape below).
+- `TicketDirectionPlanError` — typed exception thrown by `writeDirection` when the plan violates the path-specific contract. Carries `code: 'playbook_slug_missing' | 'playbook_slug_unknown' | 'playbook_slug_not_string'` + `slug?` so callers can render user-legible diagnostics without string-matching on `message`.
+
+## Plan-shape
+
+`plan` is `TicketDirectionPlan` — a path-specific object the writer validates BEFORE the row lands so downstream cheap-execution can dispatch without re-doing full-context reasoning:
+
+| `chosen_path` | Required `plan` keys | Optional `plan` keys | Writer check |
+|---|---|---|---|
+| `playbook` | `playbook_slug` (string, must exist in `public.playbooks.slug` for this workspace) | `playbook_seed_context` (record — order/subscription/customer ids to merge into `tickets.playbook_context` on step 0) | short lookup `SELECT id FROM playbooks WHERE workspace_id=? AND slug=?` — a null result throws `TicketDirectionPlanError(code='playbook_slug_unknown')` with the slug echoed |
+| `stateless` | — (Sol conventionally sets `action:"send_stateless_reply"`) | — | shape-only, no cross-table lookup |
+| `needs_info` | — (Sol conventionally sets `needs:[…]` with the concrete list of missing pieces) | — | shape-only, no cross-table lookup |
+
+Extra keys are preserved (path-specific ad-hoc knobs Sol may add). The `playbook` gate is Phase 1 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] — the choice of which playbook to run moves inside Sol's first-touch box session, retiring the signal-based matcher for the Sol cohort in Phase 2. Cross-link: [[../playbooks/README]] lists the currently active playbook slugs.
 
 ## Exports
 
@@ -22,7 +35,7 @@ async function writeDirection(
     intent: string;
     context_summary: string;
     chosen_path: TicketDirectionPath;
-    plan?: Record<string, unknown>;
+    plan?: TicketDirectionPlan;
     guardrails?: Record<string, unknown>;
     authored_by?: string;
   },
@@ -30,6 +43,8 @@ async function writeDirection(
 ```
 
 Inserts one LIVE Direction (`superseded_at IS NULL`) for a ticket. The DB-level partial UNIQUE guarantees exactly one live row per ticket — a concurrent second `writeDirection` on the same ticket errors here with `23505 unique_violation` (Postgres). Callers re-authoring a Direction MUST call `superseDirection` first. Default `authored_by` = `'sol_box_session'` (the spec's Phase 3 verification bullet asserts this value on Sol-written rows).
+
+Validates the `plan` against the `chosen_path` contract BEFORE the row is inserted (see [Plan-shape](#plan-shape)). For `chosen_path='playbook'` the writer runs a short `SELECT id FROM playbooks WHERE workspace_id=? AND slug=?` — a missing or unknown slug throws `TicketDirectionPlanError` with the slug echoed on the exception, so the caller (runTicketHandleJob → the worker) surfaces the diagnostic verbatim in the box-session log instead of the row landing with a slug the executor can't dispatch.
 
 **Called by:** `runTicketHandleJob` in [[../../scripts/builder-worker]] — after parsing Sol's final JSON and re-asserting the required-field invariant (learning #1 — the write is guarded on `intent`/`context_summary`/`chosen_path ∈ {playbook, stateless, needs_info}` before firing).
 
