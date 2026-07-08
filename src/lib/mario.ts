@@ -345,3 +345,269 @@ export async function readMarioThresholds(admin: Admin, workspace_id: string): P
 export function marioAdmin(): SupabaseClient {
   return createAdminClient();
 }
+
+// ── M4 Phase 1: dispatch wiring types + minimal appliers ────────────────────────
+// The runner (scripts/builder-worker.ts `runMarioJob`) parses Mario's terminal
+// JSON into `MarioVerdict`, hands the typed verdict to `applyBoxMario`, and on any
+// exception (or unparseable verdict after same-session repair) hands the job to
+// `failsafeStampMarioUnsure`. Phase 3 replaces `applyBoxMario`'s body with the
+// full kill-switch + loop-guard + non-destructive live-fix vocabulary + fix-spec
+// authoring + threshold self-tune; the Phase-1 body is a conservative stub that
+// records the verdict on `director_activity` (`mario_fired`) and completes the
+// job — NEVER executes any live_fix / threshold widen / fix-spec author.
+
+/** The supervising director slug ([[../../docs/brain/functions/platform.md]] Ada). */
+const MARIO_DIRECTOR_FUNCTION = "platform";
+/** The named actor for every director_activity row Mario writes (matches Reva's `GUARDIAN_ACTOR` pattern). */
+const MARIO_ACTOR = "mario";
+
+/** One non-destructive live fix in the M4 vocabulary — the exact action key + its target. */
+export interface MarioLiveFix {
+  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | ...open slot. */
+  action: string;
+  /** The specific row/slug/box the action mutates — Phase 3 helpers each read exactly one field. */
+  target: { spec_slug?: string; job_id?: string; box_id?: string };
+  /** Plain-language why — persisted verbatim on the director_activity row. */
+  reasoning: string;
+}
+
+/** The critical fix-spec Mario proposes when the stall class is likely recurring. */
+export interface MarioDurableFixSpec {
+  slug: string;
+  title: string;
+  why: string;
+  what: string;
+  phases: Array<{ title: string; why: string; what: string; body: string; verification: string }>;
+}
+
+/** The self-tuning widen Mario proposes when a false trigger fires — Phase 3 gates on a non-empty reason. */
+export interface MarioThresholdAdjustment {
+  from_event: string;
+  to_event: string;
+  new_sla_ms: number;
+  reason: string;
+}
+
+/**
+ * The terminal JSON envelope Mario emits. Every field is optional in the raw
+ * output — `normalizeMarioVerdict` fills in the conservative defaults so the
+ * runner never has to defend against a partial shape.
+ */
+export interface MarioVerdict {
+  trigger_accurate: boolean;
+  live_fix: MarioLiveFix | null;
+  durable_fix_spec: MarioDurableFixSpec | null;
+  threshold_adjustment: MarioThresholdAdjustment | null;
+  escalate: boolean;
+  reasoning: string;
+}
+
+/**
+ * Conservative default handed back on an unparseable verdict AFTER same-session
+ * repair fails. The runner uses this shape when it needs to record a
+ * shape-safe "we gave up" — never as a substitute for calling
+ * `failsafeStampMarioUnsure`.
+ */
+export const MARIO_CONSERVATIVE_DEFAULT_VERDICT: MarioVerdict = {
+  trigger_accurate: false,
+  live_fix: null,
+  durable_fix_spec: null,
+  threshold_adjustment: null,
+  escalate: true,
+  reasoning: "unparseable verdict",
+};
+
+/**
+ * `normalizeMarioVerdict` — turn a raw parsed JSON blob into a `MarioVerdict` or
+ * `null` if the shape can't be salvaged. Never throws. Missing/invalid fields
+ * fall back to the conservative-safe value (unknown → escalate; missing
+ * live_fix → null; a malformed live_fix.action drops the whole live_fix). The
+ * function is deliberately generous on the READ side and strict on the WRITE
+ * side (Phase 3 helpers each re-validate before mutating).
+ */
+export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
+  const trigger_accurate = r.trigger_accurate === true;
+  const escalate = r.escalate === true;
+
+  let live_fix: MarioLiveFix | null = null;
+  if (r.live_fix && typeof r.live_fix === "object") {
+    const lf = r.live_fix as Record<string, unknown>;
+    const action = typeof lf.action === "string" ? lf.action : "";
+    if (action) {
+      const target = (lf.target && typeof lf.target === "object" ? lf.target : {}) as Record<string, unknown>;
+      live_fix = {
+        action,
+        target: {
+          spec_slug: typeof target.spec_slug === "string" ? target.spec_slug : undefined,
+          job_id: typeof target.job_id === "string" ? target.job_id : undefined,
+          box_id: typeof target.box_id === "string" ? target.box_id : undefined,
+        },
+        reasoning: typeof lf.reasoning === "string" ? lf.reasoning : "",
+      };
+    }
+  }
+
+  let durable_fix_spec: MarioDurableFixSpec | null = null;
+  if (r.durable_fix_spec && typeof r.durable_fix_spec === "object") {
+    const d = r.durable_fix_spec as Record<string, unknown>;
+    const slug = typeof d.slug === "string" ? d.slug : "";
+    const title = typeof d.title === "string" ? d.title : "";
+    if (slug && title) {
+      const rawPhases = Array.isArray(d.phases) ? d.phases : [];
+      const phases = rawPhases.map((p) => {
+        const o = (p || {}) as Record<string, unknown>;
+        return {
+          title: typeof o.title === "string" ? o.title : "",
+          why: typeof o.why === "string" ? o.why : "",
+          what: typeof o.what === "string" ? o.what : "",
+          body: typeof o.body === "string" ? o.body : "",
+          verification: typeof o.verification === "string" ? o.verification : "",
+        };
+      });
+      durable_fix_spec = {
+        slug,
+        title,
+        why: typeof d.why === "string" ? d.why : "",
+        what: typeof d.what === "string" ? d.what : "",
+        phases,
+      };
+    }
+  }
+
+  let threshold_adjustment: MarioThresholdAdjustment | null = null;
+  if (r.threshold_adjustment && typeof r.threshold_adjustment === "object") {
+    const t = r.threshold_adjustment as Record<string, unknown>;
+    const from_event = typeof t.from_event === "string" ? t.from_event : "";
+    const to_event = typeof t.to_event === "string" ? t.to_event : "";
+    const rawSla = t.new_sla_ms;
+    const new_sla_ms = typeof rawSla === "number" ? rawSla : Number.parseInt(String(rawSla ?? ""), 10);
+    if (from_event && to_event && Number.isFinite(new_sla_ms) && new_sla_ms > 0) {
+      threshold_adjustment = {
+        from_event,
+        to_event,
+        new_sla_ms,
+        reason: typeof t.reason === "string" ? t.reason : "",
+      };
+    }
+  }
+
+  return { trigger_accurate, live_fix, durable_fix_spec, threshold_adjustment, escalate, reasoning };
+}
+
+/** The result `applyBoxMario` hands back to the runner — Phase 3 adds more fields as vocabulary lands. */
+export interface ApplyBoxMarioResult {
+  ok: boolean;
+  reason?: string;
+  recorded?: boolean;
+}
+
+/**
+ * `applyBoxMario` — Phase 1 stub. Records the incoming verdict as a
+ * `director_activity` row (`mario_fired`) for observability so the trigger-
+ * accuracy query in Phase 4 starts populating on day one, and returns
+ * `{ok:true, recorded:true}` so the runner completes the job. NEVER executes
+ * any live_fix / threshold widen / fix-spec author — Phase 3 adds the
+ * kill-switch + atomic claim-guard + loop-guard + per-action mutators.
+ *
+ * The Phase-1 body deliberately absorbs errors and returns `{ok:false}` on
+ * a lookup failure so the runner's fail-safe path takes over — Mario never
+ * throws from the applier.
+ */
+export async function applyBoxMario(
+  admin: Admin,
+  jobId: string,
+  verdict: MarioVerdict,
+): Promise<ApplyBoxMarioResult> {
+  try {
+    const { data: row, error } = await admin
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (error || !row) return { ok: false, reason: "job_not_found" };
+
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+    const rec = await recordDirectorActivity(admin, {
+      workspaceId: row.workspace_id,
+      directorFunction: MARIO_DIRECTOR_FUNCTION,
+      actionKind: "mario_fired",
+      specSlug: row.spec_slug,
+      reason: (verdict.reasoning || "(no reasoning)").slice(0, 4000),
+      metadata: {
+        actor: MARIO_ACTOR,
+        trigger_accurate: verdict.trigger_accurate,
+        live_fix_action: verdict.live_fix?.action ?? null,
+        live_fix_target: verdict.live_fix?.target ?? null,
+        durable_fix_spec_slug: verdict.durable_fix_spec?.slug ?? null,
+        threshold_adjustment: verdict.threshold_adjustment ?? null,
+        escalate: verdict.escalate,
+        job_id: jobId,
+        phase: "phase-1-stub",
+      },
+    });
+    return { ok: true, recorded: rec.recorded };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * `failsafeStampMarioUnsure` — Phase 1 fail-safe. Fires from the runner when
+ * the Max session errored, the verdict was unparseable after same-session
+ * repair, or `applyBoxMario` returned `{ok:false}`. Parks the job
+ * `needs_attention` with `error='mario_verdict_missing'` (compare-and-set
+ * against an in-flight status so a double-invoke no-ops — mirrors the
+ * `failsafeStampWatchUnsure` idempotency contract) and writes one
+ * `mario_failsafe` director_activity row for the audit trail. NEVER executes
+ * any live_fix (absence of judgment ≠ evidence to act).
+ */
+export async function failsafeStampMarioUnsure(
+  admin: Admin,
+  args: { jobId: string; reason: string; workspaceId?: string | null; specSlug?: string | null },
+): Promise<{ stamped: boolean; reason?: string }> {
+  try {
+    const { data: row } = await admin
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, status")
+      .eq("id", args.jobId)
+      .maybeSingle();
+    if (!row) return { stamped: false, reason: "job_not_found" };
+
+    const { data: claimed } = await admin
+      .from("agent_jobs")
+      .update({
+        status: "needs_attention",
+        error: "mario_verdict_missing",
+        log_tail: `mario fail-safe: ${args.reason}`.slice(0, 2000),
+      })
+      .eq("id", args.jobId)
+      .in("status", ["queued", "claimed", "building"])
+      .select("id");
+    const stamped = Array.isArray(claimed) && claimed.length > 0;
+
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      await recordDirectorActivity(admin, {
+        workspaceId: args.workspaceId ?? row.workspace_id,
+        directorFunction: MARIO_DIRECTOR_FUNCTION,
+        actionKind: "mario_failsafe",
+        specSlug: args.specSlug ?? row.spec_slug,
+        reason: args.reason.slice(0, 4000),
+        metadata: {
+          actor: MARIO_ACTOR,
+          job_id: args.jobId,
+          failsafe_reason: args.reason,
+          stamped,
+        },
+      });
+    } catch (e) {
+      console.warn("[mario] failsafe activity write failed:", e instanceof Error ? e.message : e);
+    }
+    return { stamped, reason: stamped ? undefined : "not_in_flight" };
+  } catch (e) {
+    return { stamped: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
