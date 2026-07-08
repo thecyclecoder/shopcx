@@ -12095,6 +12095,35 @@ async function runCsDirectorCallJob(job: Job) {
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
     }
 
+    // Phase 1 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — write
+    // an INTERNAL system note on the ticket for EVERY verdict (approve_remedy | author_spec |
+    // escalate_founder). Before this shipped, an `author_spec` verdict left the ticket open +
+    // escalated + note-less — the CS agent looking at the queue couldn't tell it had been
+    // reviewed. The note names June (reviewer), the decision, the 2-4 sentence reasoning, and
+    // the concrete per-verdict output (spec slug | remedy summary | founder-escalation reason)
+    // via the same `ticket_messages` write path every other internal note uses
+    // (visibility='internal', author_type='system'). Best-effort — the primary audit trail is
+    // `director_activity` above, so a failed insert here never rolls back the completed job.
+    try {
+      const { buildCsDirectorVerdictNote } = await import("../src/lib/cs-director-verdict-note");
+      const noteBody = buildCsDirectorVerdictNote({
+        decision: verdict.decision,
+        reasoning: verdict.reasoning,
+        remedy: verdict.remedy ?? null,
+        spec_seed: verdict.spec_seed ?? null,
+      });
+      const { error: noteErr } = await db.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: noteBody,
+      });
+      if (noteErr) console.warn(`${tag} internal-note insert failed: ${noteErr.message}`);
+    } catch (e) {
+      console.warn(`${tag} internal-note write threw:`, e instanceof Error ? e.message : e);
+    }
+
     // june-review-replaces-solver-skeptic-quorum-triage Phase 1 — also record the verdict to
     // `triage_runs` so the escalation-triage audit slice reflects the leaner June-review path (no
     // solver-skeptic-quorum sweep produced this call; June's review IS the triage). `verdict` is
