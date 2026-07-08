@@ -2371,6 +2371,31 @@ async function markReady(prNumber: number): Promise<boolean> {
 
 let db: Awaited<ReturnType<typeof admin>>;
 
+// spec-timecard-chokepoint-instrumentation Phase 1: single wrapper the worker's lifecycle chokepoints
+// (Vale/build/ship/fold) call to append one timecard event per checkpoint. Best-effort — the SDK
+// already swallows insert errors, but the extra try/catch keeps an SDK-load failure (dynamic import
+// crash) from ever escaping into the chokepoint's own control flow. Emits a single `[timecards]`
+// warning on any failure. See [[../docs/brain/tables/spec_timecard_events]].
+async function emitTimecard(input: {
+  workspace_id: string;
+  spec_slug: string;
+  phase_index?: number | null;
+  event_kind: string;
+  actor: string;
+  wait_kind?: string | null;
+  waiting_on?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const { recordTimecardEvent } = await import("../src/lib/spec-timecards");
+    await recordTimecardEvent(db, input);
+  } catch (e) {
+    console.warn(
+      `[timecards] emit failed spec=${input.spec_slug} kind=${input.event_kind}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
 async function update(id: string, patch: Record<string, unknown>) {
   // needs-input-must-carry-a-question — reject an EMPTY needs_input park at the single chokepoint.
   // A `needs_input` park is an answerable pause: the owner inbox / build card / /dashboard/migrations
@@ -8880,6 +8905,21 @@ async function runFoldJob(job: Job) {
     }
   }
 
+  // spec-timecard-chokepoint-instrumentation Phase 1 — one fold_started per slug in the surviving batch
+  // (post-guards). phase_index=null (fold is spec-level). Best-effort per slug; a timecard failure never
+  // blocks the fold. Fired here (post-release, pre-worktree) so a slug released back to `pending` above
+  // never gets an unmatched fold_started.
+  for (const slug of slugs) {
+    await emitTimecard({
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "fold_started",
+      actor: "worker",
+      metadata: { job_id: job.id, batch_size: slugs.length },
+    });
+  }
+
   sh("git", ["fetch", "origin"]);
   let branch = job.spec_branch;
   sh("git", ["worktree", "remove", "--force", wt]);
@@ -8998,6 +9038,18 @@ async function runFoldJob(job: Job) {
         const { setSpecStatus } = await import("../src/lib/specs-table");
         for (const slug of slugs) await setSpecStatus(job.workspace_id, slug, "folded", "fold-worker");
       }
+      // spec-timecard-chokepoint-instrumentation Phase 1 — no-op fold terminal (no brain changes): the
+      // specs still folded from the ledger's point of view.
+      for (const slug of slugs) {
+        await emitTimecard({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          phase_index: null,
+          event_kind: "folded",
+          actor: "worker",
+          metadata: { job_id: job.id, no_new_changes: true },
+        });
+      }
       // A fold can pause on needs_input → draft PR; un-draft it on a no-new-change resume (same gap as runJob).
       const pr = await ensurePr(branch!, slugs[0] || "fold", false);
       if (pr) {
@@ -9038,6 +9090,18 @@ async function runFoldJob(job: Job) {
     {
       const { setSpecStatus } = await import("../src/lib/specs-table");
       for (const slug of slugs) await setSpecStatus(job.workspace_id, slug, "folded", "fold-worker");
+    }
+    // spec-timecard-chokepoint-instrumentation Phase 1 — the post-commit success terminal: PR opened
+    // and the batch flipped to `folded`. Emit one `folded` event per slug.
+    for (const slug of slugs) {
+      await emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: null,
+        event_kind: "folded",
+        actor: "worker",
+        metadata: { job_id: job.id, pr: pr.number, pr_url: pr.url },
+      });
     }
     await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: logTail });
     console.log(`${tag} ✓ completed → ${pr.url}`);
@@ -11164,6 +11228,19 @@ async function runSpecReviewJob(job: Job) {
     }
   }
 
+  // spec-timecard-chokepoint-instrumentation Phase 1 — Vale enters review for each materialized slug.
+  // phase_index=null (Vale reviews the spec as a whole, not a specific phase).
+  for (const slug of reviewable) {
+    await emitTimecard({
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "review_started",
+      actor: "vale",
+      metadata: { job_id: job.id },
+    });
+  }
+
   // agent-mandate-hardening-spec-review Phase 1 — bake the accumulated coaching into the run-job. Pre-
   // resolve every goal in the workspace so Vale can validate any `Parent: [[../goals/{slug}]]` or
   // `[[../goals/{slug}#M{n}-…]]` wikilink against the DB row directly. The rejection pattern the coaching
@@ -11298,6 +11375,16 @@ async function runSpecReviewJob(job: Job) {
       const disposition = rawDisposition && rawDispositionReason ? rawDisposition : undefined;
       const disposition_reason = disposition ? rawDispositionReason : undefined;
       const result = await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects, disposition, disposition_reason });
+      // spec-timecard-chokepoint-instrumentation Phase 1 — Vale's verdict lands. phase_index=null; a
+      // pass/needs_fix is a spec-level event (Vale reviews the whole spec at the vale_pass seam).
+      await emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: d.slug,
+        phase_index: null,
+        event_kind: result.applied === "pass" ? "review_passed" : "review_failed",
+        actor: "vale",
+        metadata: { job_id: job.id, ...(defects.length ? { defects } : {}) },
+      });
       if (result.applied === "pass") {
         passed++;
         if (disposition) dispositions++;
@@ -21271,6 +21358,16 @@ async function dispatchJob(job: Job) {
             try {
               await stampPhaseBuilt(job.workspace_id, slug, pos, { build_sha: opts.headSha });
               console.log(`${tag} stamped phase ${pos} BUILT (build_sha ${opts.headSha.slice(0, 8)}, in_progress — not shipped)`);
+              // spec-timecard-chokepoint-instrumentation Phase 1 — every phase-position we just stamped
+              // BUILT gets one build_done. Best-effort; a timecard failure never blocks stampPhaseBuilt.
+              await emitTimecard({
+                workspace_id: job.workspace_id,
+                spec_slug: slug,
+                phase_index: pos,
+                event_kind: "build_done",
+                actor: "worker",
+                metadata: { job_id: job.id, build_sha: opts.headSha },
+              });
             } catch (e) {
               console.error(`${tag} stampPhaseBuilt(pos=${pos}) failed (non-fatal, continuing):`, e instanceof Error ? e.message : e);
             }
@@ -21519,6 +21616,21 @@ async function dispatchJob(job: Job) {
           console.error(`${tag} next-planned-phase derivation failed (proceeding unscoped — pre-flight still applies):`, e instanceof Error ? e.message : e);
         }
       }
+    }
+
+    // spec-timecard-chokepoint-instrumentation Phase 1 — a build session is opening for this spec. The
+    // build/plan-pool claim RPC just flipped this row to `building`; emit build_started at the point the
+    // TypeScript worker actually starts running the phase, once phasePosition is derived. phase_index
+    // carries the 1-based phase position (null on a one-shot / unscoped session).
+    if (slug) {
+      await emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: phasePosition,
+        event_kind: "build_started",
+        actor: "worker",
+        metadata: { job_id: job.id, resume: !!isResume },
+      });
     }
 
     // `isResume && sessionId`: a started-fresh run (owning account was capped → sessionId cleared) has no
