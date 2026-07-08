@@ -1596,6 +1596,32 @@ export async function runControlTowerMonitor(): Promise<MonitorResult> {
       } else {
         // Newly red → open an incident + page owners. The partial unique index is
         // the backstop against a racing double-open (concurrency-1 cron makes it rare).
+        //
+        // Snapshot-vs-write race guard (cron_freshness only): the snapshot's beats
+        // read happens ~ms before this insert. For a cron whose livenessWindowMs is
+        // ~2× its cadence, the next scheduled firing's heartbeat can land in the same
+        // second the alert row is being written (loop:portal-auto-resume-cron — 20:15
+        // UTC beat wrote at 20:15:12.049, snapshot-based alert would have written at
+        // 20:15:12.281 → false page). Re-read the single most recent beat right at
+        // the write moment; if it's now within the window, the cron has already
+        // recovered mid-tick — skip the insert. A truly stale cron still has no
+        // fresh beat, so the assertion is unchanged for real failures.
+        if (loop.violation.reason === "cron_freshness") {
+          const { data: fresh } = await admin
+            .from("loop_heartbeats")
+            .select("ran_at")
+            .eq("loop_id", loop.id)
+            .order("ran_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (fresh?.ran_at) {
+            const def = MONITORED_LOOPS.find((l) => l.id === loop.id);
+            const windowMs = def?.livenessWindowMs ?? 26 * 60 * 60_000;
+            if (Date.now() - new Date(fresh.ran_at).getTime() <= windowMs) {
+              continue;
+            }
+          }
+        }
         const { error } = await admin.from("loop_alerts").insert({
           loop_id: loop.id,
           kind: loop.kind,
