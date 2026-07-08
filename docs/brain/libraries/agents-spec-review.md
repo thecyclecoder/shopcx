@@ -62,6 +62,10 @@ Apply ONE Vale quality verdict to `spec_card_state` + record the audit row. Two 
 
 Best-effort + idempotent — re-running the same verdict produces the same end state. Errors are swallowed (the box rerun catches them next cadence). Legacy `approve`/`defer` verdict strings auto-route as `pass`.
 
+#### spec-review-pass-always-stamps-review-passed-flag Phase 1 — durable-stamp invariant
+
+On a `pass` the applier now runs `assertDurableReviewPassStamp(workspaceId, slug)` AFTER `markSpecCardValePassed` and BEFORE the `spec_review_passed` `director_activity` write. It re-reads `specs.vale_review_passed_at`; if NULL (the dual-write inside `upsertCardState` silently dropped it — the outer `try/catch` swallows all errors as best-effort), it forces a **compare-and-set** direct UPDATE to `now()`. The write is NOT swallowed — a failure THROWS and the outer try/catch turns the whole apply into `ok:false`, so the audit row is **never** recorded on a pass without a durable stamp. This is the invariant: `activity_row(spec_review_passed) ⇒ specs.vale_review_passed_at IS NOT NULL`. Idempotent — an already-stamped row returns immediately after a single SELECT. Covers the `spec-dispose.ts:141-148` author-intent fallback transitively, because Ada's disposition NEVER consumes `vale_review_passed_at` (unlike `vale_pass` — see [[spec-card-state]] `SpecCardFlags.vale_review_passed` doc), so once the invariant holds at pass time it survives disposition into `planned`/`shipped` unchanged.
+
 ## Verdict types
 
 ```ts

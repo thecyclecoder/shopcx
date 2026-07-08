@@ -30,7 +30,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { markSpecCardValePassed, markSpecCardValeNeedsFix } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
-import { listSpecs } from "@/lib/specs-table";
+import { getSpec, listSpecs, stampSpecValeReviewPassed } from "@/lib/specs-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -180,6 +180,51 @@ export async function enqueueSpecReviewIfDue(
 }
 
 /**
+ * spec-review-pass-always-stamps-review-passed-flag Phase 1 — the durable stamp is INVARIANT-BACKED.
+ *
+ * `markSpecCardValePassed` writes the durable `specs.vale_review_passed_at` timestamp through
+ * `upsertCardState → dualWriteSpecRow`, but `upsertCardState` swallows ALL internal errors as
+ * best-effort (a mirror hiccup must never break the underlying flow). So a transient failure of
+ * the specs UPDATE (rare — RLS blip, network reset, pooler hiccup) left the durable stamp NULL
+ * while the caller happily continued to record a `spec_review_passed` director_activity row.
+ * Net: some passed specs had an activity row but a NULL `vale_review_passed_at` — invisible to
+ * Vale's queue selector (it stayed in-queue and got re-reviewed) AND to the claim-time build gate
+ * (which reads `specs.vale_review_passed_at`, so the spec's build was silently held.)
+ *
+ * The FIX (Phase 1 — "every pass durably stamps the flag"): after `markSpecCardValePassed`, this
+ * helper re-reads `specs.vale_review_passed_at` for the slug; if it's still NULL we do a DIRECT
+ * guaranteed UPDATE to `now()`. Errors here are NOT swallowed — they THROW, so the outer
+ * `applySpecReviewDecision` try/catch turns the whole apply into `ok:false` and the
+ * `spec_review_passed` director_activity row is NEVER recorded on a pass that failed to stamp.
+ * This is the invariant: activity_row(spec_review_passed) ⇒ specs.vale_review_passed_at IS NOT NULL.
+ *
+ * Idempotent + cheap: an already-stamped row returns immediately with no writes (single SELECT).
+ * Covers the "author-intent fallback" case at `spec-dispose.ts:141-148` transitively too — Ada's
+ * disposition NEVER consumes `vale_review_passed_at` (unlike `vale_pass`), so once this invariant
+ * holds, the stamp survives through disposition into planned/shipped exactly as designed.
+ */
+async function assertDurableReviewPassStamp(
+  workspaceId: string,
+  slug: string,
+): Promise<void> {
+  const row = await getSpec(workspaceId, slug);
+  if (!row) throw new Error(`durable-stamp: specs row missing for ${slug} (cannot stamp vale_review_passed_at)`);
+  if (row.vale_review_passed_at) return; // already durably stamped by markSpecCardValePassed's dual-write.
+  // Force the durable stamp via the narrow SDK writer (compare-and-set on `vale_review_passed_at IS NULL`
+  // so a racing writer can't be clobbered). Errors THROW — the caller's outer try/catch returns ok:false
+  // and refuses to record the spec_review_passed activity row without a durable stamp.
+  const stamped = await stampSpecValeReviewPassed(workspaceId, slug);
+  if (stamped) return; // we stamped it — invariant holds.
+  // Compare-and-set matched 0 rows: either a racing writer beat us to it, or the row was folded/deleted
+  // between the read and the write. Re-read to distinguish; the invariant is preserved iff the row still
+  // exists with a non-null stamp OR the row is gone.
+  const after = await getSpec(workspaceId, slug);
+  if (after && after.vale_review_passed_at == null) {
+    throw new Error(`durable-stamp: ${slug} still NULL after guaranteed write (row exists) — invariant broken`);
+  }
+}
+
+/**
  * Apply ONE Vale quality decision to spec_card_state + record the audit trail (Phase 3).
  *
  *   - `pass` sets `flags.vale_pass=true` (the spec stays in `in_review` for Ada's disposition lane);
@@ -190,6 +235,13 @@ export async function enqueueSpecReviewIfDue(
  * Back-compat: a legacy Phase-2 verdict (`approve` / `defer`) auto-routes as `pass` (the disposition is
  * Ada's call now). The director_activity action_kind reflects the live Phase-3 vocabulary so the audit
  * ledger doesn't carry orphaned legacy strings.
+ *
+ * spec-review-pass-always-stamps-review-passed-flag Phase 1 — on a PASS, `assertDurableReviewPassStamp`
+ * runs AFTER `markSpecCardValePassed` and BEFORE the activity write. It re-reads
+ * `specs.vale_review_passed_at`; if NULL (mirror dual-write dropped the stamp), it forces a direct
+ * guaranteed UPDATE and THROWS on failure — the outer try/catch then returns `ok:false` and the
+ * `spec_review_passed` audit row is NEVER recorded on a pass without a durable stamp. Enforces the
+ * invariant: activity_row(spec_review_passed) ⇒ specs.vale_review_passed_at IS NOT NULL.
  */
 export async function applySpecReviewDecision(
   workspaceId: string,
@@ -240,6 +292,9 @@ export async function applySpecReviewDecision(
           ? { disposition, disposition_reason: dispositionReason }
           : undefined,
       );
+      // spec-review-pass-always-stamps-review-passed-flag Phase 1 — invariant guard. Throws on failure
+      // so the activity row below is NEVER recorded on a pass without a durable stamp.
+      await assertDurableReviewPassStamp(workspaceId, decision.slug);
     } else {
       // vale-instant-per-spec-review — stamp the durable needs_fix marker (`vale_pass=false`) so the spec
       // LEAVES Vale's queue until it's re-authored. Without this, the ~30s instant-per-spec poll would

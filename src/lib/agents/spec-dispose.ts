@@ -138,6 +138,13 @@ export function adaDispositionFor(candidate: DispositionCandidate): AdaDecision 
   // Back-compat: no stored Vale rec → fall back to the author's intended (today's trust-the-author
   // behavior). A pre-migration legacy pass whose vale_pass was set BEFORE the vale_disposition columns
   // existed lands here; the sweep still flips the card silently, matching prior behavior.
+  //
+  // spec-review-pass-always-stamps-review-passed-flag Phase 1 — durable-stamp invariant survives this
+  // fallback by construction: `applyAdaDisposition` (spec-card-state.ts:678) clears `vale_pass` /
+  // `intended_status` / `ada_disposition` but NEVER touches `vale_review_passed` (see the flag doc at
+  // spec-card-state.ts:79-85). So a legacy pass whose durable stamp was set on the pass path survives
+  // disposition into `planned` and the claim-time build gate sees the flag; a legacy pass whose stamp
+  // was NEVER set (pre-Phase-1) is the exact case the Phase-2 reconciler will heal.
   if (valeRec !== "planned" && valeRec !== "deferred") {
     return {
       kind: "same",
