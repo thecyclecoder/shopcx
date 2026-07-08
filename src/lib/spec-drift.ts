@@ -40,6 +40,7 @@ import {
   stampPhaseShipped,
   type SpecPhaseRow,
 } from "@/lib/specs-table";
+import { listGoals, type GoalRow } from "@/lib/goals-table";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -60,6 +61,55 @@ async function gh(method: string, path: string, body?: unknown): Promise<{ ok: b
   });
   const text = await res.text();
   return { ok: res.ok, status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
+}
+
+// ── Goal-aware guard (reese-goal-aware-drift Phase 1) ───────────────────────────────────────────
+//
+// A goal member spec's `claude/build-{slug}` branch merges onto `goal/{goal-slug}` (M4 — stamps
+// `specs.goal_branch_sha`), NOT onto `main`. The goal's `claude/goal-{slug}` branch only lands on
+// main atomically at M5 (stamps `goals.main_merge_sha`). Between M4 and M5 the phase's code is on
+// the goal branch, not main — a shipped phase in that window looks "code missing from main" to a
+// naive path check, and the reconciler would open a reverse-drift row against a phase that is
+// accumulating normally.
+//
+// This guard says: if the spec is a goal member whose owning goal has not promoted to main yet
+// (`goals.main_merge_sha === null`), do NOT classify the phase as reverse-drift. Once the goal
+// promotes, the normal on-main check applies and a genuine post-merge revert still surfaces.
+//
+// Pure helper — takes the loaded goal list and the spec's milestone_id. Feeds both the reconciler's
+// suspect-set filter and the pre-filter's short-circuit. Testable without DB or GitHub.
+
+export interface GoalPendingVerdict {
+  /** True iff the spec belongs to a goal whose atomic goal→main promotion has not landed. */
+  pending: boolean;
+  /** The owning goal's slug when `pending` is true (for the reasoning line the caller emits). */
+  goalSlug: string | null;
+  /** The owning goal's title when `pending` is true. */
+  goalTitle: string | null;
+}
+
+/**
+ * Is this spec a member of a goal whose `goals.main_merge_sha` is still null? Pure — a
+ * standalone spec (no `milestone_id`) always returns `pending: false`. A milestone whose parent
+ * goal isn't in `goals` (stale, deleted) returns `pending: false` — the guard fails safe (never
+ * suppresses a real drift). Once the goal promotes (`main_merge_sha` set) the return flips to
+ * `pending: false` and the normal on-main check applies.
+ */
+export function isGoalPendingPromotion(
+  milestoneId: string | null | undefined,
+  goals: readonly GoalRow[],
+): GoalPendingVerdict {
+  if (!milestoneId) return { pending: false, goalSlug: null, goalTitle: null };
+  for (const g of goals) {
+    for (const m of g.milestones) {
+      if (m.id !== milestoneId) continue;
+      if (g.main_merge_sha === null) {
+        return { pending: true, goalSlug: g.slug, goalTitle: g.title };
+      }
+      return { pending: false, goalSlug: g.slug, goalTitle: g.title };
+    }
+  }
+  return { pending: false, goalSlug: null, goalTitle: null };
 }
 
 // ── Phase shape (DB row → drift-reconciler view) ─────────────────────────────────────────────────
@@ -243,6 +293,26 @@ export async function driftPreFilterPhase(
   if (!spec) return null;
   const phase = driftPhasesFromRows(spec.phases).find((p) => p.index === phaseIndex);
   if (!phase) return null;
+
+  // Goal-aware guard (reese-goal-aware-drift Phase 1): a shipped phase whose spec is a member of a
+  // goal that has not yet promoted to main lives on the goal branch, not main. Report it as
+  // `code-present` with a goal-pending reasoning so the caller auto-resolves any stale drift row
+  // without a Max session and without escalation. Fail-open — a listGoals read failure falls
+  // through to the normal path check (never suppress a real drift on a hiccup).
+  if (spec.milestone_id) {
+    try {
+      const goals = await listGoals(workspaceId);
+      const gp = isGoalPendingPromotion(spec.milestone_id, goals);
+      if (gp.pending) {
+        return {
+          verdict: "code-present",
+          reasoning: `goal-pending: spec is a member of goal ${gp.goalSlug ?? ""} whose atomic goal→main promotion has not landed (main_merge_sha is null) — the phase's code lives on the goal branch, not main; not reverse-drift`,
+          symbolsFound: [],
+          pathsMissing: [],
+        };
+      }
+    } catch { /* fall through to normal path/symbol checks */ }
+  }
 
   const paths = extractCodePaths(phase.body);
   if (!paths.length) return null; // nothing to verify → let the session decide (rare — reverse-drift phases usually name paths)
@@ -1010,10 +1080,19 @@ export async function runSpecDriftReconciler(workspaceId: string): Promise<Drift
   //     verification, we read the typed body straight from the canonical row. Through the specs-table SDK
   //     (no raw PM SQL — pm-db-agent-toolkit); filter to shipped phases of non-folded specs in memory.
   const specRows = await listSpecs(workspaceId);
+  // Goal-aware guard (reese-goal-aware-drift Phase 1) — load the goal list once + skip specs whose
+  // owning goal has not promoted to main yet. A goal-member's shipped phase's code lives on the
+  // goal branch until the goal atomically promotes; scanning it against main would false-flag a
+  // reverse-drift row. Any existing open row for such a spec auto-resolves via `syncReverseDriftRows`
+  // (which resolves any open row not in the current suspect set). Fail-open — a `listGoals` read
+  // failure falls back to the non-goal-aware scan (never suppress a real drift on a hiccup).
+  let goalsForGuard: GoalRow[] = [];
+  try { goalsForGuard = await listGoals(workspaceId); } catch { goalsForGuard = []; }
   const shippedBySlug = new Map<string, { position: number; title: string; body: string }[]>();
   for (const spec of specRows) {
     if (spec.status === "folded") continue;
     if (archived.has(spec.slug)) continue;
+    if (isGoalPendingPromotion(spec.milestone_id, goalsForGuard).pending) continue;
     const shipped = spec.phases.filter((p) => p.status === "shipped");
     if (!shipped.length) continue;
     shippedBySlug.set(

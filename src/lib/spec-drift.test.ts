@@ -15,7 +15,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickMergedPrFromList, type BranchPrCandidate } from "./spec-drift";
+import { isGoalPendingPromotion, pickMergedPrFromList, type BranchPrCandidate } from "./spec-drift";
+import type { GoalRow } from "./goals-table";
 
 const OPEN: BranchPrCandidate = { number: 100, merged_at: null, merge_commit_sha: null };
 const CLOSED_UNMERGED: BranchPrCandidate = { number: 949, merged_at: null, merge_commit_sha: null };
@@ -83,4 +84,84 @@ test("pickMergedPrFromList: a non-array payload (e.g. GitHub returned an error o
   const garbage = { message: "Bad credentials" } as unknown as BranchPrCandidate[];
   assert.doesNotThrow(() => pickMergedPrFromList(garbage));
   assert.equal(pickMergedPrFromList(garbage), null);
+});
+
+// ── isGoalPendingPromotion — reese-goal-aware-drift Phase 1 ────────────────────────────────────
+//
+// The named failing state: a shipped phase of a goal member whose goal.main_merge_sha is null was
+// being classified as reverse-drift by the on-main path check (three currently-open Sol rows).
+// These tests pin the guard: the goal-pending case returns `pending: true`; every non-pending shape
+// (standalone spec / goal member post-merge / unknown milestone) returns `pending: false` so a
+// genuine post-merge revert still opens a drift row.
+
+const NOW = "2026-07-08T00:00:00Z";
+function goal(input: { slug: string; milestones: Array<{ id: string; position?: number; title?: string }>; main_merge_sha: string | null }): GoalRow {
+  return {
+    id: `g-${input.slug}`,
+    workspace_id: "ws",
+    slug: input.slug,
+    title: input.slug,
+    body: "",
+    outcome: null,
+    success_metric: null,
+    owner: "platform",
+    proposer_function: null,
+    parent_goal_id: null,
+    is_parent: false,
+    status: "greenlit",
+    why: null,
+    main_merge_sha: input.main_merge_sha,
+    promotion_held_reason: null,
+    created_at: NOW,
+    updated_at: NOW,
+    milestones: input.milestones.map((m, i) => ({
+      id: m.id,
+      goal_id: `g-${input.slug}`,
+      position: m.position ?? i + 1,
+      title: m.title ?? `M${i + 1}`,
+      body: null,
+      why: null,
+      what: null,
+      created_at: NOW,
+      updated_at: NOW,
+    })),
+  };
+}
+
+test("isGoalPendingPromotion: goal member whose goal main_merge_sha is null → pending:true (the Sol false-positive shape)", () => {
+  const goals = [goal({ slug: "sol", milestones: [{ id: "m-sol-1" }], main_merge_sha: null })];
+  const v = isGoalPendingPromotion("m-sol-1", goals);
+  assert.equal(v.pending, true);
+  assert.equal(v.goalSlug, "sol");
+});
+
+test("isGoalPendingPromotion: goal member AFTER its goal promoted (main_merge_sha set) → pending:false (drift row still opens for real revert)", () => {
+  const goals = [goal({ slug: "sol", milestones: [{ id: "m-sol-1" }], main_merge_sha: "abc123" })];
+  const v = isGoalPendingPromotion("m-sol-1", goals);
+  assert.equal(v.pending, false);
+});
+
+test("isGoalPendingPromotion: standalone spec (milestone_id null) → pending:false (never suppressed)", () => {
+  const goals = [goal({ slug: "sol", milestones: [{ id: "m-sol-1" }], main_merge_sha: null })];
+  assert.equal(isGoalPendingPromotion(null, goals).pending, false);
+  assert.equal(isGoalPendingPromotion(undefined, goals).pending, false);
+});
+
+test("isGoalPendingPromotion: milestone_id present but not in any known goal → pending:false (fail-safe; never suppress real drift)", () => {
+  const goals = [goal({ slug: "sol", milestones: [{ id: "m-sol-1" }], main_merge_sha: null })];
+  assert.equal(isGoalPendingPromotion("m-unknown", goals).pending, false);
+});
+
+test("isGoalPendingPromotion: empty goals list → pending:false (listGoals read failure fell back to [])", () => {
+  assert.equal(isGoalPendingPromotion("m-sol-1", []).pending, false);
+});
+
+test("isGoalPendingPromotion: correct goal picked when multiple goals + multiple milestones present", () => {
+  const goals = [
+    goal({ slug: "sol", milestones: [{ id: "m-sol-1" }, { id: "m-sol-2" }], main_merge_sha: null }),
+    goal({ slug: "luna", milestones: [{ id: "m-luna-1" }], main_merge_sha: "shipped" }),
+  ];
+  assert.equal(isGoalPendingPromotion("m-sol-2", goals).goalSlug, "sol");
+  assert.equal(isGoalPendingPromotion("m-sol-2", goals).pending, true);
+  assert.equal(isGoalPendingPromotion("m-luna-1", goals).pending, false);
 });
