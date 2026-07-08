@@ -26,6 +26,8 @@ import type { FraudCaseItem } from "@/components/shared/FraudCasesList";
 import { TicketAnalysisPanel } from "@/components/TicketAnalysisPanel";
 import { AiInvestigationBadge } from "@/components/ai-investigation-badge";
 import { useTriageInProgress } from "@/lib/use-triage-in-progress";
+import { resolveEscalationPersona } from "@/lib/ticket-escalation-persona";
+import { PersonaAvatar } from "@/components/agents/persona-chip";
 
 // Sentinel <option> value for "escalate to the AI Routine" — escalated_at set
 // with escalated_to null. Distinct from "" (not escalated, both null).
@@ -2708,6 +2710,28 @@ export default function TicketDetailPage() {
                 )}
                 Escalated To
               </label>
+              {/* Routine escalation → the CS Director persona (June) hard-calls it. Render her
+                  headshot + emoji + name so the field shows a real reviewer's face, not a
+                  generic robot. Reuses PersonaAvatar from the org/roster UI so the identity
+                  presentation stays consistent. See src/lib/ticket-escalation-persona.ts +
+                  docs/brain/specs/cs-director-third-rung-hard-calls-above-triage-quorum.md. */}
+              {ticket.escalated_at && !ticket.escalated_to && (() => {
+                const persona = resolveEscalationPersona(ticket.escalated_at, ticket.escalated_to);
+                if (!persona) return null;
+                return (
+                  <div
+                    className="mt-1 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 dark:border-amber-700 dark:bg-amber-950"
+                    data-testid="escalated-to-persona"
+                  >
+                    <PersonaAvatar persona={persona} size={20} />
+                    <span className="flex items-baseline gap-1 text-sm font-medium text-amber-800 dark:text-amber-300">
+                      <span aria-hidden>{persona.emoji}</span>
+                      <span>{persona.name}</span>
+                      <span className="text-xs font-normal opacity-70">· {persona.role}</span>
+                    </span>
+                  </div>
+                );
+              })()}
               <select
                 value={ticket.escalated_to || (ticket.escalated_at ? ESCALATE_ROUTINE_VALUE : "")}
                 onChange={(e) => {
@@ -2728,7 +2752,16 @@ export default function TicketDetailPage() {
                     : "border-zinc-300 bg-white text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 }`}
               >
-                <option value={ESCALATE_ROUTINE_VALUE}>🤖 AI Routine</option>
+                {(() => {
+                  // Routine escalation (escalated_at set, escalated_to null) is hard-called
+                  // by June (CS Director) once quorum can't resolve it — surface her identity
+                  // in the select, not a generic robot label. See src/lib/ticket-escalation-persona.ts.
+                  const routinePersona = resolveEscalationPersona(new Date().toISOString(), null);
+                  const routineLabel = routinePersona
+                    ? `${routinePersona.emoji} ${routinePersona.name}`
+                    : "🤖 AI Routine";
+                  return <option value={ESCALATE_ROUTINE_VALUE}>{routineLabel}</option>;
+                })()}
                 <option value="">Not escalated</option>
                 {members.map((m) => (
                   <option key={m.user_id} value={m.user_id}>{m.display_name || m.email}</option>
@@ -2737,11 +2770,21 @@ export default function TicketDetailPage() {
               {(ticket.escalated_to || ticket.escalated_at) && ticket.escalation_reason && (
                 <p className="mt-1 text-sm text-amber-600 dark:text-amber-400">Reason: {ticket.escalation_reason}</p>
               )}
-              {(ticket.escalated_to || ticket.escalated_at) && ticket.escalated_at && (
-                <p className="mt-0.5 text-sm text-zinc-400">
-                  Escalated {formatDate(ticket.escalated_at)}{!ticket.escalated_to && " to AI Routine"}
-                </p>
-              )}
+              {(ticket.escalated_to || ticket.escalated_at) && ticket.escalated_at && (() => {
+                const routinePersona = !ticket.escalated_to
+                  ? resolveEscalationPersona(ticket.escalated_at, ticket.escalated_to)
+                  : null;
+                const routineSuffix = routinePersona
+                  ? ` to ${routinePersona.emoji} ${routinePersona.name}`
+                  : !ticket.escalated_to
+                  ? " to AI Routine"
+                  : "";
+                return (
+                  <p className="mt-0.5 text-sm text-zinc-400">
+                    Escalated {formatDate(ticket.escalated_at)}{routineSuffix}
+                  </p>
+                );
+              })()}
             </div>
             {/* AI hard gate — per-ticket "turn off AI" human directive.
                 Non-propagating on merge (see src/lib/ticket-merge.ts).
