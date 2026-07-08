@@ -277,6 +277,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/iteration_runs]] — Iteration engine's per-account daily-run audit log (status/timing/per-stage counts); the supervisable-autonomy record for the whole engine (Phase 5).
 - [[tables/iteration_scorecards_daily]] — Deterministic daily ad/adset/campaign/variant/angle scorecards the iteration engine reads (Phase 3).
 - [[tables/slack_notification_rules]] — Per-workspace Slack notification routing rules (which events go to which channel).
+- [[tables/spec_timecard_events]] — Append-only per-lifecycle-step ledger for every spec (created, review, build, ship, spec-test, security, fold, waits). Mario's M1 foundation — powers the M3 stall detector + the M5 detail-page timeline. See [[specs/spec-timecard-ledger-and-sdk]].
 - [[tables/sync_jobs]] — Background sync job state (Shopify bulk ops, Appstle pulls) — progress, status, error.
 
 ## Inngest functions (`inngest/`)
