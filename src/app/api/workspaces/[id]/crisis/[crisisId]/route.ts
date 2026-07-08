@@ -89,41 +89,22 @@ export async function GET(
   const affectedSku = crisis.affected_sku;
   const affectedVariantId = crisis.affected_variant_id;
 
-  // Paginate through all active/paused subs (default limit is 1000)
-  const affectedSubs: { id: string; items: unknown; billing_interval: string | null; billing_interval_count: number | null; next_billing_date: string | null; status: string }[] = [];
-  let subOffset = 0;
-  while (true) {
-    const { data: batch } = await admin.from("subscriptions")
-      .select("id, items, billing_interval, billing_interval_count, next_billing_date, status")
-      .eq("workspace_id", workspaceId)
-      .in("status", ["active", "paused"])
-      .range(subOffset, subOffset + 999);
-    if (!batch || batch.length === 0) break;
-    affectedSubs.push(...batch);
-    subOffset += batch.length;
-    if (batch.length < 1000) break;
-  }
-
-  const matchingSubs = (affectedSubs || []).filter(s => {
-    const items = (s.items as { sku?: string; variant_id?: string; price_cents?: number }[]) || [];
-    return items.some(i =>
-      (i.sku && affectedSku && i.sku.toUpperCase() === affectedSku.toUpperCase()) ||
-      (i.variant_id && i.variant_id === affectedVariantId)
-    );
+  // Phase 4 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+  // Prior code paged every active/paused sub in the workspace to app and
+  // ran the item filter + MRR sum in JS — server-side now via
+  // public.crisis_affected_subs.
+  const { data: crisisAggRows } = await admin.rpc("crisis_affected_subs", {
+    p_workspace: workspaceId,
+    p_variant_id: affectedVariantId,
+    p_sku: affectedSku,
   });
-
-  // Calculate monthly revenue from affected subs
-  let monthlyRevenueCents = 0;
-  for (const sub of matchingSubs) {
-    const items = (sub.items as { price_cents?: number; quantity?: number }[]) || [];
-    const subTotal = items.reduce((sum, i) => sum + ((i.price_cents || 0) * (i.quantity || 1)), 0);
-    const interval = (sub.billing_interval || "MONTH").toUpperCase();
-    const count = sub.billing_interval_count || 1;
-    // Normalize to monthly
-    if (interval === "WEEK") monthlyRevenueCents += subTotal * (4.33 / count);
-    else if (interval === "DAY") monthlyRevenueCents += subTotal * (30 / count);
-    else monthlyRevenueCents += subTotal / count; // MONTH
-  }
+  const crisisAgg = (Array.isArray(crisisAggRows) ? crisisAggRows[0] : crisisAggRows) as {
+    affected_count: number | string | null;
+    monthly_revenue_cents: number | string | null;
+    sub_ids: string[] | null;
+  } | null;
+  const matchingSubIds = new Set<string>((crisisAgg?.sub_ids ?? []).filter(Boolean));
+  const monthlyRevenueCents = Number(crisisAgg?.monthly_revenue_cents ?? 0) || 0;
 
   // Estimate months at risk
   let monthsAtRisk = 3; // default
@@ -135,7 +116,10 @@ export async function GET(
 
   // Affected = subs still with the item + subs already processed (swapped away)
   const processedSubIds = new Set(allActions.map(a => a.subscription_id).filter(Boolean));
-  const stillAffected = matchingSubs.filter(s => !processedSubIds.has(s.id)).length;
+  let stillAffected = 0;
+  for (const id of matchingSubIds) {
+    if (!processedSubIds.has(id)) stillAffected += 1;
+  }
   const totalAffected = stillAffected + processedSubIds.size;
 
   const financialImpact = {
