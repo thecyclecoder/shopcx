@@ -215,35 +215,167 @@ export interface ActionResult {
  * "{{coupon_code}}" string and the downstream API call fails.
  *
  * The map mirrors substituteActionPlaceholders (the message-side helper).
+ *
+ * Fallback code-thread (atomic redeem→apply — ticket 0a9e4d7f, Judy):
+ * when the action is `apply_(loyalty_)coupon` and it has NO real `code`
+ * (missing, empty, or still an unsubstituted `{{coupon_code}}` /
+ * `[COUPON_CODE]` token because Sonnet omitted the template), thread the
+ * `couponCode` from a prior successful `redeem_points` directly. Points
+ * must never be spent without the coupon actually landing on the target.
+ *
+ * Exported for unit tests; the direct call sites are the executor loops
+ * in {@link executeActionsInline} and {@link handleDirectAction}.
  */
-function substituteActionParams(
+export function substituteActionParams(
   action: ActionParams,
   results: { action: ActionParams; result: ActionResult }[],
 ): ActionParams {
   const map: Record<string, string> = {};
+  let lastCoupon: string | undefined;
   for (const { result } of results) {
     if (!result.success) continue;
-    if (result.couponCode) map.coupon_code = result.couponCode;
+    if (result.couponCode) {
+      map.coupon_code = result.couponCode;
+      lastCoupon = result.couponCode;
+    }
     if (result.trackingNumber) map.tracking_number = result.trackingNumber;
     if (result.carrier) map.carrier = result.carrier;
     if (result.labelUrl) map.label_url = result.labelUrl;
   }
-  if (Object.keys(map).length === 0) return action;
 
-  const sub = (v: string): string => {
-    let out = v;
-    for (const [k, val] of Object.entries(map)) {
-      out = out.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, "g"), val);
-      out = out.replace(new RegExp(`\\[\\s*${k.toUpperCase()}\\s*\\]`, "g"), val);
-    }
-    return out;
-  };
   const cloned = { ...action } as unknown as Record<string, unknown>;
-  for (const key of Object.keys(cloned)) {
-    const v = cloned[key];
-    if (typeof v === "string") cloned[key] = sub(v);
+
+  if (Object.keys(map).length > 0) {
+    const sub = (v: string): string => {
+      let out = v;
+      for (const [k, val] of Object.entries(map)) {
+        out = out.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, "g"), val);
+        out = out.replace(new RegExp(`\\[\\s*${k.toUpperCase()}\\s*\\]`, "g"), val);
+      }
+      return out;
+    };
+    for (const key of Object.keys(cloned)) {
+      const v = cloned[key];
+      if (typeof v === "string") cloned[key] = sub(v);
+    }
   }
+
+  if (
+    lastCoupon &&
+    (action.type === "apply_loyalty_coupon" || action.type === "apply_coupon")
+  ) {
+    const looksReal = (s: unknown): boolean =>
+      typeof s === "string" && s.length > 0 && !/\{\{|\[/.test(s);
+    if (!looksReal(cloned.code) && !looksReal(cloned.coupon_code)) {
+      cloned.code = lastCoupon;
+    }
+  }
+
   return cloned as unknown as ActionParams;
+}
+
+/**
+ * Roll back a loyalty redemption when the paired apply_(loyalty_)coupon
+ * did not land — re-credit points and mark the redemption `rolled_back`
+ * so points are never spent without the coupon actually applying. The
+ * atomic redeem→apply contract (ticket 0a9e4d7f, Judy). See
+ * [[../libraries/loyalty]].
+ *
+ * Detection: (a) any apply_(loyalty_)coupon result marked failure, OR
+ * (b) an apply_(loyalty_)coupon that succeeded but is listed in
+ * verifyFailures (self-heal verify+retry gave up). The prior successful
+ * `redeem_points` in the same turn is the source of the code we roll
+ * back — its `couponCode` result points at the exact loyalty_redemptions
+ * row.
+ *
+ * Safety: only rolls back a redemption whose current status is `active`.
+ * The apply_loyalty_coupon internal regen path (line ~1051) mutates the
+ * original row to `expired` when it re-mints; leaving that alone here
+ * avoids double-refunding a regen sequence — Phase 2 will fold the
+ * regen-then-fail edge case in.
+ *
+ * Exported for unit tests. Idempotent — if the redemption is already
+ * non-active, nothing happens.
+ */
+export async function rollbackLoyaltyRedemptionOnApplyFailure(
+  ctx: Pick<ActionContext, "admin" | "workspaceId" | "ticketId">,
+  results: { action: ActionParams; result: ActionResult }[],
+  verifyFailures: string[],
+  sysNote: SysNoteFn,
+): Promise<void> {
+  const isApplyType = (t: string): boolean =>
+    t === "apply_loyalty_coupon" || t === "apply_coupon";
+
+  const applyFailed = results.some(
+    (r) => isApplyType(r.action.type) && !r.result.success,
+  );
+  const applyVerifyFailed = verifyFailures.some((f) =>
+    f.startsWith("apply_loyalty_coupon:") || f.startsWith("apply_coupon:"),
+  );
+  if (!applyFailed && !applyVerifyFailed) return;
+
+  const redeem = results.find(
+    (r) =>
+      r.action.type === "redeem_points" &&
+      r.result.success &&
+      typeof r.result.couponCode === "string" &&
+      r.result.couponCode.length > 0,
+  );
+  const code = redeem?.result.couponCode;
+  if (!code) return;
+
+  const { data: red } = await ctx.admin
+    .from("loyalty_redemptions")
+    .select("id, member_id, points_spent, status")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("discount_code", code)
+    .maybeSingle();
+  if (!red || red.status !== "active") return;
+
+  const { data: member } = await ctx.admin
+    .from("loyalty_members")
+    .select("id, workspace_id, points_balance, points_earned, points_spent")
+    .eq("id", red.member_id)
+    .single();
+  if (!member) return;
+
+  // Re-credit inline against ctx.admin (not earnPoints — that helper
+  // instantiates its own admin client, which is fine in prod but breaks
+  // the unit test's in-memory fake admin). Matches earnPoints's write
+  // shape: an 'adjustment' transaction row + a re-read-then-update on
+  // loyalty_members so a concurrent balance change isn't clobbered.
+  await ctx.admin.from("loyalty_transactions").insert({
+    workspace_id: member.workspace_id,
+    member_id: member.id,
+    points_change: red.points_spent,
+    type: "adjustment",
+    description: `Rollback: apply_loyalty_coupon failed for ${code} (ticket ${ctx.ticketId})`,
+    order_id: null,
+  });
+  const { data: current } = await ctx.admin
+    .from("loyalty_members")
+    .select("points_balance, points_earned")
+    .eq("id", member.id)
+    .single();
+  const curBal = (current?.points_balance as number | undefined) ?? member.points_balance;
+  const curEarned = (current?.points_earned as number | undefined) ?? member.points_earned;
+  await ctx.admin
+    .from("loyalty_members")
+    .update({
+      points_balance: curBal + red.points_spent,
+      points_earned: curEarned + red.points_spent,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", member.id);
+
+  await ctx.admin
+    .from("loyalty_redemptions")
+    .update({ status: "rolled_back" })
+    .eq("id", red.id);
+
+  await sysNote(
+    `[Rollback] apply_loyalty_coupon didn't land — re-credited ${red.points_spent} pts, marked ${code} rolled_back.`,
+  );
 }
 
 /**
@@ -2898,13 +3030,16 @@ async function handleDirectAction(
     await sysNote(`Action failed: ${f.action.type} — ${f.result.error}`);
   }
 
+  // Hoisted so the atomic redeem+apply rollback can see the verify verdict
+  // regardless of which branch we took below.
+  const verifyFailures: string[] = [];
+
   if (failures.length === 0) {
     // Self-heal: verify each action actually took effect BEFORE we send
     // the AI's prefab "I did it" message. Earlier flow sent the message
     // optimistically and then verified — the customer would see a fake
     // success even when the action silently didn't stick.
     await new Promise(resolve => setTimeout(resolve, 3000));
-    const verifyFailures: string[] = [];
 
     // Verify-and-retry safety.
     //
@@ -2996,6 +3131,20 @@ async function handleDirectAction(
       "Someone on my team is working on this and we'll get back to you shortly!";
     await send(errorMsg, ctx.sandbox);
     await escalateTicket(ctx, `Direct action failures: ${failures.map((f) => `${f.action.type}: ${f.result.error}`).join("; ")}`);
+  }
+
+  // Atomic redeem+apply guardrail (ticket 0a9e4d7f, Judy): if
+  // redeem_points succeeded but the paired apply_(loyalty_)coupon
+  // didn't LAND — initial handler failure OR self-heal verify+retry
+  // failure — re-credit the spent points and mark the redemption
+  // rolled_back. Points are never spent without a coupon actually on
+  // the target. Runs after both branches finalize their side effects.
+  try {
+    await rollbackLoyaltyRedemptionOnApplyFailure(ctx, results, verifyFailures, sysNote);
+  } catch (err) {
+    await sysNote(
+      `[Rollback] loyalty redemption rollback threw — ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
