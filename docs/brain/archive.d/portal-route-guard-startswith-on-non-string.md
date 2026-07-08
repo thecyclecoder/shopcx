@@ -1,0 +1,1 @@
+- **Portal /api/portal route: guard .startsWith against a non-string value** · verified 2026-07-08 · → [[../libraries/portal__route]]

@@ -1,0 +1,1 @@
+- **GitHub webhook: ACK fast + move 4-gate fan-out to after() with a 250s deadline** · verified 2026-07-08 · → [[../integrations/github-webhook]]

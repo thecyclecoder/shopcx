@@ -1,0 +1,1 @@
+- **Retire the residual .in() id/slug batching → server-side RPCs** · verified 2026-07-08 · → [[../libraries/specs-table]] · [[../libraries/brain-roadmap]]
