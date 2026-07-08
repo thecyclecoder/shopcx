@@ -82,14 +82,19 @@ const GRADER_MODEL = SONNET_MODEL;
 const TERMINAL_JOB_STATUSES = new Set(["completed", "merged", "failed", "needs_attention"]);
 
 /**
- * Grader-result `reason`s that mean a benign in-flight race, NOT a grader defect — mirrors the
- * director-grader's INFLIGHT_SKIP_REASONS. `not_concluded` happens when director triage re-queues a
- * job (needs_attention → queued) between the sweep snapshot and gradeAgentAction's re-fetch;
- * `job_not_found` is the same shape one step further (the row was already finalized + collected).
- * Both are expected during normal director churn and must stay silent — only true grader errors
- * (grader_http_429, parse_failed, …) should hit console.error and surface in the Vercel error feed.
+ * Grader-result `reason`s that mean a benign in-flight race OR a blameless-infra skip, NOT a grader
+ * defect — mirrors the director-grader's INFLIGHT_SKIP_REASONS. `not_concluded` happens when director
+ * triage re-queues a job (needs_attention → queued) between the sweep snapshot and gradeAgentAction's
+ * re-fetch; `job_not_found` is the same shape one step further (the row was already finalized +
+ * collected). `blameless_infra_failure` (grader-treats-infra-outage-failures-as-blameless Phase 2)
+ * marks a job that failed for a bounded outage/infra reason — the CLI's Max-account credentials
+ * evicted mid-run, a Max-cap park, a 0-token dead session, a session that died without a parseable
+ * verdict, a DB-down author-write fallout — NEVER a worker judgment slip, so no grade is written
+ * and no coach signal fires. All THREE are expected during normal director churn / an outage window
+ * and must stay silent — only true grader errors (grader_http_429, parse_failed, …) should hit
+ * console.error and surface in the Vercel error feed.
  */
-const AGENT_INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "job_not_found"]);
+export const AGENT_INFLIGHT_SKIP_REASONS = new Set(["not_concluded", "job_not_found", "blameless_infra_failure"]);
 
 /** The standing performance window — last N graded jobs per worker (the spec's locked config). */
 export const ROLLUP_WINDOW = 10;
@@ -559,6 +564,11 @@ export async function applyBoxGrade(opts: { agentJobId: string; grade: number; r
 
   if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
   if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
+  // grader-treats-infra-outage-failures-as-blameless Phase 2: defensive guard — the box-hosted
+  // grader session SHOULD skip a blameless-infra job before calling applyBoxGrade, but if a stale
+  // box session (pre-fix, or a race) hands us one anyway we still refuse to write a 1-10 grade
+  // for it. Same reason string + AGENT_INFLIGHT_SKIP_REASONS silencing as gradeAgentAction.
+  if (isBlamelessInfraFailure(job)) return { ok: false, reason: "blameless_infra_failure" };
 
   const { data: existing } = await admin
     .from("agent_action_grades")
@@ -597,6 +607,14 @@ export async function gradeAgentAction(opts: { agentJobId: string; admin?: Admin
   if (!AGENT_RUBRICS[job.kind]) return { ok: false, reason: "not_a_gradeable_worker" };
   // Not gradeable until the action has actually concluded.
   if (!TERMINAL_JOB_STATUSES.has(job.status)) return { ok: false, reason: "not_concluded" };
+  // grader-treats-infra-outage-failures-as-blameless Phase 2: an outage/infra failure is NEVER a
+  // worker judgment mistake — the CLI's Max-account credentials evicted, a Max-cap park, a 0-token
+  // dead session, a "no parseable verdict" session that died, or the DB-down "silent author-write
+  // fallout" all reflect INFRA state, not what the worker decided. Return early with the
+  // `blameless_infra_failure` skip reason (silenced by AGENT_INFLIGHT_SKIP_REASONS so the sweep
+  // doesn't console.error) and write NO agent_action_grades row. A blameless failure MUST NEVER
+  // become a 1-10 grade — that was the 2026-07-08 poison that perpetually re-parked needs_attention.
+  if (isBlamelessInfraFailure(job)) return { ok: false, reason: "blameless_infra_failure" };
 
   const { data: existing } = await admin
     .from("agent_action_grades")

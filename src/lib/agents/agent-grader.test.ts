@@ -16,8 +16,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AGENT_INFLIGHT_SKIP_REASONS,
   GRADE_BATCH_CAP,
   GRADE_CADENCE_MS,
+  applyBoxGrade,
   isBlamelessInfraFailure,
   isInfraCancelledError,
   selectGradingBatch,
@@ -294,4 +296,120 @@ test("isBlamelessInfraFailure: matches on log_tail as well as error", () => {
     isBlamelessInfraFailure({ error: null, log_tail: "silent author-write fallout in author-spec.ts" }),
     true,
   );
+});
+
+// ── Phase 2: grader-skip wiring — applyBoxGrade + AGENT_INFLIGHT_SKIP_REASONS ─────────────────────
+//
+// A blameless-infra job must NEVER become a 1-10 grade. The skip is silent (no console.error) and
+// writes NO agent_action_grades row — mirroring the existing in-flight-race handling in the sweep.
+
+/** Minimal admin-client fake — captures every mutation on `agent_action_grades` and returns a
+ *  scripted response for the initial `.from('agent_jobs')` fetch + the existing-grade lookup.
+ *  Sufficient to exercise applyBoxGrade's control flow without a real Supabase. */
+type BoxGradeWrite = { table: string; op: "insert" | "update"; payload: Record<string, unknown> };
+function makeGraderAdmin(jobRow: Record<string, unknown> | null, existingGrade: Record<string, unknown> | null = null): {
+  admin: unknown;
+  writes: BoxGradeWrite[];
+} {
+  const writes: BoxGradeWrite[] = [];
+  const admin = {
+    from(table: string) {
+      const single = async () => {
+        if (table === "agent_jobs") return { data: jobRow };
+        if (table === "agent_action_grades") return { data: existingGrade };
+        return { data: null };
+      };
+      const chain = {
+        select: (_cols?: string) => chain,
+        eq: (_col: string, _val: unknown) => chain,
+        maybeSingle: single,
+        single,
+        insert(payload: Record<string, unknown>) {
+          writes.push({ table, op: "insert", payload });
+          return {
+            select: (_c?: string) => ({
+              single: async () => ({ data: { id: `new-${table}-id` }, error: null }),
+            }),
+          };
+        },
+        update(payload: Record<string, unknown>) {
+          writes.push({ table, op: "update", payload });
+          return chain;
+        },
+      };
+      return chain;
+    },
+  };
+  return { admin, writes };
+}
+
+/** Concluded blameless-infra job (CLI auth outage) — the 2026-07-08 poisoning shape. */
+const BLAMELESS_JOB = {
+  id: "job-blameless-1",
+  workspace_id: "ws-1",
+  kind: "build",
+  spec_slug: "some-spec",
+  status: "failed",
+  error: "authentication_failed — CLAUDE_CONFIG_DIR credentials evicted mid-run",
+  log_tail: "[claude] Please run /login to continue",
+  pr_url: null,
+  pending_actions: null,
+  created_at: "2026-07-08T12:00:00Z",
+};
+
+/** Concluded WORKER failure — a real tsc break, not an outage. Must still grade. */
+const REAL_FAIL_JOB = {
+  id: "job-real-fail-1",
+  workspace_id: "ws-1",
+  kind: "build",
+  spec_slug: "some-spec",
+  status: "failed",
+  error: "tsc failed: 3 type errors in src/lib/foo.ts",
+  log_tail: "src/lib/foo.ts(42,3): error TS2322: Type 'string' is not assignable to type 'number'.",
+  pr_url: null,
+  pending_actions: null,
+  created_at: "2026-07-08T12:00:00Z",
+};
+
+test("applyBoxGrade: blameless-infra job → { ok:false, reason:'blameless_infra_failure' } and NO grade row written", async () => {
+  const { admin, writes } = makeGraderAdmin(BLAMELESS_JOB);
+  const errors: string[] = [];
+  const origErr = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  try {
+    const res = await applyBoxGrade({ agentJobId: BLAMELESS_JOB.id, grade: 2, reasoning: "outage failed the run", admin: admin as never });
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "blameless_infra_failure");
+    // NO writes to agent_action_grades — a blameless failure MUST NEVER become a 1-10 grade.
+    const gradeWrites = writes.filter((w) => w.table === "agent_action_grades");
+    assert.equal(gradeWrites.length, 0);
+    // Silent skip — no console.error for the blameless case.
+    assert.equal(errors.length, 0);
+  } finally {
+    console.error = origErr;
+  }
+});
+
+test("applyBoxGrade: genuine worker failure (tsc break) still grades → one insert into agent_action_grades", async () => {
+  const { admin, writes } = makeGraderAdmin(REAL_FAIL_JOB, null);
+  const res = await applyBoxGrade({ agentJobId: REAL_FAIL_JOB.id, grade: 3, reasoning: "tsc failed — worker mistake", admin: admin as never });
+  assert.equal(res.ok, true);
+  assert.equal(res.grade, 3);
+  const gradeInserts = writes.filter((w) => w.table === "agent_action_grades" && w.op === "insert");
+  assert.equal(gradeInserts.length, 1);
+  // The stored grade matches what the caller passed (clamped 1-10) — the normal path is unchanged.
+  assert.equal((gradeInserts[0].payload as { grade: number }).grade, 3);
+  assert.equal((gradeInserts[0].payload as { agent_job_id: string }).agent_job_id, REAL_FAIL_JOB.id);
+});
+
+test("AGENT_INFLIGHT_SKIP_REASONS: silences the sweep on the blameless-infra skip", () => {
+  // gradeConcludedAgentActions decides whether to console.error a per-job skip based on this set.
+  // Membership of 'blameless_infra_failure' is what makes the sweep silent (spec Verification —
+  // "Confirm no console.error for the skip"), alongside the existing in-flight-race reasons.
+  assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("blameless_infra_failure"), true);
+  assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("not_concluded"), true);
+  assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("job_not_found"), true);
+  // A TRUE grader error must NOT be silenced — it still surfaces in the Vercel error feed.
+  assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("parse_failed"), false);
+  assert.equal(AGENT_INFLIGHT_SKIP_REASONS.has("grader_http_429"), false);
 });
