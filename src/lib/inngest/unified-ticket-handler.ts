@@ -27,6 +27,7 @@ import { matchPatterns } from "@/lib/pattern-matcher";
 import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { isAutomatedInbound } from "@/lib/automated-sender";
+import { decideOutreachRoute } from "@/lib/outreach-route";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
@@ -1087,7 +1088,20 @@ export const unifiedTicketHandler = inngest.createFunction(
     // (src/app/api/webhooks/email/route.ts) creates/looks up the customers row from the sender's
     // email, so the customer row's email column IS the sender. Non-email channels have no
     // notion of an automated sender and pass through (isAutomatedSender(null) === false).
-    if (isNew && isAutomatedInbound(st.custEmail, msg)) {
+    //
+    // Phase 3 refactor: both this pre-classifier site and the post-classifier site at § 1c
+    // dispatch through the pure `decideOutreachRoute` predicate (src/lib/outreach-route.ts).
+    // The four verification tests in outreach-route.test.ts pin THAT function's routing, so
+    // the shipped handler runs the same predicate the tests exercise — coaching #1's named-
+    // symbol acceptance token instead of a docstring-only description of the invariant.
+    const preClassifierOutreachRoute = decideOutreachRoute({
+      isNew,
+      senderEmail: st.custEmail,
+      body: msg,
+      solFirstTouchEnabled: cfg.sol_first_touch_enabled,
+      agentAssigned,
+    });
+    if (preClassifierOutreachRoute.kind === "pre_filter_close") {
       await step.run("outreach-automated-sender-pre-filter", async () => {
         await addTicketTag(tid, "cls:outreach");
         await addTicketTag(tid, "outreach");
@@ -1155,7 +1169,18 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     // `outreach` tag were already stamped at ~1108. Both dispatch gates below ALSO check
     // msgType !== "outreach" as belt-and-suspenders so a future refactor that moves this
     // short-circuit can't accidentally leak an outreach ticket into a paid handling session.
-    if (isNew && msgType === "outreach") {
+    //
+    // Phase 3: dispatch through `decideOutreachRoute` with `classifierBucket = msgType` so
+    // this site runs the same predicate the four Phase-3 verification tests pin.
+    const postClassifierOutreachRoute = decideOutreachRoute({
+      isNew,
+      senderEmail: st.custEmail,
+      body: msg,
+      classifierBucket: msgType,
+      solFirstTouchEnabled: cfg.sol_first_touch_enabled,
+      agentAssigned,
+    });
+    if (postClassifierOutreachRoute.kind === "classifier_close") {
       await step.run("outreach-deterministic-close", async () => {
         await setStatus(admin, tid, cfg.auto_resolve);
         await sysNote(admin, tid, "[System] Outreach — deterministically closed, no AI response.");
