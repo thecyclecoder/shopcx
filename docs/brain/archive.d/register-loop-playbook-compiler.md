@@ -1,0 +1,1 @@
+- **Register monitored loop: playbook-compiler** · verified 2026-07-08 · → [[../inngest/playbook-compiler]]
