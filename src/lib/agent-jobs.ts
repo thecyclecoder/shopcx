@@ -2047,6 +2047,22 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         const effects = await applyGoalPromotionEffects(workspaceId, goalSlug, merge.mergeSha);
         result.promoted.push(goalSlug);
         result.effects[goalSlug] = effects;
+        // one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 2 — the
+        // OUTSIDE-DEPENDENT auto-queue leg. `applyGoalPromotionEffects` already fires
+        // `autoQueueUnblockedBy(memberSpec.slug)` for each goal-mate leg. That path only catches
+        // dependents whose stored `blocked_by` matches a member-spec slug AS A SPEC blocker — which is
+        // the goal-mate case (Phase 1 leaves goal-mates as `kind:"spec"`). An OUTSIDE dependent's
+        // resolved blocker is `kind:"goal"` with `slug=goalSlug`, so the per-member calls silently
+        // skip it. This sweep releases those outside dependents the moment the goal's atomic promotion
+        // stamped `main_merge_sha` (see [[autoQueueUnblockedByGoal]] for the pure predicate + guards).
+        try {
+          const outsideQueued = await autoQueueUnblockedByGoal(workspaceId, goalSlug);
+          if (outsideQueued.length) {
+            console.log(`[goal-main-promote] ${goalSlug} outside-dependent auto-queue → ${outsideQueued.join(", ")}`);
+          }
+        } catch (e) {
+          console.warn(`[goal-main-promote] ${goalSlug} outside-dependent unblock failed (continuing):`, e instanceof Error ? e.message : e);
+        }
         // post-M5-goal-finalization — RETIRE the goal itself: greenlit → complete (explicit override) + enqueue
         // the goal-fold lane (folds into the brain + flips → folded). Without this the promoted goal lingers as
         // `greenlit` on the active board forever (the gap observed live on noop-goal-v2).
@@ -2224,6 +2240,75 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
       instructions: `Auto-queued by spec-blockers: prerequisite ${shippedSlug} shipped, clearing the last blocker.`,
     });
     if (res.enqueued) queued.push(dep.slug);
+  }
+  return queued;
+}
+
+/**
+ * one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 2 — the
+ * GOAL-shipping counterpart to `autoQueueUnblockedBy`. Called from `promoteCompleteGoalsToMain` the
+ * moment `stampGoalPromotedToMain(goalId, mergeSha, …)` succeeds — the atomic goal→main promotion
+ * just landed AND `goals.main_merge_sha` is now non-null. Every outside dependent whose LAST
+ * uncleared blocker is a goal blocker on `goalSlug` is now enqueue-eligible; this fan-out enqueues
+ * their build via the SAME gated chokepoint (`enqueueBuildIfDue`) the spec-shipping unblock uses.
+ *
+ * SCOPE — this ONLY re-releases outside dependents (a spec NOT in `goalSlug`). Goal-mates were
+ * already released by the per-member `autoQueueUnblockedBy` calls in `applyGoalPromotionEffects`
+ * (their blocker leg is a plain spec slug, not a goal blocker — Phase 1 leaves goal-mates as
+ * `kind:"spec"`). This function is IDEMPOTENT with those calls: the goal-mate dependency's
+ * blocked_by ISN'T `kind:"goal"`, so `isReadyForGoalUnblock` filters it out.
+ *
+ * Guards (Bo coaching — "confirming predicate at the action point"):
+ *   - `isReadyForGoalUnblock` re-asserts BOTH "mentions THIS goal as a goal blocker" AND "every
+ *     blocker is cleared" against the fresh roadmap read — so a card that just picked up a NEW
+ *     external blocker between the goal ship and the sweep is correctly held.
+ *   - Per-spec dedup on `agent_jobs` (any-status match) before enqueue — one auto-queue per spec.
+ *   - `enqueueBuildIfDue` re-checks the FULL eligibility gate (specReviewDone + not-deferred +
+ *     not-shipped + auto_build + blockers + in-flight) — an un-Vale-passed dependent no-ops here
+ *     and the reactive `build/spec-build-eligible` event re-fires when Vale later passes.
+ *
+ * Best-effort per spec — one dependent's failure never blocks the rest. Never throws. Returns the
+ * slugs it enqueued (empty when nothing changed).
+ */
+export async function autoQueueUnblockedByGoal(
+  workspaceId: string,
+  goalSlug: string,
+): Promise<string[]> {
+  if (!goalSlug || typeof goalSlug !== "string") return [];
+  const { isReadyForGoalUnblock } = await import("@/lib/blocker-goal-normalize");
+  // Fresh roadmap read — resolveBlockedBy already threads `goals.main_merge_sha` into the
+  // goal-blocker's `cleared` predicate (Phase 1), so the sweep runs against the just-stamped state.
+  const { specs } = await getRoadmap(workspaceId);
+  const dependents = specs.filter((s) => isReadyForGoalUnblock(s, goalSlug));
+  if (!dependents.length) return [];
+
+  const admin = createAdminClient();
+  const queued: string[] = [];
+  for (const dep of dependents) {
+    try {
+      // Dedupe (same shape as `autoQueueUnblockedBy`): a card with ANY existing build job (queued /
+      // in-flight / merged / failed) is skipped — the "one auto-queue per spec" guarantee. The
+      // wider "any status" dedupe is a deliberate superset of `enqueueBuildIfDue`'s ACTIVE-only
+      // guard so a re-run of this sweep (after another goal ships) never doubles up.
+      const { data: existing } = await admin
+        .from("agent_jobs")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("spec_slug", dep.slug)
+        .eq("kind", "build")
+        .limit(1);
+      if (existing && existing.length) continue;
+
+      const res = await enqueueBuildIfDue(workspaceId, dep.slug, {
+        instructions: `Auto-queued by spec-blockers: goal ${goalSlug} landed on main, clearing the last blocker.`,
+      });
+      if (res.enqueued) queued.push(dep.slug);
+    } catch (e) {
+      console.warn(
+        `[goal-unblock] ${dep.slug} auto-queue on goal ${goalSlug} failed (continuing):`,
+        e instanceof Error ? e.message : e,
+      );
+    }
   }
   return queued;
 }

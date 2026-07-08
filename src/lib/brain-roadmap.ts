@@ -36,6 +36,10 @@ import { rollupPhaseStatus } from "@/lib/spec-card-state";
 // goal-promotion-fold-collision-and-held-surfacing Phase 2 — pure predicate for the HELD promotion surface.
 // One-truth-per-derivation: `promoteCompleteGoalsToMain` writes the state, this reader derives the badge.
 import { deriveGoalPromotionSurface } from "@/lib/goal-promotion-surface";
+// one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — outside-dependent
+// blocker normalization. Pure; the wire-up in `resolveBlockedBy` supplies the workspace's goal-membership
+// index (spec slug → goal + goal.main_merge_sha) once per workspace read.
+import { deriveEffectiveBlockers, type GoalMembership } from "@/lib/blocker-goal-normalize";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -86,7 +90,25 @@ export interface SpecCard {
   // `cleared` when its own derived status is `shipped` OR it's archived/folded (no longer a live spec) —
   // i.e. the prerequisite code is on `main`. The board + the enqueue gate share this one source of truth.
   // Empty when the spec declares no Blocked-by. Resolved against the full spec set in getRoadmap/getSpec.
-  blockedBy: { slug: string; title: string; status: Phase; cleared: boolean }[];
+  //
+  // one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — when the raw
+  // `specs.blocked_by` slug names a spec that is a MEMBER of a goal AND the dependent is NOT in that
+  // goal (not a goal-mate), the effective blocker is the GOAL, not the member spec: `kind:"goal"`,
+  // `slug` becomes the goal slug, `memberSpecSlug` preserves the original raw spec slug (so the
+  // author-spec re-author path round-trips without collapsing to the goal). A goal-mate blocker
+  // (dependent + blocker in the SAME goal) stays `kind:"spec"` — the intra-goal serializer at
+  // [[agent-jobs]] `sequencePromoteCandidates` already orders it.
+  blockedBy: {
+    slug: string;
+    title: string;
+    status: Phase;
+    cleared: boolean;
+    kind?: "spec" | "goal";
+    /** When `kind==="goal"`: the ORIGINAL raw spec slug from `specs.blocked_by`. Preserved so the
+     *  author-spec re-author path can persist the original slug verbatim (Phase 1 does NOT do author-time
+     *  normalization; that's an OPT-IN Vale-side change). */
+    memberSpecSlug?: string;
+  }[];
   // spec-blockers Phase 2 (auto-queue on unblock): when this spec's LAST blocker ships, its build is
   // auto-enqueued — unless the owner opts out with a `**Auto-build:** off` header line. `false` = opted
   // out (never auto-queued); undefined/true = default (eligible). Manual Build is unaffected either way.
@@ -384,10 +406,51 @@ export function parseAuthoredSpecMarkdown(slug: string, raw: string): SpecCard {
  * when its blocking spec's derived status is `shipped`, OR the slug is no longer a live spec at all
  * (archived/folded — it's left specs/ — or a dangling reference): a prerequisite already on `main` never
  * permanently blocks. Returns a fresh blockedBy array (title + status filled from the resolved spec).
+ *
+ * one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — accepts an
+ * optional `goalByBlockerSlug` workspace-scoped index (spec slug → goal membership). When a raw blocker
+ * slug names a spec that is a MEMBER of a goal AND the dependent is NOT in that same goal (not a
+ * goal-mate), the entry is REWRITTEN via [[../blocker-goal-normalize]] `deriveEffectiveBlockers` so the
+ * effective blocker names the GOAL (kind:"goal", slug=goalSlug, title=goalTitle, memberSpecSlug=the
+ * original raw spec slug). The `cleared` predicate for a goal blocker keys on `goals.main_merge_sha`
+ * (the atomic goal→main promotion marker) — a member spec ISN'T on main until the whole goal is, and
+ * this predicate keeps the outside dependent's Build gate red until then. Goal-mate blockers (dependent
+ * + blocker in the SAME goal) fall through to the pre-existing spec-slug path — the intra-goal
+ * serializer at [[../agent-jobs]] `sequencePromoteCandidates` handles them.
+ *
+ * When `goalByBlockerSlug` is omitted (older/single-slug caller paths), the outside-dependent
+ * normalization is INERT — every entry stays a `kind:"spec"` blocker with the pre-Phase-1 behavior.
  */
-function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCard["blockedBy"] {
-  return card.blockedBy.map((b) => {
-    const target = bySlug.get(b.slug);
+function resolveBlockedBy(
+  card: SpecCard,
+  bySlug: Map<string, SpecCard>,
+  goalByBlockerSlug?: ReadonlyMap<string, import("@/lib/blocker-goal-normalize").GoalMembership>,
+): SpecCard["blockedBy"] {
+  const map = goalByBlockerSlug ?? new Map<string, import("@/lib/blocker-goal-normalize").GoalMembership>();
+  const dependent = {
+    slug: card.slug,
+    // The dependent's OWN goal (null when it's a standalone / outside-of-goal spec). Read from the
+    // same workspace-scoped map — a goal-member card carries its own goal entry.
+    goalSlug: map.get(card.slug)?.goalSlug ?? null,
+  };
+  const rawSlugs = card.blockedBy.map((b) => b.slug);
+  const effective = deriveEffectiveBlockers(rawSlugs, dependent, map);
+  return effective.map((eff) => {
+    if (eff.kind === "goal") {
+      // The goal blocker: `cleared` iff `goals.main_merge_sha` is set (atomic goal→main promotion
+      // happened). Rendered status mirrors that predicate — `shipped` after the promotion, `planned`
+      // (⏳) while still off main.
+      const cleared = !!eff.mainMergeSha;
+      return {
+        slug: eff.slug,
+        title: eff.title,
+        status: cleared ? ("shipped" as Phase) : ("planned" as Phase),
+        cleared,
+        kind: "goal" as const,
+        memberSpecSlug: eff.memberSpecSlug,
+      };
+    }
+    const target = bySlug.get(eff.slug);
     if (target) {
       // A deferred / in-review / in-testing prerequisite hasn't shipped → still blocking; show it as ⏳
       // (the chip cares shipped-or-not). `in_testing` is a derived board state that means "work is on a
@@ -396,12 +459,24 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
         target.status === "deferred" || target.status === "in_review" || target.status === "in_testing"
           ? "planned"
           : target.status;
-      return { slug: b.slug, title: target.title, status, cleared: target.status === "shipped" };
+      return {
+        slug: eff.slug,
+        title: target.title,
+        status,
+        cleared: target.status === "shipped",
+        kind: "spec" as const,
+      };
     }
     // Not a live spec → archived/folded (the prereq shipped + was retired into the brain) or a dangling
     // slug. Either way treat it as cleared so a Blocked-by pointing at an already-shipped/archived spec
     // never permanently blocks.
-    return { slug: b.slug, title: b.slug, status: "shipped" as Phase, cleared: true };
+    return {
+      slug: eff.slug,
+      title: eff.slug,
+      status: "shipped" as Phase,
+      cleared: true,
+      kind: "spec" as const,
+    };
   });
 }
 
@@ -410,6 +485,49 @@ function resolveBlockedBy(card: SpecCard, bySlug: Map<string, SpecCard>): SpecCa
 // straight from `public.specs` + `public.spec_phases` (`dbRowToSpecCard`), so there's no markdown card to
 // overlay. The only transient `spec_card_state.flags` signals that aren't on `public.specs` yet
 // (short_circuit / one-shot merged_pr) are surfaced by `overlayCardFlags` instead.
+
+/**
+ * one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — build the
+ * workspace-scoped goal-membership index (spec slug → owning goal + `goals.main_merge_sha`) the
+ * blocker normalizer at [[../blocker-goal-normalize]] reads. One `listGoals` (goals + milestones in a
+ * pair of queries) plus a milestone-id → goal lookup over the spec rows we already loaded — no extra
+ * per-spec I/O. Only goal-MEMBER specs appear in the map (standalone / no-milestone specs are absent,
+ * which the normalizer treats as "not a goal-member" — correct).
+ *
+ * Best-effort: a read failure yields an empty map. The normalizer then leaves every blocker as
+ * `kind:"spec"` (pre-Phase-1 behavior) — the board still renders and the enqueue gate still refuses
+ * uncleared spec blockers, so an outage never wedges the pipeline; it only degrades the outside-
+ * dependent goal rewrite to a spec rewrite for the duration of the outage.
+ */
+async function buildGoalMembershipMap(
+  workspaceId: string,
+  specRows: SpecRow[],
+): Promise<ReadonlyMap<string, GoalMembership>> {
+  try {
+    const goals = await listGoalsFromDb(workspaceId);
+    if (!goals.length) return new Map<string, GoalMembership>();
+    // milestone id → owning goal
+    const goalByMilestoneId = new Map<string, { slug: string; title: string; mainMergeSha: string | null }>();
+    for (const g of goals) {
+      for (const m of g.milestones) {
+        goalByMilestoneId.set(m.id, { slug: g.slug, title: g.title, mainMergeSha: g.main_merge_sha });
+      }
+    }
+    const out = new Map<string, GoalMembership>();
+    for (const r of specRows) {
+      if (!r.milestone_id) continue;
+      const goal = goalByMilestoneId.get(r.milestone_id);
+      if (!goal) continue;
+      out.set(r.slug, { goalSlug: goal.slug, goalTitle: goal.title, mainMergeSha: goal.mainMergeSha });
+    }
+    return out;
+  } catch (e) {
+    console.warn(
+      `[blocker-goal-normalize] buildGoalMembershipMap failed — falling back to empty (spec-slug blockers only): ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return new Map<string, GoalMembership>();
+  }
+}
 
 /**
  * The (effectively single-tenant) build-console workspace to resolve when a caller doesn't pass one — the
@@ -641,7 +759,13 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
   const rows = (await listSpecsFromDb(workspaceId)).filter((r) => isBoardableStatus(r.status));
   const cards = rows.map(dbRowToSpecCard);
   const bySlug = new Map(cards.map((c) => [c.slug, c]));
-  for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug);
+  // one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — the workspace's
+  // goal-membership index (spec slug → owning goal + goal.main_merge_sha). Built once per workspace read
+  // from the spec rows' `milestone_id` join through `listGoals` (goals + milestones fetched in one pair of
+  // queries). Best-effort: a read error yields an empty map, which makes the outside-dependent
+  // normalization INERT (blocker resolution falls back to the pre-Phase-1 spec-slug behavior).
+  const goalByBlockerSlug = await buildGoalMembershipMap(workspaceId, rows);
+  for (const c of cards) c.blockedBy = resolveBlockedBy(c, bySlug, goalByBlockerSlug);
   // Card-state overlay (short_circuit / merged_pr) — best-effort. A missing table / read error leaves cards
   // un-overlaid (the canonical row already carries the truth for everything else).
   try {
@@ -1272,9 +1396,14 @@ export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw
   if (!row || !isBoardableStatus(row.status)) return null;
   let card = dbRowToSpecCard(row);
   // Resolve Blocked-by against the live workspace set so the detail page's BuildButton sees the same
-  // cleared/uncleared state as the board (spec-blockers).
-  const specs = await readSpecsFromDb(wsId);
-  card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])));
+  // cleared/uncleared state as the board (spec-blockers). one-off-spec-depending-on-goal-work-blocks-
+  // on-the-goal-not-the-member-spec Phase 1 — the workspace goal-membership index (loaded once from
+  // the SAME listSpecs rows readSpecsFromDb consumes) so the outside-dependent normalization runs on
+  // the single-slug getSpec path (BuildButton) with the exact same predicate as the board.
+  const allRows = (await listSpecsFromDb(wsId)).filter((r) => isBoardableStatus(r.status));
+  const specs = allRows.map(dbRowToSpecCard);
+  const goalByBlockerSlug = await buildGoalMembershipMap(wsId, allRows);
+  card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])), goalByBlockerSlug);
   // Card-state overlay for the transient short-circuit / one-shot-PR flags that aren't on `public.specs`.
   try {
     const { getSpecCardStates } = await import("@/lib/spec-card-state");
