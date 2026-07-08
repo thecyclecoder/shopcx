@@ -5600,22 +5600,28 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} blocked — prerequisite(s) not cleared: ${list}; left queued for the escort to re-release` };
   }
 
-  // ── 4) SERIALIZE WITHIN GOAL (serialize-goal-member-spec-builds Phase 1) ──
-  // Individual blocked_by clearance (leg 3 above) said nothing about goal-MATES that ALSO cleared this
-  // tick — so N goal-mates could all pass the gate and race, colliding on hot files shared across the
-  // goal (the 2026-07-06 guaranteed-ticket-handling jam: #1245/#1246/#1248 all collided on
-  // action-executor.ts + refund handlers). This leg makes the dispatch SERIAL within a goal:
-  //   (b) no other build for this goal is currently in-flight (claimed/building/…), AND
-  //   (c) this spec is the earliest not-yet-built goal-member in blocked_by-topological order.
-  // Cross-GOAL parallelism is preserved (one-off + members of different goals are unaffected — the
-  // helper no-ops for one-off specs). Ordered AFTER blocked_by clearance so a genuinely-blocked spec
-  // still holds on the semantic reason; BEFORE the Vale leg so a still-in-review out-of-order spec is
-  // caught here before Vale's cooldown extends. Requeue (never park) — the next tick re-evaluates as
-  // soon as the sibling merges onto the goal branch.
+  // ── 4) SERIALIZE WITHIN GOAL — defensive assertion (goal-member-builds-gate-at-enqueue-not-at-claim Phase 2) ──
+  // Phase 1 of goal-member-builds-gate-at-enqueue-not-at-claim moved the (b) "no other goal-mate
+  // build in-flight" check UP to enqueue time (`evaluateGoalMemberEnqueueAdmission`), so a
+  // second goal-mate never lands as a `queued` row in the first place. Phase 2 (this session)
+  // adds the RELEASE side (`admitNextGoalMemberOnCompletion` runs from `applyMergedBuildEffects`
+  // after every merge), so a goal's serial slot is admitted-and-refilled without any claim-gate
+  // requeue loops. The legacy claim-time serializer's (b) + (c) legs are therefore UNREACHABLE
+  // in a healthy run — kept here as a DEFENSIVE ASSERTION with a leak-visible log line, so if
+  // Phase 1's fail-open path (transient DB error → admission returns ok:true) ever admits a
+  // second goal-mate, this claim-gate still catches it + we know to look. Cross-GOAL
+  // parallelism is preserved (one-off + members of different goals no-op here).
   const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
   const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, slug);
   if (!serial.ok) {
-    return { ok: false, disposition: "requeue", reason: `claim-gate: ${serial.reason}; held until the goal serializer releases` };
+    console.warn(
+      `[phase1-gate-leak] claim-time goal-member serializer fired for ${slug} — the enqueue-time admission gate should have caught this. serial verdict: ${serial.reason}`,
+    );
+    return {
+      ok: false,
+      disposition: "requeue",
+      reason: `claim-gate defensive assertion (phase1-gate-leak): ${serial.reason}`,
+    };
   }
 
   // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST

@@ -10,7 +10,14 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
-import { ACTIVE_STATUSES, getLiveJobForSlug, phaseScopedInstructions, type AgentJob, type PendingAction } from "@/lib/agent-jobs";
+import {
+  ACTIVE_STATUSES,
+  evaluateGoalMemberEnqueueAdmission,
+  getLiveJobForSlug,
+  phaseScopedInstructions,
+  type AgentJob,
+  type PendingAction,
+} from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
 import { routingOwnerForJobAsync, mirrorWebDecisionToAdaSlack } from "@/lib/agents/approval-inbox";
 import { resolveApproverLive, CEO } from "@/lib/agents/approval-router";
@@ -181,6 +188,17 @@ export async function queueRoadmapBuild(
       .single();
     if (followErr) return { ok: false, status: 500, error: followErr.message };
     return { ok: true, job: followUp as AgentJob, queuedBehindActive: true };
+  }
+
+  // goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 — enqueue-time admission gate. Refuse
+  // to insert a build row for a goal-bound spec while ANY sibling goal-mate build is already
+  // active (queued/claimed/building/…). The owner-visible response mirrors the blocked-by 409 —
+  // the button clears itself the moment the sibling completes and the reactive path re-enqueues.
+  // Fail-open on a resolve error (returns {ok:true}) — the claim-time serializer is still a
+  // backstop for any row that slipped past.
+  const admission = await evaluateGoalMemberEnqueueAdmission(workspaceId, slug);
+  if (!admission.ok) {
+    return { ok: false, status: 409, error: `Serialized — ${admission.reason}` };
   }
 
   // Only reference chain_phases when actually chaining — a normal build omits it so the DB default
