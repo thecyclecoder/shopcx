@@ -27,6 +27,7 @@ import { TicketAnalysisPanel } from "@/components/TicketAnalysisPanel";
 import { AiInvestigationBadge } from "@/components/ai-investigation-badge";
 import { useTriageInProgress } from "@/lib/use-triage-in-progress";
 import { resolveEscalationPersona } from "@/lib/ticket-escalation-persona";
+import { PersonaAvatar } from "@/components/agents/persona-chip";
 
 // Sentinel <option> value for "escalate to the AI Routine" — escalated_at set
 // with escalated_to null. Distinct from "" (not escalated, both null).
@@ -2709,6 +2710,28 @@ export default function TicketDetailPage() {
                 )}
                 Escalated To
               </label>
+              {/* Routine escalation → the CS Director persona (June) hard-calls it. Render her
+                  headshot + emoji + name so the field shows a real reviewer's face, not a
+                  generic robot. Reuses PersonaAvatar from the org/roster UI so the identity
+                  presentation stays consistent. See src/lib/ticket-escalation-persona.ts +
+                  docs/brain/specs/cs-director-third-rung-hard-calls-above-triage-quorum.md. */}
+              {ticket.escalated_at && !ticket.escalated_to && (() => {
+                const persona = resolveEscalationPersona(ticket.escalated_at, ticket.escalated_to);
+                if (!persona) return null;
+                return (
+                  <div
+                    className="mt-1 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 dark:border-amber-700 dark:bg-amber-950"
+                    data-testid="escalated-to-persona"
+                  >
+                    <PersonaAvatar persona={persona} size={20} />
+                    <span className="flex items-baseline gap-1 text-sm font-medium text-amber-800 dark:text-amber-300">
+                      <span aria-hidden>{persona.emoji}</span>
+                      <span>{persona.name}</span>
+                      <span className="text-xs font-normal opacity-70">· {persona.role}</span>
+                    </span>
+                  </div>
+                );
+              })()}
               <select
                 value={ticket.escalated_to || (ticket.escalated_at ? ESCALATE_ROUTINE_VALUE : "")}
                 onChange={(e) => {
