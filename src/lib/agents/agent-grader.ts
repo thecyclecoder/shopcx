@@ -178,6 +178,112 @@ export const INFRA_CANCEL_ERR_RE = /runaway|zombie|cancelled|stale-session|sessi
 export function isInfraCancelledError(err: string | null | undefined): boolean {
   return typeof err === "string" && err.length > 0 && INFRA_CANCEL_ERR_RE.test(err);
 }
+
+// ── isBlamelessInfraFailure — the outage/infra skip predicate ────────────────────────────────────
+// grader-treats-infra-outage-failures-as-blameless-not-low-grades Phase 1.
+//
+// An INFRA/outage failure is NOT a worker judgment mistake. 2026-07-08 incident: the Claude CLI's
+// Max-account credentials evicted mid-run, so every worker's next `claude -p` returned an outage
+// error ("authentication_failed" / "Not logged in" / "Please run /login") with 0 tokens spent.
+// The grader (which reads only the job row) treated every one as a 1-2/10 real failure, the
+// coach's low-grade window filled with the outage, and each cycle re-parked needs_attention
+// coaching that never had a real coachable signature — perpetual re-parking off an outage that
+// had already resolved. This predicate teaches the grader to SKIP the job entirely (no low grade
+// written) and the coach to EXCLUDE it from its low-grade window, so an outage burst can't poison
+// the rollup or ping the CEO on a repeat.
+//
+// Signatures — the concrete outage classes seen on 2026-07-08:
+//   (a) CLI-auth outage — "authentication_failed" / "Not logged in" / "Please run /login". The
+//       Max account's credentials evicted mid-run; every next claude -p failed at auth.
+//   (b) 0-token dead session — input+output tokens both zero AND the blob says the session
+//       produced no output (never reached the model). Not a worker slip — the session died before
+//       judgment.
+//   (c) Max-cap park — "all Max accounts capped" / "usage limit reached ... all Max accounts
+//       capped". The box parked the job blocked_on_usage awaiting reset.
+//   (d) No-parseable-verdict — "no parseable decisions" / "no parseable verdict" / "no parseable
+//       learning". A session ended before producing a verdict the worker code could parse;
+//       usually the CLI crashed mid-run.
+//   (e) DB-down author-write fallout — "silent author-write fallout" / "did not persist to
+//       public.specs". The Supabase pooler stalled during the spec-author write.
+//
+// CONSERVATIVE — a parseable-but-wrong verdict is NEVER blameless. A worker that DID reach its
+// judgment layer and made a bad call is exactly what the grader/coach loop exists to catch. We
+// mirror agent-coaching.ts's WORKER_ATTRIBUTABLE_MARKERS: if the blob says "wrong disposition",
+// "misdiagnosed", "false-positive", … the job is worker-attributable regardless of what other
+// signature co-occurs. This protects against the false-negative direction (accidentally masking
+// a real slip); the false-positive direction (grading an outage) is what we're fixing.
+//
+// Reused from BOTH the grader (Phase 2 — skip the job, write no grade row) and the coach (Phase
+// 3 — exclude blameless jobs from the low-grade window so the coach never parks needs_attention
+// on an outage burst).
+export const BLAMELESS_INFRA_FAILURE_PATTERNS: { key: string; pattern: RegExp }[] = [
+  // (a) CLI-auth outage
+  { key: "cli_auth_failed", pattern: /authentication[_ ]failed/i },
+  { key: "cli_not_logged_in", pattern: /not logged in/i },
+  { key: "cli_login_prompt", pattern: /please\s*(run|use|log\s*in).{0,20}\/?login/i },
+  // (c) Max-cap park
+  { key: "all_max_accounts_capped", pattern: /all\s+max\s+accounts\s+capped/i },
+  // (d) session died with no parseable verdict / decisions / learning
+  { key: "no_parseable_verdict", pattern: /no\s+parseable\s+verdict/i },
+  { key: "no_parseable_decisions", pattern: /no\s+parseable\s+decisions/i },
+  { key: "no_parseable_learning", pattern: /no\s+parseable\s+learning/i },
+  // (e) DB-down author-write fallout
+  { key: "silent_author_write_fallout", pattern: /silent\s+author-write\s+fallout/i },
+  { key: "did_not_persist_specs", pattern: /did\s+not\s+persist\s+to\s+public\.specs/i },
+];
+
+/** Concrete WORKER-attributable markers: strings that PROVE the failure reflected the worker's
+ *  own judgment (a wrong verdict / a misdiagnosis / a false-positive), so a co-occurring outage
+ *  signature can't mask a coachable slip. Mirrors agent-coaching.ts's WORKER_ATTRIBUTABLE_MARKERS
+ *  — same conservative direction: protect against masking a real slip, never against catching an
+ *  outage. */
+const BLAMELESS_INFRA_WORKER_MARKERS: RegExp[] = [
+  /wrong\s+(disposition|verdict|call|route|choice)/i,
+  /mis(-|)?diagnosed|misjudged|missed a real/i,
+  /false[- ]positive|false[- ]negative/i,
+];
+
+/** Sub-signature (b): "0-token dead session" — input+output tokens both zero AND the blob
+ *  carries a "no output"/"empty response"/"session ended" style marker. Requires BOTH so that a
+ *  fresh unmetered job (tokens still null/0 but no error) is never classified as blameless — a
+ *  clean success with a null cost is common. */
+const NO_OUTPUT_SIGNATURE_RE = /no\s+output|empty\s+session|empty\s+response|session\s+ended\s+with\s+no|dead\s+session|0[- ]token/i;
+
+export interface BlamelessInfraJobShape {
+  /** agent_jobs.error — the failure reason the worker code stamped. */
+  error?: string | null;
+  /** agent_jobs.log_tail — the last N lines of the session's stdout/stderr. */
+  log_tail?: string | null;
+  /** Total input tokens consumed by the session (from ai_token_usage rollup, or the worker's own
+   *  end-of-run stamp). Null/undefined = unknown, treated as unmetered (never blameless off this
+   *  signal alone). */
+  input_tokens?: number | null;
+  /** Total output tokens produced by the session. Null/undefined = unknown. */
+  output_tokens?: number | null;
+}
+
+/**
+ * Does this concluded agent_jobs row reflect an INFRA/outage failure the grader should SKIP (no
+ * low grade written) and the coach should EXCLUDE from its low-grade window? Conservative — if
+ * the blob carries a worker-attributable marker (wrong verdict, misdiagnosed, false-positive,
+ * …), the job is NEVER blameless even when an outage signature also matches. Pure fn — no DB /
+ * IO — so the deployed grader + the local unit tests exercise the same code.
+ */
+export function isBlamelessInfraFailure(job: BlamelessInfraJobShape): boolean {
+  const blob = `${job.error ?? ""}\n${job.log_tail ?? ""}`;
+  // Worker-attributable markers ALWAYS win — a real slip that co-occurred with an outage is
+  // still coachable. Guarding against the false-negative direction (masking a real slip).
+  for (const p of BLAMELESS_INFRA_WORKER_MARKERS) if (p.test(blob)) return false;
+  // (a) / (c) / (d) / (e) — a concrete outage signature in the error/log_tail.
+  for (const s of BLAMELESS_INFRA_FAILURE_PATTERNS) if (s.pattern.test(blob)) return true;
+  // (b) 0-token dead session — tokens zero AND the blob confirms no output. Requires the
+  // "no output"/"empty response" marker so an unmetered clean success isn't misclassified.
+  const inTok = Number(job.input_tokens ?? 0);
+  const outTok = Number(job.output_tokens ?? 0);
+  if (inTok === 0 && outTok === 0 && NO_OUTPUT_SIGNATURE_RE.test(blob)) return true;
+  return false;
+}
+
 /** Coaching trigger: rollup below this, OR a drop larger than DROP_THRESHOLD vs the prior window. */
 export const COACH_LOW_ROLLUP = 7;
 export const DROP_THRESHOLD = 1.5;

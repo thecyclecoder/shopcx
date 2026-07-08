@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import {
   GRADE_BATCH_CAP,
   GRADE_CADENCE_MS,
+  isBlamelessInfraFailure,
   isInfraCancelledError,
   selectGradingBatch,
   withinGradeCadence,
@@ -212,4 +213,85 @@ test("GRADE_CADENCE_MS default is ~2h", () => {
 
 test("GRADE_BATCH_CAP default is 12 (env-overridable)", () => {
   assert.equal(GRADE_BATCH_CAP, 12);
+});
+
+// ── isBlamelessInfraFailure — grader-treats-infra-outage-failures-as-blameless-not-low-grades P1 ──
+//
+// Concrete 2026-07-08 outage signatures the grader must SKIP (write NO low grade) and the coach
+// must EXCLUDE from its low-grade window — so a burst of outage errors can't poison the rollup or
+// perpetually re-park needs_attention. Conservative: a parseable-but-wrong verdict is NEVER
+// blameless; a worker's real judgment slip stays coachable even if an outage co-occurred.
+
+test("isBlamelessInfraFailure: (a) CLI-auth outage strings → blameless", () => {
+  assert.equal(isBlamelessInfraFailure({ error: "authentication_failed — CLAUDE_CONFIG_DIR credentials expired" }), true);
+  assert.equal(isBlamelessInfraFailure({ error: "Not logged in. Run /login to authenticate." }), true);
+  assert.equal(isBlamelessInfraFailure({ error: "session error: Please run /login before invoking claude" }), true);
+});
+
+test("isBlamelessInfraFailure: (b) 0 input+output tokens with no parseable output → blameless", () => {
+  assert.equal(
+    isBlamelessInfraFailure({
+      input_tokens: 0,
+      output_tokens: 0,
+      log_tail: "session ended with no output — 0-token dead session",
+    }),
+    true,
+  );
+  // Guardrail on (b): tokens 0 with a null blob is NOT blameless (could be an unmetered clean success).
+  assert.equal(isBlamelessInfraFailure({ input_tokens: 0, output_tokens: 0, error: null, log_tail: null }), false);
+  // Guardrail on (b): tokens > 0 AND "no output" is NOT the 0-token signature; must be tokens==0.
+  assert.equal(
+    isBlamelessInfraFailure({ input_tokens: 100, output_tokens: 50, log_tail: "no output" }),
+    false,
+  );
+});
+
+test("isBlamelessInfraFailure: (c) 'all Max accounts capped' Max-cap park → blameless", () => {
+  assert.equal(
+    isBlamelessInfraFailure({ error: "usage limit reached — all Max accounts capped (parked; auto-resumes at the soonest reset)" }),
+    true,
+  );
+  assert.equal(isBlamelessInfraFailure({ error: "all Max accounts capped — awaiting reset" }), true);
+});
+
+test("isBlamelessInfraFailure: (d) 'no parseable verdict/decisions/learning' session-died → blameless", () => {
+  assert.equal(isBlamelessInfraFailure({ error: "spec-review produced no parseable decisions" }), true);
+  assert.equal(isBlamelessInfraFailure({ error: "the agent produced no parseable verdict after 3 attempts" }), true);
+  assert.equal(isBlamelessInfraFailure({ error: "agent-coach — no parseable learning returned" }), true);
+});
+
+test("isBlamelessInfraFailure: (e) DB-down author-write fallout → blameless", () => {
+  assert.equal(isBlamelessInfraFailure({ error: "silent author-write fallout — the write did not land" }), true);
+  assert.equal(isBlamelessInfraFailure({ error: "spec did not persist to public.specs (author write returned no row)" }), true);
+});
+
+test("isBlamelessInfraFailure: parseable-but-wrong verdict is NOT blameless (worker judgment slip)", () => {
+  assert.equal(isBlamelessInfraFailure({ error: "spec-review: needs_fix on a sound spec — wrong verdict" }), false);
+  assert.equal(isBlamelessInfraFailure({ error: "regression: false-positive dismissal of a real bug" }), false);
+  assert.equal(isBlamelessInfraFailure({ error: "misdiagnosed root-cause — symptom, not root" }), false);
+  // Worker-attributable marker WINS over a co-occurring outage signature (protects against masking).
+  assert.equal(
+    isBlamelessInfraFailure({
+      error: "authentication_failed",
+      log_tail: "but then re-tried and produced wrong disposition on the ticket",
+    }),
+    false,
+  );
+});
+
+test("isBlamelessInfraFailure: a clean success / empty job is NOT blameless", () => {
+  assert.equal(isBlamelessInfraFailure({ error: null, log_tail: null }), false);
+  assert.equal(isBlamelessInfraFailure({}), false);
+  assert.equal(isBlamelessInfraFailure({ error: null, log_tail: "PR merged clean — build ok" }), false);
+});
+
+test("isBlamelessInfraFailure: matches on log_tail as well as error", () => {
+  assert.equal(
+    isBlamelessInfraFailure({ error: null, log_tail: "…\n[claude] authentication_failed\n" }),
+    true,
+  );
+  assert.equal(
+    isBlamelessInfraFailure({ error: null, log_tail: "silent author-write fallout in author-spec.ts" }),
+    true,
+  );
 });
