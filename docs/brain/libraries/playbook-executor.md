@@ -30,8 +30,19 @@ async function matchPlaybook(admin: Admin, wsId: string, intent: string, msg: st
 ### `startPlaybook` — function
 
 ```ts
-async function startPlaybook(admin: Admin, ticketId: string, playbookId: string,) : Promise<void>
+async function startPlaybook(
+  admin: Admin, ticketId: string, playbookId: string,
+  opts?: { seed_context?: Record<string, unknown> },
+) : Promise<void>
 ```
+
+Stamps the ticket onto a playbook: `active_playbook_id = playbookId`, `playbook_step = 0`, `playbook_context = seed_context ?? {}`, `playbook_exceptions_used = 0`, plus the `pb` + `pb:<slug>` tags. Called by:
+
+- **Deterministic matcher** — `unified-ticket-handler.routeExec` § 2b (Phase-2 rename in [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]]). Omits `seed_context`, so `playbook_context = {}`, matching pre-Phase-2 behavior.
+- **Sol's session-chosen path** — `unified-ticket-handler.routeExec` § 2a (Phase 2 of the same spec). Passes `{ seed_context: direction.plan.playbook_seed_context }` so the ids Sol already picked (order / subscription / customer) land on step 0 without the executor re-deriving them.
+- **Followup selection** (cancel-flow, etc.) — same shape, no seed.
+
+`seed_context` merges shallow-into an empty fresh context (a starting playbook has no prior context), so callers can pass whatever the target playbook's step 0 reads (e.g. `refund` reads `order_id`; `assisted-purchase-classic` reads `subscription_id`). Non-object values are ignored (guarded to `{}`).
 
 ### `PlaybookExecResult` — interface
 

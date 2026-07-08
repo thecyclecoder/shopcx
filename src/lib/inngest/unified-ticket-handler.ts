@@ -2478,6 +2478,56 @@ async function routeExec(
 
   // 2. Playbook
   if (hasCust && !social) {
+    // ── 2a. SOL-CHOSEN PLAYBOOK ──
+    // Phase 2 of docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+    // When Sol's live Direction names a playbook slug at first-touch AND the ticket is not
+    // already running one, the deterministic matcher stays quiet — we resolve the slug against
+    // public.playbooks (workspace-scoped) and dispatch directly. The reasoning stamp on
+    // ticket_resolution_events splits by source ('sol:session-chose-playbook:{slug}' vs
+    // 'sol:matcher-chose-playbook:{slug}') so Phase 4's analytics tile can measure the shift.
+    // If resolveSolChosenPlaybook returns null (no live Direction, stateless/needs_info,
+    // active_playbook_id already set, or slug unknown), we fall through to the matcher unchanged.
+    const { resolveSolChosenPlaybook } = await import("@/lib/ticket-directions");
+    const solChoice = await resolveSolChosenPlaybook(admin, wsId, tid);
+    if (solChoice) {
+      const { data: pbName } = await admin
+        .from("playbooks").select("name").eq("id", solChoice.playbook_id).maybeSingle();
+      const displayName = (pbName as { name: string } | null)?.name ?? solChoice.slug;
+      await sysNote(admin, tid, `[System] → Playbook: ${displayName} (sol:session-chose)`);
+      await startPlaybook(admin, tid, solChoice.playbook_id, { seed_context: solChoice.seed_context });
+      await addTicketTag(tid, `pb:${displayName.toLowerCase().replace(/\s+/g, "_")}`);
+      await markFirstTouch(tid, "ai");
+
+      // Ledger stamp — the exact reasoning string Phase 4's tile splits on. Best-effort:
+      // a diagnostic-substrate failure MUST NOT block the customer-facing send.
+      try {
+        const { count } = await admin
+          .from("ticket_resolution_events")
+          .select("id", { count: "exact", head: true })
+          .eq("ticket_id", tid);
+        const turn_index = (count ?? 0) + 1;
+        await admin
+          .from("ticket_resolution_events")
+          .insert({
+            workspace_id: wsId,
+            ticket_id: tid,
+            turn_index,
+            reasoning: `sol:session-chose-playbook:${solChoice.slug}`,
+            chosen: { playbook_id: solChoice.playbook_id, playbook_slug: solChoice.slug, source: "sol_session" },
+          });
+      } catch {
+        // Ledger is diagnostic — never fail the dispatch because the stamp failed.
+      }
+
+      if (await newerActivity(admin, tid, t0)) return;
+      const result = await executePlaybookStep(wsId, tid, msg, pers);
+      if (result.systemNote) await sysNote(admin, tid, result.systemNote);
+      if (result.response) await sendWithDelay(admin, wsId, tid, ch, result.response, cfg.sandbox);
+      await setStatus(admin, tid, cfg.auto_resolve);
+      return;
+    }
+
+    // ── 2b. DETERMINISTIC MATCHER ──
     // Matcher-defer guard (playbook-compiler-loop § Phase 3 —
     // matcher-defers-on-uncertainty). Below DEFER_THRESHOLD (DB-driven, default
     // 0.65) the matcher returns null and we fall through to Sonnet —
@@ -2501,6 +2551,31 @@ async function routeExec(
       await startPlaybook(admin, tid, pbMatch.id);
       await addTicketTag(tid, `pb:${pbMatch.name.toLowerCase().replace(/\s+/g, "_")}`);
       await markFirstTouch(tid, "ai");
+
+      // Ledger stamp — mirror the Sol-chosen path so Phase 4's tile can split by source.
+      // The slug is derived from the matched playbook's row so the two prefixes reference
+      // the same identifier space. Best-effort per the same rule as above.
+      try {
+        const { data: pbRow } = await admin
+          .from("playbooks").select("slug").eq("id", pbMatch.id).maybeSingle();
+        const matchedSlug = (pbRow as { slug: string } | null)?.slug ?? pbMatch.name.toLowerCase().replace(/\s+/g, "_");
+        const { count } = await admin
+          .from("ticket_resolution_events")
+          .select("id", { count: "exact", head: true })
+          .eq("ticket_id", tid);
+        const turn_index = (count ?? 0) + 1;
+        await admin
+          .from("ticket_resolution_events")
+          .insert({
+            workspace_id: wsId,
+            ticket_id: tid,
+            turn_index,
+            reasoning: `sol:matcher-chose-playbook:${matchedSlug}`,
+            chosen: { playbook_id: pbMatch.id, playbook_slug: matchedSlug, source: "matcher" },
+          });
+      } catch {
+        // Ledger is diagnostic — never fail the dispatch because the stamp failed.
+      }
 
       // Execute first step immediately
       // delay moved to send()

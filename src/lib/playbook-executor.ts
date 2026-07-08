@@ -2691,8 +2691,23 @@ export async function assertPlaybookStepConfidence(
 
 // ── Start a playbook on a ticket ──
 
+/**
+ * Stamps the ticket onto a playbook: sets `active_playbook_id`, resets step + exception counters,
+ * seeds `playbook_context`, and applies the `pb` / `pb:<slug>` tags. Called by the deterministic
+ * signal matcher (matchPlaybook / matchPlaybookScored) AND — Phase 2 of
+ * [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] — by
+ * unified-ticket-handler's Sol-chosen branch when the live Direction names a `playbook_slug`.
+ *
+ * The optional `seed_context` merges into the fresh `playbook_context` at step 0 so the executor
+ * doesn't have to re-derive ids Sol already picked (Sol writes them on `plan.playbook_seed_context`
+ * — typically `{ order_id, subscription_id, customer_id }`). The merge is shallow and Sol's keys
+ * DO NOT overwrite existing context (there is no existing context — this is a fresh start), so
+ * this is functionally "seed the initial context object". Legacy signal-matched calls omit the
+ * argument and get the pre-Phase-2 behavior (empty `{}`) unchanged.
+ */
 export async function startPlaybook(
   admin: Admin, ticketId: string, playbookId: string,
+  opts?: { seed_context?: Record<string, unknown> },
 ): Promise<void> {
   const [{ data: ticket }, { data: playbook }] = await Promise.all([
     admin.from("tickets").select("tags").eq("id", ticketId).single(),
@@ -2705,10 +2720,13 @@ export async function startPlaybook(
   if (!newTags.includes("pb")) newTags.push("pb");
   if (!newTags.includes(pbTag)) newTags.push(pbTag);
 
+  const seedContext =
+    opts?.seed_context && typeof opts.seed_context === "object" ? opts.seed_context : {};
+
   await admin.from("tickets").update({
     active_playbook_id: playbookId,
     playbook_step: 0,
-    playbook_context: {},
+    playbook_context: seedContext,
     playbook_exceptions_used: 0,
     tags: newTags,
   }).eq("id", ticketId);

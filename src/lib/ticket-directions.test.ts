@@ -16,7 +16,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeDirection, TicketDirectionPlanError } from "./ticket-directions";
+import { writeDirection, TicketDirectionPlanError, resolveSolChosenPlaybook } from "./ticket-directions";
 
 interface FakePlaybook {
   id: string;
@@ -270,4 +270,209 @@ test("chosen_path='playbook' + non-string slug → rejected with playbook_slug_n
     },
   );
   assert.equal(state.directions.length, 0);
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// resolveSolChosenPlaybook — Phase 2 of
+// docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+// The helper returns non-null only when Sol's live Direction names a slug,
+// the ticket is not already on a playbook, and the slug resolves in this
+// workspace — otherwise the caller falls through to the deterministic matcher.
+// ──────────────────────────────────────────────────────────────────────
+
+interface FakeTicket {
+  id: string;
+  workspace_id: string;
+  active_playbook_id: string | null;
+}
+
+interface DispatchSeed {
+  playbooks?: FakePlaybook[];
+  tickets?: FakeTicket[];
+  directions?: Array<{
+    id: string;
+    workspace_id: string;
+    ticket_id: string;
+    chosen_path: "playbook" | "stateless" | "needs_info";
+    plan: Record<string, unknown>;
+    superseded_at: string | null;
+  }>;
+}
+
+function makeDispatchAdmin(seed: DispatchSeed) {
+  const state = {
+    playbooks: (seed.playbooks ?? []).map((p) => ({ ...p })),
+    tickets: (seed.tickets ?? []).map((t) => ({ ...t })),
+    directions: (seed.directions ?? []).map((d) => ({
+      // getLiveDirection selects the full COLS list; fill in benign defaults for the rest.
+      id: d.id,
+      workspace_id: d.workspace_id,
+      ticket_id: d.ticket_id,
+      intent: "test",
+      context_summary: "test",
+      chosen_path: d.chosen_path,
+      plan: { ...d.plan },
+      guardrails: {},
+      authored_by: "sol_box_session",
+      authored_at: "2026-07-08T00:00:00Z",
+      superseded_at: d.superseded_at,
+      resession_count: 0,
+    })),
+  };
+
+  function selectBuilder<T>(rows: T[]) {
+    const filters: Record<string, unknown> = {};
+    let onlyLive = false;
+    const builder = {
+      select(_cols: string) {
+        return builder;
+      },
+      eq(col: string, val: unknown) {
+        filters[col] = val;
+        return builder;
+      },
+      is(col: string, val: unknown) {
+        if (col === "superseded_at" && val === null) onlyLive = true;
+        return builder;
+      },
+      maybeSingle() {
+        const match = (rows as unknown as Array<Record<string, unknown>>).find((r) => {
+          if (onlyLive && r.superseded_at !== null) return false;
+          for (const [k, v] of Object.entries(filters)) {
+            if (r[k] !== v) return false;
+          }
+          return true;
+        });
+        return Promise.resolve({ data: (match as unknown as T) ?? null, error: null });
+      },
+    };
+    return builder;
+  }
+
+  const admin = {
+    from(table: string) {
+      if (table === "ticket_directions") return selectBuilder(state.directions);
+      if (table === "tickets") return selectBuilder(state.tickets);
+      if (table === "playbooks") return selectBuilder(state.playbooks);
+      throw new Error(`unexpected table: ${table}`);
+    },
+  };
+  return { admin: admin as unknown as import("@supabase/supabase-js").SupabaseClient, state };
+}
+
+test("resolveSolChosenPlaybook: no live Direction → null (matcher path preserved)", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenPlaybook: live Direction with chosen_path='stateless' → null (bypass matcher AND no playbook)", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [
+      { id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "stateless", plan: {}, superseded_at: null },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenPlaybook: live Direction with chosen_path='needs_info' → null", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [
+      { id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "needs_info", plan: { needs: ["address"] }, superseded_at: null },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenPlaybook: chosen_path='playbook' but active_playbook_id already set → null (follow-up turn, shortcircuit owns it)", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: "pb-1" }],
+    directions: [
+      {
+        id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "playbook",
+        plan: { playbook_slug: "refund" }, superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenPlaybook: playbook_slug points at slug not in this workspace → null", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [
+      { id: "pb-other", workspace_id: "00000000-0000-0000-0000-00000000ws2", slug: "refund", name: "Refund" },
+    ],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [
+      {
+        id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "playbook",
+        plan: { playbook_slug: "refund" }, superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenPlaybook: happy path — resolves to { playbook_id, slug, seed_context }", async () => {
+  const seed = { order_id: "ord-42", subscription_id: "sub-7" };
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "assisted-purchase-classic", name: "Assisted Purchase" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [
+      {
+        id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "playbook",
+        plan: { playbook_slug: "assisted-purchase-classic", playbook_seed_context: seed },
+        superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.ok(out !== null, "expected non-null resolution");
+  assert.equal(out!.playbook_id, "pb-1");
+  assert.equal(out!.slug, "assisted-purchase-classic");
+  assert.deepEqual(out!.seed_context, seed);
+});
+
+test("resolveSolChosenPlaybook: happy path with omitted seed_context → seed defaults to {}", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [
+      {
+        id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "playbook",
+        plan: { playbook_slug: "refund" }, superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.ok(out !== null);
+  assert.deepEqual(out!.seed_context, {});
+});
+
+test("resolveSolChosenPlaybook: superseded Direction → null (superseded_at IS NOT NULL disables the branch)", async () => {
+  const { admin } = makeDispatchAdmin({
+    playbooks: [{ id: "pb-1", workspace_id: WS, slug: "refund", name: "Refund" }],
+    tickets: [{ id: TID, workspace_id: WS, active_playbook_id: null }],
+    directions: [
+      {
+        id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "playbook",
+        plan: { playbook_slug: "refund" }, superseded_at: "2026-07-08T01:00:00Z",
+      },
+    ],
+  });
+  const out = await resolveSolChosenPlaybook(admin, WS, TID);
+  assert.equal(out, null);
 });

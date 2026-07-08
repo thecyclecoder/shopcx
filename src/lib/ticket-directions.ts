@@ -241,6 +241,66 @@ export const loadLiveDirection = getLiveDirection;
  * increment, `.select('id')` returns zero rows and we return `null` so the caller can bail
  * without double-counting.
  */
+/**
+ * Sol-chosen playbook resolver — Phase 2 of
+ * [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]].
+ *
+ * unified-ticket-handler's `routeExec` calls this BEFORE the deterministic matcher
+ * (matchPlaybookScored → applyDeferThreshold → matchPlaybook). Returns non-null only when Sol's
+ * live Direction names a playbook AND the ticket is not already running one AND the slug
+ * resolves to a live playbook row scoped to this workspace — in that case the caller runs
+ * startPlaybook(seed_context) and stamps `ticket_resolution_events.reasoning`
+ * `'sol:session-chose-playbook:{slug}'`. When any of those preconditions fails (no live
+ * Direction, chosen_path is stateless/needs_info, active_playbook_id already set — a follow-up
+ * turn that the shortcircuit path handles — or the slug doesn't resolve), returns null and the
+ * caller falls through to the existing signal-matched path (`'sol:matcher-chose-playbook:...'`).
+ *
+ * Guards mirror learning #2 (confirming predicate at the action point, not a coarser proxy):
+ *   - Workspace scope re-asserted on both the Direction read and the playbook lookup so a
+ *     cross-workspace slug or a mis-authored Direction on a foreign ticket cannot dispatch.
+ *   - `active_playbook_id IS NULL` gates the START; a ticket mid-playbook stays on its existing
+ *     path (the shortcircuit already covers "still running" — cf. Phase 4 of
+ *     [[../specs/sol-cheap-execution-over-ticket-direction]]).
+ *   - The playbook lookup uses `.maybeSingle()` — a `null` result throws no error; the caller
+ *     just falls through, so a Direction that names a retired-in-DB slug degrades gracefully.
+ */
+export async function resolveSolChosenPlaybook(
+  admin: Admin,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<{ playbook_id: string; slug: string; seed_context: Record<string, unknown> } | null> {
+  const direction = await getLiveDirection(admin, ticket_id, { workspace_id });
+  if (!direction) return null;
+  if (direction.chosen_path !== "playbook") return null;
+  const slug = direction.plan.playbook_slug;
+  if (typeof slug !== "string" || slug.length === 0) return null;
+
+  const { data: ticketRow, error: ticketErr } = await admin
+    .from("tickets")
+    .select("active_playbook_id")
+    .eq("workspace_id", workspace_id)
+    .eq("id", ticket_id)
+    .maybeSingle();
+  if (ticketErr) throw ticketErr;
+  const activePbId = (ticketRow as { active_playbook_id: string | null } | null)?.active_playbook_id ?? null;
+  if (activePbId) return null;
+
+  const { data: pb, error: pbErr } = await admin
+    .from("playbooks")
+    .select("id")
+    .eq("workspace_id", workspace_id)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (pbErr) throw pbErr;
+  if (!pb) return null;
+
+  const seed = direction.plan.playbook_seed_context;
+  const seed_context =
+    seed && typeof seed === "object" && !Array.isArray(seed) ? (seed as Record<string, unknown>) : {};
+
+  return { playbook_id: (pb as { id: string }).id, slug, seed_context };
+}
+
 export async function incrementResessionCount(
   admin: Admin,
   input: { workspace_id: string; direction_id: string; from_count: number },
