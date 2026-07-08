@@ -15068,6 +15068,18 @@ function repairPrompt(brief: string): string {
     ``,
     `⭐ MALFORMED SPEC mandate (spec-review-agent Phase 4) — if an EXISTING spec you'd extend (a parent, a Blocked-by: link, a sibling root-cause spec you'd group onto) is malformed/off the CHECKLIST (mangled phase numbering, missing **Owner:**/**Parent:**, missing **Verification** section, a customer_id table with no DB-companion plan, a stale H1 status emoji), do NOT build around it: surface "needs-human" with a one-line note ("[[<slug>]] is malformed — <what's off>; should be flipped back to in_review via markSpecCardBackToReview before this fix can hang off it"). Never silently patch a malformed spec inline; the in_review flip is what gets it back into Vale's queue.`,
     ``,
+    `⭐ KPI_DRIFT ROOT-CAUSE CONSOLIDATION mandate (baked from agent-mandate-hardening-repair coaching) — Rafa's #1 recurring mistake is treating every \`loop:kpi_drift:<metric>:<cadence>\` signature as its own bug and authoring a per-signature fix. They all share ONE root cause: the stale KPI snapshot row selected by the done-guard in \`src/lib/inngest/platform-director-cron.ts\` and read by \`src/lib/agents/kpi-review.ts\`. One guard heals every metric+cadence at once. So when the SIGNATURE matches \`loop:kpi_drift:<metric>:<cadence>\`, BEFORE deciding a verdict:`,
+    `  1. Read \`src/lib/inngest/platform-director-cron.ts\` (the daily/weekly/monthly done-guards) AND \`src/lib/agents/kpi-review.ts\` (the reader / audit).`,
+    `  2. Grep \`public.specs\` (via getSpec / listSpecs) + recent merges for an existing in-flight or merged snapshot done-guard spec — e.g. kpi-daily-snapshot-heal-stale-inflight-rows, devops-kpi-weekly-snapshot-date-lag-fix, kpi-audit-heal-weekly-stale-snapshot-rows, devops-kpi-daily-snapshot-date-lag-fix, or any \`Related-spec:\` fanning off them.`,
+    `  3. If an existing guard/spec ALREADY COVERS this metric+cadence (or its cadence is trivially reached by extending that spec's target file), return "needs-human" with the ONE-LINE note "resolved-by [[<that-spec>]] — snapshot done-guard already covers this cadence, pending deploy verification (do NOT author a new per-signature spec; the human should confirm the deploy landed + the metric recovered before closing)". Do NOT author a new spec. Do NOT return "transient" — a fix that hasn't deployed is not a transient wait.`,
+    `  4. Only when the guard GENUINELY misses that cadence and no sibling spec is in-flight → verdict "real-bug" with a spec whose \`target\` is the EXISTING guard file (\`src/lib/inngest/platform-director-cron.ts\` OR \`src/lib/agents/kpi-review.ts\`) and whose Phase 1 EXTENDS that same guard to cover the missing cadence. Never author a new spec that re-edits those lines separately from the existing guard — the correct outcome is ONE done-guard for all cadences, not a stack of per-cadence heals.`,
+    ``,
+    `⭐ NEVER CLOSE ON AN UNVERIFIED FIX mandate (baked from agent-mandate-hardening-repair coaching) — Rafa's #2 recurring mistake is marking a job "completed" as soon as a fix is identified/queued/pending-deploy, before confirming the deploy landed and the KPI/error actually recovered. A fix that hasn't landed in production has NOT held; asserting "root cause fixed" without evidence is exactly the pattern the rubric penalizes. Rules:`,
+    `  • Do NOT return "transient" merely because a prior fix "was queued" or "is pending deploy" or "was auto-queued" — that conflates "a fix was authored" with "the fix held". A queued/pending fix is a HYPOTHESIS, not a resolution.`,
+    `  • When a prior fix is referenced (an existing spec, a linked PR, a Blocked-by), your verdict must be "needs-human" with a ONE-LINE note "pending verification — awaiting deploy of [[<spec-or-PR>]] + <specific post-deploy signal, e.g. the KPI returning to baseline / the error signature not recurring for one cycle>". A human confirms and closes; you do NOT close speculatively.`,
+    `  • Only return "transient" when the error is a GENUINE one-off wait that already recovered by itself (a momentary upstream timeout, a deploy-boundary race that self-cleared), with NO pending fix behind it. If your reason has to mention "pending deploy", "already-fixed", "resolved-by", "queued", "in-flight", or "auto-queued", the verdict is "needs-human" (pending verification), not "transient".`,
+    `  • Do NOT invent verdicts — the recognized set is exactly: "real-bug" | "monitor-false-positive" | "foreign-app-noise" | "transient" | "needs-human". "already-fixed" / "pending-verification" are NOT verdicts; when a fix exists but is unverified, use "needs-human" with the pending-verification note above.`,
+    ``,
     `The spec you author is reviewed by the FOUNDER on the Roadmap board BEFORE any build — so its prose must be HUMAN-READABLE, not machine shorthand. A reviewer who never saw this error must understand, in plain language: (a) what is failing + the user-facing/system impact, (b) what you propose to change, concretely, (c) why that's the right fix. Write \`problem\`, \`proposedChange\`, and \`why\` as PROSE a non-engineer can follow — never a bare code-path string. (The \`target\` file is a machine hint, NOT the proposal.)`,
     ``,
     `Final message = ONLY one JSON object:`,
@@ -15561,6 +15573,20 @@ async function runRepairJob(job: Job) {
 
     if (verdict === "transient") {
       const reason = String(parsed?.reason || "transient / genuine wait — no code fix");
+      // agent-mandate-hardening-repair Phase 1: NEVER close on an unverified fix. A "transient" whose
+      // reason cites an unverified pending fix (queued, pending deploy, resolved-by, already-fixed,
+      // auto-queued, in-flight, or a [[spec-slug]] link) is a hypothesis, not a resolution — the
+      // prompt tells Rafa to return "needs-human" (pending verification) instead, but the code holds
+      // the same line so a slipped verdict cannot silently phantom-close the loop before the deploy
+      // lands + the metric recovers. Park needs_attention with an actionable "pending verification"
+      // note; leave the error row OPEN so the reconcile keeps observing it until a human closes.
+      const unverifiedFixRe = /(pending\s+deploy|pending\s+verification|already[-\s]?fixed|resolved[-\s]?by|auto[-\s]?queued|in[-\s]?flight|queued\s+build|\[\[[a-z0-9-]+\]\])/i;
+      if (unverifiedFixRe.test(reason)) {
+        const note = `pending verification — the "transient" reason references an unverified fix (${reason.slice(0, 400)}); a human should confirm the deploy landed + the target metric/error recovered before closing.`;
+        await update(job.id, { status: "needs_attention", error: "pending verification — unverified fix cited", log_tail: note.slice(-2000) });
+        console.log(`${tag} transient with unverified-fix reason → parked needs_attention (pending verification), NOT completed`);
+        return;
+      }
       await resolveRepairErrorRow(instr, `transient: ${reason}`);
       await update(job.id, { status: "completed", error: null, log_tail: `transient → resolved: ${reason}`.slice(-2000) });
       console.log(`${tag} transient → resolved the error row, no spec`);
