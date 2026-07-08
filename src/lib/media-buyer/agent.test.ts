@@ -21,9 +21,12 @@ import {
   computeMediaBuyerPlan,
   DEFAULT_FATIGUE_REPLENISH_VARIANTS,
   DEFAULT_TEST_COHORT_TARGET,
+  evaluateSensorTrustSnapshot,
   FATIGUE_REPLENISH_THRESHOLD,
+  SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
   type MediaBuyerPlanInputs,
+  type SensorTrustSnapshot,
 } from "./agent";
 import type { DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import type { IterationPolicy } from "@/lib/meta/decision-engine";
@@ -362,4 +365,104 @@ test("computeMediaBuyerPlan — sub-trigger winner is NEVER fatigue-replenished 
   );
   // Only REAL winners qualify — fatigue-replenish assumes a winning angle worth cloning.
   assert.equal(plan.fatigueReplenish.length, 0);
+});
+
+// ── media-buyer-sensor-trust-probe Phase 3 — sensor_trust_ok short-circuit ──
+
+const NOW_MS = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z, fixed for age math
+
+function snapshot(overrides: Partial<SensorTrustSnapshot> = {}): SensorTrustSnapshot {
+  return {
+    snapshot_date: "2026-07-07",
+    band: "green",
+    coverage_ratio: 0.85,
+    reasons: [],
+    // Fresh: exactly 1h old vs NOW_MS.
+    created_at: new Date(NOW_MS - 3600_000).toISOString(),
+    ...overrides,
+  };
+}
+
+test("evaluateSensorTrustSnapshot — missing snapshot → deny with missing_snapshot", () => {
+  const denial = evaluateSensorTrustSnapshot(null, NOW_MS);
+  assert.ok(denial, "null snapshot should deny");
+  assert.equal(denial.band, null);
+  assert.equal(denial.snapshot_date, null);
+  assert.deepEqual(denial.reasons, ["missing_snapshot"]);
+  assert.ok(denial.reason.toLowerCase().includes("no media_buyer_sensor_trust snapshot"));
+});
+
+test("evaluateSensorTrustSnapshot — stale snapshot (72h old) → deny with stale_snapshot in reasons", () => {
+  // 72h old → past the 48h cap. Even a band='green' snapshot cannot rescue it.
+  const s = snapshot({
+    band: "green",
+    reasons: ["low_unresolved_share_within_cap"],
+    created_at: new Date(NOW_MS - 72 * 3600_000).toISOString(),
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "stale snapshot must deny");
+  assert.equal(denial.band, "green");
+  assert.equal(denial.snapshot_date, s.snapshot_date);
+  // Existing reasons preserved + stale_snapshot appended.
+  assert.ok(denial.reasons.includes("low_unresolved_share_within_cap"));
+  assert.ok(denial.reasons.includes("stale_snapshot"));
+  assert.ok(denial.reason.toLowerCase().includes("stale"));
+});
+
+test("evaluateSensorTrustSnapshot — band='red' fresh snapshot → deny (attribution untrusted)", () => {
+  const s = snapshot({
+    band: "red",
+    coverage_ratio: 0.3,
+    reasons: ["low_coverage", "unresolved_share_over_cap"],
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "red band must deny");
+  assert.equal(denial.band, "red");
+  assert.equal(denial.coverage_ratio, 0.3);
+  // The probe's own reasons flow through — the runner records them verbatim on
+  // the director_activity row (spec: metadata={reasons, snapshot_date, band, coverage_ratio}).
+  assert.deepEqual(denial.reasons, ["low_coverage", "unresolved_share_over_cap"]);
+  assert.ok(denial.reason.toLowerCase().includes("red"));
+});
+
+test("evaluateSensorTrustSnapshot — fresh band='green' → allow (returns null)", () => {
+  const s = snapshot({ band: "green" });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.equal(denial, null, "fresh green snapshot must NOT deny");
+});
+
+test("evaluateSensorTrustSnapshot — fresh band='yellow' → allow (yellow is a warning, not a refusal)", () => {
+  // Yellow is the probe's own "borderline" carrier — the runner still proceeds so
+  // Shadow-mode calls land; only red short-circuits per spec Phase 3.
+  const s = snapshot({ band: "yellow", coverage_ratio: 0.6 });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.equal(denial, null, "fresh yellow snapshot must NOT deny");
+});
+
+test("evaluateSensorTrustSnapshot — snapshot exactly at the freshness cap (48h) is still allowed", () => {
+  // Boundary — 48h exactly is inside the cap (≤, not <).
+  const s = snapshot({
+    band: "green",
+    created_at: new Date(NOW_MS - SENSOR_TRUST_MAX_AGE_MS).toISOString(),
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.equal(denial, null, "exact-cap snapshot must NOT deny");
+});
+
+test("evaluateSensorTrustSnapshot — 48h+1ms is stale → deny", () => {
+  // Boundary — 1ms past the cap trips the freshness guard.
+  const s = snapshot({
+    band: "green",
+    created_at: new Date(NOW_MS - SENSOR_TRUST_MAX_AGE_MS - 1).toISOString(),
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "48h+1ms snapshot must deny");
+  assert.ok(denial.reasons.includes("stale_snapshot"));
+});
+
+test("evaluateSensorTrustSnapshot — malformed created_at → deny (defensive: infinite age)", () => {
+  const s = snapshot({ band: "green", created_at: "not-a-date" });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "unparseable created_at must fail closed");
+  assert.ok(denial.reasons.includes("stale_snapshot"));
 });

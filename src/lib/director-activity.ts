@@ -189,6 +189,15 @@ export type DirectorActionKind =
   // into the test cohort. Metadata carries source_meta_ad_id + roas + fatigue_score
   // + new_ad_campaign_ids so the audit trail cites the concrete winner in decline.
   | "media_buyer_fatigue_replenish_triggered"
+  // media-buyer-sensor-trust-probe Phase 3 — the Media Buyer's pre-plan sensor-trust
+  // gate ([[../libraries/media-buyer-agent]] § The five verbs / § Sensor-trust contract).
+  // Before `computeMediaBuyerPlan`, the runner loads the newest `media_buyer_sensor_trust`
+  // snapshot for (workspace, meta_ad_account_id) and enforces (a) present, (b) age ≤ 48h,
+  // (c) band !== 'red'. Any check failing writes ONE row + returns the dormant plan shape
+  // — no `iteration_actions` writes, no `ad_publish_jobs`, zero Meta motion. Metadata
+  // carries the snapshot_date / band / coverage_ratio / reasons the probe already stamped,
+  // so the audit trail cites the numbers, not narrative. Owned by Growth (director_function='growth').
+  | "media_buyer_sensor_trust_denied"
   // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the CS Director (💬 June) supervision
   // ledger for the per-ticket QC grader. One row per box-session verdict (applyAnalyzerVerdict
   // completed on the box lane, kind='ticket-analyze'), so June's activity feed / EOD recap /

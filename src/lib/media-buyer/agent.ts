@@ -50,6 +50,147 @@ const GROWTH_DIRECTOR_FUNCTION = "growth";
 /** Default number of live creatives the Media Buyer keeps in the test cohort at any time. */
 export const DEFAULT_TEST_COHORT_TARGET = 3;
 
+/**
+ * media-buyer-sensor-trust-probe Phase 3 — the freshness cap on a sensor-trust snapshot.
+ * A snapshot whose `created_at` is older than this is treated as untrusted (`stale_snapshot`
+ * added to the reasons + the same denied path fires) — "stale trust ≡ untrusted", per the
+ * spec's verification (a 72h-stale snapshot must deny the pass). Measured from `created_at`
+ * (row-insertion time), not `snapshot_date` (a date bucket), so a day-late probe run doesn't
+ * silently keep the pass alive on cold data.
+ */
+export const SENSOR_TRUST_MAX_AGE_MS = 48 * 3600_000;
+
+/** The trimmed row shape the pure gate consumes — mirrors the SELECT the runner does. */
+export interface SensorTrustSnapshot {
+  snapshot_date: string;
+  band: string | null;
+  coverage_ratio: number | null;
+  reasons: string[] | null;
+  created_at: string;
+}
+
+/** The verdict the pure gate emits when it denies a pass. */
+export interface SensorTrustDenial {
+  reason: string;
+  snapshot_date: string | null;
+  band: string | null;
+  coverage_ratio: number | null;
+  reasons: string[];
+}
+
+/**
+ * Pure — decide whether the latest sensor-trust snapshot lets the Media Buyer pass proceed.
+ * Returns a `SensorTrustDenial` for any failing check (missing / stale / red-band); returns
+ * `null` when the snapshot clears all three gates. The `reasons` field on a denial carries
+ * the snapshot's own reasons plus any freshness signal we add (`missing_snapshot` when the
+ * row itself is absent, `stale_snapshot` when the age cap trips) so downstream can distinguish.
+ *
+ * Gate order:
+ *   1) present — a null snapshot deny with `missing_snapshot` reason.
+ *   2) fresh — `nowMs - created_at ≤ SENSOR_TRUST_MAX_AGE_MS` (48h). Stale ≡ untrusted.
+ *   3) band !== 'red' — a red band is the probe's explicit "sensor untrusted" verdict.
+ * A green OR yellow band that is fresh clears the gate — yellow is a warning the probe
+ * carries via its own reasons (unresolved-share nearing cap, thin spend allocation), not a
+ * refusal; only red short-circuits the pass.
+ */
+export function evaluateSensorTrustSnapshot(
+  snapshot: SensorTrustSnapshot | null,
+  nowMs: number,
+): SensorTrustDenial | null {
+  if (!snapshot) {
+    return {
+      reason: "no media_buyer_sensor_trust snapshot for this workspace/account — run the sensor-trust-probe lane first.",
+      snapshot_date: null,
+      band: null,
+      coverage_ratio: null,
+      reasons: ["missing_snapshot"],
+    };
+  }
+  const existingReasons = Array.isArray(snapshot.reasons) ? snapshot.reasons : [];
+  const createdMs = new Date(snapshot.created_at).getTime();
+  const ageMs = Number.isFinite(createdMs) ? nowMs - createdMs : Number.POSITIVE_INFINITY;
+  if (ageMs > SENSOR_TRUST_MAX_AGE_MS) {
+    const ageH = Math.max(0, Math.round(ageMs / 3600_000));
+    return {
+      reason: `sensor-trust snapshot is stale — ${ageH}h old (cap ${SENSOR_TRUST_MAX_AGE_MS / 3600_000}h). Stale trust ≡ untrusted.`,
+      snapshot_date: snapshot.snapshot_date,
+      band: snapshot.band,
+      coverage_ratio: snapshot.coverage_ratio,
+      reasons: [...existingReasons, "stale_snapshot"],
+    };
+  }
+  if (snapshot.band === "red") {
+    return {
+      reason: `sensor-trust band=red — attribution untrusted; refusing to grade Media Buyer calls until the probe recovers.`,
+      snapshot_date: snapshot.snapshot_date,
+      band: snapshot.band,
+      coverage_ratio: snapshot.coverage_ratio,
+      reasons: existingReasons,
+    };
+  }
+  return null;
+}
+
+/**
+ * Read the newest `media_buyer_sensor_trust` snapshot for a workspace + optional account
+ * (order by snapshot_date desc, limit 1). Returns `null` when no row exists. The account
+ * filter mirrors the probe's write path — a per-account probe row is preferred over a
+ * workspace-wide one; a null-account caller reads only the null-account row.
+ */
+async function readLatestSensorTrust(
+  admin: Admin,
+  workspaceId: string,
+  metaAdAccountId: string | null,
+): Promise<SensorTrustSnapshot | null> {
+  const base = admin
+    .from("media_buyer_sensor_trust")
+    .select("snapshot_date, band, coverage_ratio, reasons, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("snapshot_date", { ascending: false })
+    .limit(1);
+  const { data, error } = metaAdAccountId
+    ? await base.eq("meta_ad_account_id", metaAdAccountId).maybeSingle()
+    : await base.is("meta_ad_account_id", null).maybeSingle();
+  if (error || !data) return null;
+  const row = data as {
+    snapshot_date: string;
+    band: string | null;
+    coverage_ratio: number | null;
+    reasons: unknown;
+    created_at: string;
+  };
+  return {
+    snapshot_date: row.snapshot_date,
+    band: row.band,
+    coverage_ratio: row.coverage_ratio,
+    reasons: Array.isArray(row.reasons) ? (row.reasons as string[]) : null,
+    created_at: row.created_at,
+  };
+}
+
+/**
+ * Build the dormant plan shape the pass returns when the sensor-trust gate denies —
+ * mirrors the no-active-policy dormancy shape (0 promote/kill/replenish, empty summary
+ * naming the denial reason). Kept in one place so the two dormancy paths stay in sync.
+ */
+function buildSensorTrustDormantPlan(
+  denial: SensorTrustDenial,
+  cohortTargetCount: number,
+): MediaBuyerPlan {
+  return {
+    policyActive: false,
+    policyVersionId: null,
+    cohortConfigured: false,
+    cohortTargetCount,
+    currentTestCohortSize: 0,
+    promote: [],
+    kill: [],
+    replenish: [],
+    fatigueReplenish: [],
+    summary: `Dormant: sensor-trust denied — ${denial.reason}`,
+  };
+}
+
 /** A promote action — scale up the winner's parent Meta adset via the executor. */
 export interface MediaBuyerPromoteAction {
   kind: "promote";
@@ -355,6 +496,46 @@ export async function runMediaBuyerLoop(
   opts: RunMediaBuyerOptions,
 ): Promise<RunMediaBuyerResult> {
   const nowMs = opts.nowMs ?? Date.now();
+
+  // ── Sensor-trust gate (media-buyer-sensor-trust-probe Phase 3) ────────────
+  // Before computeMediaBuyerPlan, refuse to grade Media Buyer calls against
+  // untrusted spend/revenue. Load the newest `media_buyer_sensor_trust` snapshot
+  // for (workspace, meta_ad_account_id) — ordered snapshot_date desc, limit 1 —
+  // and enforce (a) present, (b) age ≤ SENSOR_TRUST_MAX_AGE_MS (48h), (c) band !== 'red'.
+  // Any check failing writes ONE `media_buyer_sensor_trust_denied` director_activity
+  // row (metadata cites {reasons, snapshot_date, band, coverage_ratio}) and returns
+  // the SAME dormant summary shape [[docs/brain/libraries/media-buyer-agent]] § Policy
+  // contract already documents for no active policy — zero iteration_actions writes,
+  // zero ad_publish_jobs, no Meta motion. This is the short-circuit the goal's
+  // "shadow-mode winner/loser calls match a human review within tolerance" criterion
+  // hinges on: only trust ROAS numbers once the attribution sensor is provably clean.
+  const latestTrust = await readLatestSensorTrust(admin, opts.workspaceId, opts.metaAdAccountId);
+  const denial = evaluateSensorTrustSnapshot(latestTrust, nowMs);
+  if (denial) {
+    await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_sensor_trust_denied",
+      specSlug: null,
+      reason: `Media Buyer pass skipped — ${denial.reason}`,
+      metadata: {
+        meta_ad_account_id: opts.metaAdAccountId,
+        snapshot_date: denial.snapshot_date,
+        band: denial.band,
+        coverage_ratio: denial.coverage_ratio,
+        reasons: denial.reasons,
+        autonomous: true,
+      },
+    });
+    const dormantPlan = buildSensorTrustDormantPlan(
+      denial,
+      opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET,
+    );
+    return {
+      plan: dormantPlan,
+      writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] },
+    };
+  }
 
   // ── Read: policy, cohort, winners, losers, ready-to-test bin ───────────────
   const [policy, cohort] = await Promise.all([

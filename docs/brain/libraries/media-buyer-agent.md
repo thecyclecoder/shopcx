@@ -18,7 +18,8 @@ Every pass emits at most five kinds of typed action:
 - `kill` — a scorecard adset ([[../tables/iteration_scorecards_daily]]) below the policy's `roas_floor` with spend ≥ `pause_min_spend_cents` triggers a `pause` (via `iteration_actions`). The action cites the highest-spend child ad's `meta_ad_id` as the "source of the decline" so the audit trail names a creative, not just the wrapper.
 - `replenish` — when the test cohort ([[../tables/media_buyer_test_cohorts]]) has fewer than `cohortTargetCount` live ads, the agent picks from [[ready-to-test]] (top-of-bin, in ready order) and publishes each via the Phase 1 rail (`origin='media-buyer-test'`, `publish_active=true`). The cohort ceiling is enforced by [[media-buyer-publish-gate]].
 - `fatigue_replenish` — **(Phase 3)** — a WINNING ad whose parent adset's `iteration_scorecards_daily.fatigue_score` crosses `FATIGUE_REPLENISH_THRESHOLD = 0.5` (the same cutoff decision-engine uses to suppress a scale-up on fatigue) triggers a call to [[winning-creative-detect]] `amplifyWinner` — spawns N fresh variants of the winning angle at `status='ready'`, respecting the per-day `MAX_AMPLIFICATIONS_PER_DAY` cap. The variants land in [[ready-to-test]] and the standard `replenish` verb picks them up on the next pass to publish into the test cohort. The action cites the source `meta_ad_id` + its ROAS + fatigue score + the resulting `new_ad_campaign_ids` so the lineage is traceable.
-- (implicit) `dormant` — no active [[../tables/iteration_policies]] row → NO actions; the pass records `media_buyer_no_active_policy` and returns. Never silent.
+- (implicit) `dormant — no active policy` — no active [[../tables/iteration_policies]] row → NO actions; the pass records `media_buyer_no_active_policy` and returns. Never silent.
+- (implicit) `dormant — sensor-trust denied` — **([[../specs/media-buyer-sensor-trust-probe]] Phase 3)** — BEFORE `computeMediaBuyerPlan`, the runner loads the newest [[../tables/media_buyer_sensor_trust]] snapshot for `(workspaceId, metaAdAccountId)` and enforces (a) present, (b) age ≤ `SENSOR_TRUST_MAX_AGE_MS = 48h`, (c) `band !== 'red'`. Any check failing writes ONE `media_buyer_sensor_trust_denied` [[../tables/director_activity]] row (metadata: `{reasons, snapshot_date, band, coverage_ratio}` — the probe's own numbers, cited verbatim) + returns the same dormant summary shape as the no-active-policy path — ZERO `iteration_actions` writes, ZERO `ad_publish_jobs`, no Meta motion. This is the short-circuit the parent goal's "shadow-mode winner/loser calls match a human review within tolerance" criterion hinges on: only trust ROAS numbers once the attribution sensor is provably clean for that cohort. A `stale_snapshot` reason is added when the freshness cap trips (stale trust ≡ untrusted); `missing_snapshot` when the row is absent entirely.
 
 ## Exports
 
@@ -65,6 +66,18 @@ The orchestrator. Reads all inputs, computes the plan, persists the writes:
 
 Returns `{ plan, writes: { iterationActionsInserted, directorActivityRows, publishJobsInserted, amplifiedAdCampaignIds } }`.
 
+## Sensor-trust contract — dormant without a clean probe
+
+**([[../specs/media-buyer-sensor-trust-probe]] Phase 3.)** The Media Buyer refuses to grade shadow-mode calls against untrusted spend/revenue. Every pass first loads the newest [[../tables/media_buyer_sensor_trust]] row for `(workspaceId, metaAdAccountId)` — ordered `snapshot_date desc, limit 1` — and gates the pass on:
+
+1. **Present** — a null row denies with `reasons=['missing_snapshot']`.
+2. **Fresh** — `now - created_at ≤ SENSOR_TRUST_MAX_AGE_MS` (48h), measured from row insertion (not `snapshot_date`, a date bucket) so a day-late probe run doesn't silently keep the pass alive on cold data. Past-cap denies with `stale_snapshot` appended to the probe's own reasons.
+3. **Band ≠ 'red'** — a red band is the probe's explicit "sensor untrusted" verdict; the probe's own reasons flow through verbatim on the denial. Yellow is a warning the probe carries via its own reasons (unresolved-share nearing cap, thin spend allocation) — the runner still proceeds; only red short-circuits.
+
+A denial writes ONE `media_buyer_sensor_trust_denied` [[../tables/director_activity]] row + returns the same dormant summary shape the no-active-policy path uses (0 promote/kill/replenish, no writes, `plan.summary` names the denial reason). The row's metadata is `{ meta_ad_account_id, snapshot_date, band, coverage_ratio, reasons, autonomous:true }` — the probe's numbers CITED, not paraphrased. Restore the pass by re-running the [[media-buyer__sensor-trust-probe]] lane (the box worker's `sensor-trust-probe` kind) — a fresh green/yellow snapshot lifts the gate on the next cadence pass.
+
+The pure `evaluateSensorTrustSnapshot` (DB-free) is the seam the unit tests pin the gate math against; the orchestrator's `readLatestSensorTrust` handles the read, and the runner writes the audit row + returns the dormant plan. This mirrors the pure/orchestrator split in [[media-buyer__sensor-trust-probe]] itself so the two libraries stay symmetric.
+
 ## Policy contract — dormant without it
 
 The Media Buyer refuses to autonomously act without an active [[../tables/iteration_policies]] row. On a pass with no policy:
@@ -96,4 +109,4 @@ For the replenish path to actually insert `ad_publish_jobs` rows, the [[../table
 
 ## Related
 
-[[../tables/media_buyer_test_cohorts]] · [[media-buyer-publish-gate]] · [[../tables/ad_publish_jobs]] · [[../tables/iteration_policies]] · [[../tables/iteration_actions]] · [[../tables/iteration_scorecards_daily]] · [[../tables/director_activity]] · [[../tables/meta_ads]] · [[winning-creative-detect]] · [[ready-to-test]] · [[../meta/decision-engine]] · [[../meta/execution]] · [[builder-worker]] · [[iteration-policy-authoring]] · [[../specs/media-buyer-test-winner-loop]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[../tables/media_buyer_test_cohorts]] · [[../tables/media_buyer_sensor_trust]] · [[media-buyer-publish-gate]] · [[media-buyer__sensor-trust-probe]] · [[../tables/ad_publish_jobs]] · [[../tables/iteration_policies]] · [[../tables/iteration_actions]] · [[../tables/iteration_scorecards_daily]] · [[../tables/director_activity]] · [[../tables/meta_ads]] · [[winning-creative-detect]] · [[ready-to-test]] · [[../meta/decision-engine]] · [[../meta/execution]] · [[builder-worker]] · [[iteration-policy-authoring]] · [[../specs/media-buyer-test-winner-loop]] · [[../specs/media-buyer-sensor-trust-probe]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
