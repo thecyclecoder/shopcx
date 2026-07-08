@@ -30,14 +30,22 @@
  *     cleared on re-author. A future signal (director_activity kind, once wired) can add
  *     this without a schema change.
  *
+ * Resilience: each source read is wrapped in its own try/catch so ONE flaky source-table
+ * query (a schema drift on a rarely-used column, a Supabase timeout) doesn't wipe the
+ * whole backfill — the script logs the source that failed + continues with the rest. A
+ * partial backfill re-runs cleanly (idempotent dedupe).
+ *
  * Run:
  *   npx tsx scripts/backfill-spec-timecards-from-history.ts             # dry-run (default)
  *   npx tsx scripts/backfill-spec-timecards-from-history.ts --apply     # write
+ *   npx tsx scripts/backfill-spec-timecards-from-history.ts --workspace=<uuid> [--apply]
  */
 import { createAdminClient } from "./_bootstrap";
 
 const PAGE = 1000;
 const INSERT_BATCH = 500;
+
+type Admin = ReturnType<typeof createAdminClient>;
 
 type ProposedRow = {
   workspace_id: string;
@@ -53,14 +61,18 @@ function keyOf(r: { spec_slug: string; event_kind: string; at: string }): string
   return `${r.spec_slug}|${r.event_kind}|${r.at}`;
 }
 
-async function backfillOneWorkspace(
-  admin: ReturnType<typeof createAdminClient>,
-  workspace_id: string,
-  apply: boolean,
-): Promise<{ existing: number; proposed: number; inserted: number }> {
-  // Snapshot already-backfilled events for dedupe. Only actor='backfill' matters —
-  // real writes made by the M2 chokepoints go on top, unaffected.
-  const existingKeys = new Set<string>();
+/** Run a source-table reader and swallow its errors — a partial backfill is better than none. */
+async function safe<T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    console.warn(`  ! source '${name}' failed: ${(e as Error).message} — skipping this source`);
+    return fallback;
+  }
+}
+
+async function readExistingBackfillKeys(admin: Admin, workspace_id: string): Promise<Set<string>> {
+  const keys = new Set<string>();
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
       .from("spec_timecard_events")
@@ -71,14 +83,18 @@ async function backfillOneWorkspace(
     if (error) throw new Error(`spec_timecard_events read failed: ${error.message}`);
     if (!data?.length) break;
     for (const r of data) {
-      existingKeys.add(keyOf({ spec_slug: r.spec_slug as string, event_kind: r.event_kind as string, at: r.at as string }));
+      keys.add(keyOf({ spec_slug: String(r.spec_slug), event_kind: String(r.event_kind), at: String(r.at) }));
     }
     if (data.length < PAGE) break;
   }
+  return keys;
+}
 
+async function readSpecs(admin: Admin, workspace_id: string): Promise<{
+  proposed: ProposedRow[];
+  slugById: Map<string, string>;
+}> {
   const proposed: ProposedRow[] = [];
-
-  // 1. specs — 'created' + 'review_passed' + spec_id-to-slug map for spec_phases join.
   const slugById = new Map<string, string>();
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
@@ -89,11 +105,13 @@ async function backfillOneWorkspace(
     if (error) throw new Error(`specs read failed: ${error.message}`);
     if (!data?.length) break;
     for (const s of data) {
-      slugById.set(String(s.id), String(s.slug));
+      const slug = String(s.slug ?? "");
+      if (!slug) continue;
+      slugById.set(String(s.id), slug);
       if (s.created_at) {
         proposed.push({
           workspace_id,
-          spec_slug: String(s.slug),
+          spec_slug: slug,
           phase_index: null,
           event_kind: "created",
           actor: "backfill",
@@ -104,7 +122,7 @@ async function backfillOneWorkspace(
       if (s.vale_review_passed_at) {
         proposed.push({
           workspace_id,
-          spec_slug: String(s.slug),
+          spec_slug: slug,
           phase_index: null,
           event_kind: "review_passed",
           actor: "backfill",
@@ -115,9 +133,11 @@ async function backfillOneWorkspace(
     }
     if (data.length < PAGE) break;
   }
+  return { proposed, slugById };
+}
 
-  // 2. spec_status_history — 'review_started' + 'folded' transitions.
-  //    to_value is JSON-stringified per the spec_status_history brain page.
+async function readStatusHistory(admin: Admin, workspace_id: string): Promise<ProposedRow[]> {
+  const proposed: ProposedRow[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
       .from("spec_status_history")
@@ -128,11 +148,13 @@ async function backfillOneWorkspace(
     if (error) throw new Error(`spec_status_history read failed: ${error.message}`);
     if (!data?.length) break;
     for (const r of data) {
+      const slug = String(r.spec_slug ?? "");
+      if (!slug || !r.at) continue;
       const to = String(r.to_value ?? "");
       if (to === '"in_review"') {
         proposed.push({
           workspace_id,
-          spec_slug: String(r.spec_slug),
+          spec_slug: slug,
           phase_index: null,
           event_kind: "review_started",
           actor: "backfill",
@@ -142,7 +164,7 @@ async function backfillOneWorkspace(
       } else if (to === '"folded"') {
         proposed.push({
           workspace_id,
-          spec_slug: String(r.spec_slug),
+          spec_slug: slug,
           phase_index: null,
           event_kind: "folded",
           actor: "backfill",
@@ -153,38 +175,58 @@ async function backfillOneWorkspace(
     }
     if (data.length < PAGE) break;
   }
+  return proposed;
+}
 
-  // 3. spec_phases — 'phase_shipped' for every phase with a merge_sha stamp.
-  //    Join via spec_id → slug map so we can carry the slug in the ledger row.
+async function readPhases(
+  admin: Admin,
+  workspace_id: string,
+  slugById: Map<string, string>,
+): Promise<ProposedRow[]> {
+  const proposed: ProposedRow[] = [];
   const specIds = [...slugById.keys()];
+  // Guard: `.in("spec_id", [])` errors on some PostgREST versions — a workspace with zero
+  // specs has no phases to backfill.
+  if (specIds.length === 0) return proposed;
   for (let i = 0; i < specIds.length; i += PAGE) {
     const batch = specIds.slice(i, i + PAGE);
-    const { data, error } = await admin
-      .from("spec_phases")
-      .select("spec_id, position, merge_sha, updated_at, pr")
-      .in("spec_id", batch)
-      .not("merge_sha", "is", null);
-    if (error) throw new Error(`spec_phases read failed: ${error.message}`);
-    for (const p of data ?? []) {
-      const slug = slugById.get(String(p.spec_id));
-      if (!slug) continue;
-      proposed.push({
-        workspace_id,
-        spec_slug: slug,
-        phase_index: p.position != null ? Number(p.position) : null,
-        event_kind: "phase_shipped",
-        actor: "backfill",
-        at: String(p.updated_at),
-        metadata: {
-          backfill_source: "spec_phases[merge_sha≠null].updated_at",
-          merge_sha: p.merge_sha,
-          pr: p.pr,
-        },
-      });
+    if (batch.length === 0) continue;
+    // Paginate the phases-per-batch too — a large workspace can have >1000 shipped phases,
+    // which would silently truncate at Supabase's default row cap otherwise.
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await admin
+        .from("spec_phases")
+        .select("spec_id, position, merge_sha, updated_at, pr")
+        .in("spec_id", batch)
+        .not("merge_sha", "is", null)
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`spec_phases read failed: ${error.message}`);
+      if (!data?.length) break;
+      for (const p of data) {
+        const slug = slugById.get(String(p.spec_id));
+        if (!slug || !p.updated_at) continue;
+        proposed.push({
+          workspace_id,
+          spec_slug: slug,
+          phase_index: p.position != null ? Number(p.position) : null,
+          event_kind: "phase_shipped",
+          actor: "backfill",
+          at: String(p.updated_at),
+          metadata: {
+            backfill_source: "spec_phases[merge_sha≠null].updated_at",
+            merge_sha: p.merge_sha,
+            pr: p.pr,
+          },
+        });
+      }
+      if (data.length < PAGE) break;
     }
   }
+  return proposed;
+}
 
-  // 4. agent_jobs kind='build' — 'build_started' (claimed_at) + 'build_done' (updated_at when completed).
+async function readBuildJobs(admin: Admin, workspace_id: string): Promise<ProposedRow[]> {
+  const proposed: ProposedRow[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
       .from("agent_jobs")
@@ -193,7 +235,7 @@ async function backfillOneWorkspace(
       .eq("kind", "build")
       .not("claimed_at", "is", null)
       .range(from, from + PAGE - 1);
-    if (error) throw new Error(`agent_jobs[build] read failed: ${error.message}`);
+    if (error) throw new Error(`agent_jobs[kind=build] read failed: ${error.message}`);
     if (!data?.length) break;
     for (const j of data) {
       const slug = String(j.spec_slug ?? "");
@@ -223,8 +265,11 @@ async function backfillOneWorkspace(
     }
     if (data.length < PAGE) break;
   }
+  return proposed;
+}
 
-  // 5. spec_test_runs — 'spec_test_verdict' at run_at (carries the verdict on metadata).
+async function readSpecTestRuns(admin: Admin, workspace_id: string): Promise<ProposedRow[]> {
+  const proposed: ProposedRow[] = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
       .from("spec_test_runs")
@@ -251,6 +296,53 @@ async function backfillOneWorkspace(
     }
     if (data.length < PAGE) break;
   }
+  return proposed;
+}
+
+async function backfillOneWorkspace(
+  admin: Admin,
+  workspace_id: string,
+  apply: boolean,
+): Promise<{ existing: number; proposed: number; inserted: number }> {
+  console.log(`workspace ${workspace_id}: reading existing backfill snapshot …`);
+  const existingKeys = await readExistingBackfillKeys(admin, workspace_id);
+  console.log(`  existing backfill rows: ${existingKeys.size}`);
+
+  console.log(`  reading specs …`);
+  const specsResult = await safe(
+    "specs",
+    () => readSpecs(admin, workspace_id),
+    { proposed: [] as ProposedRow[], slugById: new Map<string, string>() },
+  );
+  console.log(`    specs → ${specsResult.proposed.length} event(s), ${specsResult.slugById.size} spec(s) mapped`);
+
+  console.log(`  reading spec_status_history …`);
+  const statusRows = await safe("spec_status_history", () => readStatusHistory(admin, workspace_id), []);
+  console.log(`    spec_status_history → ${statusRows.length} event(s)`);
+
+  console.log(`  reading spec_phases …`);
+  const phaseRows = await safe(
+    "spec_phases",
+    () => readPhases(admin, workspace_id, specsResult.slugById),
+    [],
+  );
+  console.log(`    spec_phases → ${phaseRows.length} event(s)`);
+
+  console.log(`  reading agent_jobs[build] …`);
+  const buildRows = await safe("agent_jobs[build]", () => readBuildJobs(admin, workspace_id), []);
+  console.log(`    agent_jobs[build] → ${buildRows.length} event(s)`);
+
+  console.log(`  reading spec_test_runs …`);
+  const testRows = await safe("spec_test_runs", () => readSpecTestRuns(admin, workspace_id), []);
+  console.log(`    spec_test_runs → ${testRows.length} event(s)`);
+
+  const proposed: ProposedRow[] = [
+    ...specsResult.proposed,
+    ...statusRows,
+    ...phaseRows,
+    ...buildRows,
+    ...testRows,
+  ];
 
   // Dedupe: (a) against DB (existingKeys), (b) against ourselves (same-batch dupes).
   const seenInBatch = new Set<string>();
@@ -264,7 +356,7 @@ async function backfillOneWorkspace(
   }
 
   console.log(
-    `workspace ${workspace_id}: proposed=${proposed.length} already-backfilled=${existingKeys.size} to-insert=${toInsert.length}`,
+    `  → workspace ${workspace_id}: proposed=${proposed.length} already-backfilled=${existingKeys.size} to-insert=${toInsert.length}`,
   );
 
   if (!apply) {
@@ -302,14 +394,20 @@ async function main() {
   let totalProposed = 0;
   let totalInserted = 0;
   for (const w of workspaces) {
-    const r = await backfillOneWorkspace(admin, w.id, apply);
-    totalExisting += r.existing;
-    totalProposed += r.proposed;
-    totalInserted += r.inserted;
+    try {
+      const r = await backfillOneWorkspace(admin, w.id, apply);
+      totalExisting += r.existing;
+      totalProposed += r.proposed;
+      totalInserted += r.inserted;
+    } catch (e) {
+      console.error(`workspace ${w.id}: FAILED — ${(e as Error).message}`);
+      // Continue with next workspace rather than abort the whole run.
+    }
+    console.log("");
   }
 
   console.log(
-    `\nTotals: proposed=${totalProposed} already-backfilled=${totalExisting} ${apply ? `inserted=${totalInserted}` : `would-insert=${totalProposed - totalExisting}`}`,
+    `Totals: proposed=${totalProposed} already-backfilled=${totalExisting} ${apply ? `inserted=${totalInserted}` : `would-insert=${totalProposed - totalExisting}`}`,
   );
   if (!apply) {
     console.log(
