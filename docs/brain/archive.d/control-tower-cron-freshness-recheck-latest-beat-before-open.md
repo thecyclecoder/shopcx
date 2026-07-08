@@ -1,0 +1,1 @@
+- **Control Tower: re-check latest heartbeat before opening a cron_freshness alert** · verified 2026-07-08 · → [[../libraries/control-tower]]
