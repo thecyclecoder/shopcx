@@ -7,10 +7,14 @@
  * sessions under 💬 June (CS Director) — Phase 1 of
  * docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md.
  *
- * The prior inline `analyzeTicket()` path (a direct fetch to api.anthropic.com) is gone —
+ * The prior inline grade (a direct fetch to api.anthropic.com from analyzeTicketInner) is gone —
  * enqueue is cheap + never Anthropic-dependent, so the cron no longer needs its own
  * park-and-drain deferral for outages (the box lane parks its own queued rows
- * `blocked_on_dependency` when the Claude-down breaker is tripped).
+ * `blocked_on_dependency` when the Claude-down breaker is tripped). The cron still routes
+ * through `analyzeTicket()` (not the raw `enqueueTicketAnalyzeJob`) so its finally block emits
+ * the `ai:ticket-analyzer` inline-agent feeder heartbeat once per handled ticket —
+ * the Control Tower tile's liveness-when-work-exists assertion evaluates against actual feeder
+ * activity, not a permanently-silent channel.
  *
  * Replaces the old nightly batch (ai-nightly-analysis.ts).
  *
@@ -29,7 +33,7 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { enqueueTicketAnalyzeJob } from "@/lib/ticket-analyzer";
+import { analyzeTicket } from "@/lib/ticket-analyzer";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /**
@@ -210,15 +214,18 @@ export const ticketAnalysisCron = inngest.createFunction(
     let skipped = 0;
     const skipReasons: Record<string, number> = {};
 
-    // Enqueue one `ticket-analyze` box job per candidate. Enqueue is idempotent per-ticket
-    // (one-in-flight dedup inside enqueueTicketAnalyzeJob), so a re-selection while an earlier
-    // grade is still running is a no-op skip (`already_in_flight`).
+    // Enqueue one `ticket-analyze` box job per candidate — routed through the analyzeTicket
+    // wrapper so its finally block emits the `ai:ticket-analyzer` inline-agent heartbeat
+    // (Control Tower feeder liveness) once per handled ticket. Enqueue itself still runs inside
+    // enqueueTicketAnalyzeJob (one-in-flight dedup per ticket, so a re-selection while an
+    // earlier grade is still running is a no-op skip `already_in_flight`); the wrapper adds
+    // only the beat + the same AnalyzeResult shape.
     for (const t of tickets) {
       const result = await step.run(`enqueue-${t.id}`, async () => {
         try {
-          return await enqueueTicketAnalyzeJob(t.id, "auto_close");
+          return await analyzeTicket(t.id, "auto_close");
         } catch (err) {
-          console.error("[ticket-analysis-cron] enqueueTicketAnalyzeJob error:", err);
+          console.error("[ticket-analysis-cron] analyzeTicket error:", err);
           return { ok: false as const, reason: "exception" };
         }
       });
