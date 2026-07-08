@@ -138,6 +138,21 @@ The `KNOWN_JOB_KINDS` constant next to the `Job.kind` union enumerates every kin
 
 When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.
 
+## Idempotent worktree add — `ensureWorktreeSlotFree` (builder-worktree-prune-before-add)
+
+Every build lane's `git worktree add -B <branch> <wt> <base>` (the fresh path AND the resume path in `runBuildJob`) is preceded by `ensureWorktreeSlotFree(wt)`. It's the PATH-side complement to `removeWorktreeForBranch` (the branch-side helper): the branch-side clears any admin entry holding `<branch>`, the path-side clears any admin entry OR orphan dir at `<wt>` — because `git worktree add` fails with `'<wt>' already exists` whenever the target directory pre-exists, regardless of whether it's a tracked worktree.
+
+The wedge this exists to prevent (2026-07-08 media-buyer-sensor-trust-probe): the target dir `builds/build-<slug>/` pre-existed as an ORPHAN — a lingering `tsconfig.tsbuildinfo` file inside, NOT a registered worktree — from a prior attempt that crashed after the file was written but before the worktree was registered. The bare `git worktree remove --force <wt>` call was a no-op (nothing to remove; the dir was never registered), and the follow-up `git worktree add` failed with `'<wt>' already exists`. `removeWorktreeForBranch` did not help because the branch was never held — only the DIR was orphaned on disk.
+
+`ensureWorktreeSlotFree(wt)` performs the recovery a human would do:
+
+1. `git worktree prune` — reconcile admin state with disk state (a registered worktree whose dir was manually deleted still lists; prune clears that).
+2. If `<wt>` IS a registered worktree, `removeWorktreeDir(<wt>)` — force-remove admin entry + best-effort dir remove.
+3. Else if `<wt>` exists on disk (the orphan case), `rm -rf <wt>` — guarded to `BUILDS_DIR` via the same resolve check `removeWorktreeDir` uses.
+4. Final `git worktree prune` — a registered-remove may have left an admin entry if the dir was already gone.
+
+SAFETY. The helper hard-refuses any path that isn't `BUILDS_DIR` or a child of it (matches `removeWorktreeDir`'s guard, which once destroyed the primary repo — see the 2026-06-24 incident recorded on `removeWorktreeDir`). A caller that passes `REPO_DIR` or any non-`builds/` path gets a `[worktree] ensureWorktreeSlotFree REFUSING …` log and a no-op — the guarded rm-rf can never touch the primary checkout.
+
 ## Related
 
 [[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
