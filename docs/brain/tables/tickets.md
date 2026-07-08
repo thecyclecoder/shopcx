@@ -83,6 +83,7 @@ Customer support tickets. status (open/pending/closed/archived), channel, handle
 | `locked_at` | `timestamptz` | ✓ |  |
 | `merge_summary` | `text` | ✓ | Compact plain-text state summary (issue, confirmed facts, actions, open items) written at merge time by [[../libraries/ticket-merge]] → Sonnet. Downstream Opus turns read this instead of re-costing the full pre-merge history. Feeds Phase 2 stable-prefix context assembly in [[../libraries/sonnet-orchestrator-v2]]. |
 | `merge_summary_at` | `timestamptz` | ✓ | Timestamp of the `merge_summary` write. Doubles as the "since window" boundary Phase 2 uses to slice messages after the summary. |
+| `ai_cost_cents` | `int8` | — | default: `0` · Running per-ticket AI cost in whole cents. Stamped inline by [[../libraries/action-executor]] `executeSonnetDecision` after each Sonnet turn — sums the [[ai_token_usage]] rows this turn produced (matched on `ticket_id` + `created_at >= turnStartedAt`), converts tokens → cents via [[../libraries/ai-usage]] `usageCostCents`, atomically increments via the `add_ticket_ai_cost(uuid, bigint)` SECURITY DEFINER RPC. Feeds the Sol-economics analytics tile (median + p95 per-ticket cost, split by pre-Sol vs Sol cohort, compared against Catherine $8.92 baseline). See [[../specs/sol-cost-csat-measurement-vs-pre-sol-baseline]]. |
 
 ## Foreign keys
 

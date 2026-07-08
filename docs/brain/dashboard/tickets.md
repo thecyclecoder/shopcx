@@ -32,6 +32,7 @@ Master ticket queue. Filters by status, channel, assignee, tags, snooze, escalat
 - `escalated/` → [[tickets/escalated]]
 - `improve/` → [[tickets/improve]]
 - `todos/` → [[tickets/todos]]
+- `analytics/` → [[tickets__analytics]] — Selective-clarify rate + Sol economics tiles
 
 ## API endpoints called
 

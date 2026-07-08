@@ -12,6 +12,7 @@ import { unbackedEffectClaim } from "@/lib/claim-guard";
 import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
+import { usageCostCents } from "@/lib/ai-usage";
 
 // ── Types ──
 
@@ -2448,6 +2449,12 @@ export async function executeSonnetDecision(
   // Phase 1 lands the substrate with those columns NULL.
   // Spec: docs/brain/specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension.md
   await stageResolutionEvent(ctx, decision);
+  // Turn-start cutoff for the per-turn AI-cost stamp below. Any ai_token_usage
+  // row written under this executor run — orchestrator, playbook compiler,
+  // sub-Haiku, etc. — carries created_at >= turnStartedAt, so summing rows
+  // above this bound + matching ticket_id yields THIS turn's cost delta.
+  // Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
+  const turnStartedAt = new Date().toISOString();
   const stampedSend: SendFn = async (m, sb) => {
     await send(m, sb);
     await stampResolutionShipped(ctx);
@@ -2595,6 +2602,14 @@ export async function executeSonnetDecision(
     }
   }
 
+  // Sum this turn's ai_token_usage rows for this ticket and add to
+  // tickets.ai_cost_cents. Same 'never fail the executor on a ledger
+  // error' invariant as the resolution-events stampers above — swallow
+  // errors, never re-throw. Feeds the Sol-economics analytics tile the
+  // spec's later phases add.
+  // Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
+  await stampTicketAiCost(ctx, turnStartedAt);
+
   return {
     messageSent,
     escalated: ctx._escalatedThisRun === true,
@@ -2704,6 +2719,63 @@ async function stampResolutionVerified(
       .is("verified_at", null);
   } catch {
     // Never fail the executor because the ledger stamp failed.
+  }
+}
+
+// ── Per-turn AI cost stamp ──
+//
+// Sums the ai_token_usage rows this turn produced (matching ticket_id +
+// created_at >= turn start) into whole cents via usageCostCents() and adds
+// the delta to tickets.ai_cost_cents. Feeds the Sol-economics analytics tile
+// the spec's later phases add: median + p95 per-ticket AI cost, split by
+// pre-Sol vs Sol cohort, compared against the Catherine $8.92 baseline.
+//
+// Never throws — the executor's ledger-error invariant covers this. If the
+// stamp fails (network blip, RPC missing pre-migration, whatever) we still
+// return the successful turn to the customer.
+//
+// Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
+
+interface AiTokenUsageRow {
+  model: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cache_read_tokens: number | null;
+}
+
+async function stampTicketAiCost(
+  ctx: ActionContext,
+  turnStartedAt: string,
+): Promise<void> {
+  try {
+    const { data: rows } = await ctx.admin
+      .from("ai_token_usage")
+      .select("model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens")
+      .eq("ticket_id", ctx.ticketId)
+      .gte("created_at", turnStartedAt);
+    if (!rows || rows.length === 0) return;
+    let totalCents = 0;
+    for (const r of rows as AiTokenUsageRow[]) {
+      totalCents += usageCostCents(r.model, {
+        input_tokens: r.input_tokens ?? 0,
+        output_tokens: r.output_tokens ?? 0,
+        cache_creation_tokens: r.cache_creation_tokens ?? 0,
+        cache_read_tokens: r.cache_read_tokens ?? 0,
+      });
+    }
+    const delta = Math.round(totalCents);
+    if (delta <= 0) return;
+    // Atomic SQL-side increment via add_ticket_ai_cost RPC — see
+    // supabase/migrations/20260929120000_tickets_ai_cost_cents.sql. Handles
+    // the rare cross-ticket merge re-fire race without a lost update.
+    await ctx.admin.rpc("add_ticket_ai_cost", {
+      p_ticket_id: ctx.ticketId,
+      p_delta: delta,
+    });
+  } catch {
+    // Never fail the executor because the cost stamp failed. Same
+    // invariant as the resolution-events stampers above.
   }
 }
 
