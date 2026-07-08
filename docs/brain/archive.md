@@ -15,6 +15,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Prune stale build worktrees before worktree add (stop goal-build collisions)** · verified 2026-07-08 · → [[../libraries/builder-worker]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
+- **Portal remediation: add a frequency-route replay + self-resolved so retries-that-worked auto-close** · verified 2026-07-08 · → [[../libraries/portal__remediation]]
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]
 - **Verify billing-interval on Appstle upstream_timeout, mirroring the 504 branch** · verified 2026-07-07 · → [[../libraries/appstle]]
