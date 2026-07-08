@@ -15,15 +15,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   analyzeInstanceHealth,
+  analyzeRequestVolume,
   analyzeSlowQuery,
   buildFixSpecMarkdown,
   classifyExplainPlan,
   enqueueDbHealthProposal,
   getDbHealthPanel,
   isForeignQuery,
+  isInfrastructuralQuery,
   isMaintenanceCommand,
   type InstanceHealthInput,
   type DbHealthFinding,
+  type RequestVolumeInput,
   type SlowQueryRow,
 } from "./db-health";
 import type { createAdminClient } from "@/lib/supabase/admin";
@@ -598,4 +601,109 @@ test("Phase 2 panel — an enqueued instance proposal shows up in getDbHealthPan
   assert.ok(match, `expected the enqueued instance finding to appear in panel.proposals; got ${JSON.stringify(panel.proposals)}`);
   assert.equal(match!.cause, "rollback_error_rate");
   assert.equal(match!.category, "instance");
+});
+
+// ── db-health-request-volume + temp-spill-attribution (2026-07-08 Devi re-tool) ──
+
+const SET_CONFIG_PREAMBLE =
+  "select set_config('search_path', $1, true), set_config('role', $2, true), set_config('request.jwt.claims', $3, true), set_config('request.method', $4, true)";
+const SUBSCRIPTIONS_SCAN =
+  'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."customer_id", "public"."subscriptions"."items" FROM "public"."subscriptions" WHERE "public"."subscriptions"."workspace_id" = $1 ORDER BY "public"."subscriptions"."created_at" ASC LIMIT $2 OFFSET $3 )';
+
+test("isInfrastructuralQuery flags the PostgREST set_config preamble + GoTrue reads, not app queries", () => {
+  assert.equal(isInfrastructuralQuery(SET_CONFIG_PREAMBLE), true);
+  assert.equal(isInfrastructuralQuery("SELECT set_config($2, $1, $3)"), true);
+  assert.equal(isInfrastructuralQuery("SELECT identities.identity_data FROM identities WHERE user_id = $1"), true);
+  assert.equal(isInfrastructuralQuery("SELECT x FROM auth.sessions WHERE id = $1"), true);
+  assert.equal(isInfrastructuralQuery(SUBSCRIPTIONS_SCAN), false);
+  assert.equal(isInfrastructuralQuery("SELECT id FROM public.orders WHERE workspace_id = $1"), false);
+  // A PostgREST mutation CTE that references set_config for response headers is an APP write, NOT the
+  // preamble — must not be swept in (else Devi would silently stop proposing fixes for that INSERT).
+  assert.equal(
+    isInfrastructuralQuery('WITH pgrst_source AS (INSERT INTO "public"."account_usage_snapshots"("account") SELECT set_config($2, $1, $3))'),
+    false,
+  );
+});
+
+test("analyzeSlowQuery returns null for an infrastructural query even when it dominates total time", () => {
+  const row: SlowQueryRow = {
+    queryid: "-7821780334453251234",
+    query: SET_CONFIG_PREAMBLE,
+    calls: 8_000_000,
+    total_exec_time: 264_000, // 264s — well over the 30s total floor
+    mean_exec_time: 0.03,
+    stddev_exec_time: 1.3,
+    rows: 8_000_000,
+  };
+  assert.equal(analyzeSlowQuery(row, null), null, "the set_config preamble must never become a reduce_calls proposal");
+});
+
+test("temp_spill_pressure NAMES the dominant offender + points at the app query (attribution)", () => {
+  const input: InstanceHealthInput = {
+    ...incidentInput(),
+    tempOffenders: [
+      { queryid: "-3890044173419587747", query: SUBSCRIPTIONS_SCAN, calls: 35_293, tempBytes: 314 * GB },
+      { queryid: "1", query: "select refresh_customer_segments($1,$2)", calls: 2, tempBytes: 17 * 1024 * 1024 },
+    ],
+  };
+  const temp = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(temp, "expected a temp_spill_pressure finding");
+  assert.match(temp!.evidence, /Top temp-spill offenders/);
+  assert.match(temp!.evidence, /subscriptions/); // the offender is named
+  assert.match(temp!.evidence, /dominant spiller \(queryid -3890044173419587747\) is an APP query/);
+});
+
+test("temp_spill_pressure still fires (aggregate) when NO offenders were captured", () => {
+  const temp = analyzeInstanceHealth(incidentInput()).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(temp, "the aggregate temp flag must fire without offenders");
+  assert.doesNotMatch(temp!.evidence, /Top temp-spill offenders/);
+});
+
+test("analyzeRequestVolume fires above the flag + names the top callers (with infra label)", () => {
+  const input: RequestVolumeInput = {
+    windowHours: 100,
+    totalCalls: 18_000_000, // 180K/hr ≥ 100K flag
+    totalRows: 18_000_000, // 180K/hr ≥ 100K flag
+    topByCalls: [
+      { queryid: "-7821780334453251234", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 },
+      { queryid: "spec", query: 'SELECT "public"."specs"."id" FROM "public"."specs" WHERE workspace_id = $1', calls: 1_300_000, rows: 1_300_000 },
+    ],
+    topByRows: [
+      { queryid: "-7821780334453251234", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 },
+    ],
+  };
+  const f = analyzeRequestVolume(input);
+  assert.ok(f, "expected a request_volume_pressure finding above the flag");
+  assert.equal(f!.cause, "request_volume_pressure");
+  assert.equal(f!.fixKind, "reduce_calls");
+  assert.match(f!.impact, /req\/hr/);
+  assert.match(f!.evidence, /rows shipped/);
+  assert.match(f!.evidence, /\[infrastructural\]/); // the set_config preamble is labelled, not proposed as fixable
+});
+
+test("analyzeRequestVolume returns null under the flag and for a too-short window", () => {
+  assert.equal(
+    analyzeRequestVolume({ windowHours: 100, totalCalls: 100, totalRows: 100, topByCalls: [], topByRows: [] }),
+    null,
+    "under both flags ⇒ no finding",
+  );
+  assert.equal(
+    analyzeRequestVolume({ windowHours: 0.2, totalCalls: 9_000_000, totalRows: 9_000_000, topByCalls: [], topByRows: [] }),
+    null,
+    "too-short window ⇒ noisy rate, skip",
+  );
+});
+
+test("the request_volume_pressure spec renders escalation guidance (aggregate, not a per-query index)", () => {
+  const f = analyzeRequestVolume({
+    windowHours: 100,
+    totalCalls: 18_000_000,
+    totalRows: 18_000_000,
+    topByCalls: [{ queryid: "q", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 }],
+    topByRows: [{ queryid: "q", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 }],
+  });
+  assert.ok(f);
+  const md = buildFixSpecMarkdown(f!);
+  assert.match(md, /aggregate request-volume/i);
+  assert.match(md, /aggregate RPC/); // the durable lever is called out
 });
