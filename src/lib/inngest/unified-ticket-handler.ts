@@ -26,6 +26,7 @@ import { retrieveContext } from "@/lib/rag";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
+import { isAutomatedInbound } from "@/lib/automated-sender";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
@@ -1066,6 +1067,39 @@ export const unifiedTicketHandler = inngest.createFunction(
     const cfg = await step.run("config", () => channelCfg(admin, wsId, st.ch));
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
+
+    // ── 1a2. AUTOMATED-SENDER PRE-FILTER (zero AI, skip the classifier) ──
+    // Phase 2 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
+    // Ahead of the classify-bucket Haiku step below, run a deterministic pre-filter over the
+    // inbound's from-address + body. Automated no-reply senders (TestFlight, App Store receipts,
+    // mailer daemons, GitHub notifications, …) and messages carrying unambiguous automated-
+    // notification markers ("please do not reply to this email", "this mailbox is not monitored")
+    // are closed + tagged `outreach` here, WITHOUT invoking the Haiku classifier or any other AI
+    // call — the whole point of Phase 2 is that this subclass costs zero AI dollars.
+    //
+    // Conservative on purpose (verification bullet 2 — no false positive on a genuine customer):
+    // isAutomatedInbound rejects anything ambiguous. Human brand-collab outreach that doesn't
+    // trip these deterministic patterns falls through to the (cheap Haiku) classifier and is
+    // caught by Phase 1's `msgType === "outreach"` short-circuit at § 1c. See automated-sender.ts
+    // for the exact predicate + automated-sender.test.ts for the pinned behavior.
+    //
+    // st.custEmail equals the inbound From address on email tickets — the email webhook
+    // (src/app/api/webhooks/email/route.ts) creates/looks up the customers row from the sender's
+    // email, so the customer row's email column IS the sender. Non-email channels have no
+    // notion of an automated sender and pass through (isAutomatedSender(null) === false).
+    if (isNew && isAutomatedInbound(st.custEmail, msg)) {
+      await step.run("outreach-automated-sender-pre-filter", async () => {
+        await addTicketTag(tid, "cls:outreach");
+        await addTicketTag(tid, "outreach");
+        await setStatus(admin, tid, cfg.auto_resolve);
+        await sysNote(
+          admin,
+          tid,
+          `[System] Automated-sender pre-filter tripped (sender=${st.custEmail || "(none)"}) — deterministically closed, no AI response, classify-bucket skipped (zero AI cost).`,
+        );
+      });
+      return { status: "outreach_automated_sender_pre_filter" };
+    }
 
     // ── 1b. Three-bucket classification: account / general / outreach ──
     // - account = needs customer data (refund, cancel, order status, etc.)
