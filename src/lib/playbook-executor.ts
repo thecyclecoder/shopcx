@@ -619,6 +619,10 @@ async function executeStep(
     case "cancel_subscription":
       return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers, policyRules);
 
+    case "pause_subscription":
+    case "pause":
+      return handlePauseSubscription(wsId, subs, ctx, step, dataContext, pers, policyRules);
+
     case "issue_store_credit":
       return handleIssueStoreCredit(admin, wsId, customer, orders, ctx, step, tid);
 
@@ -2281,6 +2285,70 @@ async function handleCancelSubscription(
     action: "advance", newStep: step.step_order + 1, response,
     context: { subs_cancelled: cancelled },
     systemNote: `[Playbook] Cancelled ${cancelled.length} subscription(s): ${cancelled.join(", ")}.`,
+  };
+}
+
+// docs/brain/specs/refund-playbook-skips-pause-step-when-subscription-already-cancelled.md
+// Refund-playbook pause step decider. When the target sub is already
+// cancelled there is nothing to pause — skip (no action, no claim) and
+// advance. Firing appstle-pause on a cancelled sub previously left the
+// step's "I've paused your subscription" reply unbacked, which the
+// claim-guard blocked and escalated (ticket 472310cc).
+export function decidePauseSubscriptionStep(
+  subs: Array<{ shopify_contract_id: string; status: string }>,
+  identifiedContractId: string | undefined,
+  stepOrder: number,
+): { action: "advance"; newStep: number; reason: string } | { action: "pause"; contractId: string } {
+  if (!identifiedContractId) {
+    return { action: "advance", newStep: stepOrder + 1, reason: "no identified subscription" };
+  }
+  const sub = subs.find(s => s.shopify_contract_id === identifiedContractId);
+  if (!sub) {
+    return { action: "advance", newStep: stepOrder + 1, reason: "identified subscription not found" };
+  }
+  if (sub.status === "cancelled") {
+    return { action: "advance", newStep: stepOrder + 1, reason: "subscription already cancelled" };
+  }
+  return { action: "pause", contractId: identifiedContractId };
+}
+
+async function handlePauseSubscription(
+  wsId: string, subs: SubscriptionData[], ctx: Record<string, unknown>,
+  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
+): Promise<PlaybookExecResult> {
+  const identifiedSub = ctx.identified_subscription as string | undefined;
+  const decision = decidePauseSubscriptionStep(subs, identifiedSub, step.step_order);
+
+  if (decision.action === "advance") {
+    return {
+      action: "advance", newStep: decision.newStep,
+      systemNote: `[Playbook] Pause step skipped — ${decision.reason}. Advancing.`,
+    };
+  }
+
+  const { appstleSubscriptionAction } = await import("@/lib/appstle");
+  const result = await appstleSubscriptionAction(
+    wsId, decision.contractId, "pause", "Customer requested via playbook", "AI Playbook",
+  );
+
+  if (!result.success) {
+    return {
+      action: "escalate_api_failure",
+      error: `Failed to pause subscription: ${decision.contractId}`,
+      systemNote: `[Playbook] Pause failed for ${decision.contractId}: ${result.error || "unknown"}`,
+    };
+  }
+
+  const response = await aiGenerate(
+    basePrompt(step, pers, policyRules),
+    `Customer data:\n${dataCtx}\n\nPaused subscription: ${decision.contractId}\n\nConfirm the pause in one short sentence.`,
+  );
+
+  return {
+    action: "advance", newStep: step.step_order + 1, response,
+    context: { sub_paused: decision.contractId },
+    systemNote: `[Playbook] Paused subscription: ${decision.contractId}.`,
+    backedActions: ["pause_timed", "pause"],
   };
 }
 
