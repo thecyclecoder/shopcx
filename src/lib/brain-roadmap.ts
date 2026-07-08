@@ -40,6 +40,11 @@ import { deriveGoalPromotionSurface } from "@/lib/goal-promotion-surface";
 // blocker normalization. Pure; the wire-up in `resolveBlockedBy` supplies the workspace's goal-membership
 // index (spec slug → goal + goal.main_merge_sha) once per workspace read.
 import { deriveEffectiveBlockers, type GoalMembership } from "@/lib/blocker-goal-normalize";
+// escort-reliably-dispatches-ready-goal-members Phase 1 — the trust boundary for "is this blocker cleared?"
+// A goal-mate blocker clears the instant it lands on the goal branch (goal_branch_sha stamped) — the derived
+// card status stays "in_progress" until the whole goal ships to main, so keying on `target.status==='shipped'`
+// stalled every goal-mate dependent forever.
+import { isCardShippedByPhaseProvenance, isCardAccumulatedOnGoalBranch } from "@/lib/spec-phase-provenance";
 
 export type Phase = "planned" | "in_progress" | "shipped" | "rejected";
 
@@ -459,11 +464,28 @@ function resolveBlockedBy(
         target.status === "deferred" || target.status === "in_review" || target.status === "in_testing"
           ? "planned"
           : target.status;
+      // escort-reliably-dispatches-ready-goal-members Phase 1 — the cleared predicate is grounded in the
+      // spec-phase-provenance trust boundary, NOT the derived card status:
+      //   1. Truly-shipped-by-provenance (every non-rejected phase has pr OR merge_sha, or the one-shot
+      //      card-level shippedPr is set) — cleared for ANY dependent, goal-mate or not.
+      //   2. Goal-mate ordering — dependent + blocker in the SAME goal AND blocker landed on the goal
+      //      branch (specs.goal_branch_sha stamped): cleared even though the derived card.status stays
+      //      "in_progress" until the whole goal ships to main. This is the exact gap the observed 2026-07-08
+      //      stall exposed — shadow-mode's spec branch merged into goal/autonomous-media-buyer-supervision
+      //      (goal_branch_sha stamped) but its goal-mate dependents (daily-cadence-cron / director-slack-digest)
+      //      never dispatched because the old `target.status === "shipped"` predicate demanded main-merge.
+      // Outside-of-goal dependents keep waiting for the atomic goal→main promotion — handled by the
+      // `kind:"goal"` branch above (predicate on `goals.main_merge_sha`), so this fallback never fires there.
+      const targetGoalSlug = map.get(eff.slug)?.goalSlug ?? null;
+      const isGoalMate = dependent.goalSlug !== null && dependent.goalSlug === targetGoalSlug;
+      const cleared =
+        isCardShippedByPhaseProvenance(target) ||
+        (isGoalMate && isCardAccumulatedOnGoalBranch(target));
       return {
         slug: eff.slug,
         title: target.title,
         status,
-        cleared: target.status === "shipped",
+        cleared,
         kind: "spec" as const,
       };
     }
