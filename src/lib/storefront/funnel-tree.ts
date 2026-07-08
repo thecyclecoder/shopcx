@@ -1431,20 +1431,27 @@ export async function computeCartAnalytics(args: {
   const scoped = carts.filter(cartInScope);
 
   // recovery: cart email → did the customer order AFTER the reminder?
+  //
+  // Phase 3 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+  // Prior code chunked customer_ids in groups of 200 and issued .in("customer_id", chunk)
+  // against orders — a chunk that matched >1000 order rows silently dropped
+  // rows past PostgREST's 1000-row cap, so the post-reminder purchase test
+  // under-counted recovered carts on any high-order-count workspace. Server-side
+  // GROUP BY email → array_agg(created_at) now.
   const emails = [...new Set(scoped.map((c) => (c.email || "").toLowerCase()).filter(Boolean))];
   const orderTimesByEmail = new Map<string, number[]>();
   if (emails.length) {
-    const custIds = new Map<string, string>(); // customer_id → email
-    for (let i = 0; i < emails.length; i += 200) {
-      const { data } = await admin.from("customers").select("id, email").eq("workspace_id", workspaceId).in("email", emails.slice(i, i + 200));
-      for (const cu of data || []) custIds.set(cu.id as string, String(cu.email).toLowerCase());
-    }
-    const ids = [...custIds.keys()];
-    for (let i = 0; i < ids.length; i += 200) {
-      const { data } = await admin.from("orders").select("customer_id, created_at").in("customer_id", ids.slice(i, i + 200));
-      for (const o of data || []) {
-        const em = custIds.get(o.customer_id as string); if (!em) continue;
-        const arr = orderTimesByEmail.get(em) || []; arr.push(new Date(o.created_at as string).getTime()); orderTimesByEmail.set(em, arr);
+    for (let i = 0; i < emails.length; i += 500) {
+      const { data } = await admin.rpc("order_times_by_email", {
+        p_workspace: workspaceId,
+        p_emails: emails.slice(i, i + 500),
+      });
+      for (const row of (data ?? []) as Array<{ email: string; order_times: string[] | null }>) {
+        const times = (row.order_times ?? []).map((t) => new Date(t).getTime()).filter((n) => Number.isFinite(n));
+        const key = String(row.email).toLowerCase();
+        const arr = orderTimesByEmail.get(key) || [];
+        arr.push(...times);
+        orderTimesByEmail.set(key, arr);
       }
     }
   }

@@ -38,23 +38,15 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  // Get distinct source_names with counts (paginate to avoid 1000 row limit)
+  // Phase 3 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+  // Prior code paged the entire orders table into a JS Map just to GROUP BY
+  // source_name — server-side GROUP BY now.
+  const { data: countRows } = await admin.rpc("order_source_counts", {
+    p_workspace: workspaceId,
+  });
   const counts = new Map<string, number>();
-  let offset = 0;
-  while (true) {
-    const { data: batch } = await admin
-      .from("orders")
-      .select("source_name")
-      .eq("workspace_id", workspaceId)
-      .range(offset, offset + 999);
-
-    if (!batch || batch.length === 0) break;
-    for (const row of batch) {
-      const src = row.source_name || "(unknown)";
-      counts.set(src, (counts.get(src) || 0) + 1);
-    }
-    offset += batch.length;
-    if (batch.length < 1000) break;
+  for (const row of (countRows ?? []) as Array<{ source_name: string; cnt: number | string | null }>) {
+    counts.set(row.source_name, Number(row.cnt ?? 0) || 0);
   }
 
   // Get current mapping + threshold
