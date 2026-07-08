@@ -1,0 +1,1 @@
+- **Order-now must be a reachable action for Sol / the orchestrator — stop claiming 'no bill_now action exists' when it does** · verified 2026-07-08 · → [[../orchestrator-tools]]
