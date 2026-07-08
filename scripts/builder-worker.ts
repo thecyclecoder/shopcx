@@ -2401,6 +2401,37 @@ async function emitTimecard(input: {
   }
 }
 
+// spec-timecard-chokepoint-instrumentation Phase 2 (Fix 1) — fused-session-safe emitter. runSpecTestJob
+// on the pre-merge branch is a FUSED session (Vera runs the spec-test AND Vault runs the security
+// review in ONE claude -p pass — see applyFusedSecurityAsBranchVerdict below), so both spec_test_*
+// and security_* pairs get emitted from the same job's lifetime. This helper keys off the SESSION-
+// LOCAL Set the runner owns: the first call for a given event_kind emits + adds the kind; any
+// subsequent call for the same kind in the same job silently no-ops. That guarantees the fused
+// session emits "one of each, not two of one" as the spec verification requires.
+async function emitTimecardOnceInSession(
+  emitted: Set<string>,
+  input: {
+    workspace_id: string;
+    spec_slug: string | null | undefined;
+    phase_index?: number | null;
+    event_kind: string;
+    actor: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  if (!input.spec_slug) return; // spec-less rows never emit (mirrors emitTimecard's caller guard)
+  if (emitted.has(input.event_kind)) return; // second emit for this kind — the fused-session guard
+  emitted.add(input.event_kind);
+  await emitTimecard({
+    workspace_id: input.workspace_id,
+    spec_slug: input.spec_slug,
+    phase_index: input.phase_index ?? null,
+    event_kind: input.event_kind,
+    actor: input.actor,
+    metadata: input.metadata,
+  });
+}
+
 async function update(id: string, patch: Record<string, unknown>) {
   // needs-input-must-carry-a-question — reject an EMPTY needs_input park at the single chokepoint.
   // A `needs_input` park is an answerable pause: the owner inbox / build card / /dashboard/migrations
@@ -11225,6 +11256,20 @@ async function runSpecTestJob(job: Job) {
   const slug = job.spec_slug;
   const tag = `[spec-test:${slug}]`;
   console.log(`${tag} testing shipped spec (job ${job.id.slice(0, 8)})`);
+  // spec-timecard-chokepoint-instrumentation Phase 2 — fused-session in-memory guard. The pre-merge
+  // path here also runs the security review inline (applyFusedSecurityAsBranchVerdict); this set is
+  // threaded through so both spec_test_* and security_* pairs emit AT MOST ONCE PER KIND per job.
+  const emittedThisSession = new Set<string>();
+  // Emit spec_test_started at claim (before Vera even opens the session). phase_index=null — spec-test
+  // grades the WHOLE spec, not a specific phase. Best-effort — every emission wraps a failing insert.
+  await emitTimecardOnceInSession(emittedThisSession, {
+    workspace_id: job.workspace_id,
+    spec_slug: slug,
+    phase_index: null,
+    event_kind: "spec_test_started",
+    actor: "vera",
+    metadata: { job_id: job.id },
+  });
   try {
     // spec-test-materialize-on-derived-status: Vera reads the spec from `.box/spec-${slug}.md` (the prompt +
     // SKILL.md both point there) — the worker MUST materialize the DB row to that path first, or Vera reads a
@@ -11374,6 +11419,16 @@ async function runSpecTestJob(job: Job) {
         transcript: transcript.slice(-8000), error: reason,
         spec_branch: branch, preview_url: previewOrigin,
       });
+      // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict at the spec_test_runs
+      // insert (error path). Fused-session-guarded so a fused session emits only one verdict per kind.
+      await emitTimecardOnceInSession(emittedThisSession, {
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: null,
+        event_kind: "spec_test_verdict",
+        actor: "vera",
+        metadata: { job_id: job.id, agent_verdict: "error", reason },
+      });
       await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
     };
 
@@ -11491,6 +11546,17 @@ async function runSpecTestJob(job: Job) {
       // null (the standing lane targets prod, not a branch).
       spec_branch: branch, preview_url: previewOrigin,
     });
+    // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict at the canonical
+    // spec_test_runs insert (success path). Carries the agent_verdict + one-line summary for the
+    // M5 timeline. Fused-session-guarded so a fused session emits only one verdict.
+    await emitTimecardOnceInSession(emittedThisSession, {
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "spec_test_verdict",
+      actor: "vera",
+      metadata: { job_id: job.id, agent_verdict, summary },
+    });
     // spec-test-maximize-machine-coverage Phase 3: reflect the run's green (`pass`) checks onto the spec
     // markdown's verification bullets (leading ✅, committed to main). Best-effort — never fail the run.
     try {
@@ -11519,6 +11585,9 @@ async function runSpecTestJob(job: Job) {
           parsedFused: parsed as Record<string, unknown>,
           raw,
           tag,
+          // spec-timecard-chokepoint-instrumentation Phase 2 — share the fused-session set so
+          // security_started + security_verdict emit AT MOST ONCE for this pre-merge session.
+          emittedThisSession,
         });
       } catch (e) {
         console.error(`${tag} fused-security apply failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
@@ -11634,6 +11703,17 @@ async function runSpecTestJob(job: Job) {
         workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
         agent_verdict: "error", summary: {}, checks: [], transcript: null, error: `error: ${msg}`,
         spec_branch: job.spec_branch ?? null, preview_url: previewOrigin,
+      });
+      // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict on a worker-side throw.
+      // Fused-session-guarded: the writeErrorRun/success paths already fired this kind, this is a
+      // no-op when it did.
+      await emitTimecardOnceInSession(emittedThisSession, {
+        workspace_id: job.workspace_id,
+        spec_slug: slug,
+        phase_index: null,
+        event_kind: "spec_test_verdict",
+        actor: "vera",
+        metadata: { job_id: job.id, agent_verdict: "error", reason: msg },
       });
     } catch { /* audit best-effort */ }
     await update(job.id, { status: "failed", error: msg });
@@ -20349,13 +20429,33 @@ async function applySecurityVerdictToJob(
     tag: string;
     recordDirectorActivity: typeof import("../src/lib/director-activity").recordDirectorActivity;
     SECURITY_DIRECTOR_FUNCTION: string;
+    // spec-timecard-chokepoint-instrumentation Phase 2 — the session-local Set the caller owns so
+    // security_verdict emits AT MOST ONCE per fused (or standalone) job. Optional so a caller that
+    // has no set (legacy path, if any) still works — it just falls back to a fresh single-shot set.
+    emittedThisSession?: Set<string>;
   },
 ): Promise<void> {
   const { parsed, verdict, raw, isError, fallbackReason, source, specLabel, activityReason, activityMetadata, parentSlug, instr, mode, tag, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION } = args;
+  const emittedThisSession = args.emittedThisSession ?? new Set<string>();
+  // spec-timecard-chokepoint-instrumentation Phase 2 — a single per-job security_verdict at the
+  // shared applier's terminal write. Fires here (once) regardless of the verdict branch below, so
+  // both standalone runSecurityReviewJob and the fused pre-merge session record exactly one
+  // verdict per session. Best-effort — a timecard failure never blocks the apply.
+  const emitVerdict = async () => {
+    await emitTimecardOnceInSession(emittedThisSession, {
+      workspace_id: job.workspace_id,
+      spec_slug: parentSlug || job.spec_slug || null,
+      phase_index: null,
+      event_kind: "security_verdict",
+      actor: "vault",
+      metadata: { job_id: job.id, agent_verdict: verdict, mode, source_kind: source.kind },
+    });
+  };
   if (verdict === "clean" || verdict === "false-positive") {
     const review = String(parsed?.review || `${verdict} — no vulnerability introduced`);
     const ledger = JSON.stringify({ ...instr, verdict });
     await update(job.id, { status: "completed", error: null, instructions: ledger, log_tail: `${verdict}: ${review}`.slice(-2000) });
+    await emitVerdict();
     console.log(`${tag} ${verdict} → no action`);
     // reactive-fold-on-gate-complete: a POST-MERGE (diff-mode) security review reaching clean is the LAST gate
     // for a one-off / already-spec-test-passed spec — `getSecurityStateBySlug` now reports `completedClean`, so
@@ -20384,6 +20484,7 @@ async function applySecurityVerdictToJob(
       metadata: activityMetadata,
     });
     await update(job.id, { status: "needs_attention", error: "needs-human", instructions: JSON.stringify({ ...instr, verdict }), log_tail: review.slice(-2000) });
+    await emitVerdict();
     console.log(`${tag} needs-human → surfaced, no spec`);
     return;
   }
@@ -20392,19 +20493,23 @@ async function applySecurityVerdictToJob(
     const authored = await authorSecurityFixSpec(parsed?.spec, parentSlug, source, job.workspace_id);
     if (!authored) {
       await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real vulnerability but no valid fix spec" });
+      await emitVerdict();
       console.log(`${tag} real-vuln but no valid spec → surfaced needs-human`);
       return;
     }
     const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
     await routeSecurityFix(job, authored, { tag, specLabel, review, ledger, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION });
+    await emitVerdict();
     return;
   }
   if (isError && !parsed) {
     await update(job.id, { status: "failed", error: "security review errored", log_tail: raw.slice(-2000) });
+    await emitVerdict();
     return;
   }
   // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never auto-pass.
   await update(job.id, { status: "needs_attention", error: fallbackReason ?? "security review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
+  await emitVerdict();
 }
 
 /**
@@ -20425,11 +20530,28 @@ async function applyFusedSecurityAsBranchVerdict(args: {
   parsedFused: Record<string, unknown>;
   raw: string;
   tag: string;
+  // spec-timecard-chokepoint-instrumentation Phase 2 — the fused-session emit-once set the caller
+  // (runSpecTestJob) owns. Threaded here so security_started + security_verdict AT MOST ONCE per
+  // fused job regardless of how many terminal branches applySecurityVerdictToJob takes.
+  emittedThisSession?: Set<string>;
 }): Promise<void> {
   const { job, slug, branch, previewOrigin, parsedFused, raw, tag } = args;
+  const emittedThisSession = args.emittedThisSession ?? new Set<string>();
   const { classifyFusedSecurityEnvelope, mapFusedSecurityToVerdict } = await import("../src/lib/security-envelope");
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { SECURITY_DIRECTOR_FUNCTION } = await import("../src/lib/security-agent");
+  // spec-timecard-chokepoint-instrumentation Phase 2 — security_started for the fused pre-merge
+  // session. The security review is running INSIDE the spec-test session, so this fires as the
+  // fused caller pivots into the security-verdict apply. phase_index=null — security_review is
+  // spec-scoped, not phase-scoped.
+  await emitTimecardOnceInSession(emittedThisSession, {
+    workspace_id: job.workspace_id,
+    spec_slug: slug,
+    phase_index: null,
+    event_kind: "security_started",
+    actor: "vault",
+    metadata: { job_id: job.id, fused: true, branch },
+  });
 
   const fusedSecurity = parsedFused.security;
   const verdictInfo = classifyFusedSecurityEnvelope(fusedSecurity);
@@ -20532,6 +20654,16 @@ async function applyFusedSecurityAsBranchVerdict(args: {
       instructions: JSON.stringify({ ...instrJson, verdict, routed: "fixes-as-phases" }),
       log_tail: `real-vuln → ${outcome}`.slice(-2000),
     });
+    // spec-timecard-chokepoint-instrumentation Phase 2 — security_verdict for the fused real-vuln
+    // early-return (fixes-as-phases path bypasses applySecurityVerdictToJob).
+    await emitTimecardOnceInSession(emittedThisSession, {
+      workspace_id: job.workspace_id,
+      spec_slug: slug,
+      phase_index: null,
+      event_kind: "security_verdict",
+      actor: "vault",
+      metadata: { job_id: job.id, agent_verdict: "real-vuln", mode: "branch", routed: "fixes-as-phases", fused: true },
+    });
     console.log(`${tag} fused real-vuln on ${branch} → ${outcome}`);
     return;
   }
@@ -20566,6 +20698,9 @@ async function applyFusedSecurityAsBranchVerdict(args: {
     tag: `[fused-security:${syntheticJob.id.slice(0, 8)}]`,
     recordDirectorActivity,
     SECURITY_DIRECTOR_FUNCTION,
+    // spec-timecard-chokepoint-instrumentation Phase 2 — carry the fused-session set into the
+    // shared applier so the security_verdict emit stays single-fire.
+    emittedThisSession,
   });
 }
 
@@ -20573,6 +20708,21 @@ async function runSecurityReviewJob(job: Job) {
   const tag = `[security:${job.id.slice(0, 8)}]`;
   const { recordDirectorActivity } = await import("../src/lib/director-activity");
   const { SECURITY_DIRECTOR_FUNCTION, depFindingSignature } = await import("../src/lib/security-agent");
+  // spec-timecard-chokepoint-instrumentation Phase 2 — session-local emit-once guard. A standalone
+  // security-review job runs a single security pass; the set makes the security_started + verdict
+  // pair robust to any accidental re-fire in later maintenance.
+  const emittedThisSession = new Set<string>();
+  // Emit security_started at claim. phase_index=null — the security review grades the whole
+  // diff/branch/dep-scan, not a specific phase. spec_slug is null for a dep-watch scan; the emitter
+  // no-ops in that case (nothing to correlate on the ledger).
+  await emitTimecardOnceInSession(emittedThisSession, {
+    workspace_id: job.workspace_id,
+    spec_slug: job.spec_slug,
+    phase_index: null,
+    event_kind: "security_started",
+    actor: "vault",
+    metadata: { job_id: job.id, kind: "security-review" },
+  });
   let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
@@ -20726,6 +20876,8 @@ async function runSecurityReviewJob(job: Job) {
       source, specLabel, activityReason, activityMetadata,
       parentSlug, instr, mode, tag,
       recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION,
+      // spec-timecard-chokepoint-instrumentation Phase 2 — carry the standalone session's guard set.
+      emittedThisSession,
     });
   } catch (e) {
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
