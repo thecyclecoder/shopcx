@@ -1,0 +1,1 @@
+- **Migration-drift check: stop reporting present tables as absent (false positive)** · verified 2026-07-08 · → [[../libraries/control-tower]]

@@ -49,7 +49,9 @@ export type DbHealthCause =
   | "temp_spill_pressure" // pg_stat_database.temp_files/temp_bytes crossed the window flag — hash/sort work_mem is spilling to disk on the instance, dragging every heavy query.
   | "connection_saturation" // active+waiting backends are eating a big fraction of max_connections — new sessions will queue/error before they can run.
   | "cache_pressure" // blks_hit / (blks_hit + blks_read) fell below the floor — the working set is spilling out of shared_buffers (memory tier).
-  | "rollback_error_rate"; // pg_stat_database.xact_rollback / total transactions crossed the flag — clients are being killed / rolling back at a rate that indicates ongoing pressure (the 2026-07-02 incident's 7.43%).
+  | "rollback_error_rate" // pg_stat_database.xact_rollback / total transactions crossed the flag — clients are being killed / rolling back at a rate that indicates ongoing pressure (the 2026-07-02 incident's 7.43%).
+  // request-volume / egress cause (db-health-request-volume, from the slow-query pass's pg_stat_statements aggregate):
+  | "request_volume_pressure"; // total PostgREST request rate and/or rows shipped/hr crossed the flag — an internal polling / row-shipping firehose (the driver of egress + the auth-preamble churn), fixed upstream (cache / batch / widen poll / reuse connections / an aggregate RPC), never a per-query index.
 
 /** What the proposed fix spec asks the owner to build. The agent never runs these — it proposes. */
 export type DbHealthFixKind =
@@ -88,6 +90,7 @@ const FIX_KIND_BY_CAUSE: Record<DbHealthCause, DbHealthFixKind> = {
   connection_saturation: "raise_compute",
   cache_pressure: "raise_compute",
   rollback_error_rate: "investigate_timeouts",
+  request_volume_pressure: "reduce_calls",
 };
 
 // ── Input row shapes (what the box reads + hands us) ──────────────────────────
@@ -184,6 +187,30 @@ export interface InstanceHealthInput {
    * role). Quoted verbatim in the evidence so the operator sees the exact ceiling being hit.
    */
   authenticatedStatementTimeoutMs: number | null;
+  /**
+   * db-health-temp-spill-attribution (2026-07-08): the top pg_stat_statements offenders by
+   * `temp_blks_written`, so a `temp_spill_pressure` finding can NAME which query is spilling — not
+   * just "the instance is spilling". pg_stat_database.temp_bytes is an instance aggregate with no
+   * query attribution; the previous instance pass proposed a generic `raise_work_mem` bump and never
+   * fingered the offender, so a single unindexed disk-sort (the subscriptions LTV scan: 9 MB/call ×
+   * 35K calls = 314 GB, 98% of all spill) hid inside the aggregate for a week. Optional — the
+   * aggregate flag still fires without it; offenders make the proposal actionable at the source.
+   */
+  tempOffenders?: TempSpillOffender[];
+}
+
+/**
+ * One temp-file-spilling query the box captured from pg_stat_statements (ordered by temp_blks_written)
+ * when the instance pass ran. Names the OFFENDER behind an instance-level temp_spill_pressure signal so
+ * the fix targets the query (an index on the ORDER BY / GROUP BY, or a rewrite) rather than a blanket
+ * work_mem bump. db-health-temp-spill-attribution.
+ */
+export interface TempSpillOffender {
+  queryid: string;
+  query: string;
+  calls: number;
+  /** Cumulative temp bytes this query wrote in the stats window (temp_blks_written × block size). */
+  tempBytes: number;
 }
 
 /**
@@ -242,6 +269,20 @@ export const INSTANCE_CACHE_HIT_FLOOR = 0.99;
 export const INSTANCE_CONN_UTIL_FLAG = 0.8; // 80%
 /** A live query past this fraction of the `authenticated` statement_timeout is "near timeout" — driving the timeout-pressure signal BEFORE the rollback lands. */
 export const INSTANCE_TIMEOUT_HEADROOM_FRACTION = 0.5;
+
+// ── Request-volume / egress thresholds (db-health-request-volume, 2026-07-08) ──
+// Nothing in Devi watched aggregate request VOLUME — so an internal polling firehose (the box worker +
+// dashboards: ~78K PostgREST requests/hr, ~182K rows shipped/hr, plus ~349K fresh auth sessions from
+// un-reused connections) drove egress + the 8M-call auth-preamble churn with no signal. These are the
+// escalation line: above them, the pass surfaces the top internal callers for an upstream fix
+// (cache / batch / widen the poll interval / reuse connections / an aggregate RPC), never a per-query
+// index. Tunable — set to the sustained rate that means "someone is polling too hard", not normal load.
+/** Sustained PostgREST request rate (sum(calls)/window-hours) at or above this ⇒ request_volume_pressure. */
+export const REQUEST_VOLUME_CALLS_PER_HR_FLAG = 100_000;
+/** Rows shipped to clients per hour (sum(rows)/window-hours) at or above this ⇒ request_volume_pressure (egress proxy). */
+export const REQUEST_VOLUME_ROWS_PER_HR_FLAG = 100_000;
+/** Ignore windows shorter than this — a just-reset pg_stat_statements gives a noisy rate. */
+export const REQUEST_VOLUME_MIN_WINDOW_HOURS = 1;
 
 // ── Phase 2 trend thresholds (project the size-history forward, not just day-over-day) ──
 /** Need at least this many snapshots in the window to fit a trend (fewer ⇒ no projection — honest). */
@@ -327,6 +368,34 @@ export function isMaintenanceCommand(query: string): boolean {
 export function isForeignQuery(query: string): boolean {
   const q = query || "";
   return FOREIGN_QUERY_RES.some((re) => re.test(q));
+}
+
+// db-health-request-volume (2026-07-08): INFRASTRUCTURAL queries — the PostgREST per-request preamble
+// (`set_config('role' | 'request.*' | 'search_path' | 'request.jwt.*', …)`) and the GoTrue auth
+// server's own session/identity reads. These are issued by the platform on EVERY authenticated
+// request; they have NO app endpoint to cache, NO predicate to index, and NO poll interval to widen.
+// The slow-query pass kept re-proposing a DOOMED `reduce_calls` fix for the 8M-call set_config preamble
+// (queryid -7821780334453251234: proposed + built 3× over 6/23–7/7, always returning) because a spec
+// build can't reduce a per-request preamble. The lever for these is REQUEST VOLUME itself, surfaced in
+// aggregate by analyzeRequestVolume — never a per-query proposal. Distinct from isForeignQuery (which
+// filters queries we don't OWN); an infra query is ours-by-platform but not spec-fixable.
+const INFRASTRUCTURAL_QUERY_RES: RegExp[] = [
+  /\bset_config\s*\(\s*'(?:role|search_path|request\.|request\.jwt)/i, // PostgREST per-request preamble (named args)
+  /^\s*\(*\s*select\s+set_config\s*\(\s*\$\d/i, // normalized preamble AT STATEMENT START (`SELECT set_config($2, $1, $3)`) — anchored so a mutation CTE that merely references set_config for response headers is NOT swept in
+  /\bfrom\s+auth\./i, // GoTrue auth schema (schema-qualified)
+  /\bfrom\s+(?:mfa_amr_claims|mfa_factors|mfa_challenges|flow_state|saml_relay_states|refresh_tokens|one_time_tokens|sso_providers|sso_domains|saml_providers)\b/i, // GoTrue internal tables
+  /\b(?:refresh_token_hmac_key|identities\.identity_data|sessions\.aal|users\.confirmation_token|users\.email_change_token)\b/i, // GoTrue-distinctive columns (bare-table session/identity/user reads)
+];
+
+/**
+ * Is this a platform-infrastructural query (PostgREST request preamble / GoTrue auth reads) rather than
+ * an app query? These are issued per-request by the platform itself — there is no proposal that reduces
+ * them (no endpoint, no predicate, no poll interval). analyzeSlowQuery skips them so Devi never churns a
+ * doomed `reduce_calls` spec; analyzeRequestVolume surfaces their VOLUME in aggregate instead.
+ */
+export function isInfrastructuralQuery(query: string): boolean {
+  const q = query || "";
+  return INFRASTRUCTURAL_QUERY_RES.some((re) => re.test(q));
 }
 
 // ── A finding ────────────────────────────────────────────────────────────────
@@ -470,6 +539,12 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
   // there's no endpoint to cache or predicate to index. Without this it misclassifies as high_call_volume
   // → a nonsense reduce_calls proposal.
   if (isMaintenanceCommand(row.query)) return null;
+  // Gap 5 (db-health-request-volume, 2026-07-08) — the PostgREST per-request preamble
+  // (set_config) and GoTrue auth reads are infrastructural: no endpoint/predicate/poll to fix, so a
+  // `reduce_calls` spec is un-buildable and just churns (queryid -7821780334453251234 was proposed +
+  // built 3× and always returned). Skip the per-query proposal; analyzeRequestVolume surfaces their
+  // aggregate volume as an escalation instead.
+  if (isInfrastructuralQuery(row.query)) return null;
 
   const overFloor = row.mean_exec_time >= SLOW_QUERY_MIN_MEAN_MS || row.total_exec_time >= SLOW_QUERY_MIN_TOTAL_MS;
   if (!overFloor) return null;
@@ -812,8 +887,28 @@ export function analyzeInstanceHealth(
 
   // 2) temp_spill_pressure — cumulative temp_bytes crossed the window flag (883 GB in the incident).
   //    Hash/sort work_mem is spilling to disk on every heavy query, dragging the whole instance.
+  //    db-health-temp-spill-attribution (2026-07-08): pg_stat_database.temp_bytes is an instance
+  //    aggregate with NO query attribution, so the previous pass could only propose a generic
+  //    `raise_work_mem` bump — and a single unindexed disk-sort (the subscriptions LTV scan: 314 GB,
+  //    98% of all spill) hid inside the aggregate for a week. When the box captured the top
+  //    temp_blks_written offenders, NAME them and point the fix at the dominant spiller (an
+  //    index/rewrite at the source, not a blanket work_mem bump).
   if (input.tempBytes >= tempFlag) {
     const impact = `${humanBytes(input.tempBytes)} spilled to temp files (${input.tempFiles.toLocaleString()} files) — hash/sort work_mem is undersized`;
+    const offenders = (input.tempOffenders ?? []).filter((o) => o.tempBytes > 0).slice(0, 5);
+    const dominant = offenders[0];
+    const offenderLines = offenders.length > 0
+      ? [
+          ``,
+          `Top temp-spill offenders (pg_stat_statements by temp_blks_written — the per-query attribution pg_stat_database cannot give):`,
+          ...offenders.map(
+            (o) => `  - ${humanBytes(o.tempBytes)} over ${o.calls.toLocaleString()} calls${isInfrastructuralQuery(o.query) ? " [infrastructural]" : ""} — \`${previewQuery(o.query)}\``,
+          ),
+          dominant && !isInfrastructuralQuery(dominant.query)
+            ? `The dominant spiller (queryid ${dominant.queryid}) is an APP query — an index on its ORDER BY / GROUP BY, or a rewrite into a set-returning/aggregate RPC, eliminates the spill AT THE SOURCE. A work_mem bump is the fallback, not the fix.`
+            : `Confirm the dominant spiller's plan (a Sort/Hash reporting \`external merge\` / \`Disk: NkB\`) before proposing a work_mem bump — an index on the sort/group key is often the cheaper win.`,
+        ]
+      : [];
     findings.push({
       signature: `dbhealth:instance:temp_spill_pressure`,
       category: "instance",
@@ -827,6 +922,7 @@ export function analyzeInstanceHealth(
         `pg_stat_database.temp_files: ${input.tempFiles.toLocaleString()} on-disk temp files.`,
         `pg_stat_database.temp_bytes: ${humanBytes(input.tempBytes)} (${input.tempBytes.toLocaleString()} bytes) — window flag is ${humanBytes(tempFlag)}.`,
         `The 2026-07-02 incident hit ${humanBytes(883 * 1024 * 1024 * 1024)} across 92,832 files — the operator-visible signature of an undersized work_mem: every hash/sort >work_mem spills, dragging every heavy query.`,
+        ...offenderLines,
       ].join("\n"),
       specSlug: slugFor("raise_work_mem", "instance"),
       specTitle: specTitleFor("temp_spill_pressure", "the instance", `${humanBytes(input.tempBytes)} temp-file spill across ${input.tempFiles.toLocaleString()} files`),
@@ -905,6 +1001,107 @@ export function analyzeInstanceHealth(
   }
 
   return findings;
+}
+
+// ── Request-volume / egress escalation (db-health-request-volume, 2026-07-08) ──
+
+/** One top pg_stat_statements row for the request-volume escalation (by calls or by rows shipped). */
+export interface RequestVolumeTopQuery {
+  queryid: string;
+  query: string;
+  calls: number;
+  /** Total rows this query returned to clients over the window (pg_stat_statements.rows) — the egress proxy. */
+  rows: number;
+}
+
+/**
+ * Aggregate request-volume signals for the window (from pg_stat_statements + pg_stat_statements_info).
+ * Everything is over the SAME window (since the last stats reset).
+ */
+export interface RequestVolumeInput {
+  /** Hours since the stats window reset (pg_stat_statements_info.stats_reset → now). */
+  windowHours: number;
+  /** sum(calls) over pg_stat_statements — total statements in the window. */
+  totalCalls: number;
+  /** sum(rows) over pg_stat_statements — total rows shipped to clients (egress proxy). */
+  totalRows: number;
+  /** Top statements by call count (the request firehose). */
+  topByCalls: RequestVolumeTopQuery[];
+  /** Top statements by rows returned (the egress firehose). */
+  topByRows: RequestVolumeTopQuery[];
+}
+
+export interface RequestVolumeThresholds {
+  callsPerHrFlag?: number;
+  rowsPerHrFlag?: number;
+  minWindowHours?: number;
+}
+
+/**
+ * Flag an aggregate request-VOLUME / egress firehose — the blind spot that let ~78K PostgREST req/hr +
+ * ~182K rows/hr (the box worker + dashboards polling; the 8M-call auth preamble is the tell) drive egress
+ * with no Devi signal. This is NOT a per-query problem (no single index fixes it) — it's an ESCALATION
+ * that names the top internal callers so the owner cuts the volume upstream (cache / batch / widen the
+ * poll interval / reuse connections / replace a row-shipping read with an aggregate RPC). Returns null
+ * when the window is too short to trust the rate, or the rate is under both flags. Pure + deterministic.
+ */
+export function analyzeRequestVolume(
+  input: RequestVolumeInput,
+  thresholds: RequestVolumeThresholds = {},
+): DbHealthFinding | null {
+  const callsFlag = thresholds.callsPerHrFlag ?? REQUEST_VOLUME_CALLS_PER_HR_FLAG;
+  const rowsFlag = thresholds.rowsPerHrFlag ?? REQUEST_VOLUME_ROWS_PER_HR_FLAG;
+  const minWindow = thresholds.minWindowHours ?? REQUEST_VOLUME_MIN_WINDOW_HOURS;
+  if (!(input.windowHours >= minWindow)) return null; // too-short window ⇒ noisy rate, skip honestly
+
+  const callsPerHr = input.totalCalls / input.windowHours;
+  const rowsPerHr = input.totalRows / input.windowHours;
+  const callsOver = callsPerHr >= callsFlag;
+  const rowsOver = rowsPerHr >= rowsFlag;
+  if (!callsOver && !rowsOver) return null;
+
+  const fmtRate = (n: number) => Math.round(n).toLocaleString();
+  const share = (n: number, total: number) => (total > 0 ? pct(n / total) : "0%");
+  const topCalls = input.topByCalls.slice(0, 8);
+  const topRows = input.topByRows.slice(0, 8);
+  // An infrastructural caller (the auth preamble) can't be spec-fixed directly, but naming it explains
+  // the volume; an app caller in the top list IS the actionable lever.
+  const label = (q: RequestVolumeTopQuery) => isInfrastructuralQuery(q.query) ? " [infrastructural]" : "";
+
+  const impact =
+    `${fmtRate(callsPerHr)} req/hr` + (callsOver ? ` (≥ ${callsFlag.toLocaleString()} flag)` : "") +
+    ` · ${fmtRate(rowsPerHr)} rows/hr shipped` + (rowsOver ? ` (≥ ${rowsFlag.toLocaleString()} flag)` : "") +
+    ` over a ${input.windowHours.toFixed(1)}h window`;
+
+  const evidence = [
+    `Window: ${input.windowHours.toFixed(1)}h (since the last pg_stat_statements reset).`,
+    `Totals: ${input.totalCalls.toLocaleString()} statements (${fmtRate(callsPerHr)}/hr${callsOver ? ` — ≥ ${callsFlag.toLocaleString()}/hr flag` : ""}), ${input.totalRows.toLocaleString()} rows shipped (${fmtRate(rowsPerHr)}/hr${rowsOver ? ` — ≥ ${rowsFlag.toLocaleString()}/hr flag` : ""}).`,
+    `Rows shipped to clients is the egress proxy — most PostgREST/Supabase billing is metered on it.`,
+    ``,
+    `Top callers by request count:`,
+    ...topCalls.map((q) => `  - ${q.calls.toLocaleString()} calls (${share(q.calls, input.totalCalls)} of all)${label(q)} — \`${previewQuery(q.query)}\``),
+    ``,
+    `Top callers by rows shipped (egress):`,
+    ...topRows.map((q) => `  - ${q.rows.toLocaleString()} rows (${share(q.rows, input.totalRows)} of all) over ${q.calls.toLocaleString()} calls${label(q)} — \`${previewQuery(q.query)}\``),
+    ``,
+    `This is an aggregate VOLUME signal, not a per-query cost problem — a single index won't move it. Cut the volume at the source: widen poll intervals on internal loops, cache/batch hot reads, reuse authenticated connections (a burst of distinct auth sessions is the "connections aren't pooled" tell), and replace row-shipping reads with aggregate RPCs.`,
+  ].join("\n");
+
+  return {
+    signature: `dbhealth:request-volume:instance`,
+    category: "slow_query",
+    cause: "request_volume_pressure",
+    fixKind: "reduce_calls",
+    table: "(instance)",
+    title: `Request-volume / egress firehose — ${fmtRate(callsPerHr)} req/hr, ${fmtRate(rowsPerHr)} rows/hr`,
+    impact,
+    // Rank below active incidents (temp/timeout/rollback score in the millions) but above routine
+    // slow-query findings — it's a standing cost signal, not a live outage.
+    score: Math.max(callsPerHr, rowsPerHr),
+    evidence,
+    specSlug: slugFor("reduce_calls", "request-volume"),
+    specTitle: specTitleFor("request_volume_pressure", "the instance", impact),
+  };
 }
 
 // ── Phase 2 — trend projection (growth-to-ceiling + autovacuum-lag trend) ─────
@@ -1131,6 +1328,7 @@ export function buildFixSpecMarkdown(finding: DbHealthFinding): string {
     rollback_error_rate: `**Owner-approval-only — instance-saturation signal, no auto-apply.** A high aggregate rollback ratio is a SYSTEMIC signal, not a per-query one — a single slow query can't move the aggregate. The two leading suspects (in order): (1) the \`authenticated\` \`statement_timeout\` ceiling is catching queries under load → address the top slow-query offenders; (2) the app is fighting itself (deadlocks) → check the \`deadlocks\` counter in the evidence and the concurrent-write hot spot. Do NOT raise the timeout ceiling as the reflex — it hides the real culprit. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero changes; the fix is an owner decision.`,
     cache_pressure: `**Owner-approval-only — instance-saturation signal, no auto-apply.** The cache-hit ratio fell below the floor — the hot working set no longer fits in \`shared_buffers\`. Every miss is a disk read that competes for the same latency budget the \`statement_timeout\` enforces. The lever is compute tier (more RAM ⇒ larger \`shared_buffers\`), not a per-query fix. Confirm the working set has grown organically (not a runaway one-off scan) via the size sweep before proposing a tier bump. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
     connection_saturation: `**Owner-approval-only — instance-saturation signal, no auto-apply.** Active + waiting backends are eating a big fraction of \`max_connections\`. At this utilization, new sessions queue at the pooler or fail to connect (the customer-visible "DATABASE errors" class). The lever is compute tier (more max_connections + RAM headroom) OR a pgBouncer-style layer for short-lived sessions. Check whether the culprit is a genuine traffic spike vs a leaked pool before proposing a resize. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero infra changes; the fix is an owner decision.`,
+    request_volume_pressure: `**Escalation — aggregate request-volume / egress, not a per-query fix.** The instance is serving a request/row-shipping firehose (mostly INTERNAL polling: the box worker + dashboards; the auth-preamble call count is the tell). No single index moves an aggregate volume signal. Work the TOP CALLERS named in the evidence, in order: (1) widen poll intervals on internal loops that don't need sub-minute freshness; (2) cache / batch hot reads; (3) reuse authenticated connections (a burst of distinct auth sessions = connections aren't pooled); (4) replace any row-shipping read (fetch-many-then-aggregate-in-JS) with an aggregate RPC that returns scalars. Rows-shipped/hr is the egress meter — attack the top rows-shipped callers first. Impact quoted verbatim from the evidence: **${finding.impact}**. The agent applies zero changes; cutting the volume is an owner decision.`,
   };
   const guidance = instanceGuidanceByCause[finding.cause] ?? fixGuidance[finding.fixKind];
   // dbhealth-spec-evidence-survives-parse: the markdown MUST follow the proven author-spec shape or the
@@ -1457,6 +1655,7 @@ function specTitleFor(cause: DbHealthCause, target: string, hint: string): strin
     connection_saturation: `Investigate connection saturation on ${target}`,
     cache_pressure: `Investigate cache-hit pressure on ${target}`,
     rollback_error_rate: `Investigate rollback rate on ${target}`,
+    request_volume_pressure: `Cut the request-volume / egress firehose on ${target}`,
   };
   return base[cause] || `Fix ${target}: ${hint.slice(0, 40)}`;
 }

@@ -15,6 +15,18 @@ export function clampInt(n: unknown, fallback: number): number {
   return Number.isFinite(x) ? Math.trunc(x) : fallback;
 }
 
+// Typeof-guarded String.prototype.startsWith for values that originate from
+// request input (body fields, query params, URL fragments) — a body field the
+// client sends as a number/object/null used to crash the portal with
+// `t.startsWith is not a function` (signature vercel:a08795a29d9404a4), and the
+// outer /api/portal try-catch mislabeled it as `[portal] route error:` +
+// returned 401 Unauthorized. Handlers that already coerce via `s()` still call
+// this at the .startsWith site so a future refactor removing the coerce can't
+// silently reintroduce the crash.
+export function safeStartsWith(v: unknown, prefix: string): boolean {
+  return typeof v === "string" && v.startsWith(prefix);
+}
+
 /**
  * fetch() with a bounded per-request deadline. A stalled upstream (Appstle,
  * Shopify GraphQL, Braintree, Avalara) can otherwise hold a portal Lambda open

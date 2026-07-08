@@ -3663,6 +3663,32 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       const finding = mod.analyzeSlowQuery(row, plan);
       if (finding) findings.push(finding);
     }
+
+    // db-health-request-volume (2026-07-08): the aggregate request/egress firehose signal — the blind
+    // spot that let ~78K PostgREST req/hr + ~182K rows/hr of internal polling drive egress with no Devi
+    // finding. Reuses this pass's pg_stat_statements access. Best-effort — additive; a failure here must
+    // never break the slow-query pass.
+    try {
+      const infoRes = await c.query(`select stats_reset from pg_stat_statements_info`);
+      const statsReset = (infoRes.rows[0] as { stats_reset?: string } | undefined)?.stats_reset;
+      const windowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
+      const totalsRes = await c.query(`select coalesce(sum(calls),0)::bigint as calls, coalesce(sum(rows),0)::bigint as rows from pg_stat_statements`);
+      const totals = (totalsRes.rows[0] ?? {}) as Record<string, unknown>;
+      const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by calls desc limit 8`);
+      const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by rows desc limit 8`);
+      const mapTop = (rs: Array<Record<string, unknown>>) => rs.map((r) => ({ queryid: String(r.queryid ?? ""), query: String(r.query ?? ""), calls: Number(r.calls ?? 0), rows: Number(r.rows ?? 0) }));
+      const rvFinding = mod.analyzeRequestVolume({
+        windowHours,
+        totalCalls: Number(totals.calls ?? 0),
+        totalRows: Number(totals.rows ?? 0),
+        topByCalls: mapTop(topCallsRes.rows as Array<Record<string, unknown>>),
+        topByRows: mapTop(topRowsRes.rows as Array<Record<string, unknown>>),
+      });
+      if (rvFinding) findings.push(rvFinding);
+    } catch (e) {
+      console.warn("[db-health] request-volume escalation failed:", e instanceof Error ? e.message : String(e));
+    }
+
     const proposed = await surfaceDbHealthFindings(findings);
     const ranked = mod.dedupeFindings(findings);
     const slow_queries = ranked.slice(0, 10).map((f) => ({ queryid: f.signature.split(":").pop() || "", cause: f.cause, table: f.table, impact: f.impact }));
@@ -3977,6 +4003,31 @@ async function runDbHealthInstanceJob(): Promise<void> {
       /* best-effort: partial signals are still worth beating */
     }
 
+    // db-health-temp-spill-attribution (2026-07-08): pg_stat_database.temp_bytes is an instance
+    // aggregate with no query attribution — so name the top temp_blks_written offenders here so a
+    // temp_spill_pressure finding fingers the spilling query (the subscriptions LTV scan was 98% of
+    // spill, invisible in the aggregate). Best-effort — a failure must never skip the pass.
+    let tempOffenders: import("../src/lib/control-tower/db-health").TempSpillOffender[] = [];
+    try {
+      const toRes = await c.query(
+        `select queryid::text as queryid, query, calls,
+                (temp_blks_written * current_setting('block_size')::bigint)::bigint as temp_bytes
+           from pg_stat_statements
+          where temp_blks_written > 0
+            and query not ilike '%pg_stat_statements%'
+          order by temp_blks_written desc
+          limit 5`,
+      );
+      tempOffenders = (toRes.rows as Array<Record<string, unknown>>).map((r) => ({
+        queryid: String(r.queryid ?? ""),
+        query: String(r.query ?? ""),
+        calls: Number(r.calls ?? 0),
+        tempBytes: Number(r.temp_bytes ?? 0),
+      }));
+    } catch {
+      /* best-effort: pg_stat_statements may be unreadable; the aggregate temp flag still fires */
+    }
+
     const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
       xactCommit: statDb.xactCommit,
       xactRollback: statDb.xactRollback,
@@ -3991,6 +4042,7 @@ async function runDbHealthInstanceJob(): Promise<void> {
       statementsNearTimeout,
       nearTimeoutSamples,
       authenticatedStatementTimeoutMs,
+      tempOffenders,
     };
     const findings = mod.analyzeInstanceHealth(input);
     const ranked = mod.rankFindings(findings);
