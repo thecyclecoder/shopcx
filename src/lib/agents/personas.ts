@@ -208,6 +208,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   "deploy-guardian": {
     key: "deploy-guardian", name: "Reva", role: "Deploy Guardian", emoji: "🛡️",
     personality: "Watches each auto-merged deploy over its canary window — on a clear deploy-correlated regression, restores known-good FAST (revert the offending squash on main); escalates anything ambiguous instead of guessing.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
     mascotId: "default", avatarUrl: `${AV}reva-deployguardian.jpg?v=5`,
     chip: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-900/40",
     dot: "bg-fuchsia-500", ring: "bg-fuchsia-50 dark:bg-fuchsia-900/20", accent: "text-fuchsia-600 dark:text-fuchsia-400",

@@ -509,6 +509,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Sub-minute / minute crons (window ~10 min) ─
   { id: "claude-status-poll-cron", kind: "cron", owner: "platform", label: "Claude status poll", description: "Polls status.claude.com for the Claude API + Claude Code components → drives the Claude-down breaker.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "deploy-guardian-cron", kind: "cron", owner: "platform", label: "Deploy guardian", description: "Evaluates each auto-merged deploy's canary watch over its window → healthy/regressed/unsure verdict (deploy-health-rollback-guardian).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "deploy-guardian" /* Reva — surfaces under Ada in the agents roster (agent-roster-sync source 2) */ },
+  // Reva's canary-INVESTIGATION box-session (reva-box-session-causal-rollback). The deploy-guardian
+  // cron above fires a kind='deploy-review' job when a canary window closes non-healthy; the job is a
+  // read-only diff walk on Max → typed revert/keep verdict (builder-worker.ts runDeployReviewJob). Same
+  // agent as the cron (Reva), so personaKind:'deploy-guardian' MERGES it into her one card (org-chart
+  // source 2, byPersona), and agentKind:'deploy-review' REGISTERS the job kind so it stops surfacing as a
+  // flagged "unregistered" worker card (org-chart source 3). Reactive + a loose window: a quiet
+  // deploy-review is healthy (most deploys are fine and never trigger an investigation) — the cron's beats
+  // carry Reva's liveness.
+  { id: "deploy-review-agent", kind: "reactive", owner: "platform", agentKind: "deploy-review", personaKind: "deploy-guardian", label: "Deploy review", description: "Reva's box-session investigation of a non-healthy canary — read-only diff walk → typed revert/keep verdict (reva-box-session-causal-rollback).", expectedCadence: "on a non-healthy canary verdict", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
   { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
