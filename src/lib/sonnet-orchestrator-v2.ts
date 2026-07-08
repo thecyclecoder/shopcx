@@ -315,6 +315,58 @@ ${summary}
 Everything below is the conversation SINCE that lock-in — the tail. Rely on this summary for prior state; only the tail changes turn-to-turn.`;
 }
 
+/**
+ * Phase 1 of docs/brain/specs/orchestrator-surfaces-line-item-variant-and-computed-per-unit-price.md.
+ *
+ * Compute the actual charged total per order line and its rounded
+ * per-unit price so the orchestrator never has to multiply MSRP-ish
+ * fields to infer what the customer really paid.
+ *
+ * Preference order per line:
+ *   1. `line_total_cents` / `total_cents` when the row already carries it
+ *      (internal + amplifier orders stamp both).
+ *   2. Pro-rata attribution from the order's chargeable subtotal —
+ *      `payment_details.subtotal_cents` when present, else
+ *      `orders.total_cents` — split by each line's (price_cents × qty)
+ *      weight so a multi-line order does not collapse everything onto
+ *      one line.
+ *   3. Fall back to `price_cents × qty` when nothing else is available.
+ */
+export type OrchestratorOrderLineForCompute = {
+  quantity?: number | null;
+  price_cents?: number | null;
+  total_cents?: number | null;
+  line_total_cents?: number | null;
+};
+export function computeChargedLineTotals(
+  order: {
+    total_cents?: number | null;
+    payment_details?: { subtotal_cents?: number | null } | null | unknown;
+  },
+  lines: OrchestratorOrderLineForCompute[],
+): Array<{ chargedTotalCents: number; perUnitCents: number }> {
+  const pd = (order.payment_details as { subtotal_cents?: number | null } | null) || null;
+  const orderCharged = (pd?.subtotal_cents ?? order.total_cents ?? 0) || 0;
+  const weights = lines.map(l => Math.max(0, (l.price_cents || 0) * (l.quantity || 0)));
+  const totalWeight = weights.reduce((s, w) => s + w, 0);
+  return lines.map((l, idx) => {
+    const qty = Math.max(1, l.quantity || 1);
+    const stored = l.line_total_cents ?? l.total_cents ?? null;
+    let chargedTotal: number;
+    if (stored != null) {
+      chargedTotal = stored;
+    } else if (totalWeight > 0 && orderCharged > 0) {
+      chargedTotal = Math.round(orderCharged * (weights[idx] / totalWeight));
+    } else {
+      chargedTotal = (l.price_cents || 0) * qty;
+    }
+    return {
+      chargedTotalCents: chargedTotal,
+      perUnitCents: Math.round(chargedTotal / qty),
+    };
+  });
+}
+
 async function buildPreContext(
   workspaceId: string,
   ticketId: string,
@@ -1078,23 +1130,32 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
 
     parts.push("\nRECENT ORDERS (last 180 days):");
     for (const o of orders) {
-      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; sku?: string; variant_id?: string }[] || []);
-      const itemStr = lineItems.map(i => {
+      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; total_cents?: number; line_total_cents?: number; sku?: string; variant_id?: string }[] || []);
+      // Phase 1 of docs/brain/specs/orchestrator-surfaces-line-item-variant-
+      // and-computed-per-unit-price.md — hand Sonnet a reconciled per-unit
+      // (line total ÷ qty) so it never divides MSRP-ish price_cents by
+      // hand. `charged[i]` also carries the line total for the surface
+      // note. Ticket cd2e4a9a exposed the pre-fix drift: a $44.74 / 2-unit
+      // order surfaced as $22.46/unit (Shopify originalUnitPriceSet, pre-
+      // discount) instead of the actual $22.37/unit.
+      const charged = computeChargedLineTotals(o as { total_cents?: number | null; payment_details?: { subtotal_cents?: number | null } | null }, lineItems);
+      const itemStr = lineItems.map((i, idx) => {
         const qty = i.quantity || 1;
-        const realizedCents = i.price_cents || 0;
+        const perUnitCents = charged[idx].perUnitCents;
+        const lineTotalCents = charged[idx].chargedTotalCents;
         const titleFull = `${i.title || "?"}${i.variant_title ? ` (${i.variant_title})` : ""}`;
         const msrp = i.variant_id ? msrpMap.get(String(i.variant_id)) : undefined;
         if (msrp) {
           const standardCents = Math.round(msrp * 0.75);
           const floorCents = Math.round(msrp * 0.5);
           const flag =
-            realizedCents < floorCents ? " [BELOW 50% FLOOR — not allowed anymore]" :
-            Math.abs(realizedCents - floorCents) <= 10 ? " [AT FLOOR — minimum allowed]" :
-            realizedCents < standardCents ? " [grandfathered, above floor]" :
+            perUnitCents < floorCents ? " [BELOW 50% FLOOR — not allowed anymore]" :
+            Math.abs(perUnitCents - floorCents) <= 10 ? " [AT FLOOR — minimum allowed]" :
+            perUnitCents < standardCents ? " [grandfathered, above floor]" :
             "";
-          return `${titleFull} x${qty} @ $${(realizedCents / 100).toFixed(2)}/unit realized (MSRP $${(msrp / 100).toFixed(2)} | standard sub $${(standardCents / 100).toFixed(2)} | 50% floor $${(floorCents / 100).toFixed(2)})${flag}`;
+          return `${titleFull} x${qty} @ $${(perUnitCents / 100).toFixed(2)}/unit realized (line total $${(lineTotalCents / 100).toFixed(2)} | MSRP $${(msrp / 100).toFixed(2)} | standard sub $${(standardCents / 100).toFixed(2)} | 50% floor $${(floorCents / 100).toFixed(2)})${flag}`;
         }
-        return `${titleFull} x${qty} @ $${(realizedCents / 100).toFixed(2)}/unit realized`;
+        return `${titleFull} x${qty} @ $${(perUnitCents / 100).toFixed(2)}/unit realized (line total $${(lineTotalCents / 100).toFixed(2)})`;
       }).join(", ");
       const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fulfillments = (o.fulfillments as { tracking_number?: string; status?: string }[] || []);
@@ -1125,7 +1186,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"}${sourceLabel}${subTag} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
     }
     parts.push(`PRICING TERMINOLOGY (use customer-facing language):
-- "Realized price" = what the customer actually pays per unit (the per-unit price on the order). Use this when speaking to customers.
+- "Realized price" = what the customer actually pays per unit (the per-unit price on the order). Use this when speaking to customers. Each line surfaces it computed as line total ÷ quantity, so never re-derive per-unit by multiplying anything — use the number shown.
 - "Base price" = an internal-only concept (realized / 0.75). NEVER mention "base price" in customer messages.
 - MSRP = the variant's listed retail price.
 - Standard subscription price = MSRP × 0.75 (the default 25% subscriber discount).

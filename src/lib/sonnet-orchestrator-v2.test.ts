@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   warnOnMissingResolutionFields,
   resolutionSchemaAdoption,
+  computeChargedLineTotals,
   type SonnetDecision,
 } from "./sonnet-orchestrator-v2";
 
@@ -139,4 +140,66 @@ test("NaN / non-finite confidence counts as missing", () => {
   } finally {
     console.warn = originalWarn;
   }
+});
+
+// ── Named failing state (Phase 1 of docs/brain/specs/orchestrator-surfaces
+// -line-item-variant-and-computed-per-unit-price.md) ────────────────────
+// Ticket cd2e4a9a: order carries 2 units and total $44.74, but the pre-fix
+// orchestrator surfaced $22.46/unit (Shopify originalUnitPriceSet, pre-
+// discount) and the AI proceeded to invent multiplication from there. The
+// asserted correct state: surface per-unit = $22.37, i.e. line total ÷
+// quantity from the real amounts the order carries — never $22.46.
+test("Phase 1 — ticket cd2e4a9a: 2-unit / $44.74 line surfaces $22.37/unit, not $22.46", () => {
+  const order = { total_cents: 4474 };
+  const lines = [{ quantity: 2, price_cents: 2246 }]; // MSRP-ish per-unit
+  const [row] = computeChargedLineTotals(order, lines);
+  assert.equal(row.perUnitCents, 2237, "per-unit must be line total ÷ qty ($22.37), not the MSRP-ish $22.46");
+  assert.equal(row.chargedTotalCents, 4474, "line total for a single-line order is the whole order charged");
+});
+
+test("Phase 1 — payment_details.subtotal_cents wins over order.total_cents (shipping/tax excluded)", () => {
+  const order = { total_cents: 5000, payment_details: { subtotal_cents: 4474 } };
+  const lines = [{ quantity: 2, price_cents: 2246 }];
+  const [row] = computeChargedLineTotals(order, lines);
+  assert.equal(row.chargedTotalCents, 4474);
+  assert.equal(row.perUnitCents, 2237);
+});
+
+test("Phase 1 — line_total_cents on the row overrides pro-rata", () => {
+  const order = { total_cents: 9999 };
+  const lines = [{ quantity: 2, price_cents: 2246, line_total_cents: 4474 }];
+  const [row] = computeChargedLineTotals(order, lines);
+  assert.equal(row.chargedTotalCents, 4474);
+  assert.equal(row.perUnitCents, 2237);
+});
+
+test("Phase 1 — multi-line order distributes charged total by (price_cents × qty) weight", () => {
+  // Two lines: A = $22.46 × 2 = $44.92, B = $30.00 × 1 = $30.00, weights 44.92:30
+  // Charged subtotal = $70 (some order-level discount reduced $74.92 → $70).
+  // Line A gets 44.92/74.92 × 7000 = 4196c; line B gets 2804c.
+  const order = { total_cents: 7000 };
+  const lines = [
+    { quantity: 2, price_cents: 2246 },
+    { quantity: 1, price_cents: 3000 },
+  ];
+  const [a, b] = computeChargedLineTotals(order, lines);
+  assert.equal(a.chargedTotalCents + b.chargedTotalCents <= 7000 + 1 && a.chargedTotalCents + b.chargedTotalCents >= 7000 - 1, true, "sum must round to the order charged total ±1");
+  assert.equal(a.perUnitCents, Math.round(a.chargedTotalCents / 2));
+  assert.equal(b.perUnitCents, b.chargedTotalCents);
+  assert.ok(a.perUnitCents < 2246 && a.perUnitCents > 2000, `line A per-unit ${a.perUnitCents} should reflect the order-level discount`);
+});
+
+test("Phase 1 — fallback to price_cents × qty when no order-side charged total is known", () => {
+  const order = {}; // no total, no payment_details
+  const lines = [{ quantity: 3, price_cents: 1500 }];
+  const [row] = computeChargedLineTotals(order, lines);
+  assert.equal(row.chargedTotalCents, 4500);
+  assert.equal(row.perUnitCents, 1500);
+});
+
+test("Phase 1 — 0-quantity line falls back to qty=1 to avoid divide-by-zero", () => {
+  const order = { total_cents: 500 };
+  const lines = [{ quantity: 0, price_cents: 500 }];
+  const [row] = computeChargedLineTotals(order, lines);
+  assert.equal(Number.isFinite(row.perUnitCents), true, "per-unit must be finite even for a 0-qty line");
 });
