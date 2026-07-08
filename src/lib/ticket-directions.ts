@@ -287,6 +287,44 @@ export async function getLiveDirection(
 export const loadLiveDirection = getLiveDirection;
 
 /**
+ * message_sent → close. Phase 1 of
+ * [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
+ *
+ * Sol's first-touch box session ([[../inngest/unified-ticket-handler]] `runTicketHandleJob` in
+ * scripts/builder-worker.ts) sends a resolving reply through `deliverTicketMessage` but never
+ * closes the ticket — so it stays `open` and the [[ticket-analyzer]] closed-tickets-only sweep
+ * never enqueues Cora to grade it. This helper is the single, shared "message_sent → close"
+ * write mirroring the old handler's [[../inngest/unified-ticket-handler]] `setStatus` semantics
+ * (documented rule: "message_sent → close the ticket; next inbound reopens"), so the box lane
+ * and the Inngest lane close identically. NOT a parallel path — same six-field update:
+ * `status='closed'`, `closed_at=now`, `updated_at=now`, and clears the escalation triple so a
+ * previously-escalated-then-resolved ticket doesn't linger in the escalation view.
+ *
+ * Guarded by workspace_id (Learning #6 — the confirming predicate at the action point, not a
+ * coarser proxy): a cross-workspace ticket id can never authorize the close. Compare-and-set on
+ * `.eq('workspace_id', …).eq('id', …)`; the write is idempotent for the message_sent case (a
+ * racing close from a follow-up turn is a no-op — the row is already closed).
+ */
+export async function closeTicketOnResolvingReply(
+  admin: Admin,
+  opts: { workspace_id: string; ticket_id: string },
+): Promise<void> {
+  const now = new Date().toISOString();
+  await admin
+    .from("tickets")
+    .update({
+      status: "closed",
+      closed_at: now,
+      updated_at: now,
+      escalated_at: null,
+      escalated_to: null,
+      escalation_reason: null,
+    })
+    .eq("workspace_id", opts.workspace_id)
+    .eq("id", opts.ticket_id);
+}
+
+/**
  * Bump `resession_count` on the live Direction for `ticket_id`. Phase 2 of
  * [[../specs/sol-runaway-re-session-cap-guardrail]] — the router (`reSessionSol`) calls this
  * BEFORE it supersedes the live row so the incremented count is captured on the row about to

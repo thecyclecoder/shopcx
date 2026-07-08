@@ -16,7 +16,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeDirection, TicketDirectionPlanError, resolveSolChosenPlaybook } from "./ticket-directions";
+import {
+  writeDirection,
+  TicketDirectionPlanError,
+  resolveSolChosenPlaybook,
+  closeTicketOnResolvingReply,
+} from "./ticket-directions";
 
 interface FakePlaybook {
   id: string;
@@ -685,4 +690,68 @@ test("resolveSolChosenPlaybook: superseded Direction → null (superseded_at IS 
   });
   const out = await resolveSolChosenPlaybook(admin, WS, TID);
   assert.equal(out, null);
+});
+
+// ── Phase 1 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+// closeTicketOnResolvingReply is the shared "message_sent → close" write mirroring the old
+// unified-ticket-handler `setStatus`. These tests pin (a) the six fields the update writes, (b) the
+// workspace_id + id compound predicate (Learning #6 — cross-workspace cannot authorize a close),
+// and (c) that closed_at + updated_at are set to a fresh timestamp (not null).
+
+function makeCloseAdmin() {
+  let captured: {
+    table?: string;
+    payload?: Record<string, unknown>;
+    filters?: Record<string, unknown>;
+  } | null = null;
+  const admin = {
+    from(table: string) {
+      const filters: Record<string, unknown> = {};
+      const builder = {
+        update(p: Record<string, unknown>) {
+          captured = { table, payload: p, filters };
+          return builder;
+        },
+        eq(col: string, val: unknown) {
+          filters[col] = val;
+          return builder;
+        },
+        then(resolve: (v: { error: null }) => void) {
+          resolve({ error: null });
+        },
+      };
+      return builder;
+    },
+  };
+  return {
+    admin: admin as unknown as import("@supabase/supabase-js").SupabaseClient,
+    captured: () => captured,
+  };
+}
+
+test("closeTicketOnResolvingReply writes the six-field message_sent→close update on tickets", async () => {
+  const { admin, captured } = makeCloseAdmin();
+  await closeTicketOnResolvingReply(admin, { workspace_id: WS, ticket_id: TID });
+  const c = captured();
+  assert.ok(c, "update must fire");
+  assert.equal(c!.table, "tickets");
+  const payload = c!.payload as Record<string, unknown>;
+  assert.equal(payload.status, "closed");
+  assert.equal(typeof payload.closed_at, "string");
+  assert.ok(!Number.isNaN(Date.parse(payload.closed_at as string)));
+  assert.equal(typeof payload.updated_at, "string");
+  assert.ok(!Number.isNaN(Date.parse(payload.updated_at as string)));
+  // Clears the escalation triple so a previously-escalated ticket doesn't linger in the
+  // escalation view after Sol resolves it.
+  assert.equal(payload.escalated_at, null);
+  assert.equal(payload.escalated_to, null);
+  assert.equal(payload.escalation_reason, null);
+});
+
+test("closeTicketOnResolvingReply is scoped by workspace_id + id (a cross-workspace id cannot authorize the close)", async () => {
+  const { admin, captured } = makeCloseAdmin();
+  await closeTicketOnResolvingReply(admin, { workspace_id: WS, ticket_id: TID });
+  const c = captured();
+  assert.ok(c, "update must fire");
+  assert.deepEqual(c!.filters, { workspace_id: WS, id: TID });
 });

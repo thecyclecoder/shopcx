@@ -10694,15 +10694,38 @@ async function runTicketHandleJob(job: Job) {
           } else {
             const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
             const channel = (t?.channel as string | null) || "email";
+            let sendOk = false;
             try {
               const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
               await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+              sendOk = true;
             } catch (e) {
               // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
               // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
               // the job (the Direction is authored; a human can retry the reply from the Improve tab).
               const msg = e instanceof Error ? e.message : String(e);
               console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+            }
+            // ── Phase 1 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+            // message_sent → close. Mirrors the old unified-ticket-handler `setStatus`
+            // ("message_sent → close the ticket; next inbound reopens"). A `chosen_path='stateless'`
+            // Direction that shipped its resolving reply is Sol's message_sent case — close the
+            // ticket so Cora's closed-tickets-only ticket-analyzer sweep can grade it. Guards
+            // (Learning #6 — confirming predicate at the action point):
+            //   (a) sendOk — never close on a failed send; the Direction is durable and a human
+            //       can retry via Improve, but the ticket stays open until a reply actually lands.
+            //   (b) chosenPath === "stateless" — the ONLY chosen_path this phase closes on.
+            //       `needs_info` is a clarifying question (keep open — Phase 2), `playbook` /
+            //       `journey` are status_managed (a mechanism owns state — Phase 2).
+            if (sendOk && chosenPath === "stateless") {
+              try {
+                const { closeTicketOnResolvingReply } = await import("../src/lib/ticket-directions");
+                await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
+              } catch (e) {
+                // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} close-on-resolving-reply failed (reply already shipped): ${msg}`);
+              }
             }
           }
         }
