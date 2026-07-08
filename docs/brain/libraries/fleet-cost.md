@@ -44,6 +44,7 @@ async function rollupFleetCost(opts?: FleetCostRollupOpts): Promise<FleetCostRol
 ## Gotchas
 
 - **`$` only where a real bill exists.** Max-lane buckets stay `usd_cents: null` / `subscription_only: true` — read those as a subscription proxy, never as "$0".
+- **`apiBilled` is the contract other surfaces reuse — do NOT invent a parallel concept.** [[ticket-analyzer]] mirrors this exact predicate: `analyzerCostCentsForRun` (extracted for the smallest possible unit test) applies `apiBilled && model ? usageCostCents(...) : 0` and persists the flag on [[../tables/ticket_analyses]] `billing_source` ('max' | 'api' | null). A Max-lane analyzer run persists `cost_cents = 0` AND skips [[ai-usage]] `logAiUsage` so no downstream summing surface (`/api/tickets/[id]/analysis`, `stampTicketAiCost`, workspace/developer AI analytics) fabricates a dollar figure. The deployed-analyzer fallback path (`apiBilled: true`) still records real cents. Same rule everywhere: apiBilled=true → `$`; apiBilled=false → subscription proxy (token only). See `docs/brain/specs/ticket-cost-distinguishes-max-subscription-from-real-api-spend.md`.
 - **Best-effort writes.** A missing cost row ≠ a build failure; the writer swallows errors by design.
 - **Multiple rows per `job_id`** (resumes / multi-turn) aggregate in the rollup — never treat one row as a whole job's cost.
 

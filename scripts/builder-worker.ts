@@ -12496,6 +12496,11 @@ async function runTicketAnalyzeJob(job: Job) {
     const applied = await applyAnalyzerVerdict(
       prep.prepared,
       { score: verdict.score, issues: verdict.issues, action_items: verdict.action_items, summary: verdict.summary },
+      // The BOX lane runs on the Max subscription — no per-token bill. Stamp `apiBilled: false`
+      // so this row's `ticket_analyses.billing_source` lands as 'max', mirroring the apiBilled
+      // contract on [[fleet-cost]] recordAgentJobCost. The deployed-analyzer fallback path (box
+      // down, running against the paid API) is the ONLY caller that should ever stamp true.
+      // ticket-cost-distinguishes-max-subscription-from-real-api-spend Phase 1.
       usage
         ? {
             input_tokens: usage.input_tokens,
@@ -12503,8 +12508,9 @@ async function runTicketAnalyzeJob(job: Job) {
             cache_creation_tokens: usage.cache_creation_input_tokens,
             cache_read_tokens: usage.cache_read_input_tokens,
             model,
+            apiBilled: false,
           }
-        : { model },
+        : { model, apiBilled: false },
     );
 
     // Phase 2 of ticket-analyzer-becomes-box-agent-under-june: record the verdict to
