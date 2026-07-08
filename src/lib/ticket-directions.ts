@@ -25,10 +25,17 @@ export interface TicketDirection {
   authored_by: string;
   authored_at: string;
   superseded_at: string | null;
+  /**
+   * Anti-runaway re-session counter — Phase 1 of
+   * [[../specs/sol-runaway-re-session-cap-guardrail]]. Zero on the first Direction; incremented
+   * by the router ([[../inflection-detector]] `reSessionSol` — Phase 2) on every re-session so
+   * the cap check (`>= ai_channel_config.sol_max_resessions`) can fire.
+   */
+  resession_count: number;
 }
 
 const COLS =
-  "id, workspace_id, ticket_id, intent, context_summary, chosen_path, plan, guardrails, authored_by, authored_at, superseded_at";
+  "id, workspace_id, ticket_id, intent, context_summary, chosen_path, plan, guardrails, authored_by, authored_at, superseded_at, resession_count";
 
 /**
  * Insert one live Direction for a ticket. The DB-level partial UNIQUE
@@ -120,3 +127,33 @@ export async function getLiveDirection(
  * changing the M1 SDK's shipped name.
  */
 export const loadLiveDirection = getLiveDirection;
+
+/**
+ * Bump `resession_count` on the live Direction for `ticket_id`. Phase 2 of
+ * [[../specs/sol-runaway-re-session-cap-guardrail]] — the router (`reSessionSol`) calls this
+ * BEFORE it supersedes the live row so the incremented count is captured on the row about to
+ * be superseded (the durable per-ticket bounce history the cap check reads on the NEXT
+ * inflection).
+ *
+ * Compare-and-set on the CURRENT live row: `.eq('id', direction_id)` + `.is('superseded_at', null)`
+ * + workspace_id scope (per Learning #1 — re-assert the read-time preconditions in the write
+ * itself). If the live row got superseded by a racing caller between the caller's read and this
+ * increment, `.select('id')` returns zero rows and we return `null` so the caller can bail
+ * without double-counting.
+ */
+export async function incrementResessionCount(
+  admin: Admin,
+  input: { workspace_id: string; direction_id: string; from_count: number },
+): Promise<number | null> {
+  const { data, error } = await admin
+    .from("ticket_directions")
+    .update({ resession_count: input.from_count + 1 })
+    .eq("id", input.direction_id)
+    .eq("workspace_id", input.workspace_id)
+    .is("superseded_at", null)
+    .select("id");
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{ id: string }>;
+  if (rows.length !== 1) return null;
+  return input.from_count + 1;
+}
