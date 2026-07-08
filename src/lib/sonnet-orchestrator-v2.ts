@@ -11,7 +11,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
-import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
+import { SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
+import { renderDirectionSystemPrompt, prefixDirectionContextReasoning } from "@/lib/ai-context";
+import type { TicketDirection } from "@/lib/ticket-directions";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
 import { currentDateContext } from "@/lib/ai-date-context";
 import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/product-intelligence/publish";
@@ -22,6 +24,11 @@ import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrown
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
   opus: OPUS_MODEL,
+  // Phase 3 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md — the
+  // model-picker's fresh-Direction route returns 'haiku' when the ticket has a
+  // fresh + high-confidence + stateless Direction, so the orchestrator must
+  // recognise the tier to actually route the call.
+  haiku: HAIKU_MODEL,
 } as const;
 export type OrchestratorModelKey = keyof typeof MODEL_IDS;
 
@@ -316,6 +323,15 @@ async function buildPreContext(
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
+  // Phase 5 Fix 1 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md.
+  // When a live Direction is passed (superseded_at NULL), the user block is built
+  // from the Direction's intent + context_summary + guardrails INSTEAD of the
+  // customer-name/orders/full-history block. Sol summarized the ticket at
+  // first-touch so re-fetching wastes tokens on data the model would re-summarize
+  // identically. The shared system prefix stays byte-identical (cache-friendly);
+  // only the volatile user block changes shape. See docs/brain/inngest/unified-ticket-handler.md
+  // § Step 2e (Direction-scoped branch).
+  directionOverride?: TicketDirection | null,
 ): Promise<{ system: string; userBlockPrefix: string | null; userBlock: string }> {
   const admin = createAdminClient();
 
@@ -719,6 +735,29 @@ ${guidanceBlock}
 
 ` : ""}${convoHeader}
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}`;
+
+  // Phase 5 Fix 1 Direction-scoped user block. When a non-superseded live Direction
+  // is passed, the caller has already committed to Sol's summary as the durable
+  // per-turn state — the customer-name / orders / full-history block above becomes
+  // dead cost. Swap the userBlock (only) with the Direction's rendered suffix +
+  // just the newest inbound message. Keep the shared system prefix + userBlockPrefix
+  // untouched so the 1-hour cache breakpoint still hits. On chosen_path='playbook'
+  // WITHOUT an active_playbook_id (the Phase 4 short-circuit fall-through), the
+  // playbook step is omitted deliberately — assembleDirectionContext returns
+  // playbook_snapshot=null in that case, and this branch mirrors that.
+  if (directionOverride && !directionOverride.superseded_at) {
+    const directionSuffix = renderDirectionSystemPrompt(directionOverride, null);
+    const directionUserBlock = `${currentDateContext()}
+
+${directionSuffix}${guidanceBlock ? `
+
+AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
+${guidanceBlock}` : ""}
+
+NEWEST INBOUND (Sol's Direction above summarizes everything prior — do NOT re-fetch customer / orders / prior history):
+Customer: ${message.slice(0, 2000)}`;
+    return { system, userBlockPrefix: null, userBlock: directionUserBlock };
+  }
 
   return { system, userBlockPrefix, userBlock };
 }
@@ -1928,14 +1967,29 @@ export async function callSonnetOrchestratorV2(
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
   modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
+  // Phase 5 Fix 1 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md.
+  // When passed non-null + non-superseded, buildPreContext swaps the customer/orders/
+  // full-history user block for the Direction's rendered suffix, and the returned
+  // decision.reasoning is prefixed with 'sol:direction-context' so stageResolutionEvent
+  // stamps the ticket_resolution_events ledger with the spec-verification tag.
+  directionOverride?: TicketDirection | null,
 ): Promise<SonnetDecision> {
   const startedAt = Date.now();
   let decision: SonnetDecision | null = null;
   let threw: unknown = null;
   try {
     decision = await runOrchestratorDecision(
-      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice,
+      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice, directionOverride,
     );
+    if (directionOverride && !directionOverride.superseded_at && decision) {
+      // Prefix the reasoning so downstream stageResolutionEvent stamps
+      // ticket_resolution_events.reasoning starting with 'sol:direction-context' — the
+      // exact string the spec Phase 2 / Fix-1 verification asserts on. Guarded on the
+      // same predicate buildPreContext used above so a superseded direction never
+      // taints the ledger tag. prefixDirectionContextReasoning is pure + pinned to a
+      // constant in ai-context.ts so a unit test can assert the exact tag byte-for-byte.
+      decision = { ...decision, reasoning: prefixDirectionContextReasoning(decision.reasoning) };
+    }
     return decision;
   } catch (err) {
     threw = err;
@@ -1966,6 +2020,7 @@ async function runOrchestratorDecision(
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
   modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
+  directionOverride?: TicketDirection | null,
 ): Promise<SonnetDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -1980,7 +2035,7 @@ async function runOrchestratorDecision(
   };
 
   try {
-    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
+    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext, directionOverride);
     // Cache-control breakpoints, 1-hour TTL. The heavy, shared payload
     // (tools + system rules/policies/handlers, ~40-50K tokens) is now
     // byte-identical for every ticket in the workspace, so the first

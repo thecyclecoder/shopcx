@@ -20,6 +20,40 @@ Inside the `resolve` step (right after the ticket row load) the handler short-ci
 
 The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
 
+## Step 3.97 — Pre-ship inflection gate ([[../libraries/inflection-detector]])
+
+Between the inbound-message handling (§ 3.9x) and either the playbook short-circuit (§ 3.98) OR the Sonnet orchestrator (§ 4), the `sol-inflection-gate` step calls [[../libraries/inflection-detector]] `applyInflectionGate` to decide whether the drafted reply should ship. Phase 2 + Phase 4 (Fix 1) of [[../specs/sol-drift-frustration-detector-and-re-session-router]].
+
+- **kind='none'** — the newest customer message still fits the live [[../tables/ticket_directions]] intent (or no Direction has been authored). The step returns and the pipeline falls through to the playbook short-circuit / Sonnet orchestrator dispatch exactly as today.
+- **kind='drift' | 'frustration'** — the drafted reply is HELD (no `ticket_messages` outbound row for this turn — the gate returns BEFORE Sonnet/playbook runs, so no reply is even drafted). One [[../tables/ticket_resolution_events]] row is staged with `reasoning='sol:inflection-<kind>'` and the classifier `evidence` blob stashed in the jsonb `chosen` column. On `frustration` AND `ai_channel_config.sol_frustration_holding_message_enabled !== false` (migration-default `true`), the standard `sendWithDelay` wrapper sends a short "we're looking into that for you" inline holding message so the customer knows they were heard. Then [[../libraries/inflection-detector]] `reSessionSol` supersedes the live Direction (compare-and-set) and enqueues a new `agent_jobs` row `kind='ticket-handle'` `instructions.reason='inflection'` for the box worker's `runTicketHandleJob` to author a fresh Direction. Drift bounces are silent by design.
+
+Gate placement is BEFORE Sonnet so we don't pay for a Sonnet draft that we would immediately drop — the observable behavior (no reply, `sol:inflection` ledger row) is identical.
+
+Playbook-active tickets still enter this gate. `applyInflectionGate` reads `tickets.active_playbook_id` and passes `isPlaybookActive` to `detectInflection`; the detector's Stage-1 drift path is SKIPPED mid-playbook (the playbook drives the reply, not Direction alignment), but the frustration regex catalog still fires — so a mid-playbook "refund now" bounces to re-session per the spec.
+
+Guards (coaching #1/#2 pattern): `reSessionSol` wraps `superseDirection`'s workspace-scoped compare-and-set (so a racing caller can't fan out a duplicate ticket-handle session), the DB partial UNIQUE on ticket_directions is a second belt, the ledger stage is best-effort (a diagnostic-substrate failure MUST NOT block the bounce), and the holding-message send is doubly-gated (kind==='frustration' AND the config column true).
+
+## Step 2d — Sol-chosen vs signal-matched playbook dispatch
+
+Phase 2 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] moves playbook selection inside Sol's first-touch box session for the Sol cohort. `routeExec` § 2 now branches on the live [[../tables/ticket_directions]] row BEFORE the deterministic matcher fires:
+
+- **§ 2a — Sol-chosen path** ([[../libraries/ticket-directions]] `resolveSolChosenPlaybook`). Non-null return only when: live Direction exists (`superseded_at IS NULL`), `chosen_path='playbook'`, `plan.playbook_slug` is a non-empty string, `tickets.active_playbook_id IS NULL` (this is a START not a follow-up turn — [[../specs/sol-cheap-execution-over-ticket-direction]] Phase 4's `Step 3.98` short-circuit already owns "still running"), and the slug resolves to a live `public.playbooks` row for the ticket's workspace. On a hit, [[../libraries/playbook-executor]] `startPlaybook` is called with `seed_context = plan.playbook_seed_context` so the executor's step 0 doesn't re-derive the ids Sol already picked. Ledger stamp: `ticket_resolution_events.reasoning = 'sol:session-chose-playbook:{slug}'` (best-effort — the send never fails on a ledger error).
+- **§ 2b — Signal-matched path** (existing `matchPlaybookScored` → `applyDeferThreshold` → `matchPlaybook` chain). Ledger stamp on a hit: `ticket_resolution_events.reasoning = 'sol:matcher-chose-playbook:{slug}'` where `slug` is the resolved `playbooks.slug` for the matched row (falls back to the sanitized name if the row hasn't been backfilled yet). The two prefixes reference the same identifier space so Phase 4's analytics tile can split by source without a heuristic classifier.
+
+Guards (learning #2 pattern — confirming predicate at the action point):
+- Direction read is workspace-scoped (`workspace_id = ?`) — a cross-workspace ticket-id collision cannot dispatch.
+- Playbook slug lookup is workspace-scoped — the same slug in another workspace does NOT authorize the dispatch.
+- `active_playbook_id IS NULL` gate on the ticket — a ticket mid-playbook stays on its existing branch (the Step 3.98 short-circuit handles follow-up turns).
+
+## Step 2e — Sonnet orchestrator (Direction-scoped user block)
+
+The `sonnet-orchestrate` step (Step 2e in the pipeline) loads the live [[../tables/ticket_directions]] row for the ticket via [[../libraries/ticket-directions]] `loadLiveDirection` BEFORE the picker + orchestrator call — Phases 2/3/5-Fix-1 of [[../specs/sol-cheap-execution-over-ticket-direction]]. Two things branch off it:
+
+- **Direction present + non-superseded (Direction-scoped path).** The Direction is passed to [[../libraries/sonnet-orchestrator-v2]] `callSonnetOrchestratorV2` as `directionOverride`. `buildPreContext` swaps the `CUSTOMER: name (email)` + `RECENT ORDERS` + full-history user block for the Direction's rendered suffix (intent + context_summary + JSON-stringified guardrails + chosen_path) — see [[../libraries/ai-context]] `assembleDirectionContext` + `renderDirectionSystemPrompt`. Sol has already summarized customer + orders + prior history into `context_summary` at first-touch, so re-fetching wastes tokens on data the model would re-summarize identically. The shared system prefix stays byte-identical (cache-friendly); only the volatile user block changes. `callSonnetOrchestratorV2` prefixes the returned decision's `reasoning` with `sol:direction-context ` so [[../libraries/action-executor]] `stageResolutionEvent` stamps [[../tables/ticket_resolution_events]] `.reasoning` with the tag — cost analytics can split cost-per-turn by path without a heuristic classifier.
+- **No live Direction (legacy tickets / workspaces without `sol_first_touch_enabled`).** `directionOverride` is null; the full-context `buildPreContext` path runs exactly as before, and the ledger `reasoning` does NOT carry the `sol:direction-context` prefix.
+
+Also feeds [[../libraries/model-picker]] `pickOrchestratorModel` — a fresh + high-confidence + stateless Direction relaxes the picker toward Haiku (see [[../libraries/model-picker]] § Direction-driven Haiku route). The `active_playbook_id` case is short-circuited earlier at Step 3.98 (§ [[../specs/sol-cheap-execution-over-ticket-direction]] Phase 4) so this Step 2e branch only sees stateless / needs_info / playbook-with-no-active-id Directions.
+
 ## Outage resilience — no silent Claude swallows
 
 The local `claude()` helper (Haiku/Sonnet quick turns) **throws** on a failed call instead of the old `if (!r.ok) return ""` (which let callers proceed on empty data): retryable status / network → `AnthropicDependencyError` (run retries), terminal status / missing key → `NonRetriableError` (fail fast). See [[../libraries/anthropic-retry]]. The main Sonnet decision ([[../libraries/sonnet-orchestrator-v2]]) likewise throws on a retryable failure rather than degrading every ticket to "escalate". The one explicit exception is `personalizeMacroText` (`{ optional: true }`) — the macro body is already a valid reply, so it degrades gracefully.
