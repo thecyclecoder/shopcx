@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Prune stale build worktrees before worktree add (stop goal-build collisions)** · verified 2026-07-08 · → [[../libraries/builder-worker]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
