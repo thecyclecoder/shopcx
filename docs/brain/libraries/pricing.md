@@ -4,7 +4,20 @@
 
 ## The principle
 
-A subscription stores catalog **references**, not prices. The only price an internal sub row may carry is a **grandfathered override** (`items[].price_override_cents`). Everything else is derived live, so a catalog price change or a rule edit flows through automatically — nothing is hard-baked into the row. (Orders are the exception: an order is a historical record, so the renewal snapshots the engine's prices onto the order's line items.)
+A subscription stores catalog **references**, not prices — **unless** the sub carries a configured grandfathered lock. When a lock is set, that lock is the **authoritative renewal price**; live catalog decomposition is skipped so a grandfathered customer is never silently overcharged when a catalog price rises. Everything else is derived live, so a catalog price change or a rule edit flows through automatically — nothing is hard-baked into the row. (Orders are the exception: an order is a historical record, so the renewal snapshots the engine's prices onto the order's line items.)
+
+### Renewal-price contract (the grandfathered / configured lock)
+
+Two lock shapes on `items[]` — both authoritative on renewal:
+
+1. **`price_override_cents` — pre-discount grandfathered base.** S&S + quantity-break still apply on top; the engine reproduces the customer's realized rate.
+2. **`price_cents` — post-discount baked per-unit charge.** Used **verbatim** as the unit price; catalog + rule decomposition (S&S, quantity break, offer overlay) is **skipped entirely** on that line. Coupons in `applied_discounts` still apply through the caller.
+
+When **neither** lock is set, the line prices live from the catalog + product rule.
+
+**The contract is one line:** a renewal's per-unit is the sub's configured line price + `applied_discounts`, the **grandfathered rate** — **never** re-derived off the product's current standard catalog price. A catalog price that has risen since acquisition can never flow through the S&S / quantity-break / offer decomposition path to overcharge a locked sub. This is why the internal renewal path is safe against silent catalog creep — the ceiling is on the sub row, not on the current catalog.
+
+**Belt & suspenders — the overcharge guard.** As a fail-safe, [[../inngest/internal-subscription-renewals]] runs [[subscription-renewal-guard]] `checkRenewalOverchargeGuard` at the pre-charge junction (after `resolveSubscriptionPricing`, before `resolve-coupons` / `avalara-commit` / `insert-pending-transaction` / `braintree-sale`): per product line, it compares the engine's computed `unit_cents` against that item's configured ceiling (`price_cents` if set, else `price_override_cents`, else uncapped). If any product line's computed unit **exceeds** its ceiling, the renewal is **HELD** — the charge is NOT submitted to Braintree at the higher amount, `next_billing_date` is intentionally **NOT** advanced (so a fix + re-run picks it back up on the next cron tick), a `customer_events` row `subscription.renewal_held_overcharge_guard` is logged, and the outcome beat is `skipped_other`. So even if a future repricing regression reintroduces catalog decomposition on a locked line, the customer is never silently overcharged. Gifts (unit $0 by design) and shipping protection (flag-billed, not a catalog line) never contribute a ceiling or a computed amount. Uncapped items — no `price_cents` and no `price_override_cents` — are the live-catalog opt-in and the guard passes them through.
 
 ## Export
 
@@ -24,6 +37,8 @@ break% = quantity-break tier for the MIX-AND-MATCH total quantity of all lines
 sns%   = pricing_rule.subscribe_discount_pct, else workspaces.subscription_discount_pct
 unit   = round(base × (1 − break%/100) × (1 − sns%/100))
 ```
+
+**Post-discount lock shortcut.** When an item carries `price_cents` (and no `price_override_cents`), the rules above are **skipped** for that line and `unit = price_cents` verbatim — the sub's stored per-unit is authoritative. See the "Renewal-price contract" above and [[subscription-renewal-guard]].
 
 ### Persist-to-renewal offer overlay
 
@@ -65,9 +80,10 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 
 ## Gotchas
 
-- **Never bake a price on an internal sub item.** A baked `price_cents` is legacy; the engine reads it only as a fallback when a variant isn't in the catalog (so nothing prices to $0 mid-rollout). Item mutations strip it.
-- **Double-discount trap (fixed 2026-06):** if a variant isn't found in the catalog, `base` falls back to the item's baked price — which is already post-discount — then S&S applies again. The cause was a variant stored as a Shopify id while the engine only looked up by `shopify_variant_id`. The dual-shape resolver closes this; the real fix is items storing the UUID.
+- **A baked `price_cents` on an internal sub item is authoritative — NOT legacy.** As of the grandfathered-price contract ([[../specs/subscription-renewal-honors-configured-grandfathered-price-never-bills-standard]] Phase 1), `price_cents` (when set) is the post-discount **grandfathered lock** for that line and is used verbatim as the unit price; the S&S / quantity-break / offer decomposition is skipped for that line. This is what protects a customer who signed up at $39.95 from silently paying today's $61.17 standard when the catalog moves. The engine still tolerates a baked `price_cents` on a variant not in the catalog as a pre-migration fallback (so nothing prices to $0 mid-rollout), but the lock behavior is deliberate and load-bearing.
+- **Double-discount trap (fixed 2026-06):** if a variant isn't found in the catalog, `base` falls back to the item's baked price — which is already post-discount — then S&S applies again. The cause was a variant stored as a Shopify id while the engine only looked up by `shopify_variant_id`. The dual-shape resolver closes this; the real fix is items storing the UUID. The grandfathered-lock path above (`hasBakedUnit` branch) also avoids this by short-circuiting rule decomposition entirely.
+- **Never bill above the configured price.** A pre-charge overcharge guard runs at the renewal junction ([[subscription-renewal-guard]] `checkRenewalOverchargeGuard` in [[../inngest/internal-subscription-renewals]]): if the engine's computed unit exceeds an item's configured ceiling (`price_cents` / `price_override_cents`), the renewal is **held**, not billed at the higher amount. `next_billing_date` is not advanced so a fix + re-run picks it back up. See the [[../specs/subscription-renewal-honors-configured-grandfathered-price-never-bills-standard]] spec for the shape.
 
 ---
 
-[[../README]] · [[../lifecycles/commerce-sdk]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/customer-portal]]
+[[../README]] · [[../lifecycles/commerce-sdk]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/customer-portal]] · [[subscription-renewal-guard]]

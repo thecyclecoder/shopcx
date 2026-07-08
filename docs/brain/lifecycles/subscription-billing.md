@@ -36,17 +36,18 @@ Window is 1 hour so we have buffer + can amortize across the hour evenly via con
 
 ## Internal scheduler — Phase 2: line item resolution
 
-Pricing is **derived, never baked**. The renewal calls the pricing engine
+Pricing is **derived, never baked** — **unless** the sub carries a configured grandfathered lock, in which case that lock is authoritative. The renewal calls the pricing engine
 ([[../libraries/pricing]] · `resolveSubscriptionPricing`), which is the single
 source of truth shared with the portal display. For each due sub:
 
 1. **Resolve each line** from `subscription.items` JSONB — items are catalog
-   **references** (variant + product UUIDs, quantity), not prices.
+   **references** (variant + product UUIDs, quantity), not prices — unless the item carries a lock (see below).
 2. **Derive the price per line** = `base × (1 − quantity-break%) × (1 − S&S%)`,
    where `base` = `items[].price_override_cents` (grandfathered lock) ?? catalog
    `product_variants.price_cents`, the break is the **mix-and-match** tier for the
    total quantity sharing the line's [[../tables/pricing_rules]], and S&S is the
    rule's `subscribe_discount_pct` (else `workspaces.subscription_discount_pct`).
+   **When an item carries a post-discount lock (`price_cents` set, no `price_override_cents`), rule decomposition is SKIPPED and `unit = price_cents` verbatim** — the sub's own configured per-unit is the authoritative renewal price. See the renewal-price contract in [[../libraries/pricing]] § The principle. This is what protects a grandfathered customer whose catalog price has since risen from silently being charged the current standard.
 3. **Snapshot** the engine's per-line charged prices onto the order's line items
    (an order is a historical record, so it bakes the price; the sub never does).
 4. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon
@@ -66,6 +67,19 @@ source of truth shared with the portal display. For each due sub:
    rate. **Protection** line if
    `shipping_protection_added=true` (passthrough; excluded from the discountable
    product subtotal). **Compute pre-tax total**.
+
+## Internal scheduler — Phase 2.5: overcharge guard (fail-safe)
+
+Belt & suspenders to the configured-lock contract above. After line-item resolution and **before** coupon resolution / Avalara commit / pending-transaction insert / Braintree sale, the renewal calls [[../libraries/subscription-renewal-guard]] `checkRenewalOverchargeGuard(items, pricing.lines)`. Per product line, it compares the engine's computed `unit_cents` against that item's configured ceiling — `price_cents` if set, else `price_override_cents`, else uncapped (live-catalog opt-in). Gifts (unit $0 by design) and shipping protection (flag-billed, not a catalog line) never contribute.
+
+If **any** product line's computed unit exceeds its ceiling — a divergence between what the engine computed and what the sub is configured for — the renewal is **HELD**:
+
+- `emitRenewalOutcomeHeartbeat("skipped_other")` — outcome accounted for in Control Tower's distribution beats.
+- [[../tables/customer_events]] `subscription.renewal_held_overcharge_guard` — subscription_id, reason (`overcharge_above_configured`), computed vs configured totals, offending lines.
+- Return `{ skipped: true, reason: "overcharge_guard_held" }` — the charge is **NEVER** submitted to Braintree at the higher amount.
+- `next_billing_date` is **intentionally NOT advanced** — a fix + re-run picks the sub back up on the next daily cron tick.
+
+Why this exists: with the Phase 1 engine change (`price_cents` / `price_override_cents` flow through as the authoritative unit), a grandfathered customer's rate should never be exceeded — but if a future repricing regression reintroduces catalog decomposition on a locked line, this guard catches it before the customer is charged. Fail-safe: a grandfathered customer is never silently overcharged.
 
 ## Internal scheduler — Phase 3: tax quote
 
@@ -213,6 +227,7 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 |---|---|
 | `src/lib/internal-subscription.ts` | Internal scheduler core |
 | `src/lib/inngest/internal-subscription-renewals.ts` | Hourly cron |
+| `src/lib/subscription-renewal-guard.ts` | Pre-charge overcharge guard (fail-safe) |
 | `src/lib/appstle.ts` | Appstle helpers with is_internal short-circuit |
 | `src/lib/integrations/braintree.ts` | Gateway + transaction.sale + refund + void |
 | `src/lib/avalara.ts` | Tax client |
@@ -238,6 +253,8 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 - Per `feedback_no_double_billing_framing` memory: customer comms must not frame parallel-sub charges as "double billing." That rule lives in sonnet_prompts, not in this lifecycle — but flag it for anyone touching billing UX.
 
 **Subscription overcharge remediation** ([[../specs/subscription-overcharge-remediation]], [[../libraries/subscription-overcharge]]): detection signal `{charged, expected, delta, dropped_base}` surfaced into the orchestrator + escalation-triage; remediation = partial_refund(delta) → restore grandfathered base (Appstle heal / internal `price_override_cents`, never migrate-to-internal) → customer_reply. `update_line_item_price` direct action now routes internal subs.
+
+**Renewal charges the sub's configured (grandfathered) price** ([[../specs/subscription-renewal-honors-configured-grandfathered-price-never-bills-standard]], derived from ticket 5402b5d4). The engine honors `items[].price_cents` as an authoritative post-discount lock (Phase 1), and a pre-charge overcharge guard ([[../libraries/subscription-renewal-guard]]) holds any renewal whose computed unit exceeds the sub's configured ceiling before it reaches Braintree (Phase 2). Contract: **a renewal's per-unit is the sub's configured line price + `applied_discounts` — never the product's current standard catalog price**; a computed amount exceeding the configured total is **held** (not billed), `next_billing_date` is not advanced, and a `subscription.renewal_held_overcharge_guard` [[../tables/customer_events]] row is logged for review.
 
 **Recent activity:**
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents (touches transactions)
