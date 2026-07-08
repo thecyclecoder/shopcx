@@ -30,6 +30,7 @@ import {
   signatureFor,
   isTransientSupabaseLogNoise,
   isForeignGoTrueEdgeNoise,
+  isForeignGoTrueAuthLogNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -168,6 +169,14 @@ const LOG_QUERIES: LogQuery[] = [
       "where metadata.level in ('error','fatal') " +
       `order by t.timestamp desc limit ${ROW_LIMIT}`,
     mapRow: (row) => {
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` 504 on the
+      // auth_logs surface ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]]).
+      // Same choice as the edge_logs twin below — foreign-owned surface, no lever from us;
+      // the transient class still recurred inside the recur window and escalated. Narrow to
+      // (msg 504-prefix + `"path":"/user"` + `"method":"GET"`) so a real GoTrue outage on
+      // other paths (/token, /admin), a non-504 error, or a real auth-signature bug on
+      // /user is still captured normally.
+      if (isForeignGoTrueAuthLogNoise(str(row.msg), str(row.event_message))) return null;
       const severity = str(row.severity) || "error";
       const message = str(row.msg) || str(row.event_message) || "auth error";
       return {

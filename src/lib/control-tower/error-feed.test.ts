@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
   isTransientClientNetworkAbort,
@@ -319,6 +320,109 @@ test("isForeignGoTrueEdgeNoise returns false on missing path/status", () => {
   assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", undefined), false);
   assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", ""), false);
   assert.equal(isForeignGoTrueEdgeNoise("/auth/v1/user", "5xx"), false);
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-504-auth-log-noise) ──
+// The auth_logs sibling of isForeignGoTrueEdgeNoise: the same GoTrue saturation blip
+// surfaces on the app-level auth_logs surface as msg `504: Processing this request timed
+// out…` + event_message JSON `"path":"/user"` + `"method":"GET"`. Foreign-owned, no lever
+// from us; scoping into the transient class still recurred inside TRANSIENT_RECUR_WINDOW_MS
+// and escalated on every cycle. Drop AT CAPTURE to the exact shape only.
+
+test("isForeignGoTrueAuthLogNoise drops the exact 504 GoTrue /user shape", () => {
+  const eventMessage =
+    '{"component":"api","level":"error","method":"GET","msg":"504: Processing this request timed out, please retry after a moment.","path":"/user","status":504,"time":"2026-07-06T18:00:00Z"}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      eventMessage,
+    ),
+    true,
+  );
+  // Trailing detail in msg after the 504 prefix stays dropped (same class of GoTrue timeout).
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("504: Processing this request timed out — retry", eventMessage),
+    true,
+  );
+  // Leading whitespace tolerated.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("  504: Processing this request timed out", eventMessage),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a non-504 auth error (invalid JWT, rate limit)", () => {
+  const jwtEvent =
+    '{"component":"api","level":"error","method":"GET","msg":"invalid JWT: signature mismatch","path":"/user","status":401}';
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch", jwtEvent), false);
+  const rateEvent =
+    '{"component":"api","level":"error","method":"POST","msg":"rate limit exceeded","path":"/token","status":429}';
+  assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded", rateEvent), false);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a 504 on a non-/user path (real GoTrue outage elsewhere)", () => {
+  // /token — the real auth-signing surface. A 504 here IS a real GoTrue outage worth paging.
+  const tokenEvent =
+    '{"component":"api","level":"error","method":"POST","msg":"504: Processing this request timed out, please retry after a moment.","path":"/token","status":504}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      tokenEvent,
+    ),
+    false,
+  );
+  // /admin — same principle.
+  const adminEvent =
+    '{"component":"api","level":"error","method":"GET","msg":"504: Processing this request timed out, please retry after a moment.","path":"/admin/users","status":504}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      adminEvent,
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a 504 on /user with a non-GET method", () => {
+  // A POST/DELETE to /user would be a mutation surface — a 504 there isn't the getUser noise.
+  const postEvent =
+    '{"component":"api","level":"error","method":"POST","msg":"504: Processing this request timed out, please retry after a moment.","path":"/user","status":504}';
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      postEvent,
+    ),
+    false,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise returns false on missing / empty inputs", () => {
+  const eventMessage =
+    '{"component":"api","level":"error","method":"GET","msg":"504: Processing this request timed out, please retry after a moment.","path":"/user","status":504}';
+  assert.equal(isForeignGoTrueAuthLogNoise(null, eventMessage), false);
+  assert.equal(isForeignGoTrueAuthLogNoise(undefined, eventMessage), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("", eventMessage), false);
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "504: Processing this request timed out, please retry after a moment.",
+      "",
+    ),
+    false,
+  );
 });
 
 test("isTransientSupabaseLogNoise KEEPS a real auth error (invalid JWT, rate limit) — pages", () => {
