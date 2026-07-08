@@ -21629,10 +21629,60 @@ async function dispatchJob(job: Job) {
       await update(job.id, { status: "failed", error: "git commit failed", log_tail: (commit.out + commit.err).slice(-2000) });
       return;
     }
-    const push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+    // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2: on a non-fast-forward
+    // push rejection (a sibling worker/phase pushed onto the same claude/build-<slug> after this
+    // build's worktree add), rebase onto the current remote tip and retry the push ONCE — the built
+    // phase commit is real work; a lost push here strands the spec mid-build and needs a human to
+    // re-kick (real: spec cx-box-agents-sol-cora-june-...-no-raw-sql, jobs a30ad1e5 pushed phase 1
+    // → a2520180 failed on non-ff and threw its phase away). Only a non-ff rejection is recoverable
+    // here; auth/network/other errors still mark the job failed with the original error. A rebase
+    // conflict fails to `needs_attention` (never a silent drop). Phase 1 (fetch+base on remote tip
+    // before the worktree add) closes the pre-build window; this is the last-line defense for the
+    // window between the worktree add and this push.
+    let push = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
     if (push.code !== 0) {
-      await update(job.id, { status: "failed", error: "git push failed", log_tail: push.err.slice(-2000) });
-      return;
+      const combined = `${push.out}\n${push.err}`;
+      const isNonFastForward = /non-fast-forward|\(fetch first\)|rejected.*(fetch first|non-fast-forward)|Updates were rejected/i.test(combined);
+      if (isNonFastForward) {
+        console.warn(`${tag} non-fast-forward push on ${branch} — a sibling push moved the tip; fetching + rebasing + retrying once`);
+        const fetch = sh("git", ["fetch", "origin", branch!], { cwd: wt });
+        if (fetch.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed (non-fast-forward) and post-push fetch also failed",
+            log_tail: `push:\n${combined.slice(-1000)}\nfetch:\n${(fetch.out + fetch.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        const rebase = sh("git", ["rebase", `origin/${branch}`], { cwd: wt });
+        if (rebase.code !== 0) {
+          // Rebase conflict (or other rebase abort). Do NOT silently drop the phase — surface for a
+          // human. Abort the in-progress rebase so the worktree is left clean for the reap.
+          sh("git", ["rebase", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error: "phase push rebase-retry hit a conflict against the sibling push — cannot fast-forward without a merge decision",
+            log_tail: `push:\n${combined.slice(-800)}\nrebase:\n${(rebase.out + rebase.err).slice(-1000)}`.slice(-2000),
+          });
+          console.error(`${tag} rebase-retry CONFLICT on ${branch} — parked needs_attention (never silently dropped)`);
+          return;
+        }
+        const retryPush = sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
+        if (retryPush.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "git push failed after fetch+rebase retry",
+            log_tail: `push #1 (non-ff):\n${combined.slice(-600)}\nrebase: ok\npush #2:\n${(retryPush.out + retryPush.err).slice(-800)}`.slice(-2000),
+          });
+          return;
+        }
+        push = retryPush;
+        console.log(`${tag} rebase-retry SUCCESS on ${branch} — phase landed on top of the sibling push (no phase work lost)`);
+      } else {
+        // Genuine (non-recoverable) push error — auth / network / policy. Fail as before, don't retry.
+        await update(job.id, { status: "failed", error: "git push failed", log_tail: combined.slice(-2000) });
+        return;
+      }
     }
     // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
     // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best
