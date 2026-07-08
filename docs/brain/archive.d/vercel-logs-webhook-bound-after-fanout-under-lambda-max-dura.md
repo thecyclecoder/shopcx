@@ -1,0 +1,1 @@
+- **Bound the Vercel log-drain webhook's after() fan-out with a wall-clock deadline so it never re-hits Vercel's 300s Lambda timeout** · verified 2026-07-08 · → [[../integrations/vercel-log-drain]]
