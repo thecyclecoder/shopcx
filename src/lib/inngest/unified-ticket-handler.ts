@@ -2193,9 +2193,42 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           case "closed":
             await sysNote(admin, tid, "[System] Ticket closed via close_ticket action — no customer reply expected.");
             break;
-          case "message_sent":
-            await setStatus(admin, tid, cfg.auto_resolve);
+          case "message_sent": {
+            // Phase 4 of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+            // the resolution completion gate. A ticket cannot auto-close while any
+            // ticket_required_outcomes row is not status='verified'. Judy's failure was exactly
+            // this — bag/credit both failed to run yet the ticket auto-resolved because auto-close
+            // keyed off "reply sent" instead of "DB items done". Escalate instead of close when
+            // there are unfinished items, naming them verbatim in escalation_reason.
+            const { assertOutcomesCompleteBeforeClose, escalateTicketOnIncompleteOutcomes } = await import("@/lib/outcome-completion-gate");
+            const completion = await assertOutcomesCompleteBeforeClose({
+              admin,
+              workspace_id: wsId,
+              ticket_id: tid,
+            });
+            if (completion.ok) {
+              await setStatus(admin, tid, cfg.auto_resolve);
+            } else {
+              const escalated = await escalateTicketOnIncompleteOutcomes({
+                admin,
+                workspace_id: wsId,
+                ticket_id: tid,
+                verdict: completion,
+              });
+              if (escalated) {
+                await sysNote(
+                  admin,
+                  tid,
+                  `[System] Auto-close BLOCKED by outcome-completion gate — ${completion.unfinished_items.length} required outcome(s) unfinished (${completion.unfinished_items.map((u) => `${u.kind}[${u.status}]`).join(", ")}). Escalated for human resolution.`,
+                );
+              } else {
+                // CAS lost (racing writer already progressed the ticket). Fall through to the
+                // normal close — the other writer's state is authoritative.
+                await setStatus(admin, tid, cfg.auto_resolve);
+              }
+            }
             break;
+          }
           case "no_action_agent":
             // Orchestrator took no customer-facing action on an agent-involved
             // ticket — the assigned agent needs a signal a customer message is
