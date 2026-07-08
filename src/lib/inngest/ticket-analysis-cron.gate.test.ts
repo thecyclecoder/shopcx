@@ -76,3 +76,57 @@ test("skip: garbage closed_at string", () => {
   const direction = { authored_at: iso(minutesAgo(120)) };
   assert.equal(passesCoraSelectionGate(ticket, direction, NOW), false);
 });
+
+// ── Phase 2: June already decided this cycle → skip; new Sol handling re-opens eligibility ──
+
+test("phase2 skip: June decided AFTER Sol's authored_at (current cycle already decided)", () => {
+  const authoredAt = minutesAgo(180); // Sol handled 3h ago
+  const juneDecidedAt = minutesAgo(90); // June decided 90 min ago (this cycle)
+  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: null };
+  const direction = { authored_at: iso(authoredAt) };
+  assert.equal(
+    passesCoraSelectionGate(ticket, direction, NOW, iso(juneDecidedAt)),
+    false,
+  );
+});
+
+test("phase2 skip: June decided at EXACTLY Sol's authored_at (current cycle boundary)", () => {
+  const authoredAt = minutesAgo(180);
+  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: null };
+  const direction = { authored_at: iso(authoredAt) };
+  assert.equal(
+    passesCoraSelectionGate(ticket, direction, NOW, iso(authoredAt)),
+    false,
+  );
+});
+
+test("phase2 pass: June decided in a PRIOR cycle (Sol re-authored past the decision)", () => {
+  const priorJuneAt = minutesAgo(360); // June decided 6h ago
+  const newAuthoredAt = minutesAgo(120); // Sol re-handled 2h ago (new cycle)
+  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: null };
+  const direction = { authored_at: iso(newAuthoredAt) };
+  assert.equal(
+    passesCoraSelectionGate(ticket, direction, NOW, iso(priorJuneAt)),
+    true,
+  );
+});
+
+test("phase2 pass: no June decision at all (undecided ticket, standard Phase 1 gate)", () => {
+  const ticket = { closed_at: iso(minutesAgo(90)), last_analyzed_at: null };
+  const direction = { authored_at: iso(minutesAgo(180)) };
+  assert.equal(passesCoraSelectionGate(ticket, direction, NOW, null), true);
+});
+
+test("phase2 skip: June-decided this cycle beats a stale last_analyzed_at pass", () => {
+  // Sanity check: ordering — Phase 2 exclusion still fires even when the last_analyzed_at gate
+  // (Phase 1) would pass. A June decision this cycle wins.
+  const authoredAt = minutesAgo(180);
+  const staleAnalyzedAt = minutesAgo(360); // prior-cycle analyze (would pass Phase 1)
+  const juneDecidedAt = minutesAgo(90); // this cycle → Phase 2 fails
+  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: iso(staleAnalyzedAt) };
+  const direction = { authored_at: iso(authoredAt) };
+  assert.equal(
+    passesCoraSelectionGate(ticket, direction, NOW, iso(juneDecidedAt)),
+    false,
+  );
+});
