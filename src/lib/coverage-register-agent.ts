@@ -96,33 +96,64 @@ export function inferCadence(cronExpr: string): { label: string; windowMs: numbe
 
 /**
  * Infer the owner-function from the loop id / domain (the owner CONFIRMS / overrides before merge):
- * storefront-/meta-/ads/capi → growth · ticket-/escalation/csat → cs · renewal/subscription/
- * dunning/loyalty/journey/return → retention · scorecard/campaign → cmo · else platform (the default).
+ * storefront-/meta-/ads/capi/research/creative/acquisition/lander/scout/prospect/brand → growth ·
+ * ticket-/escalation/csat/support → cs · renewal/subscription/dunning/loyalty/journey/return →
+ * retention · scorecard/crisis/blog/copy/creative-brief/social/email/klaviyo → cmo · else null
+ * (unknown — the caller must NOT ship a fake `platform` guess with the boilerplate placeholder).
+ *
+ * Agent-mandate-hardening coaching bake-in (2026-07): the previous default of `owner: 'platform'` +
+ * "Confirm the owner-function" description shipped as *ready to merge* on acquisition-research-* /
+ * creative-finder-* crons (they don't match the old narrow regex → they fell to `platform`), which
+ * was WRONG for those growth-owned crons. The mandate: catch every known growth/cs/retention/cmo
+ * shape here, and when we still can't classify, return `null` so `inferLoopEntry` marks the entry
+ * low-confidence (explicit "REQUIRES OWNER CONFIRMATION" in the description + `platform` as a
+ * placeholder to keep the type honest), rather than silently pretending we knew.
  */
-export function inferOwner(loopId: string): OwnerFunction {
+export function inferOwner(loopId: string): OwnerFunction | null {
   const id = (loopId || "").toLowerCase();
-  if (/^storefront-|^meta-|capi|(^|-)ad(s)?(-|$)/.test(id)) return "growth";
-  if (/^ticket-|escalation|csat|support/.test(id)) return "cs";
-  if (/renewal|subscription|dunning|loyalty|journey|return/.test(id)) return "retention";
-  if (/scorecard|campaign/.test(id)) return "cmo";
-  return "platform";
+  if (/^storefront-|^meta-|capi|(^|-)ad(s)?(-|$)|research|creative|acquisition|lander|landing|scout|prospect|(^|-)brand(-|$)|amazon|demograph/.test(id)) return "growth";
+  if (/^ticket-|escalation|csat|support|inbox/.test(id)) return "cs";
+  if (/renewal|subscription|dunning|loyalty|journey|return|refund|churn/.test(id)) return "retention";
+  if (/scorecard|campaign|crisis|blog|copy|creative-brief|social|email|klaviyo/.test(id)) return "cmo";
+  // platform-owned infra shapes we DO recognize (so we don't slip past into low-confidence): control-
+  // tower, brain, spec, build, deploy, security, control-plane, monitor, watchdog, backup, migration.
+  if (/control-tower|brain|(^|-)spec(-|$)|build|deploy|security|monitor|watchdog|backup|migration|health|platform|director|worker|inngest|control-plane|sync/.test(id)) return "platform";
+  return null;
 }
 
 /** Build the full inferred MONITORED_LOOPS entry for an unregistered cron loop. Pure + deterministic. */
 export function inferLoopEntry(loopId: string, cadence: string, nowIso?: string): InferredLoopEntry {
   const { label, windowMs } = inferCadence(cadence);
+  const inferred = inferOwner(loopId);
+  const confidentOwner = inferred !== null;
+  const owner: OwnerFunction = inferred ?? "platform";
+  const description = confidentOwner
+    ? `Auto-proposed monitored loop for the ${loopId} cron (${label}). Confirm the owner-function + cadence/window.`
+    // Low-confidence fallback: inferOwner couldn't classify the id → we're SHOWING `owner: 'platform'`
+    // only because the type demands a value; the owner MUST override before merging. Bake-in from the
+    // coaching that shipped acquisition-research-* / creative-finder-* with the boilerplate default.
+    : `Auto-proposed monitored loop for the ${loopId} cron (${label}). **REQUIRES OWNER CONFIRMATION** — inferOwner could not classify this loop id; the \`owner: 'platform'\` value below is a placeholder, NOT a confident guess. Set the true owner-function (growth / cs / retention / cmo / platform) before merging.`;
   const entry: InferredLoopEntry = {
     id: loopId,
     kind: "cron",
-    owner: inferOwner(loopId),
+    owner,
     label: loopId,
-    description: `Auto-proposed monitored loop for the ${loopId} cron (${label}). Confirm the owner-function + cadence/window.`,
+    description,
     expectedCadence: label,
     livenessWindowMs: windowMs,
   };
   // Long-cadence crons need registeredAt to claim the registered_not_firing newcron grace.
   if (windowMs >= 6 * HOUR) entry.registeredAt = nowIso || new Date().toISOString();
   return entry;
+}
+
+/**
+ * Was the inferred entry's `owner` produced with confidence, or did we fall through to the low-
+ * confidence `platform` placeholder? Callers (dashboards / one-tap materialize) can render an
+ * explicit "requires owner confirmation" banner when this is false.
+ */
+export function isOwnerConfident(loopId: string): boolean {
+  return inferOwner(loopId) !== null;
 }
 
 /** Render a liveness window in the registry's `N * UNIT` house style. */
