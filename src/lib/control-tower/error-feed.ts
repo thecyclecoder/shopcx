@@ -931,6 +931,14 @@ export function feedLoopId(source: ErrorSource): string {
 // storming the table into DB-saturation 500s (signature supabase-logs:6f16957ed72e1f38).
 const FEED_BEAT_MIN_INTERVAL_MS = 60_000;
 const lastFeedBeatAt = new Map<string, number>();
+// Bounded client-side timeout on the record_feed_beat RPC. Under Vercel drain firehose bursts the
+// Supabase gateway occasionally holds a same-minute racer past its edge deadline and returns a 504
+// that the vercel-drain feed then re-ingests — a self-echoing error signature about the very beat
+// the RPC exists to observe (Control Tower `supabase-logs:0356e510f43cf142`). 3s is well above p99
+// for a one-line ON CONFLICT DO NOTHING and well under the gateway deadline, so the timer only
+// ever trips on a genuinely stuck response and cuts the 504 off before it can self-feed
+// ([[../specs/record-feed-beat-bounded-client-timeout-no-hung-liveness-rpc]]).
+const FEED_BEAT_RPC_TIMEOUT_MS = 3_000;
 
 export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admin): Promise<void> {
   const loopId = feedLoopId(source);
@@ -938,17 +946,39 @@ export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admi
   // Fast path: this warm instance beat for this source < 1 min ago → skip (no DB call).
   const lastLocal = lastFeedBeatAt.get(loopId) ?? 0;
   if (now - lastLocal < FEED_BEAT_MIN_INTERVAL_MS) return;
-  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs.
+  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs. This
+  // ALSO makes the bounded-timeout path below safe to swallow silently: if the RPC is aborted
+  // at 3s we've already done the "one call per warm instance per minute" bookkeeping, so the
+  // next call within 60s fast-paths regardless, and the DB's UNIQUE partial index
+  // `loop_heartbeats_feed_minute_uidx` already guarantees at-most-one same-minute row across
+  // cold instances — a swallowed timeout can't corrupt liveness state.
   lastFeedBeatAt.set(loopId, now);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FEED_BEAT_RPC_TIMEOUT_MS);
   try {
     const admin = adminClient ?? createAdminClient();
     // Atomic cross-instance throttle: the DB collapses every same-minute racer to one row. A
     // burst that all gets past the fast path (cold/concurrent instances) no-ops at the DB
     // instead of all inserting — no read-then-write race, no insert storm.
-    const { error } = await admin.rpc("record_feed_beat", { p_loop_id: loopId });
-    if (error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, error.message);
+    //
+    // Bounded client-side timeout: race the RPC against a 3s AbortController timer (the same
+    // pattern used in packing-slip-message.ts / claude-health.ts / meta-product-match.ts). A
+    // best-effort liveness beat must never monopolize a serverless invocation for a minute or
+    // fabricate a 504 error signature about itself; on timeout resolve as a silent no-op —
+    // NOT a console.warn, a timeout is expected best-effort behaviour, not an error to
+    // surface. The existing warn path stays for genuine non-timeout RPC errors.
+    const raced = await Promise.race<{ kind: "rpc"; error: { message: string } | null } | { kind: "timeout" }>([
+      admin.rpc("record_feed_beat", { p_loop_id: loopId }).then((r) => ({ kind: "rpc", error: r.error })),
+      new Promise((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve({ kind: "timeout" }), { once: true });
+      }),
+    ]);
+    if (raced.kind === "timeout") return; // silent no-op — see comment above
+    if (raced.error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, raced.error.message);
   } catch (e) {
     console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, e instanceof Error ? e.message : e);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
