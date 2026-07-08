@@ -9,6 +9,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
+import { assertCtaBackedByLaunch } from "@/lib/sol-cta-reference-guard";
 import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
@@ -2710,6 +2711,26 @@ export async function executeSonnetDecision(
       if (unbackedClaim) {
         await sysNote(`[Guard] Blocked unbacked "${unbackedClaim}" claim in ${decision.action_type} — no action was attached. Escalating instead of sending a false promise.`);
         await escalateTicket(ctx, `blocked_unbacked_claim:${unbackedClaim}`);
+        break;
+      }
+      // CTA-reference guard — Phase 3 of docs/brain/specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta.md.
+      // A message that references a CTA ("click the button below", "use the link", "click here",
+      // etc.) is UNBACKED on the ai_response / kb_response paths because they attach no journey;
+      // no journey_sessions row is written this turn. Block the send + escalate with the
+      // 'cta_tail' claim reason so triage-escalations routes the job to needs_attention on the
+      // same terms as every other blocked_unbacked_claim:* variant. Fail-safe: the underlying
+      // guard fails-open on a DB probe error, so a transient read failure cannot strand a legit
+      // reply.
+      const ctaAssess = await assertCtaBackedByLaunch({
+        admin: ctx.admin,
+        workspace_id: ctx.workspaceId,
+        ticket_id: ctx.ticketId,
+        message: decision.response_message,
+        turn_started_at: turnStartedAt,
+      });
+      if (!ctaAssess.ok) {
+        await sysNote(`[Guard] ${ctaAssess.reason}`);
+        await escalateTicket(ctx, `blocked_unbacked_claim:cta_tail`);
         break;
       }
       if (decision.response_message) {
