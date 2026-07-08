@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch, safeStartsWith } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
@@ -143,7 +143,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   // same approach subSwapVariant already uses successfully. Fall back to the
   // synthesized line GID only when we genuinely can't resolve a variant id.
   if (oldLineId && !isInternal) {
-    if (oldLineId.startsWith("gid://shopify/SubscriptionLine/")) {
+    if (safeStartsWith(oldLineId, "gid://shopify/SubscriptionLine/")) {
       // Already a real Shopify line GID — trust it.
       body.oldLineId = oldLineId;
     } else {
@@ -163,7 +163,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   } else if (oldLineId) {
     // Internal subs don't use this body for an API call (they take the internal
     // branch below), but keep the legacy shape so logging stays consistent.
-    body.oldLineId = oldLineId.startsWith("gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
+    body.oldLineId = safeStartsWith(oldLineId, "gid://") ? oldLineId : `gid://shopify/SubscriptionLine/${oldLineId}`;
   }
 
   // Pure removals (without replacement) belong in the dedicated removeLineItem
@@ -199,7 +199,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         const { data: subData } = await adminDb.from("subscriptions")
           .select("items").eq("shopify_contract_id", String(contractId)).single();
         const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
-        const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
+        const rawLineId = safeStartsWith(oldLineId, "gid://") ? oldLineId.split("/").pop() : oldLineId;
         const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
         oldVariantId = lineItem?.variant_id ? String(lineItem.variant_id) : null;
       }
@@ -245,7 +245,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       const adminDb = createAdminClient();
       const { data: subData } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
       const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
-      const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
+      const rawLineId = safeStartsWith(oldLineId, "gid://") ? oldLineId.split("/").pop() : oldLineId;
       const li = items.find((i) => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
       if (li?.variant_id) oldVarIds = [String(li.variant_id)];
     }
@@ -355,7 +355,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
           }
         }
       } else if (oldLineId) {
-        const rawLineId = oldLineId.startsWith("gid://") ? oldLineId.split("/").pop() : oldLineId;
+        const rawLineId = safeStartsWith(oldLineId, "gid://") ? oldLineId.split("/").pop() : oldLineId;
         const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
         if (lineItem?.variant_id) {
           resolvedOldVariants.push({ variant_id: String(lineItem.variant_id), sku: lineItem.sku || null, title: lineItem.title || null, variant_title: lineItem.variant_title || null, quantity: lineItem.quantity || 1 });
