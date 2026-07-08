@@ -1,0 +1,1 @@
+- **Orchestrator surfaces the product variant + computed per-unit price on order line items** · verified 2026-07-08 · → [[../libraries/sonnet-orchestrator-v2]]

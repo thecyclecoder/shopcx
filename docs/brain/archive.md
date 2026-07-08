@@ -21,6 +21,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
 - **KPI audit: flag worker_grade_rollup + director_call_grade as current-state point reads** · verified 2026-07-08 · → [[../libraries/platform-scorecard]] · [[../libraries/kpi-review]]
 - **A one-off spec that depends on goal-internal work blocks on the goal, not the member spec** · verified 2026-07-08 · → [[../project-management]] · [[../libraries/brain-roadmap]] · [[../lifecycles/spec-goal-branch-pm-flow]]
+- **Orchestrator surfaces the product variant + computed per-unit price on order line items** · verified 2026-07-08 · → [[../libraries/sonnet-orchestrator-v2]]
 - **Portal errors route to Sol first-touch, escalate to June only on rail-hit** · verified 2026-07-08 · → [[../libraries/portal__enqueue-sol-first-touch]]
 - **Portal remediation: add a frequency-route replay + self-resolved so retries-that-worked auto-close** · verified 2026-07-08 · → [[../libraries/portal__remediation]]
 - **Reese ignores goal-branch drift, and a confirmed reverse-drift lands in the CEO inbox** · verified 2026-07-08 · → [[../libraries/spec-drift]]

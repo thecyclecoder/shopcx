@@ -44,6 +44,19 @@ The runner is **read-only against everything except one write**: it records the 
 
 An unparseable verdict from the session parks the job `needs_attention` (a human eyeballs `log_tail`) and does NOT write an audit row — a lie in the ledger is worse than a gap. A `decision` field missing / not one of the three literals falls back to `escalate_founder` in `normalizeCsDirectorVerdict` — the shape-safe conservative default (never silently upgrade to auto-approve / auto-author).
 
+### Loop closure — internal note + ticket state per verdict
+
+Every verdict CLOSES THE TICKET LOOP so a ruled-on ticket is never left in the `open+escalated+no-owner` limbo (spec [[../specs/cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict]] Phase 2 invariant). Two writes happen after the `director_activity` audit row above — both compare-and-set / best-effort so a failure never rolls back the completed job:
+
+1. **Internal note.** `runCsDirectorCallJob` writes ONE internal `ticket_messages` row (`visibility='internal'`, `author_type='system'`) naming June as the reviewer, the decision, the 2–4-sentence reasoning, and the concrete per-verdict output — the authored spec slug for `author_spec`, the RemedyPlan summary for `approve_remedy`, the founder-escalation reason for `escalate_founder`. Body composition lives in [[cs-director-verdict-note]] (pure, unit-tested). Before this shipped, an `author_spec` verdict left the ticket note-less — the CS agent scanning the queue couldn't tell it had been reviewed.
+2. **Ticket state transition.** The runner then applies the per-verdict `tickets` patch from [[cs-director-ticket-transition]] via `.eq("id", ticketId).eq("workspace_id", …).select("id")` (compare-and-set — an async race that already advanced the ticket is logged as a zero-row miss, never silently overwritten):
+   - **`author_spec`** → `status='closed'` + `resolved_at`/`closed_at` stamped + `assigned_to` / `escalated_at` / `escalated_to` / `escalation_reason` all cleared. The customer side is complete; the structural fix is tracked on the authored spec.
+   - **`approve_remedy` with a no-customer-reply signal** (`remedy.needs_customer_reply=false` / `remedy.customer_reply=false` / `remedy.close_ticket=true` / `remedy.resolves_ticket=true` / `remedy.status='closed'|'resolved'`) → same close+clear patch as `author_spec`.
+   - **`approve_remedy` default** (customer reply pending) → escalation cleared only (`escalated_at` / `escalated_to` / `escalation_reason` → `null`); status left `open` so the Phase-2 `applyBoxCsDirectorCall` executor's next turn can ship the customer reply without being stranded on an escalated queue.
+   - **`escalate_founder`** → escalation NOT cleared. `escalation_reason` is stamped with `'CEO — awaits founder ruling: <why>'` and (when a `workspace_members role='owner'` lookup resolves the founder's `user_id`) `escalated_to` is stamped with that user_id — so the ticket is OWNED by the founder rather than stranded on the routine's default lane.
+
+Same `visibility='internal'` / `author_type='system'` note mechanism the rest of the pipeline uses ([[ticket-analyzer]], [[improve-plan-executor]], [[escalation]]) so the entry renders in the ticket thread as a non-customer note.
+
 ## Where it's wired (org placement)
 
 - **Function:** `cs` ([[../functions/cs]] § Roles + approval names the CS Director seat alongside `cs_manager` + `admin`).

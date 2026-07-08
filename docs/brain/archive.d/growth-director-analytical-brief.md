@@ -1,0 +1,1 @@
+- **Growth Director analytical brief** · verified 2026-07-08 · → [[../libraries/growth-director-analytical-brief]]

@@ -10,6 +10,37 @@ Per-ticket AI analysis: sentiment, intent, summary, suggested action. Runs as a 
 
 The analyzer is now a supervised box-session agent. `scripts/builder-worker.ts → runTicketAnalyzeJob` claims each `kind='ticket-analyze'` job, loads the ticket + guidance context, runs ONE Max session with `buildSystemPrompt` + `buildUserPrompt`, parses the JSON verdict via `parseAnalysis`, then calls `applySeverityActions` to write the outcome. Records to [[../tables/director_activity]] on completion (`actor='ticket-analyze:box-session'`, `action_kind='analyzed_ticket'`, `spec_slug=ticket_id`, `reason`, `metadata: { score, severity, issues, escalated?, ai_messages }`). Existin gates (do_not_reply skip, ai_disabled / analyzer_locked respect, force-override rules) are preserved in the dispatch path.
 
+## Research CLI (bounded read-only, verify before flagging)
+
+Cora may **verify a claim** she cannot confirm from the transcript with a bounded set of read-only lookups **before grading it**, so a fact missing from the prepared bundle is no longer a guess. Introduced in [[../specs/cora-gets-readonly-research-power-to-verify-claims-before-grading]] · Phases 1-3.
+
+**Ordering (Phase 2):**
+
+1. **PRIMARY PATH — research, then grade the truth.**
+   - Claim **verified correct** by research → NOT an `inaccuracy` issue; the hard cap does not fire. Example: AI said "Berry"; `get_product_nutrition` confirms Berry is a real Superfoods variant → cleared.
+   - Claim **verified contradicted** by research → real `inaccuracy` issue, `description` cites what was looked up. This is the case the inaccuracy hard cap is written for. Example: AI said "$47.99 per unit"; `get_customer_account`'s orders block shows the line at `$50.99` → kept.
+2. **FALLBACK — grading-confidence guard.** Only when research still cannot settle the claim (tool returned nothing conclusive; fact is outside the read-only surface): do NOT emit `inaccuracy` on it; do NOT score-cap or force-escalate on an unverified detail. Prefer `kb_gap` (documented surface, missing fact) or omit — silence beats a fabrication flag. This fallback is subordinate to the primary research path, not a substitute for it.
+
+**Bound (Phase 3):**
+
+- **Read-only** at the allowlist level — the CLI (`scripts/analyzer-research-tools.ts`) refuses anything outside the fixed tool list.
+- **No mutation** at the executor level — delegates to `src/lib/improve-tools.ts` → `sonnet-orchestrator-v2`'s `executeToolCall`, the same shared read-only executor `ticket-improve` / `ticket-handle` use. The analyzer's ONLY write remains its verdict, applied by `applyAnalyzerVerdict` on the deterministic worker.
+- **Targeted, not open-ended** — a hard per-grade lookup counter (env `ANALYZER_RESEARCH_CAP`, default `8`) refuses further calls once the cap is hit within a single grade. The counter lives at `/tmp/analyzer-research-<ticketId>.count` and resets after 30 min of staleness (well past any single grade's runtime). Running count is echoed to stderr on each call so Cora can see how close she is; hitting the cap forces the FALLBACK path.
+
+**Tools (all delegate to the shared read-only executor):**
+
+| Tool | Surface | Verifies |
+|---|---|---|
+| `get_customer_account` | Subscriptions (with per-line `variant_id` + realized price + MSRP/floor context), last 180d of orders (with `line_items` per-unit price + discount codes + financial_status + subscription linkage), loyalty balance, marketing consent | Per-unit price claims (real charged amounts), subscription state, entitlement claims, linked-account facts |
+| `get_product_knowledge` | Product info (title/description/positioning) | Product-level positioning claims |
+| `get_product_nutrition` | Per-variant Supplement Facts (variant title / flavor / servings / key nutrients) — `json_input: {"query":"..."}` | Variant / flavor claims (e.g. "Berry"), per-variant nutrition claims |
+| `get_returns` | Returns / exchanges on file for the customer | Return-status claims |
+| `get_ticket_analysis` | Latest prior analysis for this ticket | Re-grade context (score / issues / summary) |
+
+Brain / policy read is native (Claude Code `Read` / `Grep` against `docs/brain/`), so a policy claim can be verified against the current documented policy without going through the CLI.
+
+Called from the `ticket-analyze` skill (`.claude/skills/ticket-analyze/SKILL.md`) — the box worker's `runTicketAnalyzeJob` prompt threads the ticket id in and points Cora at this CLI. See also [[../recipes/pm-flow-data-sources]] for the invariant that the analyzer never reads from `docs/brain/specs/*.md` (the DB row is the source of truth).
+
 ## SDK
 
 [[../libraries/ticket-analyses]] — typed `TicketAnalysis` shape + `getAnalysis`, `insertAnalysis`, `listForTicket`, `updateAnalysis`. Every read/write flows through this SDK (never raw `.from('ticket_analyses').update/insert/delete` outside it). Compliance check ([scripts/_check-pm-sdk-compliance.ts](https://github.com/thecyclecoder/shopcx/blob/main/scripts/_check-pm-sdk-compliance.ts), modeled on the PM-flow guard) forbids raw `ticket_analyses` mutations outside the SDK.

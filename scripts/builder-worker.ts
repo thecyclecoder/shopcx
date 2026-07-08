@@ -12096,6 +12096,92 @@ async function runCsDirectorCallJob(job: Job) {
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
     }
 
+    // Phase 1 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — write
+    // an INTERNAL system note on the ticket for EVERY verdict (approve_remedy | author_spec |
+    // escalate_founder). Before this shipped, an `author_spec` verdict left the ticket open +
+    // escalated + note-less — the CS agent looking at the queue couldn't tell it had been
+    // reviewed. The note names June (reviewer), the decision, the 2-4 sentence reasoning, and
+    // the concrete per-verdict output (spec slug | remedy summary | founder-escalation reason)
+    // via the same `ticket_messages` write path every other internal note uses
+    // (visibility='internal', author_type='system'). Best-effort — the primary audit trail is
+    // `director_activity` above, so a failed insert here never rolls back the completed job.
+    try {
+      const { buildCsDirectorVerdictNote } = await import("../src/lib/cs-director-verdict-note");
+      const noteBody = buildCsDirectorVerdictNote({
+        decision: verdict.decision,
+        reasoning: verdict.reasoning,
+        remedy: verdict.remedy ?? null,
+        spec_seed: verdict.spec_seed ?? null,
+      });
+      const { error: noteErr } = await db.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: noteBody,
+      });
+      if (noteErr) console.warn(`${tag} internal-note insert failed: ${noteErr.message}`);
+    } catch (e) {
+      console.warn(`${tag} internal-note write threw:`, e instanceof Error ? e.message : e);
+    }
+
+    // Phase 2 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — after
+    // the internal note lands, move the ticket to the state the verdict implies so a ruled-on
+    // ticket is never left in the open+escalated+no-owner limbo (the Phase-2 invariant). Shape:
+    //   author_spec       → close + de-escalate + unassign (structural fix lives on its own spec)
+    //   approve_remedy    → close + de-escalate when the RemedyPlan signals no further customer
+    //                       reply is needed; otherwise de-escalate only so the executor's next
+    //                       turn is not stranded on an escalated queue.
+    //   escalate_founder  → keep escalated, stamp escalation_reason with 'CEO — awaits founder
+    //                       ruling: <why>', and (when we can resolve the workspace owner)
+    //                       stamp escalated_to with the founder's user_id — the ticket is now
+    //                       OWNED rather than orphaned on the routine's default lane.
+    // Compare-and-set + `.select("id")` guard per operational-rules § 'mutating call' — an async
+    // race that already advanced the ticket must not be silently overwritten by our patch.
+    // Best-effort — the primary audit trail is `director_activity` above + the internal note we
+    // just wrote, so a transition failure never rolls back the completed job.
+    try {
+      const { decideCsDirectorTicketTransition } = await import("../src/lib/cs-director-ticket-transition");
+      let ceoUserId: string | null = null;
+      if (verdict.decision === "escalate_founder") {
+        try {
+          const { data: owner } = await db
+            .from("workspace_members")
+            .select("user_id")
+            .eq("workspace_id", job.workspace_id)
+            .eq("role", "owner")
+            .maybeSingle();
+          ceoUserId = (owner?.user_id as string | null) ?? null;
+        } catch (e) {
+          console.warn(`${tag} workspace-owner lookup for CEO stamp failed:`, e instanceof Error ? e.message : e);
+        }
+      }
+      const transition = decideCsDirectorTicketTransition({
+        decision: verdict.decision,
+        reasoning: verdict.reasoning,
+        remedy: verdict.remedy ?? null,
+        ceoUserId,
+        now: new Date().toISOString(),
+      });
+      if (transition.action_key !== "noop") {
+        const { error: patchErr, data: patched } = await db
+          .from("tickets")
+          .update(transition.patch)
+          .eq("id", ticketId)
+          .eq("workspace_id", job.workspace_id)
+          .select("id");
+        if (patchErr) {
+          console.warn(`${tag} ticket state transition failed: ${patchErr.message}`);
+        } else if (!patched?.length) {
+          console.warn(`${tag} ticket state transition matched 0 rows (ticket=${ticketId.slice(0, 8)})`);
+        } else {
+          console.log(`${tag} ticket → ${transition.action_key}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`${tag} ticket state transition threw:`, e instanceof Error ? e.message : e);
+    }
+
     // june-review-replaces-solver-skeptic-quorum-triage Phase 1 — also record the verdict to
     // `triage_runs` so the escalation-triage audit slice reflects the leaner June-review path (no
     // solver-skeptic-quorum sweep produced this call; June's review IS the triage). `verdict` is
@@ -12403,15 +12489,24 @@ function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | nul
 
 // The prompt the box session sees: the pre-built system rubric (calibration rules + policies +
 // current-date context) followed by the pre-built user turn (window + guidance + playbook context +
-// conversation) prepareAnalyzerRun already assembled. The session's ONLY job is to return the JSON
-// verdict — no investigation, no tool calls, no Read/Grep. Kept intentionally spare (mirrors the
-// prior inline Anthropic call's shape) so the box lane's grade is equivalent to the pre-conversion
-// scores (spec Phase 1 verification: "A replay of recent tickets yields equivalent scores/severity
-// actions").
-function ticketAnalyzePrompt(system: string, userMsg: string): string {
+// conversation) prepareAnalyzerRun already assembled. Cora may VERIFY a claim she can't confirm
+// from the transcript using the bounded read-only research CLI (scripts/analyzer-research-tools.ts)
+// + Claude Code's Read/Grep against docs/brain/ — Phase 1 of
+// cora-gets-readonly-research-power-to-verify-claims-before-grading.md. She never mutates; the
+// worker's applyAnalyzerVerdict is the only writer. Bounded: a handful of targeted lookups per
+// grade, not open-ended. See the ticket-analyze skill for when to research vs. defer to the
+// low-confidence unverified handling.
+function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string): string {
   return [
-    `You are the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director), Phase 1 of docs/brain/specs/ticket-analyzer-becomes-box-agent-under-june.md.`,
-    `Score the AI's behavior in the conversation window below against the QC rubric. Do NOT investigate — no Read/Grep/tool use is needed; grade only what the transcript shows. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    `You are Cora, the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director). Use the ticket-analyze skill (cwd is the repo root).`,
+    `Score the AI's behavior in the conversation window below against the QC rubric. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `PRIMARY PATH — RESEARCH BEFORE FLAGGING (Phase 2). When the AI made a factual claim you can't confirm from the transcript (a variant/flavor, a per-unit price, a subscription state, a policy, a customer entitlement), verify it FIRST with the bounded read-only research CLI:`,
+    `  npx tsx scripts/analyzer-research-tools.ts <tool> ${ticketId} [json_input]`,
+    `  Tools: get_customer_account (subs + orders with real per-unit line-item prices + loyalty), get_product_knowledge, get_product_nutrition (per-variant flavors — json_input {"query":"..."}), get_returns, get_ticket_analysis.`,
+    `Brain/policy read: Read/Grep docs/brain/ directly. All read-only — you NEVER mutate; the worker is the only writer.`,
+    `Then grade the truth: a claim VERIFIED CORRECT is NOT an issue (don't flag). A claim VERIFIED CONTRADICTED by real data IS a real 'inaccuracy' issue (flag with concrete evidence citing what you looked up). Keep it bounded — a handful of targeted lookups per grade, not open-ended.`,
+    `FALLBACK — the grading-confidence guard is used ONLY for a claim the research surface still cannot settle (tool returned nothing conclusive, fact is outside the read-only surface): do NOT emit 'inaccuracy' on an unverified detail; do NOT score-cap or force-escalate on it. Prefer 'kb_gap' or omit entirely — silence is better than a fabrication flag. This fallback is subordinate to the primary research path, not a substitute.`,
     ``,
     `--- GRADER SYSTEM (rubric + calibration rules + active policies) ---`,
     system,
@@ -12458,7 +12553,7 @@ async function runTicketAnalyzeJob(job: Job) {
     }
 
     const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
-      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg), sid, REPO_DIR, cfg, job.id),
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId), sid, REPO_DIR, cfg, job.id),
     );
     await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });
