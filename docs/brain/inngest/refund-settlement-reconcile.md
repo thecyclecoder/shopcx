@@ -20,6 +20,14 @@ The **T+3d settlement backstop** for [[../tables/order_refunds]] — the Phase-3
   3. On `settled`: compare-and-set flip — `UPDATE order_refunds SET status='settled', settled_at=now() WHERE id=? AND workspace_id=? AND status='succeeded'` + `.select('id')` to assert exactly one row transitioned. A row that raced into `reversed` (chargeback / manual reversal) is protected by the `status='succeeded'` predicate.
   4. On `drift`: two writes — (i) a deduped `dashboard_notifications` row of `type='refund_drift'` carrying `metadata.order_refund_id` + `amount_cents_mirror` + `amount_cents_vendor` + `reason`; (ii) best-effort sysNote on the ticket that fired the refund, resolved from the [[../tables/customer_events]] `order.refunded` row's `properties.ticket_id`.
 
+## Monitoring
+
+Registered in the [[../libraries/control-tower]] `MONITORED_LOOPS` cron registry with:
+- **Owner:** [[../functions/platform]]
+- **Expected cadence:** daily (15 6 * * *)
+- **Liveness window:** 26 hours (one missed tick + 2-hour buffer)
+- **Registered:** 2026-07-08 — automatically proposed by [[../libraries/coverage-register-agent]] via the [[../specs/control-tower-complete-coverage]] Phase 1 self-audit, owner-confirmed at build time. The window ensures a 6:15 AM UTC miss on any given day still keeps the tile green until the next day's run. See [[../specs/register-loop-refund-settlement-reconcile]].
+
 ## Gotchas
 
 - **The dedupe guard is metadata-based.** A re-tick after the ops card was opened but before it was dismissed must not spam a second one — `openDriftNotification` short-circuits when a matching `dashboard_notifications` with `dismissed=false AND metadata @> {order_refund_id: X}` already exists.
