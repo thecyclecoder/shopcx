@@ -12223,46 +12223,70 @@ async function runCsDirectorCallJob(job: Job) {
       console.warn(`${tag} triage_runs insert threw:`, e instanceof Error ? e.message : e);
     }
 
-    // Phase 2 of cs-director-storyline-digests-to-founder-with-bidirectional-reply — route
-    // decision='escalate_founder' verdicts into the CURRENT digest as a `per_ticket_escalation`
-    // storyline instead of firing a real-time dashboard_notifications page. EXCEPT: a black-swan
-    // verdict (fraud alert · chargeback storm · systemic outage — see cs-director-black-swan) still
-    // pages the CEO in real time, because its harm compounds during the weekly batching lag.
+    // Phase 1 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation —
+    // EVERY `escalate_founder` verdict now mints an `agent_approval_request` dashboard_notification
+    // routed to the CEO (the shape `buildApprovalsFeed` reads into its escalated set). Before this
+    // shipped, only verdicts the black-swan classifier flagged (fraud / chargeback storm / outage)
+    // paged the CEO in real time — every other escalate_founder verdict was appended to the weekly
+    // digest storyline, so a legitimate hard call (a real overcharge on a grandfathered sub, a
+    // stuck refund on a billable card, …) landed with NO CEO card at all: the ticket sat open +
+    // escalated, no owner, and the escalation reached no one (the derived-from ticket that fed the
+    // spec is the concrete recurrence — a $26.89 grandfathered overcharge June ruled
+    // escalate_founder on with zero CEO notification).
+    //
+    // The card is minted UNCONDITIONALLY (via the pure `buildEscalateFounderCard` builder — pure so
+    // its shape is testable without a Supabase mock). The digest append below is preserved for the
+    // weekly cs-director storyline (non-black-swan → the storyline batches the finding); the CEO
+    // card is now the PRIMARY surface either way. Best-effort — the audit row on `director_activity`
+    // above is already the primary trail; a card-insert failure never rolls back the completed job,
+    // but is logged loudly (`ERROR` — this is the escalation reaching no one, the exact regression
+    // this spec fixes).
     if (verdict.decision === "escalate_founder") {
+      const { classifyBlackSwan } = await import("../src/lib/cs-director-black-swan");
+      const cls = classifyBlackSwan({
+        decision: verdict.decision,
+        reasoning: verdict.reasoning,
+        metadata: verdict as unknown as Record<string, unknown>,
+      });
+
+      // ── ALWAYS-MINT: the CEO card is the escalate_founder → CEO-inbox contract. ─────────────
       try {
-        const { classifyBlackSwan } = await import("../src/lib/cs-director-black-swan");
-        const cls = classifyBlackSwan({
-          decision: verdict.decision,
+        const { buildEscalateFounderCard } = await import("../src/lib/cs-director-escalate-founder-card");
+        const row = buildEscalateFounderCard({
+          ticketId,
           reasoning: verdict.reasoning,
-          metadata: verdict as unknown as Record<string, unknown>,
+          jobId: job.id,
+          triageRunId: triageRunId ?? null,
+          blackSwanClass: cls.isBlackSwan ? (cls.class_key ?? null) : null,
+          blackSwanSource: cls.isBlackSwan ? (cls.source ?? null) : null,
         });
-        if (cls.isBlackSwan) {
-          // Real-time page — dashboard_notifications, mirroring the escalation.ts shape. Best-effort;
-          // a failed insert still lets the job complete so the audit row (already recorded above) is
-          // the trail. The metadata carries the classifier's source so an audit can distinguish an
-          // explicit verdict tag from a keyword-default hit.
-          const { error: notifErr } = await db.from("dashboard_notifications").insert({
-            workspace_id: job.workspace_id,
-            type: "system",
-            title: `CS Director — black-swan escalation (${cls.class_key ?? "unspecified"})`,
-            body: (verdict.reasoning || "").slice(0, 500),
-            link: `/dashboard/tickets/${ticketId}`,
-            metadata: {
-              ticket_id: ticketId,
-              triage_run_id: triageRunId,
-              cs_director_call_job_id: job.id,
-              black_swan_class: cls.class_key ?? null,
-              black_swan_source: cls.source ?? null,
-            },
-          });
-          if (notifErr) {
-            console.warn(`${tag} black-swan dashboard_notifications insert failed: ${notifErr.message}`);
-          } else {
-            console.log(`${tag} black-swan page fired (class=${cls.class_key ?? "unspecified"} · source=${cls.source})`);
-          }
+        const { error: notifErr } = await db.from("dashboard_notifications").insert({
+          workspace_id: job.workspace_id,
+          type: "agent_approval_request",
+          title: row.title,
+          body: row.body,
+          link: row.link,
+          metadata: row.metadata,
+          read: false,
+          dismissed: false,
+        });
+        if (notifErr) {
+          console.error(`${tag} CEO card insert failed — escalation reached no one: ${notifErr.message}`);
         } else {
-          // Non-black-swan — append to the current digest. The lazy-create branch inside
-          // appendPerTicketEscalation guarantees a digest exists even if the composer hasn't run yet.
+          const suffix = cls.isBlackSwan ? ` · black_swan=${cls.class_key ?? "unspecified"}` : "";
+          console.log(`${tag} escalate_founder CEO card minted (routed_to_function=ceo${suffix})`);
+        }
+      } catch (e) {
+        console.error(`${tag} escalate_founder CEO card build/insert threw:`, e instanceof Error ? e.message : e);
+      }
+
+      // ── SECONDARY: non-black-swan verdicts also land in the weekly digest storyline. Black-swan
+      //    verdicts skip the digest (they page in real time via the card above; the storyline is a
+      //    quiet-tail batching mechanism the black-swan classes explicitly bypass). Preserved from
+      //    cs-director-storyline-digests-to-founder-with-bidirectional-reply Phase 2 so the digest
+      //    keeps its per_ticket_escalation storyline shape.
+      if (!cls.isBlackSwan) {
+        try {
           const { appendPerTicketEscalation } = await import("../src/lib/cs-director-digest");
           const r = await appendPerTicketEscalation(db, {
             workspaceId: job.workspace_id,
@@ -12278,11 +12302,11 @@ async function runCsDirectorCallJob(job: Job) {
           if (r.appended) {
             console.log(`${tag} escalate_founder appended to digest ${r.digest_id?.slice(0, 8)} @ idx ${r.storyline_index}`);
           } else {
-            console.warn(`${tag} escalate_founder append failed — verdict still on the audit trail`);
+            console.warn(`${tag} escalate_founder digest append failed — CEO card is the primary trail`);
           }
+        } catch (e) {
+          console.warn(`${tag} escalate_founder digest append threw:`, e instanceof Error ? e.message : e);
         }
-      } catch (e) {
-        console.warn(`${tag} escalate_founder routing threw:`, e instanceof Error ? e.message : e);
       }
     }
 
