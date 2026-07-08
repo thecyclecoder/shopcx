@@ -12124,6 +12124,63 @@ async function runCsDirectorCallJob(job: Job) {
       console.warn(`${tag} internal-note write threw:`, e instanceof Error ? e.message : e);
     }
 
+    // Phase 2 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — after
+    // the internal note lands, move the ticket to the state the verdict implies so a ruled-on
+    // ticket is never left in the open+escalated+no-owner limbo (the Phase-2 invariant). Shape:
+    //   author_spec       → close + de-escalate + unassign (structural fix lives on its own spec)
+    //   approve_remedy    → close + de-escalate when the RemedyPlan signals no further customer
+    //                       reply is needed; otherwise de-escalate only so the executor's next
+    //                       turn is not stranded on an escalated queue.
+    //   escalate_founder  → keep escalated, stamp escalation_reason with 'CEO — awaits founder
+    //                       ruling: <why>', and (when we can resolve the workspace owner)
+    //                       stamp escalated_to with the founder's user_id — the ticket is now
+    //                       OWNED rather than orphaned on the routine's default lane.
+    // Compare-and-set + `.select("id")` guard per operational-rules § 'mutating call' — an async
+    // race that already advanced the ticket must not be silently overwritten by our patch.
+    // Best-effort — the primary audit trail is `director_activity` above + the internal note we
+    // just wrote, so a transition failure never rolls back the completed job.
+    try {
+      const { decideCsDirectorTicketTransition } = await import("../src/lib/cs-director-ticket-transition");
+      let ceoUserId: string | null = null;
+      if (verdict.decision === "escalate_founder") {
+        try {
+          const { data: owner } = await db
+            .from("workspace_members")
+            .select("user_id")
+            .eq("workspace_id", job.workspace_id)
+            .eq("role", "owner")
+            .maybeSingle();
+          ceoUserId = (owner?.user_id as string | null) ?? null;
+        } catch (e) {
+          console.warn(`${tag} workspace-owner lookup for CEO stamp failed:`, e instanceof Error ? e.message : e);
+        }
+      }
+      const transition = decideCsDirectorTicketTransition({
+        decision: verdict.decision,
+        reasoning: verdict.reasoning,
+        remedy: verdict.remedy ?? null,
+        ceoUserId,
+        now: new Date().toISOString(),
+      });
+      if (transition.action_key !== "noop") {
+        const { error: patchErr, data: patched } = await db
+          .from("tickets")
+          .update(transition.patch)
+          .eq("id", ticketId)
+          .eq("workspace_id", job.workspace_id)
+          .select("id");
+        if (patchErr) {
+          console.warn(`${tag} ticket state transition failed: ${patchErr.message}`);
+        } else if (!patched?.length) {
+          console.warn(`${tag} ticket state transition matched 0 rows (ticket=${ticketId.slice(0, 8)})`);
+        } else {
+          console.log(`${tag} ticket → ${transition.action_key}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`${tag} ticket state transition threw:`, e instanceof Error ? e.message : e);
+    }
+
     // june-review-replaces-solver-skeptic-quorum-triage Phase 1 — also record the verdict to
     // `triage_runs` so the escalation-triage audit slice reflects the leaner June-review path (no
     // solver-skeptic-quorum sweep produced this call; June's review IS the triage). `verdict` is
