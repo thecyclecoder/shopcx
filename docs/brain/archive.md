@@ -23,6 +23,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **A CS Director review closes the ticket loop — internal note + resolution — not just the engineering loop** · verified 2026-07-08 · → [[../libraries/cs-director]] · [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../lifecycles/ticket-lifecycle]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
+- **An escalate_founder verdict reliably reaches the CEO inbox with a diagnosis + recommended remedy** · verified 2026-07-08 · → [[../libraries/cs-director]] · [[../libraries/cs-director-escalate-founder-card]] · [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../lifecycles/ticket-lifecycle]]
 - **Escalation keys on real severity, not a middling score — a resolved ticket with a minor issue stays closed** · verified 2026-07-08 · → [[../lifecycles/ai-analysis]]
 - **Growth Director analytical brief** · verified 2026-07-08 · → [[../libraries/growth-director-analytical-brief]]
 - **KPI audit: flag worker_grade_rollup + director_call_grade as current-state point reads** · verified 2026-07-08 · → [[../libraries/platform-scorecard]] · [[../libraries/kpi-review]]
