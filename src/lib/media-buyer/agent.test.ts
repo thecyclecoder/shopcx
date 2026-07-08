@@ -54,6 +54,7 @@ function policy(overrides: Partial<IterationPolicy> = {}): IterationPolicy {
     per_account_daily_budget_delta_ceiling_cents: 100_000, // $1000
     min_budget_floor_cents: 1_000,
     never_pause_object_ids: [],
+    mode: "armed",
     ...overrides,
   };
 }
