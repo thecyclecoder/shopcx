@@ -19,6 +19,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Prune stale build worktrees before worktree add (stop goal-build collisions)** · verified 2026-07-08 · → [[../libraries/builder-worker]]
 - **Cora gets read-only research power to verify a claim before grading it** · verified 2026-07-08 · → [[../libraries/ticket-analyzer]] § Research CLI
 - **Cora grades against the data the AI had — no fabrication flag or escalation on facts absent from her own surface** · verified 2026-07-08 · → [[../lifecycles/ai-analysis]] + [[../libraries/ticket-analyzer]]
+- **Cora investigates once, ~30 min after Sol handles + closes a ticket — never re-investigates a settled ticket** · verified 2026-07-08 · → [[../libraries/ticket-analyzer]] + [[../lifecycles/ai-analysis]]
+- **A CS Director review closes the ticket loop — internal note + resolution — not just the engineering loop** · verified 2026-07-08 · → [[../libraries/cs-director]] · [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../lifecycles/ticket-lifecycle]]
 - **Drop Supabase GoTrue auth-log '/user 504 context deadline exceeded' noise at capture** · verified 2026-07-08 · → [[../libraries/control-tower]]
 - **Drop foreign GoTrue-to-localhost-Postgres dial-timeout noise at capture** · verified 2026-07-08 · → [[libraries/control-tower]]
 - **Growth Director analytical brief** · verified 2026-07-08 · → [[../libraries/growth-director-analytical-brief]]
@@ -33,6 +35,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Sol API-mode cheap execution over the Ticket Direction** · verified 2026-07-08 · → [[../libraries/ai-context]] · [[../libraries/model-picker]] · [[../inngest/unified-ticket-handler]] · [[../lifecycles/ticket-lifecycle]]
 - **Sol cost + CSAT rollups + Catherine-marker cohort compare** · verified 2026-07-08 · → [[../tables/tickets]] · [[../tables/sol_replay_runs]] · [[../libraries/action-executor]] · [[../recipes/backfill-ticket-ai-cost]] · [[../dashboard/tickets]]
 - **Inflection detector (drift + frustration) → re-session Sol** · verified 2026-07-08 · → [[../libraries/inflection-detector]] · [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
+- **The Sol first-touch acknowledgement fires only on chat, not on email/SMS/portal/other channels** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
 - **Anti-runaway cap on Sol re-sessions (frustration-always-bounces bounded)** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../lifecycles/ticket-lifecycle]] · [[../libraries/cs-director-digest]] · [[../dashboard/tickets]]
 - **Playbook selection becomes a Sol session decision, not a signal match** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../inngest/unified-ticket-handler]] · [[../dashboard/tickets]]
 - **Ticket Direction artifact + Sol first-touch box session (ack-then-session-output)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]

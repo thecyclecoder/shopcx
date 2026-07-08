@@ -1,0 +1,1 @@
+- **The Sol first-touch acknowledgement fires only on chat, not on email/SMS/portal/other channels** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
