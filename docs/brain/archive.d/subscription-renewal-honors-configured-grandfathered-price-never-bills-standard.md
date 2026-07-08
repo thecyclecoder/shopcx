@@ -1,0 +1,1 @@
+- **A subscription renewal charges the sub's configured (grandfathered) price, never the standard price** · verified 2026-07-08 · → [[../lifecycles/subscription-billing]]
