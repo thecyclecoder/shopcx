@@ -1,0 +1,1 @@
+- **Sol cost + CSAT rollups + Catherine-marker cohort compare** · verified 2026-07-08 · → [[../tables/tickets]] · [[../tables/sol_replay_runs]] · [[../libraries/action-executor]] · [[../recipes/backfill-ticket-ai-cost]] · [[../dashboard/tickets]]

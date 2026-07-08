@@ -20,6 +20,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **KPI audit: flag worker_grade_rollup + director_call_grade as current-state point reads** · verified 2026-07-08 · → [[../libraries/platform-scorecard]] · [[../libraries/kpi-review]]
 - **A one-off spec that depends on goal-internal work blocks on the goal, not the member spec** · verified 2026-07-08 · → [[../project-management]] · [[../libraries/brain-roadmap]] · [[../lifecycles/spec-goal-branch-pm-flow]]
 - **Portal remediation: add a frequency-route replay + self-resolved so retries-that-worked auto-close** · verified 2026-07-08 · → [[../libraries/portal__remediation]]
+- **Reese ignores goal-branch drift, and a confirmed reverse-drift lands in the CEO inbox** · verified 2026-07-08 · → [[../libraries/spec-drift]]
+- **Sol API-mode cheap execution over the Ticket Direction** · verified 2026-07-08 · → [[../libraries/ai-context]] · [[../libraries/model-picker]] · [[../inngest/unified-ticket-handler]] · [[../lifecycles/ticket-lifecycle]]
+- **Sol cost + CSAT rollups + Catherine-marker cohort compare** · verified 2026-07-08 · → [[../tables/tickets]] · [[../tables/sol_replay_runs]] · [[../libraries/action-executor]] · [[../recipes/backfill-ticket-ai-cost]] · [[../dashboard/tickets]]
+- **Inflection detector (drift + frustration) → re-session Sol** · verified 2026-07-08 · → [[../libraries/inflection-detector]] · [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]
+- **Anti-runaway cap on Sol re-sessions (frustration-always-bounces bounded)** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../lifecycles/ticket-lifecycle]] · [[../libraries/cs-director-digest]] · [[../dashboard/tickets]]
+- **Playbook selection becomes a Sol session decision, not a signal match** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../inngest/unified-ticket-handler]] · [[../dashboard/tickets]]
+- **Ticket Direction artifact + Sol first-touch box session (ack-then-session-output)** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]
 - **Add Payment Method Journey** · verified 2026-07-07 · → [[../journeys/add-payment-method]]
 - **Bound loggedAppstleFetch with AbortSignal.timeout so a stalled Appstle upstream can't hang /api/portal to 30s** · verified 2026-07-07 · → [[libraries/appstle-call-log]]
 - **Verify billing-interval on Appstle upstream_timeout, mirroring the 504 branch** · verified 2026-07-07 · → [[../libraries/appstle]]
@@ -538,6 +545,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Centralized Commerce SDK — one internal-aware layer for every customer-facing read & write** · folded 2026-07-05 · → [[lifecycles/commerce-sdk]]
 - **Ticket handling — guaranteed, observable, self-running** · folded 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
+- **Sol: set the ticket's direction once (box session), then run it cheap (API) — re-session on drift** · folded 2026-07-08 · → [[lifecycles/ticket-lifecycle]]
 
 ## Related
 

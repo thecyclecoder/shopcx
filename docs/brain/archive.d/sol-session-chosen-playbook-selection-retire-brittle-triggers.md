@@ -1,0 +1,1 @@
+- **Playbook selection becomes a Sol session decision, not a signal match** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../inngest/unified-ticket-handler]] · [[../dashboard/tickets]]

@@ -1,0 +1,1 @@
+- **Sol API-mode cheap execution over the Ticket Direction** · verified 2026-07-08 · → [[../libraries/ai-context]] · [[../libraries/model-picker]] · [[../inngest/unified-ticket-handler]] · [[../lifecycles/ticket-lifecycle]]
