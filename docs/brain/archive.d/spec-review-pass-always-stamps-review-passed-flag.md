@@ -1,0 +1,1 @@
+- **Spec-review pass must always stamp the durable review-passed flag** · verified 2026-07-08 · → [[../libraries/agents-spec-review]]
