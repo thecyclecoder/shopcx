@@ -24,6 +24,11 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
+// agent-jobs-update-retry-and-error-surface Phase 1 — the bounded-retry chokepoint the shared
+// `update(id, patch)` helper below funnels every agent_jobs PATCH through. Absorbs a transient
+// Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
+// AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
+import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -2401,7 +2406,29 @@ async function update(id: string, patch: Record<string, unknown>) {
       };
     }
   }
-  await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+  // agent-jobs-update-retry-and-error-surface Phase 1 — inspect Supabase's response instead of
+  // firing-and-forgetting. A Cloudflare 521 in front of PostgREST used to silently drop the
+  // transition (build stays running past terminal, needs_input never lands, dispatch proceeds as
+  // if the row was updated). writeAgentJobsUpdateWithRetry retries the transient class (5xx /
+  // fetch failed / ECONNRESET) with bounded backoff and THROWS AgentJobsUpdateError on the
+  // terminal case so the caller cannot continue as if the write succeeded. A bug-shaped throw
+  // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
+  const finalPatch = { ...patch, updated_at: new Date().toISOString() };
+  const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
+  await writeAgentJobsUpdateWithRetry(
+    async () => {
+      // Supabase-js resolves this awaited chain to { data, error, status, statusText }. The
+      // retry helper ONLY reads `error` + `status` — data can be undefined on a bare update
+      // without .select(), which is exactly what we do here (fire the transition, no read).
+      const resp = (await db.from("agent_jobs").update(finalPatch).eq("id", id)) as {
+        error: { message?: string; code?: string | null; details?: string | null; hint?: string | null } | null;
+        status?: number | null;
+        statusText?: string | null;
+      };
+      return { error: resp.error, status: resp.status ?? null, statusText: resp.statusText ?? null };
+    },
+    { jobId: id, attemptedStatus },
+  );
   // no-parked-specs-auto-route-needs-attention Phase 0 — classify every park at the single chokepoint.
   // Every needs_attention write goes through this helper, so stamping here covers every caller (build,
   // repair, regression, security, spec-test, …) with no per-callsite plumbing. Best-effort + async:
@@ -2898,6 +2925,53 @@ function derivePhase(instructions: string | null | undefined): string | null {
   const m = /\bPhase\s+(\d+)\b/i.exec(instructions);
   return m ? `Phase ${m[1]}` : null;
 }
+// build-box-page-reflects-real-per-lane-group-usage Phase 1: the box worker runs each kind in its
+// OWN dedicated lane with its own cap (MAX_CONCURRENT for the build/plan pool, MAX_TICKET_HANDLE +
+// MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL for customer service, MAX_PLATFORM_DIRECTOR +
+// MAX_DIRECTOR_COACH for director, MAX_FOLD for fold, everything else in a bag of small
+// concurrency-1/2 lanes). The pre-existing scalar build_lanes/fold_lanes only carried two of those
+// caps, which is why /dashboard/roadmap/box could render nonsense like "13/10 in use" — it lumped
+// every non-fold in-flight lane against the build/plan pool cap. LANE_GROUPS is the FULL per-group
+// cap picture, emitted verbatim into the heartbeat row's `lane_groups` jsonb column each tick so
+// the page + BoxChip can render each group against its OWN cap (and its OWN kind-set). Kinds MUST
+// stay in sync with the poll-loop count* helpers below (countPlatformDirector groups
+// platform-director + director-bounce-back + growth-director; countFold groups fold + goal-fold; …).
+const LANE_GROUPS = {
+  build_plan: {
+    cap: MAX_CONCURRENT,
+    kinds: ["build", "plan"] as const,
+  },
+  customer_service: {
+    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL,
+    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call"] as const,
+  },
+  director: {
+    cap: MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH,
+    kinds: ["platform-director", "director-bounce-back", "growth-director", "director-coach"] as const,
+  },
+  fold: {
+    cap: MAX_FOLD,
+    kinds: ["fold", "goal-fold"] as const,
+  },
+  other: {
+    cap:
+      MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST + MAX_SPEC_REVIEW +
+      MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
+      MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
+      MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
+      MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE +
+      MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
+      MAX_PROPOSED_MODEL_TIER,
+    kinds: [
+      "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test", "spec-review",
+      "migration-fix", "deploy-review", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
+      "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
+      "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
+      "media-buyer-grade", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
+    ] as const,
+  },
+} as const;
 async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
   // reconcile-per-account-in-flight-count (Phase 2): heal the free-running load counter to the ground-truth
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
@@ -2913,8 +2987,12 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       status,
       active_builds: activeBuilds,
       detail: detail ?? null,
-      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
-      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
+      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling) — kept for back-compat
+      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane) — kept for back-compat
+      // build-box-page-reflects-real-per-lane-group-usage Phase 1 — per-group caps so the page can
+      // render each lane group against its OWN cap instead of lumping every non-fold kind into the
+      // build/plan pool. Kind-sets mirror the poll-loop count* helpers.
+      lane_groups: LANE_GROUPS,
       lanes, // [{ kind, job_id, spec_slug, since, phase }] for every in-flight lane this tick
       // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2): surfaces how each
       // account's quota is burning + an all-capped state to the box-health view + Control Tower box tile.
@@ -3049,6 +3127,17 @@ async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown
 // Read the live `public` BASE TABLE names off the pooler (raw SQL — information_schema isn't exposed
 // through PostgREST). Returns null when the host has no DB password (→ the check reports 'skipped',
 // never a false "no drift"). Best-effort connect/teardown.
+//
+// Reads pg_catalog.pg_class directly — the AUTHORITATIVE system-catalog source — instead of
+// information_schema.tables, which is filtered by the connecting role's per-table privileges (see the
+// SQL-standard note in [pg docs / 34.19]: "Only those tables ... that the current user has access to
+// ... are shown"). The migration-drift-check-stop-false-positive-on-present-tables spec Phase 1
+// root-caused the god_mode_sessions/god_mode_approvals phantom-absent alerts to exactly this: the
+// tables were CREATEd + RLS-guarded via scripts/apply-god-mode-sessions-migration.ts, but the pooler
+// role's effective privilege on them left them invisible to information_schema.tables even though
+// they physically exist. pg_class is unaffected — it is the raw catalog view every table registers
+// in on CREATE, regardless of grants. relkind: 'r' = ordinary base table, 'p' = partitioned table
+// (still a table, materialized as its partitions). Excludes toast/index/view/materialized-view/etc.
 async function fetchLivePublicTables(): Promise<string[] | null> {
   let connectionString: string;
   try {
@@ -3062,7 +3151,9 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   await c.connect();
   try {
     const res = await c.query(
-      "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
+      "select c.relname as table_name from pg_catalog.pg_class c " +
+        "join pg_catalog.pg_namespace n on n.oid = c.relnamespace " +
+        "where n.nspname = 'public' and c.relkind in ('r', 'p')",
     );
     return (res.rows as Array<{ table_name: string }>).map((r) => r.table_name);
   } finally {
@@ -3397,6 +3488,32 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       const finding = mod.analyzeSlowQuery(row, plan);
       if (finding) findings.push(finding);
     }
+
+    // db-health-request-volume (2026-07-08): the aggregate request/egress firehose signal — the blind
+    // spot that let ~78K PostgREST req/hr + ~182K rows/hr of internal polling drive egress with no Devi
+    // finding. Reuses this pass's pg_stat_statements access. Best-effort — additive; a failure here must
+    // never break the slow-query pass.
+    try {
+      const infoRes = await c.query(`select stats_reset from pg_stat_statements_info`);
+      const statsReset = (infoRes.rows[0] as { stats_reset?: string } | undefined)?.stats_reset;
+      const windowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
+      const totalsRes = await c.query(`select coalesce(sum(calls),0)::bigint as calls, coalesce(sum(rows),0)::bigint as rows from pg_stat_statements`);
+      const totals = (totalsRes.rows[0] ?? {}) as Record<string, unknown>;
+      const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by calls desc limit 8`);
+      const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by rows desc limit 8`);
+      const mapTop = (rs: Array<Record<string, unknown>>) => rs.map((r) => ({ queryid: String(r.queryid ?? ""), query: String(r.query ?? ""), calls: Number(r.calls ?? 0), rows: Number(r.rows ?? 0) }));
+      const rvFinding = mod.analyzeRequestVolume({
+        windowHours,
+        totalCalls: Number(totals.calls ?? 0),
+        totalRows: Number(totals.rows ?? 0),
+        topByCalls: mapTop(topCallsRes.rows as Array<Record<string, unknown>>),
+        topByRows: mapTop(topRowsRes.rows as Array<Record<string, unknown>>),
+      });
+      if (rvFinding) findings.push(rvFinding);
+    } catch (e) {
+      console.warn("[db-health] request-volume escalation failed:", e instanceof Error ? e.message : String(e));
+    }
+
     const proposed = await surfaceDbHealthFindings(findings);
     const ranked = mod.dedupeFindings(findings);
     const slow_queries = ranked.slice(0, 10).map((f) => ({ queryid: f.signature.split(":").pop() || "", cause: f.cause, table: f.table, impact: f.impact }));
@@ -3711,6 +3828,55 @@ async function runDbHealthInstanceJob(): Promise<void> {
       /* best-effort: partial signals are still worth beating */
     }
 
+    // db-health-temp-spill-attribution (2026-07-08): pg_stat_database.temp_bytes is an instance
+    // aggregate with no query attribution — so name the top temp_blks_written offenders here so a
+    // temp_spill_pressure finding fingers the spilling query (the subscriptions LTV scan was 98% of
+    // spill, invisible in the aggregate). Best-effort — a failure must never skip the pass.
+    let tempOffenders: import("../src/lib/control-tower/db-health").TempSpillOffender[] = [];
+    try {
+      const toRes = await c.query(
+        `select queryid::text as queryid, query, calls,
+                (temp_blks_written * current_setting('block_size')::bigint)::bigint as temp_bytes
+           from pg_stat_statements
+          where temp_blks_written > 0
+            and query not ilike '%pg_stat_statements%'
+          order by temp_blks_written desc
+          limit 5`,
+      );
+      tempOffenders = (toRes.rows as Array<Record<string, unknown>>).map((r) => ({
+        queryid: String(r.queryid ?? ""),
+        query: String(r.query ?? ""),
+        calls: Number(r.calls ?? 0),
+        tempBytes: Number(r.temp_bytes ?? 0),
+      }));
+    } catch {
+      /* best-effort: pg_stat_statements may be unreadable; the aggregate temp flag still fires */
+    }
+
+    // db-health-temp-spill-rate (2026-07-08): read the PRIOR instance-pass reading so
+    // analyzeInstanceHealth can rate the temp spill (Δbytes/Δhours) — a self-clearing signal — instead
+    // of the cumulative pg_stat_database.temp_bytes, which can't be reset (Supabase's postgres role
+    // isn't superuser) and so would keep the temp tile red forever after a fix. Best-effort.
+    let tempBytesPrev: number | undefined;
+    let tempReadingAgeHours: number | undefined;
+    try {
+      const { data: prev } = await db
+        .from("loop_heartbeats")
+        .select("ran_at, produced")
+        .eq("loop_id", mod.DB_HEALTH_INSTANCE_LOOP_ID)
+        .order("ran_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const prevTemp = (prev as { produced?: { signals?: { temp_bytes?: number } } } | null)?.produced?.signals?.temp_bytes;
+      const prevAt = (prev as { ran_at?: string } | null)?.ran_at;
+      if (typeof prevTemp === "number" && prevAt) {
+        const ageH = (Date.now() - new Date(prevAt).getTime()) / 3_600_000;
+        if (ageH > 0) { tempBytesPrev = prevTemp; tempReadingAgeHours = ageH; }
+      }
+    } catch {
+      /* best-effort: no prior reading ⇒ analyzeInstanceHealth uses the cumulative fallback */
+    }
+
     const input: import("../src/lib/control-tower/db-health").InstanceHealthInput = {
       xactCommit: statDb.xactCommit,
       xactRollback: statDb.xactRollback,
@@ -3725,6 +3891,9 @@ async function runDbHealthInstanceJob(): Promise<void> {
       statementsNearTimeout,
       nearTimeoutSamples,
       authenticatedStatementTimeoutMs,
+      tempOffenders,
+      tempBytesPrev,
+      tempReadingAgeHours,
     };
     const findings = mod.analyzeInstanceHealth(input);
     const ranked = mod.rankFindings(findings);
@@ -10171,9 +10340,20 @@ async function runTicketHandleJob(job: Job) {
       // with an empty slug — the writer will fail the Direction otherwise, and the ticket
       // burns the box turn.
       `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
+      // Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+      // MESSAGE-IS-LAST. Any concrete outcome your first_reply CLAIMS (added a bag, applied a
+      // credit, issued a refund, created a return, cancelled a subscription, …) MUST also appear
+      // as a structured required_outcomes item so the honor step can fire + verify it BEFORE the
+      // send. Judy 0a9e4d7f: the reply claimed bag+credit while neither action ran. The worker
+      // (a) writes each required_outcomes item to the DB, (b) runs the honor step (dispatches +
+      // verifies via the shared action executor), (c) only THEN allows the reply to send. An item
+      // that fails to verify blocks the send. When your first_reply makes NO concrete claim (a
+      // needs_info question, a bare informational reply), return required_outcomes:[] — the honor
+      // step is a no-op and the reply flows normally.
+      `REQUIRED OUTCOMES — the structured 'what'. For every concrete outcome your first_reply CLAIMS (or promises to make happen), also emit a required_outcomes entry with {kind:'<action_type>', description:'<one-line human summary>', target_ids:{…the ids the executor needs: contract_id, order_id, product_id, coupon_code, amount_cents…}, expected_db_state:{…the DB predicate that would prove it done…}}. The worker fires each entry via the shared action executor (directActionHandlers[kind]) and verifies against the DB BEFORE your first_reply sends — an unverifiable entry BLOCKS the send. Emit the outcomes in the order they should run. If your first_reply makes no concrete claim (a question, an informational answer, a policy explanation), return required_outcomes:[] — the honor step is a no-op.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"required_outcomes":[{"kind":"…","description":"…","target_ids":{…},"expected_db_state":{…}}],"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
@@ -10259,8 +10439,9 @@ async function runTicketHandleJob(job: Job) {
       const guardrails = (d.guardrails && typeof d.guardrails === "object" ? d.guardrails : {}) as Record<string, unknown>;
 
       const { writeDirection } = await import("../src/lib/ticket-directions");
+      let directionId: string | null = null;
       try {
-        await writeDirection(db, {
+        const directionRow = await writeDirection(db, {
           workspace_id: workspaceId,
           ticket_id: ticketId,
           intent,
@@ -10270,6 +10451,7 @@ async function runTicketHandleJob(job: Job) {
           guardrails,
           // authored_by default = 'sol_box_session' (the SDK default; matches the Phase 3 verification)
         });
+        directionId = directionRow.id;
       } catch (e) {
         // The partial-UNIQUE on ticket_id WHERE superseded_at IS NULL enforces the one-live-row
         // invariant — a re-dispatched job on the same ticket that already has a live Direction fails
@@ -10278,6 +10460,125 @@ async function runTicketHandleJob(job: Job) {
         const msg = e instanceof Error ? e.message : String(e);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
+      }
+
+      // ── Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified ──
+      // Phase 1 wire-in: persist Sol's required_outcomes — the structured "what" behind the reply.
+      // Every concrete outcome the first_reply CLAIMS is stored as an individually-checkable row
+      // (kind + description + target_ids + expected_db_state, status='pending') so the honor step
+      // can dispatch it AND the send guards can gate on verified state. Sol's prompt requires the
+      // array; an omitted / non-array field is treated as [] (no claims → no rows → honor step is
+      // a no-op → reply flows normally).
+      const { writeRequiredOutcomes } = await import("../src/lib/ticket-required-outcomes");
+      const rawOutcomes = Array.isArray((parsed as { required_outcomes?: unknown }).required_outcomes)
+        ? ((parsed as { required_outcomes: unknown[] }).required_outcomes as unknown[])
+        : [];
+      const outcomeItems: Array<{
+        kind: string;
+        description: string;
+        target_ids?: Record<string, unknown>;
+        expected_db_state?: Record<string, unknown>;
+      }> = [];
+      for (const it of rawOutcomes) {
+        if (!it || typeof it !== "object") continue;
+        const o = it as {
+          kind?: unknown;
+          description?: unknown;
+          target_ids?: unknown;
+          expected_db_state?: unknown;
+        };
+        const kind = typeof o.kind === "string" ? o.kind.trim() : "";
+        const description = typeof o.description === "string" ? o.description.trim() : "";
+        if (!kind || !description) continue;
+        const targetIds =
+          o.target_ids && typeof o.target_ids === "object" && !Array.isArray(o.target_ids)
+            ? (o.target_ids as Record<string, unknown>)
+            : {};
+        const expected =
+          o.expected_db_state && typeof o.expected_db_state === "object" && !Array.isArray(o.expected_db_state)
+            ? (o.expected_db_state as Record<string, unknown>)
+            : {};
+        outcomeItems.push({ kind, description, target_ids: targetIds, expected_db_state: expected });
+      }
+      if (outcomeItems.length > 0) {
+        try {
+          await writeRequiredOutcomes(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            direction_id: directionId,
+            items: outcomeItems,
+          });
+        } catch (e) {
+          // A required_outcomes insert failure does NOT unwind the Direction — the ledger is durable
+          // substrate. Surface the error in log_tail so it's grep-able but continue: with zero rows
+          // written, the honor step is a no-op and the outcome-claim guard downstream will block any
+          // send that CLAIMS an unverified outcome (Judy 0a9e4d7f's failure mode) via
+          // assertClaimsBackedByOutcomes.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} writeRequiredOutcomes failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      // Phase 2 wire-in: HONOR every required_outcome BEFORE composing/sending the customer reply.
+      // The honor step walks each row in authored order, dispatches the action via the shared
+      // directActionHandlers, and verifies via verifyActionInDB. Actions run to completion (or fail
+      // loudly) FIRST — the reply-drafting step is NOT reached while any item is pending. A failed
+      // item routes the ticket to needs_human naming the unfinished item (Judy 0a9e4d7f: bag/credit
+      // would fire OR fail loudly here — never a reply promising them while neither ran).
+      let honorBlockLine: string | null = null;
+      if (outcomeItems.length > 0) {
+        const { data: tCustomer } = await db
+          .from("tickets")
+          .select("customer_id, channel")
+          .eq("id", ticketId)
+          .single();
+        const customerId = (tCustomer?.customer_id as string | null) ?? null;
+        const honorChannel = (tCustomer?.channel as string | null) || "email";
+        if (!customerId) {
+          // No linked customer — the executor can't dispatch a customer-scoped action. Block the
+          // reply so an unverifiable claim can't ship; the Improve tab picks up the ticket.
+          honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${honorBlockLine}`);
+          await update(job.id, {
+            log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          try {
+            const { honorRequiredOutcomes } = await import("../src/lib/honor-required-outcomes");
+            const honor = await honorRequiredOutcomes({
+              admin: db,
+              workspace_id: workspaceId,
+              ticket_id: ticketId,
+              customer_id: customerId,
+              channel: honorChannel,
+              // Real production dispatchers — the box worker has admin creds and this is the
+              // very step the spec's Phase 2 verification names ("re-running Judy's scenario
+              // executes bag/credit (or fails loudly) BEFORE any reply exists").
+              sandbox: false,
+            });
+            if (!honor.all_verified) {
+              const failedNames =
+                [...honor.failed_items, ...honor.carried_forward_failed]
+                  .map((f) => `${f.kind}:${f.description}${f.failed_reason ? ` (${f.failed_reason})` : ""}`)
+                  .join(" | ") || "(none named)";
+              honorBlockLine = `Sol reply BLOCKED by honor step: ${honor.failed_items.length} failed / ${honor.carried_forward_failed.length} carried-forward. Failed: ${failedNames}. Direction authored; a human re-drafts via Improve.`;
+              console.warn(`${tag} ${honorBlockLine}`);
+              await update(job.id, {
+                log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+              });
+            }
+          } catch (e) {
+            // Honor step blew up — block the send. A message-is-last invariant is that we NEVER
+            // ship a claim we couldn't verify; erroring is the same as unverified from the send
+            // gate's perspective.
+            const msg = e instanceof Error ? e.message : String(e);
+            honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${honorBlockLine}`);
+            await update(job.id, {
+              log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          }
+        }
       }
 
       // Ship the first customer-facing reply through the SAME production delivery sink the orchestrator
@@ -10295,7 +10596,10 @@ async function runTicketHandleJob(job: Job) {
       // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
       // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
-      if (firstReply) {
+      // The honor step above sets honorBlockLine when a required_outcome failed to verify — the
+      // message-is-last invariant refuses to compose OR send a reply when any promise is unbacked.
+      // The Direction is still durable; the ticket routes to needs_human via the Improve tab.
+      if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
         if (bait.ok === false) {
@@ -10305,17 +10609,43 @@ async function runTicketHandleJob(job: Job) {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
           });
         } else {
-          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-          const channel = (t?.channel as string | null) || "email";
-          try {
-            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-          } catch (e) {
-            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-            const msg = e instanceof Error ? e.message : String(e);
-            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          // Phase 3 of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+          // the MESSAGE-IS-LAST send guard. After the policy-bait guard passes, check that every
+          // outcome the DRAFT reply CLAIMS (adding a bag, applying a credit, issuing a refund, …)
+          // is backed by a ticket_required_outcomes row with status='verified'. Judy 0a9e4d7f's
+          // failure was exactly this — the reply promised bag+credit while neither action had
+          // actually run. Fail-open on unknown kinds (a novel action can't over-block a legit
+          // reply); every match against an unverified row blocks the send and routes to the
+          // Improve tab (same needs_human path the policy-bait guard uses).
+          const { assertClaimsBackedByOutcomes } = await import("../src/lib/sol-outcome-claim-guard");
+          const claimVerdict = await assertClaimsBackedByOutcomes({
+            admin: db,
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            message: firstReply,
+          });
+          if (claimVerdict.ok === false) {
+            const claimSummary = claimVerdict.blocked_claims
+              .map((c) => `${c.kind}[status=${c.current_status}]:${JSON.stringify(c.matched_phrase.slice(0, 60))}`)
+              .join(" | ");
+            const blockLine = `Sol reply BLOCKED by outcome-claim guard: ${claimVerdict.reason}. Claims: ${claimSummary}. Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${blockLine}`);
+            await update(job.id, {
+              log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          } else {
+            const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+            const channel = (t?.channel as string | null) || "email";
+            try {
+              const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+              await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+            } catch (e) {
+              // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+              // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+              // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+              const msg = e instanceof Error ? e.message : String(e);
+              console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+            }
           }
         }
       }
@@ -12145,6 +12475,30 @@ async function loadCsDirectorCallBrief(
     parts.push(cxBrief);
   }
 
+  // Phase 1 of cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-
+  // escalation — for the ticket's customer, evaluate every active playbook's tier-exception ladder
+  // (thresholds pulled verbatim from the playbook_exceptions rows) and its disqualifier list
+  // (previous_exception / has_chargeback / has_chargeback_on_order) so June sees whether the
+  // customer clears a Tier-1 / Tier-2 offer BEFORE deciding escalate_founder. If eligible_for_offer
+  // is true on the matching playbook, the correct verdict is approve_remedy routing back into the
+  // playbook's offer_exception step — NOT escalate_founder (the motivating case is ticket
+  // 87ce35a1: a $1569-LTV / 19-order customer escalated for an out-of-policy renewal refund the
+  // Refund playbook's tiers were designed to save). Best-effort — a load failure returns an
+  // empty snapshot so the base brief still renders.
+  try {
+    const { loadPlaybookTierEligibility, formatPlaybookTierBrief } = await import("../src/lib/cs-director-playbook-tier-eligibility");
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    const { evaluations, stats } = await loadPlaybookTierEligibility(db, workspaceId, ticketRow?.customer_id ?? null);
+    parts.push(formatPlaybookTierBrief(evaluations, stats));
+  } catch (e) {
+    parts.push("");
+    parts.push(`PLAYBOOK EXCEPTION-TIER ELIGIBILITY: read failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
   // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
   // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
@@ -12242,6 +12596,8 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
     `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so the executor authors it via the specs SDK as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
     `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). The runner mints a CEO dashboard notification carrying both so the founder can approve/adjust in one read.`,
+    ``,
+    `TIER-LADDER-BEFORE-ESCALATION RULE (cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-escalation Phase 1): BEFORE emitting escalate_founder on an out-of-policy refund/return, consult the PLAYBOOK EXCEPTION-TIER ELIGIBILITY section of the brief. If ANY matching playbook shows \`eligible_for_offer=true\` (customer clears ≥1 tier AND no disqualifier is active), the correct verdict is approve_remedy that routes back into the playbook's offer_exception step (the sanctioned Tier-1 store_credit_return or Tier-2 refund_return SAVE) — NOT escalate_founder. escalate_founder is reserved for: clears NO tier, a disqualifier applies, or a genuine policy/authority gap the playbook can't resolve (e.g. a full refund past the CS ceiling, an identity merge, a storyline call). Motivating case: ticket 87ce35a1 was escalated for an out-of-policy renewal refund on a $1569-LTV / 19-order customer the Refund playbook's Tier-1/Tier-2 was designed to save. Cite the specific tier (\`Tier N "<exception_name>" → <resolution_type>\`) in your \`reasoning\` when you route back into the ladder so the audit trail shows the sanctioned save you picked.`,
     ``,
     brief,
     ``,

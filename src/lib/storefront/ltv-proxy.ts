@@ -28,7 +28,6 @@
  * weight recorded here.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getCustomerStatsBatch } from "@/lib/customer-stats";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -51,10 +50,6 @@ export const MIN_SUBS_FOR_ESTIMATE = 5;
  *  `storefront_ltv_calibration` signal; until then it is the initial version. */
 export const INITIAL_WEIGHTS_VERSION = 1;
 
-/** Fully-refunded order statuses — excluded from realized revenue (mirrors
- *  [[customer-stats]] + [[storefront-experiment-attribution]]). */
-const REFUNDED = new Set(["refunded", "REFUNDED", "partially_refunded", "PARTIALLY_REFUNDED"]);
-
 const PAGE = 1000;
 const MAX_PAGES = 100; // safety cap (100k rows) — logs if hit
 
@@ -62,19 +57,6 @@ function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
-}
-
-/** A line inside subscriptions.items — internal subs key by product_id (UUID); Appstle
- *  subs may carry only Shopify variant ids and won't match by product_id (excluded +
- *  reflected in the sample size). */
-function itemsMatchProduct(items: unknown, productId: string): boolean {
-  if (!Array.isArray(items)) return false;
-  for (const raw of items) {
-    if (!raw || typeof raw !== "object") continue;
-    const item = raw as Record<string, unknown>;
-    if (String(item.product_id ?? item.productId ?? "") === productId) return true;
-  }
-  return false;
 }
 
 export interface SubLTVEstimate {
@@ -93,8 +75,9 @@ export interface SubLTVEstimate {
   est_sub_ltv_cents: number;
   /** Realized subscribers sampled (subs matching the product with ≥1 paid order). */
   sample_size: number;
-  /** Cross-check: mean customer-level realized LTV of these subscribers, via
-   *  [[customer-stats]] `getCustomerStatsBatch` (all their orders, not per-sub). */
+  /** Cross-check: mean customer-level realized LTV of these subscribers (all their orders,
+   *  customer_links-group-aware, not per-sub). Computed in the `estimate_sub_ltv` RPC with
+   *  the same semantics as [[customer-stats]] `getCustomerStatsBatch`. */
   mean_subscriber_ltv_cents: number;
   flags: {
     /** No per-product COGS source — `margin_fraction` is the placeholder, not real cost. */
@@ -143,80 +126,48 @@ export async function estimateSubLTV(opts: {
     },
   });
 
-  // 1. Subscriptions for this product (scan items JSON in JS — robust across the
-  //    internal {product_id} and Appstle item shapes; page like the rest of storefront/).
-  const subIds: string[] = [];
-  const customerIds = new Set<string>();
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const { data } = await admin
-      .from("subscriptions")
-      .select("id, customer_id, items")
-      .eq("workspace_id", opts.workspaceId)
-      .order("created_at", { ascending: true })
-      .order("id", { ascending: true })
-      .range(page * PAGE, page * PAGE + PAGE - 1);
-    const batch = (data as Array<{ id: string; customer_id: string | null; items: unknown }>) || [];
-    for (const sub of batch) {
-      if (!itemsMatchProduct(sub.items, opts.product_id)) continue;
-      subIds.push(sub.id);
-      if (sub.customer_id) customerIds.add(sub.customer_id);
-    }
-    if (batch.length < PAGE) break;
-    if (page === MAX_PAGES - 1) {
-      console.warn(`[storefront-ltv-proxy] subscriptions hit ${MAX_PAGES}-page cap for ws=${opts.workspaceId}`);
-    }
-  }
-  if (subIds.length === 0) return empty(0);
+  // All aggregation runs server-side in public.estimate_sub_ltv (migration
+  // 20260708120000): the subscriptions ⋈ orders renewal/revenue rollup + the
+  // customer_links-aware LTV cross-check, both refund rules preserved verbatim. One round
+  // trip, no rows shipped, no on-disk sort.
+  //
+  // The previous JS path (1) PAGED THROUGH EVERY subscription ordered by created_at with no
+  // supporting index → a full sort spilling ~9 MB/call → 314 GB total (~98% of all instance
+  // temp-spill), and (2) shipped every order for every matched sub AND every matched
+  // customer to fold ~6 scalars in JS — which Supabase's 1000-row response cap silently
+  // TRUNCATED, undercounting renewal survival ~20% and zeroing the subscriber-LTV
+  // cross-check. Moving it into the DB fixed the cost AND the correctness. See
+  // docs/brain/libraries/db-health.md.
+  const { data, error } = await admin.rpc("estimate_sub_ltv", {
+    p_workspace_id: opts.workspaceId,
+    p_product_id: opts.product_id,
+  });
+  if (error) throw new Error(`estimate_sub_ltv RPC failed: ${error.message}`);
+  const agg = (Array.isArray(data) ? data[0] : data) as {
+    matched_subs: number | string;
+    sampled: number | string;
+    total_renewals: number | string;
+    total_paid_orders: number | string;
+    total_revenue_cents: number | string;
+    mean_subscriber_ltv_cents: number | string;
+  } | null | undefined;
 
-  // 2. Paid orders per subscription (orders.subscription_id is the universal renewal log).
-  const ordersBySub = new Map<string, number[]>(); // sub id → paid total_cents per order
-  for (const ids of chunk(subIds, 200)) {
-    const { data } = await admin
-      .from("orders")
-      .select("subscription_id, total_cents, financial_status")
-      .in("subscription_id", ids);
-    for (const o of (data as Array<{ subscription_id: string | null; total_cents: number | null; financial_status: string | null }>) || []) {
-      if (!o.subscription_id) continue;
-      if (o.financial_status && REFUNDED.has(o.financial_status)) continue;
-      const arr = ordersBySub.get(o.subscription_id) ?? [];
-      arr.push(o.total_cents ?? 0);
-      ordersBySub.set(o.subscription_id, arr);
-    }
-  }
+  // `matched_subs` = subs carrying the product (old subIds.length); `sampled` = of those,
+  // subs with ≥1 paid order. Same two early-exits as before.
+  const matchedSubs = Number(agg?.matched_subs ?? 0);
+  if (matchedSubs === 0) return empty(0);
+  const sampled = Number(agg?.sampled ?? 0);
+  if (sampled === 0) return empty(matchedSubs);
 
-  // 3. Aggregate over realized subscribers (subs with ≥1 paid order). renewal survival =
-  //    mean paid orders past the initial; lifetime revenue = mean total per subscriber.
-  let totalRenewals = 0;
-  let totalPaidOrders = 0;
-  let totalRevenueCents = 0;
-  let sampled = 0;
-  for (const totals of ordersBySub.values()) {
-    if (totals.length === 0) continue;
-    sampled += 1;
-    totalRenewals += totals.length - 1;
-    totalPaidOrders += totals.length;
-    totalRevenueCents += totals.reduce((a, b) => a + b, 0);
-  }
-  if (sampled === 0) return empty(subIds.length);
+  const totalRenewals = Number(agg!.total_renewals);
+  const totalPaidOrders = Number(agg!.total_paid_orders);
+  const totalRevenueCents = Number(agg!.total_revenue_cents);
+  const meanSubscriberLtvCents = Number(agg!.mean_subscriber_ltv_cents);
 
   const renewalSurvival = totalRenewals / sampled;
   const meanOrderCents = totalPaidOrders ? totalRevenueCents / totalPaidOrders : 0;
   const meanLifetimeRevenueCents = totalRevenueCents / sampled;
   const estSubLtvCents = Math.round(marginFraction * meanLifetimeRevenueCents);
-
-  // 4. Cross-check input via getCustomerStatsBatch (spec: reuse for realized-orders).
-  //    Customer-level LTV across ALL their orders — a sanity reference, not per-sub.
-  let meanSubscriberLtvCents = 0;
-  if (customerIds.size > 0) {
-    const stats = await getCustomerStatsBatch([...customerIds]);
-    let sum = 0;
-    let n = 0;
-    for (const s of stats.values()) {
-      sum += s.ltv_cents;
-      n += 1;
-    }
-    meanSubscriberLtvCents = n ? Math.round(sum / n) : 0;
-  }
 
   const insufficient = sampled < MIN_SUBS_FOR_ESTIMATE;
   if (cogsMissing) {

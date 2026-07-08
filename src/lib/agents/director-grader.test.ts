@@ -332,3 +332,94 @@ test("applyBoxDirectorGrade: a ceo-decided approval WITHOUT a marker row is stil
   assert.equal(r.ok, false, "a ceo-decided approval with NO marker row still isn't a director-decision grade");
   assert.equal(r.reason, "not_a_director_approval");
 });
+
+// ── Phase 2 of cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-
+// escalation — the CEO's grade of June REWARDS routing a tier-eligible out-of-policy refund back
+// into the exception ladder (approve_remedy → offer_exception) and PENALIZES an escalate_founder
+// that a tier offer would have resolved. Verification is that the rubric text baked into
+// `buildDirectorGraderSystemPrompt` for `dimension='cs_director_call'` explicitly wires those two
+// asymmetric grading signals so the supervisory cascade reinforces the correct behavior over time
+// (anti-Goodhart: CEO grades June's judgment).
+
+import { buildDirectorGraderSystemPrompt } from "./director-grader";
+
+/** Minimal stub for the ONE query buildDirectorGraderSystemPrompt makes — an admin whose
+ *  `.from("director_grader_prompts").select().eq().eq().order()` chain resolves to an empty
+ *  rules list (no calibration rules override the base rubric). */
+function makeEmptyRulesAdmin() {
+  const chain: {
+    eq: (col: string, val: unknown) => typeof chain;
+    order: (col: string, opts?: unknown) => Promise<{ data: unknown[]; error: null }>;
+  } = {
+    eq() { return chain; },
+    async order() { return { data: [], error: null }; },
+  };
+  return {
+    from(_table: string) {
+      return { select(_cols: string) { return chain; } };
+    },
+  } as unknown as Parameters<typeof buildDirectorGraderSystemPrompt>[0];
+}
+
+test("cs_director_call rubric: rewards approve_remedy routing a tier-eligible refund back into offer_exception (Phase 2)", async () => {
+  const prompt = await buildDirectorGraderSystemPrompt(makeEmptyRulesAdmin(), "ws-1", "cs_director_call");
+
+  // The rubric names the TIER-LADDER-BEFORE-ESCALATION CHECK and the ladder-clear reward branch.
+  assert.match(prompt, /TIER-LADDER-BEFORE-ESCALATION CHECK/);
+  assert.match(prompt, /REWARD an approve_remedy that routes a tier-eligible out-of-policy refund back into the playbook's offer_exception step/);
+  // The playbook_exceptions rows are the authority — the rubric must not hardcode thresholds.
+  assert.match(prompt, /from the playbook \/ playbook_exceptions rows verbatim — never hardcoded/);
+  // A verdict that cites the specific tier by name scores HIGH on soundness.
+  assert.match(prompt, /cites the tier the customer cleared[\s\S]*Tier 1 "Return for Store Credit" → store_credit_return[\s\S]*scores HIGH on soundness/);
+});
+
+test("cs_director_call rubric: penalizes escalate_founder that a tier offer would have resolved (Phase 2)", async () => {
+  const prompt = await buildDirectorGraderSystemPrompt(makeEmptyRulesAdmin(), "ws-1", "cs_director_call");
+
+  // The rubric names the missed-tier penalty branch, cites the motivating case (ticket 87ce35a1),
+  // and requires reasoning that names the missed tier — so the CEO's grade is grounded, not vibey.
+  assert.match(prompt, /PENALIZE an escalate_founder on an out-of-policy refund\/return when the brief showed `eligible_for_offer=true`/);
+  assert.match(prompt, /ticket 87ce35a1/);
+  assert.match(prompt, /Reasoning MUST cite the missed tier by name when this penalty applies/);
+});
+
+test("cs_director_call rubric: does NOT penalize escalate_founder on genuinely out-of-leash calls (guards against over-correction)", async () => {
+  const prompt = await buildDirectorGraderSystemPrompt(makeEmptyRulesAdmin(), "ws-1", "cs_director_call");
+
+  // The rubric explicitly protects the three cases the third rung exists for — clears NO tier,
+  // disqualifier applies, or a genuine out-of-leash / storyline / precedent call. Without this
+  // guard the fix would flip June's incentive too far the other way.
+  assert.match(
+    prompt,
+    /DO NOT PENALIZE escalate_founder when the customer clears NO tier, a disqualifier applies, or the call is a genuine out-of-leash \/ storyline \/ precedent judgment/,
+  );
+});
+
+test("cs_director_call rubric: the anti-Goodhart cascade explicitly cuts BOTH directions (Phase 2)", async () => {
+  const prompt = await buildDirectorGraderSystemPrompt(makeEmptyRulesAdmin(), "ws-1", "cs_director_call");
+
+  // Pre-Phase-2 the rubric only warned against under-escalation (refund-everyone). Phase 2 adds the
+  // symmetric warning against over-escalation of ladder-savable calls — a CS Director that escalates
+  // a tier-eligible refund is failing the same objective a CS Director that refund-everyones is.
+  assert.match(prompt, /a CS Director that escalates a call the sanctioned tier ladder was designed to save is ALSO failing/);
+  assert.match(prompt, /the anti-Goodhart cascade cuts BOTH directions/);
+});
+
+test("cs_director_call rubric: soundness axis explicitly consumes the tier-ladder signal (Phase 2)", async () => {
+  const prompt = await buildDirectorGraderSystemPrompt(makeEmptyRulesAdmin(), "ws-1", "cs_director_call");
+
+  // The tier-ladder outcome flows into the soundness axis so the graded fixture asymmetry
+  // (missed-tier escalate_founder → LOW; tier-cite approve_remedy → HIGH) is wired at the axis
+  // that dominates the grade.
+  assert.match(
+    prompt,
+    /On a tier-eligible out-of-policy refund\/return, an escalate_founder that ignored the ladder scores LOW[\s\S]*approve_remedy routing to offer_exception that cites the specific tier scores HIGH/,
+  );
+});
+
+test("other dimensions (auto-approval / goal-escort / cs_storyline_precedent) do NOT receive the tier-ladder criterion (dimension isolation)", async () => {
+  for (const dim of ["auto-approval", "goal-escort", "cs_storyline_precedent"] as const) {
+    const prompt = await buildDirectorGraderSystemPrompt(makeEmptyRulesAdmin(), "ws-1", dim);
+    assert.doesNotMatch(prompt, /TIER-LADDER-BEFORE-ESCALATION CHECK/, `dimension=${dim} must NOT carry the tier-ladder rubric — it's cs_director_call only`);
+  }
+});

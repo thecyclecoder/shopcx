@@ -1228,65 +1228,38 @@ export interface SpecPhaseAnomalies {
 /**
  * Integrity-scan reader for the spec_phases anomaly sweep (the reconciler's surface-don't-auto-correct
  * rail): returns (a) ORPHAN spec_phases rows whose parent `specs` row is missing, and (b) PROVENANCE-GAP
- * phases — `status='shipped'` with both `pr` and `merge_sha` null. Resolves `spec_id → {slug, workspace}`
- * internally so callers never touch raw PM tables. Read-only; folded specs are excluded from the gap set
- * (a folded spec is archived, its provenance no longer actionable). Orphans are global by nature (no parent
- * row to read a workspace from), so the orphan set is not workspace-filtered.
+ * phases — `status='shipped'` with both `pr` and `merge_sha` null. Sourced from the
+ * `list_spec_phase_anomalies(uuid)` RPC (supabase/migrations/20261003120000_list_spec_phase_anomalies_rpc.sql):
+ * the spec_phases LEFT JOIN specs runs SERVER-SIDE, so no id array crosses the wire — retiring the
+ * residual `.in("id", specIds.slice(...))` batch loop that dodged the ~16KB undici header cap
+ * (UND_ERR_HEADERS_OVERFLOW). Read-only; folded specs are excluded from the gap set (a folded spec is
+ * archived, its provenance no longer actionable). Orphans are global by nature (no parent row to read
+ * a workspace from), so the orphan set is not workspace-filtered.
  */
 export async function listSpecPhaseAnomalies(workspaceId: string): Promise<SpecPhaseAnomalies> {
   const admin = createAdminClient();
-
-  // Read all phases (id, spec_id, position, status) + the live spec id→{slug, workspace, status} map, then
-  // intersect: orphans are phases whose spec_id is absent from the live set.
-  const { data: allPhases, error: pErr } = await admin
-    .from("spec_phases")
-    .select("id, spec_id, position, status, pr, merge_sha");
-  if (pErr) throw pErr;
-  const phaseRows = (allPhases ?? []) as {
-    id: string;
+  const { data, error } = await admin.rpc("list_spec_phase_anomalies", {
+    p_workspace_id: workspaceId,
+  });
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{
+    kind: "orphan" | "provenance_gap";
+    phase_id: string;
     spec_id: string;
     position: number;
     status: Phase;
-    pr: number | null;
-    merge_sha: string | null;
-  }[];
+    slug: string | null;
+    workspace_id: string | null;
+  }>;
 
   const orphans: OrphanPhaseAnomaly[] = [];
   const provenanceGaps: ProvenanceGapAnomaly[] = [];
-  if (!phaseRows.length) return { orphans, provenanceGaps };
-
-  const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
-  // Batch the `.in("id", …)` resolve so the URL can't overflow the 16KB header limit at scale
-  // (UND_ERR_HEADERS_OVERFLOW) — same guard as listSpecs above.
-  const liveById = new Map<string, { slug: string; workspace_id: string; status: SpecStatus }>();
-  for (let i = 0; i < specIds.length; i += 200) {
-    const { data: liveSpecs, error: sErr } = await admin
-      .from("specs")
-      .select("id, slug, workspace_id, status")
-      .in("id", specIds.slice(i, i + 200));
-    if (sErr) throw sErr;
-    for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
-      liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
+  for (const r of rows) {
+    if (r.kind === "orphan") {
+      orphans.push({ phase_id: r.phase_id, spec_id: r.spec_id, position: r.position, status: r.status });
+    } else if (r.slug !== null && r.workspace_id !== null) {
+      provenanceGaps.push({ slug: r.slug, workspace_id: r.workspace_id, position: r.position });
     }
   }
-
-  for (const p of phaseRows) {
-    const parent = liveById.get(p.spec_id);
-    if (!parent) {
-      orphans.push({ phase_id: p.id, spec_id: p.spec_id, position: p.position, status: p.status });
-      continue;
-    }
-    // Provenance gap: shipped phase, no pr + no merge_sha, in the requested workspace, non-folded parent.
-    if (
-      p.status === "shipped" &&
-      p.pr === null &&
-      p.merge_sha === null &&
-      parent.workspace_id === workspaceId &&
-      parent.status !== "folded"
-    ) {
-      provenanceGaps.push({ slug: parent.slug, workspace_id: parent.workspace_id, position: p.position });
-    }
-  }
-
   return { orphans, provenanceGaps };
 }

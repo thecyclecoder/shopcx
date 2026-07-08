@@ -58,6 +58,14 @@ Current policy contract:
 
 > **Auto-grant feature removed 2026-06-03.** A previous tier-0 "System Error → Refund Without Return" exception with `auto_grant=true` existed; the detection logic was stubbed and never shipped. Sonnet escalates these scenarios directly when they come up, and `never_delivered` is handled by the replacement flow. The legacy DB row is preserved but dormant — the executor filters `!auto_grant` defensively.
 
+## Tier-ladder-before-escalation rule (June, cs-director-call)
+
+An out-of-policy refund/return from a customer who **clears one of the tiers above** and **hits no disqualifier below** is resolved via the sanctioned Tier-1 (`store_credit_return`) or Tier-2 (`refund_return`) offer routed through step 4 (`offer_exception`) — **NOT** a founder escalation. The CS Director (💬 June) MUST evaluate this ladder BEFORE emitting `escalate_founder` on any out-of-policy refund/return; escalating a tier-eligible customer wastes a sanctioned save the playbook was designed to make. Pinned by [[../specs/cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-escalation]] and enforced in [[../libraries/cs-director]] § Tier-ladder-before-escalation rule (the runtime brief loads eligibility via [[../libraries/cs-director-playbook-tier-eligibility]]; the CEO's grade of June via [[../libraries/director-grader]] `cs_director_call` rubric REWARDS the tier-cite `approve_remedy` and PENALIZES the missed-tier `escalate_founder`).
+
+`escalate_founder` remains the right verdict when the customer clears NO tier, ANY disqualifier fires (`previous_exception`, `has_chargeback`, `has_chargeback_on_order`), OR the call is a genuine out-of-leash / storyline / precedent judgment (full refund past the CS ceiling, cancel-with-refund on a legacy sub, identity merge, a policy/rule change) — those are exactly the calls the third rung exists for.
+
+**Motivating case — ticket `87ce35a1`.** June originally escalated an out-of-policy renewal-refund on a customer with LTV **$1,569 / 19 orders / no disqualifier** to the founder — even though the customer cleared BOTH Tier 1 (`store_credit_return`) and Tier 2 (`refund_return`) with no disqualifier active. The correct verdict was `approve_remedy` routing back into `offer_exception` (the sanctioned save the playbook was designed for), not a founder page.
+
 ## Disqualifiers (`disqualifier_behavior='silent'`)
 
 - **previous_exception** — customer got a playbook exception before → blocks `exceptions_only`. In-policy returns still allowed.
@@ -116,4 +124,4 @@ From [[../playbooks/README]] universal patterns:
 
 ## Related
 
-[[../README]] · [[replacement-order]] · [[../tables/playbooks]] · [[../tables/playbook_policies]] · [[../tables/playbook_exceptions]] · [[../tables/policies]] · [[../tables/returns]] · [[../tables/store_credit_log]] · [[../tables/subscriptions]] · [[../tables/chargeback_events]] · [[../journeys/cancel]] · [[../journeys/select-subscription]] · [[../lifecycles/return-pipeline]] · [[../lifecycles/cancel-flow]] · [[../integrations/shopify]] · [[../integrations/appstle]] · [[../integrations/braintree]]
+[[../README]] · [[replacement-order]] · [[../tables/playbooks]] · [[../tables/playbook_policies]] · [[../tables/playbook_exceptions]] · [[../tables/policies]] · [[../tables/returns]] · [[../tables/store_credit_log]] · [[../tables/subscriptions]] · [[../tables/chargeback_events]] · [[../journeys/cancel]] · [[../journeys/select-subscription]] · [[../lifecycles/return-pipeline]] · [[../lifecycles/cancel-flow]] · [[../integrations/shopify]] · [[../integrations/appstle]] · [[../integrations/braintree]] · [[../libraries/cs-director]] · [[../libraries/cs-director-playbook-tier-eligibility]] · [[../libraries/director-grader]]

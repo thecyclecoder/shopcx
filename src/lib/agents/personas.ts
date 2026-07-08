@@ -277,7 +277,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
     dot: "bg-purple-500", ring: "bg-purple-50 dark:bg-purple-900/20", accent: "text-purple-600 dark:text-purple-400",
   },
   "product-seed": {
-    key: "product-seed", name: "Sol", role: "Product Seeding", emoji: "🩷",
+    key: "product-seed", name: "Piper", role: "Product Seeding", emoji: "🩷",
     personality: "Takes a product from nothing to published — pulls intel, builds the page, ships the catalog row.",
     mascotId: "default", avatarUrl: `${AV}sol-productseed.jpg?v=4`,
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",

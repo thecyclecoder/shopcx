@@ -72,6 +72,7 @@ Webhook HMAC verified with Client Secret.
 - **`shopify_customer_id` / `shopify_order_id` etc. stored as numeric strings**, never as ints. Joins to our tables use UUIDs — see [[../tables/customers]] gotchas.
 - **Webhook delivery is at-least-once.** Handlers must be idempotent.
 - **Multipass tokens are short-lived** (5 min). Generate fresh per portal redirect.
+- **`orders/create` + `orders/updated` seed `orders.payment_details` (checkout breakdown).** As of Phase 2 of [[../specs/shopify-order-confirmation-emails]], `handleOrderEvent` writes `{ subtotal_cents, tax_cents, shipping_cents, discount_cents }` (from `payload.subtotal_price` / `payload.total_tax` / `payload.shipping_lines[].price` fallback `payload.total_shipping_price_set` / `payload.total_discounts`) MERGED with the existing `payment_details` so the fraud-detector's card fingerprint (`gateway`, `card_bin`, `card_last4`, …) survives the update-refire. The `line_items` JSONB now carries `variant_title` + `total_discount_cents` + `product_id` alongside the pre-existing `{ title, quantity, price_cents, sku, variant_id }`. See [[../libraries/shopify-webhooks]] gotchas.
 
 ## Files
 
