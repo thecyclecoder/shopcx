@@ -1,0 +1,1 @@
+- **Reese ignores goal-branch drift, and a confirmed reverse-drift lands in the CEO inbox** · verified 2026-07-08 · → [[../libraries/spec-drift]]
