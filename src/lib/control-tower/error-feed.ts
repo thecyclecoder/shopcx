@@ -571,12 +571,24 @@ export function isForeignGoTrueEdgeNoise(
  *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
  *      `dial ... (i/o timeout | operation was canceled)` phrase.
  *
- * Narrowly gated so everything actionable still surfaces / pages on first sight: `context
- * canceled` (browser-abort) + a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE
- * host (a real Postgres pooler on our side — not the `host=localhost user=supabase_auth_admin`
- * GoTrue-internal shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`,
- * rate limits, signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504
- * on `/user` with a non-GET (mutation) method all carry different shapes and stay captured.
+ *  (d) timeout-context-canceled ([[../specs/error-feed-drop-supabase-gotrue-auth-log-timeout-context-cancel]],
+ *      `supabase-logs:c9eb05fd1d3fb82c`) — GoTrue's `/user` handler surfaces a request whose
+ *      read timer fires AFTER the parent context was already canceled (the Go idiom for a
+ *      browser abort racing GoTrue's own read timer) with the EXACT phrase `Unhandled server
+ *      error: timeout: context canceled` (case-insensitive, trimmed). The prior fix scoped
+ *      the raw `context canceled` substring as transient via `isTransientSupabaseLogNoise`,
+ *      but the chronic saturation cadence recurred inside `TRANSIENT_RECUR_WINDOW_MS` and
+ *      escalated on every cycle. The narrow exact-phrase drop leaves the raw `context
+ *      canceled` substring on any OTHER GoTrue message (a real browser-abort on `/token` /
+ *      `/admin` / etc.) still routed through the transient classifier.
+ *
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: the raw
+ * `context canceled` substring on a non-exact-shape GoTrue message (browser-abort elsewhere)
+ * plus a `dial ... i/o timeout` / `dial ... canceled` on a REMOTE host (a real Postgres
+ * pooler on our side — not the `host=localhost user=supabase_auth_admin` GoTrue-internal
+ * shape) stay transient via `isTransientSupabaseLogNoise`; `invalid JWT`, rate limits,
+ * signature mismatches, a 504 on `/token` / `/admin`, a non-504 5xx, or a 504 on `/user`
+ * with a non-GET (mutation) method all carry different shapes and stay captured.
  */
 export function isForeignGoTrueAuthLogNoise(
   msg: string | null | undefined,
@@ -585,6 +597,10 @@ export function isForeignGoTrueAuthLogNoise(
   // (a) context-deadline shape — msg-only, exact phrase.
   const text = (msg ?? "").trim().toLowerCase();
   if (text === "unhandled server error: context deadline exceeded") return true;
+  // (d) timeout-context-canceled shape — msg-only, exact phrase. The sibling of (a): a
+  // browser-abort racing GoTrue's own read timer against its Postgres backend. Exact-match
+  // only so the raw `context canceled` substring on other GoTrue surfaces stays transient.
+  if (text === "unhandled server error: timeout: context canceled") return true;
   // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
   const m = (msg ?? "").trimStart();
   if (m.startsWith("504: Processing this request timed out")) {

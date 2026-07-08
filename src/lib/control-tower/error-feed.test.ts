@@ -508,12 +508,48 @@ test("isForeignGoTrueAuthLogNoise drops the exact phrase (case + whitespace inse
   assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: context deadline exceeded  "), true);
 });
 
-test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (context canceled / invalid JWT / rate-limit)", () => {
-  // The browser-abort sibling — still routed through the transient class.
-  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+test("isForeignGoTrueAuthLogNoise KEEPS other GoTrue error phrases (invalid JWT / rate-limit)", () => {
   // Actionable GoTrue errors — must still surface / page on first sighting.
   assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
   assert.equal(isForeignGoTrueAuthLogNoise("rate limit exceeded"), false);
+});
+
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-timeout-context-cancel) ──
+// The exact-phrase `Unhandled server error: timeout: context canceled` shape — a browser abort
+// racing GoTrue's own read timer. Prior fix routed the raw `context canceled` substring through
+// the transient classifier, but the chronic saturation cadence recurred inside the transient
+// window and escalated every cycle (supabase-logs:c9eb05fd1d3fb82c). Drop AT CAPTURE — exact
+// phrase only so the raw `context canceled` substring on other GoTrue paths stays transient.
+
+test("isForeignGoTrueAuthLogNoise drops the exact timeout: context canceled phrase (case + whitespace insensitive)", () => {
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("unhandled server error: timeout: context canceled"), true);
+  assert.equal(isForeignGoTrueAuthLogNoise("  Unhandled server error: timeout: context canceled  "), true);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS near-miss variants of the timeout: context canceled phrase", () => {
+  // A bare `context canceled` substring on a non-exact GoTrue message stays transient — a
+  // real browser-abort on `/token` / `/admin` / etc. still routes through the classifier.
+  assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
+  // Embedded (prefix/suffix) — exact-match check rejects it. The raw substring on the
+  // original phrase still catches via the transient classifier's `context canceled` matcher.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("prefix Unhandled server error: timeout: context canceled suffix"),
+    false,
+  );
+  // Sibling phrasing — `context deadline exceeded` is (a), not (d). Different signature.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context deadline exceeded"),
+    false,
+  );
+  // Missing the `timeout:` marker — no longer the (d) shape.
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: context canceled"), false);
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS real auth error shapes even when they mention timeout / canceled", () => {
+  // Actionable GoTrue errors — must still surface / page on first sighting.
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT"), false);
 });
 
 // ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-localhost-dial-time) ──
