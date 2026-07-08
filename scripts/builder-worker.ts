@@ -12264,7 +12264,7 @@ async function runCsDirectorCallJob(job: Job) {
     // `executeSonnetDecision` + `deliverTicketMessage` in Phase 2; author_spec → specs SDK in
     // Phase 3; escalate_founder → the runner already mints the CEO card here, so the executor stub
     // logs and defers) — but the routing contract exists and the audit contract advances.
-    let applyResult: { ok: boolean; handler?: string; reason?: string } = { ok: true, handler: "not_run" };
+    let applyResult: { ok: boolean; handler?: string; reason?: string; needs_attention?: boolean; error?: string; message_delivered?: boolean } = { ok: true, handler: "not_run" };
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -12556,8 +12556,16 @@ async function runCsDirectorCallJob(job: Job) {
 
     // cs-director-call-phase-2-executor-fires-june-verdicts Phase 1 — surface which executor
     // handler took the verdict on the log_tail (approve_remedy / author_spec / escalate_founder /
-    // noop) so an audit reader sees BOTH what June decided AND how the mutator routed it.
-    const applyLine = `apply → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${applyResult.reason ? ` · reason=${applyResult.reason}` : ""}`;
+    // noop) so an audit reader sees BOTH what June decided AND how the mutator routed it. Phase 2
+    // adds the `message_delivered` suffix so the log_tail shows whether the customer actually heard
+    // back on an approve_remedy verdict — the derived-from ticket 115350d5's original failure was a
+    // silent "verdict recorded but nothing shipped", and this line is the primary place a human
+    // scanning the queue sees WHAT actually happened.
+    const applyLine = `apply → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${
+      applyResult.reason ? ` · reason=${applyResult.reason}` : ""
+    }${applyResult.message_delivered != null ? ` · message_delivered=${applyResult.message_delivered}` : ""}${
+      applyResult.needs_attention ? " · NEEDS_ATTENTION" : ""
+    }`;
     const summary = [
       `decision=${verdict.decision}`,
       applyLine,
@@ -12574,6 +12582,24 @@ async function runCsDirectorCallJob(job: Job) {
       console.log(`${tag} verdict=${verdict.decision} (session errored — recorded + logged)`);
       return;
     }
+
+    // cs-director-call-phase-2-executor-fires-june-verdicts Phase 2 — a failed remedy action
+    // (approve_remedy where executeSonnetDecision escalated / plan malformed / delivery threw)
+    // MUST park the job `needs_attention` so a human sees WHY on the queue. The customer never
+    // heard a false "we fixed it" (the executor's own send path was suppressed + we skipped
+    // deliverTicketMessage on failure — see handleApproveRemedy), and the audit row landed on the
+    // director_activity write above; parking `needs_attention` is what the derived-from ticket
+    // 115350d5 required so the escalation reaches an operator instead of dead-ending in the log.
+    if (applyResult.needs_attention) {
+      await update(job.id, {
+        status: "needs_attention",
+        error: applyResult.error ?? `cs-director-call ${verdict.decision} action failed — human review needed`,
+        log_tail: summary.slice(-2000),
+      });
+      console.warn(`${tag} verdict=${verdict.decision} — needs_attention (${applyResult.reason ?? "unspecified"})`);
+      return;
+    }
+
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision}`);
   } catch (e) {
