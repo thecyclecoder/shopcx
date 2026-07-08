@@ -7942,6 +7942,17 @@ async function closeOutSpecForFold(workspaceId: string, slug: string): Promise<{
   }
   const { error } = await db.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: slug, p_user: null });
   if (error) return { ok: false, error: `enqueue_fold failed: ${error.message}`, flipped };
+  // spec-timecard-chokepoint-instrumentation Phase 3 — enqueue_fold coalesces (reuse-or-create a
+  // fold-batch row); either way this slug is now queued for the fold lane. Job_id is null because
+  // the RPC returns nothing — the fold-batch row's id is a shared batch, not a per-slug identifier.
+  await emitTimecard({
+    workspace_id: workspaceId,
+    spec_slug: slug,
+    phase_index: null,
+    event_kind: "job_queued",
+    actor: "closeOutSpecForFold",
+    metadata: { kind: "fold" },
+  });
   return { ok: true, flipped };
 }
 
@@ -8563,6 +8574,16 @@ async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise
       console.warn(`${tag} re-enqueue fold failed: ${error.message}`);
       return;
     }
+    // spec-timecard-chokepoint-instrumentation Phase 3 — the snapshot-race sweep re-queues the fold
+    // lane for a slug that landed in pending_folds after this job's initial snapshot.
+    await emitTimecard({
+      workspace_id: workspaceId,
+      spec_slug: pendingSlug,
+      phase_index: null,
+      event_kind: "job_queued",
+      actor: "reEnqueueFoldIfPending",
+      metadata: { kind: "fold", snapshot_race: true },
+    });
     console.log(`${tag} ↻ re-enqueued a fold-batch — pending_folds rows arrived during this job (snapshot-race sweep)`);
   } catch (e) {
     console.warn(`${tag} re-enqueue fold errored: ${e instanceof Error ? e.message : String(e)}`);
@@ -22204,6 +22225,20 @@ async function main() {
       // mid-run queued_resume flip); a job dispatched with null started fresh (cache-cold).
       resumed: !!job.claude_session_id,
     });
+    // spec-timecard-chokepoint-instrumentation Phase 3 — every claim_agent_job return that carries a
+    // spec_slug lands one `job_claimed`. This single seam covers every kind's claim lane (the RPC just
+    // flipped the row to `building`); a triage-escalations claim with spec_slug=null is skipped inside
+    // emitTimecard by the SDK's caller-side guard. Best-effort — never blocks the launch.
+    if (job.spec_slug) {
+      void emitTimecard({
+        workspace_id: job.workspace_id,
+        spec_slug: job.spec_slug,
+        phase_index: null,
+        event_kind: "job_claimed",
+        actor: "worker",
+        metadata: { kind: job.kind, job_id: job.id, box_id: WORKER_BOX_ID },
+      });
+    }
     // Stamp an initial heartbeat at claim time (stale-session-reaper) so a just-claimed job that hasn't
     // emitted its first stream-json line yet isn't immediately treated as stale — the reaper's N-minute
     // window starts now, and runBoxSession's per-line bumps keep it fresh while the session is alive.
