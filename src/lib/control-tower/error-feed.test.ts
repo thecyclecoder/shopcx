@@ -659,6 +659,48 @@ test("isForeignGoTrueAuthLogNoise KEEPS a longer/prefixed variant (postgres/api 
   );
 });
 
+// ── isForeignGoTrueAuthLogNoise (error-feed-drop-supabase-gotrue-auth-log-unable-to-fetch-rec) ──
+// GoTrue's `/user` SELECT-on-auth.users emits `Unhandled server error: unable to fetch
+// records: context canceled` when the parent HTTP request context dies mid-query — normal
+// browser behavior (tab close, navigation away, React StrictMode double-mount aborting an
+// in-flight `supabase.auth.getUser()`). Already routed through the transient class via the
+// `context canceled` substring, but the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS`
+// and paged a Platform owner on a healthy loop (supabase-logs:f5b02a707c3d4e49). Drop AT
+// CAPTURE — exact phrase only so a plain `context canceled` on any non-/user path stays
+// transient via `isTransientSupabaseLogNoise`.
+
+test("isForeignGoTrueAuthLogNoise drops the exact 'unable to fetch records: context canceled' phrase (case + whitespace insensitive)", () => {
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("Unhandled server error: unable to fetch records: context canceled"),
+    true,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("unhandled server error: unable to fetch records: context canceled"),
+    true,
+  );
+  assert.equal(
+    isForeignGoTrueAuthLogNoise("  Unhandled server error: unable to fetch records: context canceled  "),
+    true,
+  );
+});
+
+test("isForeignGoTrueAuthLogNoise KEEPS a plain 'context canceled' on a non-/user path (still routed through the transient class)", () => {
+  // A plain `context canceled` on a different path — NOT the exact (d) phrase, so still
+  // captured. `isTransientSupabaseLogNoise('auth', …)` still tags it transient (recur window
+  // catches a chronic upstream outage) so a real problem still surfaces.
+  assert.equal(isForeignGoTrueAuthLogNoise("Unhandled server error: timeout: context canceled"), false);
+  assert.equal(isForeignGoTrueAuthLogNoise("context canceled"), false);
+  // A longer/embedded variant of the exact (d) phrase — the exact-match contract keeps it.
+  assert.equal(
+    isForeignGoTrueAuthLogNoise(
+      "prefix Unhandled server error: unable to fetch records: context canceled suffix",
+    ),
+    false,
+  );
+  // Actionable GoTrue errors still surface / page on first sighting.
+  assert.equal(isForeignGoTrueAuthLogNoise("invalid JWT: signature mismatch"), false);
+});
+
 test("isTransientSupabaseLogNoise returns false on empty postgres message", () => {
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: "" }), false);
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "ERROR", message: null }), false);

@@ -547,7 +547,7 @@ export function isForeignGoTrueEdgeNoise(
  * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
  * passes just the message), the 504 shape needs the request JSON.
  *
- * Three distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
+ * Four distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
  * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
  * owner in a loop they can't fix):
  *
@@ -571,7 +571,19 @@ export function isForeignGoTrueEdgeNoise(
  *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
  *      `dial ... (i/o timeout | operation was canceled)` phrase.
  *
- *  (d) timeout-context-canceled ([[../specs/error-feed-drop-supabase-gotrue-auth-log-timeout-context-cancel]],
+ *  (d) `/user` SELECT-on-auth.users browser-abort passthrough
+ *      ([[../specs/error-feed-drop-supabase-gotrue-auth-log-unable-to-fetch-rec]],
+ *      `supabase-logs:f5b02a707c3d4e49`, 8 occ / 4 days) — when the parent HTTP request
+ *      context dies mid-query on GoTrue's `/user` SELECT-on-`auth.users` path (browser tab
+ *      closed, navigation away, React StrictMode double-mount aborting an in-flight
+ *      `supabase.auth.getUser()`), GoTrue emits the EXACT phrase `Unhandled server error:
+ *      unable to fetch records: context canceled` (case-insensitive, trimmed). Already
+ *      routed through `isTransientSupabaseLogNoise` via the `context canceled` substring,
+ *      but the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS` on a healthy loop, so
+ *      the transient class isn't enough — drop AT CAPTURE. The phrase is unique to
+ *      GoTrue's SELECT-on-`auth.users` code path; nothing in OUR code can emit it.
+ *
+ *  (e) timeout-context-canceled ([[../specs/error-feed-drop-supabase-gotrue-auth-log-timeout-context-cancel]],
  *      `supabase-logs:c9eb05fd1d3fb82c`) — GoTrue's `/user` handler surfaces a request whose
  *      read timer fires AFTER the parent context was already canceled (the Go idiom for a
  *      browser abort racing GoTrue's own read timer) with the EXACT phrase `Unhandled server
@@ -597,7 +609,12 @@ export function isForeignGoTrueAuthLogNoise(
   // (a) context-deadline shape — msg-only, exact phrase.
   const text = (msg ?? "").trim().toLowerCase();
   if (text === "unhandled server error: context deadline exceeded") return true;
-  // (d) timeout-context-canceled shape — msg-only, exact phrase. The sibling of (a): a
+  // (d) /user SELECT-on-auth.users browser-abort — msg-only, exact phrase. The phrase is
+  // unique to GoTrue's SELECT-on-auth.users code path (nothing in OUR code emits it), so an
+  // exact-match drop cannot swallow an actionable error; a plain `context canceled` on any
+  // other path carries a different msg and still routes through the transient class.
+  if (text === "unhandled server error: unable to fetch records: context canceled") return true;
+  // (e) timeout-context-canceled shape — msg-only, exact phrase. The sibling of (a): a
   // browser-abort racing GoTrue's own read timer against its Postgres backend. Exact-match
   // only so the raw `context canceled` substring on other GoTrue surfaces stays transient.
   if (text === "unhandled server error: timeout: context canceled") return true;
