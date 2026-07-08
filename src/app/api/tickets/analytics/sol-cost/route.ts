@@ -29,8 +29,20 @@
  *       pre_sol: { count, avg: number | null },
  *       sol:     { count, avg: number | null }
  *     },
- *     resessions: Array<{ supersede_count: number, tickets: number }>
+ *     resessions: Array<{ supersede_count: number, tickets: number }>,
+ *     cap_hits: {
+ *       total_7d: number,
+ *       per_playbook_slug: Record<string, number>,
+ *       per_inflection_kind: { frustration: number, drift: number }
+ *     }
  *   }
+ *
+ * `cap_hits` — Phase 3 of docs/brain/specs/sol-runaway-re-session-cap-guardrail.md.
+ * Fixed 7-day rolling window (independent of `window_days`) over
+ * `ticket_resolution_events WHERE reasoning='sol:cap-hit'`, so the "Sol cap-hits (7d)"
+ * subline on the Sol economics tile has a stable time horizon regardless of the tile's
+ * cost window. `per_playbook_slug` is keyed by the ticket's current `active_playbook_id`
+ * (mapped to `playbooks.name`); tickets not on a playbook bucket into `"none"`.
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
@@ -141,6 +153,80 @@ export async function GET(req: Request) {
     .map(([supersede_count, tickets]) => ({ supersede_count, tickets }))
     .sort((a, b) => a.supersede_count - b.supersede_count);
 
+  // Phase 3 of sol-runaway-re-session-cap-guardrail — cap-hit tile data.
+  // Fixed 7-day window (per spec), workspace-scoped, filtered on the router-authored
+  // `sol:cap-hit` sentinel.
+  const capHitsSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const capHits: {
+    total_7d: number;
+    per_playbook_slug: Record<string, number>;
+    per_inflection_kind: { frustration: number; drift: number };
+  } = {
+    total_7d: 0,
+    per_playbook_slug: {},
+    per_inflection_kind: { frustration: 0, drift: 0 },
+  };
+  try {
+    const { data: capHitRows } = await admin
+      .from("ticket_resolution_events")
+      .select("ticket_id, chosen")
+      .eq("workspace_id", workspaceId)
+      .eq("reasoning", "sol:cap-hit")
+      .gte("staged_at", capHitsSince);
+    const rows = (capHitRows ?? []) as Array<{
+      ticket_id: string;
+      chosen: Record<string, unknown> | null;
+    }>;
+    capHits.total_7d = rows.length;
+
+    // Resolve each cap-hit ticket's current active_playbook_id → playbooks.name for the
+    // per_playbook_slug bucket. Tickets not on a playbook (or with a stale/missing playbook)
+    // bucket into "none". Deduped by ticket_id so we make a single lookup per unique ticket.
+    const uniqueTicketIds = Array.from(new Set(rows.map((r) => r.ticket_id)));
+    const playbookByTicket = new Map<string, string>();
+    if (uniqueTicketIds.length > 0) {
+      const { data: tks } = await admin
+        .from("tickets")
+        .select("id, active_playbook_id")
+        .eq("workspace_id", workspaceId)
+        .in("id", uniqueTicketIds);
+      const tkRows = (tks ?? []) as Array<{ id: string; active_playbook_id: string | null }>;
+      const activePbIds = Array.from(
+        new Set(
+          tkRows
+            .map((t) => t.active_playbook_id)
+            .filter((v): v is string => typeof v === "string"),
+        ),
+      );
+      const nameByPbId = new Map<string, string>();
+      if (activePbIds.length > 0) {
+        const { data: pbs } = await admin
+          .from("playbooks")
+          .select("id, name")
+          .eq("workspace_id", workspaceId)
+          .in("id", activePbIds);
+        for (const p of ((pbs ?? []) as Array<{ id: string; name: string | null }>)) {
+          if (typeof p.name === "string" && p.name.length > 0) nameByPbId.set(p.id, p.name);
+        }
+      }
+      for (const t of tkRows) {
+        const name = t.active_playbook_id ? (nameByPbId.get(t.active_playbook_id) ?? "none") : "none";
+        playbookByTicket.set(t.id, name);
+      }
+    }
+    for (const r of rows) {
+      const slug = playbookByTicket.get(r.ticket_id) ?? "none";
+      capHits.per_playbook_slug[slug] = (capHits.per_playbook_slug[slug] ?? 0) + 1;
+      const kindRaw = (r.chosen ?? {})["kind"];
+      const kind = kindRaw === "frustration" || kindRaw === "drift" ? kindRaw : null;
+      if (kind === "frustration") capHits.per_inflection_kind.frustration += 1;
+      else if (kind === "drift") capHits.per_inflection_kind.drift += 1;
+    }
+  } catch {
+    // ticket_resolution_events might be temporarily unavailable — the tile renders zeros
+    // rather than 500'ing the whole analytics page.
+  }
+
   // Phase 4: latest sol_replay_runs median as the shadow baseline. Null when
   // no replay has run yet or the table doesn't exist (pre-migration).
   let shadowBaselineCents: number | null = null;
@@ -194,5 +280,6 @@ export async function GET(req: Request) {
       },
     },
     resessions,
+    cap_hits: capHits,
   });
 }

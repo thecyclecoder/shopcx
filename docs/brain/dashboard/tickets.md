@@ -32,7 +32,7 @@ Master ticket queue. Filters by status, channel, assignee, tags, snooze, escalat
 - `escalated/` → [[tickets/escalated]]
 - `improve/` → [[tickets/improve]]
 - `todos/` → [[tickets/todos]]
-- `analytics/` → [[tickets__analytics]] — Selective-clarify rate + Sol economics tiles
+- `analytics/` → [[tickets__analytics]] — Selective-clarify rate + Sol economics tiles. The **Sol economics tile** carries a small "**Sol cap-hits (7d)**" subline below the re-session histogram — a fixed 7-day rolling count of `ticket_resolution_events WHERE reasoning='sol:cap-hit'` sourced from `GET /api/tickets/analytics/sol-cost`'s `cap_hits.total_7d` field, broken down by inflection kind (`frustration` / `drift`). See [[../specs/sol-runaway-re-session-cap-guardrail]] § Phase 3 — the same read backs the [[../libraries/cs-director-digest]] cap-hit `early_warning` storyline that fires when the count exceeds `ai_channel_config.sol_cap_hit_alarm` (default `5`).
 
 ## API endpoints called
 

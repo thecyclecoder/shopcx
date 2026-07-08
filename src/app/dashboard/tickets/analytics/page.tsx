@@ -32,6 +32,12 @@ interface SolCost {
   cost: { overall: SolCostStats; pre_sol: SolCostStats; sol: SolCostStats };
   csat: { pre_sol: SolCostCsat; sol: SolCostCsat };
   resessions: Array<{ supersede_count: number; tickets: number }>;
+  // Phase 3 of docs/brain/specs/sol-runaway-re-session-cap-guardrail.md.
+  cap_hits: {
+    total_7d: number;
+    per_playbook_slug: Record<string, number>;
+    per_inflection_kind: { frustration: number; drift: number };
+  };
 }
 
 function centsToDollars(n: number): string {
@@ -213,6 +219,12 @@ function AnalyticsInner() {
                 </div>
               </div>
             )}
+            {/* Phase 3 of docs/brain/specs/sol-runaway-re-session-cap-guardrail.md —
+                fixed 7-day rolling window over ticket_resolution_events sol:cap-hit rows. */}
+            <p className="mt-3 text-[10px] text-zinc-500">
+              Sol cap-hits (7d): <span className="font-mono text-zinc-700 dark:text-zinc-300">{solCost.cap_hits.total_7d.toLocaleString()}</span>
+              {" "}(frustration {solCost.cap_hits.per_inflection_kind.frustration.toLocaleString()} · drift {solCost.cap_hits.per_inflection_kind.drift.toLocaleString()})
+            </p>
           </>
         )}
       </div>

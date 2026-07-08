@@ -23,6 +23,7 @@ Per-(workspace, channel) AI agent settings — personality, confidence threshold
 | `ai_turn_limit` | `int4` | — | default: `4` |
 | `problem_lockin_threshold` | `numeric` | — | default: `0.7` · CHECK ∈ [0,1] · read by [[../lifecycles/ai-multi-turn]] § Confidence-gated problem lock-in — when the latest [[ticket_resolution_events]] row on a ticket has `confidence >=` this value, its `problem` is injected as `ESTABLISHED PROBLEM (locked in at T{N})` into the Sonnet system prompt. See [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]. |
 | `sol_max_resessions` | `integer` | ✓ | default: `3` · **NULL = uncapped** (per the parent goal's "never rewards ... but bounds re-sessions" language — a workspace can opt out). Read by the router (Phase 2 of [[../specs/sol-runaway-re-session-cap-guardrail]]) — when [[ticket_directions]].`resession_count >=` this value, the next inflection SKIPS the fresh Sol dispatch and escalates the ticket to the routine lane with `escalation_reason='sol_resession_cap_hit'` instead. |
+| `sol_cap_hit_alarm` | `integer` | — | default: `5` · Phase 3 alarm threshold for the CS Director digest's cap-hit `early_warning` storyline (Fix 1 of [[../specs/sol-runaway-re-session-cap-guardrail]]). When the rolling 7-day count of `ticket_resolution_events` rows with `reasoning='sol:cap-hit'` STRICTLY EXCEEDS this value, [[../libraries/cs-director-digest]] emits one `early_warning` storyline into the next composed [[cs_director_digests]] row so June sees it in the next digest cycle. |
 
 ## Foreign keys
 
