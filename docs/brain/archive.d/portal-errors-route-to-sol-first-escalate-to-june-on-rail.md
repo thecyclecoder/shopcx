@@ -1,0 +1,1 @@
+- **Portal errors route to Sol first-touch, escalate to June only on rail-hit** · verified 2026-07-08 · → [[../libraries/portal__enqueue-sol-first-touch]]
