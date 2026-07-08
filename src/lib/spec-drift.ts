@@ -40,6 +40,7 @@ import {
   stampPhaseShipped,
   type SpecPhaseRow,
 } from "@/lib/specs-table";
+import { listGoals, type GoalRow } from "@/lib/goals-table";
 
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 function ghToken(): string | undefined {
@@ -60,6 +61,55 @@ async function gh(method: string, path: string, body?: unknown): Promise<{ ok: b
   });
   const text = await res.text();
   return { ok: res.ok, status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
+}
+
+// ── Goal-aware guard (reese-goal-aware-drift Phase 1) ───────────────────────────────────────────
+//
+// A goal member spec's `claude/build-{slug}` branch merges onto `goal/{goal-slug}` (M4 — stamps
+// `specs.goal_branch_sha`), NOT onto `main`. The goal's `claude/goal-{slug}` branch only lands on
+// main atomically at M5 (stamps `goals.main_merge_sha`). Between M4 and M5 the phase's code is on
+// the goal branch, not main — a shipped phase in that window looks "code missing from main" to a
+// naive path check, and the reconciler would open a reverse-drift row against a phase that is
+// accumulating normally.
+//
+// This guard says: if the spec is a goal member whose owning goal has not promoted to main yet
+// (`goals.main_merge_sha === null`), do NOT classify the phase as reverse-drift. Once the goal
+// promotes, the normal on-main check applies and a genuine post-merge revert still surfaces.
+//
+// Pure helper — takes the loaded goal list and the spec's milestone_id. Feeds both the reconciler's
+// suspect-set filter and the pre-filter's short-circuit. Testable without DB or GitHub.
+
+export interface GoalPendingVerdict {
+  /** True iff the spec belongs to a goal whose atomic goal→main promotion has not landed. */
+  pending: boolean;
+  /** The owning goal's slug when `pending` is true (for the reasoning line the caller emits). */
+  goalSlug: string | null;
+  /** The owning goal's title when `pending` is true. */
+  goalTitle: string | null;
+}
+
+/**
+ * Is this spec a member of a goal whose `goals.main_merge_sha` is still null? Pure — a
+ * standalone spec (no `milestone_id`) always returns `pending: false`. A milestone whose parent
+ * goal isn't in `goals` (stale, deleted) returns `pending: false` — the guard fails safe (never
+ * suppresses a real drift). Once the goal promotes (`main_merge_sha` set) the return flips to
+ * `pending: false` and the normal on-main check applies.
+ */
+export function isGoalPendingPromotion(
+  milestoneId: string | null | undefined,
+  goals: readonly GoalRow[],
+): GoalPendingVerdict {
+  if (!milestoneId) return { pending: false, goalSlug: null, goalTitle: null };
+  for (const g of goals) {
+    for (const m of g.milestones) {
+      if (m.id !== milestoneId) continue;
+      if (g.main_merge_sha === null) {
+        return { pending: true, goalSlug: g.slug, goalTitle: g.title };
+      }
+      return { pending: false, goalSlug: g.slug, goalTitle: g.title };
+    }
+  }
+  return { pending: false, goalSlug: null, goalTitle: null };
 }
 
 // ── Phase shape (DB row → drift-reconciler view) ─────────────────────────────────────────────────
@@ -243,6 +293,26 @@ export async function driftPreFilterPhase(
   if (!spec) return null;
   const phase = driftPhasesFromRows(spec.phases).find((p) => p.index === phaseIndex);
   if (!phase) return null;
+
+  // Goal-aware guard (reese-goal-aware-drift Phase 1): a shipped phase whose spec is a member of a
+  // goal that has not yet promoted to main lives on the goal branch, not main. Report it as
+  // `code-present` with a goal-pending reasoning so the caller auto-resolves any stale drift row
+  // without a Max session and without escalation. Fail-open — a listGoals read failure falls
+  // through to the normal path check (never suppress a real drift on a hiccup).
+  if (spec.milestone_id) {
+    try {
+      const goals = await listGoals(workspaceId);
+      const gp = isGoalPendingPromotion(spec.milestone_id, goals);
+      if (gp.pending) {
+        return {
+          verdict: "code-present",
+          reasoning: `goal-pending: spec is a member of goal ${gp.goalSlug ?? ""} whose atomic goal→main promotion has not landed (main_merge_sha is null) — the phase's code lives on the goal branch, not main; not reverse-drift`,
+          symbolsFound: [],
+          pathsMissing: [],
+        };
+      }
+    } catch { /* fall through to normal path/symbol checks */ }
+  }
 
   const paths = extractCodePaths(phase.body);
   if (!paths.length) return null; // nothing to verify → let the session decide (rare — reverse-drift phases usually name paths)
@@ -1010,10 +1080,19 @@ export async function runSpecDriftReconciler(workspaceId: string): Promise<Drift
   //     verification, we read the typed body straight from the canonical row. Through the specs-table SDK
   //     (no raw PM SQL — pm-db-agent-toolkit); filter to shipped phases of non-folded specs in memory.
   const specRows = await listSpecs(workspaceId);
+  // Goal-aware guard (reese-goal-aware-drift Phase 1) — load the goal list once + skip specs whose
+  // owning goal has not promoted to main yet. A goal-member's shipped phase's code lives on the
+  // goal branch until the goal atomically promotes; scanning it against main would false-flag a
+  // reverse-drift row. Any existing open row for such a spec auto-resolves via `syncReverseDriftRows`
+  // (which resolves any open row not in the current suspect set). Fail-open — a `listGoals` read
+  // failure falls back to the non-goal-aware scan (never suppress a real drift on a hiccup).
+  let goalsForGuard: GoalRow[] = [];
+  try { goalsForGuard = await listGoals(workspaceId); } catch { goalsForGuard = []; }
   const shippedBySlug = new Map<string, { position: number; title: string; body: string }[]>();
   for (const spec of specRows) {
     if (spec.status === "folded") continue;
     if (archived.has(spec.slug)) continue;
+    if (isGoalPendingPromotion(spec.milestone_id, goalsForGuard).pending) continue;
     const shipped = spec.phases.filter((p) => p.status === "shipped");
     if (!shipped.length) continue;
     shippedBySlug.set(
@@ -1173,6 +1252,162 @@ async function syncReverseDriftRows(workspaceId: string, suspects: { slug: strin
       await admin.from("spec_drift").update({ status: "resolved", last_seen_at: nowIso }).eq("id", row.id);
     }
   }
+}
+
+// ── CEO inbox routing for confirmed reverse-drift (reese-goal-aware-drift Phase 2) ─────────────
+//
+// Before this phase a confirmed reverse-drift only reached the CEO as a director-board message —
+// easy to miss when the board scrolls or the founder isn't looking at it. The board post STAYS
+// (the CS/DevOps rooms still need the visibility), but each confirmed reverse-drift ALSO surfaces
+// as an actionable CEO inbox item — the `dashboard_notifications` `agent_approval_request` shape
+// every other escalate_founder card uses (author-spec.ts:979, fleet-spend-governor.ts:321), so it
+// appears alongside the founder's other approvals with the spec + phase + missing-code detail.
+//
+// De-dupe: a stable per-(workspace, spec, phase) `dedupe_key` — a persistent drift row bumps the
+// existing card's title/body/metadata but never mints a new one. Mirrors the fleet-spend-governor
+// pattern (one OPEN breach per lane at a time; the next pass just refreshes the snapshot).
+
+export interface ReverseDriftInboxInput {
+  workspaceId: string;
+  specSlug: string;
+  /** 0-based phase index (matches spec_drift.phase_index and the /api/roadmap/spec-drift surface). */
+  phaseIndex: number;
+  phaseTitle: string;
+  /** The missing-code detail (from the drift row's `detail` or the session/pre-filter reasoning). */
+  detail: string;
+  /** The spec_drift.id this inbox card gates — audit trail + deep-link back to the drift row. */
+  driftRowId: string;
+}
+
+export interface ReverseDriftInboxRow {
+  title: string;
+  body: string;
+  link: string;
+  metadata: {
+    routed_to_function: string;
+    raised_by_function: string;
+    escalated_by_director: string;
+    escalation_kind: string;
+    escalation_reason: string;
+    dedupe_key: string;
+    spec_slug: string;
+    phase_index: number;
+    phase_title: string;
+    drift_row_id: string;
+    deep_link: string;
+    autonomous: boolean;
+  };
+}
+
+/**
+ * Stable per-(workspace, spec, phase) dedupe key. A re-surfaced same drift row — same (workspace,
+ * slug, phase_index) — yields the same key, so the inbox emitter finds the existing OPEN card and
+ * refreshes it instead of minting a duplicate. Pure — testable without DB or GitHub.
+ */
+export function reverseDriftDedupeKey(args: {
+  workspaceId: string;
+  specSlug: string;
+  phaseIndex: number;
+}): string {
+  return `spec-drift-reverse:${args.workspaceId}:${args.specSlug}:${args.phaseIndex}`;
+}
+
+/**
+ * Pure builder for the CEO inbox row surfacing ONE confirmed reverse-drift. Returns the
+ * `dashboard_notifications` row shape (title/body/link/metadata) that the emitter inserts.
+ *
+ * Testable without DB: same inputs → same title/body/metadata (dedupe_key deterministic from
+ * workspace+slug+phase). The escalation_kind `spec_drift_reverse` distinguishes this card from
+ * every other escalate_founder card in the CEO approvals feed.
+ */
+export function buildReverseDriftInboxRow(input: ReverseDriftInboxInput): ReverseDriftInboxRow {
+  const { workspaceId, specSlug, phaseIndex, phaseTitle, detail, driftRowId } = input;
+  const dedupe_key = reverseDriftDedupeKey({ workspaceId, specSlug, phaseIndex });
+  const title = `Reverse-drift: ${specSlug} P${phaseIndex + 1} (${phaseTitle}) — code missing from main`.slice(0, 200);
+  const body = `Reese confirmed ${specSlug} P${phaseIndex + 1} (${phaseTitle}) is marked SHIPPED in the DB but its code is NOT on main. ${detail} Decide: rebuild the phase, confirm an intentional revert, or downgrade the phase status.`.slice(0, 4000);
+  const link = "/dashboard/roadmap";
+  return {
+    title,
+    body,
+    link,
+    metadata: {
+      routed_to_function: "ceo",
+      raised_by_function: "platform",
+      escalated_by_director: "platform",
+      escalation_kind: "spec_drift_reverse",
+      escalation_reason: detail.slice(0, 2000),
+      dedupe_key,
+      spec_slug: specSlug,
+      phase_index: phaseIndex,
+      phase_title: phaseTitle,
+      drift_row_id: driftRowId,
+      deep_link: link,
+      autonomous: true,
+    },
+  };
+}
+
+/**
+ * Emit ONE confirmed reverse-drift as a CEO inbox item (`dashboard_notifications` type
+ * `agent_approval_request` — the shape every other escalate_founder card uses). Idempotent under
+ * a persistent drift row: if an OPEN card with the same dedupe_key already exists, we bump its
+ * title/body/metadata but insert nothing new (the verification's "does not create a duplicate
+ * inbox item" contract). A dismissed card is NOT counted as open — the founder dismissing the
+ * card + Reese re-confirming the same drift is a legitimate re-surface, so a new card mints.
+ *
+ * Compare-and-set on the update (mirrors the read predicate) so a concurrent dismiss can't be
+ * clobbered by a late re-surface: workspace + type + dedupe + still-not-dismissed. Returns
+ * `{ emitted, reSurfaced }` so the caller can log which path fired. Best-effort — a Supabase
+ * error is logged upstream + returned as `emitted:false, reSurfaced:false` (the board post
+ * still ran and the drift row stays open for the next pass).
+ */
+export async function emitReverseDriftInboxItem(
+  admin: ReturnType<typeof createAdminClient>,
+  input: ReverseDriftInboxInput,
+): Promise<{ emitted: boolean; reSurfaced: boolean; error?: string }> {
+  const { workspaceId } = input;
+  const row = buildReverseDriftInboxRow(input);
+  const dedupe = row.metadata.dedupe_key;
+
+  // De-dupe read: an OPEN (undismissed) same-dedupe_key notification already represents this
+  // drift row. Never a bare row-exists match — narrow by (workspace, type, dedupe_key, dismissed).
+  const { data: open } = await admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("type", "agent_approval_request")
+    .eq("metadata->>dedupe_key", dedupe)
+    .eq("dismissed", false)
+    .limit(1);
+  if ((open ?? []).length > 0) {
+    const existing = (open as Array<{ id: string }>)[0];
+    // Compare-and-set: re-assert the read-time predicate on the update. A concurrent dismiss
+    // between the read and the write flips `dismissed=true` and this update matches zero rows —
+    // safer than a bare `.eq("id", existing.id)` update that would resurrect a dismissed card.
+    const { error: updErr } = await admin
+      .from("dashboard_notifications")
+      .update({ title: row.title, body: row.body, metadata: row.metadata })
+      .eq("id", existing.id)
+      .eq("workspace_id", workspaceId)
+      .eq("type", "agent_approval_request")
+      .eq("metadata->>dedupe_key", dedupe)
+      .eq("dismissed", false);
+    if (updErr) return { emitted: false, reSurfaced: false, error: updErr.message };
+    return { emitted: false, reSurfaced: true };
+  }
+
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: workspaceId,
+    type: "agent_approval_request",
+    title: row.title,
+    body: row.body,
+    link: row.link,
+    metadata: row.metadata,
+    read: false,
+    dismissed: false,
+  });
+  if (error) return { emitted: false, reSurfaced: false, error: error.message };
+  return { emitted: true, reSurfaced: false };
 }
 
 /** Open spec-drift rows for a workspace (newest-bumped first) — the Control Tower's "Spec drift" surface. */
