@@ -9955,9 +9955,9 @@ async function runTicketHandleJob(job: Job) {
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>"}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
-      `See the ticket-handle skill for chosen_path + plan + guardrails shape.`,
+      `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
 
     const { resultText, isError, raw, usage, model, configDir: handleDir } = await runBoxLane(
@@ -10046,6 +10046,46 @@ async function runTicketHandleJob(job: Job) {
           // the job (the Direction is authored; a human can retry the reply from the Improve tab).
           const msg = e instanceof Error ? e.message : String(e);
           console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      // ── Phase 2 of portal-errors-route-to-sol-first-escalate-to-june-on-rail ──
+      // Dual output: on a portal-error first-touch (params.reason === 'portal_error') Sol MAY
+      // return a `proposed_spec` field when she judges the error has a structural code cause. The
+      // worker (the only mutator) authors the spec on the Roadmap via authorSpecRowStructured
+      // (owner=cs, autoBuild=false, Derived-from-ticket ref — same shape improve-plan-executor
+      // uses for ticket-derived CS specs). A one-off / self-inflicted portal error yields no
+      // proposed_spec (validate returns null) and no spec noise. Guarded on reason=portal_error
+      // so a non-portal ticket-handle (first_touch / inflection) can't smuggle a spec through.
+      if (params.reason === "portal_error") {
+        const { validateSolProposedSpec, authorSolProposedPortalErrorSpec } = await import(
+          "../src/lib/portal/sol-proposed-spec"
+        );
+        const proposedRaw = (parsed as { proposed_spec?: unknown }).proposed_spec;
+        const proposedSpec = validateSolProposedSpec(proposedRaw);
+        if (proposedSpec) {
+          try {
+            const authorOutcome = await authorSolProposedPortalErrorSpec(
+              workspaceId,
+              ticketId,
+              proposedSpec,
+            );
+            if (authorOutcome.authored) {
+              const anchor = authorOutcome.anchoredMandateSlug
+                ? ` — anchored to CS mandate "${authorOutcome.anchoredMandateHeading ?? authorOutcome.anchoredMandateSlug}" (cs#${authorOutcome.anchoredMandateSlug})` +
+                  (authorOutcome.anchoredBy === "auto" ? " [auto]" : "")
+                : "";
+              console.log(`${tag} portal-error dual-output: spec authored ${authorOutcome.slug} (owner=cs)${anchor}`);
+            } else {
+              console.warn(`${tag} portal-error dual-output: authorSpecRowStructured returned false for ${authorOutcome.slug}`);
+            }
+          } catch (e) {
+            // A failed spec author does NOT unwind the Direction or the customer reply — the
+            // spec is an ADDITIONAL output on top of the customer fix. Surface the error in
+            // log_tail so it's grep-able but complete the job.
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`${tag} portal-error dual-output: spec author failed (customer fix already delivered): ${msg}`);
+          }
         }
       }
 
