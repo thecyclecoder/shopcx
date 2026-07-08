@@ -1,6 +1,6 @@
 # ticket_resolution_events
 
-The **write-ahead ledger** for every orchestrator turn — one row per `executeSonnetDecision()` call, inserted at the top of the executor BEFORE any customer-facing claim ships. Every branch (`direct_action` / `journey` / `playbook` / `workflow` / `macro` / `kb_response` / `ai_response` / `escalate` / clarification) shares the same row. The row's lifecycle stamps (`staged_at` → `shipped_at` → `verified_at` + `verified_outcome`) are the substrate M1's inline verify block reads against, M2's confidence-gated clarify keys off, and M4's compiler loop mines. See [[../specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension]] and [[../goals/guaranteed-ticket-handling]] § M2.
+The **write-ahead ledger** for every orchestrator turn — one row per `executeSonnetDecision()` call, inserted at the top of the executor BEFORE any customer-facing claim ships. Every branch (`direct_action` / `journey` / `playbook` / `workflow` / `macro` / `kb_response` / `ai_response` / `escalate` / clarification) shares the same row. The row's lifecycle stamps (`staged_at` → `shipped_at` → `verified_at` + `verified_outcome`) are the substrate the inline-verify send guard ([[../libraries/sol-outcome-claim-guard]] — the M1 inline-verify bounce, shipped as Phase 3 of [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]]) reads against, M2's confidence-gated clarify keys off, and M4's compiler loop mines. See [[../specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension]] and [[../goals/guaranteed-ticket-handling]] § M2.
 
 Written by [[../libraries/action-executor]] `executeSonnetDecision` (insert) + `stampResolutionShipped` (shipped_at from every send-path wrapper) + `stampResolutionVerified` (verified_at + verified_outcome from the direct-action `verifyActionInDB` block, or the executor's return-time verdict for message-only branches).
 
@@ -20,8 +20,8 @@ Written by [[../libraries/action-executor]] `executeSonnetDecision` (insert) + `
 | `chosen` | `jsonb` | ✓ | populated from `SonnetDecision.chosen` — the picked `{option_index, why}` (non-object or missing `option_index` → NULL) |
 | `staged_at` | `timestamptz` | — | default `now()` — stamped at insert, BEFORE any customer-facing message ships |
 | `shipped_at` | `timestamptz` | ✓ | stamped by [[../libraries/action-executor]] `stampResolutionShipped` on the first send in this turn (compare-and-set on NULL — a re-send in the same turn doesn't overwrite) |
-| `verified_at` | `timestamptz` | ✓ | stamped by [[../libraries/action-executor]] `stampResolutionVerified` once per row (compare-and-set on NULL); NULL means the outcome is still in flight (escalated to an agent or M1's inline verify hasn't run yet) |
-| `verified_outcome` | `text` | ✓ | CHECK ∈ `confirmed` \| `unbacked` \| `drifted` \| `clarified` — `confirmed` = DB verify passed (or a message-only branch shipped cleanly); `drifted` = the executor's `verifyActionInDB` couldn't back the claim; `unbacked` = M1's inline verify block rejected the response before it shipped; `clarified` = Phase 2's selective-clarify gate ([[../libraries/selective-clarify]]) short-circuited a low-confidence × irreversible plan with a confirmation-turn instead of firing the action |
+| `verified_at` | `timestamptz` | ✓ | stamped by [[../libraries/action-executor]] `stampResolutionVerified` or by [[../libraries/sol-outcome-claim-guard]] `stampUnbackedOnLedger` once per row (compare-and-set on NULL); NULL means the outcome is still in flight (escalated to an agent, or the inline-verify send guard hasn't fired on this turn) |
+| `verified_outcome` | `text` | ✓ | CHECK ∈ `confirmed` \| `unbacked` \| `drifted` \| `clarified` — `confirmed` = DB verify passed (or a message-only branch shipped cleanly); `drifted` = the executor's `verifyActionInDB` couldn't back the claim; `unbacked` = the inline-verify send guard ([[../libraries/sol-outcome-claim-guard]] — Phase 3 of [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]], shipped) rejected the response before it shipped because it asserted an outcome whose backing [[ticket_required_outcomes]] row was not `status='verified'`; `clarified` = Phase 2's selective-clarify gate ([[../libraries/selective-clarify]]) short-circuited a low-confidence × irreversible plan with a confirmation-turn instead of firing the action |
 | `reasoning` | `text` | ✓ | the orchestrator's `SonnetDecision.reasoning` — the auditable "why this action" trail |
 
 **CHECK constraints:** `confidence ∈ [0, 1] OR NULL` · `verified_outcome ∈ {'confirmed','unbacked','drifted','clarified'} OR NULL`.
@@ -34,7 +34,7 @@ Written by [[../libraries/action-executor]] `executeSonnetDecision` (insert) + `
 
 **Out:** `workspace_id` → [[workspaces]].id · `ticket_id` → [[tickets]].id.
 
-**In:** none yet — future M1 (inline verify block) will bounce `verified_outcome='unbacked'` verdicts back onto this row; future M4 (compiler loop) will mine the row-set for prompt calibration but write only through [[sonnet_prompts]].
+**In:** the shipped inline-verify send guard ([[../libraries/sol-outcome-claim-guard]] `stampUnbackedOnLedger`) writes `verified_outcome='unbacked'` back onto this row when a message asserted an outcome whose backing [[ticket_required_outcomes]] row was not `status='verified'`. Future M4 (compiler loop) will mine the row-set for prompt calibration but write only through [[sonnet_prompts]].
 
 ## Read paths
 
