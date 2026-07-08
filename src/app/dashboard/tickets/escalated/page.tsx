@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { AiInvestigationBadge } from "@/components/ai-investigation-badge";
 import { useTriageInProgress } from "@/lib/use-triage-in-progress";
+import { resolveEscalationPersona } from "@/lib/ticket-escalation-persona";
 
 interface Row {
   id: string;
@@ -37,8 +38,15 @@ const CHIP_DEFS: Array<{ key: keyof Chips; label: string; match: (r: Row, uid: s
   { key: "assigned_human_legacy", label: "Assigned to human (legacy)", match: (r) => r.routed_to === "assigned" },
 ];
 
+// A routine escalation is hard-called by June (CS Director) — the fallback label
+// resolves to her identity, not a generic robot label. See resolveEscalationPersona.
+const ROUTINE_ESCALATION_PERSONA = resolveEscalationPersona(new Date().toISOString(), null);
+const ROUTINE_LABEL = ROUTINE_ESCALATION_PERSONA
+  ? `${ROUTINE_ESCALATION_PERSONA.emoji} ${ROUTINE_ESCALATION_PERSONA.name}`
+  : "🤖 AI Routine";
+
 const ROUTED_BADGE: Record<string, { label: (r: Row) => string; cls: string }> = {
-  routine: { label: () => "🤖 AI Routine", cls: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
+  routine: { label: () => ROUTINE_LABEL, cls: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
   todo_pending: { label: () => "todo:pending", cls: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" },
   todo_approved: { label: () => "todo:approved", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" },
   rejected: { label: (r) => `rejected → ${r.routed_name || "?"}`, cls: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400" },
