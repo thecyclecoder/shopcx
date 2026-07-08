@@ -741,6 +741,39 @@ export interface AnalyzerBoxRunUsage {
   cache_creation_tokens?: number;
   cache_read_tokens?: number;
   model?: string | null;
+  /**
+   * True when this analyzer run was billed against the paid API (deployed-analyzer fallback
+   * when the box is down); false when it ran on the Max subscription box lane. Mirrors the
+   * apiBilled contract on [[fleet-cost]] recordAgentJobCost — the SAME signal, plumbed into
+   * `ticket_analyses.billing_source`. Undefined = the caller didn't record it; the row is
+   * persisted with `billing_source: null` (honest unknown, not retroactively mislabelled).
+   */
+  apiBilled?: boolean;
+}
+
+/**
+ * Fleet-cost's apiBilled contract applied to a per-ticket analyzer run — the ONE place that decides
+ * whether to attach dollars to a ticket_analyses row. Mirrors the exact predicate on
+ * [[fleet-cost]] recordAgentJobCost (`p.apiBilled && p.model ? usageCostCents(model, row) : null`)
+ * — a Max/box lane's tokens are a subscription proxy with NO per-token bill, so we NEVER fabricate
+ * a dollar figure for them. Extracted as a pure function so the smallest possible unit test can pin
+ * the rule against a Max run (0¢) + an api-billed run (real cents) + a caller-didn't-record it
+ * run (0¢, honest unknown) without touching the DB.
+ *
+ * ticket-cost-distinguishes-max-subscription-from-real-api-spend Phase 2.
+ */
+export function analyzerCostCentsForRun(usage: AnalyzerBoxRunUsage | null | undefined, fallbackModel: string): number {
+  if (!usage?.apiBilled) return 0;
+  const model = usage.model ?? fallbackModel;
+  const inputTokens = usage.input_tokens ?? 0;
+  const outputTokens = usage.output_tokens ?? 0;
+  if (!inputTokens && !outputTokens) return 0;
+  return usageCostCents(model, {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_creation_tokens: usage.cache_creation_tokens ?? 0,
+    cache_read_tokens: usage.cache_read_tokens ?? 0,
+  });
 }
 
 /**
@@ -775,34 +808,38 @@ export async function applyAnalyzerVerdict(
     }
   }
 
-  // Per-ticket cost snapshot — the box lane's Max session is flat-rate, but the historical
-  // per-ticket cost line + ai_token_usage row shape stays intact. Use the box's actual run
-  // model when known (usage.model) so ticket_analyses.model reflects reality; fall back to the
-  // canonical GRADER_MODEL constant. usageCostCents is only queried when we have tokens to bill.
+  // Per-ticket cost snapshot — apply the fleet-cost apiBilled rule so a Max/box run persists $0
+  // (its tokens are a subscription proxy, never a real dollar bill) while the deployed-analyzer
+  // fallback path (apiBilled=true) still lands its true usageCostCents. Same predicate
+  // [[fleet-cost]] recordAgentJobCost uses on agent_job_costs.usage_cost_cents; extracted as
+  // analyzerCostCentsForRun above so a unit test can pin the rule without touching the DB.
+  // ticket-cost-distinguishes-max-subscription-from-real-api-spend Phase 2.
   const model = usage?.model ?? GRADER_MODEL;
   const inputTokens = usage?.input_tokens ?? 0;
   const outputTokens = usage?.output_tokens ?? 0;
-  const costCents = inputTokens || outputTokens
-    ? usageCostCents(model, {
+  const costCents = analyzerCostCentsForRun(usage, GRADER_MODEL);
+
+  // ai_token_usage is the API-BILLED ledger the customer-facing cost surfaces sum into a real
+  // dollar figure (/api/tickets/[id]/analysis + stampTicketAiCost on tickets.ai_cost_cents via
+  // add_ticket_ai_cost). A Max/box lane's tokens are a subscription proxy already recorded on
+  // agent_job_costs by meterAgentJob → recordAgentJobCost; writing them into ai_token_usage too
+  // would double-count as a fabricated dollar. Skip the write entirely on the Max lane; only the
+  // apiBilled=true fallback path (deployed analyzer running against the paid API when the box is
+  // down) contributes to ai_token_usage. Same honesty invariant fleet-cost's header names.
+  if (usage?.apiBilled) {
+    await logAiUsage({
+      workspaceId: prepared.workspaceId,
+      model,
+      usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
-        cache_creation_tokens: usage?.cache_creation_tokens ?? 0,
-        cache_read_tokens: usage?.cache_read_tokens ?? 0,
-      })
-    : 0;
-
-  await logAiUsage({
-    workspaceId: prepared.workspaceId,
-    model,
-    usage: {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cache_creation_input_tokens: usage?.cache_creation_tokens ?? 0,
-      cache_read_input_tokens: usage?.cache_read_tokens ?? 0,
-    },
-    purpose: "ticket_analysis",
-    ticketId: prepared.ticketId,
-  });
+        cache_creation_input_tokens: usage?.cache_creation_tokens ?? 0,
+        cache_read_input_tokens: usage?.cache_read_tokens ?? 0,
+      },
+      purpose: "ticket_analysis",
+      ticketId: prepared.ticketId,
+    });
+  }
 
   // Insert the analysis row through the SDK. All writes to `ticket_analyses` route through
   // insertAnalysis / applyAdminOverride / applyAgentRescore — the guard
@@ -823,6 +860,7 @@ export async function applyAnalyzerVerdict(
     costCents: costCents,
     trigger: prepared.trigger,
     aiMessageCount: prepared.aiMessageCount,
+    apiBilled: usage?.apiBilled,
   });
   if (insertErr) {
     console.warn(`[ticket-analyzer] insertAnalysis failed (${prepared.ticketId}): ${insertErr}`);
