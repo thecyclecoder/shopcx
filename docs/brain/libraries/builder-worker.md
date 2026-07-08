@@ -169,6 +169,16 @@ Every phase build accumulates a commit(-set) onto the persistent per-spec branch
 
 Phases 1 + 2 defend the git-level branch race; Phase 3 defends the row-level queue race. All three run BEFORE any side effect (worktree side effects for phase 1; the push itself for phase 2; the claim gate + worktree add for phase 3), so a wedged state doesn't need a Control-Tower-level backstop for the common case.
 
+## The shared `update(id, patch)` — the `agent_jobs` write chokepoint
+
+Every job kind funnels its status/error/log_tail transitions through `update(id, patch)`. The function is the single seam where a queue-state PATCH becomes real, so both invariants below sit here — no per-lane plumbing.
+
+1. **needs-input-must-carry-a-question** — reject an empty `needs_input` park (no `questions[]` AND no `pending_actions[]`) and repair to `needs_attention` on the fly. Preserved by [[../specs/agent-jobs-update-retry-and-error-surface]] Phase 1.
+
+2. **Bounded retry + typed failure surface on a transient Supabase 5xx** ([[../specs/agent-jobs-update-retry-and-error-surface]] Phase 1). The write goes through `writeAgentJobsUpdateWithRetry` ([[agent-jobs-update-retry]]): it inspects Supabase's `{ error, status }` response instead of firing-and-forgetting, retries the transient class (Cloudflare 521 / edge 5xx / thrown `fetch failed` / `ECONNRESET` / `ETIMEDOUT`) with bounded exponential backoff (default 4 attempts, 250 ms base), and on exhaustion throws `AgentJobsUpdateError` carrying the `jobId` + `attemptedStatus` + last Supabase error. A PostgREST `PGRST*` code or a bug-shaped throw (e.g. `TypeError`) fails fast — retrying a bug just delays the surface. Motivated by the Control Tower's Management-Logs signature `supabase-logs:68fda858b6ae7a63` (repeated `521 PATCH /rest/v1/agent_jobs`), which used to silently drop the transition so the build system's queue lied about what happened.
+
+After a successful write the `needs_attention` classifier fan-out (`stampNeedsAttentionClass`) still runs unchanged — the retry sits INSIDE the guard and BEFORE the classifier, so both existing behaviors are preserved.
+
 ## Related
 
 [[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
