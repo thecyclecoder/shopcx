@@ -1,0 +1,1 @@
+- **Deterministic read-only CX SDK for Sol/Cora/June** · verified 2026-07-08 · → [[../libraries/cx-agent-sdk]]
