@@ -58,6 +58,7 @@
     "test:ad-spend-governor": "tsx --test src/lib/ad-spend-governor.test.ts",
     "test:growth-allocation": "tsx --test src/lib/growth-allocation.test.ts",
     "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts",
+    "test:media-buyer-sensor-trust": "tsx --test src/lib/media-buyer/sensor-trust-probe.test.ts",
     "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts",
     "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts",
     "test:check-table-refs-have-migrations": "tsx --test scripts/_check-table-refs-have-migrations.test.ts",

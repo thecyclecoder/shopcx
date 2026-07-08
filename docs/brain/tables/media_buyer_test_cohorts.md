@@ -33,6 +33,9 @@ The Phase 1 publish path ([[../inngest/ad-tool]] `adToolPublishToMeta` + the `PO
 | `default_meta_account_id` | `text?` | **Phase 2** — bare Meta ad-account id the Media Buyer runner uses when inserting replenish `ad_publish_jobs` rows. NULL = replenish deferred with `media_buyer_replenish_missing_config`. |
 | `default_meta_page_id` | `text?` | **Phase 2** — bare Meta page id used for the creative's `object_story_spec.page_id`. NULL = replenish deferred. |
 | `default_meta_instagram_user_id` | `text?` | **Phase 2** — the page's linked IG account id. NULL is fine (the publisher tolerates a null IG id). |
+| `green_min_coverage` | `numeric?` | **[[../specs/media-buyer-sensor-trust-probe]] Phase 1** — attribution coverage ratio at or above which the [[media_buyer_sensor_trust]] probe emits `band='green'`. NULL = fall back to the Phase 2 code-level default. |
+| `yellow_min_coverage` | `numeric?` | **[[../specs/media-buyer-sensor-trust-probe]] Phase 1** — coverage ratio at or above which the probe emits `band='yellow'` (below `green_min_coverage`). Under this floor → `band='red'`. NULL = code-level default. |
+| `max_unresolved_share` | `numeric?` | **[[../specs/media-buyer-sensor-trust-probe]] Phase 1** — cap on `unresolved_revenue_share` before the probe drops the band toward `red`. NULL = code-level default. |
 | `notes` | `text?` | owner notes — surfaced on the editor |
 | `updated_by` | `uuid?` | → `auth.users.id` · ON DELETE SET NULL · `NULL` when a service-role script writes |
 | `created_at` | `timestamptz` | default `now()` |
@@ -64,7 +67,8 @@ The Phase 1 publish path ([[../inngest/ad-tool]] `adToolPublishToMeta` + the `PO
 
 - **Phase 1:** `supabase/migrations/20260707120000_media_buyer_test_cohorts.sql` — apply with `npx tsx scripts/apply-media-buyer-test-cohorts-migration.ts`. Idempotent (`create table if not exists`, `create or replace function`, policy guards, `add column if not exists` on `ad_publish_jobs.origin`). RLS: service-role full access + workspace-member SELECT (mirrors [[ad_spend_budgets]]).
 - **Phase 2:** `supabase/migrations/20260707130000_media_buyer_test_cohorts_publish_targets.sql` — additive; adds `default_meta_account_id`, `default_meta_page_id`, `default_meta_instagram_user_id` (all NULLABLE) so the Media Buyer runner can insert replenish `ad_publish_jobs` rows. Apply with `npx tsx scripts/apply-media-buyer-test-cohorts-publish-targets-migration.ts`.
+- **[[../specs/media-buyer-sensor-trust-probe]] Phase 1:** `supabase/migrations/20260928130000_media_buyer_test_cohorts_sensor_trust_thresholds.sql` — additive; adds `green_min_coverage`, `yellow_min_coverage`, `max_unresolved_share` (all NULLABLE) so the cohort owner authors the [[media_buyer_sensor_trust]] bands. Apply with `npx tsx scripts/apply-media-buyer-sensor-trust-migration.ts`.
 
 ## Related
 
-[[workspaces]] · [[meta_ad_accounts]] · [[ad_publish_jobs]] · [[ad_spend_budgets]] · [[iteration_policies]] · [[director_activity]] · [[../libraries/media-buyer-publish-gate]] · [[../lifecycles/ad-publish]] · [[../specs/media-buyer-test-winner-loop]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[workspaces]] · [[meta_ad_accounts]] · [[ad_publish_jobs]] · [[ad_spend_budgets]] · [[iteration_policies]] · [[director_activity]] · [[media_buyer_sensor_trust]] · [[../libraries/media-buyer-publish-gate]] · [[../lifecycles/ad-publish]] · [[../specs/media-buyer-test-winner-loop]] · [[../specs/media-buyer-sensor-trust-probe]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
