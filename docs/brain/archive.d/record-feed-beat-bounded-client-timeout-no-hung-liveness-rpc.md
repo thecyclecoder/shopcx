@@ -1,0 +1,1 @@
+- **Bound record_feed_beat RPC client-side (3s timeout, swallow) so a hung liveness beat stops leaking 504s into the Vercel error feed** · verified 2026-07-08 · → [[../libraries/control-tower]]

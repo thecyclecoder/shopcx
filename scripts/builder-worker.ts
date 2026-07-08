@@ -24,6 +24,11 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
+// agent-jobs-update-retry-and-error-surface Phase 1 — the bounded-retry chokepoint the shared
+// `update(id, patch)` helper below funnels every agent_jobs PATCH through. Absorbs a transient
+// Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
+// AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
+import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -2426,7 +2431,29 @@ async function update(id: string, patch: Record<string, unknown>) {
       };
     }
   }
-  await db.from("agent_jobs").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+  // agent-jobs-update-retry-and-error-surface Phase 1 — inspect Supabase's response instead of
+  // firing-and-forgetting. A Cloudflare 521 in front of PostgREST used to silently drop the
+  // transition (build stays running past terminal, needs_input never lands, dispatch proceeds as
+  // if the row was updated). writeAgentJobsUpdateWithRetry retries the transient class (5xx /
+  // fetch failed / ECONNRESET) with bounded backoff and THROWS AgentJobsUpdateError on the
+  // terminal case so the caller cannot continue as if the write succeeded. A bug-shaped throw
+  // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
+  const finalPatch = { ...patch, updated_at: new Date().toISOString() };
+  const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
+  await writeAgentJobsUpdateWithRetry(
+    async () => {
+      // Supabase-js resolves this awaited chain to { data, error, status, statusText }. The
+      // retry helper ONLY reads `error` + `status` — data can be undefined on a bare update
+      // without .select(), which is exactly what we do here (fire the transition, no read).
+      const resp = (await db.from("agent_jobs").update(finalPatch).eq("id", id)) as {
+        error: { message?: string; code?: string | null; details?: string | null; hint?: string | null } | null;
+        status?: number | null;
+        statusText?: string | null;
+      };
+      return { error: resp.error, status: resp.status ?? null, statusText: resp.statusText ?? null };
+    },
+    { jobId: id, attemptedStatus },
+  );
   // no-parked-specs-auto-route-needs-attention Phase 0 — classify every park at the single chokepoint.
   // Every needs_attention write goes through this helper, so stamping here covers every caller (build,
   // repair, regression, security, spec-test, …) with no per-callsite plumbing. Best-effort + async:
@@ -2923,6 +2950,53 @@ function derivePhase(instructions: string | null | undefined): string | null {
   const m = /\bPhase\s+(\d+)\b/i.exec(instructions);
   return m ? `Phase ${m[1]}` : null;
 }
+// build-box-page-reflects-real-per-lane-group-usage Phase 1: the box worker runs each kind in its
+// OWN dedicated lane with its own cap (MAX_CONCURRENT for the build/plan pool, MAX_TICKET_HANDLE +
+// MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL for customer service, MAX_PLATFORM_DIRECTOR +
+// MAX_DIRECTOR_COACH for director, MAX_FOLD for fold, everything else in a bag of small
+// concurrency-1/2 lanes). The pre-existing scalar build_lanes/fold_lanes only carried two of those
+// caps, which is why /dashboard/roadmap/box could render nonsense like "13/10 in use" — it lumped
+// every non-fold in-flight lane against the build/plan pool cap. LANE_GROUPS is the FULL per-group
+// cap picture, emitted verbatim into the heartbeat row's `lane_groups` jsonb column each tick so
+// the page + BoxChip can render each group against its OWN cap (and its OWN kind-set). Kinds MUST
+// stay in sync with the poll-loop count* helpers below (countPlatformDirector groups
+// platform-director + director-bounce-back + growth-director; countFold groups fold + goal-fold; …).
+const LANE_GROUPS = {
+  build_plan: {
+    cap: MAX_CONCURRENT,
+    kinds: ["build", "plan"] as const,
+  },
+  customer_service: {
+    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL,
+    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call"] as const,
+  },
+  director: {
+    cap: MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH,
+    kinds: ["platform-director", "director-bounce-back", "growth-director", "director-coach"] as const,
+  },
+  fold: {
+    cap: MAX_FOLD,
+    kinds: ["fold", "goal-fold"] as const,
+  },
+  other: {
+    cap:
+      MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST + MAX_SPEC_REVIEW +
+      MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
+      MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
+      MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
+      MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE +
+      MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
+      MAX_PROPOSED_MODEL_TIER,
+    kinds: [
+      "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test", "spec-review",
+      "migration-fix", "deploy-review", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
+      "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
+      "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
+      "media-buyer-grade", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
+    ] as const,
+  },
+} as const;
 async function writeHeartbeat(activeBuilds: number, status: string, detail?: string, lanes: LaneRow[] = []) {
   // reconcile-per-account-in-flight-count (Phase 2): heal the free-running load counter to the ground-truth
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
@@ -2938,8 +3012,12 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       status,
       active_builds: activeBuilds,
       detail: detail ?? null,
-      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling)
-      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane)
+      build_lanes: MAX_CONCURRENT, // total build/plan lanes (the pool ceiling) — kept for back-compat
+      fold_lanes: MAX_FOLD, // total fold lanes (concurrency-1 lane) — kept for back-compat
+      // build-box-page-reflects-real-per-lane-group-usage Phase 1 — per-group caps so the page can
+      // render each lane group against its OWN cap instead of lumping every non-fold kind into the
+      // build/plan pool. Kind-sets mirror the poll-loop count* helpers.
+      lane_groups: LANE_GROUPS,
       lanes, // [{ kind, job_id, spec_slug, since, phase }] for every in-flight lane this tick
       // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2): surfaces how each
       // account's quota is burning + an all-capped state to the box-health view + Control Tower box tile.
@@ -3074,6 +3152,17 @@ async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown
 // Read the live `public` BASE TABLE names off the pooler (raw SQL — information_schema isn't exposed
 // through PostgREST). Returns null when the host has no DB password (→ the check reports 'skipped',
 // never a false "no drift"). Best-effort connect/teardown.
+//
+// Reads pg_catalog.pg_class directly — the AUTHORITATIVE system-catalog source — instead of
+// information_schema.tables, which is filtered by the connecting role's per-table privileges (see the
+// SQL-standard note in [pg docs / 34.19]: "Only those tables ... that the current user has access to
+// ... are shown"). The migration-drift-check-stop-false-positive-on-present-tables spec Phase 1
+// root-caused the god_mode_sessions/god_mode_approvals phantom-absent alerts to exactly this: the
+// tables were CREATEd + RLS-guarded via scripts/apply-god-mode-sessions-migration.ts, but the pooler
+// role's effective privilege on them left them invisible to information_schema.tables even though
+// they physically exist. pg_class is unaffected — it is the raw catalog view every table registers
+// in on CREATE, regardless of grants. relkind: 'r' = ordinary base table, 'p' = partitioned table
+// (still a table, materialized as its partitions). Excludes toast/index/view/materialized-view/etc.
 async function fetchLivePublicTables(): Promise<string[] | null> {
   let connectionString: string;
   try {
@@ -3087,7 +3176,9 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   await c.connect();
   try {
     const res = await c.query(
-      "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
+      "select c.relname as table_name from pg_catalog.pg_class c " +
+        "join pg_catalog.pg_namespace n on n.oid = c.relnamespace " +
+        "where n.nspname = 'public' and c.relkind in ('r', 'p')",
     );
     return (res.rows as Array<{ table_name: string }>).map((r) => r.table_name);
   } finally {
@@ -10128,16 +10219,46 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
 // error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
+  // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
+  // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
+  // (first-touch here + Improve co-pilot above) can't drift on what "the ticket" means.
   const base = await loadImproveBrief(ticketId);
-  const { data: ticket } = await db
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot (customer + merged identity, subscriptions with
+  // realized pricing + applied_discounts, orders w/ per-unit computed, active products, active
+  // policies) so Sol's Direction is grounded in the same numbers the deployed orchestrator sees —
+  // never a guess from improvised SQL. Best-effort: a missing customer / SDK read failure leaves
+  // the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  return cxBrief ? `${base}\n\n${cxBrief}` : base;
+}
+
+/**
+ * Build the CX SDK snapshot text block for a ticket. Resolves the ticket's workspace_id +
+ * customer_id, then calls the deterministic getCxBundle → formatCxBundle. Non-throwing:
+ * a null customer still emits the workspace's products + policies. A hard read failure
+ * leaves the block empty (the caller falls back to the base brief). Phase 1 of
+ * docs/brain/specs/cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-
+ * access-no-raw-sql.md.
+ */
+async function loadCxAgentSdkBrief(ticketId: string): Promise<string> {
+  const { data: t } = await db
     .from("tickets")
-    .select("workspace_id")
+    .select("workspace_id, customer_id")
     .eq("id", ticketId)
     .maybeSingle();
-  const workspaceId = (ticket as { workspace_id: string | null } | null)?.workspace_id ?? null;
-  if (!workspaceId) return base;
-  const policiesBlock = await loadActivePoliciesBlock(workspaceId);
-  return policiesBlock ? `${base}\n\n${policiesBlock}` : base;
+  if (!t?.workspace_id) return "";
+  try {
+    const { getCxBundle, formatCxBundle } = await import("../src/lib/cx-agent-sdk");
+    const bundle = await getCxBundle(
+      db,
+      t.workspace_id as string,
+      (t.customer_id as string | null) ?? null,
+    );
+    return formatCxBundle(bundle);
+  } catch {
+    return "";
+  }
 }
 
 // Render the workspace's active policies (is_active + superseded_by IS NULL) as a policy block
@@ -10198,6 +10319,8 @@ async function runTicketHandleJob(job: Job) {
       `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
       brief,
       ``,
+      `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
+      `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
       `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
       `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
@@ -10224,9 +10347,20 @@ async function runTicketHandleJob(job: Job) {
       // with an empty slug — the writer will fail the Direction otherwise, and the ticket
       // burns the box turn.
       `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
+      // Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+      // MESSAGE-IS-LAST. Any concrete outcome your first_reply CLAIMS (added a bag, applied a
+      // credit, issued a refund, created a return, cancelled a subscription, …) MUST also appear
+      // as a structured required_outcomes item so the honor step can fire + verify it BEFORE the
+      // send. Judy 0a9e4d7f: the reply claimed bag+credit while neither action ran. The worker
+      // (a) writes each required_outcomes item to the DB, (b) runs the honor step (dispatches +
+      // verifies via the shared action executor), (c) only THEN allows the reply to send. An item
+      // that fails to verify blocks the send. When your first_reply makes NO concrete claim (a
+      // needs_info question, a bare informational reply), return required_outcomes:[] — the honor
+      // step is a no-op and the reply flows normally.
+      `REQUIRED OUTCOMES — the structured 'what'. For every concrete outcome your first_reply CLAIMS (or promises to make happen), also emit a required_outcomes entry with {kind:'<action_type>', description:'<one-line human summary>', target_ids:{…the ids the executor needs: contract_id, order_id, product_id, coupon_code, amount_cents…}, expected_db_state:{…the DB predicate that would prove it done…}}. The worker fires each entry via the shared action executor (directActionHandlers[kind]) and verifies against the DB BEFORE your first_reply sends — an unverifiable entry BLOCKS the send. Emit the outcomes in the order they should run. If your first_reply makes no concrete claim (a question, an informational answer, a policy explanation), return required_outcomes:[] — the honor step is a no-op.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"required_outcomes":[{"kind":"…","description":"…","target_ids":{…},"expected_db_state":{…}}],"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
@@ -10312,8 +10446,9 @@ async function runTicketHandleJob(job: Job) {
       const guardrails = (d.guardrails && typeof d.guardrails === "object" ? d.guardrails : {}) as Record<string, unknown>;
 
       const { writeDirection } = await import("../src/lib/ticket-directions");
+      let directionId: string | null = null;
       try {
-        await writeDirection(db, {
+        const directionRow = await writeDirection(db, {
           workspace_id: workspaceId,
           ticket_id: ticketId,
           intent,
@@ -10323,6 +10458,7 @@ async function runTicketHandleJob(job: Job) {
           guardrails,
           // authored_by default = 'sol_box_session' (the SDK default; matches the Phase 3 verification)
         });
+        directionId = directionRow.id;
       } catch (e) {
         // The partial-UNIQUE on ticket_id WHERE superseded_at IS NULL enforces the one-live-row
         // invariant — a re-dispatched job on the same ticket that already has a live Direction fails
@@ -10331,6 +10467,125 @@ async function runTicketHandleJob(job: Job) {
         const msg = e instanceof Error ? e.message : String(e);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
+      }
+
+      // ── Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified ──
+      // Phase 1 wire-in: persist Sol's required_outcomes — the structured "what" behind the reply.
+      // Every concrete outcome the first_reply CLAIMS is stored as an individually-checkable row
+      // (kind + description + target_ids + expected_db_state, status='pending') so the honor step
+      // can dispatch it AND the send guards can gate on verified state. Sol's prompt requires the
+      // array; an omitted / non-array field is treated as [] (no claims → no rows → honor step is
+      // a no-op → reply flows normally).
+      const { writeRequiredOutcomes } = await import("../src/lib/ticket-required-outcomes");
+      const rawOutcomes = Array.isArray((parsed as { required_outcomes?: unknown }).required_outcomes)
+        ? ((parsed as { required_outcomes: unknown[] }).required_outcomes as unknown[])
+        : [];
+      const outcomeItems: Array<{
+        kind: string;
+        description: string;
+        target_ids?: Record<string, unknown>;
+        expected_db_state?: Record<string, unknown>;
+      }> = [];
+      for (const it of rawOutcomes) {
+        if (!it || typeof it !== "object") continue;
+        const o = it as {
+          kind?: unknown;
+          description?: unknown;
+          target_ids?: unknown;
+          expected_db_state?: unknown;
+        };
+        const kind = typeof o.kind === "string" ? o.kind.trim() : "";
+        const description = typeof o.description === "string" ? o.description.trim() : "";
+        if (!kind || !description) continue;
+        const targetIds =
+          o.target_ids && typeof o.target_ids === "object" && !Array.isArray(o.target_ids)
+            ? (o.target_ids as Record<string, unknown>)
+            : {};
+        const expected =
+          o.expected_db_state && typeof o.expected_db_state === "object" && !Array.isArray(o.expected_db_state)
+            ? (o.expected_db_state as Record<string, unknown>)
+            : {};
+        outcomeItems.push({ kind, description, target_ids: targetIds, expected_db_state: expected });
+      }
+      if (outcomeItems.length > 0) {
+        try {
+          await writeRequiredOutcomes(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            direction_id: directionId,
+            items: outcomeItems,
+          });
+        } catch (e) {
+          // A required_outcomes insert failure does NOT unwind the Direction — the ledger is durable
+          // substrate. Surface the error in log_tail so it's grep-able but continue: with zero rows
+          // written, the honor step is a no-op and the outcome-claim guard downstream will block any
+          // send that CLAIMS an unverified outcome (Judy 0a9e4d7f's failure mode) via
+          // assertClaimsBackedByOutcomes.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} writeRequiredOutcomes failed (Direction still authored): ${msg}`);
+        }
+      }
+
+      // Phase 2 wire-in: HONOR every required_outcome BEFORE composing/sending the customer reply.
+      // The honor step walks each row in authored order, dispatches the action via the shared
+      // directActionHandlers, and verifies via verifyActionInDB. Actions run to completion (or fail
+      // loudly) FIRST — the reply-drafting step is NOT reached while any item is pending. A failed
+      // item routes the ticket to needs_human naming the unfinished item (Judy 0a9e4d7f: bag/credit
+      // would fire OR fail loudly here — never a reply promising them while neither ran).
+      let honorBlockLine: string | null = null;
+      if (outcomeItems.length > 0) {
+        const { data: tCustomer } = await db
+          .from("tickets")
+          .select("customer_id, channel")
+          .eq("id", ticketId)
+          .single();
+        const customerId = (tCustomer?.customer_id as string | null) ?? null;
+        const honorChannel = (tCustomer?.channel as string | null) || "email";
+        if (!customerId) {
+          // No linked customer — the executor can't dispatch a customer-scoped action. Block the
+          // reply so an unverifiable claim can't ship; the Improve tab picks up the ticket.
+          honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${honorBlockLine}`);
+          await update(job.id, {
+            log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else {
+          try {
+            const { honorRequiredOutcomes } = await import("../src/lib/honor-required-outcomes");
+            const honor = await honorRequiredOutcomes({
+              admin: db,
+              workspace_id: workspaceId,
+              ticket_id: ticketId,
+              customer_id: customerId,
+              channel: honorChannel,
+              // Real production dispatchers — the box worker has admin creds and this is the
+              // very step the spec's Phase 2 verification names ("re-running Judy's scenario
+              // executes bag/credit (or fails loudly) BEFORE any reply exists").
+              sandbox: false,
+            });
+            if (!honor.all_verified) {
+              const failedNames =
+                [...honor.failed_items, ...honor.carried_forward_failed]
+                  .map((f) => `${f.kind}:${f.description}${f.failed_reason ? ` (${f.failed_reason})` : ""}`)
+                  .join(" | ") || "(none named)";
+              honorBlockLine = `Sol reply BLOCKED by honor step: ${honor.failed_items.length} failed / ${honor.carried_forward_failed.length} carried-forward. Failed: ${failedNames}. Direction authored; a human re-drafts via Improve.`;
+              console.warn(`${tag} ${honorBlockLine}`);
+              await update(job.id, {
+                log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+              });
+            }
+          } catch (e) {
+            // Honor step blew up — block the send. A message-is-last invariant is that we NEVER
+            // ship a claim we couldn't verify; erroring is the same as unverified from the send
+            // gate's perspective.
+            const msg = e instanceof Error ? e.message : String(e);
+            honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${honorBlockLine}`);
+            await update(job.id, {
+              log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          }
+        }
       }
 
       // Ship the first customer-facing reply through the SAME production delivery sink the orchestrator
@@ -10348,7 +10603,10 @@ async function runTicketHandleJob(job: Job) {
       // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
       // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
-      if (firstReply) {
+      // The honor step above sets honorBlockLine when a required_outcome failed to verify — the
+      // message-is-last invariant refuses to compose OR send a reply when any promise is unbacked.
+      // The Direction is still durable; the ticket routes to needs_human via the Improve tab.
+      if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
         if (bait.ok === false) {
@@ -10358,17 +10616,43 @@ async function runTicketHandleJob(job: Job) {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
           });
         } else {
-          const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
-          const channel = (t?.channel as string | null) || "email";
-          try {
-            const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-            await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-          } catch (e) {
-            // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-            // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-            // the job (the Direction is authored; a human can retry the reply from the Improve tab).
-            const msg = e instanceof Error ? e.message : String(e);
-            console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+          // Phase 3 of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+          // the MESSAGE-IS-LAST send guard. After the policy-bait guard passes, check that every
+          // outcome the DRAFT reply CLAIMS (adding a bag, applying a credit, issuing a refund, …)
+          // is backed by a ticket_required_outcomes row with status='verified'. Judy 0a9e4d7f's
+          // failure was exactly this — the reply promised bag+credit while neither action had
+          // actually run. Fail-open on unknown kinds (a novel action can't over-block a legit
+          // reply); every match against an unverified row blocks the send and routes to the
+          // Improve tab (same needs_human path the policy-bait guard uses).
+          const { assertClaimsBackedByOutcomes } = await import("../src/lib/sol-outcome-claim-guard");
+          const claimVerdict = await assertClaimsBackedByOutcomes({
+            admin: db,
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            message: firstReply,
+          });
+          if (claimVerdict.ok === false) {
+            const claimSummary = claimVerdict.blocked_claims
+              .map((c) => `${c.kind}[status=${c.current_status}]:${JSON.stringify(c.matched_phrase.slice(0, 60))}`)
+              .join(" | ");
+            const blockLine = `Sol reply BLOCKED by outcome-claim guard: ${claimVerdict.reason}. Claims: ${claimSummary}. Direction authored; a human re-drafts via Improve.`;
+            console.warn(`${tag} ${blockLine}`);
+            await update(job.id, {
+              log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+            });
+          } else {
+            const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+            const channel = (t?.channel as string | null) || "email";
+            try {
+              const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+              await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+            } catch (e) {
+              // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
+              // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
+              // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+              const msg = e instanceof Error ? e.message : String(e);
+              console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+            }
           }
         }
       }
@@ -12210,6 +12494,17 @@ async function loadCsDirectorCallBrief(
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
 
+  // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+  // append the deterministic CX SDK snapshot so June's verdict is grounded in the same shape Sol
+  // and Cora saw — customer + merged identity, subscriptions w/ realized pricing + discounts,
+  // orders w/ per-unit computed, active products, active policies. Best-effort — a missing
+  // customer / SDK read failure leaves the base brief unchanged.
+  const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
+  if (cxBrief) {
+    parts.push("");
+    parts.push(cxBrief);
+  }
+
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
   // Bake the first review's verdict + reasoning + remedy/spec_seed into the brief so the second
   // reviewer can adversarially re-check it (agree, revise, or refute) with the same context the
@@ -12310,7 +12605,9 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     ``,
     brief,
     ``,
-    `Investigate read-only (the improve-box-tools.ts read-only tools + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
+    `DETERMINISTIC READ-ONLY CX DATA — call the shared SDK for customer + merged identity, orders w/ per-unit, subscriptions w/ realized pricing + applied_discounts, active products, and active policies (never improvise SQL):`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
     `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs reasoning + recommended_remedy when a concrete action is nameable, reasoning alone when it isn't).`,
@@ -12933,10 +13230,14 @@ function normalizeTicketAnalyzeVerdict(raw: unknown): TicketAnalyzeVerdict | nul
 // worker's applyAnalyzerVerdict is the only writer. Bounded: a handful of targeted lookups per
 // grade, not open-ended. See the ticket-analyze skill for when to research vs. defer to the
 // low-confidence unverified handling.
-function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string): string {
+function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string, cxSdkBrief: string = ""): string {
   return [
     `You are Cora, the ShopCX ticket QC-grader — a supervised box-session agent under 💬 June (CS Director). Use the ticket-analyze skill (cwd is the repo root).`,
     `Score the AI's behavior in the conversation window below against the QC rubric. The deterministic worker will apply your verdict (ticket_analyses insert + severity actions) after you return.`,
+    ``,
+    `DETERMINISTIC READ-ONLY CX DATA — PREFERRED FIRST STOP. Every CX lookup goes through the shared read-only SDK; NEVER improvise SQL for these surfaces:`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `The bundle carries customer + merged identity, subscriptions w/ realized pricing + applied_discounts, orders w/ per-unit computed + variant title, active products (variants/flavors/pricing), and active sonnet_prompts policies — the SAME shape the deployed orchestrator sees.`,
     ``,
     `PRIMARY PATH — RESEARCH BEFORE FLAGGING (Phase 2). When the AI made a factual claim you can't confirm from the transcript (a variant/flavor, a per-unit price, a subscription state, a policy, a customer entitlement), verify it FIRST with the bounded read-only research CLI:`,
     `  npx tsx scripts/analyzer-research-tools.ts <tool> ${ticketId} [json_input]`,
@@ -12950,7 +13251,7 @@ function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string):
     ``,
     `--- USER TURN ---`,
     userMsg,
-    ``,
+    cxSdkBrief ? `\n${cxSdkBrief}\n` : ``,
     `Final message = ONLY one JSON object, no prose around it:`,
     `{"score":<integer 1-10>,"issues":[{"type":"<one of the issue types above>","description":"..."}],"action_items":[{"priority":"high|medium|low","description":"..."}],"summary":"<1-2 sentences>"}`,
   ].join("\n");
@@ -12989,8 +13290,15 @@ async function runTicketAnalyzeJob(job: Job) {
       return;
     }
 
+    // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
+    // pull the deterministic CX SDK snapshot (customer + merged identity, subscriptions w/ realized
+    // pricing + applied_discounts, orders w/ per-unit computed, active products, active policies)
+    // so Cora starts every grade with the SAME numbers the deployed orchestrator sees. Best-effort:
+    // an SDK read failure leaves the snapshot empty and the grade still proceeds on the
+    // conversation-window + system rubric.
+    const cxSdkBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
     const { session, resultText, isError, raw, usage, model, configDir: analyzeDir } = await runBoxLane(
-      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId), sid, REPO_DIR, cfg, job.id),
+      (cfg, sid) => runTicketAnalyzeClaude(ticketAnalyzePrompt(prep.prepared.system, prep.prepared.userMsg, ticketId, cxSdkBrief), sid, REPO_DIR, cfg, job.id),
     );
     await meterAgentJob(job, analyzeDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: analyzeDir });

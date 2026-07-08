@@ -1,0 +1,1 @@
+- **Build the cs-director-call Phase-2 executor so June's verdicts actually fire** · verified 2026-07-08 · → [[../libraries/cs-director]]

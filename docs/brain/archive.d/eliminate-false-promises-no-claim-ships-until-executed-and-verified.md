@@ -1,0 +1,1 @@
+- **Message is last — honor every promise before you speak: no customer message until its required outcomes are executed and verified** · verified 2026-07-08 · → [[../lifecycles/ticket-lifecycle]]

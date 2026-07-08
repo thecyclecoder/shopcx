@@ -43,7 +43,8 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 - `skip_next_order` — advance `next_billing_date` by one cycle
 - `change_frequency` — update billing interval
 - `change_next_date` — set explicit next billing date
-- `bill_now` — fire an immediate Appstle billing attempt
+- `bill_now` — fire an immediate Appstle billing attempt (charge the current upcoming order right away; flavor-aware — internal subs fire the Braintree renewal pipeline, Appstle subs attempt the upcoming Appstle billing via `subscriptionOrderNow` / `orderNowByContract`). Selective-clarify covers it: at confidence < 0.7 the executor inserts a confirm-first turn before the charge fires.
+- `order_now` — customer-facing name for `bill_now` — SAME `subscriptionOrderNow` charge. Registered as its own key in `directActionHandlers` because the portal handler (`src/lib/portal/handlers/order-now.ts`) and `portal/mutation-guard.ts` both name the capability `order_now`, so the orchestrator/Sol sometimes emit that name; without the entry the emission landed on "Unknown action type" and the model rationalized the miss as "no bill_now action exists for non-emergency requests" (ticket 0a9e4d7f, Judy — the incident this fix retires). **Always reachable for any active sub** — never emergency-only, never crisis-only. The orchestrator prompt's `ORDER-NOW / BILL-NOW IS ALWAYS REACHABLE` hard rule forbids the "doesn't exist" claim. Selective-clarify covers `order_now` on the same threshold as `bill_now`.
 - `reactivate` — reactivate a cancelled sub
 - `add_item` / `remove_item` / `swap_variant` / `change_quantity` — line-item mutations
 - `update_line_item_price` — price override (see [[recipes/change-line-item-price]] for the 25% Subscribe-&-Save baked-in math)

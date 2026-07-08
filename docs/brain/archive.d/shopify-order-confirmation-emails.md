@@ -1,0 +1,1 @@
+- **Order confirmation emails for Shopify-sourced orders (Klaviyo replacement)** · verified 2026-07-08 · → [[../inngest/order-confirmation]]
