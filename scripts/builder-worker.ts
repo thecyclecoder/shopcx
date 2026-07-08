@@ -3100,6 +3100,17 @@ async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown
 // Read the live `public` BASE TABLE names off the pooler (raw SQL — information_schema isn't exposed
 // through PostgREST). Returns null when the host has no DB password (→ the check reports 'skipped',
 // never a false "no drift"). Best-effort connect/teardown.
+//
+// Reads pg_catalog.pg_class directly — the AUTHORITATIVE system-catalog source — instead of
+// information_schema.tables, which is filtered by the connecting role's per-table privileges (see the
+// SQL-standard note in [pg docs / 34.19]: "Only those tables ... that the current user has access to
+// ... are shown"). The migration-drift-check-stop-false-positive-on-present-tables spec Phase 1
+// root-caused the god_mode_sessions/god_mode_approvals phantom-absent alerts to exactly this: the
+// tables were CREATEd + RLS-guarded via scripts/apply-god-mode-sessions-migration.ts, but the pooler
+// role's effective privilege on them left them invisible to information_schema.tables even though
+// they physically exist. pg_class is unaffected — it is the raw catalog view every table registers
+// in on CREATE, regardless of grants. relkind: 'r' = ordinary base table, 'p' = partitioned table
+// (still a table, materialized as its partitions). Excludes toast/index/view/materialized-view/etc.
 async function fetchLivePublicTables(): Promise<string[] | null> {
   let connectionString: string;
   try {
@@ -3113,7 +3124,9 @@ async function fetchLivePublicTables(): Promise<string[] | null> {
   await c.connect();
   try {
     const res = await c.query(
-      "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
+      "select c.relname as table_name from pg_catalog.pg_class c " +
+        "join pg_catalog.pg_namespace n on n.oid = c.relnamespace " +
+        "where n.nspname = 'public' and c.relkind in ('r', 'p')",
     );
     return (res.rows as Array<{ table_name: string }>).map((r) => r.table_name);
   } finally {
