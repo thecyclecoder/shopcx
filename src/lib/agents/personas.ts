@@ -485,8 +485,20 @@ function defaultPersona(slug: string, label?: string): AgentPersona {
 }
 
 /** Resolve a persona by function slug, worker kind, or "ceo"; falls back to a neutral persona. */
+// Agent JOB kinds whose persona lives under a DIFFERENT key than the kind string
+// (the job's agentKind ≠ the persona's key). Without this, getPersona(kind) misses
+// PERSONAS and falls back to the blank default mascot — e.g. a `deploy-review` box
+// lane rendered with no avatar instead of Reva's photo (agentKind `deploy-review`
+// → persona `deploy-guardian`; agentKind `cs-director-call` → persona `cs-director`).
+// Mirrors the control-tower registry's agentKind→personaKind mapping.
+const KIND_PERSONA_ALIAS: Record<string, string> = {
+  "deploy-review": "deploy-guardian", // Reva's canary-investigation box session
+  "cs-director-call": "cs-director", // June's CS-director review box session
+};
+
 export function getPersona(slug: string, label?: string): AgentPersona {
-  const base = PERSONAS[slug] ?? defaultPersona(slug, label);
-  const responsibilities = RESPONSIBILITIES[slug];
+  const key = KIND_PERSONA_ALIAS[slug] ?? slug;
+  const base = PERSONAS[key] ?? defaultPersona(slug, label);
+  const responsibilities = RESPONSIBILITIES[key] ?? RESPONSIBILITIES[slug];
   return responsibilities ? { ...base, responsibilities } : base;
 }
