@@ -1110,6 +1110,25 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
       if (msgType === "outreach") await addTicketTag(tid, "outreach");
     }
 
+    // ── 1c. OUTREACH DETERMINISTIC CLOSE ──
+    // Phase 1 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
+    // Outreach = brand-collab / UGC / partnership / cold sales pitch. Never a customer-service
+    // request, so we don't reply and — critically — don't enqueue Sol's ticket-handle box session
+    // (a Max-tier handling session costs real money per ticket). Close deterministically here,
+    // BEFORE the account-path email flow (~1119), the auto-link-by-identity step (~1885), the Sol
+    // first-touch dispatch (~1919), the inflection gate (~1994), and the Sonnet orchestrator
+    // (~2242) — every paid downstream lane is bypassed by the early return. The classifier tag +
+    // `outreach` tag were already stamped at ~1108. Both dispatch gates below ALSO check
+    // msgType !== "outreach" as belt-and-suspenders so a future refactor that moves this
+    // short-circuit can't accidentally leak an outreach ticket into a paid handling session.
+    if (isNew && msgType === "outreach") {
+      await step.run("outreach-deterministic-close", async () => {
+        await setStatus(admin, tid, cfg.auto_resolve);
+        await sysNote(admin, tid, "[System] Outreach — deterministically closed, no AI response.");
+      });
+      return { status: "outreach_deterministic_close" };
+    }
+
     let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
 
     // ── 2. Account path: inline email lookup (stateful conversation) ──
@@ -1916,7 +1935,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // bullet 3); (3) !agentAssigned — a human is already handling this ticket, don't step on their
     // toes (agent_intervened / assigned_to / escalated_to all set agentAssigned above). Fraud is
     // already handled — a fraud-blocked ticket returned above at line ~1730 (verification bullet 4).
-    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned) {
+    // msgType !== "outreach" belt-and-suspenders (Phase 1 of the outreach-deterministic-close
+    // spec): the primary short-circuit at § 1c already returned above, so this gate only fires
+    // for account/general — but pinning the classifier bucket into the dispatch predicate itself
+    // means a future refactor that moves the short-circuit block can't silently leak an outreach
+    // ticket into a Max-tier ticket-handle session.
+    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned && msgType !== "outreach") {
       const isChatChannel = st.ch === "chat";
       const acked = await step.run("sol-first-touch-ack", async () => {
         if (await newerActivity(admin, tid, t0)) return false;
@@ -2238,6 +2262,15 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
+    //
+    // msgType !== "outreach" belt-and-suspenders (Phase 1 of the outreach-deterministic-close
+    // spec): the primary short-circuit at § 1c already returned above for outreach tickets, so a
+    // fall-through to here means account/general. The explicit guard pins the classifier bucket
+    // into this parallel dispatch lane's predicate so outreach can NEVER reach a paid Sonnet/Opus
+    // turn via any refactor that reorders the upstream blocks.
+    if (isNew && msgType === "outreach") {
+      return { status: "outreach_deterministic_close_guard" };
+    }
     {
       const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
       const { executeSonnetDecision } = await import("@/lib/action-executor");
