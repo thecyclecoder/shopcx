@@ -135,7 +135,28 @@ export type ActionApi = {
    *  "payment_failed_update_blocked") so the overlay can render an
    *  inline CTA instead of dead-ending at a Close button. */
   failAction: (description?: string, errorCode?: string) => void;
+  /** Stable per-sub key (contract.internal_id, our UUID) used to save the
+   *  in-flight mutation before the customer detours through the payment
+   *  section during the failed-payment recovery flow — see the retry
+   *  effect + pendingRetryKey helper below (Phase 3 of
+   *  portal-failed-payment-block-exempts-internal-and-offers-inline-card-update).
+   *  The UUID is chosen because it's invariant across the
+   *  Appstle→internal migration (shopify_contract_id gets rewritten to
+   *  `internal-…`, so keying by contract.id would break on retry). */
+  subKey?: string;
 };
+
+/** sessionStorage key namespace for the pending retry (Phase 3). Scoped by
+ *  the sub UUID so multiple tabs / subs don't collide. */
+const PENDING_RETRY_PREFIX = "sp:pendingRetry:";
+function pendingRetryKey(subKey: string): string {
+  return `${PENDING_RETRY_PREFIX}${subKey}`;
+}
+interface PendingRetry {
+  route: string;
+  payload: Record<string, unknown>;
+  success: string;
+}
 
 /** One row of the last-5-orders widget. Fields cover both the render
  *  (order_number, created_at, total_cents) and the honest-status
@@ -176,6 +197,10 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
     startAction: () => { setActionDescription(undefined); setActionErrorCode(undefined); setActionPhase("loading"); },
     completeAction: (description) => { setActionDescription(description); setActionErrorCode(undefined); setActionPhase("success"); },
     failAction: (description, errorCode) => { setActionDescription(description); setActionErrorCode(errorCode); setActionPhase("error"); },
+    // UUID — invariant across the Appstle→internal migration; keying the
+    // pending-retry storage by contract.id would break because migration
+    // rewrites shopify_contract_id to `internal-…`.
+    subKey: contract?.internal_id || contract?.id || undefined,
   };
 
   const loadContract = useCallback(async () => {
@@ -219,6 +244,67 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
       }
     })();
   }, [loadContract, loadCatalog]);
+
+  // Phase 3 — after the customer returned from the payment section
+  // (`/subscriptions/<uuid>?retry=1`), replay the change-date / frequency
+  // mutation that hit `payment_failed_update_blocked` before the detour.
+  // The migration already ran during the card save (see
+  // PaymentMethodsSection.tsx retryOnSuccess branch), so the sub is now
+  // internal — the Phase 1 guard lets it through and the customer's
+  // original intent completes in one flow without a second manual step.
+  useEffect(() => {
+    if (loading || !contract) return;
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("retry") !== "1") return;
+
+    // Drop the marker regardless of what happens next, so a page reload
+    // never re-fires the retry.
+    url.searchParams.delete("retry");
+    window.history.replaceState({}, "", url.toString());
+
+    const subKey = contract.internal_id || contract.id;
+    let pending: PendingRetry | null = null;
+    try {
+      const raw = sessionStorage.getItem(pendingRetryKey(subKey));
+      if (raw) pending = JSON.parse(raw) as PendingRetry;
+      sessionStorage.removeItem(pendingRetryKey(subKey));
+    } catch { pending = null; }
+    if (!pending || !pending.route || !pending.payload) return;
+
+    (async () => {
+      action.startAction();
+      try {
+        const res = await fetch(`/api/portal?route=${pending.route}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(pending.payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.error) {
+          const errCode = typeof data?.error === "string" ? data.error : undefined;
+          // Rare tail: migration didn't take (network flake, etc.), the
+          // block still fires. Re-save the pending retry so the CTA the
+          // overlay renders can drive the same recovery loop again.
+          if (errCode === "payment_failed_update_blocked") {
+            try {
+              sessionStorage.setItem(pendingRetryKey(subKey), JSON.stringify(pending));
+            } catch { /* storage full — the CTA still works, just no auto-retry next round */ }
+          }
+          action.failAction(data?.message || data?.error || undefined, errCode);
+          return;
+        }
+        action.completeAction(pending.success);
+        await loadContract();
+      } catch {
+        action.failAction();
+      }
+    })();
+    // Fire exactly once per (loading→loaded) transition. `action` is
+    // recreated every render but its setters are stable; safe to omit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, contract?.internal_id, contract?.id]);
 
   if (loading) {
     return (
@@ -451,9 +537,12 @@ export function SubscriptionDetailScreen({ subscriptionId, workspace }: Props) {
           label: "Update payment method",
           onClick: () => {
             // Route to the in-portal payment section in add-card mode,
-            // pinned to this sub — same deep-link pattern the "+ Add a
-            // new card" button on the payment-method card uses.
-            window.location.href = `/payment-methods?add=1&forSub=${encodeURIComponent(contract.internal_id || contract.id)}`;
+            // pinned to this sub. retryOnSuccess=1 opts into the Phase 3
+            // recovery loop: the card save migrates the sub to internal
+            // (unblocking the Phase 1 guard), pins the new card, and
+            // sends the customer back to this screen with `?retry=1` so
+            // the change-date / frequency mutation replays automatically.
+            window.location.href = `/payment-methods?add=1&forSub=${encodeURIComponent(contract.internal_id || contract.id)}&retryOnSuccess=1`;
           },
         } : null}
       />
@@ -1405,7 +1494,20 @@ function useMutator(action: ActionApi, onMutate: () => Promise<void>) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.error) {
-        action.failAction(data?.message || data?.error || undefined, typeof data?.error === "string" ? data.error : undefined);
+        const errCode = typeof data?.error === "string" ? data.error : undefined;
+        // Phase 3 — stash the in-flight mutation so the return leg from
+        // the payment section can replay it after migration. Keyed by
+        // the sub UUID (contract.internal_id) because migration rewrites
+        // shopify_contract_id, invalidating any other key.
+        if (errCode === "payment_failed_update_blocked" && action.subKey) {
+          try {
+            sessionStorage.setItem(
+              pendingRetryKey(action.subKey),
+              JSON.stringify({ route, payload, success } satisfies PendingRetry),
+            );
+          } catch { /* storage full or disabled — the CTA still works, just no auto-retry */ }
+        }
+        action.failAction(data?.message || data?.error || undefined, errCode);
         return;
       }
       action.completeAction(success);
