@@ -30,6 +30,12 @@ export const DEFAULT_IRREVERSIBLE_SET: ReadonlySet<string> = new Set([
   "partial_refund",
   "cancel",
   "bill_now",
+  // `order_now` is the customer-facing name for the same charge — registered
+  // in directActionHandlers so a natural-name emission from Sol / the
+  // orchestrator dispatches instead of landing on "Unknown action type"
+  // (ticket 0a9e4d7f). Gate it here too so the confirm-first guardrail
+  // covers both names uniformly.
+  "order_now",
   "subscriptionOrderNow",
 ]);
 
@@ -98,7 +104,7 @@ export function buildClarificationMessage(
   if (type === "cancel") {
     return `Just to confirm before I cancel your subscription, is that right?`;
   }
-  if (type === "bill_now" || type === "subscriptionOrderNow") {
+  if (type === "bill_now" || type === "order_now" || type === "subscriptionOrderNow") {
     return `Just to confirm before I bill your next order now, is that right?`;
   }
   // Fallback — no irreversible action in the batch (this path shouldn't be reached
