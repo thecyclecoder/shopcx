@@ -625,10 +625,19 @@ export default function BoxPage() {
         .catch(() => {})
         .finally(() => alive && setLoading(false));
     load();
-    const interval = setInterval(load, 5000);
+    // cut-internal-egress-pooler-and-spec-rpcs Phase 3: visibility-guard the 5s tick — a
+    // backgrounded tab (a common state while a build finishes off-tab) stops firing the
+    // box-status poll and refreshes on 'visibilitychange' → visible so lane state is fresh
+    // the moment the tab returns. Mirrors the shipped sidebar reduce-calls pattern
+    // (src/app/dashboard/sidebar.tsx:347).
+    const runPoll = () => { if (document.visibilityState === "visible") load(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") load(); };
+    const interval = setInterval(runPoll, 5000);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       alive = false;
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
