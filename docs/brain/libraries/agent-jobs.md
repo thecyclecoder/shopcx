@@ -150,6 +150,16 @@ Goal-bound specs of the SAME goal must serialize on build (concurrent builds col
 
 `evaluateGoalMemberBuildDispatch` is the **DB reader** — calls `resolveGoalSlugForSpec` (get the goal), `getGoalSpecMembersInOrder` (list goal-mates in blocked_by order), `listAgentJobs` (check for in-flight builds), and invokes the pure predicate. Wired into `scripts/builder-worker.ts` `evaluateClaimTimeBuildGate` **leg 4** (the 4-leg claim gate: 1-goal-bound-validation, 2-blocked_by-clear, 3-vale-pass, **4-goal-member-serialize**, 5-one-off-fallback) — after blocked_by clearance, before Vale check. Never throws; fails OPEN (a read error → treat as `'ineligible'` → no-op gate, the downstream tests still protect).
 
+### `evaluateGoalMemberEnqueueAdmission` / `decideGoalMemberEnqueueAdmission` — functions  *(goal-member-builds-gate-at-enqueue-not-at-claim Phase 1)*
+
+```ts
+type GoalMemberEnqueueAdmissionResult = { ok: true } | { ok: false; reason: string };
+function decideGoalMemberEnqueueAdmission(input: { slug, goalSlug, inflight: GoalMemberInflightRow[] }): GoalMemberEnqueueAdmissionResult
+async function evaluateGoalMemberEnqueueAdmission(workspaceId, slug): Promise<GoalMemberEnqueueAdmissionResult>
+```
+
+The **enqueue-time admission gate**. `evaluateGoalMemberBuildDispatch` (above) serializes goal-mate builds at CLAIM time — N goal-mates land as `queued` rows and the claim-gate then re-queues the losers each tick. That prevents the race but leaves the CEO's board looking like the whole goal is a live pile-up. This helper moves the (b) "no other goal-mate build in-flight" leg UP to enqueue: before `enqueueBuildIfDue` / `queueNextChainedPhase` / `queueRoadmapBuild` (in [[roadmap-actions]]) inserts a `kind='build'` row, it consults the admission gate. If ANY goal-mate row is in `ACTIVE_STATUSES` (queued / queued_resume / claimed / building / needs_input / needs_approval / blocked_on_usage), the insert is REFUSED with reason `serialized-goal-mate-in-flight` and the spec stays ELIGIBLE-BUT-UNQUEUED — the reactive path (`buildOnEligible` / `autoQueueUnblockedBy` / the chain reconciler) re-fires the moment the sibling completes. The pure `decideGoalMemberEnqueueAdmission` predicate is the seam the [[../specs/goal-member-builds-gate-at-enqueue-not-at-claim]] Phase 1 test pins ("two back-to-back enqueues leave exactly one row"). The reader `evaluateGoalMemberEnqueueAdmission` does the DB work above it: `resolveGoalSlugForSpec` (one-off / null goal ⇒ ok:true) → `goalBranchState` (list member slugs) → `agent_jobs` `.in('status', ACTIVE_STATUSES).neq('spec_slug', slug)` (any goal-mate row) → predicate. Fail-OPEN on any resolve error (the claim-time serializer is still in place as a backstop until Phase 2 retires it). Does NOT retire `evaluateGoalMemberBuildDispatch` / the claim-gate leg 4 — that's Phase 2 of this spec.
+
 ### `reconcileDirtyGoalMemberPrs` / `decideGoalMemberPrRedrive` — functions  *(serialize-goal-member-spec-builds Phase 2)*
 
 ```ts

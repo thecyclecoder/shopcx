@@ -628,6 +628,16 @@ export async function enqueueBuildIfDue(
     .limit(1);
   if (inflight && inflight.length) return { enqueued: false, reason: "in-flight" };
 
+  // goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 — enqueue-time admission gate. Before
+  // this the same-spec in-flight guard above only stopped a duplicate for THIS spec; a
+  // goal-MATE (a different spec of the same goal) could still land as a second `queued` row
+  // and race the first. The claim-time serializer would then requeue the loser each tick, but
+  // the CEO's board still showed both cards live. Gate here so the loser never enqueues; the
+  // reactive path (buildOnEligible / autoQueueUnblockedBy) re-fires when the sibling completes.
+  // Fail-open on any resolve error (the claim-time serializer is still in place as a backstop).
+  const admission = await evaluateGoalMemberEnqueueAdmission(workspaceId, slug);
+  if (!admission.ok) return { enqueued: false, reason: admission.reason };
+
   const { data: inserted, error } = await admin
     .from("agent_jobs")
     .insert({
@@ -1534,6 +1544,92 @@ export async function evaluateGoalMemberBuildDispatch(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 — enqueue-time admission gate.
+// ─────────────────────────────────────────────────────────────────────────────
+// The existing goal-member serializer (evaluateGoalMemberBuildDispatch above + the claim-time
+// legs 4 in scripts/builder-worker.ts) enforces "one goal-mate builds at a time" AFTER the row
+// is already queued: N goal-mates land as `queued` rows, then the claim-gate picks one and
+// re-queues the rest each tick until they release. That works, but it leaves the CEO's board
+// looking like the whole goal is a live pile-up (N queued cards for one goal), and it burns
+// claim-gate ticks on rows that should never have been admitted in the first place.
+//
+// This gate moves the (b) "no other goal-mate build in-flight" check UP to enqueue time. Before
+// enqueueBuildIfDue / queueNextChainedPhase / queueRoadmapBuild inserts a build agent_jobs row
+// for a goal-bound spec, it consults evaluateGoalMemberEnqueueAdmission — if ANY goal-mate build
+// is already active (ACTIVE_STATUSES: queued/queued_resume/claimed/building/needs_input/
+// needs_approval/blocked_on_usage), the insert is refused with reason 'serialized-goal-mate-in-
+// flight'. The spec stays ELIGIBLE-BUT-UNQUEUED — the reactive enqueue path (buildOnEligible /
+// autoQueueUnblockedBy) or the chain reconciler re-queues it the moment the sibling completes.
+//
+// This does NOT retire the claim-time serializer — that's Phase 2's job. The claim-time gate
+// still runs as a defense in depth (any queued row that slipped past the admission gate — e.g.
+// via a deliberate raw-insert override the enqueue helpers document — is still serialized at
+// claim time). Fail-open on any resolve error (return {ok:true}) so a transient DB glitch never
+// falsely blocks an unrelated one-off enqueue.
+
+/** The result of an enqueue-admission check — `ok:true` admits the enqueue, `ok:false` refuses
+ *  with a reason legible in the caller's log. Mirrors GoalMemberBuildDispatchResult's shape so
+ *  the two serializer legs stay recognizable side-by-side. */
+export type GoalMemberEnqueueAdmissionResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/** The PURE core of `evaluateGoalMemberEnqueueAdmission`. Given this spec + the goal + the set
+ *  of ALREADY-INFLIGHT goal-mate build rows, decide whether the enqueue may proceed. Kept pure
+ *  so the named failing state — "two back-to-back enqueues for the same goal leave exactly one
+ *  row" — is testable end-to-end without a Supabase seam. A self-row in the input is a defense-
+ *  in-depth belt against a stale read (the reader also .neq's on slug); it MUST NOT false-
+ *  positive-refuse a legitimate re-enqueue of THIS spec. */
+export function decideGoalMemberEnqueueAdmission(input: {
+  slug: string;
+  goalSlug: string;
+  inflight: GoalMemberInflightRow[];
+}): GoalMemberEnqueueAdmissionResult {
+  const { slug, goalSlug, inflight } = input;
+  const other = inflight.find((r) => r.slug !== slug);
+  if (other) {
+    return {
+      ok: false,
+      reason: `serialized-goal-mate-in-flight: goal ${goalSlug} already has ${other.slug} (${other.status}); admission held to prevent goal-mate build collisions`,
+    };
+  }
+  return { ok: true };
+}
+
+/** The DB reader — resolve the goal, list its members, query agent_jobs for any goal-mate row
+ *  in ACTIVE_STATUSES, then invoke the pure predicate. Fail-open: any resolver miss returns
+ *  {ok:true} so a transient DB error never falsely blocks the enqueue (the claim-time
+ *  serializer + the caller's in-flight-per-slug guard remain as backstops). */
+export async function evaluateGoalMemberEnqueueAdmission(
+  workspaceId: string,
+  slug: string,
+): Promise<GoalMemberEnqueueAdmissionResult> {
+  const goalSlug = await resolveGoalSlugForSpec(workspaceId, slug);
+  if (!goalSlug) return { ok: true }; // one-off / not goal-bound — no serialization
+
+  const { goalBranchState } = await import("@/lib/specs-table");
+  const state = await goalBranchState(workspaceId, goalSlug);
+  if (state.specs.length === 0) return { ok: true }; // race: goal resolved but has no members
+
+  const memberSlugs = state.specs.map((s) => s.slug);
+  const admin = createAdminClient();
+  const { data: inflightRows } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "build")
+    .in("spec_slug", memberSlugs)
+    .in("status", ACTIVE_STATUSES)
+    .neq("spec_slug", slug);
+  const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
+    slug: (r as { spec_slug: string }).spec_slug,
+    status: (r as { status: string }).status,
+  }));
+
+  return decideGoalMemberEnqueueAdmission({ slug, goalSlug, inflight });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // serialize-goal-member-spec-builds Phase 2 — auto-re-drive a DIRTY goal-member PR.
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 1 serialized within-goal dispatch (only one goal-mate builds at a time). Phase 2 handles the
@@ -2382,6 +2478,17 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
     .in("status", ACTIVE_STATUSES)
     .limit(1);
   if (active && active.length) return null;
+
+  // goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 — enqueue-time admission gate. A
+  // chain-continuation for a goal-bound spec is still a fresh `queued` row, so it must respect
+  // the same "one goal-mate in-flight at a time" rule as the direct build-enqueue paths.
+  // Silently skips (returns null) when a goal-mate is in-flight — the chain resumes on the next
+  // reconciler pass once the sibling finishes (reconcileMergedJobs → this same helper).
+  const admission = await evaluateGoalMemberEnqueueAdmission(workspaceId, slug);
+  if (!admission.ok) {
+    console.log(`[chain-advance] ${slug} chain hold: ${admission.reason}`);
+    return null;
+  }
 
   // chained-phase-session-resume Phase 1 — carry the just-merged phase's session onto the next phase's
   // build job so `runBuildJob` `--resume`s it (prior transcript served from cache ~0.1x) instead of
