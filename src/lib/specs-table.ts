@@ -1032,6 +1032,36 @@ export async function setSpecBlockers(
 }
 
 /**
+ * spec-review-pass-always-stamps-review-passed-flag Phase 1 — the narrow SDK writer that stamps the
+ * DURABLE `specs.vale_review_passed_at` timestamp (build-gate-durable-review-signal). The primary
+ * pass path already dual-writes this via [[spec-card-state]] `markSpecCardValePassed` →
+ * `dualWriteSpecRow`, but that path is best-effort (a mirror hiccup is silently swallowed). This
+ * writer is the INVARIANT GUARD called by [[../agents/spec-review]] `assertDurableReviewPassStamp`
+ * after the pass to force the stamp when the mirror write dropped it — errors THROW so the caller
+ * refuses to record a `spec_review_passed` `director_activity` row when the durable stamp isn't in
+ * place. Returns `true` when the write actually stamped the row (was NULL, now `now()`), `false`
+ * when a racing writer already stamped it (the compare-and-set `.is(vale_review_passed_at,null)`
+ * matched 0 rows) or the row is missing (folded). Idempotent: caller should read first and only
+ * call this when the current stored value is NULL.
+ */
+export async function stampSpecValeReviewPassed(
+  workspaceId: string,
+  slug: string,
+): Promise<boolean> {
+  const admin = createAdminClient();
+  const stampedAt = new Date().toISOString();
+  const { data, error } = await admin
+    .from("specs")
+    .update({ vale_review_passed_at: stampedAt, updated_at: stampedAt })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .is("vale_review_passed_at", null)
+    .select("id");
+  if (error) throw error;
+  return (data ?? []).length > 0;
+}
+
+/**
  * Re-parent a spec — set the free-text `parent` prose + the typed `parent_kind`/`parent_ref` pair (and the
  * `milestone_id` FK) in ONE slug-resolved UPDATE, without round-tripping the whole body through `upsertSpec`
  * (which replaces phases). The narrow SDK writer for the parent columns — sibling to `setSpecBlockers` /

@@ -40,7 +40,7 @@ The POLICY seam. Phase 3 shipped a TRUST-THE-AUTHOR stub — Ada agreed with `in
 | `deferred` | `planned`  | **downgrade** | Autonomous flip → `deferred` + CEO notification carrying VALE's reason. |
 | `planned`  | `deferred` | **upgrade** | GATED — CEO Approval Request carrying VALE's reason (director still owns the outcome via the gate). |
 
-Back-compat: a candidate with NO stored `vale_disposition` (pre-migration legacy pass) FALLS BACK to `intended` — `kind='same'`, reason names the fallback so the audit ledger reflects it. The sweep still flips silently, matching the Phase-3 behavior — nothing regresses mid-migration.
+Back-compat: a candidate with NO stored `vale_disposition` (pre-migration legacy pass) FALLS BACK to `intended` — `kind='same'`, reason names the fallback so the audit ledger reflects it. The sweep still flips silently, matching the Phase-3 behavior — nothing regresses mid-migration. `spec-review-pass-always-stamps-review-passed-flag` Phase 1 — the durable `specs.vale_review_passed_at` stamp SURVIVES this fallback by construction: `applyAdaDisposition` clears `vale_pass` / `ada_disposition` / `intended_status` but NEVER touches `vale_review_passed` (see [[spec-card-state]] `SpecCardFlags.vale_review_passed`), so the claim-time build gate still reads a stamped flag after Ada's silent flip.
 
 Director-owns-the-outcome: Vale only PROPOSES. The DIRECTOR still DISPOSES via the CEO gate (an UPGRADE remains gated). Same north-star principle as before: spending MORE than the author proposed confirms with the CEO; spending LESS is autonomous + a one-click override.
 
