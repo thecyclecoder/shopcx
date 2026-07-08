@@ -12264,7 +12264,18 @@ async function runCsDirectorCallJob(job: Job) {
     // `executeSonnetDecision` + `deliverTicketMessage` in Phase 2; author_spec → specs SDK in
     // Phase 3; escalate_founder → the runner already mints the CEO card here, so the executor stub
     // logs and defers) — but the routing contract exists and the audit contract advances.
-    let applyResult: { ok: boolean; handler?: string; reason?: string; needs_attention?: boolean; error?: string; message_delivered?: boolean } = { ok: true, handler: "not_run" };
+    let applyResult: {
+      ok: boolean;
+      handler?: string;
+      reason?: string;
+      needs_attention?: boolean;
+      error?: string;
+      message_delivered?: boolean;
+      // Phase 3 — cs-director-call-phase-2-executor-fires-june-verdicts § Phase 3 handler results.
+      spec_slug?: string;
+      linkage_ticket_id?: string | null;
+      linkage_triage_run_id?: string | null;
+    } = { ok: true, handler: "not_run" };
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -12561,11 +12572,16 @@ async function runCsDirectorCallJob(job: Job) {
     // back on an approve_remedy verdict — the derived-from ticket 115350d5's original failure was a
     // silent "verdict recorded but nothing shipped", and this line is the primary place a human
     // scanning the queue sees WHAT actually happened.
+    // Phase 3 additions on the applyLine — surface the SDK spec_slug on author_spec verdicts + the
+    // resolved linkage on escalate_founder verdicts so an audit reader sees the executor's
+    // machine-readable output next to which handler took the routing.
     const applyLine = `apply → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${
       applyResult.reason ? ` · reason=${applyResult.reason}` : ""
     }${applyResult.message_delivered != null ? ` · message_delivered=${applyResult.message_delivered}` : ""}${
-      applyResult.needs_attention ? " · NEEDS_ATTENTION" : ""
-    }`;
+      applyResult.spec_slug ? ` · spec_slug=${applyResult.spec_slug}` : ""
+    }${applyResult.linkage_ticket_id ? ` · linkage_ticket=${applyResult.linkage_ticket_id.slice(0, 8)}` : ""}${
+      applyResult.linkage_triage_run_id ? ` · linkage_triage_run=${applyResult.linkage_triage_run_id.slice(0, 8)}` : ""
+    }${applyResult.needs_attention ? " · NEEDS_ATTENTION" : ""}`;
     const summary = [
       `decision=${verdict.decision}`,
       applyLine,

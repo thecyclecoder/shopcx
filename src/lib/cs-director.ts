@@ -12,7 +12,7 @@
  * SAME shape as `applyBoxDeployReview` in [[deploy-guardian]] (Reva's Phase-3 mutator): the box session
  * decides read-only + returns a typed verdict; this writer routes it to the per-decision handler.
  *
- * PHASE 2 (this file): the `approve_remedy` handler NOW EXECUTES.
+ * PHASE 2 (approve_remedy): the handler NOW EXECUTES.
  *   - `handleApproveRemedy` builds a `direct_action` `SonnetDecision` from the verdict's `RemedyPlan`
  *     (`action_type` + `payload`) and fires it through `executeSonnetDecision` (the same real
  *     executor prod uses — see [[../../docs/brain/recipes/run-orchestrator-action]]) with a NO-OP send
@@ -20,8 +20,25 @@
  *     escalation (the action succeeded + verify passed), we THEN deliver the RemedyPlan's customer
  *     message via `deliverTicketMessage`. A failed action never sends a customer message — the
  *     mutator returns `needs_attention:true` and the runner parks the job so a human can eyeball.
- *   - `handleAuthorSpec` + `handleEscalateFounder` remain Phase-3 stubs (routing contract exists;
- *     the actual mutations land in Phase 3).
+ *
+ * PHASE 3 (author_spec + escalate_founder): the remaining handlers materialize.
+ *   - `handleAuthorSpec` calls `authorSpecRowStructured` (the specs SDK — NEVER a raw insert per
+ *     CLAUDE.md § "PM data WRITES go through the specs-table SDK") from the verdict's `spec_seed`
+ *     (`slug`/`title`/`intent`/`problem`). The authored spec is `owner='cs'` with a bare
+ *     `[[../functions/cs]]` parent (the SDK's Phase-2 auto-anchor deterministically picks a CS
+ *     mandate), `autoBuild:false` (Roadmap-commissioned per CEO directive 2026-06-29 — Ada builds
+ *     every spec, all functions), and its summary carries a `**Derived-from-ticket:** {ticket_id}`
+ *     header — that's the LINKAGE BACK Phase 3's verification requires. A malformed spec_seed / SDK
+ *     failure returns `needs_attention:true` (never a silent no-write).
+ *   - `handleEscalateFounder` FORMALIZES THE LINKAGE-BACK CONTRACT the runner already writes. The
+ *     runner is the SOLE writer of the CEO `dashboard_notifications` card per
+ *     [[../../docs/brain/specs/escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation]] —
+ *     minted AFTER `applyBoxCsDirectorCall` returns, so the executor cannot verify the card exists
+ *     at this seat and MUST NOT double-mint (a duplicate card would page the CEO twice). The
+ *     executor's Phase-3 role is to RESOLVE + RETURN the linkage payload (`ticket_id` +
+ *     `triage_run_id` from the job's instructions) so the runner's `log_tail` / audit surface names
+ *     the linkage explicitly, and the result carries a machine-readable form future coverage /
+ *     bounce-back handlers can pick up without re-parsing.
  *
  * PHASE 2 INVARIANT (execute-then-message, from the derived-from ticket): the customer message is
  * NEVER sent before the action returns success. This is the whole point of the executor — a failed
@@ -29,11 +46,19 @@
  * the ordering by passing a no-op `send` to `executeSonnetDecision`; the sole delivery site is the
  * `deliverTicketMessage` call AFTER a clean executor return.
  *
+ * PHASE 3 INVARIANT (single writer per surface): the runner + this executor together respect the
+ * single-deterministic-writer principle from the north star ([[../../docs/brain/operational-rules]]
+ * § supervisable autonomy). The runner mints the CEO card (single writer), the executor writes the
+ * authored spec via the SDK chokepoint (single writer), and the audit row on `director_activity`
+ * lives on the runner (single writer). No handler in this file re-writes any of those artifacts —
+ * duplicates would page the CEO twice / land two specs with the same slug / corrupt the audit trail.
+ *
  * See [[../../docs/brain/libraries/cs-director]] · [[deploy-guardian]] ·
  * [[../../docs/brain/tables/director_activity]].
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
+import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -87,6 +112,25 @@ export interface ApplyBoxCsDirectorCallResult {
   needs_attention?: boolean;
   error?: string;
   message_delivered?: boolean;
+  /**
+   * Phase 3 (`author_spec`): the slug the specs SDK actually landed. Surfaced so the runner's
+   * `log_tail` + a downstream Roadmap join can name the authored spec without re-parsing the
+   * verdict's `spec_seed` (the LLM may pass a slug shape we normalize before the SDK write).
+   */
+  spec_slug?: string;
+  /**
+   * Phase 3 (`escalate_founder`): the ticket_id the executor resolved from `job.instructions` when it
+   * routed this verdict — the LINKAGE-BACK marker the spec's Phase-3 verification asks for. The
+   * runner is the sole writer of the CEO card + its metadata carries the same ticket_id; this field
+   * surfaces the same fact on the executor's result so the audit surface names it in one place.
+   */
+  linkage_ticket_id?: string | null;
+  /**
+   * Phase 3 (`escalate_founder`): the triage_run_id from `job.instructions` (null when this call
+   * did not go through the triage audit slice — a synthetic dispatch, or a Phase-1 no-triage lane).
+   * Same linkage-back purpose as `linkage_ticket_id` above.
+   */
+  linkage_triage_run_id?: string | null;
 }
 
 // ── Pure planners (unit-tested) ────────────────────────────────────────────────────────────────
@@ -460,35 +504,363 @@ async function handleApproveRemedy(
   }
 }
 
+// ── Phase 3 planners ──────────────────────────────────────────────────────────────────────────
+
 /**
- * Phase 3 executor stub for `author_spec`. Phase 3 will hand the verdict's `spec_seed` to the specs
- * SDK (`authorSpecRowStructured` — never a raw insert per CLAUDE.md § "PM data WRITES go through the
- * specs-table SDK"), anchored to a CS mandate. Phase 1 logs the intent + returns clean.
+ * A normalized spec-seed extracted from June's `verdict.spec_seed` — everything the specs SDK needs to
+ * land a Derived-from-ticket spec cleanly. `slug` is normalized (lower-kebab-case, alphanum + dashes
+ * only) so a slightly-off shape from the LLM (`My Slug!` / `foo_bar`) still writes as a valid
+ * `public.specs` row. The four content fields are REQUIRED — an SDK write with a blank body / no
+ * verification / no plain-language intent fails the SDK's own guard rails (`assertEveryPhaseHasBody`
+ * / `assertEveryPhaseHasChecks` / `assertEveryNodeHasIntent`) so we reject up-front and park
+ * needs_attention rather than throw deep inside the chokepoint.
  */
-async function handleAuthorSpec(
-  _admin: Admin,
-  jobId: string,
-  _verdict: CsDirectorVerdictInput,
-): Promise<ApplyBoxCsDirectorCallResult> {
-  console.log(`[cs-director:${jobId.slice(0, 8)}] author_spec routed (Phase 2 scaffold — specs SDK stub, no spec authored)`);
-  return { ok: true, handler: "author_spec" };
+export interface AuthorSpecPlan {
+  slug: string;
+  title: string;
+  intent: string;
+  problem: string;
+  /** Optional structural target the LLM may name (e.g. a file or function) — surfaced in the summary
+   *  when present so the future builder sees where June thought the fix should land. */
+  target: string | null;
 }
 
 /**
- * Phase 3 executor stub for `escalate_founder`. The runner (`runCsDirectorCallJob`) already mints the
- * CEO `dashboard_notifications` card on every `escalate_founder` verdict per
- * [[../../docs/brain/specs/escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation]] —
- * so Phase 2 of this executor is a logged no-op that acknowledges the routing without a second
- * insert. Phase 3 of this spec formalizes the card contract inside the executor (single writer, one
- * consistent shape) and adds the linkage back to the originating ticket / triage_run.
+ * Normalize the `spec_seed`'s slug — mirrors the improve-plan-executor's slugify (`replace(/[^a-z0-9-]/gi,
+ * '-').toLowerCase()`) so an LLM that emitted `Cs Analyzer Coupon Gap` or `cs_analyzer_coupon_gap`
+ * still lands `cs-analyzer-coupon-gap` (a valid `specs.slug` shape). Empty-after-normalize means the
+ * seed had no usable slug — the planner falls back to `needs_attention` for that.
+ */
+function normalizeSpecSlug(raw: string): string {
+  return raw.replace(/[^a-z0-9-]/gi, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
+
+/**
+ * Plan the specs-SDK write from June's `verdict.spec_seed`. `ok:false` means the seed is malformed
+ * (missing slug/title/intent/problem OR the slug normalizes to empty) — the executor MUST park the
+ * job needs_attention without touching the specs table, because a raw insert would violate the
+ * "specs SDK is the sole writer" invariant AND a blank/incomplete spec would fail the SDK guards
+ * anyway. Pure so the test suite can exercise every branch without a Supabase mock.
+ */
+export function planAuthorSpec(
+  seed: Record<string, unknown> | undefined | null,
+): { ok: true; plan: AuthorSpecPlan } | { ok: false; reason: string } {
+  if (!seed || typeof seed !== "object" || Array.isArray(seed)) {
+    return { ok: false, reason: "spec_seed_missing" };
+  }
+  const slugRaw = typeof seed.slug === "string" ? seed.slug.trim() : "";
+  const title = typeof seed.title === "string" ? seed.title.trim() : "";
+  const intent = typeof seed.intent === "string" ? seed.intent.trim() : "";
+  const problem = typeof seed.problem === "string" ? seed.problem.trim() : "";
+  if (!slugRaw) return { ok: false, reason: "spec_seed_missing_slug" };
+  if (!title) return { ok: false, reason: "spec_seed_missing_title" };
+  if (!intent) return { ok: false, reason: "spec_seed_missing_intent" };
+  if (!problem) return { ok: false, reason: "spec_seed_missing_problem" };
+  const slug = normalizeSpecSlug(slugRaw);
+  if (!slug) return { ok: false, reason: "spec_seed_slug_empties_after_normalize" };
+  const target =
+    typeof seed.target === "string" && seed.target.trim().length > 0 ? seed.target.trim() : null;
+  return { ok: true, plan: { slug, title, intent, problem, target } };
+}
+
+/**
+ * Build the `StructuredSpecInput` handed to `authorSpecRowStructured`. Pure so the test suite can
+ * assert the exact shape — every field the SDK's authoring gates check (`why`/`what`/`phases` with
+ * body + verification + why + what) is populated, and the Derived-from-ticket linkage is prepended
+ * to the summary as the FIRST line so a reader (or `grep`) can spot it without reading the whole
+ * body. Owner is always `'cs'` (June's function); parent is always the bare `[[../functions/cs]]`
+ * wikilink so the SDK's Phase-2 auto-anchor deterministically resolves it to a specific CS mandate
+ * (same pattern the improve-plan-executor uses when the LLM omitted the mandate pick).
+ */
+export function buildAuthorSpecInput(plan: AuthorSpecPlan, ticketId: string): StructuredSpecInput {
+  const targetLine = plan.target ? `\n\n**Target:** \`${plan.target}\`` : "";
+  const summary = [
+    `**Derived-from-ticket:** \`${ticketId}\``,
+    ``,
+    plan.intent,
+    ``,
+    `## Problem (from ticket \`${ticketId}\`)`,
+    plan.problem,
+    targetLine ? targetLine.trimStart() : ``,
+    ``,
+    `> Authored by the CS Director (💬 June) from ticket \`${ticketId}\` via the cs-director-call executor. Commission the build from the Roadmap board (owner = cs).`,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+  const whyLine = `Ticket ${ticketId} surfaced a product gap the CS Director ruled needs a structural fix (not a per-customer remedy).`;
+  const whatLine = `When this spec ships, the product gap identified in ticket ${ticketId} is addressed.`;
+  const phaseBody = [
+    `Implement the fix scoped from the problem above.`,
+    ``,
+    `Land the code change + the matching brain page in the SAME PR (CLAUDE.md hard rule).`,
+  ].join("\n");
+  const phaseVerification = [
+    `Reproduce the ticket scenario → confirm the fixed behavior, and that the ticket that surfaced it (\`${ticketId}\`) would now be handled correctly.`,
+    `\`npx tsc --noEmit\` passes.`,
+  ].join("\n");
+  return {
+    title: plan.title,
+    summary,
+    owner: "cs",
+    parent: `[[../functions/cs]]`,
+    blocked_by: [],
+    autoBuild: false, // CEO directive 2026-06-29 — Ada is the sole builder; specs commission on Roadmap.
+    why: whyLine,
+    what: whatLine,
+    phases: [
+      {
+        title: `P1 — implement the fix`,
+        body: phaseBody,
+        verification: phaseVerification,
+        status: "planned",
+        why: whyLine,
+        what: whatLine,
+      },
+    ],
+  };
+}
+
+// ── Phase 3 injectable dependencies ────────────────────────────────────────────────────────────
+
+/**
+ * The subset of concrete calls `handleAuthorSpec` needs to write via the specs SDK. Injected so the
+ * SDK-write invariant + malformed-seed failure paths can be exercised without booting the full
+ * author-spec chokepoint's transitive deps (mandate resolver, brain-refs suggester, etc.) in unit
+ * tests. Default resolves to the real `authorSpecRowStructured` at first call (dynamic import
+ * mirrors the runner's own pattern in scripts/builder-worker.ts).
+ */
+export interface AuthorSpecDeps {
+  authorSpec: (
+    workspaceId: string,
+    slug: string,
+    spec: StructuredSpecInput,
+    intendedStatus: "planned" | "deferred",
+    opts?: AuthorSpecOpts,
+  ) => Promise<boolean>;
+}
+
+async function defaultAuthorSpec(
+  workspaceId: string,
+  slug: string,
+  spec: StructuredSpecInput,
+  intendedStatus: "planned" | "deferred",
+  opts?: AuthorSpecOpts,
+): Promise<boolean> {
+  const { authorSpecRowStructured } = await import("@/lib/author-spec");
+  return authorSpecRowStructured(workspaceId, slug, spec, intendedStatus, opts);
+}
+
+const defaultAuthorSpecDeps: AuthorSpecDeps = {
+  authorSpec: defaultAuthorSpec,
+};
+
+// ── Shared: resolve linkage from job.instructions ──────────────────────────────────────────────
+
+/**
+ * Pull ticket_id + triage_run_id out of an `agent_jobs.instructions` JSON string. Best-effort — a
+ * malformed / missing instructions row returns nulls, and the caller decides whether that's a
+ * needs_attention (approve_remedy / author_spec — the linkage back matters for what they write) or
+ * a clean no-op (escalate_founder — the runner already wrote the linkage on the CEO card).
+ */
+function parseLinkageFromInstructions(
+  instructions: string | null | undefined,
+): { ticketId: string | null; triageRunId: string | null } {
+  if (!instructions) return { ticketId: null, triageRunId: null };
+  try {
+    const parsed = JSON.parse(instructions) as { ticket_id?: string; triage_run_id?: string };
+    return {
+      ticketId: typeof parsed?.ticket_id === "string" ? String(parsed.ticket_id) : null,
+      triageRunId: typeof parsed?.triage_run_id === "string" ? String(parsed.triage_run_id) : null,
+    };
+  } catch {
+    return { ticketId: null, triageRunId: null };
+  }
+}
+
+async function resolveLinkageFromJob(
+  admin: Admin,
+  jobId: string,
+): Promise<{ ticketId: string | null; triageRunId: string | null }> {
+  const { data: jobRow } = await admin
+    .from("agent_jobs")
+    .select("instructions")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (!jobRow) return { ticketId: null, triageRunId: null };
+  return parseLinkageFromInstructions((jobRow as { instructions: string | null }).instructions);
+}
+
+// ── Phase 3 handlers ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Phase 3 executor for `author_spec` (docs/brain/specs/cs-director-call-phase-2-executor-fires-
+ * june-verdicts.md § Phase 3). Writes June's `spec_seed` through the specs SDK
+ * (`authorSpecRowStructured`) — NEVER a raw `.from('specs').insert` (CLAUDE.md § "PM data WRITES go
+ * through the specs-table SDK", enforced by `_check-pm-sdk-compliance.ts`). The authored spec:
+ *
+ *  - `owner: 'cs'` — June's function; the spec lives in her portfolio on the Roadmap.
+ *  - `parent: '[[../functions/cs]]'` — bare parent; the SDK's Phase-2 auto-anchor deterministically
+ *    resolves it to a specific CS mandate (same pattern the improve-plan-executor uses).
+ *  - `autoBuild: false` — the CEO directive (2026-06-29) is Ada builds every spec, all functions;
+ *    a director-authored spec commissions on the Roadmap, not straight to build.
+ *  - `intendedStatus: 'planned'` — a freshly-authored ticket-derived spec lands in the planned lane,
+ *    ready for review + commissioning.
+ *  - summary carries `**Derived-from-ticket:** {ticket_id}` as the first line — the LINKAGE BACK
+ *    Phase 3's verification bullet asks for (a Roadmap reader can trace the spec to the ticket that
+ *    surfaced it in one grep).
+ *
+ * Fail-safes (all park needs_attention — never a silent no-write):
+ *  - `spec_seed` malformed / missing required fields → `spec_seed_missing_*`.
+ *  - `ticket_id` unresolvable from `job.instructions` → `ticket_id_unresolved` (the Derived-from
+ *    linkage would be blank, which defeats the whole point of the linkage bullet).
+ *  - SDK write returned `false` (chokepoint's guard failed — invalid parent / spec-body-empty /
+ *    runaway derivative fix / etc.) → `author_spec_write_returned_false`.
+ *  - SDK write threw (`AuthorWriteFailedError` or an underlying Supabase error) → `author_spec_threw`.
+ */
+async function handleAuthorSpec(
+  admin: Admin,
+  jobId: string,
+  workspaceId: string,
+  verdict: CsDirectorVerdictInput,
+  deps: AuthorSpecDeps = defaultAuthorSpecDeps,
+): Promise<ApplyBoxCsDirectorCallResult> {
+  const tag = `[cs-director:${jobId.slice(0, 8)}]`;
+  try {
+    // 1. Plan the seed. A missing required field is a stop-the-line — we never author a spec that
+    //    would fail the SDK's own guard rails deep in the chokepoint (a blank body / no verification
+    //    / no plain-language intent all throw with a different error class we'd have to translate).
+    const planned = planAuthorSpec(verdict.spec_seed);
+    if (!planned.ok) {
+      const error = `author_spec: spec_seed malformed (${planned.reason}) — no spec written`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "author_spec",
+        needs_attention: true,
+        reason: planned.reason,
+        error,
+      };
+    }
+
+    // 2. Resolve ticket_id for the Derived-from-ticket LINKAGE-BACK header. The runner's Phase-1
+    //    enqueue guarantees `ticket_id` in the instructions, but we defend against a shape drift
+    //    class (instructions unparseable / a synthetic job that dispatched without the JSON payload).
+    //    A blank linkage would defeat verification bullet #3, so we park instead of authoring.
+    const linkage = await resolveLinkageFromJob(admin, jobId);
+    if (!linkage.ticketId) {
+      const error = `author_spec: ticket_id not resolvable from job.instructions — Derived-from linkage would be blank, no spec written`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "author_spec",
+        needs_attention: true,
+        reason: "ticket_id_unresolved",
+        error,
+      };
+    }
+
+    // 3. Build the structured input + hand it to the SDK. `intendedStatusSetBy` is the surface a
+    //    grader / audit reader uses to trace which author path landed this spec — same convention
+    //    the improve-plan-executor uses (`box:ticket-improve`) so the two ticket-derived spec paths
+    //    are grep-able by prefix (`box:*`).
+    const specInput = buildAuthorSpecInput(planned.plan, linkage.ticketId);
+    let authored = false;
+    try {
+      authored = await deps.authorSpec(workspaceId, planned.plan.slug, specInput, "planned", {
+        intendedStatusSetBy: "box:cs-director-call",
+      });
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const error = `author_spec: SDK threw (${errMsg}) — no spec written`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "author_spec",
+        needs_attention: true,
+        reason: "author_spec_threw",
+        error,
+      };
+    }
+    if (!authored) {
+      const error = `author_spec: SDK returned false for slug=${planned.plan.slug} (chokepoint guard rejected / runaway-fix circuit-breaker tripped) — no spec written`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "author_spec",
+        needs_attention: true,
+        reason: "author_spec_write_returned_false",
+        error,
+      };
+    }
+    console.log(`${tag} author_spec: SDK wrote slug=${planned.plan.slug} (derived-from ticket=${linkage.ticketId.slice(0, 8)})`);
+    return { ok: true, handler: "author_spec", spec_slug: planned.plan.slug };
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    console.error(`${tag} handleAuthorSpec threw:`, errMsg);
+    return {
+      ok: false,
+      handler: "author_spec",
+      needs_attention: true,
+      reason: "handler_threw",
+      error: `author_spec: handler threw (${errMsg})`,
+    };
+  }
+}
+
+/**
+ * Phase 3 executor for `escalate_founder` (docs/brain/specs/cs-director-call-phase-2-executor-fires-
+ * june-verdicts.md § Phase 3). FORMALIZES THE LINKAGE-BACK CONTRACT — the runner is the SOLE WRITER
+ * of the CEO `dashboard_notifications` card per [[../../docs/brain/specs/escalate-founder-reliably-
+ * creates-the-ceo-inbox-card-with-diagnosis-and-recommendation]] (minted after this executor
+ * returns), and this handler NEVER mints a second card (a duplicate would page the CEO twice).
+ *
+ * What the executor DOES on Phase 3:
+ *  - Resolves the ticket_id + triage_run_id from `job.instructions` — the same values the runner
+ *    reads to stamp the card's metadata (`metadata.ticket_id` / `metadata.triage_run_id`), so the
+ *    two writers agree on the linkage.
+ *  - Returns them on the result as `linkage_ticket_id` + `linkage_triage_run_id` so the runner's
+ *    `log_tail` names the linkage in a machine-readable form. This IS the "record the linkage back
+ *    to the originating ticket / triage_run" verification bullet — a bounce-back handler / audit
+ *    join can pull the linkage off the result without re-reading the CEO card's JSON metadata blob.
+ *
+ * A missing ticket_id here is NOT a needs_attention — it's the same shape drift class the runner's
+ * Phase-1 guard already caught at enqueue time, so we log a warning and return `ok:true` with a
+ * `null` linkage. The runner's audit row on `director_activity` is the primary trail regardless.
  */
 async function handleEscalateFounder(
-  _admin: Admin,
+  admin: Admin,
   jobId: string,
   _verdict: CsDirectorVerdictInput,
 ): Promise<ApplyBoxCsDirectorCallResult> {
-  console.log(`[cs-director:${jobId.slice(0, 8)}] escalate_founder routed (Phase 2 scaffold — CEO card minted by runner; executor stub, no second write)`);
-  return { ok: true, handler: "escalate_founder" };
+  const tag = `[cs-director:${jobId.slice(0, 8)}]`;
+  try {
+    const linkage = await resolveLinkageFromJob(admin, jobId);
+    if (!linkage.ticketId) {
+      console.warn(`${tag} escalate_founder: no ticket_id in job.instructions — linkage payload will be null`);
+    } else {
+      console.log(
+        `${tag} escalate_founder: linkage ticket=${linkage.ticketId.slice(0, 8)}${linkage.triageRunId ? ` triage_run=${linkage.triageRunId.slice(0, 8)}` : ""} — CEO card minted by runner (single writer)`,
+      );
+    }
+    return {
+      ok: true,
+      handler: "escalate_founder",
+      linkage_ticket_id: linkage.ticketId,
+      linkage_triage_run_id: linkage.triageRunId,
+    };
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    console.error(`${tag} handleEscalateFounder threw:`, errMsg);
+    // Non-fatal — the runner is the sole card writer; a linkage-resolve blip doesn't roll back the
+    // runner's audit row + card mint. Surface as ok:true with a null linkage.
+    return {
+      ok: true,
+      handler: "escalate_founder",
+      linkage_ticket_id: null,
+      linkage_triage_run_id: null,
+      reason: `linkage_resolve_threw: ${errMsg}`,
+    };
+  }
 }
 
 // ── Public entrypoint ──────────────────────────────────────────────────────────────────────────
@@ -515,13 +887,37 @@ async function handleEscalateFounder(
  * log it on the job's `log_tail` without rolling back the completed job. Same shape contract as
  * `applyBoxDeployReview` in [[deploy-guardian]].
  */
+/**
+ * The full injectable dependency surface for `applyBoxCsDirectorCall` — a union of the Phase-2
+ * approve_remedy deps and the Phase-3 author_spec deps. Kept as a single input so the runner's
+ * single call site stays clean AND unit tests can override only the fields they exercise (the rest
+ * fall back to real defaults). Fields are declared optional here because the union of two full deps
+ * bags is the same shape as either bag on its own — the executor threads whichever set the routed
+ * decision needs.
+ */
+export interface CsDirectorApplyDeps {
+  approveRemedy?: ApproveRemedyDeps;
+  authorSpec?: AuthorSpecDeps;
+}
+
 export async function applyBoxCsDirectorCall(
   admin: Admin,
   jobId: string,
   verdict: CsDirectorVerdictInput,
-  deps: ApproveRemedyDeps = defaultApproveRemedyDeps,
+  deps: CsDirectorApplyDeps | ApproveRemedyDeps = {},
 ): Promise<ApplyBoxCsDirectorCallResult> {
   try {
+    // Backwards-compat shim: Phase 2 tests pass an `ApproveRemedyDeps` bag directly (loadTicketFacts
+    // / loadWorkspaceSandbox / runExecutor / deliverMessage). Detect that shape by presence of one
+    // of the known ApproveRemedyDeps keys and rebranch it into the new CsDirectorApplyDeps union.
+    const isLegacyApproveBag =
+      deps && typeof deps === "object" && "loadTicketFacts" in (deps as Record<string, unknown>);
+    const normalizedDeps: CsDirectorApplyDeps = isLegacyApproveBag
+      ? { approveRemedy: deps as ApproveRemedyDeps }
+      : (deps as CsDirectorApplyDeps);
+    const approveRemedyDeps = normalizedDeps.approveRemedy ?? defaultApproveRemedyDeps;
+    const authorSpecDeps = normalizedDeps.authorSpec ?? defaultAuthorSpecDeps;
+
     const { data: jobRow } = await admin
       .from("agent_jobs")
       .select("id, workspace_id, kind")
@@ -532,9 +928,11 @@ export async function applyBoxCsDirectorCall(
     if (job.kind !== "cs-director-call") return { ok: false, reason: `wrong_kind:${job.kind}` };
 
     if (verdict.decision === "approve_remedy") {
-      return handleApproveRemedy(admin, jobId, job.workspace_id, verdict, deps);
+      return handleApproveRemedy(admin, jobId, job.workspace_id, verdict, approveRemedyDeps);
     }
-    if (verdict.decision === "author_spec") return handleAuthorSpec(admin, jobId, verdict);
+    if (verdict.decision === "author_spec") {
+      return handleAuthorSpec(admin, jobId, job.workspace_id, verdict, authorSpecDeps);
+    }
     if (verdict.decision === "escalate_founder") return handleEscalateFounder(admin, jobId, verdict);
 
     console.log(`[cs-director:${jobId.slice(0, 8)}] no actionable decision ('${String(verdict.decision)}') — clean no-op`);
