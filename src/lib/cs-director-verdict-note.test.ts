@@ -90,3 +90,50 @@ test("approve_remedy with an empty remedy object records a graceful fallback lin
   assert.match(note, /Decision: approve_remedy/);
   assert.match(note, /see director_activity for the RemedyPlan/);
 });
+
+// ── Phase 3 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation ──
+// The note surfaces the Phase-2 `recommended_remedy` when June names one on an escalate_founder
+// verdict, so the ticket thread carries the SAME diagnosis + recommendation the CEO card carries.
+// A CS agent reading the ticket sees the concrete recommended action, not just the reasoning.
+
+test("Phase 3 — escalate_founder note surfaces June's recommended_remedy when present so ticket thread matches the CEO card", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "escalate_founder",
+    reasoning: "Grandfathered sub renewed at the new $59.90 price instead of the $33.01 lock — overcharged $26.89 on the 2026-06-24 renewal.",
+    recommended_remedy: {
+      kind: "refund_and_price_lock",
+      summary: "Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before the next renewal.",
+    },
+  });
+  assert.match(note, /Decision: escalate_founder/);
+  assert.match(note, /Escalated to CEO for hard call:/);
+  assert.match(note, /Recommended remedy \(refund_and_price_lock\): Refund \$26\.89/);
+});
+
+test("Phase 3 — escalate_founder note without a recommended_remedy stays back-compatible (Phase 1 shape)", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "escalate_founder",
+    reasoning: "Non-binary judgment call — the policy call is CEO's.",
+  });
+  assert.match(note, /Decision: escalate_founder/);
+  assert.match(note, /Escalated to CEO for hard call:/);
+  assert.doesNotMatch(note, /Recommended remedy:/, "no recommendation → the note is silent on it (Phase 1 shape)");
+});
+
+test("Phase 3 — escalate_founder with a summary-only recommended_remedy still surfaces it as the summary", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "escalate_founder",
+    reasoning: "Something specific.",
+    recommended_remedy: { summary: "Comp a full month + escalate to the fulfillment vendor about the repeated delay." },
+  });
+  assert.match(note, /Recommended remedy: Comp a full month/);
+});
+
+test("Phase 3 — escalate_founder with an empty recommended_remedy object is treated as no recommendation, not a bare fallback", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "escalate_founder",
+    reasoning: "Something specific.",
+    recommended_remedy: {},
+  });
+  assert.doesNotMatch(note, /Recommended remedy:/, "empty object == no recommendation, note stays quiet");
+});
