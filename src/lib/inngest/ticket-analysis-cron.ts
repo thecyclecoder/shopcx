@@ -13,12 +13,59 @@
  * `blocked_on_dependency` when the Claude-down breaker is tripped).
  *
  * Replaces the old nightly batch (ai-nightly-analysis.ts).
+ *
+ * Phase 1 of docs/brain/specs/cora-only-investigates-after-sol-handles-and-ticket-closed-30min-no-reinvestigation:
+ * Cora only analyzes a ticket once, after Sol has handled it (there's a LIVE ticket_directions
+ * row) AND its closed_at is >= 30 min ago AND we haven't already analyzed it for THIS Sol
+ * handling cycle (dedup on the live Direction's `authored_at`). See {@link passesCoraSelectionGate}.
  */
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enqueueTicketAnalyzeJob } from "@/lib/ticket-analyzer";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+
+/**
+ * Milliseconds Cora waits after Sol handles + the ticket closes before she analyzes. The 30-min
+ * settle lets the customer respond ("thanks!" / "wait, one more thing") so Cora grades the
+ * settled cycle, not an in-flight one.
+ */
+export const CORA_CLOSE_SETTLE_MS = 30 * 60 * 1000;
+
+/**
+ * Pure predicate for the Phase 1 gate — pinned in a unit test without a DB so the rule is
+ * reviewable in isolation.
+ *
+ * Cora selects a ticket for analysis only when:
+ *   1. Sol has handled it — there is a LIVE `ticket_directions` row (authored_at is known).
+ *   2. The ticket has been closed_at >= {@link CORA_CLOSE_SETTLE_MS} ago (the 30-min settle).
+ *   3. It has NOT already been analyzed for THIS Sol handling cycle — dedup on the live
+ *      Direction's `authored_at` (a `last_analyzed_at` at-or-after the Direction's authored_at
+ *      means we already graded this handling and must skip; a stale `last_analyzed_at` from a
+ *      prior handling is fine — Cora may re-grade the new cycle).
+ *
+ * Returns true when the ticket passes; false when any gate fails. The cron caller applies
+ * `.stamp last_analyzed_at on the skip so a later updated_at bump can't re-select the same row.
+ */
+export function passesCoraSelectionGate(
+  ticket: { closed_at: string | null; last_analyzed_at: string | null },
+  direction: { authored_at: string } | null,
+  now: Date,
+): boolean {
+  if (!direction) return false;
+  if (!ticket.closed_at) return false;
+  const closedMs = new Date(ticket.closed_at).getTime();
+  if (Number.isNaN(closedMs)) return false;
+  if (now.getTime() - closedMs < CORA_CLOSE_SETTLE_MS) return false;
+  if (ticket.last_analyzed_at) {
+    const analyzedMs = new Date(ticket.last_analyzed_at).getTime();
+    const authoredMs = new Date(direction.authored_at).getTime();
+    if (!Number.isNaN(analyzedMs) && !Number.isNaN(authoredMs) && analyzedMs >= authoredMs) {
+      return false;
+    }
+  }
+  return true;
+}
 
 export const ticketAnalysisCron = inngest.createFunction(
   {
@@ -52,16 +99,52 @@ export const ticketAnalysisCron = inngest.createFunction(
       // re-trip the close → analyze → reopen → close loop the veto is
       // there to break. Paired with the applySeverityActions
       // hard-return + the stamp-on-slip guard below.
+      //
+      // The 30-min-settled floor is also applied at the source: closed_at IS NOT NULL AND
+      // closed_at <= (now - 30 min). Tickets closed <30 min ago are skipped entirely so Cora
+      // never grades an in-flight window (the customer might still reply "thanks!").
+      const settleCutoff = new Date(Date.now() - CORA_CLOSE_SETTLE_MS).toISOString();
       const { data } = await admin.from("tickets")
-        .select("id, workspace_id, last_analyzed_at, updated_at, tags, analyzer_locked")
+        .select("id, workspace_id, last_analyzed_at, updated_at, closed_at, tags, analyzer_locked")
         .eq("status", "closed")
         .eq("analyzer_locked", false)
         .contains("tags", ["ai"])
+        .not("closed_at", "is", null)
+        .lte("closed_at", settleCutoff)
         .gte("updated_at", cutoff)
         .order("updated_at", { ascending: false })
         .limit(300);
-      const needs = (data || []).filter(t =>
-        !t.last_analyzed_at || new Date(t.last_analyzed_at) < new Date(t.updated_at as string)
+      const candidates = (data || []) as Array<{
+        id: string;
+        workspace_id: string;
+        last_analyzed_at: string | null;
+        updated_at: string;
+        closed_at: string | null;
+        tags: string[] | null;
+        analyzer_locked: boolean | null;
+      }>;
+      if (!candidates.length) return [];
+
+      // Load the LIVE ticket_directions rows in one batch — this is the "Sol-handled" signal +
+      // the per-handling-cycle dedup key. A ticket without a live Direction is dropped: Cora
+      // only investigates AFTER Sol has handled. Dedup is `last_analyzed_at >= authored_at` →
+      // already graded THIS handling cycle → skip.
+      const ids = candidates.map(t => t.id);
+      const { data: dirRows } = await admin.from("ticket_directions")
+        .select("ticket_id, authored_at")
+        .in("ticket_id", ids)
+        .is("superseded_at", null);
+      const directionByTicket = new Map<string, { authored_at: string }>(
+        (dirRows || []).map(d => [d.ticket_id as string, { authored_at: d.authored_at as string }]),
+      );
+
+      const now = new Date();
+      const needs = candidates.filter(t =>
+        passesCoraSelectionGate(
+          { closed_at: t.closed_at, last_analyzed_at: t.last_analyzed_at },
+          directionByTicket.get(t.id) ?? null,
+          now,
+        ),
       );
       return needs.slice(0, 100); // cap per run — next cycle picks up the rest
     });
