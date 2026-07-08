@@ -2045,19 +2045,23 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
-        // Phase 3 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md —
-        // load the live Direction (if any) BEFORE the picker so the fresh-Direction
-        // Haiku route can fire. loadLiveDirection returns null when Sol hasn't
-        // authored one yet (legacy tickets / workspaces without sol_first_touch_enabled);
-        // the picker treats that as "no candidate for the Haiku route" and falls
-        // through to the existing Sonnet-vs-Opus rules.
+        // Phase 3 + Phase 5 Fix 1 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md —
+        // load the live Direction (if any) BEFORE the picker so both (a) the fresh-Direction
+        // Haiku route (Phase 3) can fire and (b) the orchestrator's Direction-scoped user
+        // block (Phase 2 / Fix 1) can swap in — no customer name / orders / full history in
+        // the prompt when Sol has already summarized the ticket. loadLiveDirection returns
+        // null when Sol hasn't authored one yet (legacy tickets / workspaces without
+        // sol_first_touch_enabled); the picker treats that as "no Haiku route" and the
+        // orchestrator falls through to the existing full-context user block unchanged.
         const { loadLiveDirection } = await import("@/lib/ticket-directions");
         const liveDirection = await loadLiveDirection(admin, tid, { workspace_id: wsId });
+        const directionActive = !!(liveDirection && !liveDirection.superseded_at);
         const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null, direction: liveDirection });
-        await sysNote(admin, tid, `[System] Orchestrator model: ${pick.model} (${pick.reason})`);
+        await sysNote(admin, tid, `[System] Orchestrator model: ${pick.model} (${pick.reason})${directionActive ? " · direction-scoped context" : ""}`);
         const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers,
           agentAssigned ? { assigned: true, intervened: st.intervened } : null,
-          pick);
+          pick,
+          directionActive ? liveDirection : null);
         await sysNote(admin, tid, `[System] ${pick.model === "opus" ? "Opus" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });

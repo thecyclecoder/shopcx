@@ -7,7 +7,13 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { establishedProblemPromptLine, renderDirectionSystemPrompt, type DirectionPlaybookSnapshot } from "./ai-context";
+import {
+  establishedProblemPromptLine,
+  renderDirectionSystemPrompt,
+  prefixDirectionContextReasoning,
+  DIRECTION_CONTEXT_REASONING_TAG,
+  type DirectionPlaybookSnapshot,
+} from "./ai-context";
 import type { TicketDirection } from "./ticket-directions";
 
 test("T1 refund_request → the exact spec-verification string is emitted", () => {
@@ -90,6 +96,32 @@ test("Direction chosen_path='stateless' — playbook step context is NOT include
   const direction = makeDirection({ chosen_path: "stateless" });
   const prompt = renderDirectionSystemPrompt(direction, null);
   assert.ok(!prompt.includes("PLAYBOOK STEP"), "stateless branch must NOT emit the PLAYBOOK STEP header");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5 Fix 1 — the ticket_resolution_events reasoning must START with the
+// exact 'sol:direction-context' tag when the orchestrator ran the Direction-scoped
+// path. The spec verification (check 97eb7da6d22ddc66 + check 964e4ec31e0f6b47)
+// pins the string, so we pin it here too.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("prefixDirectionContextReasoning tags an existing reasoning body without dropping it", () => {
+  const tagged = prefixDirectionContextReasoning("chosen refund based on Direction guardrails");
+  assert.equal(tagged, "sol:direction-context chosen refund based on Direction guardrails");
+  assert.ok(tagged.startsWith(DIRECTION_CONTEXT_REASONING_TAG));
+});
+
+test("prefixDirectionContextReasoning handles empty / null / whitespace bodies cleanly", () => {
+  assert.equal(prefixDirectionContextReasoning(null), DIRECTION_CONTEXT_REASONING_TAG);
+  assert.equal(prefixDirectionContextReasoning(undefined), DIRECTION_CONTEXT_REASONING_TAG);
+  assert.equal(prefixDirectionContextReasoning(""), DIRECTION_CONTEXT_REASONING_TAG);
+  assert.equal(prefixDirectionContextReasoning("   "), DIRECTION_CONTEXT_REASONING_TAG);
+});
+
+test("DIRECTION_CONTEXT_REASONING_TAG is byte-exact 'sol:direction-context'", () => {
+  // Byte-exact pin — the spec's failing checks assert on this string, so a rename
+  // would silently break the pre-merge spec-test even if tsc + this file still compile.
+  assert.equal(DIRECTION_CONTEXT_REASONING_TAG, "sol:direction-context");
 });
 
 test("stateless branch still omits playbook step even if a snapshot is accidentally passed in", () => {

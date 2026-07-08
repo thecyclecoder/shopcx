@@ -503,6 +503,22 @@ export interface DirectionPlaybookSnapshot {
 }
 
 /**
+ * Reasoning-prefix tag for the ticket_resolution_events row of a Direction-scoped
+ * orchestrator turn. Phase 2 / Fix-1 verification asserts on the EXACT string, so it
+ * lives here as a single pinned constant + a pure prefixer. See the sonnet-orchestrator-v2
+ * `callSonnetOrchestratorV2` wrapper for the wire-in and `stageResolutionEvent` in
+ * [[docs/brain/libraries/action-executor.md]] for the ledger stamp.
+ */
+export const DIRECTION_CONTEXT_REASONING_TAG = "sol:direction-context";
+
+export function prefixDirectionContextReasoning(prev: string | null | undefined): string {
+  const body = (prev ?? "").toString().trim();
+  return body.length > 0
+    ? `${DIRECTION_CONTEXT_REASONING_TAG} ${body}`
+    : DIRECTION_CONTEXT_REASONING_TAG;
+}
+
+/**
  * Pure system-prompt renderer for the Direction-scoped path. Extracted so unit tests
  * can pin the exact shape Phase-1 verification asserts on ("suffix contains intent,
  * context_summary, stringified guardrails; does NOT contain the customer name or
