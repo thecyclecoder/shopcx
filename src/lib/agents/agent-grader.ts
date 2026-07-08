@@ -206,7 +206,13 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   "spec-chat": { name: "Sage", criteria: "accurate, grounded answers · correct DB spec authoring on finalize (writes the throwaway scratch buffer under docs/brain/specs/ that the worker parses and authors to `public.specs` + `public.spec_phases` via the author-spec SDK's `upsertSpec` — the .md is a transport buffer in a worktree the worker discards, NEVER a committed spec file and NEVER the source of truth) · read-only honored" },
   "dev-ask": { name: "Dex", criteria: "accurate, grounded answers · correct spec edits · read-only honored" },
   "security-review": { name: "Vault", criteria: "real vulnerabilities caught (not noise) · correct severity · no false-positives on safe diffs · a sound, actionable fix when flagged · produced a parseable verdict" },
-  "triage-escalations": { name: "June", criteria: "correct disposition per escalation (route vs dismiss vs needs-human) · no real blocker missed · no false escalations · sound rationale (June's own escalation triage — she replaced the solver→skeptic→quorum sweep)" },
+  // `triage-escalations` is deliberately NOT a worker rubric — it is June's (CS Director) OWN escalation
+  // triage, a DIRECTOR-tier component of June herself, so it is graded by the CEO, not by June's own
+  // worker sweep (a director never grades her own work — that is grading yourself, not the layer below).
+  // Since june-review-replaces-solver-skeptic-quorum-triage, the triage cron emits `cs-director-call`
+  // jobs (one per escalated ticket) and the CEO grades each verdict via the director-grader
+  // `cs_director_call` dimension ([[director-grader]]). See docs/brain/functions/platform.md § leash and
+  // docs/brain/libraries/agent-grader.md § who-grades-whom.
   "ticket-improve": { name: "Sol", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
   // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the per-ticket QC grader box lane
   // (kind='ticket-analyze', owner='cs'). ownerFunctionForKind('ticket-analyze')='cs' via the
@@ -216,7 +222,7 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   // prompt-auto-review-becomes-box-agent-under-june Phase 2 — Prue reviews proposed sonnet_prompts as a
   // supervised box-session agent under June (CS Director). ownerFunctionForKind('prompt-review')==='cs'
   // (Control Tower registry `agent:prompt-review`), so gradeableKindsForFunction('cs') picks this up
-  // and the CS director sweep grades it — same discipline as ticket-improve / triage-escalations.
+  // and the CS director sweep grades it — same discipline as ticket-improve / ticket-analyze.
   "prompt-review": { name: "Prue", criteria: "correct decision per proposal (accept sound rules · reject weak/redundant/voice-violating ones · supersede-not-delete when replacing an approved rule) · well-grounded reasoning citing similar prompts / policies / voice rules · calibrated confidence (no tentative accepts · no low-confidence noise) · never re-routes to a human queue" },
 };
 
@@ -231,7 +237,7 @@ export const GRADEABLE_KINDS = Object.keys(AGENT_RUBRICS);
  * a supervisor owns the layer BELOW it, not adjacent departments. So Ada (`fn='platform'`) grades
  * the platform-owned workers (build/fold/spec-test/repair/pr-resolve/security-review/spec-review/
  * plan/dev-ask/spec-chat/coverage-register/db_health) but NOT the CS/CMO/Retention/Growth workers
- * (ticket-improve, triage-escalations, product-seed, migration-fix, storefront-optimizer). A kind
+ * (ticket-improve, ticket-analyze, product-seed, migration-fix, storefront-optimizer). A kind
  * unmapped by `ownerFunctionForKind` is treated as NOT owned (never graded by a reaching-in
  * director) — a cross-function worker stays UNGRADED until its own director runs its own sweep.
  * Grading is a DIRECTOR-tier supervisory function; no director → no worker grading. Never a
