@@ -181,6 +181,9 @@ async function recordOutcomeRows(
   ok: boolean,
   reason: string | null,
 ): Promise<void> {
+  // A dry-run is a REHEARSAL — it must never touch the real outcome ledger. The simulated result
+  // lives only on the request row's `result`; the ticket's ticket_required_outcomes stay untouched.
+  if (req.dry_run) return;
   const decision = req.decision as { action_type?: unknown; actions?: unknown };
   if (decision.action_type !== "direct_action" || !Array.isArray(decision.actions)) return;
   const kinds = decision.actions
