@@ -528,8 +528,13 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     // Owner-confirmed (received-sms-rollup-cron-heartbeat Phase 2): the spec's owner is
     // platform (Infra & DevOps / reliability). Auto-proposal boilerplate stripped; label + description
     // now reflect the real function ([[../inngest/sms-callback-drain]] receivedSmsRollupCron).
-    // registeredAt claims the newcron grace window so a deploy → first-firing gap can't false-page
-    // registered_not_firing before the emit-heartbeat step's first beat lands.
+    // registeredAt REFRESHED (Phase 3 Fix 2) to the Fix-2 ship window so the newcron grace anchors
+    // to when Phase 1's emit-heartbeat step actually lands on prod — the Fix-1 anchor
+    // ("2026-07-09T01:22:22Z") had already aged out by the Fix-1 preview probe, so the tile went
+    // RED never_fired (deployAgeMs > window) instead of holding AMBER "awaiting first run". Paired
+    // with the evalCron reorder in monitor.ts that gates BOTH never_fired and registered_not_firing
+    // on this grace, the alert auto-resolves the moment prod re-evaluates the tile after ship and
+    // the first cron tick's beat lands within the 20-min window.
     id: "received-sms-rollup-cron",
     kind: "cron",
     owner: "platform",
@@ -537,7 +542,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Moves delivered SMS recipients into profile_events for segmentation + campaign reporting (received-sms-rollup-cron-heartbeat). End-of-run heartbeat lets the watchdog distinguish a healthy idle tick from a dead Inngest schedule.",
     expectedCadence: "every 5 min (*/5 * * * *)",
     livenessWindowMs: 20 * MIN,
-    registeredAt: "2026-07-09T01:22:22Z",
+    registeredAt: "2026-07-09T04:00:00Z",
   },
   // ─ Every-10-min crons (window ~40 min) ─
   { id: "abandoned-cart-reminder", kind: "cron", owner: "cmo", label: "Abandoned-cart reminder", description: "Sends abandoned-cart reminder sends on the rolling schedule.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * MIN },

@@ -294,6 +294,69 @@ test("evalCron still flips RED for a genuinely-dead cron once the observed-ancho
   }
 });
 
+// ─── Newcron grace gates BOTH reds (received-sms-rollup-cron-heartbeat Phase 3 Fix 2) ───
+// A newly-registered cron whose box worker has been up for > window (deployAgeMs > window)
+// used to trip `never_fired` before the awaiting-first-tick grace could fire — the exact
+// received-sms-rollup-cron regression where Fix 1's registeredAt landed but the tile still went
+// RED never_fired because `deployAgeMs > window` was checked first. Fix 2 reorders evalCron so
+// the grace check gates BOTH never_fired AND registered_not_firing, matching the intent of the
+// per-loop reference ("how long has this loop been registered") on both anchors.
+const receivedSmsRollupLoop: MonitoredLoop = {
+  id: "received-sms-rollup-cron",
+  kind: "cron",
+  owner: "platform",
+  label: "Received SMS rollup",
+  description: "Moves delivered SMS recipients into profile_events for segmentation + campaign reporting.",
+  expectedCadence: "every 5 min (*/5 * * * *)",
+  livenessWindowMs: 20 * 60_000,
+  registeredAt: "2026-07-09T04:00:00Z",
+};
+
+test("evalCron HOLDS AMBER for received-sms-rollup-cron when registeredAt is fresh but deployAgeMs and monitorUptimeMs are past window (Fix 2)", () => {
+  // The received-sms-rollup-cron Fix-2 regression scenario end-to-end:
+  //   - registeredAt 2026-07-09T04:00:00Z (fresh anchor Fix 2 lands on)
+  //   - cadence `*/5 * * * *` → computed first firing 04:00
+  //   - livenessWindowMs 20 min
+  //   - first_observed_at 2026-07-09T00:35:00Z (loop entry landed earlier that morning)
+  //   - deployAgeMs 6h — the box worker restarted 6h ago and has been up on this SHA since;
+  //     under the pre-Fix-2 ordering this WOULD flip the tile RED never_fired.
+  //   - watchdog has been alive 30h → monitorUptimeMs > window
+  //   - 0 beats ever (latest=null, everBeatCount=0)
+  // "Now" is 2026-07-09T04:05:00Z — only 5 min past registeredAt-firing, well inside the 20-min
+  // grace. Fix 2 reordering: the grace check runs BEFORE never_fired / registered_not_firing, so
+  // both reds are skipped and the tile stays AMBER "awaiting first run" until the first beat lands.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-09T04:05:00Z");
+  try {
+    const firstObservedMs = Date.parse("2026-07-09T00:35:00Z");
+    const deployAgeMs = 6 * 60 * 60_000; // 6h — well past 20-min window
+    const monitorUptimeMs = 30 * 60 * 60_000; // 30h — well past 20-min window
+    const result = evalCron(receivedSmsRollupLoop, null, deployAgeMs, 0, false, monitorUptimeMs, firstObservedMs);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /awaiting first run/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron still flips RED never_fired once the newcron grace itself expires (Fix 2 regression guard)", () => {
+  // Same loop, but "now" is well past the 20-min grace window. deployAgeMs > window remains > window
+  // → the reordered evalCron falls through the grace check and hits the never_fired red. Confirms
+  // the reorder doesn't muzzle a genuinely-dead cron; it only holds amber while the grace is live.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-09T05:00:00Z");
+  try {
+    const firstObservedMs = Date.parse("2026-07-09T00:35:00Z");
+    const deployAgeMs = 6 * 60 * 60_000;
+    const result = evalCron(receivedSmsRollupLoop, null, deployAgeMs, 0, false, null, firstObservedMs);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "never_fired");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 // ─── Queue-aware self-update deferral (control-tower-self-update-tile-queue-aware) ───
 // evalWorker mirrors scripts/builder-worker.ts:4290 — an idle worker BEHIND origin/main
 // while {queued, queued_resume} > 0 is intentionally parking its self-update until a
