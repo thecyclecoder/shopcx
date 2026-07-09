@@ -581,8 +581,41 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
 //     running but producing nothing useful — e.g. erroring on every ticket).
 // A genuinely-idle agent (no work waiting, no runs) is GREEN — no false positives.
 
+// control-tower-fraud-detector-workprobe-exclude-internal-renewals (signal
+// loop:ai:fraud-detector, verdict monitor-false-positive): source_name values
+// written by the internal subscription-renewal loop (see
+// src/lib/inngest/internal-subscription-renewals.ts — the regular renewal path
+// stamps `internal_subscription_renewal`, the $0 comp path stamps
+// `internal_subscription_comp_renewal`). Those orders are created by the billing
+// renewal cron and NEVER emit `fraud/order.check`, so `checkOrderForFraud` never
+// runs for them by design. Counting them as fraud-detector work makes a quiet
+// renewal-only window read as "work=1 / 0 beats" and false-fires `idle_while_work`
+// on the `ai:fraud-detector` tile. Real Shopify webhooks pass their upstream
+// `source_name` through and DO fire the fraud gate (shopify-webhooks.ts:776);
+// internal storefront checkouts stamp `source_name="storefront"` and call
+// `checkOrderForFraud` directly (src/app/api/checkout/route.ts:946) — both stay
+// in the probe's work count. Standing pattern for this class of monitor
+// false-positive: mirror the source filter at the probe, not a JS post-filter.
+export const INTERNAL_RENEWAL_ORDER_SOURCE_NAMES = [
+  "internal_subscription_renewal",
+  "internal_subscription_comp_renewal",
+] as const;
+
+/**
+ * True iff an `orders` row is upstream work the fraud detector is expected to
+ * screen. Internal renewal orders are the ONE class we exclude — every other
+ * shape (Shopify webhook, storefront, unknown/null `source_name`) DOES route
+ * through `checkOrderForFraud` and stays in the work count. Kept as a pure
+ * predicate so the DB-side probe filter and the unit test share one definition.
+ */
+export function isOrderAwaitingFraudScreen(order: { source_name?: string | null }): boolean {
+  const src = order.source_name ?? null;
+  if (src === null) return true;
+  return !(INTERNAL_RENEWAL_ORDER_SOURCE_NAMES as readonly string[]).includes(src);
+}
+
 /** Per-inline-agent window state: upstream work + ok/errored beat counts + latest/history. */
-interface InlineAgentState {
+export interface InlineAgentState {
   /** independent upstream-demand count over the window (the inlineWorkSignal probe). */
   work: number;
   /** successful beats in the window. */
@@ -595,7 +628,7 @@ interface InlineAgentState {
   history: LoopHistoryRow[];
 }
 
-function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefined): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+export function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefined): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const s = state ?? { work: 0, okCount: 0, errCount: 0, latest: null, history: [] };
   const base = {
     id: loop.id,
@@ -713,10 +746,21 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             return count ?? 0;
           }
           case "orders-awaiting-fraud-screen": {
+            // Feeder-surface mirror (control-tower-fraud-detector-workprobe-exclude-internal-renewals,
+            // signal loop:ai:fraud-detector). Real fraud-detector work = orders whose creation path
+            // fires `fraud/order.check` → `checkOrderForFraud`. Shopify webhooks
+            // (src/lib/shopify-webhooks.ts:776) and the storefront checkout route
+            // (src/app/api/checkout/route.ts:946) both do so; the internal subscription-renewal cron
+            // (src/lib/inngest/internal-subscription-renewals.ts) does NOT. So exclude the two
+            // internal-renewal source_name markers here — the same predicate that
+            // isOrderAwaitingFraudScreen enforces in JS. NULL source_name stays in the count
+            // (defensive: unknown-source orders are treated as real; matches the pre-fix behavior).
+            const excluded = INTERNAL_RENEWAL_ORDER_SOURCE_NAMES.map((n) => `"${n}"`).join(",");
             const { count } = await admin
               .from("orders")
               .select("id", { count: "exact", head: true })
-              .gte("created_at", sinceIso);
+              .gte("created_at", sinceIso)
+              .or(`source_name.is.null,source_name.not.in.(${excluded})`);
             return count ?? 0;
           }
           case "tickets-awaiting-decision": {
