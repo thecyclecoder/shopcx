@@ -530,6 +530,29 @@ function ghToken() {
   return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
 }
 
+/** The pre-merge test context for a goal-compiled spec: its own `claude/build-*` branch (built off the goal
+ *  branch, so the accumulated code is present) + the freshest preview URL captured for it (from a prior build
+ *  or spec-test job). Returns null when no preview has been captured — the caller then SKIPS rather than
+ *  false-fail against main. The `claude/*` branch name satisfies the worker's pre-merge testable gate. */
+async function resolveGoalMemberTestContext(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  slug: string,
+): Promise<{ spec_branch: string; preview_url: string } | null> {
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("spec_branch, preview_url, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .not("preview_url", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const row = (data ?? [])[0] as { spec_branch: string | null; preview_url: string | null } | undefined;
+  const preview = row?.preview_url?.trim();
+  if (!preview) return null;
+  return { spec_branch: row?.spec_branch?.trim() || `claude/build-${slug}`, preview_url: preview };
+}
+
 /**
  * Shared spec-test enqueue guard (spec-test-on-ship). Insert a `kind='spec-test'` agent_job for
  * (workspaceId, slug) IFF the spec is shipped-but-not-archived AND not already covered — no in-flight
@@ -582,6 +605,30 @@ export async function enqueueSpecTestIfDue(
     .limit(1);
   if (recent && recent.length) return { enqueued: false, reason: "fresh-run" };
 
+  // goal-compiled-tests-on-goal-branch: a spec that is a member of an INCOMPLETE goal lives on the GOAL
+  // BRANCH, not main — goal members promote atomically only when the whole goal lands on main (Gate C).
+  // A shipped-lane spec-test runs against main/production, where the goal-compiled code doesn't exist yet,
+  // so EVERY check false-fails ("migration/route/table missing" — because they're on the goal branch). That
+  // stale 'issues' verdict then blocks the goal's OWN promotion: a self-inflicted deadlock (the 2026-07-09
+  // media-buyer jam — sensor-trust-probe/shadow-mode/per-cohort each showed 4-9 auto-fails that were pure
+  // wrong-context false-fails). So route a goal-compiled spec's test to its OWN `claude/build-*` branch
+  // preview (built off the goal branch → the code IS present), which the worker's pre-merge testable gate
+  // accepts. If no preview is resolvable, SKIP rather than false-fail against main.
+  let branchCtx: { spec_branch: string; preview_url: string } | null = null;
+  const goalSlug = await resolveGoalSlugForSpec(workspaceId, slug);
+  if (goalSlug) {
+    const { getGoal } = await import("@/lib/goals-table");
+    const goal = await getGoal(workspaceId, goalSlug);
+    // main_merge_sha is NULL until the goal's atomic M5 promotion lands on main (same signal spec-drift uses
+    // for its goal-pending guard). NULL ⇒ the members' code is on the goal branch, not main ⇒ route to branch.
+    if (goal && !goal.main_merge_sha) {
+      branchCtx = await resolveGoalMemberTestContext(admin, workspaceId, slug);
+      if (!branchCtx) {
+        return { enqueued: false, reason: `goal-compiled (${goalSlug} not promoted to main) with no branch preview — skipped main-context re-verify to avoid false-fails` };
+      }
+    }
+  }
+
   const { data: inserted, error } = await admin
     .from("agent_jobs")
     .insert({
@@ -590,6 +637,7 @@ export async function enqueueSpecTestIfDue(
       kind: "spec-test",
       status: "queued",
       created_by: null,
+      ...(branchCtx ?? {}),
     })
     .select("id")
     .single();
