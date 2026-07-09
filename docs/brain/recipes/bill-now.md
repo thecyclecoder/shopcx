@@ -36,7 +36,8 @@ await appstleAttemptBilling(workspaceId, nextBillingAttemptId);
 ## When to use this
 
 - **Dunning recovery** — `dunning-new-card-recovery` calls this after switching cards.
-- **Customer portal "bill now"** — see `portal/handlers/order-now.ts`.
+- **Customer portal "bill now"** — see [[../libraries/portal__handlers__order-now]].
+- **Dashboard agent "bill now"** — `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts` (agent UI button on a subscription); gates on [[../libraries/portal__order-now-guard]] for Appstle subs, returning 409 if the contract is cancelled/inactive.
 - **Manual admin retry** — agent UI button on a dunning-stuck sub.
 
 ## Gotchas
