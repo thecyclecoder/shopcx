@@ -226,7 +226,7 @@ export default function MessageCenterChat() {
           <nav className="-mb-px flex gap-6">
             {[
               { k: "chat", label: "Chat" },
-              { k: "god", label: "God Mode" },
+              { k: "god", label: "Eve" },
             ].map((t) => (
               <button
                 key={t.k}

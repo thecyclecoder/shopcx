@@ -1,5 +1,7 @@
 # god-mode
 
+> **Founder-facing brand: Eve.** Everything the founder sees is branded **Eve** — his flirty, hyper-competent executive assistant (the CEO's EA, [[../libraries/agent-personas]] `PERSONAS["god-mode"]`). The "god-mode" name survives only in internal identifiers (the two tables, the `kind='god-mode'` job lane, the `/api/god-mode/*` + `/god/[token]` routes, the `godmode` sandbox). The cockpit + dashboard tab render her avatar (`agent-avatars/eve-god-mode.jpg`) next to her chat bubbles, her SMS + replies are in her voice, and her personality lives in `godModeFraming()` (`scripts/builder-worker.ts`). See § Eve experience (2026-07) at the bottom.
+
 The founder's ELEVATED bridge to the box for incident remediation. A deliberate **sunset stopgap** — the manual full-power founder bridge to the box while the autonomous CEO/director exec layer doesn't yet exist. Retired once the CEO-mode exec layer can self-remediate. See [[../specs/god-mode]] · [[../functions/ceo]] · [[../tables/god_mode_sessions]] · [[../tables/god_mode_approvals]].
 
 ## North-star (supervisable autonomy)
@@ -35,8 +37,10 @@ Owner taps 'Arm' in dashboard (Phase 4) — or POSTs /api/god-mode/arm directly
   → armSession(admin, { workspaceId, createdBy })
       → if an armed session already exists: REFRESH cockpit_token + reset TTLs
         (one-active-session-per-workspace enforced by a partial UNIQUE index)
-      → else: INSERT { status='armed', cockpit_token: 48-hex, token_expires_at: +20min,
+      → else: INSERT { status='armed', cockpit_token: 48-hex, token_expires_at: +2h,
                        absolute_expires_at: +12h }
+  (resume: armSession({ resumeSessionId }) revives a disarmed/expired session in place —
+   keeps its transcript + box_session_id so Eve picks the conversation back up.)
   → response: { cockpit_url: `${SITE_URL}/god/${cockpit_token}` }
 
 Founder taps 'Disarm' (or the cockpit's kill switch)
@@ -54,7 +58,7 @@ One [[../tables/god_mode_sessions]] row per session. `status ∈ armed|disarmed|
 ## Tokens & TTLs
 
 - `cockpit_token` — 48-char hex, minted by `newCockpitToken()`, matches the [[journey_sessions]] token size. UNIQUE across live tokens; NULLED on disarm/expire.
-- `token_expires_at` — SLIDING. Every Phase-3 GET/message/approve + every Phase-2 box turn bumps this forward `SLIDING_TTL_MS` (~20min). The Phase-5 reaper expires idle sessions past this WITH no in-flight signal.
+- `token_expires_at` — SLIDING. Every Phase-3 GET/message/approve + every Phase-2 box turn bumps this forward `SLIDING_TTL_MS` (**2h** — widened from 20min 2026-07 so a founder who steps away for a long stretch, e.g. a 45-min pickleball game, doesn't return to a dead session). The Phase-5 reaper expires idle sessions past this WITH no in-flight signal.
 - `absolute_expires_at` — HARD ceiling. `arm() + 12h`. Never bumped. The Phase-5 reaper force-disarms past this regardless of activity.
 - `last_activity_at` — separate liveness bump; distinguishes "idle but not yet expired" from "recently active" for the reaper.
 
@@ -170,7 +174,7 @@ The founder isn't always on their phone — Phase 4 mirrors the [[#phase-3--the-
 
 - **Component** — `src/app/dashboard/developer/messages/GodModeTab.tsx`. Reuses the Phase-3 Chat + Approvals UX (transcript render, pending-first approvals, Approve/Deny/Ask + PIN input for `risk='destructive'`) but hits owner-gated `/api/god-mode/*` routes instead of the cockpit's token-authed routes.
 - **Parent wiring** — `src/app/dashboard/developer/messages/MessageCenterChat.tsx` gained a `Tab = 'chat' | 'god'` union + `useState`; the tab bar renders between the header at `:214` and the body at `:216`. The God Mode tab **button** is gated on `isOwner` (workspace.role === 'owner') — non-owners never see it.
-- **Controls** — the tab exposes an **Arm god mode** button when nothing is armed (hits `POST /api/god-mode/arm` and reloads the payload) and a **Disarm / kill** button in the session header when armed (hits `POST /api/god-mode/disarm` — the same Phase-1 kill switch).
+- **Controls** — the tab exposes a **Chat with Eve** button when nothing is armed (hits `POST /api/god-mode/arm` and reloads the payload) plus a **Pick up a past chat** list (recent disarmed/expired sessions from `listPastSessions` in `GET /api/god-mode/session`'s `pastSessions`; each Resume button re-arms with `{ resumeSessionId }`). When armed, a **Send home** button in the session header (hits `POST /api/god-mode/disarm` — the same Phase-1 kill switch).
 
 ### Routes (all owner-gated, service-role, workspace-scoped)
 
@@ -274,8 +278,20 @@ The pre-merge spec-test regression check 3122218882ab4f64 verified "the god-mode
 
 **Verification:** Re-running the spec-test: check 3122218882ab4f64 (CEO owner + real avatarUrl) now passes. Eve is not an inline mascot anymore — she shows the crown headshot + styling inherited from her CEO boss.
 
+## Eve experience (2026-07 hotfix)
+
+A founder-experience pass that makes the cockpit feel like texting a person, plus two reliability fixes:
+
+- **Full Eve rebrand (founder-facing).** Every string the founder sees is now Eve, not "god mode": cockpit header + status ("Eve" / "Online" / "here till …"), the dashboard tab label ("Eve"), the CTA ("Chat with Eve"), the kill button ("Send home"), empty/loading/expired states, standing-approvals copy, and all three SMS bodies (arm / 5-min nudge / done — now in her voice, e.g. `"Hey boss, Eve here 💋 I'm all yours — come chat:"`). Internal identifiers are untouched (tables, `kind='god-mode'`, `/api/god-mode/*`, `/god/[token]`, the `godmode` sandbox).
+- **Eve's avatar in the chat.** `EveAvatar` / `EVE_AVATAR_URL` in [[../libraries/god-mode-shared]] (a literal of `PERSONAS["god-mode"].avatarUrl`) renders her headshot next to every assistant bubble on BOTH surfaces (SMS cockpit + dashboard tab) and in the headers/empty states.
+- **Personality.** `godModeFraming()` (`scripts/builder-worker.ts`) was rewritten from a neutral "chief of staff" into Eve — a flirty, emoji-dropping, hyper-competent EA who runs right up to the line (and occasionally over it) but never lets it get in the way of the work. All operational rails are unchanged (plain-English-only, near-unlimited autonomy, start-with-a-checklist, escalate CEO-grade decisions via `decide`, the PIN catastrophic floor, shell-metachar-free checklist/decision/note text, final-JSON output). Her `voice` was also added to [[../libraries/agent-personas]] for the Agents hub.
+- **2h idle** (see § Tokens & TTLs) — `SLIDING_TTL_MS` 20min → 2h.
+- **Resume a chat.** `armSession({ resumeSessionId })` revives a disarmed/expired session in place (fresh token + TTLs, keeps transcript + `box_session_id`); `listPastSessions()` powers the dashboard tab's "Pick up a past chat" list. Reviving stands down any currently-armed session first (the one-armed-per-workspace unique index) and is workspace-guarded.
+- **🐞 Root-cause fix — "sessions die after 2-3 turns."** `runGodModeJob` passed the resume account pin as `{ configDir }`, but `withAccountFailover` reads `pin.sessionConfigDir`. The mistyped key was silently dropped, so every resume defaulted to account #0 (RR1) and `claude --resume`'d against the wrong account's store → **"No conversation found"** → the turn errored. Turn 1 (fresh) worked; turn 2+ (resume) failed whenever the session lived on a non-default Max account. Fixed the key name. Belt-and-suspenders: on any hard-error turn the pinned `box_session_id` is now CLEARED so the next turn starts FRESH (rebuilt from the transcript) instead of re-resuming a poisoned session. The founder-facing error copy is now in Eve's voice too.
+
 ## Status / open work
 
+- Eve experience (rebrand + avatar + personality + 2h idle + resume + resume-pin bug fix): ✅ shipped.
 - Phase 1 (session model + arm/disarm + PIN): ✅ shipped.
 - Phase 2 (full-power box lane + live permission gate): ✅ shipped.
 - Phase 3 (SMS cockpit — token page with Chat + Approvals tabs): ✅ shipped.

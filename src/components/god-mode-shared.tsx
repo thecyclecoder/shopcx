@@ -8,6 +8,31 @@
  * source of truth.
  */
 
+/**
+ * Eve's headshot — the executive-assistant persona's avatar (mirrors
+ * PERSONAS["god-mode"].avatarUrl in src/lib/agents/personas.ts). Shown next to
+ * her chat bubbles so a text conversation with Eve feels like texting a person,
+ * not a console. Kept as a literal here (not imported from personas.ts) so these
+ * client surfaces don't pull the whole persona map into the bundle.
+ */
+export const EVE_AVATAR_URL =
+  "https://urjbhjbygyxffrfkarqn.supabase.co/storage/v1/object/public/agent-avatars/eve-god-mode.jpg?v=1";
+
+/** Eve's round profile picture. `size` is the pixel diameter. */
+export function EveAvatar({ size = 28, className = "" }: { size?: number; className?: string }) {
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={EVE_AVATAR_URL}
+      alt="Eve"
+      width={size}
+      height={size}
+      className={`shrink-0 rounded-full object-cover ring-1 ring-amber-200 dark:ring-amber-900/50 ${className}`}
+      style={{ width: size, height: size }}
+    />
+  );
+}
+
 type ChecklistStepState = "pending" | "active" | "done";
 type ChecklistPayload = { title: string; steps: { label: string; state: ChecklistStepState }[] };
 

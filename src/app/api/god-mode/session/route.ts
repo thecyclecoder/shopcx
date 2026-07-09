@@ -24,6 +24,7 @@ import {
   getActiveSession,
   listApprovalsForSession,
   listStandingGrants,
+  listPastSessions,
   bumpActivity,
   type GodModeApprovalRow,
   type GodModeMessage,
@@ -65,7 +66,11 @@ export async function GET() {
   const { workspaceId, admin } = auth;
 
   const session = await getActiveSession(admin, workspaceId);
-  if (!session) return NextResponse.json({ armed: false });
+  if (!session) {
+    // Nothing armed — offer past chats to resume alongside the Chat-with-Eve button.
+    const pastSessions = await listPastSessions(admin, workspaceId);
+    return NextResponse.json({ armed: false, pastSessions });
+  }
 
   await bumpActivity(admin, session.id);
   const approvals = await listApprovalsForSession(admin, session.id);
