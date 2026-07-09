@@ -165,11 +165,17 @@ export async function queueRoadmapBuild(
   }
 
   // One active build per spec — but only for a plain Build tap (no new instructions).
+  // fix-queue-roadmap-build-kind-filter Phase 1: narrow to kind='build' so a live NON-build job
+  // for the same slug (e.g. the Mario job that is INVOKING reclaim_and_redrive) can't be treated
+  // as the existing active build — otherwise Mario's reclaim coalesces into itself and the fresh
+  // build enqueue is silently dropped (the sol-reads-moved 19h stall). A non-build kind is not a
+  // live build; only a real kind='build' row blocks the fresh insert.
   const { data: existing } = await admin
     .from("agent_jobs")
     .select("*")
     .eq("workspace_id", workspaceId)
     .eq("spec_slug", slug)
+    .eq("kind", "build")
     .in("status", ACTIVE_STATUSES)
     .order("created_at", { ascending: false })
     .limit(1)
