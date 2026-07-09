@@ -131,6 +131,12 @@ import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
 import { growthAdSpendGovernorCron, growthAdSpendGovernorSweep } from "@/lib/inngest/growth-ad-spend-governor";
+import { mediaBuyerCadenceCron, mediaBuyerCadenceSweep } from "@/lib/inngest/media-buyer-cadence";
+import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
+import {
+  mediaBuyerSelfCorrectingCron,
+  mediaBuyerSelfCorrectingSweep,
+} from "@/lib/inngest/media-buyer-self-correcting";
 import { inngestFailureCapture } from "@/lib/inngest/inngest-failure-capture";
 import { supabaseLogPollCron } from "@/lib/inngest/supabase-log-poll";
 import { loopHeartbeatsPrune } from "@/lib/inngest/loop-heartbeats-prune";
@@ -293,6 +299,12 @@ export const registeredInngestFunctions = [
   fleetSpendGovernorCron,
   growthAdSpendGovernorCron,
   growthAdSpendGovernorSweep,
+  mediaBuyerCadenceCron,
+  mediaBuyerCadenceSweep,
+  mediaBuyerGradeCron,
+  mediaBuyerGradeSweep,
+  mediaBuyerSelfCorrectingCron,
+  mediaBuyerSelfCorrectingSweep,
   inngestFailureCapture,
   supabaseLogPollCron,
   loopHeartbeatsPrune,

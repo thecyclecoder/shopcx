@@ -46,6 +46,16 @@ type Admin = ReturnType<typeof createAdminClient>;
 export type PolicyActor = "director" | "human";
 
 /**
+ * The safety branch a policy version runs on (media-buyer-shadow-mode Phase 1).
+ * `shadow` — the media-buyer computes the plan but writes ZERO iteration_actions /
+ * ad_publish_jobs; it emits `*_shadow` director_activity rows instead. `armed` — the
+ * runtime behavior that shipped before this column (writes actions + publish jobs).
+ * A freshly authored draft defaults to `shadow`; a separate flip surface moves it to
+ * `armed` (spec media-buyer-armed-flip-surface).
+ */
+export type IterationPolicyMode = "shadow" | "armed";
+
+/**
  * The typed, editable thresholds the engine reads. Matches the non-id/non-status columns on
  * `iteration_policies` 1:1 so the Director (and a human) can build one with no field-name guessing.
  */
@@ -64,6 +74,8 @@ export interface IterationPolicyDraft {
   per_account_daily_budget_delta_ceiling_cents: number;
   min_budget_floor_cents?: number | null;
   never_pause_object_ids?: string[];
+  /** Safety branch. Omit ⇒ shadow (the CEO's non-negotiable read-only-before-armed default). */
+  mode?: IterationPolicyMode;
 }
 
 export interface AuthorIterationPolicyInput {
@@ -129,6 +141,9 @@ export async function authorIterationPolicy(
     per_account_daily_budget_delta_ceiling_cents: draft.per_account_daily_budget_delta_ceiling_cents,
     min_budget_floor_cents: draft.min_budget_floor_cents ?? null,
     never_pause_object_ids: draft.never_pause_object_ids ?? [],
+    // media-buyer-shadow-mode Phase 1 — a freshly authored draft lands `shadow` unless the
+    // caller explicitly overrides. The flip to `armed` is a separate, audited action.
+    mode: draft.mode ?? "shadow",
   };
 
   const { data, error } = await admin

@@ -55,6 +55,8 @@ The sentinel variant for spend/revenue that can't be resolved to a lander varian
 `coverage: { meta_revenue_total_cents, meta_revenue_resolved_cents, variant_attribution_coverage (resolved ÷ total, null if no Meta revenue), meta_orders_total, meta_orders_resolved, meta_orders_without_ad, meta_orders_resolved_via_persisted }`.
 `meta_orders_resolved_via_persisted` (Phase 2b) counts orders resolved off a persisted `advertorial_page_id` rather than the URL parse — it climbs as the new columns populate, tracking the migration off URL parsing.
 
+Consumed by [[../tables/media_buyer_sensor_trust]] via [[../specs/media-buyer-sensor-trust-probe]] Phase 2 (`runSensorTrustProbe`) — the probe rolls `variant_attribution_coverage` + the `(unresolved)` share into a per-day green/yellow/red band the Media Buyer agent reads before it trusts ROAS.
+
 ## Callers
 
 - `src/lib/inngest/meta-performance.ts` (`meta-attribution-refresh`, fired after each performance sync)

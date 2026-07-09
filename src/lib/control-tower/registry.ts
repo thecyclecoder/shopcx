@@ -684,6 +684,26 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // + a growth-owned director_activity row. NEVER pauses or throttles a campaign.
   // registeredAt graces the first-tick window (newcron-grace).
   { id: "growth-ad-spend-governor-cron", kind: "cron", owner: "growth", label: "Growth ad-spend governor", description: "Daily fan-out: reads each effective ad_spend_budgets row vs the rolling daily_meta_ad_spend sum → escalates a 2-day trend over the ceiling (loop-guarded, never auto-throttles).", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-30T12:00:00Z" },
+  // media-buyer-daily-cadence-cron spec, Phase 1: daily fan-out that enqueues one
+  // kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per
+  // workspace (workspace-wide + per-account). Same-UTC-day re-fires are a no-op.
+  // registeredAt graces the first-tick window (newcron-grace); shadow-default under
+  // the goals/autonomous-media-buyer-supervision M2 policy → no Meta writes.
+  { id: "media-buyer-cadence-cron", kind: "cron", owner: "growth", label: "Media buyer daily cadence", description: "Daily fan-out: enqueues one kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per workspace (shadow-default under the M2 policy).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-08T13:00:00Z" },
+  // media-buyer-grade-daily-cron spec, Phase 1: daily fan-out that enqueues one
+  // kind='media-buyer-grade' agent_jobs row per workspace with ≥1 UNGRADED settled
+  // (>= 3d old) Media Buyer director_activity row — the deterministic grader lane
+  // (M4 "Graded + self-correcting" milestone). Idempotent — the media_buyer_action_grades
+  // UNIQUE on director_activity_id collapses re-runs. registeredAt graces the first-tick
+  // window (newcron-grace).
+  { id: "media-buyer-grade-cron", kind: "cron", owner: "growth", label: "Media buyer grader daily", description: "Daily fan-out: enqueues one kind='media-buyer-grade' agent_jobs row per workspace with ≥1 ungraded settled (≥3d) Media Buyer director_activity row.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-09T14:00:00Z" },
+  // media-buyer-self-correcting-mode-revert spec Phase 1: daily sweep that flips an
+  // armed cohort back to `shadow` when its 14-day `media_buyer_action_grades` rolling
+  // per-day average sits < 5 for a trailing streak of ≥ 7 days (≥2 graded actions/day).
+  // Fires 30 min after `media-buyer-grade-cron` so it reads settled per-day grades —
+  // the M4 "Graded + self-correcting" milestone's revert consumer. registeredAt graces
+  // the first-tick window (newcron-grace).
+  { id: "media-buyer-self-correcting-cron", kind: "cron", owner: "growth", label: "Media buyer self-correcting revert", description: "Daily sweep: auto-flips armed Media Buyer cohorts back to `shadow` on a sustained 7-day <5 grade regression (+ CEO escalation).", expectedCadence: "daily (30 14 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-09T14:30:00Z" },
   { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments (near-live test stats). No-ops when no running experiments.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN, registeredAt: "2026-06-22T17:45:00Z" },
   { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },

@@ -18,12 +18,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildShadowActivityRows,
   computeMediaBuyerPlan,
   DEFAULT_FATIGUE_REPLENISH_VARIANTS,
   DEFAULT_TEST_COHORT_TARGET,
+  evaluateSensorTrustSnapshot,
   FATIGUE_REPLENISH_THRESHOLD,
+  SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
   type MediaBuyerPlanInputs,
+  type SensorTrustSnapshot,
 } from "./agent";
 import type { DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import type { IterationPolicy } from "@/lib/meta/decision-engine";
@@ -51,6 +55,7 @@ function policy(overrides: Partial<IterationPolicy> = {}): IterationPolicy {
     per_account_daily_budget_delta_ceiling_cents: 100_000, // $1000
     min_budget_floor_cents: 1_000,
     never_pause_object_ids: [],
+    mode: "armed",
     ...overrides,
   };
 }
@@ -362,4 +367,244 @@ test("computeMediaBuyerPlan — sub-trigger winner is NEVER fatigue-replenished 
   );
   // Only REAL winners qualify — fatigue-replenish assumes a winning angle worth cloning.
   assert.equal(plan.fatigueReplenish.length, 0);
+});
+
+// ── media-buyer-sensor-trust-probe Phase 3 — sensor_trust_ok short-circuit ──
+
+const NOW_MS = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z, fixed for age math
+
+function snapshot(overrides: Partial<SensorTrustSnapshot> = {}): SensorTrustSnapshot {
+  return {
+    snapshot_date: "2026-07-07",
+    band: "green",
+    coverage_ratio: 0.85,
+    reasons: [],
+    // Fresh: exactly 1h old vs NOW_MS.
+    created_at: new Date(NOW_MS - 3600_000).toISOString(),
+    ...overrides,
+  };
+}
+
+test("evaluateSensorTrustSnapshot — missing snapshot → deny with missing_snapshot", () => {
+  const denial = evaluateSensorTrustSnapshot(null, NOW_MS);
+  assert.ok(denial, "null snapshot should deny");
+  assert.equal(denial.band, null);
+  assert.equal(denial.snapshot_date, null);
+  assert.deepEqual(denial.reasons, ["missing_snapshot"]);
+  assert.ok(denial.reason.toLowerCase().includes("no media_buyer_sensor_trust snapshot"));
+});
+
+test("evaluateSensorTrustSnapshot — stale snapshot (72h old) → deny with stale_snapshot in reasons", () => {
+  // 72h old → past the 48h cap. Even a band='green' snapshot cannot rescue it.
+  const s = snapshot({
+    band: "green",
+    reasons: ["low_unresolved_share_within_cap"],
+    created_at: new Date(NOW_MS - 72 * 3600_000).toISOString(),
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "stale snapshot must deny");
+  assert.equal(denial.band, "green");
+  assert.equal(denial.snapshot_date, s.snapshot_date);
+  // Existing reasons preserved + stale_snapshot appended.
+  assert.ok(denial.reasons.includes("low_unresolved_share_within_cap"));
+  assert.ok(denial.reasons.includes("stale_snapshot"));
+  assert.ok(denial.reason.toLowerCase().includes("stale"));
+});
+
+test("evaluateSensorTrustSnapshot — band='red' fresh snapshot → deny (attribution untrusted)", () => {
+  const s = snapshot({
+    band: "red",
+    coverage_ratio: 0.3,
+    reasons: ["low_coverage", "unresolved_share_over_cap"],
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "red band must deny");
+  assert.equal(denial.band, "red");
+  assert.equal(denial.coverage_ratio, 0.3);
+  // The probe's own reasons flow through — the runner records them verbatim on
+  // the director_activity row (spec: metadata={reasons, snapshot_date, band, coverage_ratio}).
+  assert.deepEqual(denial.reasons, ["low_coverage", "unresolved_share_over_cap"]);
+  assert.ok(denial.reason.toLowerCase().includes("red"));
+});
+
+test("evaluateSensorTrustSnapshot — fresh band='green' → allow (returns null)", () => {
+  const s = snapshot({ band: "green" });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.equal(denial, null, "fresh green snapshot must NOT deny");
+});
+
+test("evaluateSensorTrustSnapshot — fresh band='yellow' → allow (yellow is a warning, not a refusal)", () => {
+  // Yellow is the probe's own "borderline" carrier — the runner still proceeds so
+  // Shadow-mode calls land; only red short-circuits per spec Phase 3.
+  const s = snapshot({ band: "yellow", coverage_ratio: 0.6 });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.equal(denial, null, "fresh yellow snapshot must NOT deny");
+});
+
+test("evaluateSensorTrustSnapshot — snapshot exactly at the freshness cap (48h) is still allowed", () => {
+  // Boundary — 48h exactly is inside the cap (≤, not <).
+  const s = snapshot({
+    band: "green",
+    created_at: new Date(NOW_MS - SENSOR_TRUST_MAX_AGE_MS).toISOString(),
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.equal(denial, null, "exact-cap snapshot must NOT deny");
+});
+
+test("evaluateSensorTrustSnapshot — 48h+1ms is stale → deny", () => {
+  // Boundary — 1ms past the cap trips the freshness guard.
+  const s = snapshot({
+    band: "green",
+    created_at: new Date(NOW_MS - SENSOR_TRUST_MAX_AGE_MS - 1).toISOString(),
+  });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "48h+1ms snapshot must deny");
+  assert.ok(denial.reasons.includes("stale_snapshot"));
+});
+
+test("evaluateSensorTrustSnapshot — malformed created_at → deny (defensive: infinite age)", () => {
+  const s = snapshot({ band: "green", created_at: "not-a-date" });
+  const denial = evaluateSensorTrustSnapshot(s, NOW_MS);
+  assert.ok(denial, "unparseable created_at must fail closed");
+  assert.ok(denial.reasons.includes("stale_snapshot"));
+});
+
+// ── media-buyer-shadow-mode Phase 2 — shadow persistence rows ────────────────
+//
+// The runner's shadow branch is a pure emit-only path — `iteration_actions` and
+// `ad_publish_jobs` writes are gated behind `policy.mode === 'armed'` (early-return
+// on shadow, executor writes preserved on armed). The pure `buildShadowActivityRows`
+// helper is the SEAM the runner uses to shape the shadow-mode director_activity rows,
+// so we pin its shape here — one row per plan action, `<verb>_shadow` action_kind,
+// and metadata carrying mode='shadow' + the full plan_action + the source citation
+// (source_meta_ad_id / roas / policy_version_id) the audit trail depends on.
+
+test("buildShadowActivityRows — promote action → media_buyer_promoted_winner_shadow with mode+plan_action metadata", () => {
+  const w = winner();
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+    }),
+  );
+  const rows = buildShadowActivityRows(plan);
+  const promoteRow = rows.find((r) => r.actionKind === "media_buyer_promoted_winner_shadow");
+  assert.ok(promoteRow, "shadow rows include a media_buyer_promoted_winner_shadow row for the promote action");
+  assert.equal(promoteRow.metadata.mode, "shadow");
+  assert.equal(promoteRow.metadata.source_meta_ad_id, w.metaAdId);
+  assert.equal(promoteRow.metadata.roas, w.roas);
+  assert.equal(promoteRow.metadata.policy_version_id, plan.policyVersionId);
+  // The full plan_action JSON travels on the row so a human reviewer sees the
+  // exact same shape the armed executor would consume — no paraphrase.
+  const planAction = promoteRow.metadata.plan_action as { kind?: string };
+  assert.equal(planAction.kind, "promote");
+});
+
+test("buildShadowActivityRows — kill action → media_buyer_paused_loser_shadow with mode+plan_action metadata", () => {
+  const l = loser();
+  const plan = computeMediaBuyerPlan(baseInputs({ losers: [l] }));
+  const rows = buildShadowActivityRows(plan);
+  const killRow = rows.find((r) => r.actionKind === "media_buyer_paused_loser_shadow");
+  assert.ok(killRow, "shadow rows include a media_buyer_paused_loser_shadow row for the kill action");
+  assert.equal(killRow.metadata.mode, "shadow");
+  assert.equal(killRow.metadata.source_meta_ad_id, l.sourceMetaAdId);
+  assert.equal(killRow.metadata.roas, l.roas);
+  const planAction = killRow.metadata.plan_action as { kind?: string };
+  assert.equal(planAction.kind, "kill");
+});
+
+test("buildShadowActivityRows — replenish action → media_buyer_replenished_test_cohort_shadow with mode+plan_action metadata", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 1,
+      cohortTargetCount: 3,
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+      ],
+    }),
+  );
+  const rows = buildShadowActivityRows(plan);
+  const replenishRow = rows.find((r) => r.actionKind === "media_buyer_replenished_test_cohort_shadow");
+  assert.ok(replenishRow, "shadow rows include a media_buyer_replenished_test_cohort_shadow row for the replenish action");
+  assert.equal(replenishRow.metadata.mode, "shadow");
+  assert.equal(replenishRow.metadata.policy_version_id, plan.policyVersionId);
+  const planAction = replenishRow.metadata.plan_action as { kind?: string; adCampaignId?: string };
+  assert.equal(planAction.kind, "replenish");
+  assert.equal(planAction.adCampaignId, "cmp-1");
+});
+
+test("buildShadowActivityRows — fatigue_replenish action → media_buyer_fatigue_replenish_triggered_shadow row", () => {
+  const w = winner();
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      fatigueByAdsetId: new Map([["adset-parent-1", FATIGUE_REPLENISH_THRESHOLD + 0.1]]),
+    }),
+  );
+  const rows = buildShadowActivityRows(plan);
+  const fatigueRow = rows.find((r) => r.actionKind === "media_buyer_fatigue_replenish_triggered_shadow");
+  assert.ok(fatigueRow, "shadow rows include a media_buyer_fatigue_replenish_triggered_shadow row");
+  assert.equal(fatigueRow.metadata.mode, "shadow");
+  assert.equal(fatigueRow.metadata.source_meta_ad_id, w.metaAdId);
+  assert.equal(fatigueRow.metadata.roas, w.roas);
+  const planAction = fatigueRow.metadata.plan_action as { kind?: string };
+  assert.equal(planAction.kind, "fatigue_replenish");
+});
+
+test("buildShadowActivityRows — empty plan → zero shadow rows (heartbeat is the runner's separate emit)", () => {
+  const plan = computeMediaBuyerPlan(baseInputs()); // no winners, no losers, cohort at target
+  const rows = buildShadowActivityRows(plan);
+  assert.equal(rows.length, 0, "no plan actions ⇒ no per-action shadow rows");
+});
+
+test("buildShadowActivityRows — mixed plan → one row per plan action (promote + kill + replenish + fatigue)", () => {
+  const w = winner();
+  const l = loser();
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      winners: [w],
+      losers: [l],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      fatigueByAdsetId: new Map([["adset-parent-1", FATIGUE_REPLENISH_THRESHOLD + 0.1]]),
+      currentTestCohortSize: 1,
+      cohortTargetCount: 2,
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+      ],
+    }),
+  );
+  const rows = buildShadowActivityRows(plan);
+  // One row per plan action across all four verbs — the audit trail shows the
+  // complete proposed set, not a summary.
+  assert.equal(rows.length, plan.promote.length + plan.kill.length + plan.replenish.length + plan.fatigueReplenish.length);
+  assert.equal(rows.filter((r) => r.actionKind === "media_buyer_promoted_winner_shadow").length, plan.promote.length);
+  assert.equal(rows.filter((r) => r.actionKind === "media_buyer_paused_loser_shadow").length, plan.kill.length);
+  assert.equal(rows.filter((r) => r.actionKind === "media_buyer_replenished_test_cohort_shadow").length, plan.replenish.length);
+  assert.equal(rows.filter((r) => r.actionKind === "media_buyer_fatigue_replenish_triggered_shadow").length, plan.fatigueReplenish.length);
+  for (const r of rows) {
+    assert.equal(r.metadata.mode, "shadow");
+    assert.ok(r.metadata.plan_action, "every shadow row carries the plan_action JSON");
+  }
+});
+
+// Structural guard on the runner branch predicate — the shadow-mode carve-out is
+// the ONE call site that shapes the "armed still writes iteration_actions +
+// ad_publish_jobs" invariant Phase 2 promises. If the branch condition drifts (a
+// stray edit removes the mode check, or the shadow path leaks into armed) this
+// pin catches it before merge instead of at runtime.
+test("agent.ts — runMediaBuyerLoop shadow branch is gated on policy.mode === 'shadow' (armed skips it)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+  assert.ok(
+    src.includes('if (policy.mode === "shadow")'),
+    "runMediaBuyerLoop must guard the shadow branch on `policy.mode === \"shadow\"` — armed policies must fall through to the executor writes",
+  );
+  assert.ok(
+    src.includes("buildShadowActivityRows(plan)"),
+    "shadow branch must build director_activity rows via the pure buildShadowActivityRows helper (the tested surface)",
+  );
 });

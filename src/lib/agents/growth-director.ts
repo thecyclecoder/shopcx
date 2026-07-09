@@ -305,6 +305,211 @@ export interface IterationActionOutcomeSummary {
   created_at: string | null;
 }
 
+// ── Media-buyer supervision rollup (media-buyer-grade-rollup-on-growth-director-brief Phase 1) ────
+// Surfaces per-cohort Media Buyer grade averages + shadow-vs-review agreement + the latest arming
+// authorization onto the Growth Director's brief so Max can supervise the CEO → Growth → Media Buyer
+// chain from ONE prompt. The three axes together are the "is the media buyer earning its arming?"
+// signal: grade averages tell whether prior actions held up; the shadow-review concur rate tells
+// whether the human reviewer agrees with the plan; the arming-gate row tells whether the executor is
+// currently authorized to act. All three come from workspace-scoped tables and are best-effort loaded.
+
+export interface MediaBuyerAvgGradeByKind {
+  /** The director_activity action_kind (e.g. `media_buyer_promoted_winner`) — the Media Buyer verb. */
+  actionKind: string;
+  /** Average of overall_grade (1–10) across every graded action of this kind in the window. */
+  avgGrade: number;
+  /** Count of graded actions in the window. */
+  count: number;
+}
+
+export interface MediaBuyerDailyAvg {
+  /** UTC day (YYYY-MM-DD) — the `graded_at` date bucket. */
+  day: string;
+  /** Average of overall_grade for every action graded on this day. */
+  avgGrade: number;
+  /** Count of graded actions on this day. */
+  count: number;
+}
+
+export interface MediaBuyerShadowAgreement {
+  /** How many `media_buyer_shadow_reviews` rows the reviewer submitted in the window. */
+  reviewedCount: number;
+  /** How many of those reviews carried `verdict='concur'`. */
+  concurCount: number;
+  /** `concurCount / reviewedCount` when the sample is > 0; NULL when the window is empty. */
+  concurRate: number | null;
+}
+
+export interface MediaBuyerArmingAuthorizationSummary {
+  id: string;
+  /** NULL = workspace-wide row; non-null = per-account row (mirrors the arming-gate axes). */
+  metaAdAccountId: string | null;
+  /** ISO 8601 week label (`YYYY-Www`). */
+  isoWeek: string;
+  allowed: boolean;
+  /** The structured `{ reasons: [...], metrics: {...} }` payload as stored — the audit truth. */
+  reasons: unknown;
+  evaluatedAt: string;
+  expiresAt: string;
+}
+
+export interface MediaBuyerRollupSummary {
+  /** 30-day average `overall_grade` grouped by `media_buyer_action_grades.action_kind`. */
+  avgGradeByKind: MediaBuyerAvgGradeByKind[];
+  /** 14-day daily average `overall_grade` across every Media Buyer action, oldest first. */
+  dailyOverallAvg14d: MediaBuyerDailyAvg[];
+  /** 14-day concur-rate on `media_buyer_shadow_reviews` — the human-in-the-loop agreement signal. */
+  shadowAgreement: MediaBuyerShadowAgreement;
+  /** The newest `media_buyer_arming_authorization` row for the workspace (null when none exist). */
+  latestArmingAuthorization: MediaBuyerArmingAuthorizationSummary | null;
+}
+
+/** How many recent grade rows the rollup pulls — bounded so a busy workspace never bloats the brief. */
+const MEDIA_BUYER_GRADES_CAP = 500;
+/** How many recent shadow reviews the rollup pulls (14-day window; ~10 actions/pass × 14 days is fine). */
+const MEDIA_BUYER_SHADOW_REVIEWS_CAP = 1000;
+/** Rolling windows (days) — 30d for the by-kind roll-up + 14d for the sparkline + shadow agreement. */
+const MEDIA_BUYER_GRADES_WINDOW_DAYS = 30;
+const MEDIA_BUYER_DAILY_WINDOW_DAYS = 14;
+const MEDIA_BUYER_SHADOW_WINDOW_DAYS = 14;
+
+/**
+ * Load the Media Buyer supervision rollup for one workspace — a merge of three cheap reads:
+ *   1. `media_buyer_action_grades` last 30 days — grouped in-memory by `action_kind` for the per-verb
+ *      avg + a separate 14-day slice for the daily sparkline (single fetch, two windows derived).
+ *   2. `media_buyer_shadow_reviews` last 14 days — concur-rate over reviewed count.
+ *   3. `media_buyer_arming_authorization` newest row — the current authoritative arming verdict.
+ *
+ * Returns NULL when every source is empty (no grades, no reviews, no arming row) — this is the
+ * verification's expected shape for a workspace with zero grades yet, so the prompt omits the whole
+ * section instead of rendering an empty header. Every read is best-effort; a transient failure lands
+ * an empty subresult, never a throw.
+ *
+ * `now` is injectable for tests; production always uses `new Date()`.
+ */
+export async function loadMediaBuyerRollup(
+  admin: Admin,
+  workspaceId: string,
+  opts: { now?: Date } = {},
+): Promise<MediaBuyerRollupSummary | null> {
+  const now = opts.now ?? new Date();
+  const grades30dSinceIso = new Date(now.getTime() - MEDIA_BUYER_GRADES_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const daily14dCutoffIso = new Date(now.getTime() - MEDIA_BUYER_DAILY_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const shadow14dSinceIso = new Date(now.getTime() - MEDIA_BUYER_SHADOW_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  // ── (a) 30-day grade sample, once — the 14-day daily slice is derived from it in-memory ───
+  let gradeRows: Array<{ action_kind: string; overall_grade: number; graded_at: string }> = [];
+  try {
+    const { data } = await admin
+      .from("media_buyer_action_grades")
+      .select("action_kind, overall_grade, graded_at")
+      .eq("workspace_id", workspaceId)
+      .gte("graded_at", grades30dSinceIso)
+      .order("graded_at", { ascending: false })
+      .limit(MEDIA_BUYER_GRADES_CAP);
+    gradeRows = ((data || []) as Array<{ action_kind: string; overall_grade: number | string; graded_at: string }>).map((r) => ({
+      action_kind: r.action_kind,
+      overall_grade: Number(r.overall_grade),
+      graded_at: r.graded_at,
+    }));
+  } catch {
+    /* best-effort — subresult falls back to empty */
+  }
+
+  const kindMap = new Map<string, { total: number; count: number }>();
+  for (const r of gradeRows) {
+    if (!Number.isFinite(r.overall_grade)) continue;
+    const acc = kindMap.get(r.action_kind) ?? { total: 0, count: 0 };
+    acc.total += r.overall_grade;
+    acc.count += 1;
+    kindMap.set(r.action_kind, acc);
+  }
+  const avgGradeByKind: MediaBuyerAvgGradeByKind[] = Array.from(kindMap.entries())
+    .map(([actionKind, v]) => ({ actionKind, avgGrade: v.total / v.count, count: v.count }))
+    .sort((a, b) => a.actionKind.localeCompare(b.actionKind));
+
+  const dayMap = new Map<string, { total: number; count: number }>();
+  for (const r of gradeRows) {
+    if (!Number.isFinite(r.overall_grade)) continue;
+    if (r.graded_at < daily14dCutoffIso) continue;
+    const day = r.graded_at.slice(0, 10);
+    const acc = dayMap.get(day) ?? { total: 0, count: 0 };
+    acc.total += r.overall_grade;
+    acc.count += 1;
+    dayMap.set(day, acc);
+  }
+  const dailyOverallAvg14d: MediaBuyerDailyAvg[] = Array.from(dayMap.entries())
+    .map(([day, v]) => ({ day, avgGrade: v.total / v.count, count: v.count }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+
+  // ── (b) 14-day shadow review concur-rate ───────────────────────────────────────────────────
+  let reviewedCount = 0;
+  let concurCount = 0;
+  try {
+    const { data } = await admin
+      .from("media_buyer_shadow_reviews")
+      .select("verdict, reviewed_at")
+      .eq("workspace_id", workspaceId)
+      .gte("reviewed_at", shadow14dSinceIso)
+      .limit(MEDIA_BUYER_SHADOW_REVIEWS_CAP);
+    const rows = (data || []) as Array<{ verdict: string; reviewed_at: string }>;
+    reviewedCount = rows.length;
+    concurCount = rows.filter((r) => r.verdict === "concur").length;
+  } catch {
+    /* best-effort */
+  }
+  const shadowAgreement: MediaBuyerShadowAgreement = {
+    reviewedCount,
+    concurCount,
+    concurRate: reviewedCount > 0 ? concurCount / reviewedCount : null,
+  };
+
+  // ── (c) latest arming authorization row ────────────────────────────────────────────────────
+  let latestArmingAuthorization: MediaBuyerArmingAuthorizationSummary | null = null;
+  try {
+    const { data } = await admin
+      .from("media_buyer_arming_authorization")
+      .select("id, meta_ad_account_id, iso_week, allowed, reasons, evaluated_at, expires_at")
+      .eq("workspace_id", workspaceId)
+      .order("evaluated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) {
+      latestArmingAuthorization = {
+        id: data.id as string,
+        metaAdAccountId: (data.meta_ad_account_id as string | null) ?? null,
+        isoWeek: data.iso_week as string,
+        allowed: !!data.allowed,
+        reasons: data.reasons ?? null,
+        evaluatedAt: data.evaluated_at as string,
+        expiresAt: data.expires_at as string,
+      };
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  // Verification: on a workspace with zero grades yet → rollup is null so the prompt omits the
+  // whole "Media Buyer supervision" section instead of rendering an empty header. "Nothing to show"
+  // means no graded actions, no shadow reviews, AND no arming authorization row — any one of those
+  // is enough to include the section.
+  if (
+    avgGradeByKind.length === 0 &&
+    dailyOverallAvg14d.length === 0 &&
+    reviewedCount === 0 &&
+    latestArmingAuthorization === null
+  ) {
+    return null;
+  }
+
+  return {
+    avgGradeByKind,
+    dailyOverallAvg14d,
+    shadowAgreement,
+    latestArmingAuthorization,
+  };
+}
+
 /** One in-leash action inside the brief — what the investigation confirms is sound. */
 export interface GrowthDirectorBriefAction {
   category: LeashCategory;
@@ -367,6 +572,11 @@ export interface GrowthDirectorBrief {
   /** the proposed `product_ad_angles` rows targeted by `approve_voice_angle` actions in this request,
    * loaded so the prompt can render hook + score + voice density. Empty when no such actions exist. */
   proposedVoiceAngles: ProposedVoiceAngleSummary[];
+  /** the Media Buyer supervision rollup (30d avg grade by verb + 14d sparkline + 14d shadow-vs-review
+   * agreement + latest arming authorization). NULL when a workspace has zero graded actions AND zero
+   * reviewed shadow actions AND no arming authorization row — the prompt then omits the whole section
+   * (media-buyer-grade-rollup-on-growth-director-brief Phase 1). */
+  mediaBuyerRollup: MediaBuyerRollupSummary | null;
   logTail: string;
 }
 
@@ -759,6 +969,15 @@ export async function buildGrowthDirectorBrief(
     /* best-effort */
   }
 
+  // Media Buyer supervision rollup — best-effort; NULL when the workspace has no graded actions,
+  // no shadow reviews, and no arming authorization row (verification: prompt omits the section then).
+  let mediaBuyerRollup: MediaBuyerRollupSummary | null = null;
+  try {
+    mediaBuyerRollup = await loadMediaBuyerRollup(admin, job.workspace_id);
+  } catch {
+    /* best-effort — the loader itself is defensive, but keep the catch as belt-and-suspenders */
+  }
+
   return {
     jobId: job.id,
     workspaceId: job.workspace_id,
@@ -778,6 +997,7 @@ export async function buildGrowthDirectorBrief(
     iterationActionOutcomes,
     adSpendBudgets,
     proposedVoiceAngles,
+    mediaBuyerRollup,
     logTail: (job.log_tail || "").slice(-2000),
   };
 }
@@ -869,6 +1089,58 @@ function renderExperimentsMiniReport(rows: StorefrontExperimentSummary[]): strin
     "  (a `delivery_flag='failed_to_deliver'` means the audit found the variant didn't actually reach shoppers — blocks promote/kill until verified.)",
     ...lines,
   ].join("\n");
+}
+
+/**
+ * Render the Media Buyer supervision rollup — the CEO → Growth → Media Buyer chain visibility
+ * (media-buyer-grade-rollup-on-growth-director-brief Phase 1). Returns an EMPTY string when the
+ * rollup is null so the caller (growthDirectorInvestigationPrompt) can omit the whole section
+ * rather than render a bare header — the verification's expected shape for a zero-grades workspace.
+ */
+function renderMediaBuyerRollup(r: MediaBuyerRollupSummary | null): string {
+  if (!r) return "";
+  const lines: string[] = ["## Media Buyer supervision"];
+
+  // Per-verb roll-up (30d).
+  if (r.avgGradeByKind.length) {
+    lines.push("avg grade by action_kind (last 30d):");
+    for (const k of r.avgGradeByKind) {
+      lines.push(`  - ${k.actionKind}: ${k.avgGrade.toFixed(2)}/10 (${k.count} action${k.count === 1 ? "" : "s"})`);
+    }
+  } else {
+    lines.push("avg grade by action_kind (last 30d): (no graded Media Buyer actions in window)");
+  }
+
+  // Daily sparkline (14d) — compact one-line summary keeps prompt tokens sane.
+  if (r.dailyOverallAvg14d.length) {
+    const summary = r.dailyOverallAvg14d.map((d) => `${d.day}=${d.avgGrade.toFixed(1)}`).join(", ");
+    lines.push(`daily overall avg grade (last 14d): ${summary}`);
+  } else {
+    lines.push("daily overall avg grade (last 14d): (no graded Media Buyer actions in window)");
+  }
+
+  // Shadow agreement (14d) — the human-in-the-loop concur signal (input to the arming precondition).
+  if (r.shadowAgreement.reviewedCount > 0) {
+    const pct = ((r.shadowAgreement.concurRate ?? 0) * 100).toFixed(1);
+    lines.push(
+      `shadow-vs-review agreement (last 14d): ${pct}% (${r.shadowAgreement.concurCount}/${r.shadowAgreement.reviewedCount} concur)`,
+    );
+  } else {
+    lines.push("shadow-vs-review agreement (last 14d): (no reviewed shadow actions in window)");
+  }
+
+  // Latest arming authorization — the current authoritative "can the executor act?" verdict.
+  if (r.latestArmingAuthorization) {
+    const a = r.latestArmingAuthorization;
+    const scope = a.metaAdAccountId ? `account ${a.metaAdAccountId.slice(0, 8)}` : "workspace-wide";
+    lines.push(
+      `latest arming authorization: iso_week=${a.isoWeek} · ${scope} · allowed=${a.allowed} · evaluated ${a.evaluatedAt} · expires ${a.expiresAt}`,
+    );
+  } else {
+    lines.push("latest arming authorization: (none — Media Buyer arming gate has never run for this workspace)");
+  }
+
+  return lines.join("\n");
 }
 
 /** Render proposed voice-mined angles tied to `approve_voice_angle` actions — hook + voice density + score. */
@@ -1030,6 +1302,11 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
     "",
     renderPendingRecommendations(brief.pendingRecommendations),
     brief.proposedVoiceAngles.length ? "\n" + renderProposedVoiceAngles(brief.proposedVoiceAngles) : "",
+    // media-buyer-grade-rollup-on-growth-director-brief Phase 1: surface the Media Buyer supervision
+    // signals iff the rollup is present. An empty rollup (no grades, no reviews, no arming row)
+    // returns null → the whole section is omitted (verification: prompt omits rather than renders an
+    // empty header).
+    brief.mediaBuyerRollup ? "\n" + renderMediaBuyerRollup(brief.mediaBuyerRollup) : "",
     "",
     "## The request under investigation",
     actionBlock,

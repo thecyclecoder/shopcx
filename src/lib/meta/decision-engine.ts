@@ -86,6 +86,10 @@ export interface IterationPolicy {
   per_account_daily_budget_delta_ceiling_cents: number; // run-wide budget-change ceiling
   min_budget_floor_cents: number | null;           // guardrail: never scale an object below this
   never_pause_object_ids: string[];                // guardrail: never fully pause these
+  /** Safety branch (media-buyer-shadow-mode Phase 1) — `shadow` (read-only: plan only, no
+   *  iteration_actions / ad_publish_jobs writes) or `armed` (pre-shadow behavior). Fresh
+   *  policies default to `shadow`; the flip to `armed` is a separate, audited surface. */
+  mode: "shadow" | "armed";
 }
 
 export type AutonomousActionType =
@@ -223,6 +227,9 @@ export async function loadActivePolicy(
       per_account_daily_budget_delta_ceiling_cents: Number(p.per_account_daily_budget_delta_ceiling_cents ?? 0),
       min_budget_floor_cents: p.min_budget_floor_cents == null ? null : Number(p.min_budget_floor_cents),
       never_pause_object_ids: Array.isArray(p.never_pause_object_ids) ? (p.never_pause_object_ids as string[]) : [],
+      // Safety branch (media-buyer-shadow-mode Phase 1). Absent column ⇒ shadow — a workspace
+      // reading the engine before the migration lands still gets the CEO's safe default.
+      mode: p.mode === "armed" ? "armed" : "shadow",
     };
   } catch {
     return null;

@@ -50,6 +50,147 @@ const GROWTH_DIRECTOR_FUNCTION = "growth";
 /** Default number of live creatives the Media Buyer keeps in the test cohort at any time. */
 export const DEFAULT_TEST_COHORT_TARGET = 3;
 
+/**
+ * media-buyer-sensor-trust-probe Phase 3 — the freshness cap on a sensor-trust snapshot.
+ * A snapshot whose `created_at` is older than this is treated as untrusted (`stale_snapshot`
+ * added to the reasons + the same denied path fires) — "stale trust ≡ untrusted", per the
+ * spec's verification (a 72h-stale snapshot must deny the pass). Measured from `created_at`
+ * (row-insertion time), not `snapshot_date` (a date bucket), so a day-late probe run doesn't
+ * silently keep the pass alive on cold data.
+ */
+export const SENSOR_TRUST_MAX_AGE_MS = 48 * 3600_000;
+
+/** The trimmed row shape the pure gate consumes — mirrors the SELECT the runner does. */
+export interface SensorTrustSnapshot {
+  snapshot_date: string;
+  band: string | null;
+  coverage_ratio: number | null;
+  reasons: string[] | null;
+  created_at: string;
+}
+
+/** The verdict the pure gate emits when it denies a pass. */
+export interface SensorTrustDenial {
+  reason: string;
+  snapshot_date: string | null;
+  band: string | null;
+  coverage_ratio: number | null;
+  reasons: string[];
+}
+
+/**
+ * Pure — decide whether the latest sensor-trust snapshot lets the Media Buyer pass proceed.
+ * Returns a `SensorTrustDenial` for any failing check (missing / stale / red-band); returns
+ * `null` when the snapshot clears all three gates. The `reasons` field on a denial carries
+ * the snapshot's own reasons plus any freshness signal we add (`missing_snapshot` when the
+ * row itself is absent, `stale_snapshot` when the age cap trips) so downstream can distinguish.
+ *
+ * Gate order:
+ *   1) present — a null snapshot deny with `missing_snapshot` reason.
+ *   2) fresh — `nowMs - created_at ≤ SENSOR_TRUST_MAX_AGE_MS` (48h). Stale ≡ untrusted.
+ *   3) band !== 'red' — a red band is the probe's explicit "sensor untrusted" verdict.
+ * A green OR yellow band that is fresh clears the gate — yellow is a warning the probe
+ * carries via its own reasons (unresolved-share nearing cap, thin spend allocation), not a
+ * refusal; only red short-circuits the pass.
+ */
+export function evaluateSensorTrustSnapshot(
+  snapshot: SensorTrustSnapshot | null,
+  nowMs: number,
+): SensorTrustDenial | null {
+  if (!snapshot) {
+    return {
+      reason: "no media_buyer_sensor_trust snapshot for this workspace/account — run the sensor-trust-probe lane first.",
+      snapshot_date: null,
+      band: null,
+      coverage_ratio: null,
+      reasons: ["missing_snapshot"],
+    };
+  }
+  const existingReasons = Array.isArray(snapshot.reasons) ? snapshot.reasons : [];
+  const createdMs = new Date(snapshot.created_at).getTime();
+  const ageMs = Number.isFinite(createdMs) ? nowMs - createdMs : Number.POSITIVE_INFINITY;
+  if (ageMs > SENSOR_TRUST_MAX_AGE_MS) {
+    const ageH = Math.max(0, Math.round(ageMs / 3600_000));
+    return {
+      reason: `sensor-trust snapshot is stale — ${ageH}h old (cap ${SENSOR_TRUST_MAX_AGE_MS / 3600_000}h). Stale trust ≡ untrusted.`,
+      snapshot_date: snapshot.snapshot_date,
+      band: snapshot.band,
+      coverage_ratio: snapshot.coverage_ratio,
+      reasons: [...existingReasons, "stale_snapshot"],
+    };
+  }
+  if (snapshot.band === "red") {
+    return {
+      reason: `sensor-trust band=red — attribution untrusted; refusing to grade Media Buyer calls until the probe recovers.`,
+      snapshot_date: snapshot.snapshot_date,
+      band: snapshot.band,
+      coverage_ratio: snapshot.coverage_ratio,
+      reasons: existingReasons,
+    };
+  }
+  return null;
+}
+
+/**
+ * Read the newest `media_buyer_sensor_trust` snapshot for a workspace + optional account
+ * (order by snapshot_date desc, limit 1). Returns `null` when no row exists. The account
+ * filter mirrors the probe's write path — a per-account probe row is preferred over a
+ * workspace-wide one; a null-account caller reads only the null-account row.
+ */
+async function readLatestSensorTrust(
+  admin: Admin,
+  workspaceId: string,
+  metaAdAccountId: string | null,
+): Promise<SensorTrustSnapshot | null> {
+  const base = admin
+    .from("media_buyer_sensor_trust")
+    .select("snapshot_date, band, coverage_ratio, reasons, created_at")
+    .eq("workspace_id", workspaceId)
+    .order("snapshot_date", { ascending: false })
+    .limit(1);
+  const { data, error } = metaAdAccountId
+    ? await base.eq("meta_ad_account_id", metaAdAccountId).maybeSingle()
+    : await base.is("meta_ad_account_id", null).maybeSingle();
+  if (error || !data) return null;
+  const row = data as {
+    snapshot_date: string;
+    band: string | null;
+    coverage_ratio: number | null;
+    reasons: unknown;
+    created_at: string;
+  };
+  return {
+    snapshot_date: row.snapshot_date,
+    band: row.band,
+    coverage_ratio: row.coverage_ratio,
+    reasons: Array.isArray(row.reasons) ? (row.reasons as string[]) : null,
+    created_at: row.created_at,
+  };
+}
+
+/**
+ * Build the dormant plan shape the pass returns when the sensor-trust gate denies —
+ * mirrors the no-active-policy dormancy shape (0 promote/kill/replenish, empty summary
+ * naming the denial reason). Kept in one place so the two dormancy paths stay in sync.
+ */
+function buildSensorTrustDormantPlan(
+  denial: SensorTrustDenial,
+  cohortTargetCount: number,
+): MediaBuyerPlan {
+  return {
+    policyActive: false,
+    policyVersionId: null,
+    cohortConfigured: false,
+    cohortTargetCount,
+    currentTestCohortSize: 0,
+    promote: [],
+    kill: [],
+    replenish: [],
+    fatigueReplenish: [],
+    summary: `Dormant: sensor-trust denied — ${denial.reason}`,
+  };
+}
+
 /** A promote action — scale up the winner's parent Meta adset via the executor. */
 export interface MediaBuyerPromoteAction {
   kind: "promote";
@@ -136,6 +277,99 @@ export interface MediaBuyerLoser {
   roas: number;
   spendCents: number;
   triggeringScorecardId: string;
+}
+
+// ── Shadow-mode persistence (media-buyer-shadow-mode Phase 2) ────────────────
+
+/**
+ * One director_activity row the runner writes in shadow mode. Emitted 1:1 per
+ * plan action — verb `<verb>_shadow` (`media_buyer_promoted_winner_shadow`,
+ * `media_buyer_paused_loser_shadow`, `media_buyer_replenished_test_cohort_shadow`,
+ * `media_buyer_fatigue_replenish_triggered_shadow`) — carrying `metadata.mode='shadow'`
+ * + the full `plan_action` JSON so a human reviewer can concur/dissent against the
+ * complete proposal, not a paraphrase.
+ */
+export interface ShadowActivityRow {
+  actionKind:
+    | "media_buyer_promoted_winner_shadow"
+    | "media_buyer_paused_loser_shadow"
+    | "media_buyer_replenished_test_cohort_shadow"
+    | "media_buyer_fatigue_replenish_triggered_shadow";
+  reason: string;
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Pure — build the shadow-mode director_activity rows for a computed plan. Emits ONE
+ * row per plan action across the four verbs (promote / kill / replenish / fatigue_replenish)
+ * so a human reviewer sees the exact same set of proposed moves the armed executor would
+ * make — minus the actual iteration_actions / ad_publish_jobs writes. The runner writes
+ * these via `recordDirectorActivity` on the `growth` director-function AND ALSO writes a
+ * `media_buyer_pass_completed` heartbeat with `metadata.mode='shadow'` so the audit trail
+ * shows a shadow pass even when the plan is empty.
+ *
+ * Every row carries `metadata.mode='shadow'` + `metadata.plan_action=<action JSON>`
+ * (the CEO-facing citation contract) plus the canonical `source_meta_ad_id`, `roas`, and
+ * `policy_version_id` fields — same shape the armed director_activity rows use, so a
+ * later "flip to armed" comparison stays apples-to-apples.
+ */
+export function buildShadowActivityRows(plan: MediaBuyerPlan): ShadowActivityRow[] {
+  const rows: ShadowActivityRow[] = [];
+  for (const a of plan.promote) {
+    rows.push({
+      actionKind: "media_buyer_promoted_winner_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  for (const a of plan.kill) {
+    rows.push({
+      actionKind: "media_buyer_paused_loser_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  for (const a of plan.replenish) {
+    rows.push({
+      actionKind: "media_buyer_replenished_test_cohort_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        policy_version_id: plan.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  for (const a of plan.fatigueReplenish) {
+    rows.push({
+      actionKind: "media_buyer_fatigue_replenish_triggered_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        roas: a.roas,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
+  return rows;
 }
 
 /** Inputs to the pure plan computer — all reads already done by the runner. */
@@ -356,6 +590,46 @@ export async function runMediaBuyerLoop(
 ): Promise<RunMediaBuyerResult> {
   const nowMs = opts.nowMs ?? Date.now();
 
+  // ── Sensor-trust gate (media-buyer-sensor-trust-probe Phase 3) ────────────
+  // Before computeMediaBuyerPlan, refuse to grade Media Buyer calls against
+  // untrusted spend/revenue. Load the newest `media_buyer_sensor_trust` snapshot
+  // for (workspace, meta_ad_account_id) — ordered snapshot_date desc, limit 1 —
+  // and enforce (a) present, (b) age ≤ SENSOR_TRUST_MAX_AGE_MS (48h), (c) band !== 'red'.
+  // Any check failing writes ONE `media_buyer_sensor_trust_denied` director_activity
+  // row (metadata cites {reasons, snapshot_date, band, coverage_ratio}) and returns
+  // the SAME dormant summary shape [[docs/brain/libraries/media-buyer-agent]] § Policy
+  // contract already documents for no active policy — zero iteration_actions writes,
+  // zero ad_publish_jobs, no Meta motion. This is the short-circuit the goal's
+  // "shadow-mode winner/loser calls match a human review within tolerance" criterion
+  // hinges on: only trust ROAS numbers once the attribution sensor is provably clean.
+  const latestTrust = await readLatestSensorTrust(admin, opts.workspaceId, opts.metaAdAccountId);
+  const denial = evaluateSensorTrustSnapshot(latestTrust, nowMs);
+  if (denial) {
+    await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_sensor_trust_denied",
+      specSlug: null,
+      reason: `Media Buyer pass skipped — ${denial.reason}`,
+      metadata: {
+        meta_ad_account_id: opts.metaAdAccountId,
+        snapshot_date: denial.snapshot_date,
+        band: denial.band,
+        coverage_ratio: denial.coverage_ratio,
+        reasons: denial.reasons,
+        autonomous: true,
+      },
+    });
+    const dormantPlan = buildSensorTrustDormantPlan(
+      denial,
+      opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET,
+    );
+    return {
+      plan: dormantPlan,
+      writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] },
+    };
+  }
+
   // ── Read: policy, cohort, winners, losers, ready-to-test bin ───────────────
   const [policy, cohort] = await Promise.all([
     loadActivePolicy(opts.workspaceId, opts.metaAdAccountId),
@@ -504,6 +778,60 @@ export async function runMediaBuyerLoop(
     currentTestCohortSize,
     cohortTargetCount: opts.cohortTargetCount,
   });
+
+  // ── Shadow branch (media-buyer-shadow-mode Phase 2) ───────────────────────
+  // The CEO's non-negotiable "shadow / read-only before armed" guardrail: when the
+  // active policy is on `mode='shadow'`, compute the plan but write ZERO
+  // iteration_actions + ZERO ad_publish_jobs and NEVER call amplifyWinner. Instead,
+  // emit one `<verb>_shadow` director_activity row per plan action (carrying the full
+  // plan_action JSON + mode='shadow') plus a `media_buyer_pass_completed` heartbeat
+  // whose metadata also carries mode='shadow' so the audit trail proves the shadow
+  // pass ran even when the plan is empty. The flip to `armed` is a separate,
+  // audited surface — the runtime here NEVER promotes the mode itself.
+  if (policy.mode === "shadow") {
+    let directorActivityRows = 0;
+    for (const row of buildShadowActivityRows(plan)) {
+      const rec = await recordDirectorActivity(admin, {
+        workspaceId: opts.workspaceId,
+        directorFunction: GROWTH_DIRECTOR_FUNCTION,
+        actionKind: row.actionKind,
+        specSlug: null,
+        reason: row.reason,
+        metadata: row.metadata,
+      });
+      if (rec.recorded) directorActivityRows += 1;
+    }
+    const heartbeat = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_pass_completed",
+      specSlug: null,
+      reason: plan.summary,
+      metadata: {
+        mode: "shadow",
+        policy_version_id: plan.policyVersionId,
+        promote_count: plan.promote.length,
+        kill_count: plan.kill.length,
+        replenish_count: plan.replenish.length,
+        fatigue_replenish_count: plan.fatigueReplenish.length,
+        amplified_ad_campaign_ids: [],
+        cohort_configured: plan.cohortConfigured,
+        current_test_cohort_size: plan.currentTestCohortSize,
+        cohort_target_count: plan.cohortTargetCount,
+        autonomous: true,
+      },
+    });
+    if (heartbeat.recorded) directorActivityRows += 1;
+    return {
+      plan,
+      writes: {
+        iterationActionsInserted: 0,
+        directorActivityRows,
+        publishJobsInserted: 0,
+        amplifiedAdCampaignIds: [],
+      },
+    };
+  }
 
   // ── Persist: iteration_actions + director_activity + ad_publish_jobs ──────
   const writes = { iterationActionsInserted: 0, directorActivityRows: 0, publishJobsInserted: 0, amplifiedAdCampaignIds: [] as string[] };
