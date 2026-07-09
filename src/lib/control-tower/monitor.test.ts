@@ -10,8 +10,24 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evalAgentKind, evalCron, evalWorker, extractCronExpr, firstScheduledFiringMs, jobStuckSince, nextFiringAtOrAfter, parseCronExpr, type ActiveJob, type WorkerRow } from "./monitor";
-import type { MonitoredLoop } from "./registry";
+import {
+  evalAgentKind,
+  evalCron,
+  evalInlineAgent,
+  evalWorker,
+  extractCronExpr,
+  firstScheduledFiringMs,
+  INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
+  isOrderAwaitingFraudScreen,
+  jobStuckSince,
+  nextFiringAtOrAfter,
+  parseCronExpr,
+  type ActiveJob,
+  type InlineAgentState,
+  type LoopHistoryRow,
+  type WorkerRow,
+} from "./monitor";
+import { INLINE_AGENT_IDS, MONITORED_LOOPS, type MonitoredLoop } from "./registry";
 
 test("extractCronExpr pulls the 5-field expression from expectedCadence", () => {
   assert.equal(extractCronExpr("daily (0 4 * * *)"), "0 4 * * *");
@@ -398,4 +414,66 @@ test("evalWorker still flags behind+busy as GREEN (existing behavior — never i
     if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
     else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
   }
+});
+
+// ─── ai:fraud-detector work probe — exclude internal renewal orders ───
+// control-tower-fraud-detector-workprobe-exclude-internal-renewals
+// (signal loop:ai:fraud-detector, verdict monitor-false-positive).
+// The originating false page was: one item awaited the fraud detector while it
+// was silent — but the item was an `orders` row written by the internal
+// subscription-renewal cron (source_name='internal_subscription_renewal'),
+// which by design never emits `fraud/order.check` and therefore never calls
+// `checkOrderForFraud`. The probe was counting it as fraud-detector work.
+
+test("isOrderAwaitingFraudScreen excludes internal renewal source_name values", () => {
+  // The two internal-renewal source_name markers stamped by
+  // src/lib/inngest/internal-subscription-renewals.ts are the ONLY orders we
+  // exclude — nothing else in the count changes.
+  for (const src of INTERNAL_RENEWAL_ORDER_SOURCE_NAMES) {
+    assert.equal(isOrderAwaitingFraudScreen({ source_name: src }), false, src);
+  }
+});
+
+test("isOrderAwaitingFraudScreen keeps every Shopify/web/unknown source_name in the count", () => {
+  // Real Shopify webhooks pass upstream `source_name` through (web/pos/tiktok/…);
+  // the storefront checkout route stamps 'storefront'; and older/unknown-source
+  // orders (source_name null) stay counted — same as the pre-fix behavior, so
+  // a genuine detector outage on those paths still flips the tile red.
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "web" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "storefront" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "pos" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "tiktok" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: null }), true);
+  assert.equal(isOrderAwaitingFraudScreen({}), true);
+});
+
+test("evalInlineAgent stays GREEN on a renewal-only window with no ai:fraud-detector beat", () => {
+  // The originating condition (signal loop:ai:fraud-detector): 6h window with
+  // zero fraud-detector beats but internal renewal orders present. The tightened
+  // probe now returns work=0 for that window (renewals excluded at the DB layer
+  // by the same predicate), so evalInlineAgent falls through to genuinely-idle
+  // green — no idle_while_work violation, no false red tile for Platform.
+  const fraudLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.fraudDetector);
+  assert.ok(fraudLoop, "ai:fraud-detector loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 0, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(fraudLoop!, state);
+  assert.equal(result.color, "green");
+  assert.equal(result.violation, null);
+});
+
+test("evalInlineAgent still flips RED on a real Shopify/web order with no ai:fraud-detector beat", () => {
+  // No-false-negative guard: a real Shopify/web order in-window still counts
+  // (the probe only excludes the two internal-renewal markers), so a genuine
+  // fraud-detector outage — work=1, 0 successful beats, history not empty —
+  // still surfaces idle_while_work on the tile.
+  const fraudLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.fraudDetector);
+  assert.ok(fraudLoop, "ai:fraud-detector loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 1, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(fraudLoop!, state);
+  assert.equal(result.color, "red");
+  assert.equal(result.violation?.reason, "idle_while_work");
 });
