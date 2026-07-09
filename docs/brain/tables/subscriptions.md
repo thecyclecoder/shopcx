@@ -28,6 +28,7 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 | `subscription_created_at` | `timestamptz` | ✓ |  |
 | `applied_discounts` | `jsonb` | — | default: `'[]'` |
 | `is_internal` | `bool` | — | default: `false` |
+| `migrated_from_contract_id` | `text` | ✓ | For subs flipped to internal by [[../libraries/migrate-to-internal]]: the **original** Appstle/Shopify numeric contract id (the flip RENAMES `shopify_contract_id` → `internal-…`). Retained so the Appstle cancel webhook guard and the portal's `resolveSub` map the old numeric id back to THIS live row instead of a dead cancelled shell. NULL for never-migrated subs. Partial index `idx_subscriptions_migrated_from_contract_id (workspace_id) WHERE NOT NULL`. |
 | `shipping_protection_added` | `bool` | — | default: `false` |
 | `shipping_protection_amount_cents` | `int4` | ✓ |  |
 | `shipping_method_code` | `text` | ✓ | default: `'economy'` |
