@@ -1,0 +1,1 @@
+- **Mario stall-detector cron + self-owned thresholds** · verified 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]

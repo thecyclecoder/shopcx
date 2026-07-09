@@ -1,0 +1,1 @@
+- **Spec-detail timecard timeline (timer + step log)** · verified 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
