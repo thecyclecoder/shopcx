@@ -105,13 +105,18 @@ export interface TimecardOpenWait {
  * The per-spec timeline view backing the M5 detail-page. Steps are ordered by `at` asc; open
  * waits are the unclosed `wait_entered` events. `total_elapsed_ms` runs from the first event
  * to the terminal marker (a `folded` or `phase_shipped` event, whichever is chronologically
- * latest) or to `now()` when no terminal exists.
+ * latest) or to `now()` when no terminal exists. `first_event_at` anchors the M5 RunningTimer
+ * (a live-ticking client island) — null when the spec has no ledger rows yet. `terminal_at`
+ * is populated when a terminal marker (`folded` / `phase_shipped`) has landed, so the M5
+ * TotalElapsed subcomponent knows to freeze at `total_elapsed_ms` instead of ticking live.
  */
 export interface TimecardView {
   spec_slug: string;
   steps: TimecardStep[];
   open_waits: TimecardOpenWait[];
   total_elapsed_ms: number;
+  first_event_at: string | null;
+  terminal_at: string | null;
 }
 
 /** A stalled spec surfaced by {@link listStalledCandidates}. */
@@ -293,7 +298,14 @@ export function foldTimeline(spec_slug: string, events: TimecardEvent[]): Timeca
   const endAt = terminalAt ? Date.parse(terminalAt) : Date.now();
   const total_elapsed_ms = firstAt ? Math.max(0, endAt - Date.parse(firstAt)) : 0;
 
-  return { spec_slug, steps, open_waits, total_elapsed_ms };
+  return {
+    spec_slug,
+    steps,
+    open_waits,
+    total_elapsed_ms,
+    first_event_at: firstAt,
+    terminal_at: terminalAt,
+  };
 }
 
 /**

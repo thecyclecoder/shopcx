@@ -15,9 +15,11 @@ import {
 } from "@/lib/spec-test-runs";
 import { getSecurityStateBySlug } from "@/lib/security-agent";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getTimecard, type TimecardView } from "@/lib/spec-timecards";
+import { readMarioThresholds, type MarioThreshold } from "@/lib/mario";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
 import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
-import LifecycleTimeline from "../LifecycleTimeline";
+import LifecycleTimeline, { type WaitDisplay } from "../LifecycleTimeline";
 import BranchPosition from "../BranchPosition";
 import StatusControl from "../StatusControl";
 import PriorityControl from "../PriorityControl";
@@ -63,7 +65,10 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   if (!spec) notFound();
   const goalBound = (filters.goalsBySpec[slug] ?? []).length > 0;
 
-  const [jobsBySlug, folds, testRuns, resolutions, liveSpecTestSlugs, securityBySlug] = workspaceId
+  // spec-detail-timecard-timeline Phase 1 — load the M1 timecard + workspace mario_thresholds
+  // alongside the existing per-workspace loads so LifecycleTimeline can paint per-stage duration
+  // + inter-stage gap pills without a second server round-trip.
+  const [jobsBySlug, folds, testRuns, resolutions, liveSpecTestSlugs, securityBySlug, timecard, marioThresholds] = workspaceId
     ? await Promise.all([
         getLatestJobsBySlug(workspaceId),
         getPendingFolds(workspaceId),
@@ -71,6 +76,10 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         getHumanCheckResolutions(workspaceId),
         getLiveSpecTestSlugs(workspaceId),
         getSecurityStateBySlug(createAdminClient(), workspaceId),
+        getTimecard(createAdminClient(), workspaceId, slug).catch(
+          () => ({ spec_slug: slug, steps: [], open_waits: [], total_elapsed_ms: 0, first_event_at: null, terminal_at: null }) satisfies TimecardView,
+        ),
+        readMarioThresholds(createAdminClient(), workspaceId).catch(() => [] as MarioThreshold[]),
       ])
     : [
         {} as Record<string, AgentJob>,
@@ -79,6 +88,8 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         new Map<string, import("@/lib/spec-test-runs").HumanCheckRow>(),
         new Set<string>() as ReadonlySet<string>,
         {} as Record<string, import("@/lib/security-agent").SecurityStateBySlug>,
+        { spec_slug: slug, steps: [], open_waits: [], total_elapsed_ms: 0, first_event_at: null, terminal_at: null } satisfies TimecardView,
+        [] as MarioThreshold[],
       ];
   // spec-readers-from-db-retire-parser Phase 3: per-phase status + PR/merge_sha provenance come straight off
   // the DB-sourced `spec.card.phases` (dbRowToSpecCard maps `public.spec_phases` rows) — the legacy
@@ -102,6 +113,55 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   });
   const derivation = deriveLifecycleStage(lifecycleCtx);
   const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
+
+  // spec-detail-timecard-timeline Phase 2 / Fix 1 — resolve every open_wait row on the timecard
+  // into a friendly WaitDisplay label BEFORE render, so the WaitRow never surfaces a raw slug
+  // or UUID. Owner-id (UUID-shaped) `waiting_on` → workspace_members.display_name via a single
+  // query for THIS spec's open-wait owner ids. `ceo` → "CEO". `max-usage` → "Max usage cap".
+  // A dep slug → the linked title from spec.card.blockedBy (already resolved by getSpec).
+  const openWaits = timecard.open_waits;
+  const ownerIds = new Set<string>();
+  for (const w of openWaits) {
+    if (w.waiting_on && /^[0-9a-f-]{36}$/i.test(w.waiting_on)) ownerIds.add(w.waiting_on);
+  }
+  const displayNameById = new Map<string, string>();
+  if (workspaceId && ownerIds.size > 0) {
+    const admin = createAdminClient();
+    const { data: members } = await admin
+      .from("workspace_members")
+      .select("id, display_name")
+      .eq("workspace_id", workspaceId)
+      .in("id", Array.from(ownerIds));
+    for (const m of (members ?? []) as Array<{ id: string; display_name: string | null }>) {
+      if (m.display_name) displayNameById.set(m.id, m.display_name);
+    }
+  }
+  const blockedByTitleBySlug = new Map<string, string>();
+  for (const b of spec.card.blockedBy) blockedByTitleBySlug.set(b.slug, b.title || b.slug);
+  const resolveWaitingOn = (wait_kind: string, waiting_on: string | null): string => {
+    const v = (waiting_on ?? "").trim();
+    if (wait_kind === "blocked_on_usage" || v.toLowerCase() === "max-usage") return "Max usage cap";
+    if (v.toLowerCase() === "ceo") return "CEO";
+    if (displayNameById.has(v)) return displayNameById.get(v)!;
+    if (blockedByTitleBySlug.has(v)) return blockedByTitleBySlug.get(v)!;
+    return v || wait_kind;
+  };
+  const waits: WaitDisplay[] = openWaits.map((w) => {
+    // The wait-row SLA is the (wait_kind → wait_exited) row on mario_thresholds when configured.
+    // No matching row → sky/neutral in WaitRow.
+    const t = marioThresholds.find((mt) => mt.from_event === w.wait_kind && mt.to_event === "wait_exited");
+    return {
+      wait_kind: w.wait_kind,
+      waiting_on_display: resolveWaitingOn(w.wait_kind, w.waiting_on),
+      entered_at: w.entered_at,
+      gap_ms: w.gap_ms,
+      sla_ms: t ? t.sla_ms : null,
+    };
+  });
+  // A folded / short-circuited spec renders "Total: <static>" in place of the live-ticking
+  // "Elapsed:" — {@link TimecardView.terminal_at} is set when the ledger has a terminal marker
+  // (`folded` or `phase_shipped`), so no client tick fires on a finished spec.
+  const timelineTerminal = timecard.terminal_at !== null;
 
   // Phase 3 (spec-test-maximize-machine-coverage) — live per-check green state — green when the agent
   // passed it OR the owner marked it ✓ Tested. Rendered directly from the DB
@@ -225,8 +285,18 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
 
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
               {/* build-card-lifecycle-timeline Phase 2 — the 5-node timeline replacing the floating pill,
-                  rendered here too (one shared component across the board card + detail card). */}
-              <LifecycleTimeline derivation={derivation} currentLabel={pill.label} currentTitle={pill.title} />
+                  rendered here too (one shared component across the board card + detail card).
+                  spec-detail-timecard-timeline Phase 1 — the same mount point now paints per-stage
+                  duration + inter-stage gap pills off the M1 timecard + mario_thresholds SLA. */}
+              <LifecycleTimeline
+                derivation={derivation}
+                currentLabel={pill.label}
+                currentTitle={pill.title}
+                timecard={timecard}
+                thresholds={marioThresholds}
+                waits={waits}
+                terminal={timelineTerminal}
+              />
               <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} blockedBy={spec.card.blockedBy} />
               <div className="mt-3">
                 <VerificationCard
