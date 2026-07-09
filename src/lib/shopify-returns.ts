@@ -95,6 +95,39 @@ export interface ReturnableItem {
   variantId: string | null;
 }
 
+/** The subset of an `orders.line_items` entry the return synthesis reads. */
+export interface OrderLineItemLite {
+  sku?: string;
+  title?: string;
+  variant_title?: string | null;
+  quantity?: number;
+  price_cents?: number;
+  variant_id?: string | number | null;
+}
+
+/**
+ * Build return line items from an order's OWN `line_items` — the single source of truth for
+ * [[createFullReturn]] now that we always synthesize our own return (never Shopify's return object,
+ * which drops shippable lines that aren't in a fulfillment yet — the $6-only malformed returns).
+ *
+ * `amountCents` is the per-unit `price_cents` × quantity (line total, pre-tax). Zero/negative-qty
+ * lines are dropped. `fulfillmentLineItemId` is empty (we create no Shopify reverse-fulfillment).
+ * Pure + deterministic so the mapping is unit-tested independent of Shopify/EasyPost/DB.
+ */
+export function synthesizeReturnItemsFromLines(lines: OrderLineItemLite[] | null | undefined): ReturnableItem[] {
+  return (Array.isArray(lines) ? lines : [])
+    .filter((l) => (l.quantity ?? 0) > 0)
+    .map((l) => ({
+      fulfillmentLineItemId: "",
+      title: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title || l.sku || "Item",
+      quantity: l.quantity!,
+      remainingQuantity: l.quantity!,
+      amountCents: Math.round((l.price_cents || 0) * (l.quantity || 1)),
+      currencyCode: "USD",
+      variantId: l.variant_id != null ? String(l.variant_id) : null,
+    }));
+}
+
 // ── 1. createShopifyReturn ──
 
 const RETURN_CREATE_MUTATION = `
@@ -735,80 +768,56 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
   const admin = createAdminClient();
 
   try {
-    const isInternal = !params.shopifyOrderGid;
-
-    // 1. Returnable items + 2. the return record.
-    // INTERNAL order (no Shopify order): there's no Shopify return to mirror, so build the returnable
-    // items from the order's OWN line_items and insert a Shopify-less returns row directly. The label
-    // buy + refund-commitment + DB update below are identical to the Shopify path (the label is
-    // address-based, not Shopify-based). The downstream refund routes to Braintree (inngest/returns).
-    let items: ReturnableItem[];
-    let returnResult: { returnId: string; reverseFulfillmentOrderGid: string | null };
-
-    if (isInternal) {
-      const { data: order } = await admin
-        .from("orders")
-        .select("line_items")
-        .eq("id", params.orderId)
-        .maybeSingle();
-      type IntLine = { sku?: string; title?: string; variant_title?: string; quantity?: number; price_cents?: number; variant_id?: string };
-      const lines = (Array.isArray(order?.line_items) ? order!.line_items : []) as IntLine[];
-      items = lines
-        .filter((l) => (l.quantity ?? 0) > 0)
-        .map((l) => ({
-          fulfillmentLineItemId: "", // no Shopify fulfillment line item on an internal order
-          title: l.variant_title ? `${l.title} — ${l.variant_title}` : l.title || l.sku || "Item",
-          quantity: l.quantity!,
-          remainingQuantity: l.quantity!,
-          amountCents: Math.round((l.price_cents || 0) * (l.quantity || 1)), // per-unit × qty = line total
-          currencyCode: "USD",
-          variantId: l.variant_id ? String(l.variant_id) : null,
-        }));
-      if (items.length === 0) {
-        return { success: false, error: "No returnable items on this internal order" };
-      }
-      const { data: row, error: insErr } = await admin
-        .from("returns")
-        .insert({
-          workspace_id: params.workspaceId,
-          order_id: params.orderId,
-          order_number: params.orderNumber,
-          shopify_order_gid: null, // internal — no Shopify order
-          customer_id: params.customerId,
-          ticket_id: params.ticketId ?? null,
-          resolution_type: params.resolutionType || "refund_return",
-          source: params.source || "ai",
-          status: "open",
-          return_line_items: items.map((i) => ({ title: i.title, quantity: i.remainingQuantity, variant_id: i.variantId })),
-        })
-        .select("id")
-        .single();
-      if (insErr || !row) {
-        return { success: false, error: `Failed to create internal return: ${insErr?.message || "unknown"}` };
-      }
-      returnResult = { returnId: row.id, reverseFulfillmentOrderGid: null };
-    } else {
-      // 1. Get returnable items
-      items = await getReturnableItems(params.workspaceId, params.shopifyOrderGid!);
-      if (items.length === 0) {
-        return { success: false, error: "No returnable items found on this order" };
-      }
-      // 2. Create Shopify return + DB record
-      returnResult = await createShopifyReturn(params.workspaceId, {
-        orderId: params.orderId,
-        orderNumber: params.orderNumber,
-        shopifyOrderGid: params.shopifyOrderGid!,
-        customerId: params.customerId,
-        ticketId: params.ticketId,
-        resolutionType: params.resolutionType || "refund_return",
-        returnLineItems: items.map(i => ({
-          fulfillmentLineItemId: i.fulfillmentLineItemId,
-          quantity: i.remainingQuantity,
-          title: i.title,
-        })),
-        source: params.source || "ai",
-      });
+    // 1. Returnable items + 2. the return record — ALWAYS synthesized from the order's own
+    // line_items, never Shopify's return object (founder decision, 2026-07).
+    //
+    // WHY: Shopify won't accept a shippable line item onto a return object before it's in a
+    // fulfillment, so a Shopify-created return silently drops everything except Shipping
+    // Protection — the malformed $6-only returns (Amy SC133495, Kim SC134360, Ann's coffees) all
+    // captured just the $6 protection line and shorted the customer the actual product refund. For
+    // an instant refund we can NEVER build the "perfect return" in Shopify, so we don't try: we
+    // build our OWN returns row from line_items and buy the EasyPost label directly.
+    //
+    // The label is address-based (not Shopify-based) and the delivered-refund path
+    // ([[inngest/returns]] returnsIssueRefund) reads net_refund_cents + order_id → refundOrder
+    // (gateway-routed) — it never touches the Shopify return object. We keep shopify_order_gid on
+    // the row (the ORDER still exists in Shopify; it's NOT a return gid) but create no Shopify
+    // RETURN, so shopify_return_gid / reverse-fulfillment stay null. closeReturn + item disposal
+    // no-op gracefully on a null return gid — already true for the internal-order path this
+    // generalizes.
+    const { data: order } = await admin
+      .from("orders")
+      .select("line_items")
+      .eq("id", params.orderId)
+      .maybeSingle();
+    const items = synthesizeReturnItemsFromLines(order?.line_items as OrderLineItemLite[] | null);
+    if (items.length === 0) {
+      return { success: false, error: "No returnable line items on this order" };
     }
+    const { data: row, error: insErr } = await admin
+      .from("returns")
+      .insert({
+        workspace_id: params.workspaceId,
+        order_id: params.orderId,
+        order_number: params.orderNumber,
+        // null for an internal SHOPCX* order; the ORDER gid for a Shopify order (never a return gid).
+        shopify_order_gid: params.shopifyOrderGid,
+        customer_id: params.customerId,
+        ticket_id: params.ticketId ?? null,
+        resolution_type: params.resolutionType || "refund_return",
+        source: params.source || "ai",
+        status: "open",
+        return_line_items: items.map((i) => ({ title: i.title, quantity: i.remainingQuantity, variant_id: i.variantId })),
+      })
+      .select("id")
+      .single();
+    if (insErr || !row) {
+      return { success: false, error: `Failed to create return: ${insErr?.message || "unknown"}` };
+    }
+    const returnResult: { returnId: string; reverseFulfillmentOrderGid: string | null } = {
+      returnId: row.id,
+      reverseFulfillmentOrderGid: null,
+    };
 
     // 3. Buy cheapest EasyPost label
     const { data: ws } = await admin.from("workspaces")
@@ -913,19 +922,13 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     const { data: orderRow } = await admin.from("orders")
       .select("total_cents").eq("id", params.orderId).maybeSingle();
     const orderTotalCents = orderRow?.total_cents || 0;
-    const itemsSubtotalCents = items.reduce((s, i) => s + (i.amountCents || 0), 0);
     const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
-    // If all returnable items are being returned (i.e. effectively a
-    // full return), refund the full order total minus our label cost.
-    // Otherwise refund just the line-item subtotal of what they're
-    // sending back. items.amountCents is line-item original total
-    // (no tax/shipping), so full-order math is the better path when
-    // it applies — it gives the customer their tax + shipping back.
-    const isFullReturn = itemsSubtotalCents >= orderTotalCents * 0.95;
-    const netRefundCents = Math.max(
-      0,
-      (isFullReturn ? orderTotalCents : itemsSubtotalCents) - finalLabelCostCents,
-    );
+    // We synthesize the return from EVERY line on the order (see above), so this is by construction
+    // a FULL return — refund the full order total (tax + shipping included) minus our label cost.
+    // The old `itemsSubtotal >= 95% of order total` heuristic mis-fired here: itemsSubtotal is the
+    // pre-tax line subtotal, so a ~6%-tax order (Kim SC134360: $125.92 lines / $133.80 total = 94%)
+    // read as a PARTIAL return and shorted the customer their $7.88 tax. All-lines → full order back.
+    const netRefundCents = Math.max(0, orderTotalCents - finalLabelCostCents);
 
     // Update our DB with EasyPost details + the refund commitment.
     // Status advances to label_created independently of
