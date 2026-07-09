@@ -1,0 +1,1 @@
+- **Spec timecard ledger + SDK** · verified 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]

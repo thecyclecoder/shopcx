@@ -1,0 +1,1 @@
+- **Mario reactive box agent — live fix + durable fix-spec + self-tuning** · verified 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
