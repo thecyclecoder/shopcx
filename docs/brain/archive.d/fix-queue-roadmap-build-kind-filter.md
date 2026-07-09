@@ -1,0 +1,1 @@
+- **queueRoadmapBuild's existing-job guard must filter by kind='build'** · verified 2026-07-09 · → [[../libraries/roadmap-actions]]
