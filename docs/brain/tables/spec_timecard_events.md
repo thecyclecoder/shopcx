@@ -1,6 +1,6 @@
 # spec_timecard_events
 
-The per-lifecycle-step ledger for every spec — Mario's foundation ([[../specs/spec-timecard-ledger-and-sdk]], [[../goals/mario-pipeline-plumbing]] M1). Append-only. One row per lifecycle event: `created`, review pass/fail, phase build start/done, ship, spec-test start/verdict, security verdict, fold start/done, wait entered/exited, job queued/claimed. Powers (a) the M3 detector cron's "step-done to next-step-started beyond SLA" scan and (b) the M5 detail-page timeline. The only writer is [[../libraries/spec-timecards]] `recordTimecardEvent` — every lifecycle chokepoint calls it best-effort so a write error never blocks the chokepoint.
+The per-lifecycle-step ledger for every spec — Mario's foundation ([[../specs/spec-timecard-ledger-and-sdk]], [[../lifecycles/mario-pipeline-plumbing]] M1). Append-only. One row per lifecycle event: `created`, review pass/fail, phase build start/done, ship, spec-test start/verdict, security verdict, fold start/done, wait entered/exited, job queued/claimed. Powers (a) the M3 detector cron's "step-done to next-step-started beyond SLA" scan and (b) the M5 detail-page timeline. The only writer is [[../libraries/spec-timecards]] `recordTimecardEvent` — every lifecycle chokepoint calls it best-effort so a write error never blocks the chokepoint.
 
 **Primary key:** `id`
 

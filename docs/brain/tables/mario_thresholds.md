@@ -1,6 +1,6 @@
 # mario_thresholds
 
-Mario's self-owned SLA table ([[../specs/spec-mario-stall-detector-cron-and-thresholds]], [[../goals/mario-pipeline-plumbing]] M3). One row per `(workspace_id, from_event, to_event)` pair carrying the deadline (in ms) beyond which Mario treats the gap between the two lifecycle events as a stall. Seeded with the M3 defaults; the M4 self-tuning agent is the sole writer of updates. Read by the M3 detector cron ([[../libraries/mario|src/lib/mario.ts]] `evaluateStalledSpecs`), which converts each row into an `older_than_ms` input to [[../libraries/spec-timecards]] `listStalledCandidates`.
+Mario's self-owned SLA table ([[../specs/spec-mario-stall-detector-cron-and-thresholds]], [[../lifecycles/mario-pipeline-plumbing]] M3). One row per `(workspace_id, from_event, to_event)` pair carrying the deadline (in ms) beyond which Mario treats the gap between the two lifecycle events as a stall. Seeded with the M3 defaults; the M4 self-tuning agent is the sole writer of updates. Read by the M3 detector cron ([[../libraries/mario|src/lib/mario.ts]] `evaluateStalledSpecs`), which converts each row into an `older_than_ms` input to [[../libraries/spec-timecards]] `listStalledCandidates`.
 
 **Primary key:** `id`
 
