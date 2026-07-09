@@ -229,6 +229,46 @@ export async function POST(
             } catch (err) {
               console.error("[journey/shipping_address] update_shipping_address call failed:", err);
             }
+
+            // ── Phase 2 of sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend ──
+            // If the ticket's live Direction names launch_journey_slug='shipping-address' (Sol's
+            // Phase-1 move-driven wedge), this is a MOVED customer whose new address just
+            // validated. Offer a $0 replacement of a recent shipped/in-flight order to the
+            // newly-validated address, gated on eligibility (LTV/orders per refund Tier 1) +
+            // a recent (≤21d) order with a shopify_order_id. The offer is EXPLICIT — an
+            // outbound message asking the customer + pending_move_replacement_offer stashed on
+            // playbook_context; a non-eligible customer / no-recent-order case is a silent
+            // skip with no unbacked promise. Guarded on the Direction so a non-move address
+            // change (a typo correction, a self-service tweak) does not surface the offer.
+            try {
+              const { getLiveDirection } = await import("@/lib/ticket-directions");
+              const direction = await getLiveDirection(admin, session.ticket_id, { workspace_id: wsId });
+              if (
+                direction &&
+                direction.plan.launch_journey_slug === "shipping-address" &&
+                ticket.customer_id
+              ) {
+                const { offerMoveReplacementIfEligible } = await import("@/lib/move-replacement-offer");
+                await offerMoveReplacementIfEligible(admin, {
+                  workspace_id: wsId,
+                  ticket_id: session.ticket_id,
+                  customer_id: ticket.customer_id,
+                  validated_address: {
+                    street1: newAddr.street1,
+                    street2: newAddr.street2 ?? null,
+                    city: newAddr.city,
+                    state: newAddr.state,
+                    zip: newAddr.zip,
+                    country: newAddr.country,
+                  },
+                });
+              }
+            } catch (err) {
+              // Best-effort — a failure here does NOT roll back the address update. The
+              // customer's address change already happened; only the follow-up save offer
+              // is skipped.
+              console.error("[journey/shipping_address] offerMoveReplacementIfEligible failed:", err);
+            }
           }
 
           // Update replacement record if exists
