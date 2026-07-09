@@ -89,6 +89,15 @@ that performs exactly one non-destructive UPDATE via `createAdminClient()`.
   module needs a fresh process). Set `worker_controls.drain_for_update=true` for the target
   box so the worker restarts at idle (see [[../../../scripts/builder-worker.ts]] :2928-2983
   for the drain-for-update contract). `target.box_id` REQUIRED.
+- **`reclaim_and_redrive`** — the **built-but-unmerged** class: a spec whose LATEST build is
+  `failed`/orphaned (orphaned by a worker restart, or stranded on a stale/conflicting branch) —
+  spec-test-approved + security-clean but never merged. Unlike the status-flip actions above, a
+  `failed` build has NO in-flight row to flip; this enqueues a FRESH build (rebases onto current
+  `main` → clean branch → clean merge) via the sanctioned owner-gated `queueRoadmapBuild`. The
+  worker's `ensureWorktreeSlotFree` clears a `BUILDS_DIR`-pinned branch first; the narrower
+  ephemeral `/tmp`-pinned case is the `builder-worktree-self-heal` fix-spec's job. **Prefer this
+  over escalating** a green-but-unmerged spec — reviewing+merging a green PR is routine platform
+  work you can self-service, not a CEO decision. `target.spec_slug` (defaults to the job's spec).
 - **...open extensibility slot** — a future non-destructive fix. Every new key must land in
   `applyBoxMario`'s vocabulary switch WITH a matching helper before Mario names it in a verdict.
 
