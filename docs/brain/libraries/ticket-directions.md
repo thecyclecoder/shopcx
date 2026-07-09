@@ -95,7 +95,7 @@ Message_sent → close. Phase 1 of [[../specs/sol-closes-ticket-on-resolving-rep
 
 **Guarded by workspace_id.** Compare-and-set on `.eq('workspace_id', …).eq('id', …)` (learning #6 — the confirming predicate at the action point, not a coarser proxy) — a cross-workspace ticket id can never authorize the close. Idempotent for the message_sent case: a racing close from a follow-up turn is a no-op because the row is already closed.
 
-**Called by:** `runTicketHandleJob` in [[../../scripts/builder-worker]] — gated on `classifySolBoxTurnAction(...) === 'message_sent'` (see below) so ONLY a shipped stateless resolving reply closes the ticket. A failed send, a `needs_info` clarifying question, and a `journey`/`playbook` status-managed turn all leave the ticket open.
+**Called by:** `runTicketHandleJob` in [[../../scripts/builder-worker]] — gated on `classifySolBoxTurnAction(...) === 'message_sent'`. **Founder rule (2026-07-09): EVERY shipped Sol message closes the ticket** (see the classifier below). A customer reply reopens it, and the mechanism the box armed at first touch ([[./sol-mechanism-arm]] → `active_playbook_id` → the `sol-playbook-shortcircuit`) drives from there. Only a FAILED send leaves it open.
 
 ### `classifySolBoxTurnAction` — function
 
@@ -108,16 +108,14 @@ function classifySolBoxTurnAction(input: {
 }): SolBoxTurnAction
 ```
 
-Post-execute action taxonomy for a Sol box-session turn — Phase 2 of [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]]. Mirrors [[../inngest/unified-ticket-handler]]'s `PostExecuteAction` shape (documented rule: "message_sent → close; next inbound reopens"). The classifier is the single, shared predicate the box lane's close decision drives from — no parallel taxonomy. Only `message_sent` closes; `status_managed` / `keep_open` / `escalated` all LEAVE the ticket open.
+Post-execute action taxonomy for a Sol box-session turn. **Founder rule (2026-07-09): every shipped Sol message closes the ticket** — the classifier now keys on `send_ok` alone (`send_ok → message_sent`, else `keep_open`), regardless of `chosen_path`. The prior taxonomy returned `status_managed` for `playbook`/`journey` (leave open, "the mechanism owns status"), but the box never armed the mechanism — so those tickets sat **dormant-and-open** when nothing later closed them (marty `125741eb`). Now the box arms the playbook reply-gated ([[./sol-mechanism-arm]]) AND closes; a customer reply reopens and the armed playbook drives.
 
 | `chosen_path` | `send_ok` | Action | Ticket state |
 |---|---|---|---|
-| `stateless` | `true` | `message_sent` | **CLOSE** (resolving reply shipped) |
-| `stateless` | `false` | `keep_open` | stays open (send failed; a human retries via Improve) |
-| `needs_info` | any | `keep_open` | stays open (clarifying question; customer's next inbound is the resolution signal) |
-| `playbook` | any | `status_managed` | stays open (playbook owns state; `unified-ticket-handler`'s own paths close it when the mechanism resolves) |
-| `journey` | any | `status_managed` | stays open (journey owns state) |
-| unknown | any | `keep_open` | stays open — **fail-safe**: an unrecognized outcome NEVER authorizes a close |
+| any (stateless / needs_info / playbook / journey) | `true` | `message_sent` | **CLOSE** — the message shipped; a customer reply reopens it |
+| any | `false` | `keep_open` | stays open (send failed; a human retries via Improve) |
+
+For `playbook`, Sol's opening reply IS the playbook's `apply_policy`/stand-firm step; the box arms the playbook at the step AFTER that (the `offer_exception`/action step) so it resumes there on the reply — no repeat of the opening, no double-send at arm time (arm is a silent state-set). Journeys are CTA-driven (not reply-driven) so their "arm" is a send-path change (Sol's opening carries the CTA), not handled here.
 
 The `escalated` return is reserved for the caller's `needs_human` branch — Sol's box session returns `status='needs_human'` BEFORE any Direction is written, so no `chosen_path` string is available at classification time. The taxonomy value is kept on the enum so tests and future call sites share one vocabulary.
 

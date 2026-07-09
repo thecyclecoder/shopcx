@@ -359,13 +359,12 @@ export function classifySolBoxTurnAction(input: {
   chosen_path: string;
   send_ok: boolean;
 }): SolBoxTurnAction {
-  if (input.chosen_path === "stateless") {
-    return input.send_ok ? "message_sent" : "keep_open";
-  }
-  if (input.chosen_path === "needs_info") return "keep_open";
-  if (input.chosen_path === "playbook" || input.chosen_path === "journey") return "status_managed";
-  // Unknown chosen_path — fail-safe to keep_open (never close a ticket on an unrecognized outcome).
-  return "keep_open";
+  // Founder rule (2026-07-09): EVERY Sol message closes the ticket. A closed ticket reopens on the
+  // customer's next inbound, and the mechanism Sol armed at first touch (playbook via
+  // active_playbook_id → the sol-playbook-shortcircuit) drives from there. So the box no longer
+  // leaves playbook/journey tickets open as "status_managed" — that left them dormant-and-open when
+  // nothing later closed them (marty 125741eb). Only a FAILED send (nothing shipped) keeps it open.
+  return input.send_ok ? "message_sent" : "keep_open";
 }
 
 /**
