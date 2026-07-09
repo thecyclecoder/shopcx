@@ -54,11 +54,32 @@ interface SensorTrustSummary {
   updated_at: string;
 }
 
+interface GradeRollup {
+  metaAdAccountId: string;
+  count: number;
+  avgOverallGrade: number | null;
+  dailyOverallAvg14d: { date: string; avg: number }[];
+}
+
 interface EnrichedCohort {
   cohort: CohortRow;
   policy: PolicySummary | null;
   authorization: AuthorizationSummary | null;
   sensor_trust: SensorTrustSummary | null;
+  grades?: GradeRollup | null;
+}
+
+/** Minimal inline sparkline of the 14-day daily avg overall grade (0–10 scale). */
+function Sparkline({ points }: { points: { date: string; avg: number }[] }) {
+  if (points.length < 2) return null;
+  const w = 96, h = 20, max = 10;
+  const step = w / (points.length - 1);
+  const d = points.map((p, i) => `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${(h - (p.avg / max) * h).toFixed(1)}`).join(" ");
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="text-indigo-500" data-testid="mb-grade-sparkline" aria-hidden>
+      <path d={d} fill="none" stroke="currentColor" strokeWidth={1.5} />
+    </svg>
+  );
 }
 
 interface CohortsResponse {
@@ -283,6 +304,28 @@ export default function MediaBuyerCohortsPage() {
                       ceiling ${(cohort.daily_test_ceiling_cents / 100).toFixed(2)}/day
                       {policy ? ` · policy v${policy.version}` : " · no active policy"}
                     </p>
+                    {cohort.meta_ad_account_id ? (
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs" data-testid="mb-cohort-grades">
+                        {row.grades && row.grades.count > 0 ? (
+                          <>
+                            <span className="text-zinc-600 dark:text-zinc-400">
+                              avg grade{" "}
+                              <span className="font-semibold text-zinc-900 dark:text-zinc-100">{row.grades.avgOverallGrade}/10</span>
+                              <span className="text-zinc-400"> · {row.grades.count} graded (30d)</span>
+                            </span>
+                            <Sparkline points={row.grades.dailyOverallAvg14d} />
+                          </>
+                        ) : (
+                          <span className="text-zinc-400" data-testid="mb-cohort-grades-empty">no graded actions yet</span>
+                        )}
+                        <Link
+                          href={`/dashboard/growth/media-buyer/${cohort.meta_ad_account_id}`}
+                          className="text-indigo-600 hover:underline dark:text-indigo-400"
+                        >
+                          View grades →
+                        </Link>
+                      </div>
+                    ) : null}
                     <div className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
                       {authorization ? (
                         <>
