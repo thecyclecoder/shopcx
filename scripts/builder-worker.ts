@@ -11145,18 +11145,45 @@ async function runTicketHandleJob(job: Job) {
               const msg = e instanceof Error ? e.message : String(e);
               console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
             }
-            // ── Phase 1 + 2 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
-            // Post-execute taxonomy match. Mirrors unified-ticket-handler's `PostExecuteAction`
-            // ("message_sent → close; keep_open + status_managed + escalated leave open; next
-            // inbound reopens"). classifySolBoxTurnAction is the shared predicate — never a bare
-            // `chosenPath === "stateless"` inline check (Learning #6: the confirming predicate at
-            // the action point, not a coarser proxy). The classifier factors sendOk into the
-            // decision so a failed send never closes; only `message_sent` reaches the close
-            // helper. `needs_info` → keep_open (clarifying question — customer's next inbound is
-            // the resolution signal); `journey` / `playbook` → status_managed (the mechanism owns
-            // status from here — unified-ticket-handler's own paths close it when the mechanism
-            // resolves). Verification #1: needs_info / journey / playbook / needs_human all stay
-            // open — pinned in src/lib/ticket-directions.test.ts.
+            // ── Founder directive (2026-07-09): ARM the chosen mechanism, then CLOSE ──
+            // After Sol's opening reply ships, the box (a) arms the playbook Sol chose so it takes
+            // over on the customer's NEXT reply (reply-gated, silent — armPlaybook sends nothing;
+            // the sol-playbook-shortcircuit drives executePlaybookStep on the next inbound), and
+            // (b) closes the ticket. EVERY Sol message closes — a customer reply reopens it and the
+            // armed playbook resumes. This replaces the old "playbook → status_managed, leave open"
+            // taxonomy that left marty (125741eb) dormant-and-open when nothing later closed it.
+            //
+            // Arm is silent + reply-gated: no second message ships now. The playbook resumes at the
+            // step AFTER Sol's opening (the identify/check/apply_policy prefix), so it does not
+            // repeat her stand-firm explanation — it drives the offer/exception step on the reply.
+            // Journeys are CTA-driven (not reply-driven), so they are armed on the send path, not here.
+            if (sendOk && chosenPath === "playbook") {
+              try {
+                const pbSlug = typeof (plan as { playbook_slug?: unknown }).playbook_slug === "string"
+                  ? ((plan as { playbook_slug: string }).playbook_slug).trim()
+                  : "";
+                const seedCtx = (plan as { playbook_seed_context?: unknown }).playbook_seed_context;
+                if (pbSlug) {
+                  const { armSolPlaybookReplyGated } = await import("../src/lib/sol-mechanism-arm");
+                  const armRes = await armSolPlaybookReplyGated(db, {
+                    workspaceId,
+                    ticketId,
+                    playbookSlug: pbSlug,
+                    seedContext: seedCtx && typeof seedCtx === "object" && !Array.isArray(seedCtx)
+                      ? (seedCtx as Record<string, unknown>)
+                      : null,
+                  });
+                  console.log(`${tag} playbook arm '${pbSlug}': ${armRes.reason}${armRes.armed ? ` @ step ${armRes.resumeStep}` : ""}`);
+                }
+              } catch (e) {
+                // Arm failure does NOT unwind the send — Sol's reply already shipped, Direction is
+                // durable. Surface for grep; the customer's reply still reopens the ticket and the
+                // legacy applySolDirection path re-arms it as a fallback.
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} playbook arm failed (reply already shipped): ${msg}`);
+              }
+            }
+
             const { classifySolBoxTurnAction, closeTicketOnResolvingReply } = await import(
               "../src/lib/ticket-directions"
             );

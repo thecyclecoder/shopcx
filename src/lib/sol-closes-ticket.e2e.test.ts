@@ -7,7 +7,7 @@
  * exactly these three e2e cases:
  *
  *   (1) resolving reply → closed + closed_at + ticket-analyze enqueued
- *   (2) escalation / mid-playbook / clarifying → stays open
+ *   (2) failed send / needs_human → stays open; every shipped Sol message closes (reply reopens)
  *   (3) customer inbound on a closed ticket reopens it
  *
  * The pieces exercised:
@@ -162,7 +162,7 @@ test("e2e (1): a Sol stateless resolving reply → ticket closed → Cora select
   assert.equal(passes, true, "a Sol-closed ticket 31min past close must pass Cora's selection gate → enqueue-eligible");
 });
 
-// ── (2) escalation / mid-playbook / clarifying → stays open ──
+// ── (2) failed send / needs_human → stays open; every shipped Sol message closes (reply reopens) ──
 
 /**
  * Mirrors the exact close-decision block in scripts/builder-worker.ts runTicketHandleJob:
@@ -185,7 +185,9 @@ async function runWorkerCloseDecision(
   return { action, closed: false };
 }
 
-test("e2e (2a): a Sol 'needs_info' clarifying reply leaves the ticket open (not closed)", async () => {
+test("e2e (2a): a Sol 'needs_info' clarifying reply CLOSES the ticket (every Sol message closes; reply reopens)", async () => {
+  // Founder rule (2026-07-09): every Sol message closes the ticket. A clarifying question is a Sol
+  // message — it closes; the customer's next inbound reopens the ticket and Sol continues.
   const { admin, state } = makeTicketAdmin({
     workspace_id: WS,
     id: TID,
@@ -195,13 +197,15 @@ test("e2e (2a): a Sol 'needs_info' clarifying reply leaves the ticket open (not 
     last_customer_reply_at: null,
   });
   const { action, closed } = await runWorkerCloseDecision(admin, WS, TID, "needs_info", true);
-  assert.equal(action, "keep_open");
-  assert.equal(closed, false, "the worker's close block must not fire on keep_open");
-  assert.equal(state.ticket.status, "open", "a clarifying-question turn must NEVER close the ticket");
-  assert.equal(state.ticket.closed_at, null);
+  assert.equal(action, "message_sent");
+  assert.equal(closed, true, "a shipped clarifying question closes the ticket");
+  assert.equal(state.ticket.status, "closed");
+  assert.ok(typeof state.ticket.closed_at === "string");
 });
 
-test("e2e (2b): a Sol 'playbook' Direction (mid-mechanism) leaves the ticket open — status_managed", async () => {
+test("e2e (2b): a Sol 'playbook' Direction CLOSES the ticket (opening shipped; the armed playbook drives on reply)", async () => {
+  // Founder rule: the box arms the playbook reply-gated at first touch, then closes. The customer's
+  // next inbound reopens the ticket and the sol-playbook-shortcircuit resumes the playbook.
   const { admin, state } = makeTicketAdmin({
     workspace_id: WS,
     id: TID,
@@ -211,13 +215,12 @@ test("e2e (2b): a Sol 'playbook' Direction (mid-mechanism) leaves the ticket ope
     last_customer_reply_at: null,
   });
   const { action, closed } = await runWorkerCloseDecision(admin, WS, TID, "playbook", true);
-  assert.equal(action, "status_managed", "a playbook direction is status_managed — the playbook owns state");
-  assert.equal(closed, false);
-  assert.equal(state.ticket.status, "open");
-  assert.equal(state.ticket.closed_at, null);
+  assert.equal(action, "message_sent", "Sol's opening shipped — every Sol message closes");
+  assert.equal(closed, true);
+  assert.equal(state.ticket.status, "closed");
 });
 
-test("e2e (2c): a Sol 'journey' Direction (mid-mechanism) leaves the ticket open — status_managed", async () => {
+test("e2e (2c): a Sol 'journey' Direction CLOSES the ticket (message shipped)", async () => {
   const { admin, state } = makeTicketAdmin({
     workspace_id: WS,
     id: TID,
@@ -227,9 +230,9 @@ test("e2e (2c): a Sol 'journey' Direction (mid-mechanism) leaves the ticket open
     last_customer_reply_at: null,
   });
   const { action, closed } = await runWorkerCloseDecision(admin, WS, TID, "journey", true);
-  assert.equal(action, "status_managed");
-  assert.equal(closed, false);
-  assert.equal(state.ticket.status, "open");
+  assert.equal(action, "message_sent");
+  assert.equal(closed, true);
+  assert.equal(state.ticket.status, "closed");
 });
 
 test("e2e (2d): a Sol 'stateless' Direction whose send FAILED leaves the ticket open (no close on unshipped reply)", async () => {
