@@ -179,7 +179,7 @@ export async function POST(request: Request) {
         workspace_id: returnRecord.workspace_id,
         type: "system",
         title: `Return tracking issue: ${trackerStatus}`,
-        message: `Tracking ${result.tracking_code} status is ${trackerStatus}. Please investigate.`,
+        body: `Tracking ${result.tracking_code} status is ${trackerStatus}. Please investigate.`,
         metadata: {
           return_id: returnRecord.id,
           tracking_code: result.tracking_code,
