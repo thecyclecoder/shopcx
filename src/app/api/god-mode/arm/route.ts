@@ -32,12 +32,19 @@ async function requireOwner() {
   return { user, workspaceId, admin };
 }
 
-export async function POST() {
+export async function POST(req: Request) {
   const auth = await requireOwner();
   if ("error" in auth) return auth.error;
   const { user, workspaceId, admin } = auth;
 
-  const session = await armSession(admin, { workspaceId, createdBy: user.id });
+  // Optional { resumeSessionId } — revive a past chat instead of starting fresh.
+  let resumeSessionId: string | undefined;
+  try {
+    const body = (await req.json().catch(() => ({}))) as { resumeSessionId?: unknown };
+    if (typeof body.resumeSessionId === "string" && body.resumeSessionId) resumeSessionId = body.resumeSessionId;
+  } catch { /* no body — fresh arm */ }
+
+  const session = await armSession(admin, { workspaceId, createdBy: user.id, resumeSessionId });
   if (!session.cockpit_token) {
     // Cannot happen — armSession() always mints a token — but guard so the
     // response contract is honest if the SDK evolves.
