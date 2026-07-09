@@ -302,7 +302,7 @@ export async function PATCH(
           workspace_id: workspaceId,
           type: "fraud_alert",
           title: `Amplifier release failed on ${amplifierFailures.length} order(s)`,
-          message: amplifierFailures
+          body: amplifierFailures
             .map((f) => `${f.order_number}: ${f.error || ""} ${f.details || ""}`.trim())
             .join(" · "),
         }).then(() => undefined, () => undefined);

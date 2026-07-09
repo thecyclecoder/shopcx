@@ -653,10 +653,17 @@ export const receivedSmsRollupCron = inngest.createFunction(
       // Mark ALL candidates (with or without customer) as rolled up.
       // received_sms_logged_at is the idempotency flag — after this
       // update they exit the candidate set forever.
-      await admin
-        .from("sms_campaign_recipients")
-        .update({ received_sms_logged_at: new Date().toISOString() })
-        .in("id", rows.map((r) => r.id));
+      // Chunk the id list — a single `.in("id", [...all])` built a ~40 KB query
+      // string on a large candidate batch, which the gateway rejects with 400.
+      // (An empty batch also skips the update: the loop simply doesn't run.)
+      const rolledUpAt = new Date().toISOString();
+      const rolledUpIds = rows.map((r) => r.id);
+      for (let i = 0; i < rolledUpIds.length; i += 100) {
+        await admin
+          .from("sms_campaign_recipients")
+          .update({ received_sms_logged_at: rolledUpAt })
+          .in("id", rolledUpIds.slice(i, i + 100));
+      }
 
       return { emitted: withCustomer.length, flagged: rows.length };
     });
