@@ -610,6 +610,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "security-diff-backstop-cron", kind: "cron", owner: "platform", label: "Security diff backstop (if-due)", description: "Cheap 15-min backstop for Vault's post-merge diff security review (fix-vault-post-merge-diff-backstop-7fbde0): re-sweeps recently-merged claude/* builds and enqueues a diff-mode security review for any orphaned merge SHA. Idempotent via the 14d SHA dedup inside enqueueSecurityReviewJob.", expectedCadence: "every 15m (*/15 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-07-02T00:00:00Z" },
+  {
+    id: "blueprint-build-submit-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "blueprint-build-submit-cron",
+    description: "Auto-proposed monitored loop for the blueprint-build-submit-cron cron (daily (15 11 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (15 11 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-07-08T20:15:12.164Z",
+  },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR, personaKind: "research" },
   {
