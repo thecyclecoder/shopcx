@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { loadAccountGradeRollups } from "@/lib/media-buyer/grade-rollup";
 
 // Growth → Media Buyer cohorts read (media-buyer-armed-flip-surface Phase 2 data source).
 //
@@ -201,13 +202,20 @@ export async function GET(req: Request) {
     });
   }
 
+  // media-buyer-grade-rollup-on-growth-director-brief Phase 2: roll up media_buyer_action_grades per
+  // cohort account so each row renders an avg grade + a 14-day sparkline. Grades key by ad, mapped to
+  // account through meta_ads inside loadAccountGradeRollups.
+  const accountIds = [...new Set(cohorts.map(({ cohort }) => cohort.meta_ad_account_id).filter((a): a is string => !!a))];
+  const gradeRollups = await loadAccountGradeRollups(admin, workspaceId, accountIds);
+
   const enriched = await Promise.all(
     cohorts.map(async ({ cohort }) => {
       const [auth, trust] = await Promise.all([
         loadLatestAuthorization(admin, workspaceId, cohort.meta_ad_account_id, nowMs),
         loadLatestSensorTrust(admin, workspaceId, cohort.meta_ad_account_id),
       ]);
-      return { cohort, policy: policyWide, authorization: auth, sensor_trust: trust };
+      const grades = cohort.meta_ad_account_id ? gradeRollups.get(cohort.meta_ad_account_id) ?? null : null;
+      return { cohort, policy: policyWide, authorization: auth, sensor_trust: trust, grades };
     }),
   );
 

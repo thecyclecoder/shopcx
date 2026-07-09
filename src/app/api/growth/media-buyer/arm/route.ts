@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveApproverLive } from "@/lib/agents/approval-router";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { isWorkspaceOwner } from "@/lib/media-buyer/arm-auth";
 
 // Media Buyer armed flip surface — Phase 1 of media-buyer-armed-flip-surface.
 //
@@ -28,8 +29,12 @@ import { recordDirectorActivity } from "@/lib/director-activity";
 //   1. UPDATE iteration_policies SET mode='shadow' WHERE workspace_id AND status='active' AND campaign_id IS NULL.
 //   2. Record one director_activity action_kind='media_buyer_disarmed' row with { reason, actor }.
 //
-// RBAC: workspace_members membership (any role) — the Phase 2 dashboard hides the Arm
-// button for non-owners. All writes ride the service-role admin client past RLS.
+// RBAC: workspace OWNER only. Both directions mutate iteration_policies.mode (arm→'armed',
+// disarm→'shadow') — privileged Media Buyer mode changes — so membership is not enough; a
+// non-owner member (e.g. an 'admin') must be rejected server-side, not merely hidden by the
+// Phase 2 dashboard (client-side hiding is not authorization). Matches the owner-only gate on
+// the other privileged growth/ads routes (e.g. api/ads/acquisition). Writes ride the
+// service-role admin client past RLS, so this server check is the only real gate.
 
 const GROWTH_FUNCTION = "growth";
 
@@ -55,7 +60,7 @@ interface AuthorizationRow {
   expires_at: string;
 }
 
-async function assertWorkspaceMember(
+async function assertWorkspaceOwner(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   userId: string,
@@ -66,7 +71,11 @@ async function assertWorkspaceMember(
     .eq("workspace_id", workspaceId)
     .eq("user_id", userId)
     .maybeSingle();
-  if (!member) {
+  // Owner-only: a missing membership OR a non-owner role (e.g. 'admin') is Forbidden. The
+  // privileged mode flip must never be reachable by a non-owner — client-side button hiding
+  // is not a substitute for this server-side role gate. See @/lib/media-buyer/arm-auth for
+  // the pure predicate + its unit test.
+  if (!isWorkspaceOwner(member)) {
     return { ok: false, res: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
   }
   return { ok: true };
@@ -141,7 +150,7 @@ export async function POST(req: Request) {
 
   const admin = createAdminClient();
 
-  const gate = await assertWorkspaceMember(admin, workspaceId, user.id);
+  const gate = await assertWorkspaceOwner(admin, workspaceId, user.id);
   if (!gate.ok) return gate.res;
 
   if (direction === "disarm") {

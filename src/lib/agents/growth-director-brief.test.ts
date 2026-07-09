@@ -43,6 +43,7 @@ function makeChain(result: FakeTableRow) {
   chain.select = () => chain;
   chain.eq = () => chain;
   chain.in = () => chain;
+  chain.gte = () => chain;
   chain.order = () => chain;
   chain.limit = () => chain;
   chain.update = () => chain;
@@ -469,6 +470,127 @@ test("gradeDirectorDecision applies an override on an existing grade row (writes
   assert.equal(result.cleared, false);
   assert.equal(result.gradeId, "g1");
   assert.match(result.detail, /set initial grade to 8/);
+});
+
+// ── media-buyer-grade-rollup-on-growth-director-brief Phase 1 ─────────────────────────────────────
+// The Media Buyer supervision rollup on the brief + the prompt section that surfaces it. Verifies:
+//   - a populated workspace → mediaBuyerRollup carries per-verb avgs, the 14-day sparkline, the
+//     concur rate, and the latest arming authorization; the prompt renders "Media Buyer supervision".
+//   - a zero-grades workspace (no grades, no shadow reviews, no arming row) → mediaBuyerRollup is
+//     null and the prompt OMITS the section rather than rendering an empty header.
+
+test("buildGrowthDirectorBrief carries a populated mediaBuyerRollup + growthDirectorInvestigationPrompt renders the Media Buyer supervision section (Phase 1)", async () => {
+  const now = new Date("2026-07-09T00:00:00Z");
+  const iso = (d: Date) => d.toISOString();
+  const day = (offsetDays: number) => iso(new Date(now.getTime() - offsetDays * 24 * 60 * 60 * 1000));
+  const admin = makeAdmin({
+    // Minimal Growth control surfaces so the brief loader completes.
+    function_autonomy: { data: { live: true, autonomous: true, updated_at: iso(now), updated_by: "ceo-uid" }, error: null },
+    iteration_policies: { data: [], error: null },
+    storefront_optimizer_policy: { data: null, error: null },
+    iteration_recommendations: { data: [], error: null },
+    agent_jobs: { data: [], error: null },
+    storefront_campaign_grades: { data: [], error: null },
+    storefront_experiments: { data: [], error: null },
+    iteration_runs: { data: null, error: null },
+    iteration_actions: { data: [], error: null },
+    // The Media Buyer supervision rollup — three graded actions across two verbs + shadow reviews +
+    // an arming authorization row. `graded_at` is within the 14-day and 30-day windows.
+    media_buyer_action_grades: {
+      data: [
+        { action_kind: "media_buyer_promoted_winner", overall_grade: 9, graded_at: day(1) },
+        { action_kind: "media_buyer_promoted_winner", overall_grade: 7, graded_at: day(2) },
+        { action_kind: "media_buyer_paused_loser", overall_grade: 8, graded_at: day(3) },
+      ],
+      error: null,
+    },
+    media_buyer_shadow_reviews: {
+      data: [
+        { verdict: "concur", reviewed_at: day(1) },
+        { verdict: "concur", reviewed_at: day(2) },
+        { verdict: "dissent", reviewed_at: day(3) },
+        { verdict: "undecided", reviewed_at: day(4) },
+      ],
+      error: null,
+    },
+    media_buyer_arming_authorization: {
+      data: {
+        id: "auth-1",
+        meta_ad_account_id: null,
+        iso_week: "2026-W28",
+        allowed: true,
+        reasons: { reasons: [], metrics: { agreementRate: 0.75 } },
+        evaluated_at: iso(now),
+        expires_at: iso(new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)),
+      },
+      error: null,
+    },
+  });
+
+  const { actions } = directorLeashCandidates(baseJob);
+  const brief = await buildGrowthDirectorBrief(admin, baseJob, actions);
+
+  assert.ok(brief.mediaBuyerRollup, "expected mediaBuyerRollup to be populated");
+  const r = brief.mediaBuyerRollup!;
+
+  // Per-verb avg grades — grouped by action_kind, sorted alphabetically.
+  assert.equal(r.avgGradeByKind.length, 2);
+  assert.deepEqual(
+    r.avgGradeByKind.map((v) => v.actionKind),
+    ["media_buyer_paused_loser", "media_buyer_promoted_winner"],
+  );
+  const promoted = r.avgGradeByKind.find((v) => v.actionKind === "media_buyer_promoted_winner")!;
+  assert.equal(promoted.count, 2);
+  assert.equal(promoted.avgGrade, 8);
+
+  // 14-day daily sparkline — one bucket per UTC day.
+  assert.ok(r.dailyOverallAvg14d.length >= 3, "expected ≥3 daily buckets for 3 in-window grades");
+
+  // Shadow agreement — 2 concur / 4 reviewed = 0.5.
+  assert.equal(r.shadowAgreement.reviewedCount, 4);
+  assert.equal(r.shadowAgreement.concurCount, 2);
+  assert.equal(r.shadowAgreement.concurRate, 0.5);
+
+  // Latest arming authorization row.
+  assert.ok(r.latestArmingAuthorization, "expected a latest arming authorization row");
+  assert.equal(r.latestArmingAuthorization!.isoWeek, "2026-W28");
+  assert.equal(r.latestArmingAuthorization!.allowed, true);
+
+  // The prompt renders the Media Buyer supervision section with the numeric averages.
+  const prompt = await growthDirectorInvestigationPrompt(admin, brief);
+  assert.match(prompt, /## Media Buyer supervision/);
+  assert.match(prompt, /avg grade by action_kind \(last 30d\):/);
+  assert.match(prompt, /media_buyer_promoted_winner: 8\.00\/10 \(2 actions\)/);
+  assert.match(prompt, /media_buyer_paused_loser: 8\.00\/10 \(1 action\)/);
+  assert.match(prompt, /daily overall avg grade \(last 14d\):/);
+  assert.match(prompt, /shadow-vs-review agreement \(last 14d\): 50\.0% \(2\/4 concur\)/);
+  assert.match(prompt, /latest arming authorization: iso_week=2026-W28/);
+  assert.match(prompt, /allowed=true/);
+});
+
+test("buildGrowthDirectorBrief returns null mediaBuyerRollup + prompt omits 'Media Buyer supervision' section for a zero-grades workspace (Phase 1)", async () => {
+  const admin = makeAdmin({
+    function_autonomy: { data: { live: true, autonomous: true, updated_at: "2026-07-01T00:00:00Z", updated_by: "ceo-uid" }, error: null },
+    iteration_policies: { data: [], error: null },
+    storefront_optimizer_policy: { data: null, error: null },
+    iteration_recommendations: { data: [], error: null },
+    agent_jobs: { data: [], error: null },
+    storefront_campaign_grades: { data: [], error: null },
+    storefront_experiments: { data: [], error: null },
+    iteration_runs: { data: null, error: null },
+    iteration_actions: { data: [], error: null },
+    // No grades, no shadow reviews, no arming authorization row — the rollup MUST be null so the
+    // prompt omits the section (the spec's verification: prompt omits rather than renders an
+    // empty header).
+    media_buyer_action_grades: { data: [], error: null },
+    media_buyer_shadow_reviews: { data: [], error: null },
+    media_buyer_arming_authorization: { data: null, error: null },
+  });
+  const { actions } = directorLeashCandidates(baseJob);
+  const brief = await buildGrowthDirectorBrief(admin, baseJob, actions);
+  assert.equal(brief.mediaBuyerRollup, null);
+  const prompt = await growthDirectorInvestigationPrompt(admin, brief);
+  assert.doesNotMatch(prompt, /Media Buyer supervision/);
 });
 
 test("gradeDirectorDecision un-grades (grade=null) — resets the chosen axis to NULL + graded_by back to 'agent'", async () => {
