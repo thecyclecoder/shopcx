@@ -16,13 +16,13 @@
  * Entry point: `diagnosePipeline(opts?)`. CLI wrapper: `scripts/pipeline-status.ts`.
  */
 import type { SpecCard, SpecStatus, Phase } from "@/lib/brain-roadmap";
-import { getRoadmap } from "@/lib/brain-roadmap";
+import { getRoadmap, getSpec as getSpecCard } from "@/lib/brain-roadmap";
 import type { AgentJob } from "@/lib/agent-jobs";
-import { getLatestJobsBySlug, ACTIVE_STATUSES } from "@/lib/agent-jobs";
+import { getLatestJobsBySlug, ACTIVE_STATUSES, resolveGoalSlugForSpec } from "@/lib/agent-jobs";
 import type { SpecTestRun, AgentVerdict, HumanCheckRow } from "@/lib/spec-test-runs";
-import { getLatestSpecTestRuns, getLiveSpecTestSlugs, getHumanCheckResolutions } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, getLiveSpecTestSlugs, getHumanCheckResolutions, normalizeRun, hasActiveSpecTestJob } from "@/lib/spec-test-runs";
 import type { SecurityStateBySlug } from "@/lib/security-agent";
-import { getSecurityStateBySlug } from "@/lib/security-agent";
+import { getSecurityStateBySlug, getSecurityStateForSlug } from "@/lib/security-agent";
 import { buildLifecycleContext, specTestHasOpenRegression } from "@/lib/build-lifecycle-context";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
 import type { LifecycleDerivation } from "@/lib/build-lifecycle";
@@ -740,4 +740,83 @@ export async function diagnosePipeline(opts: DiagnoseOptions = {}): Promise<Pipe
     lanes: { buildPoolSize: BUILD_POOL_SIZE, activeBuilds },
     specs: specsOut,
   };
+}
+
+/**
+ * SLUG-SCOPED single-spec diagnosis — the FAST path for the investigation SDK ([[spec-investigation]] /
+ * Mario). Reuses the exact same `assembleSpec` + classifier registry as {@link diagnosePipeline} (one
+ * classification source, no drift), but every read is scoped to this one slug instead of the workspace:
+ * the board path pulls ALL jobs / ALL spec-test runs / ALL security state / ALL human resolutions and
+ * filters down; a single-spec investigate must not (Mario runs this per stall). Returns null when the
+ * slug has no boardable spec row. `activeBuilds` (the lane-occupancy context the not-claimed detector
+ * reads) is a COUNT-only query — no rows transferred.
+ */
+export async function diagnoseSpec(workspaceId: string, slug: string): Promise<SpecDiagnosis | null> {
+  const { createAdminClient } = await import("@/lib/supabase/admin");
+  const admin = createAdminClient();
+  const now = Date.now();
+
+  // The canonical card (RPC-backed get_spec_with_phases + one light all-spec-rows read for blocker
+  // resolution — inherent, since blocked_by clearance needs sibling states; far lighter than the board fan-out).
+  const got = await getSpecCard(slug, workspaceId);
+  if (!got) return null;
+  const card = got.card;
+
+  // ONE slug-scoped raw row (the override column + goal binding + deferred).
+  const { data: rawRow } = await admin
+    .from("specs")
+    .select("slug, status, milestone_id, deferred")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  const raw = (rawRow ?? undefined) as RawSpecRow | undefined;
+
+  // Slug-scoped: the relevant-kind jobs (newest first), the latest spec-test run, live-spec-test flag,
+  // security rollup, and the active-build COUNT — all in parallel, none workspace-wide.
+  const [jobsRes, runRes, liveActive, security, buildCount] = await Promise.all([
+    admin.from("agent_jobs").select("*").eq("workspace_id", workspaceId).in("kind", RELEVANT_JOB_KINDS as string[]).eq("spec_slug", slug).order("created_at", { ascending: false }).limit(200),
+    admin.from("spec_test_runs").select("*").eq("workspace_id", workspaceId).eq("spec_slug", slug).order("run_at", { ascending: false }).limit(1),
+    hasActiveSpecTestJob(workspaceId, slug),
+    getSecurityStateForSlug(admin, workspaceId, slug),
+    admin.from("agent_jobs").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("kind", "build").in("status", ACTIVE_STATUSES as unknown as string[]),
+  ]);
+
+  const jobs = (jobsRes.data ?? []) as AgentJob[];
+  const runRows = (runRes.data ?? []) as Record<string, unknown>[];
+  const run = runRows.length ? normalizeRun(runRows[0]) : null;
+  const liveSpecTestSlugs = liveActive ? new Set<string>([slug]) : new Set<string>();
+  // Single-spec fast path skips the workspace-wide human-resolution map (it only feeds the human-QA
+  // detail node, never the primary stuck verdict) — an empty map is a safe, correctness-equivalent input.
+  const humanResolutions = new Map<string, HumanCheckRow>();
+  const goalSlug = raw?.milestone_id ? await resolveGoalSlugForSpec(workspaceId, slug) : null;
+
+  let deferAudit: string | undefined;
+  if (card.status === "deferred") {
+    const { data: hist } = await admin
+      .from("spec_status_history")
+      .select("actor, reason")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .order("at", { ascending: false })
+      .limit(1);
+    const h = ((hist ?? [])[0] ?? null) as { actor: string | null; reason: string | null } | null;
+    if (h) deferAudit = `Deferred by ${h.actor ?? "?"}${h.reason ? ` — ${h.reason}` : ""}.`;
+  }
+
+  const ctx: DoctorContext = { workspaceId, now, activeBuilds: buildCount.count ?? 0, staleFloorMin: null };
+  return assembleSpec(card, raw, jobs, run, liveSpecTestSlugs, security, humanResolutions, goalSlug, deferAudit, ctx);
+}
+
+/** Build/plan pool occupancy — the lane context for the "stuck vs just queued" call, as a COUNT-only
+ *  read (no rows transferred). Exposed so single-spec callers get lane context without a full diagnosis. */
+export async function getLaneOccupancy(workspaceId: string): Promise<{ buildPoolSize: number; activeBuilds: number }> {
+  const { createAdminClient } = await import("@/lib/supabase/admin");
+  const admin = createAdminClient();
+  const { count } = await admin
+    .from("agent_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "build")
+    .in("status", ACTIVE_STATUSES as unknown as string[]);
+  return { buildPoolSize: BUILD_POOL_SIZE, activeBuilds: count ?? 0 };
 }
