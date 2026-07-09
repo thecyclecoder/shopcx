@@ -183,6 +183,53 @@ const LEGIT_WAIT_JOB_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Grace window before a FAILED build is treated as a stall. A build can go `failed` transiently and be
+ * auto-reaped / re-driven by the worker (orphan-reaper, RERUNNABLE_KINDS) within minutes; Mario should
+ * only fire once it's clear nothing re-drove it. 20 min is comfortably past the worker's own recovery loop.
+ */
+const MARIO_FAILED_BUILD_GRACE_MS = 20 * 60 * 1000;
+
+/**
+ * SECOND candidate source (failed/orphaned builds). Mario's primary detector keys on timecard
+ * `from_event → to_event` gaps, but a build that dies AFTER claiming — orphaned by a worker restart,
+ * crashed, or errored — emits NO `build_done` event, so no happy-path threshold ever fires and the dead
+ * build sits stranded forever. Worse, a build that died before the chokepoint instrumentation went live
+ * has NO timecard events at all, so it is invisible to the threshold scan entirely. This reads the
+ * failure signal straight from `agent_jobs`: a spec whose LATEST build job is `failed` (so it was not
+ * superseded by a newer active/completed build) and older than the grace window. The caller runs these
+ * through the SAME (b)/(c)/(d) drop filters as the timecard candidates, so a blocked / terminal / phantom
+ * spec is still dropped.
+ */
+async function readFailedBuildStalls(
+  admin: Admin,
+  workspace_id: string,
+  graceMs: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; age_ms: number }>> {
+  const now = Date.now();
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status, updated_at")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "build")
+    .order("created_at", { ascending: false })
+    .limit(2000);
+  if (error) throw error;
+  // First (newest) row per spec = its latest build attempt.
+  const latestBySlug = new Map<string, { status: string; updated_at: string }>();
+  for (const j of (data ?? []) as Array<{ spec_slug: string; status: string; updated_at: string }>) {
+    if (!j.spec_slug || latestBySlug.has(j.spec_slug)) continue;
+    latestBySlug.set(j.spec_slug, { status: j.status, updated_at: j.updated_at });
+  }
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  for (const [slug, j] of latestBySlug) {
+    if (j.status !== "failed" || !j.updated_at) continue;
+    const age = now - Date.parse(j.updated_at);
+    if (age > graceMs) out.push({ workspace_id, spec_slug: slug, age_ms: age });
+  }
+  return out;
+}
+
+/**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
  *
@@ -248,6 +295,31 @@ export async function evaluateStalledSpecs(
     }
   }
 
+  // (a2) SECOND candidate source — failed/orphaned builds (see `readFailedBuildStalls`). Scoped to the
+  // same workspaces the thresholds cover (a workspace with no thresholds is not monitored). Deduped
+  // against the timecard candidates via `seen`, then run through the SAME (b)/(c)/(d) filters below.
+  const wsIds = workspace_id ? [workspace_id] : [...new Set(thresholds.map((t) => t.workspace_id))];
+  for (const ws of wsIds) {
+    const failed = await readFailedBuildStalls(admin, ws, MARIO_FAILED_BUILD_GRACE_MS);
+    for (const fb of failed) {
+      const key = `${fb.workspace_id}::${fb.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: fb.workspace_id,
+        spec_slug: fb.spec_slug,
+        // Semantic: the build STARTED (claimed) but never reached build_done — it died mid-flight.
+        from_event: "build_started",
+        to_event: "build_done",
+        gap_ms: fb.age_ms,
+        sla_ms: MARIO_FAILED_BUILD_GRACE_MS,
+        // Pre-seed the failure signal so the brief surfaces it even when the ledger is empty for this spec;
+        // step (e) preserves it when there is no ACTIVE job (readCurrentJobStatus returns null on `failed`).
+        brief: { last_events: [], blocked_by_state: [], current_job_status: "failed" },
+      });
+    }
+  }
+
   const survivors: StalledCandidate[] = [];
   for (const c of initial) {
     // (b) uncleared blockedBy → legit wait, drop.
@@ -278,7 +350,9 @@ export async function evaluateStalledSpecs(
       brief: {
         last_events: lastEvents,
         blocked_by_state: blockers.map((b) => ({ slug: b.slug, cleared: b.cleared })),
-        current_job_status: currentJobStatus,
+        // Prefer a live active status; else keep the candidate's pre-seeded status (e.g. `failed` from the
+        // failed-build source) so the brief never hides a dead build behind a null.
+        current_job_status: currentJobStatus ?? c.brief.current_job_status,
       },
     });
   }
