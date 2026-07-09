@@ -497,24 +497,231 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
   return { trigger_accurate, live_fix, durable_fix_spec, threshold_adjustment, escalate, reasoning };
 }
 
-/** The result `applyBoxMario` hands back to the runner — Phase 3 adds more fields as vocabulary lands. */
+/** The result `applyBoxMario` hands back to the runner. */
 export interface ApplyBoxMarioResult {
   ok: boolean;
   reason?: string;
   recorded?: boolean;
+  fix_executed?: boolean;
+  fix_reason?: string;
+  durable_spec_authored?: boolean;
+  threshold_widened?: boolean;
+  loop_guard_triggered?: boolean;
+  mode?: MarioAutonomyMode;
+}
+
+// ── Phase 3: kill-switch + loop-guard + non-destructive vocabulary + fix-spec author + self-tune ─
+
+/** Env keys — surfaced so Phase 4's dashboard/probe can name them consistently. */
+export const MARIO_AUTONOMY_MODE_ENV = "MARIO_AUTONOMY_MODE";
+export const MARIO_LOOP_GUARD_MAX_ENV = "MARIO_LOOP_GUARD_MAX";
+export const MARIO_ACCURACY_ALARM_PCT_ENV = "MARIO_ACCURACY_ALARM_PCT";
+
+export type MarioAutonomyMode = "live" | "surface_only" | "off";
+
+/** Read the kill-switch. Anything unrecognized defaults to `live` — the fail-safe is Mario runs. */
+export function readMarioAutonomyMode(): MarioAutonomyMode {
+  const v = (process.env[MARIO_AUTONOMY_MODE_ENV] ?? "").toLowerCase().trim();
+  if (v === "off") return "off";
+  if (v === "surface_only") return "surface_only";
+  return "live";
+}
+
+/** Default loop-guard max — a slug re-fired 3+ times in 24h is a deeper issue than a live fix can close. */
+const MARIO_LOOP_GUARD_DEFAULT_MAX = 3;
+
+/** Read the loop-guard max — env-overridable, mirrors DEPLOY_GUARDIAN_LOOP_GUARD_MAX's shape. */
+export function readMarioLoopGuardMax(): number {
+  const raw = process.env[MARIO_LOOP_GUARD_MAX_ENV];
+  const n = raw != null ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : MARIO_LOOP_GUARD_DEFAULT_MAX;
+}
+
+/** Read the accuracy-alarm threshold pct (0-100). Default 60 — under this, Mario surfaces to Ada. */
+const MARIO_ACCURACY_ALARM_DEFAULT_PCT = 60;
+export function readMarioAccuracyAlarmPct(): number {
+  const raw = process.env[MARIO_ACCURACY_ALARM_PCT_ENV];
+  const n = raw != null ? Number.parseFloat(raw) : Number.NaN;
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : MARIO_ACCURACY_ALARM_DEFAULT_PCT;
+}
+
+/** Count prior `mario_fixed` director_activity rows for THIS spec_slug in the last 24h — the loop-guard input. */
+async function countPriorMarioFixesForSlug(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string | null,
+): Promise<number> {
+  if (!specSlug) return 0;
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { count, error } = await admin
+    .from("director_activity")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("action_kind", "mario_fixed")
+    .eq("spec_slug", specSlug)
+    .gte("created_at", since);
+  if (error) return 0;
+  return count ?? 0;
+}
+
+// ── Vocabulary helpers — each does exactly one non-destructive UPDATE via createAdminClient() ─
+//    A helper throws when its `target.<field>` is missing / no row matches; applyBoxMario catches
+//    and records the reason on the mario_fired row (so the audit ledger explains why the fix
+//    didn't land instead of silently no-op'ing).
+
+/** `redrive_dropped_job` — flip an in-flight (`building`|`claimed`) row back to `queued` so the next worker
+ *  claims it fresh. Compare-and-set: only mutates rows currently in-flight; a row already terminal (done /
+ *  cancelled / failed) NEVER regresses. `target.job_id` REQUIRED. */
+async function redriveDroppedJob(admin: Admin, targetJobId: string, workspaceId: string): Promise<void> {
+  const { data: updated, error } = await admin
+    .from("agent_jobs")
+    .update({ status: "queued", updated_at: new Date().toISOString() })
+    .eq("id", targetJobId)
+    .eq("workspace_id", workspaceId)
+    .in("status", ["building", "claimed"])
+    .select("id");
+  if (error) throw new Error(`redrive_dropped_job: ${error.message}`);
+  if (!Array.isArray(updated) || updated.length === 0) throw new Error("redrive_dropped_job: no in-flight row matched");
+}
+
+/** `unstick_stale_status` — flip a row wedged in `claimed` (no worker heartbeat) back to `queued`. Same
+ *  compare-and-set shape as redrive — the only allowed status transition is `claimed`→`queued` (the
+ *  narrower predicate distinguishes it from `redrive_dropped_job` which also handles `building`). */
+async function unstickStaleStatus(admin: Admin, targetJobId: string, workspaceId: string): Promise<void> {
+  const { data: updated, error } = await admin
+    .from("agent_jobs")
+    .update({ status: "queued", updated_at: new Date().toISOString() })
+    .eq("id", targetJobId)
+    .eq("workspace_id", workspaceId)
+    .eq("status", "claimed")
+    .select("id");
+  if (error) throw new Error(`unstick_stale_status: ${error.message}`);
+  if (!Array.isArray(updated) || updated.length === 0) throw new Error("unstick_stale_status: no claimed row matched");
+}
+
+/** `release_cleared_blocker` — nudge autoQueueUnblockedBy for a spec whose blockedBy chain is now clear
+ *  but the auto-queue path missed the transition. Reads through the same fan-out the merge path uses so a
+ *  race with the shipping merge is idempotent. */
+async function releaseClearedBlocker(_admin: Admin, workspaceId: string, specSlug: string): Promise<void> {
+  const { autoQueueUnblockedBy } = await import("@/lib/agent-jobs");
+  const queued = await autoQueueUnblockedBy(workspaceId, specSlug);
+  if (queued.length === 0) throw new Error("release_cleared_blocker: no downstream slug was queued");
+}
+
+/** `requeue_unclaimed_job` — flip a queued row's `updated_at` so the next poll cycle re-picks it (an
+ *  idempotent re-queue: the row was already `queued` but starved). Compare-and-set on `status='queued'`. */
+async function requeueUnclaimedJob(admin: Admin, targetJobId: string, workspaceId: string): Promise<void> {
+  const { data: updated, error } = await admin
+    .from("agent_jobs")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", targetJobId)
+    .eq("workspace_id", workspaceId)
+    .eq("status", "queued")
+    .select("id");
+  if (error) throw new Error(`requeue_unclaimed_job: ${error.message}`);
+  if (!Array.isArray(updated) || updated.length === 0) throw new Error("requeue_unclaimed_job: no queued row matched");
+}
+
+/** `queue_box_restart` — set `worker_controls.drain_for_update=true` for the target box so the worker
+ *  restarts at idle (matches scripts/builder-worker.ts:2928-2983's drain-for-update contract). Never
+ *  kills a live session. */
+async function queueBoxRestart(admin: Admin, boxId: string): Promise<void> {
+  const nowIso = new Date().toISOString();
+  const { error } = await admin
+    .from("worker_controls")
+    .upsert(
+      {
+        box_id: boxId,
+        drain_for_update: true,
+        requested_by: "mario",
+        requested_at: nowIso,
+        updated_at: nowIso,
+      },
+      { onConflict: "box_id" },
+    );
+  if (error) throw new Error(`queue_box_restart: ${error.message}`);
+}
+
+/** Widen the SLA row for `(workspace_id, from_event, to_event)` and stamp `last_widened_at` + reason.
+ *  Compare-and-set on the (workspace, pair) unique key so a cross-workspace slug collision can't cross-write. */
+async function widenMarioThreshold(
+  admin: Admin,
+  workspaceId: string,
+  adj: MarioThresholdAdjustment,
+): Promise<boolean> {
+  const nowIso = new Date().toISOString();
+  const { data: updated, error } = await admin
+    .from("mario_thresholds")
+    .update({
+      sla_ms: adj.new_sla_ms,
+      last_widened_at: nowIso,
+      last_widened_reason: adj.reason,
+      updated_at: nowIso,
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("from_event", adj.from_event)
+    .eq("to_event", adj.to_event)
+    .select("id");
+  if (error) throw new Error(`widen_threshold: ${error.message}`);
+  return Array.isArray(updated) && updated.length > 0;
+}
+
+/** Author a critical fix-spec via `authorSpecRowStructured` — owner='platform', critical, autoBuild.
+ *  Parent is the platform function mandate (`[[../functions/platform]]`); Vale's `assertEveryPhaseHasBody`
+ *  + `assertEveryNodeHasIntent` re-gate the payload at the DB write so a malformed proposal fails loud. */
+async function authorMarioFixSpec(
+  workspaceId: string,
+  fixSpec: MarioDurableFixSpec,
+): Promise<boolean> {
+  const { authorSpecRowStructured } = await import("@/lib/author-spec");
+  return await authorSpecRowStructured(
+    workspaceId,
+    fixSpec.slug,
+    {
+      title: fixSpec.title,
+      summary: null,
+      owner: MARIO_DIRECTOR_FUNCTION,
+      parent: "[[../functions/platform]]",
+      why: fixSpec.why,
+      what: fixSpec.what,
+      critical: true,
+      autoBuild: true,
+      phases: fixSpec.phases.map((p) => ({
+        title: p.title,
+        body: p.body,
+        verification: p.verification,
+        why: p.why,
+        what: p.what,
+      })),
+    },
+    "planned",
+    { intendedStatusSetBy: "mario", parentKind: "function", parentRef: MARIO_DIRECTOR_FUNCTION },
+  );
 }
 
 /**
- * `applyBoxMario` — Phase 1 stub. Records the incoming verdict as a
- * `director_activity` row (`mario_fired`) for observability so the trigger-
- * accuracy query in Phase 4 starts populating on day one, and returns
- * `{ok:true, recorded:true}` so the runner completes the job. NEVER executes
- * any live_fix / threshold widen / fix-spec author — Phase 3 adds the
- * kill-switch + atomic claim-guard + loop-guard + per-action mutators.
+ * `applyBoxMario` — the ONLY mutator for a Mario verdict. Reads `MARIO_AUTONOMY_MODE`, enforces
+ * atomic claim-guard + loop-guard, executes one vocabulary action, optionally authors a critical
+ * fix-spec, optionally widens the SLA, and records the `mario_fired` audit row. Never throws —
+ * on any exception the runner's fail-safe path stamps the job.
  *
- * The Phase-1 body deliberately absorbs errors and returns `{ok:false}` on
- * a lookup failure so the runner's fail-safe path takes over — Mario never
- * throws from the applier.
+ * Mode contract:
+ *  - `live` (default) — every valid verdict runs through the vocabulary switch + optional fix-spec + widen.
+ *  - `surface_only` — a `live_fix` present is DEGRADED to escalate; the mutator STILL records the
+ *    `mario_fired` audit row (with `mode='surface_only'` in metadata) but performs NO mutation.
+ *  - `off` — the cron doesn't spawn a session; if a session STILL fires this code path, we behave as
+ *    `surface_only` (belt-and-suspenders — the applier is the last gate before a write).
+ *
+ * Loop-guard: `PRIOR_MARIO_FIXES_FOR_SLUG` counts `mario_fixed` director_activity rows for THIS spec_slug
+ * in the last 24h. At ≥ `MARIO_LOOP_GUARD_MAX` (default 3) the fix is SKIPPED and an escalation row
+ * (`mario_loop_guard`) is written INSTEAD — the durable_fix_spec + threshold_adjustment paths STILL run.
+ *
+ * Trigger-accuracy telemetry: the audit row's `metadata` carries `trigger_accurate` + the fix outcome so
+ * the Phase-4 dashboard query (`accuracy_pct`) can compute the false-trigger rate over the last 7 days.
+ *
+ * Self-tuning gate: a `threshold_adjustment` is applied ONLY when `trigger_accurate=false` AND the
+ * adjustment's `reason` is non-empty (schema check on the payload) — an empty reason is rejected so a
+ * false positive without a diagnosis can't move the SLA.
  */
 export async function applyBoxMario(
   admin: Admin,
@@ -522,13 +729,129 @@ export async function applyBoxMario(
   verdict: MarioVerdict,
 ): Promise<ApplyBoxMarioResult> {
   try {
-    const { data: row, error } = await admin
+    const mode = readMarioAutonomyMode();
+
+    // Read the target row — we need workspace + spec_slug for every subsequent step.
+    const { data: row, error: readErr } = await admin
       .from("agent_jobs")
-      .select("workspace_id, spec_slug")
+      .select("workspace_id, spec_slug, status")
       .eq("id", jobId)
       .maybeSingle();
-    if (error || !row) return { ok: false, reason: "job_not_found" };
+    if (readErr || !row) return { ok: false, reason: "job_not_found", mode };
 
+    // Atomic claim-guard: only ONE applyBoxMario invocation for this job wins. Mirrors
+    // applyBoxDeployReview's pending-guard shape: transition claimed → building via a compare-and-set
+    // + `.select('id')` so a second concurrent invocation matches zero rows and bails.
+    // We accept status='building' as a already-claimed state (the runner may have set it directly) —
+    // the guard's job is to serialize N concurrent appliers, not to reject a legitimate re-entry.
+    const guardCheck = await admin
+      .from("agent_jobs")
+      .update({ status: "building", updated_at: new Date().toISOString() })
+      .eq("id", jobId)
+      .eq("workspace_id", row.workspace_id)
+      .in("status", ["claimed"])
+      .select("id");
+    // A row already in 'building' is treated as a legitimate re-entry (no error).
+    // A row in a terminal state fails the guard and we bail so we don't overwrite a completed job.
+    if (row.status !== "building" && row.status !== "claimed" && (!guardCheck.data || guardCheck.data.length === 0)) {
+      return { ok: false, reason: `claim_guard: row is ${row.status}`, mode };
+    }
+
+    // Loop-guard: count prior `mario_fixed` rows for THIS spec_slug in the last 24h.
+    const priorFixes = await countPriorMarioFixesForSlug(admin, row.workspace_id, row.spec_slug);
+    const loopGuardMax = readMarioLoopGuardMax();
+    const loopGuardTriggered = priorFixes >= loopGuardMax && verdict.live_fix !== null;
+
+    // Execute the live_fix (gated on live + not-loop-guarded + valid action).
+    let fixExecuted = false;
+    let fixReason: string | null = null;
+    if (verdict.live_fix && mode === "live" && !loopGuardTriggered) {
+      const lf = verdict.live_fix;
+      try {
+        switch (lf.action) {
+          case "redrive_dropped_job":
+            if (!lf.target.job_id) throw new Error("target.job_id required");
+            await redriveDroppedJob(admin, lf.target.job_id, row.workspace_id);
+            fixExecuted = true;
+            break;
+          case "unstick_stale_status":
+            if (!lf.target.job_id) throw new Error("target.job_id required");
+            await unstickStaleStatus(admin, lf.target.job_id, row.workspace_id);
+            fixExecuted = true;
+            break;
+          case "release_cleared_blocker":
+            if (!lf.target.spec_slug) throw new Error("target.spec_slug required");
+            await releaseClearedBlocker(admin, row.workspace_id, lf.target.spec_slug);
+            fixExecuted = true;
+            break;
+          case "requeue_unclaimed_job":
+            if (!lf.target.job_id) throw new Error("target.job_id required");
+            await requeueUnclaimedJob(admin, lf.target.job_id, row.workspace_id);
+            fixExecuted = true;
+            break;
+          case "queue_box_restart": {
+            const boxId = lf.target.box_id ?? "box";
+            await queueBoxRestart(admin, boxId);
+            fixExecuted = true;
+            break;
+          }
+          default:
+            fixReason = `unknown action: ${lf.action}`;
+        }
+      } catch (e) {
+        fixReason = e instanceof Error ? e.message : String(e);
+      }
+    } else if (loopGuardTriggered) {
+      try {
+        const { recordDirectorActivity } = await import("@/lib/director-activity");
+        await recordDirectorActivity(admin, {
+          workspaceId: row.workspace_id,
+          directorFunction: MARIO_DIRECTOR_FUNCTION,
+          actionKind: "mario_loop_guard",
+          specSlug: row.spec_slug,
+          reason: `oscillation risk: ${priorFixes} prior mario_fixed row(s) in 24h ≥ MARIO_LOOP_GUARD_MAX=${loopGuardMax}. Live fix skipped; escalating.`,
+          metadata: {
+            actor: MARIO_ACTOR,
+            job_id: jobId,
+            prior_fixes: priorFixes,
+            loop_guard_max: loopGuardMax,
+            proposed_action: verdict.live_fix?.action ?? null,
+            proposed_target: verdict.live_fix?.target ?? null,
+          },
+        });
+      } catch (e) {
+        console.warn("[mario] loop-guard record failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Fix-spec authoring — runs even when loop-guarded (the recurrence is exactly WHY the durable
+    // fix-spec is proposed). Never fires in surface_only / off.
+    let durableSpecAuthored = false;
+    if (verdict.durable_fix_spec && mode === "live") {
+      try {
+        durableSpecAuthored = await authorMarioFixSpec(row.workspace_id, verdict.durable_fix_spec);
+      } catch (e) {
+        console.warn("[mario] fix-spec author failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Threshold self-tune — Phase 3 gate: only when trigger_accurate=false AND reason is non-empty.
+    let thresholdWidened = false;
+    if (
+      verdict.threshold_adjustment &&
+      verdict.trigger_accurate === false &&
+      verdict.threshold_adjustment.reason.trim().length > 0 &&
+      mode === "live"
+    ) {
+      try {
+        thresholdWidened = await widenMarioThreshold(admin, row.workspace_id, verdict.threshold_adjustment);
+      } catch (e) {
+        console.warn("[mario] threshold widen failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Trigger-accuracy record — the query `mario_fired.metadata->>'trigger_accurate'` powers the
+    // Phase-4 accuracy dashboard. Emitted on EVERY invocation regardless of mode.
     const { recordDirectorActivity } = await import("@/lib/director-activity");
     const rec = await recordDirectorActivity(admin, {
       workspaceId: row.workspace_id,
@@ -545,13 +868,231 @@ export async function applyBoxMario(
         threshold_adjustment: verdict.threshold_adjustment ?? null,
         escalate: verdict.escalate,
         job_id: jobId,
-        phase: "phase-1-stub",
+        mode,
+        fix_executed: fixExecuted,
+        fix_reason: fixReason,
+        durable_spec_authored: durableSpecAuthored,
+        threshold_widened: thresholdWidened,
+        loop_guard_triggered: loopGuardTriggered,
       },
     });
-    return { ok: true, recorded: rec.recorded };
+
+    // On a successful live_fix, record `mario_fixed` — this row is what the loop-guard's 24h count
+    // consumes on the NEXT invocation. Separate action_kind so the trigger-accuracy query
+    // (`mario_fired.metadata->>'trigger_accurate'`) never conflates a fix with a fire.
+    if (fixExecuted) {
+      try {
+        await recordDirectorActivity(admin, {
+          workspaceId: row.workspace_id,
+          directorFunction: MARIO_DIRECTOR_FUNCTION,
+          actionKind: "mario_fixed",
+          specSlug: row.spec_slug,
+          reason: (verdict.live_fix?.reasoning ?? "").slice(0, 4000),
+          metadata: {
+            actor: MARIO_ACTOR,
+            job_id: jobId,
+            action: verdict.live_fix?.action ?? null,
+            target: verdict.live_fix?.target ?? null,
+          },
+        });
+      } catch (e) {
+        console.warn("[mario] mario_fixed record failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Complete the job — compare-and-set so a concurrent stamp (fail-safe / stale-session reaper)
+    // never regresses a terminal status.
+    try {
+      await admin
+        .from("agent_jobs")
+        .update({ status: "done", updated_at: new Date().toISOString() })
+        .eq("id", jobId)
+        .in("status", ["building", "claimed"]);
+    } catch (e) {
+      console.warn("[mario] job complete-stamp failed:", e instanceof Error ? e.message : e);
+    }
+
+    return {
+      ok: true,
+      recorded: rec.recorded,
+      fix_executed: fixExecuted,
+      fix_reason: fixReason ?? undefined,
+      durable_spec_authored: durableSpecAuthored,
+      threshold_widened: thresholdWidened,
+      loop_guard_triggered: loopGuardTriggered,
+      mode,
+    };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/**
+ * The M3 migration's seeded defaults — the fallback pre-widen sla_ms when a revert caller doesn't
+ * carry the prior value (the widened row itself only stores the CURRENT sla_ms + last_widened_at +
+ * reason; the pre-widen value is derived from the seed). Mirrors the values in
+ * supabase/migrations/20261004120000_mario_thresholds.sql.
+ */
+export const MARIO_SEEDED_DEFAULT_SLA_MS: Record<string, number> = {
+  "build_done|phase_shipped": 1_800_000,
+  "review_started|review_passed": 1_200_000,
+  "spec_test_started|spec_test_verdict": 1_800_000,
+  "fold_started|folded": 1_200_000,
+  "job_queued|job_claimed": 600_000,
+  "phase_shipped|build_started": 1_800_000,
+};
+
+/** Look up the seeded default sla_ms for a (from_event, to_event) pair; null when unknown. */
+export function marioSeededDefaultSlaMs(from_event: string, to_event: string): number | null {
+  return MARIO_SEEDED_DEFAULT_SLA_MS[`${from_event}|${to_event}`] ?? null;
+}
+
+/**
+ * `revertMarioThreshold` — the Phase-4 revert path. Reads the current widened row and returns its
+ * `sla_ms` to the provided pre-widen value (or falls back to the seeded default when the caller
+ * doesn't know the prior value), clears `last_widened_at` + `last_widened_reason`, and records a
+ * `mario_threshold_reverted` audit row. Compare-and-set on `(workspace, from_event, to_event)` +
+ * a `last_widened_at IS NOT NULL` guard so a revert on an already-baseline row is a safe no-op.
+ */
+export async function revertMarioThreshold(
+  admin: Admin,
+  workspaceId: string,
+  from_event: string,
+  to_event: string,
+  preWidenSlaMs: number,
+  actor?: string,
+): Promise<{ reverted: boolean; reason?: string }> {
+  try {
+    if (!Number.isFinite(preWidenSlaMs) || preWidenSlaMs <= 0) {
+      return { reverted: false, reason: "invalid pre-widen sla_ms" };
+    }
+    const nowIso = new Date().toISOString();
+    const { data: updated, error } = await admin
+      .from("mario_thresholds")
+      .update({
+        sla_ms: preWidenSlaMs,
+        last_widened_at: null,
+        last_widened_reason: null,
+        updated_at: nowIso,
+      })
+      .eq("workspace_id", workspaceId)
+      .eq("from_event", from_event)
+      .eq("to_event", to_event)
+      .not("last_widened_at", "is", null)
+      .select("id");
+    if (error) return { reverted: false, reason: error.message };
+    const reverted = Array.isArray(updated) && updated.length > 0;
+    if (reverted) {
+      try {
+        const { recordDirectorActivity } = await import("@/lib/director-activity");
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: MARIO_DIRECTOR_FUNCTION,
+          actionKind: "mario_threshold_reverted",
+          reason: `Threshold (${from_event}→${to_event}) reverted to pre-widen sla_ms=${preWidenSlaMs}`,
+          metadata: {
+            actor: actor ?? MARIO_ACTOR,
+            from_event,
+            to_event,
+            pre_widen_sla_ms: preWidenSlaMs,
+          },
+        });
+      } catch (e) {
+        console.warn("[mario] revert audit write failed:", e instanceof Error ? e.message : e);
+      }
+    }
+    return { reverted, reason: reverted ? undefined : "no widened row to revert" };
+  } catch (e) {
+    return { reverted: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * `readMarioAccuracy` — the Phase-4 accuracy probe. Reads every `mario_fired` director_activity row
+ * for the workspace in the last N days (default 7) and computes the trigger-accuracy stats the
+ * dashboard card + the alarm cron consume. Read-only; safe from any surface.
+ */
+export interface MarioAccuracyStats {
+  window_days: number;
+  fired_count: number;
+  trigger_accurate_count: number;
+  trigger_inaccurate_count: number;
+  accuracy_pct: number | null; // null when fired_count=0 (avoid divide-by-zero visual noise)
+}
+
+export async function readMarioAccuracy(
+  admin: Admin,
+  workspaceId: string,
+  windowDays: number = 7,
+): Promise<MarioAccuracyStats> {
+  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await admin
+    .from("director_activity")
+    .select("metadata")
+    .eq("workspace_id", workspaceId)
+    .eq("action_kind", "mario_fired")
+    .gte("created_at", since);
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{ metadata: unknown }>;
+  let accurate = 0;
+  let inaccurate = 0;
+  for (const r of rows) {
+    const md = (r.metadata ?? {}) as Record<string, unknown>;
+    if (md.trigger_accurate === true) accurate++;
+    else if (md.trigger_accurate === false) inaccurate++;
+  }
+  const fired = rows.length;
+  const decisions = accurate + inaccurate;
+  const accuracy_pct = decisions === 0 ? null : Math.round((accurate / decisions) * 1000) / 10;
+  return {
+    window_days: windowDays,
+    fired_count: fired,
+    trigger_accurate_count: accurate,
+    trigger_inaccurate_count: inaccurate,
+    accuracy_pct,
+  };
+}
+
+/**
+ * `readMarioWidenedThresholds` — the Phase-4 dashboard card's widened-rows table source. Lists the
+ * mario_thresholds rows whose `last_widened_at` is populated so a human can audit a widen +
+ * one-click revert it.
+ */
+export interface MarioWidenedRow {
+  id: string;
+  from_event: string;
+  to_event: string;
+  sla_ms: number;
+  last_widened_at: string | null;
+  last_widened_reason: string | null;
+}
+
+export async function readMarioWidenedThresholds(
+  admin: Admin,
+  workspaceId: string,
+): Promise<MarioWidenedRow[]> {
+  const { data, error } = await admin
+    .from("mario_thresholds")
+    .select("id, from_event, to_event, sla_ms, last_widened_at, last_widened_reason")
+    .eq("workspace_id", workspaceId)
+    .not("last_widened_at", "is", null)
+    .order("last_widened_at", { ascending: false });
+  if (error) throw error;
+  return ((data ?? []) as Array<{
+    id: string;
+    from_event: string;
+    to_event: string;
+    sla_ms: number | string;
+    last_widened_at: string | null;
+    last_widened_reason: string | null;
+  }>).map((r) => ({
+    id: r.id,
+    from_event: r.from_event,
+    to_event: r.to_event,
+    sla_ms: typeof r.sla_ms === "string" ? Number.parseInt(r.sla_ms, 10) : r.sla_ms,
+    last_widened_at: r.last_widened_at,
+    last_widened_reason: r.last_widened_reason,
+  }));
 }
 
 /**
