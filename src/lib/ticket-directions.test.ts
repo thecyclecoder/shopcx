@@ -20,6 +20,7 @@ import {
   writeDirection,
   TicketDirectionPlanError,
   resolveSolChosenPlaybook,
+  resolveSolChosenJourney,
   closeTicketOnResolvingReply,
   classifySolBoxTurnAction,
 } from "./ticket-directions";
@@ -36,6 +37,7 @@ interface FakeJourney {
   workspace_id: string;
   slug: string;
   name: string;
+  trigger_intent?: string | null;
   is_active: boolean;
 }
 
@@ -91,6 +93,29 @@ function makeAdmin(seed: SeedInput = {}) {
     return builder;
   }
 
+  function makeJourneyBuilder() {
+    const filters: Record<string, unknown> = {};
+    const builder = {
+      select(_cols: string) {
+        return builder;
+      },
+      eq(col: string, val: unknown) {
+        filters[col] = val;
+        return builder;
+      },
+      maybeSingle() {
+        const match = state.journeys.find((j) => {
+          for (const [k, v] of Object.entries(filters)) {
+            if ((j as unknown as Record<string, unknown>)[k] !== v) return false;
+          }
+          return true;
+        });
+        return Promise.resolve({ data: match ? { id: match.id } : null, error: null });
+      },
+    };
+    return builder;
+  }
+
   function makeDirectionInsertBuilder() {
     let payload: Record<string, unknown> = {};
     const builder = {
@@ -126,8 +151,7 @@ function makeAdmin(seed: SeedInput = {}) {
   const admin = {
     from(table: string) {
       if (table === "playbooks") return makeRowLookupBuilder(state.playbooks as unknown as Array<Record<string, unknown>>);
-      if (table === "journey_definitions")
-        return makeRowLookupBuilder(state.journeys as unknown as Array<Record<string, unknown>>);
+      if (table === "journey_definitions") return makeJourneyBuilder();
       if (table === "ticket_directions") return makeDirectionInsertBuilder();
       throw new Error(`unexpected table: ${table}`);
     },
@@ -676,6 +700,443 @@ test("resolveSolChosenPlaybook: happy path with omitted seed_context → seed de
   const out = await resolveSolChosenPlaybook(admin, WS, TID);
   assert.ok(out !== null);
   assert.deepEqual(out!.seed_context, {});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// launch_journey_slug — Phase 1 of
+// docs/brain/specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend.md.
+// The writer validates the slug resolves to an active journey_definitions row (workspace-
+// scoped) BEFORE the Direction lands, so a Direction that names an unknown/inactive slug
+// bails HERE rather than at the launcher — same confirming-predicate pattern as the
+// playbook_slug gate above.
+// ──────────────────────────────────────────────────────────────────────
+
+test("plan.launch_journey_slug empty string → rejected with journey_slug_not_string", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "customer moved",
+        context_summary: "customer moved and wants to update address",
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_not_string");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.launch_journey_slug whitespace-only → rejected with journey_slug_not_string", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "customer moved",
+        context_summary: "customer moved and wants to update address",
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "   " },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_not_string");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.launch_journey_slug points at unknown slug → rejected with slug echoed", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "customer moved",
+        context_summary: "customer moved and wants to update address",
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "not-a-real-journey" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_unknown");
+      assert.equal(err.slug, "not-a-real-journey");
+      assert.match(err.message, /not-a-real-journey/);
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.launch_journey_slug matches only a DIFFERENT workspace → rejected", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "jd-other",
+        workspace_id: "00000000-0000-0000-0000-00000000ws2",
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "customer moved",
+        context_summary: "customer moved and wants to update address",
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "shipping-address" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_unknown");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0, "cross-workspace journey slug must not authorize the launch");
+});
+
+test("plan.launch_journey_slug matches an INACTIVE journey → rejected (is_active=false is not authorized)", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: false,
+      },
+    ],
+  });
+  await assert.rejects(
+    () =>
+      writeDirection(admin, {
+        workspace_id: WS,
+        ticket_id: TID,
+        intent: "customer moved",
+        context_summary: "customer moved and wants to update address",
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "shipping-address" },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "journey_slug_unknown");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.launch_journey_slug happy path (stateless + shipping-address) → Direction lands with slug on plan", async () => {
+  const { admin, state } = makeAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+    nextDirectionId: "dir-move",
+  });
+  const row = await writeDirection(admin, {
+    workspace_id: WS,
+    ticket_id: TID,
+    intent: "customer moved and wants to update address",
+    context_summary: "in-policy address change; active internal subscription",
+    chosen_path: "stateless",
+    plan: { action: "send_stateless_reply", launch_journey_slug: "shipping-address" },
+  });
+  assert.equal(row.id, "dir-move");
+  assert.equal(row.chosen_path, "stateless");
+  assert.equal(row.plan.launch_journey_slug, "shipping-address");
+  assert.equal(state.directions.length, 1);
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// resolveSolChosenJourney — the resolver the worker consults AFTER
+// writeDirection succeeds to decide whether to route the customer-facing
+// output through launchJourneyForTicket instead of the plain reply send.
+// ──────────────────────────────────────────────────────────────────────
+
+interface DispatchJourneySeed {
+  journeys?: FakeJourney[];
+  directions?: Array<{
+    id: string;
+    workspace_id: string;
+    ticket_id: string;
+    chosen_path: "playbook" | "stateless" | "needs_info";
+    plan: Record<string, unknown>;
+    superseded_at: string | null;
+  }>;
+}
+
+function makeJourneyDispatchAdmin(seed: DispatchJourneySeed) {
+  const state = {
+    journeys: (seed.journeys ?? []).map((j) => ({ ...j })),
+    directions: (seed.directions ?? []).map((d) => ({
+      id: d.id,
+      workspace_id: d.workspace_id,
+      ticket_id: d.ticket_id,
+      intent: "test",
+      context_summary: "test",
+      chosen_path: d.chosen_path,
+      plan: { ...d.plan },
+      guardrails: {},
+      authored_by: "sol_box_session",
+      authored_at: "2026-07-08T00:00:00Z",
+      superseded_at: d.superseded_at,
+      resession_count: 0,
+    })),
+  };
+
+  function selectBuilder<T>(rows: T[], cols: string) {
+    const filters: Record<string, unknown> = {};
+    let onlyLive = false;
+    const builder = {
+      select(_cols: string) {
+        return builder;
+      },
+      eq(col: string, val: unknown) {
+        filters[col] = val;
+        return builder;
+      },
+      is(col: string, val: unknown) {
+        if (col === "superseded_at" && val === null) onlyLive = true;
+        return builder;
+      },
+      maybeSingle() {
+        const match = (rows as unknown as Array<Record<string, unknown>>).find((r) => {
+          if (onlyLive && r.superseded_at !== null) return false;
+          for (const [k, v] of Object.entries(filters)) {
+            if (r[k] !== v) return false;
+          }
+          return true;
+        });
+        if (!match) return Promise.resolve({ data: null, error: null });
+        if (cols === "id, name, trigger_intent") {
+          return Promise.resolve({
+            data: {
+              id: match.id,
+              name: match.name,
+              trigger_intent: match.trigger_intent ?? null,
+            },
+            error: null,
+          });
+        }
+        return Promise.resolve({ data: match as unknown as T, error: null });
+      },
+    };
+    return builder;
+  }
+
+  const admin = {
+    from(table: string) {
+      if (table === "ticket_directions") return selectBuilder(state.directions, "*");
+      if (table === "journey_definitions") return selectBuilder(state.journeys, "id, name, trigger_intent");
+      throw new Error(`unexpected table: ${table}`);
+    },
+  };
+  return { admin: admin as unknown as import("@supabase/supabase-js").SupabaseClient, state };
+}
+
+test("resolveSolChosenJourney: no live Direction → null", async () => {
+  const { admin } = makeJourneyDispatchAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+    directions: [],
+  });
+  const out = await resolveSolChosenJourney(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenJourney: live Direction without launch_journey_slug → null", async () => {
+  const { admin } = makeJourneyDispatchAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+    directions: [
+      { id: "dir-1", workspace_id: WS, ticket_id: TID, chosen_path: "stateless", plan: { action: "send_stateless_reply" }, superseded_at: null },
+    ],
+  });
+  const out = await resolveSolChosenJourney(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenJourney: superseded Direction → null (superseded_at IS NOT NULL disables the branch)", async () => {
+  const { admin } = makeJourneyDispatchAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+    directions: [
+      {
+        id: "dir-1",
+        workspace_id: WS,
+        ticket_id: TID,
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "shipping-address" },
+        superseded_at: "2026-07-08T01:00:00Z",
+      },
+    ],
+  });
+  const out = await resolveSolChosenJourney(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenJourney: cross-workspace slug → null (mis-authored Direction cannot dispatch)", async () => {
+  const { admin } = makeJourneyDispatchAdmin({
+    journeys: [
+      {
+        id: "jd-other",
+        workspace_id: "00000000-0000-0000-0000-00000000ws2",
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+    directions: [
+      {
+        id: "dir-1",
+        workspace_id: WS,
+        ticket_id: TID,
+        chosen_path: "stateless",
+        plan: { launch_journey_slug: "shipping-address" },
+        superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenJourney(admin, WS, TID);
+  assert.equal(out, null);
+});
+
+test("resolveSolChosenJourney: happy path — returns { journey_id, slug, name, trigger_intent }", async () => {
+  const { admin } = makeJourneyDispatchAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: "shipping_address",
+        is_active: true,
+      },
+    ],
+    directions: [
+      {
+        id: "dir-1",
+        workspace_id: WS,
+        ticket_id: TID,
+        chosen_path: "stateless",
+        plan: { action: "send_stateless_reply", launch_journey_slug: "shipping-address" },
+        superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenJourney(admin, WS, TID);
+  assert.ok(out !== null, "expected non-null resolution");
+  assert.equal(out!.journey_id, "jd-ship");
+  assert.equal(out!.slug, "shipping-address");
+  assert.equal(out!.name, "Confirm Shipping Address");
+  assert.equal(out!.trigger_intent, "shipping_address");
+});
+
+test("resolveSolChosenJourney: happy path with null trigger_intent → falls back to the slug", async () => {
+  const { admin } = makeJourneyDispatchAdmin({
+    journeys: [
+      {
+        id: "jd-ship",
+        workspace_id: WS,
+        slug: "shipping-address",
+        name: "Confirm Shipping Address",
+        trigger_intent: null,
+        is_active: true,
+      },
+    ],
+    directions: [
+      {
+        id: "dir-1",
+        workspace_id: WS,
+        ticket_id: TID,
+        chosen_path: "stateless",
+        plan: { launch_journey_slug: "shipping-address" },
+        superseded_at: null,
+      },
+    ],
+  });
+  const out = await resolveSolChosenJourney(admin, WS, TID);
+  assert.ok(out !== null);
+  assert.equal(out!.trigger_intent, "shipping-address");
 });
 
 test("resolveSolChosenPlaybook: superseded Direction → null (superseded_at IS NOT NULL disables the branch)", async () => {

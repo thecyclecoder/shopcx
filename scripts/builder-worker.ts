@@ -11160,8 +11160,58 @@ async function runTicketHandleJob(job: Job) {
       if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
+        // ── Phase 3 of sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend ──
+        // Machine gate the move-dead-end invariant BEFORE the send fires. When Sol's Direction
+        // signals a MOVE and the customer has an ACTIVE subscription, the reply MUST NOT
+        // terminate with a cancel-only or "already shipped, can't redirect" dead-end — the
+        // customer must always be offered an alternative (address update / $0 replacement /
+        // self-service cancel journey). The check is workspace-scoped by ticket_id + the
+        // customer_id already threaded on the ticket; a fetch of any single active subscription
+        // for the customer is enough (`.limit(1)`), and a null customer_id fails-open (the
+        // downstream customer_id-scoped mutations already can't dispatch).
+        let hasActiveSubscription = false;
+        try {
+          const { data: t0 } = await db
+            .from("tickets")
+            .select("customer_id")
+            .eq("id", ticketId)
+            .eq("workspace_id", workspaceId)
+            .maybeSingle();
+          const custIdForGuard = (t0?.customer_id as string | null) ?? null;
+          if (custIdForGuard) {
+            const { data: activeSub } = await db
+              .from("subscriptions")
+              .select("id")
+              .eq("workspace_id", workspaceId)
+              .eq("customer_id", custIdForGuard)
+              .eq("status", "active")
+              .limit(1)
+              .maybeSingle();
+            hasActiveSubscription = !!activeSub;
+          }
+        } catch (e) {
+          // Fail-open: a probe error means the move guard degrades to no-op; the bait guard
+          // still fires. Better than blocking a legitimate reply because a diagnostic read
+          // hiccupped.
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`${tag} move-dead-end guard subscription probe failed (guard falls through): ${msg}`);
+        }
+        const { assessSolMoveDeadEndRisk } = await import("../src/lib/sol-move-dead-end-guard");
+        const moveGuard = assessSolMoveDeadEndRisk({
+          intent,
+          contextSummary,
+          plan,
+          firstReply,
+          hasActiveSubscription,
+        });
         if (bait.ok === false) {
           const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else if (moveGuard.ok === false) {
+          const blockLine = `Sol reply BLOCKED by move-dead-end guard [${moveGuard.kind}]: ${moveGuard.reason}. Matched phrase: ${JSON.stringify(moveGuard.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
           console.warn(`${tag} ${blockLine}`);
           await update(job.id, {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11192,8 +11242,27 @@ async function runTicketHandleJob(job: Job) {
               log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
             });
           } else {
-            const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
+            const { data: t } = await db.from("tickets").select("channel, customer_id").eq("id", ticketId).single();
             const channel = (t?.channel as string | null) || "email";
+            const customerIdForJourney = (t?.customer_id as string | null) ?? null;
+
+            // Phase 1 of docs/brain/specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend.md:
+            // when Sol's Direction names a STANDALONE journey via plan.launch_journey_slug (the
+            // move → shipping-address case is the wedge — 'I moved' / 'new address' / 'changed
+            // address' / 'cancel, I moved' → slug='shipping-address'), route the customer-facing
+            // output through launchJourneyForTicket instead of the plain reply send. The resolver
+            // re-asserts workspace + is_active at the action point (learning #6 — confirming
+            // predicate at the write, not a coarser proxy) so a Direction that names a retired
+            // slug degrades gracefully back to the plain send. NO active playbook is started, so
+            // the journey's completion routes through the internal-aware update_shipping_address
+            // handler (action-executor → commerce/subscription subscriptionUpdateShippingAddress,
+            // internal vs Appstle branch) rather than being consumed as a playbook step. Guards
+            // above (bait / claim / honor) still ran against firstReply — the customer output is
+            // a CTA carrying that reply as the leadIn, so the invariants hold.
+            let launchedStandaloneJourney = false;
+            // sol-closes-ticket-on-resolving-reply: sendOk gates the close decision below. Set true
+            // ONLY when the plain reply is delivered (the fallback send). A launched standalone journey
+            // leaves sendOk=false so the ticket stays OPEN — the journey owns status from here.
             let sendOk = false;
             // Journeys + workflows are delivered through the SAME executeSonnetDecision front door
             // Sonnet uses in production ([[tickets-mutate]] launchJourney / runWorkflow) — so Sol's
@@ -11206,41 +11275,77 @@ async function runTicketHandleJob(job: Job) {
             // so the journey lead-in / workflow preamble is policy-checked before it ships.
             let mechanismManagesStatus = false;
             try {
-              if (chosenPath === "journey") {
-                const jSlug = typeof (plan as { journey_slug?: unknown }).journey_slug === "string"
-                  ? ((plan as { journey_slug: string }).journey_slug).trim()
-                  : "";
-                const ctaTextRaw = (plan as { cta_text?: unknown }).cta_text;
-                const ctaText = typeof ctaTextRaw === "string" && ctaTextRaw.trim() ? ctaTextRaw.trim() : undefined;
-                if (!jSlug) throw new Error("journey Direction missing plan.journey_slug");
-                const { launchJourney } = await import("../src/lib/tickets-mutate");
-                // NB: never pass subscriptionId for cancel — launchJourney's own contract. We pass
-                // neither sub nor order hint here; the journey resolves its own target.
-                const res = await launchJourney(db, {
-                  workspaceId, ticketId, journey: jSlug, leadIn: firstReply, ctaText,
+              // (1) Standalone-journey wedge (plan.launch_journey_slug on ANY chosen_path — the
+              // move → shipping-address case). Launches via launchJourneyForTicket with firstReply
+              // as the CTA lead-in; leaves the ticket open (the journey owns status). See
+              // sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend.
+              const { resolveSolChosenJourney } = await import("../src/lib/ticket-directions");
+              const journeyChoice = await resolveSolChosenJourney(db, workspaceId, ticketId);
+              if (journeyChoice && customerIdForJourney) {
+                const { launchJourneyForTicket } = await import("../src/lib/journey-delivery");
+                const launched = await launchJourneyForTicket({
+                  workspaceId,
+                  ticketId,
+                  customerId: customerIdForJourney,
+                  journeyId: journeyChoice.journey_id,
+                  journeyName: journeyChoice.name,
+                  triggerIntent: journeyChoice.trigger_intent,
+                  channel,
+                  leadIn: firstReply,
+                  ctaText: journeyChoice.name,
                 });
-                sendOk = res.messageSent;
-                mechanismManagesStatus = true;
-                console.log(`${tag} journey '${jSlug}' launched: messageSent=${res.messageSent} statusManaged=${res.statusManaged}`);
-              } else if (chosenPath === "workflow") {
-                const wTag = typeof (plan as { workflow_tag?: unknown }).workflow_tag === "string"
-                  ? ((plan as { workflow_tag: string }).workflow_tag).trim()
-                  : "";
-                if (!wTag) throw new Error("workflow Direction missing plan.workflow_tag");
-                const { runWorkflow } = await import("../src/lib/tickets-mutate");
-                const res = await runWorkflow(db, { workspaceId, ticketId, workflow: wTag });
-                sendOk = res.messageSent || res.statusManaged;
-                mechanismManagesStatus = true;
-                console.log(`${tag} workflow '${wTag}' ran: messageSent=${res.messageSent} statusManaged=${res.statusManaged}`);
-              } else {
-                const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-                await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-                sendOk = true;
+                launchedStandaloneJourney = launched === true;
+                if (launchedStandaloneJourney) mechanismManagesStatus = true;
+              }
+
+              // (2) chosen_path=journey / workflow — Sol explicitly routed to a mechanism (only when
+              // the standalone wedge above didn't already fire). Journeys go through the SAME proven
+              // launchJourneyForTicket path (leadIn=firstReply → one message: lead-in + CTA); the
+              // cancel-subscription journey is the flagship. Workflows self-drive via runWorkflow.
+              if (!launchedStandaloneJourney) {
+                if (chosenPath === "journey") {
+                  const jSlug = typeof (plan as { journey_slug?: unknown }).journey_slug === "string"
+                    ? ((plan as { journey_slug: string }).journey_slug).trim() : "";
+                  if (!jSlug) throw new Error("journey Direction missing plan.journey_slug");
+                  if (!customerIdForJourney) throw new Error("journey Direction has no customer to launch for");
+                  const { data: jrow } = await db.from("journey_definitions")
+                    .select("id, name, trigger_intent")
+                    .eq("workspace_id", workspaceId).eq("slug", jSlug).eq("is_active", true).maybeSingle();
+                  if (!jrow) throw new Error(`journey '${jSlug}' is not an active journey in this workspace`);
+                  const ctaTextRaw = (plan as { cta_text?: unknown }).cta_text;
+                  const ctaText = typeof ctaTextRaw === "string" && ctaTextRaw.trim()
+                    ? ctaTextRaw.trim() : (jrow as { name: string }).name;
+                  const { launchJourneyForTicket } = await import("../src/lib/journey-delivery");
+                  // NB: never pass a subscription hint for cancel — the journey resolves its own target.
+                  const launched = await launchJourneyForTicket({
+                    workspaceId, ticketId, customerId: customerIdForJourney,
+                    journeyId: (jrow as { id: string }).id,
+                    journeyName: (jrow as { name: string }).name,
+                    triggerIntent: (jrow as { trigger_intent: string | null }).trigger_intent ?? "",
+                    channel, leadIn: firstReply, ctaText,
+                  });
+                  sendOk = launched === true;
+                  mechanismManagesStatus = true;
+                  console.log(`${tag} journey '${jSlug}' launched: ${launched}`);
+                } else if (chosenPath === "workflow") {
+                  const wTag = typeof (plan as { workflow_tag?: unknown }).workflow_tag === "string"
+                    ? ((plan as { workflow_tag: string }).workflow_tag).trim() : "";
+                  if (!wTag) throw new Error("workflow Direction missing plan.workflow_tag");
+                  const { runWorkflow } = await import("../src/lib/tickets-mutate");
+                  const res = await runWorkflow(db, { workspaceId, ticketId, workflow: wTag });
+                  sendOk = res.messageSent || res.statusManaged;
+                  mechanismManagesStatus = true;
+                  console.log(`${tag} workflow '${wTag}' ran: messageSent=${res.messageSent} statusManaged=${res.statusManaged}`);
+                } else {
+                  const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+                  await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+                  sendOk = true;
+                }
               }
             } catch (e) {
               // A failed delivery does NOT unwind the Direction — the direction is durable, the
-              // reply/mechanism is the customer-facing side-effect. Surface for grep and complete the
-              // job (a human can retry from the Improve tab).
+              // reply/mechanism is the customer-facing side-effect. Surface for grep and complete
+              // the job (a human can retry from the Improve tab).
               const msg = e instanceof Error ? e.message : String(e);
               console.warn(`${tag} first-touch delivery failed (chosen_path=${chosenPath}; Direction still authored): ${msg}`);
             }
