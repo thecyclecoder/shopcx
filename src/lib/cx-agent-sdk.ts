@@ -258,18 +258,25 @@ export async function getCxOrders(
   customerId: string,
 ): Promise<CxOrder[]> {
   const linked = await linkGroupIds(admin, workspaceId, customerId);
-  const since = new Date(Date.now() - RECENT_ORDER_DAYS * 86400_000).toISOString();
-  const { data: orders } = await admin
+  // Window: the last RECENT_ORDER_DAYS (180), but ALWAYS keep at least the 3
+  // most recent orders even when they're older — the same rule the box's
+  // get_customer_account uses. A hard date floor hid a disputed RENEWAL's
+  // older first order (ticket 125741eb, marty), letting the agent read the
+  // renewal as a first order. Fetch the most recent (no floor), then window
+  // to max(within-180d, 3) so the renewal-vs-first-order signal survives.
+  const cutoffIso = new Date(Date.now() - RECENT_ORDER_DAYS * 86400_000).toISOString();
+  const { data: rawOrders } = await admin
     .from("orders")
     .select(
       "order_number, shopify_order_id, total_cents, line_items, payment_details, financial_status, source_name, subscription_id, created_at",
     )
     .eq("workspace_id", workspaceId)
     .in("customer_id", linked)
-    .gte("created_at", since)
     .order("created_at", { ascending: false })
     .limit(RECENT_ORDER_CAP);
-  if (!orders?.length) return [];
+  if (!rawOrders?.length) return [];
+  const withinCount = rawOrders.filter(o => String(o.created_at) >= cutoffIso).length;
+  const orders = rawOrders.slice(0, Math.max(withinCount, 3));
 
   // Pre-fetch variant titles for enrichment (only when there are any variant_ids).
   const variantIds = new Set<string>();
@@ -660,8 +667,14 @@ export function formatCxCustomer(c: CxCustomer | null): string {
 }
 
 export function formatCxOrders(orders: CxOrder[]): string {
-  if (!orders.length) return "ORDERS: (none in the last 180 days)";
-  const lines: string[] = [`ORDERS (last ${RECENT_ORDER_DAYS} days, cap ${RECENT_ORDER_CAP}):`];
+  if (!orders.length) return "ORDERS: (none on record)";
+  const cutoffIso = new Date(Date.now() - RECENT_ORDER_DAYS * 86400_000).toISOString();
+  const someOlder = orders.some((o) => o.created_at < cutoffIso);
+  const lines: string[] = [
+    someOlder
+      ? `ORDERS (last ${RECENT_ORDER_DAYS} days had fewer than 3 — showing the 3 most recent; some are older than ${RECENT_ORDER_DAYS} days):`
+      : `ORDERS (last ${RECENT_ORDER_DAYS} days, cap ${RECENT_ORDER_CAP}):`,
+  ];
   for (const o of orders) {
     const items = o.line_items
       .map((i) => {

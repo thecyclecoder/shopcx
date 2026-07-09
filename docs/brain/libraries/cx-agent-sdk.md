@@ -23,7 +23,7 @@ Primary customer profile + all linked customer_ids in the same group (via [[../l
 ```typescript
 getCxOrders(admin, workspaceId, customerId) → Promise<CxOrder[]>
 ```
-Recent orders (last 180 days, capped 25) across the linked-identity group. Each line item includes:
+Recent orders across the linked-identity group: **the last 180 days, but ALWAYS at least the 3 most recent** even when they're older (capped 25). The last-3 floor keeps a disputed *renewal*'s older first order visible so the agent can tell renewal from first order (ticket 125741eb, marty — the January first order sat outside 180d and the renewal read as a first order). The same window rule is used by `getCustomerAccount` (the box's `get_customer_account`) in [[../libraries/sonnet-orchestrator-v2|sonnet-orchestrator-v2]] and by `fetchOrders` in [[../libraries/playbook-executor|playbook-executor]]. Each line item includes:
 - `quantity`, `variant_title`, `sku`
 - `per_unit_cents` — actual charged amount ÷ qty (matches `computeChargedLineTotals` in [[../libraries/sonnet-orchestrator-v2|sonnet-orchestrator-v2]])
 - `line_total_cents` — line total the customer was charged
@@ -71,7 +71,7 @@ Plain-text snapshot embedded at the top of the prepared briefs ([[../libraries/b
 --- CX SDK snapshot (deterministic read-only; call the SDK, not raw SQL) ---
 CUSTOMER: <name> <email> · linked: <ids> · sub: <status> · retention: <score>
 SUBSCRIPTIONS: (list)
-ORDERS: (last 180 days)
+ORDERS: (last 180 days, or the 3 most recent when fewer than 3 fall in-window)
 PRODUCTS: (active catalog)
 POLICIES: (active sonnet_prompts)
 ```

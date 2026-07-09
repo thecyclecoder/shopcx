@@ -702,17 +702,23 @@ async function fetchCustomerData(admin: Admin, wsId: string, custId: string): Pr
 }
 
 async function fetchOrders(admin: Admin, wsId: string, custId: string, config: Record<string, unknown>): Promise<OrderData[]> {
-  // Floor at 180 days so the orchestrator has full visibility into the
-  // customer's order history — not just the policy window. Surfaced on
-  // ticket 6e732303 (Veronica, May 8): customer's two orders were 25
-  // and 53 days old; the old 21-day lookback hid both and the playbook
-  // kept saying "no recent orders found" while the customer kept giving
-  // us order numbers. Even with a 35-day floor we'd still miss anything
-  // older. The policy check later correctly classifies each order as
-  // in/out of policy, so fetching more is safe — we just want Sonnet
-  // to see the full picture.
+  // Window: the last 180 days, but ALWAYS at least the 3 most recent
+  // orders if they exist — the same rule the box's get_customer_account
+  // uses (sonnet-orchestrator-v2 getCustomerAccount). A hard 180-day floor
+  // gives the orchestrator full recent visibility but can still HIDE a
+  // disputed renewal's older first order (ticket 125741eb, marty: the
+  // renewal was in-window, the January first order wasn't → the playbook
+  // could read the renewal as a first order). Floor at 180 days AND
+  // guarantee the last ≥3 so the renewal-vs-first-order signal survives.
+  //
+  // Earlier fix (ticket 6e732303, Veronica): a 21-day lookback hid two
+  // 25-/53-day-old orders and the playbook kept saying "no recent orders
+  // found." The 180-day window already covers that; this just adds the
+  // last-3 fallback for accounts whose history is older than 180 days.
+  // Downstream policy classification labels each order in/out of policy,
+  // so surfacing a few older orders is safe.
   const lookbackDays = Math.max(Number(config.lookback_days) || 180, 180);
-  const since = new Date(Date.now() - lookbackDays * 86400000).toISOString();
+  const cutoffIso = new Date(Date.now() - lookbackDays * 86400000).toISOString();
 
   // Include linked customer orders
   const linkedIds = [custId];
@@ -722,14 +728,18 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
     for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
   }
 
+  // Fetch the most recent orders with NO date floor, then window in code so
+  // we can keep the last ≥3 even when they fall outside the lookback.
   const { data } = await admin.from("orders")
     .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, delivery_status, line_items, fulfillments, source_name, subscription_id")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
-    .gte("created_at", since)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(50);
 
-  return (data || []) as OrderData[];
+  const all = (data || []) as OrderData[];
+  const within = all.filter(o => String(o.created_at) >= cutoffIso).length;
+  return all.slice(0, Math.max(within, 3));
 }
 
 async function fetchSubscriptions(admin: Admin, wsId: string, custId: string): Promise<SubscriptionData[]> {
