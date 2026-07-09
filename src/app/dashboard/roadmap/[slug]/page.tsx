@@ -15,6 +15,8 @@ import {
 } from "@/lib/spec-test-runs";
 import { getSecurityStateBySlug } from "@/lib/security-agent";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getTimecard, type TimecardView } from "@/lib/spec-timecards";
+import { readMarioThresholds, type MarioThreshold } from "@/lib/mario";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
 import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
 import LifecycleTimeline from "../LifecycleTimeline";
@@ -63,7 +65,10 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   if (!spec) notFound();
   const goalBound = (filters.goalsBySpec[slug] ?? []).length > 0;
 
-  const [jobsBySlug, folds, testRuns, resolutions, liveSpecTestSlugs, securityBySlug] = workspaceId
+  // spec-detail-timecard-timeline Phase 1 — load the M1 timecard + workspace mario_thresholds
+  // alongside the existing per-workspace loads so LifecycleTimeline can paint per-stage duration
+  // + inter-stage gap pills without a second server round-trip.
+  const [jobsBySlug, folds, testRuns, resolutions, liveSpecTestSlugs, securityBySlug, timecard, marioThresholds] = workspaceId
     ? await Promise.all([
         getLatestJobsBySlug(workspaceId),
         getPendingFolds(workspaceId),
@@ -71,6 +76,10 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         getHumanCheckResolutions(workspaceId),
         getLiveSpecTestSlugs(workspaceId),
         getSecurityStateBySlug(createAdminClient(), workspaceId),
+        getTimecard(createAdminClient(), workspaceId, slug).catch(
+          () => ({ spec_slug: slug, steps: [], open_waits: [], total_elapsed_ms: 0 }) satisfies TimecardView,
+        ),
+        readMarioThresholds(createAdminClient(), workspaceId).catch(() => [] as MarioThreshold[]),
       ])
     : [
         {} as Record<string, AgentJob>,
@@ -79,6 +88,8 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
         new Map<string, import("@/lib/spec-test-runs").HumanCheckRow>(),
         new Set<string>() as ReadonlySet<string>,
         {} as Record<string, import("@/lib/security-agent").SecurityStateBySlug>,
+        { spec_slug: slug, steps: [], open_waits: [], total_elapsed_ms: 0 } satisfies TimecardView,
+        [] as MarioThreshold[],
       ];
   // spec-readers-from-db-retire-parser Phase 3: per-phase status + PR/merge_sha provenance come straight off
   // the DB-sourced `spec.card.phases` (dbRowToSpecCard maps `public.spec_phases` rows) — the legacy
@@ -225,8 +236,16 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
 
             <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
               {/* build-card-lifecycle-timeline Phase 2 — the 5-node timeline replacing the floating pill,
-                  rendered here too (one shared component across the board card + detail card). */}
-              <LifecycleTimeline derivation={derivation} currentLabel={pill.label} currentTitle={pill.title} />
+                  rendered here too (one shared component across the board card + detail card).
+                  spec-detail-timecard-timeline Phase 1 — the same mount point now paints per-stage
+                  duration + inter-stage gap pills off the M1 timecard + mario_thresholds SLA. */}
+              <LifecycleTimeline
+                derivation={derivation}
+                currentLabel={pill.label}
+                currentTitle={pill.title}
+                timecard={timecard}
+                thresholds={marioThresholds}
+              />
               <BuildButton slug={slug} initialJob={job} specStatus={spec.card.status} initialFold={fold} blockedBy={spec.card.blockedBy} />
               <div className="mt-3">
                 <VerificationCard
