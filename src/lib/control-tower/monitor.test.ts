@@ -17,6 +17,7 @@ import {
   evalInlineAgent,
   evalWorker,
   extractCronExpr,
+  extractSolFirstTouchDispatchTicketIds,
   firstScheduledFiringMs,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
   isOrderAwaitingFraudScreen,
@@ -622,4 +623,101 @@ test("evalInlineAgent still flips RED on a real Shopify/web order with no ai:fra
   const result = evalInlineAgent(fraudLoop!, state);
   assert.equal(result.color, "red");
   assert.equal(result.violation?.reason, "idle_while_work");
+});
+
+// ── tickets-awaiting-decision Sol first-touch async-channel exclusion ──────────
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// an inbound customer email dispatched to Sol as a `ticket-handle` first-touch job counted as
+// orchestrator-owned work in the `tickets-awaiting-decision` probe. The chat-only ack ledger
+// row (`ticket_resolution_events(reasoning='sol_first_touch_ack')`) is skipped by design on
+// async channels, so the probe subtracted nothing and the tile flipped red on 0 beats.
+// The channel-agnostic dispatch signal is the `agent_jobs` row unified-ticket-handler.ts:2030-2041
+// writes for EVERY first-touch (chat + async), captured off the enqueue payload
+// (`kind='ticket-handle', instructions.reason='first_touch'`). These tests pin the pure helper
+// that extracts the ticket_ids from that batch — the piece the probe subtracts on top of the
+// existing ack exclusion so async first-touch tickets no longer manufacture a false red tile.
+
+test("extractSolFirstTouchDispatchTicketIds picks up an async (email) first-touch ticket-handle job with no ack row", () => {
+  // The originating condition: unified-ticket-handler.ts § 2b takes the async channel branch —
+  // no send, no `sol_first_touch_ack` `ticket_resolution_events` row — and enqueues a
+  // ticket-handle `agent_jobs` row with `reason: 'first_touch'` in the instructions payload.
+  // Direct mirror of the enqueue shape at unified-ticket-handler.ts:2030-2041 (`JSON.stringify({
+  // ticket_id, workspace_id, turn_index: 1, reason: 'first_touch' })`) — the exact payload the
+  // async email path writes.
+  const rows = [
+    {
+      instructions: JSON.stringify({
+        ticket_id: "ticket-async-email",
+        workspace_id: "ws-1",
+        turn_index: 1,
+        reason: "first_touch",
+      }),
+    },
+  ];
+  const ids = extractSolFirstTouchDispatchTicketIds(rows);
+  assert.deepEqual(ids, ["ticket-async-email"]);
+  // Consumed by the probe as `.in('ticket_id', [...])` → the inbound-message count for this ticket
+  // is subtracted from the total, so the async-first-touch email that fired the false page now
+  // reads as work=0 instead of work=1 in the ai:orchestrator tile — no idle_while_work violation.
+});
+
+test("extractSolFirstTouchDispatchTicketIds also catches a failed first-touch job (dispatch was made, so orchestrator was still bypassed)", () => {
+  // The spec's other named scenario: a `ticket-handle` job that later transitioned to `failed`
+  // still represents a first-touch dispatch — unified-ticket-handler.ts already handed the
+  // inbound message to Sol and returned before callSonnetOrchestratorV2 could run, so no
+  // ai:orchestrator beat is emitted regardless of the box worker's later outcome. The helper is
+  // status-agnostic (the probe's caller doesn't filter on status either) so a queued OR failed
+  // job of the same shape both exclude their inbound message.
+  const rows = [
+    {
+      instructions: JSON.stringify({
+        ticket_id: "ticket-async-failed",
+        workspace_id: "ws-1",
+        turn_index: 1,
+        reason: "first_touch",
+      }),
+    },
+  ];
+  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["ticket-async-failed"]);
+});
+
+test("extractSolFirstTouchDispatchTicketIds skips ticket-handle jobs with a different reason (portal_error, inflection)", () => {
+  // Only the first-touch class is subtracted here — portal-error and inflection ticket-handle
+  // jobs have their own downstream accounting (portal-errors-route-to-sol-first-escalate-to-june,
+  // sol-drift-frustration-detector-and-re-session-router) and their inbound messages already
+  // went through a Sonnet path that produced a beat. Filtering to `reason: 'first_touch'` keeps
+  // the exclusion tight to the actual pre-orchestrator bypass class the false page fired on.
+  const rows = [
+    { instructions: JSON.stringify({ ticket_id: "ticket-portal", workspace_id: "ws-1", turn_index: 1, reason: "portal_error", route: "cancel", error_code: null }) },
+    { instructions: JSON.stringify({ ticket_id: "ticket-inflection", workspace_id: "ws-1", turn_index: 3, reason: "drift" }) },
+    { instructions: JSON.stringify({ ticket_id: "ticket-first-touch", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
+  ];
+  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["ticket-first-touch"]);
+});
+
+test("extractSolFirstTouchDispatchTicketIds tolerates null / non-JSON / malformed instructions without throwing", () => {
+  // The probe already null/error-safes at the outer layer (defaults dispatch count to 0). The
+  // helper matches that contract so a legacy or future kind whose instructions aren't a JSON
+  // object can't blow up the tickets-awaiting-decision computation.
+  const rows = [
+    { instructions: null },
+    { instructions: "not json at all" },
+    { instructions: JSON.stringify(["array-not-object"]) },
+    { instructions: JSON.stringify({ ticket_id: "", reason: "first_touch" }) }, // empty id
+    { instructions: JSON.stringify({ reason: "first_touch" }) }, // no ticket_id
+    { instructions: JSON.stringify({ ticket_id: "T", reason: "first_touch" }) }, // valid — kept
+  ];
+  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["T"]);
+});
+
+test("extractSolFirstTouchDispatchTicketIds dedupes when a ticket has multiple first-touch jobs in the window", () => {
+  // Sol re-session (reSessionSol) enqueues a fresh ticket-handle job on inflection; the portal
+  // path also enqueues one for portal_error. Neither reuses `reason: 'first_touch'`, so the
+  // dedupe here really targets a rare double-enqueue on the same first-touch turn — the set
+  // guarantees a single message can't be subtracted twice via the `in('ticket_id', ids)` fan-out.
+  const rows = [
+    { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
+    { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
+  ];
+  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["T"]);
 });

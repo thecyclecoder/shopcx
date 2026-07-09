@@ -696,6 +696,48 @@ export function isOrderAwaitingFraudScreen(order: { source_name?: string | null 
   return !(INTERNAL_RENEWAL_ORDER_SOURCE_NAMES as readonly string[]).includes(src);
 }
 
+/**
+ * Extract the set of ticket_ids from a batch of `agent_jobs.kind='ticket-handle'` rows whose
+ * `instructions` payload identifies a Sol first-touch dispatch (`reason: 'first_touch'`).
+ *
+ * `agent_jobs` has no ticket_id column (see [[../../lib/portal/enqueue-sol-first-touch]] and
+ * unified-ticket-handler.ts:2030-2041) — every kind stores its per-job params inside a
+ * `JSON.stringify(...)`'d `instructions` text column. The `tickets-awaiting-decision` monitor
+ * probe uses this helper to turn a window of first-touch dispatch rows into the ticket-id set it
+ * subtracts from the inbound-message count, so Sol-first-touch async channels (email/SMS/portal —
+ * every non-chat channel skips the `sol_first_touch_ack` ledger row by design) aren't counted as
+ * orchestrator-owned work with 0 beats. Extracted from the probe body so it can be unit-tested
+ * without mocking Supabase — same pattern as `isOrderAwaitingFraudScreen`.
+ *
+ * Robustness:
+ *  - Non-JSON / malformed `instructions` rows are silently skipped (pre-Sol jobs, or a future
+ *    kind whose payload isn't JSON) — the probe's null/error-safe defaults do not change.
+ *  - Rows with a `reason` other than 'first_touch' are skipped (inflection, portal_error, etc.
+ *    each keep their own accounting).
+ *  - Returned ids are deduped so a re-enqueue on the same ticket doesn't inflate the exclusion.
+ */
+export function extractSolFirstTouchDispatchTicketIds(
+  rows: Array<{ instructions: string | null }>,
+): string[] {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    const raw = row.instructions;
+    if (!raw) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const payload = parsed as { ticket_id?: unknown; reason?: unknown };
+    if (payload.reason !== "first_touch") continue;
+    if (typeof payload.ticket_id !== "string" || payload.ticket_id.length === 0) continue;
+    ids.add(payload.ticket_id);
+  }
+  return [...ids];
+}
+
 /** Per-inline-agent window state: upstream work + ok/errored beat counts + latest/history. */
 export interface InlineAgentState {
   /** independent upstream-demand count over the window (the inlineWorkSignal probe). */
@@ -882,13 +924,33 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     see sol-ticket-direction-artifact-and-first-touch-box-session): a first-touch
             //     inbound on a channel with sol_first_touch_enabled=true is served by a Sol
             //     ticket-handle agent_job — unified-ticket-handler.ts:498-522 acks the customer
-            //     and writes a ticket_resolution_events row with reasoning='sol_first_touch_ack',
-            //     then enqueues kind='ticket-handle' where the box authors the Direction + first
-            //     reply. callSonnetOrchestratorV2 never runs on that inbound so no ai:orchestrator
-            //     beat is emitted. On Superfoods every channel has the flag on, so a single quiet-
-            //     window Sol-first-touch inbound would flip the tile red on healthy traffic.
-            //     The ticket_resolution_events row is the durable server-side ground-truth ledger
-            //     of that dispatch (see docs/brain/tables/ticket_resolution_events.md).
+            //     (chat only) and enqueues kind='ticket-handle' where the box authors the
+            //     Direction + first reply. callSonnetOrchestratorV2 never runs on that inbound
+            //     so no ai:orchestrator beat is emitted. On Superfoods every channel has the
+            //     flag on, so a single quiet-window Sol-first-touch inbound would flip the tile
+            //     red on healthy traffic.
+            //     Two parallel exclusions cover this class, because the two available signals
+            //     each cover a subset of channels:
+            //       (a) `ticket_resolution_events(reasoning='sol_first_touch_ack')` — the chat
+            //           ack ledger row (see docs/brain/tables/ticket_resolution_events.md).
+            //           unified-ticket-handler.ts only writes this ack row on chat; async
+            //           channels (email/SMS/portal/etc.) skip the send AND the ledger row by
+            //           design (Sol's real reply is the sole first-touch customer message),
+            //           so this exclusion alone leaves async first-touch tickets counting as
+            //           orchestrator work with 0 beats — the exact monitor-false-positive that
+            //           red-tiled `ai:orchestrator` on a quiet-window inbound email. Kept as-is
+            //           for chat.
+            //       (b) `agent_jobs(kind='ticket-handle', instructions.reason='first_touch')`
+            //           — the durable dispatch signal that unified-ticket-handler.ts writes for
+            //           EVERY first-touch channel (chat + async), captured off the enqueue
+            //           payload. Extends the exclusion to async channels using the same
+            //           handler-side ownership decision (the ticket is a Sol first-touch
+            //           dispatch, not orchestrator work) rather than a channel-scoped
+            //           downstream ledger row. This is the channel-agnostic signal the spec
+            //           `ticket-decision-workprobe-exclude-async-sol-first-touch` calls for.
+            //     A message may match both (a) and (b) on chat; per the overlap-safe note
+            //     below, double-subtraction only lowers the work count further, so the tile
+            //     still cannot false-fire idle_while_work.
             //
             // A still-OPEN, no-playbook, no-Sol-first-touch ticket with no beat keeps counting,
             // so a genuine orchestrator outage (inbound traffic piling up on tickets nothing can
@@ -900,14 +962,15 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // tickets row (closed OR csat:reopened OR active_playbook_id IS NOT NULL) —
             // NULL-safe (tickets with NULL/empty tags or NULL active_playbook_id still count)
             // and overlap-free (a csat:reopened ticket that later closes is counted once, not
-            // double-subtracted). The Sol-first-touch class lives on a sibling table
-            // (ticket_resolution_events), so it runs as a parallel query joining
-            // ticket_messages → tickets → ticket_resolution_events(reasoning='sol_first_touch_ack').
-            // Overlap between the two exclusion sets (e.g. a Sol-first-touch ticket that later
-            // closed) can double-subtract, which is safe: it only lowers the work count further,
-            // never inflates it, so the tile still can't false-fire idle_while_work — and a
-            // genuinely orchestrator-owned ticket sits in neither set, so no false negatives.
-            const [allRes, excludedRes, solFirstTouchRes] = await Promise.all([
+            // double-subtracted). The Sol-first-touch class lives on sibling tables
+            // (ticket_resolution_events for the chat ack, agent_jobs for the channel-agnostic
+            // dispatch signal), so it runs as two parallel queries. Overlap between any of
+            // the exclusion sets (e.g. a Sol-first-touch chat ticket that later closes, matching
+            // (2), (4a), and (4b)) can double-subtract, which is safe: it only lowers the work
+            // count further, never inflates it, so the tile still can't false-fire
+            // idle_while_work — and a genuinely orchestrator-owned ticket sits in NONE of the
+            // sets, so no false negatives.
+            const [allRes, excludedRes, solFirstTouchAckRes, solFirstTouchDispatchJobsRes] = await Promise.all([
               admin
                 .from("ticket_messages")
                 .select("id", { count: "exact", head: true })
@@ -928,10 +991,38 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .eq("tickets.ticket_resolution_events.reasoning", "sol_first_touch_ack"),
+              // agent_jobs has no ticket_id column (see enqueueSolFirstTouchForPortalError.ts) —
+              // the ticket_id lives in the JSON-encoded `instructions` string. Prefilter on the
+              // reason marker with a LIKE (underscore escaped so `first_touch` is literal, not a
+              // single-char wildcard) then parse the ticket_ids in Node via the pure
+              // extractSolFirstTouchDispatchTicketIds helper for unit-testability.
+              admin
+                .from("agent_jobs")
+                .select("instructions")
+                .eq("kind", "ticket-handle")
+                .gte("created_at", sinceIso)
+                .like("instructions", '%"reason":"first\\_touch"%'),
             ]);
+            const dispatchTicketIds = extractSolFirstTouchDispatchTicketIds(
+              (solFirstTouchDispatchJobsRes.data ?? []) as Array<{ instructions: string | null }>,
+            );
+            let solFirstTouchDispatchExcluded = 0;
+            if (dispatchTicketIds.length > 0) {
+              const { count } = await admin
+                .from("ticket_messages")
+                .select("id", { count: "exact", head: true })
+                .eq("direction", "inbound")
+                .eq("author_type", "customer")
+                .gte("created_at", sinceIso)
+                .in("ticket_id", dispatchTicketIds);
+              solFirstTouchDispatchExcluded = count ?? 0;
+            }
             return Math.max(
               0,
-              (allRes.count ?? 0) - (excludedRes.count ?? 0) - (solFirstTouchRes.count ?? 0),
+              (allRes.count ?? 0)
+                - (excludedRes.count ?? 0)
+                - (solFirstTouchAckRes.count ?? 0)
+                - solFirstTouchDispatchExcluded,
             );
           }
           default:
