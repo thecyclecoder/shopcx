@@ -626,6 +626,26 @@ export async function stampPhaseShipped(
     .eq("spec_id", (spec as { id: string }).id)
     .eq("position", position);
   if (error) throw error;
+  // spec-timecard-chokepoint-instrumentation Phase 1 — one phase_shipped per ship. Placed at the top of
+  // the canonical leaf write (auto-promotion, one-shot merge webhook, and goal atomic promotion all
+  // route here), so a single insert covers every path without instrumenting each caller. Best-effort —
+  // recordTimecardEvent swallows insert errors so a timecard blip never blocks the ship.
+  try {
+    const { recordTimecardEvent } = await import("./spec-timecards");
+    await recordTimecardEvent(admin, {
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      phase_index: position,
+      event_kind: "phase_shipped",
+      actor: "worker",
+      metadata: {
+        merge_sha: provenance.merge_sha,
+        ...(provenance.pr != null ? { pr: provenance.pr } : {}),
+      },
+    });
+  } catch (e) {
+    console.warn(`[timecards] phase_shipped emit failed spec=${slug} pos=${position}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**

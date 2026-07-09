@@ -518,6 +518,23 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // deploy-review is healthy (most deploys are fine and never trigger an investigation) — the cron's beats
   // carry Reva's liveness.
   { id: "deploy-review-agent", kind: "reactive", owner: "platform", agentKind: "deploy-review", personaKind: "deploy-guardian", label: "Deploy review", description: "Reva's box-session investigation of a non-healthy canary — read-only diff walk → typed revert/keep verdict (reva-box-session-causal-rollback).", expectedCadence: "on a non-healthy canary verdict", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
+  // mario-reactive-box-agent M4 Phase 5 — org placement. Mario is a broad-autonomy reactive
+  // box-session agent under Ada (platform). The mario-stall-cron detector (below, per-minute)
+  // fires a kind='mario' agent_jobs row for a genuinely stalled spec; the box lane
+  // (scripts/builder-worker.ts runMarioJob) claims it, spawns a top-level Max `claude -p` on
+  // the mario skill (read-only investigate), extracts a typed JSON verdict, and applyBoxMario
+  // (src/lib/mario.ts) is the ONLY mutator. Same persona as the cron (personaKind:'mario') so
+  // the two loops MERGE into ONE Mario card on the org chart (agent-roster-sync source 2,
+  // byPersona), and agentKind:'mario' REGISTERS the job kind so it stops surfacing as a
+  // flagged "unregistered" worker card (source 3). Loose liveness window — most ticks are quiet
+  // (the pipeline is moving); the cron's per-minute beats carry Mario's liveness.
+  { id: "mario-agent", kind: "reactive", owner: "platform", agentKind: "mario", personaKind: "mario", label: "Mario reactive fix", description: "Mario's box-session investigation of a stall the M3 detector surfaced — read-only timecard/blockers/agent_jobs walk → typed non-destructive live fix + optional durable fix-spec + optional threshold widen verdict (mario-reactive-box-agent M4).", expectedCadence: "on a mario-stall-cron enqueue", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
+  // The M3 detector tick — every minute, evaluates timecard-based stall candidates against
+  // mario_thresholds and enqueues one kind='mario' job per surviving candidate. Emits a cron
+  // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the
+  // heartbeat has a MONITORED_LOOPS entry, and personaKind:'mario' merges the beats into
+  // Mario's org-chart card (same pattern as deploy-guardian-cron ⇒ Reva above).
+  { id: "mario-stall-cron", kind: "cron", owner: "platform", label: "Mario stall detector", description: "Per-minute detector tick: evaluates timecard-based stall candidates against mario_thresholds and enqueues one kind='mario' box job per surviving stall (mario-stall-detector-cron-and-thresholds).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "mario" /* Mario — surfaces under Ada in the agents roster (agent-roster-sync source 2) */, registeredAt: "2026-07-08T00:00:00Z" },
   { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },

@@ -163,18 +163,38 @@ export async function enqueueSpecReviewIfDue(
     return { enqueued: false, enqueuedCount: 0, pending: pending.length, reason: "all-in-flight" };
   }
 
-  const { error } = await admin.from("agent_jobs").insert(
-    toEnqueue.map((slug) => ({
-      workspace_id: workspaceId,
-      spec_slug: slug, // one job PER spec — Vale reviews just this slug (not a pool sweep)
-      kind: "spec-review",
-      status: "queued",
-      created_by: null,
-      instructions: JSON.stringify({ single_spec: true }),
-    })),
-  );
+  const { data: insertedRows, error } = await admin
+    .from("agent_jobs")
+    .insert(
+      toEnqueue.map((slug) => ({
+        workspace_id: workspaceId,
+        spec_slug: slug, // one job PER spec — Vale reviews just this slug (not a pool sweep)
+        kind: "spec-review",
+        status: "queued",
+        created_by: null,
+        instructions: JSON.stringify({ single_spec: true }),
+      })),
+    )
+    .select("id, spec_slug");
   if (error) {
     return { enqueued: false, enqueuedCount: 0, pending: pending.length, reason: `insert-failed: ${error.message}` };
+  }
+  // spec-timecard-chokepoint-instrumentation Phase 3 — one `job_queued` per inserted spec-review row.
+  // Best-effort: a timecard failure never blocks the enqueue.
+  try {
+    const { recordTimecardEvent } = await import("@/lib/spec-timecards");
+    for (const row of (insertedRows ?? []) as Array<{ id: string; spec_slug: string }>) {
+      await recordTimecardEvent(admin, {
+        workspace_id: workspaceId,
+        spec_slug: row.spec_slug,
+        phase_index: null,
+        event_kind: "job_queued",
+        actor: "enqueueSpecReviewIfDue",
+        metadata: { kind: "spec-review", job_id: row.id },
+      });
+    }
+  } catch (e) {
+    console.warn(`[timecards] job_queued emit failed for spec-review batch: ${e instanceof Error ? e.message : String(e)}`);
   }
   return { enqueued: true, enqueuedCount: toEnqueue.length, pending: pending.length };
 }
