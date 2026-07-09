@@ -164,9 +164,20 @@ async function handleSubscriptionEvent(
   // they never clobber is_internal / customer_id / status. Without this, the
   // migration's OWN cancel webhook reverts the flip (status→cancelled, customer
   // → the Appstle/Shopify customer). See migrate-to-internal.ts.
-  if (contractId) {
+  if (contractId && /^[A-Za-z0-9_-]+$/.test(contractId)) {
+    // Match on EITHER the current contract id OR migrated_from_contract_id. The
+    // migration RENAMES shopify_contract_id (numeric → internal-…), so its OWN
+    // cancel webhook arrives with the old numeric id and can't be found by
+    // shopify_contract_id — without the migrated_from lookup the handler below
+    // would INSERT a fresh dead cancelled row. is_internal filter keeps this to
+    // the migrated row even if a legacy dead shell still shares the numeric id.
     const { data: existingSub } = await admin.from("subscriptions")
-      .select("is_internal").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+      .select("is_internal")
+      .eq("workspace_id", workspaceId)
+      .eq("is_internal", true)
+      .or(`shopify_contract_id.eq.${contractId},migrated_from_contract_id.eq.${contractId}`)
+      .limit(1)
+      .maybeSingle();
     if (existingSub?.is_internal) {
       console.log(`[Appstle webhook] contract ${contractId} migrated to internal — ignoring ${eventType}`);
       return;

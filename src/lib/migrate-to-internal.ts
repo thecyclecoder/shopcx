@@ -336,6 +336,9 @@ export async function migrateContractToInternalComp(
       .from("subscriptions")
       .update({
         shopify_contract_id: internalContractId,
+        // Retain the origin id so the Appstle cancel webhook (guard) + portal
+        // resolveSub map the old numeric id back to THIS row, not a dead shell.
+        migrated_from_contract_id: contractId,
         is_internal: true,
         comp: true,
         comp_note: opts.compNote ?? null,
@@ -465,6 +468,9 @@ export async function migrateCustomerAppstleSubsToInternal(
         .from("subscriptions")
         .update({
           shopify_contract_id: internalContractId,
+          // Retain the origin id so the Appstle cancel webhook (guard) + portal
+          // resolveSub map the old numeric id back to THIS row, not a dead shell.
+          migrated_from_contract_id: contractId,
           is_internal: true,
           status: sub.status,
           customer_id: billableCustomerId,

@@ -108,12 +108,32 @@ export async function resolveSub(
   const groupIds = await customerLinkGroupIds(admin, customer.id);
 
   // UUID column can't be compared against a non-UUID literal — branch on shape.
-  let q = admin.from("subscriptions")
+  const base = admin.from("subscriptions")
     .select("id, shopify_contract_id, is_internal, status, customer_id, last_payment_status, items, next_billing_date, applied_discounts")
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds);
-  q = UUID_RE.test(id) ? q.eq("id", id) : q.eq("shopify_contract_id", id);
-  const { data } = await q.maybeSingle();
+  if (UUID_RE.test(id)) {
+    const { data } = await base.eq("id", id).maybeSingle();
+    return (data as ResolvedSub | null) || null;
+  }
+  // Contract-id shape: match the current id OR a migrated_from_contract_id, so a
+  // migrated customer's STALE numeric id resolves to their live internal sub
+  // rather than the cancelled Appstle shell the migration left behind. Prefer the
+  // internal (migrated) row, then the newest, so the live sub always wins.
+  // Only the raw-string `.or()` filter (unlike a parameterized `.eq`) is exposed
+  // to PostgREST filter injection, so gate it on a safe contract-id charset;
+  // anything else can't be a real contract id anyway → parameterized `.eq`.
+  const SAFE_CONTRACT_ID = /^[A-Za-z0-9_-]+$/;
+  if (!SAFE_CONTRACT_ID.test(id)) {
+    const { data } = await base.eq("shopify_contract_id", id).maybeSingle();
+    return (data as ResolvedSub | null) || null;
+  }
+  const { data } = await base
+    .or(`shopify_contract_id.eq.${id},migrated_from_contract_id.eq.${id}`)
+    .order("is_internal", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   return (data as ResolvedSub | null) || null;
 }
 
