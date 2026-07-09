@@ -138,6 +138,16 @@ The `KNOWN_JOB_KINDS` constant next to the `Job.kind` union enumerates every kin
 
 When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.
 
+## Ephemeral worktree recovery — `removeWorktreeForBranch` third arm (builder-worktree-self-heal-reclaims-ephemeral-branch-pinned-worktrees)
+
+The **branch-side** cleanup helper `removeWorktreeForBranch(branch)` is called before every `git worktree add -B <branch>` to free any stale worktree that's still pinning `<branch>`. It has three arms:
+
+1. **Primary-held branch** — if the primary repo holds `<branch>`, switch it to main via `ensurePrimaryOnMain` instead of force-removing (the 2026-06-24 safety guard against deleting the live repo — see [[../recipes/build-box-setup]] § "The worker once deleted its own live repo").
+2. **Ephemeral worktree** (NEW) — if a non-primary worktree holds `<branch>` from OUTSIDE `BUILDS_DIR` (e.g. `/tmp/sol-reads-moved-wt` created by spec-test or branch-review), free it non-destructively via `git worktree remove --force <path>` + `git worktree prune`. This recovers the branch without routing through the guarded `rm -rf`, so the BUILDS_DIR safety guard stays intact and the removal can never target `REPO_DIR` (the primary is already filtered by the branch===null check + the explicit primary===path comparison above). Observed failure: a build resume re-failed with `fatal: '<branch>' is already used by worktree at /tmp/…` because the stale `/tmp/` tree (registered in git but the dir no longer existed) was not being cleared.
+3. **Build worktree** — if a worktree under `BUILDS_DIR` holds `<branch>`, force-remove it via `removeWorktreeDir` (existing arm, unchanged).
+
+After all three arms, a final `git worktree prune` reconciles any stale admin entries.
+
 ## Idempotent worktree add — `ensureWorktreeSlotFree` (builder-worktree-prune-before-add)
 
 Every build lane's `git worktree add -B <branch> <wt> <base>` (the fresh path AND the resume path in `runBuildJob`) is preceded by `ensureWorktreeSlotFree(wt)`. It's the PATH-side complement to `removeWorktreeForBranch` (the branch-side helper): the branch-side clears any admin entry holding `<branch>`, the path-side clears any admin entry OR orphan dir at `<wt>` — because `git worktree add` fails with `'<wt>' already exists` whenever the target directory pre-exists, regardless of whether it's a tracked worktree.
