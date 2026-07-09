@@ -10802,6 +10802,10 @@ async function runTicketHandleJob(job: Job) {
             // above (bait / claim / honor) still ran against firstReply — the customer output is
             // a CTA carrying that reply as the leadIn, so the invariants hold.
             let launchedStandaloneJourney = false;
+            // sol-closes-ticket-on-resolving-reply: sendOk gates the close decision below. Set true
+            // ONLY when the plain reply is delivered (the fallback send). A launched standalone journey
+            // leaves sendOk=false so the ticket stays OPEN — the journey owns status from here.
+            let sendOk = false;
             try {
               const { resolveSolChosenJourney } = await import("../src/lib/ticket-directions");
               const journeyChoice = await resolveSolChosenJourney(db, workspaceId, ticketId);
@@ -10829,12 +10833,38 @@ async function runTicketHandleJob(job: Job) {
               try {
                 const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
                 await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+                sendOk = true;
               } catch (e) {
                 // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
                 // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
                 // the job (the Direction is authored; a human can retry the reply from the Improve tab).
                 const msg = e instanceof Error ? e.message : String(e);
                 console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+              }
+            }
+            // ── Phase 1 + 2 of sol-closes-ticket-on-resolving-reply-so-cora-grades-it ──
+            // Post-execute taxonomy match. Mirrors unified-ticket-handler's `PostExecuteAction`
+            // ("message_sent → close; keep_open + status_managed + escalated leave open; next
+            // inbound reopens"). classifySolBoxTurnAction is the shared predicate — never a bare
+            // `chosenPath === "stateless"` inline check (Learning #6: the confirming predicate at
+            // the action point, not a coarser proxy). The classifier factors sendOk into the
+            // decision so a failed send never closes; only `message_sent` reaches the close
+            // helper. `needs_info` → keep_open (clarifying question — customer's next inbound is
+            // the resolution signal); `journey` / `playbook` → status_managed (the mechanism owns
+            // status from here — unified-ticket-handler's own paths close it when the mechanism
+            // resolves). Verification #1: needs_info / journey / playbook / needs_human all stay
+            // open — pinned in src/lib/ticket-directions.test.ts.
+            const { classifySolBoxTurnAction, closeTicketOnResolvingReply } = await import(
+              "../src/lib/ticket-directions"
+            );
+            const solTurnAction = classifySolBoxTurnAction({ chosen_path: chosenPath, send_ok: sendOk });
+            if (solTurnAction === "message_sent") {
+              try {
+                await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
+              } catch (e) {
+                // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} close-on-resolving-reply failed (reply already shipped): ${msg}`);
               }
             }
           }
@@ -10879,6 +10909,30 @@ async function runTicketHandleJob(job: Job) {
             console.warn(`${tag} portal-error dual-output: spec author failed (customer fix already delivered): ${msg}`);
           }
         }
+      }
+
+      // ── Phase 1 of cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence ──
+      // Deterministic Sol-handled stamp — the HARNESS-CONTROLLED signal Cora's feeder consumes in
+      // Phase 2 (ticket-analysis-cron passesCoraSelectionGate). The mid-session writeDirection call
+      // can fail silently under DB outage (observed on the first ~6-7 Sol-handled tickets), which
+      // hides "Sol responded" from the direction-existence gate. Stamp tickets.sol_handled_at =
+      // now() here at the box session's terminal COMPLETED state via the admin client — a
+      // deterministic write independent of Sol's Direction insert. Idempotent (a re-dispatched
+      // Sol turn on the same ticket advances the stamp to the latest handling). Best-effort only:
+      // a stamp failure does NOT unwind the completed reply/close/direction — surface the error
+      // for grep-ability and continue, mirroring the send/close/spec-author fall-throughs above.
+      try {
+        const { error: stampErr } = await db
+          .from("tickets")
+          .update({ sol_handled_at: new Date().toISOString() })
+          .eq("id", ticketId)
+          .eq("workspace_id", workspaceId);
+        if (stampErr) {
+          console.warn(`${tag} sol_handled_at stamp failed: ${stampErr.message}`);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`${tag} sol_handled_at stamp threw: ${msg}`);
       }
 
       await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });

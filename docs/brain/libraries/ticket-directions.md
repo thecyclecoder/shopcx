@@ -85,6 +85,54 @@ Reads the live Direction for a ticket (`superseded_at IS NULL`), or `null` when 
 
 **Called by:** future cheap-execution dispatchers (Phase 3 lands the unified-ticket-handler branch that calls `getLiveDirection` and drives off `chosen_path` + `plan` + `guardrails` instead of re-running the full-context orchestrator prompt).
 
+### `closeTicketOnResolvingReply` — function
+
+```ts
+async function closeTicketOnResolvingReply(
+  admin: Admin,
+  opts: { workspace_id: string; ticket_id: string },
+): Promise<void>
+```
+
+Message_sent → close. Phase 1 of [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]]. Sol's first-touch box session (`runTicketHandleJob` in [[../../scripts/builder-worker]]) sends a resolving reply through [[./ticket-delivery]] `deliverTicketMessage` but historically never closed the ticket — so it stayed `open` and [[./ticket-analyzer]]'s closed-tickets-only sweep never enqueued Cora to grade it. This helper is the single, shared close write mirroring [[../inngest/unified-ticket-handler]]'s local `setStatus` semantics (documented rule: **"message_sent → close the ticket; next inbound reopens"**). NOT a parallel path — same six-field update:
+
+- `status = 'closed'`
+- `closed_at = now()`
+- `updated_at = now()`
+- `escalated_at = null` · `escalated_to = null` · `escalation_reason = null` (clears the escalation triple so a previously-escalated-then-resolved ticket doesn't linger in the Escalated view)
+
+**Guarded by workspace_id.** Compare-and-set on `.eq('workspace_id', …).eq('id', …)` (learning #6 — the confirming predicate at the action point, not a coarser proxy) — a cross-workspace ticket id can never authorize the close. Idempotent for the message_sent case: a racing close from a follow-up turn is a no-op because the row is already closed.
+
+**Called by:** `runTicketHandleJob` in [[../../scripts/builder-worker]] — gated on `classifySolBoxTurnAction(...) === 'message_sent'` (see below) so ONLY a shipped stateless resolving reply closes the ticket. A failed send, a `needs_info` clarifying question, and a `journey`/`playbook` status-managed turn all leave the ticket open.
+
+### `classifySolBoxTurnAction` — function
+
+```ts
+type SolBoxTurnAction = "message_sent" | "status_managed" | "keep_open" | "escalated";
+
+function classifySolBoxTurnAction(input: {
+  chosen_path: string;
+  send_ok: boolean;
+}): SolBoxTurnAction
+```
+
+Post-execute action taxonomy for a Sol box-session turn — Phase 2 of [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]]. Mirrors [[../inngest/unified-ticket-handler]]'s `PostExecuteAction` shape (documented rule: "message_sent → close; next inbound reopens"). The classifier is the single, shared predicate the box lane's close decision drives from — no parallel taxonomy. Only `message_sent` closes; `status_managed` / `keep_open` / `escalated` all LEAVE the ticket open.
+
+| `chosen_path` | `send_ok` | Action | Ticket state |
+|---|---|---|---|
+| `stateless` | `true` | `message_sent` | **CLOSE** (resolving reply shipped) |
+| `stateless` | `false` | `keep_open` | stays open (send failed; a human retries via Improve) |
+| `needs_info` | any | `keep_open` | stays open (clarifying question; customer's next inbound is the resolution signal) |
+| `playbook` | any | `status_managed` | stays open (playbook owns state; `unified-ticket-handler`'s own paths close it when the mechanism resolves) |
+| `journey` | any | `status_managed` | stays open (journey owns state) |
+| unknown | any | `keep_open` | stays open — **fail-safe**: an unrecognized outcome NEVER authorizes a close |
+
+The `escalated` return is reserved for the caller's `needs_human` branch — Sol's box session returns `status='needs_human'` BEFORE any Direction is written, so no `chosen_path` string is available at classification time. The taxonomy value is kept on the enum so tests and future call sites share one vocabulary.
+
+Pure predicate — no DB access, safe to unit-test in isolation ([[../../src/lib/ticket-directions.test]]).
+
+**Called by:** `runTicketHandleJob` in [[../../scripts/builder-worker]] — the classifier is the confirming predicate at the close-decision action point.
+
 ### `incrementResessionCount` — function
 
 ```ts
@@ -104,6 +152,7 @@ Bumps `resession_count` on the LIVE Direction by 1. Phase 2 of [[../specs/sol-ru
 - **Directions are authored, never mutated.** Only `superseDirection` ever changes a row's `superseded_at`; no export mutates `intent` / `plan` / `guardrails` in place.
 - **Compare-and-set on supersede.** `superseDirection`'s write is `.eq("ticket_id", …).is("superseded_at", null)` — a racing supersede returns zero rows and the caller sees `null` (learning #1 — re-assert the read-time precondition in the write itself).
 - **Service-role only.** Every export takes `admin: SupabaseClient` — RLS is on with no policies, so a non-service-role read/write is rejected at the DB. Never call from client code.
+- **Only `message_sent` closes.** The `classifySolBoxTurnAction` taxonomy is the single, shared close-decision predicate for the Sol box lane — mirroring [[../inngest/unified-ticket-handler]]'s `PostExecuteAction`. `keep_open` (needs_info clarifying question, failed send), `status_managed` (playbook / journey mechanism owns state), and `escalated` (needs_human punt) all leave the ticket `open`. This is what makes Cora's grade fire: [[./ticket-analyzer]]'s closed-tickets-only sweep enqueues a Cora grade for the newly-closed ticket via `enqueueTicketAnalyzeJob`, and the reopen-on-inbound path in the per-channel webhooks (email / sms / widget) flips a closed ticket back to `open` when the customer replies. See [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
 
 ## Sol operating rules (folded from [[../specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]])
 

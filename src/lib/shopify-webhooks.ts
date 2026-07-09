@@ -233,7 +233,9 @@ export async function handleDisputeEvent(
       }).catch(() => {});
     }
   } else {
-    // disputes/update — update existing row
+    // disputes/update — update existing row, or upsert if this is the first
+    // time we've seen the dispute (Shopify only guarantees delivery for events
+    // after webhook registration, so a create we never saw is normal — not an error).
     const { data: existing } = await admin
       .from("chargeback_events")
       .select("id, status, auto_action_taken")
@@ -241,32 +243,58 @@ export async function handleDisputeEvent(
       .eq("shopify_dispute_id", disputeId)
       .maybeSingle();
 
+    let chargebackEventId: string | null = null;
+
     if (!existing) {
-      console.error(`disputes/update for unknown dispute ${disputeId}`);
-      return;
+      const { data: inserted } = await admin
+        .from("chargeback_events")
+        .insert({
+          workspace_id: workspaceId,
+          shopify_dispute_id: disputeId,
+          shopify_order_id: shopifyOrderId,
+          dispute_type: disputeType,
+          reason,
+          network_reason_code: networkReasonCode,
+          amount_cents: amountCents,
+          currency,
+          status,
+          evidence_due_by: evidenceDueBy,
+          evidence_sent_on: evidenceSentOn,
+          finalized_on: finalizedOn,
+          raw_payload: payload,
+          initiated_at: initiatedAt,
+        })
+        .select("id")
+        .single();
+
+      chargebackEventId = inserted?.id ?? null;
+    } else {
+      await admin
+        .from("chargeback_events")
+        .update({
+          status,
+          evidence_sent_on: evidenceSentOn,
+          finalized_on: finalizedOn,
+          raw_payload: payload,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing.id);
+
+      chargebackEventId = existing.id;
     }
 
-    await admin
-      .from("chargeback_events")
-      .update({
-        status,
-        evidence_sent_on: evidenceSentOn,
-        finalized_on: finalizedOn,
-        raw_payload: payload,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id);
+    if (!chargebackEventId) return;
 
     // Fire outcome events
     if (status === "won") {
       inngest.send({
         name: "chargeback/won",
-        data: { chargebackEventId: existing.id, workspaceId },
+        data: { chargebackEventId, workspaceId },
       }).catch(() => {});
     } else if (status === "lost") {
       inngest.send({
         name: "chargeback/lost",
-        data: { chargebackEventId: existing.id, workspaceId },
+        data: { chargebackEventId, workspaceId },
       }).catch(() => {});
     }
   }
