@@ -85,6 +85,7 @@ So the tool's degenerate state is the **trigger** for the agent's highest-value 
 
 ## Owned / contributed goals
 
+- **Autonomous media-buyer supervision** — ✅ complete (folded 2026-07-09). Took the already-built Media Buyer loop ([[../specs/media-buyer-test-winner-loop]]) from dormant code to a live, supervised, self-correcting system over the Amazing Coffee + Superfood Tabs cohorts, honoring the CEO guardrail *shadow before armed, autonomous ad-spend stays human-vetoable*: M1 sensor trust ([[../libraries/media-buyer-policy-calibrator]] · [[../libraries/media-buyer__sensor-trust-probe]]) → M2 shadow-mode daily cadence ([[../inngest/media-buyer-cadence]] · [[../tables/media_buyer_shadow_reviews]]) → M3 owner-vetoable arming flip ([[../lifecycles/media-buyer-arming]] · [[../libraries/media-buyer-arming-gate]]) → M4 daily grading + auto-revert ([[../libraries/media-buyer-grader]] · [[../libraries/media-buyer-self-correcting]]). End-to-end home + status: [[../lifecycles/media-buyer-arming]] § Status / open work.
 - Contributes to [[../goals/ceo-mode]] › **M2 — Growth Director** (first director prototype: ROAS/CAC analyst → CEO).
 
 ## Autonomy (cutover + rollback)

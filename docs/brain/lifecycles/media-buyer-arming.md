@@ -1,6 +1,6 @@
 # Lifecycle: Media Buyer arming (shadow ↔ armed)
 
-The owner-vetoable flip that moves a workspace's Media Buyer cohort from `iteration_policies.mode='shadow'` (audit-only) to `mode='armed'` (executor may act) — and the symmetric disarm the owner uses to yank it back. Encodes the [[../goals/autonomous-media-buyer-supervision]] M3 "autonomous ad-spend stays human-vetoable" requirement as a real API + audit surface, not a raw SQL invitation.
+The owner-vetoable flip that moves a workspace's Media Buyer cohort from `iteration_policies.mode='shadow'` (audit-only) to `mode='armed'` (executor may act) — and the symmetric disarm the owner uses to yank it back. Encodes the [[../functions/growth]] media-buyer-supervision goal's M3 "autonomous ad-spend stays human-vetoable" requirement (folded 2026-07-09; see § Status / open work) as a real API + audit surface, not a raw SQL invitation.
 
 Phases 1 + 2 of [[../specs/media-buyer-armed-flip-surface]]; blocked-by the deterministic arming-gate ([[../specs/media-buyer-arming-gate]]) that authors the [[../tables/media_buyer_arming_authorization]] rows this route reads.
 
@@ -47,9 +47,22 @@ The route above is the **owner-driven** transition. The **autonomous** side of t
 - **Compare-and-set audit** — the UPDATE uses `.select('id')` to return the ids that transitioned. The audit row carries `metadata.updated_policy_ids` so a zero-length list (no active policy for the workspace) is legibly recorded as "no-op flip" rather than silently succeeding.
 - **Disarm is unconditional** — no authorization check, no approval routing. The safety valve is the owner's; a routing rail could otherwise trap the workspace in armed on a director-agent outage.
 
+## Status / open work
+
+**Shipped — goal `autonomous-media-buyer-supervision` folded complete 2026-07-09.** The arming flip on this page is M3 of a four-milestone goal (owned by [[../functions/growth]]) that took the already-built Media Buyer loop ([[../functions/growth]] § Static-ad optimization → `media-buyer-test-winner-loop`) from dormant code to a **live, supervised, self-correcting** system over the Amazing Coffee + Superfood Tabs test cohorts. The CEO guardrail — *shadow/read-only before armed, autonomous ad-spend stays human-vetoable* — is encoded end-to-end across these permanent homes:
+
+- **M1 — Sensor trust.** Per-cohort iteration-policy calibration ([[../libraries/media-buyer-policy-calibrator]]) + the sensor-trust probe ([[../libraries/media-buyer__sensor-trust-probe]] → [[../tables/media_buyer_sensor_trust]]) prove the loop's per-creative ROAS read is trustable before any budget moves.
+- **M2 — Shadow mode (read-only).** The daily cadence cron ([[../inngest/media-buyer-cadence]]) runs the loop over both cohorts in `mode='shadow'`, logging what it *would* do to [[../tables/media_buyer_shadow_reviews]] and delivering the Growth Director (Max) digest — recommend, never spend.
+- **M3 — Armed (bounded autonomous execution).** *This lifecycle* — the deterministic weekly arming gate ([[../libraries/media-buyer-arming-gate]] → [[../tables/media_buyer_arming_authorization]]) plus the owner-vetoable flip surface (route + dashboard tile) that moves a cohort `shadow → armed` only on a fresh authorization, and yanks it back on demand.
+- **M4 — Graded + self-correcting.** The daily grader cron ([[../inngest/media-buyer-grade]] → [[../libraries/media-buyer-grader]] → [[../tables/media_buyer_action_grades]]) scores each executed action against realized ROAS resolved 3d+ later; the grade rollup ([[../libraries/media-buyer-grade-rollup]]) surfaces it on the Growth Director's brief; and the auto-revert ([[../inngest/media-buyer-self-correcting]] → [[../libraries/media-buyer-self-correcting]]) flips a slipping cohort back to `shadow` + escalates the CEO — the ⭐ north-star discipline (proxy-optimizing tool → objective-owning director → CEO) made mechanical.
+
+**Outcome:** the Media Buyer runs daily on both cohorts, its shadow calls matched human review within tolerance, and once armed it holds blended CAC at/under the LTV-derived target with no required daily human intervention — self-disarming on regression. The shared `shadow ↔ armed` mutation both this route and the self-correcting revert call is [[../libraries/media-buyer__mode-flip]].
+
+**Open work:** per-campaign `iteration_policies.mode` overrides (v1 is workspace-wide, `campaign_id IS NULL`); extending the cohort set beyond the two launch products.
+
 ## Related
 
 - [[../specs/media-buyer-armed-flip-surface]] (this spec) · [[../specs/media-buyer-arming-gate]] · [[../specs/media-buyer-shadow-mode]]
-- [[../tables/iteration_policies]] · [[../tables/media_buyer_arming_authorization]] · [[../tables/director_activity]]
-- [[../libraries/approval-router]] · [[../libraries/director-activity]] · [[../libraries/media-buyer-arming-gate]] · [[../libraries/media-buyer-agent]]
-- [[../goals/autonomous-media-buyer-supervision]] (M3 milestone)
+- [[../tables/iteration_policies]] · [[../tables/media_buyer_arming_authorization]] · [[../tables/media_buyer_action_grades]] · [[../tables/director_activity]]
+- [[../libraries/approval-router]] · [[../libraries/director-activity]] · [[../libraries/media-buyer-arming-gate]] · [[../libraries/media-buyer-agent]] · [[../libraries/media-buyer-self-correcting]] · [[../libraries/media-buyer__mode-flip]]
+- [[../functions/growth]] (owning function) · [[../inngest/media-buyer-cadence]] · [[../inngest/media-buyer-grade]] · [[../inngest/media-buyer-self-correcting]]
