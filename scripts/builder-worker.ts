@@ -10727,7 +10727,7 @@ async function runTicketHandleJob(job: Job) {
       `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
       `(tools: get_customer_account, get_returns, get_chargebacks, get_email_history, get_crisis_status, get_dunning_status, get_product_knowledge, get_product_nutrition, get_ticket_analysis, get_policies). You may also Read/Grep the brain + src/ and WebSearch.`,
-      `Investigation is free + read-only. You NEVER mutate — the worker calls writeDirection() with your JSON and sends first_reply through the production delivery sink.`,
+      `Investigation is free + read-only. You never run raw writes — but you are NOT limited to describing an outcome and hoping: to make an account change you ENQUEUE a validated action and a deterministic worker executes + verifies it while you watch (see EXECUTING CHANGES below). The worker also calls writeDirection() with your JSON and sends your first_reply through the production delivery sink.`,
       ``,
       // Phase 1 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
       // REQUIRE policy review before Sol commits. The CURRENT POLICIES block in the brief above is the
@@ -10751,20 +10751,25 @@ async function runTicketHandleJob(job: Job) {
       // with an empty slug — the writer will fail the Direction otherwise, and the ticket
       // burns the box turn.
       `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
-      // Phase 6 wire-in of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
-      // MESSAGE-IS-LAST. Any concrete outcome your first_reply CLAIMS (added a bag, applied a
-      // credit, issued a refund, created a return, cancelled a subscription, …) MUST also appear
-      // as a structured required_outcomes item so the honor step can fire + verify it BEFORE the
-      // send. Judy 0a9e4d7f: the reply claimed bag+credit while neither action ran. The worker
-      // (a) writes each required_outcomes item to the DB, (b) runs the honor step (dispatches +
-      // verifies via the shared action executor), (c) only THEN allows the reply to send. An item
-      // that fails to verify blocks the send. When your first_reply makes NO concrete claim (a
-      // needs_info question, a bare informational reply), return required_outcomes:[] — the honor
-      // step is a no-op and the reply flows normally.
-      `REQUIRED OUTCOMES — the structured 'what'. For every concrete outcome your first_reply CLAIMS (or promises to make happen), also emit a required_outcomes entry with {kind:'<action_type>', description:'<one-line human summary>', target_ids:{…the ids the executor needs: contract_id, order_id, product_id, coupon_code, amount_cents…}, expected_db_state:{…the DB predicate that would prove it done…}}. The worker fires each entry via the shared action executor (directActionHandlers[kind]) and verifies against the DB BEFORE your first_reply sends — an unverifiable entry BLOCKS the send. Emit the outcomes in the order they should run. If your first_reply makes no concrete claim (a question, an informational answer, a policy explanation), return required_outcomes:[] — the honor step is a no-op.`,
+      // Sol cheap-execution (enqueue→worker-execute→poll→adapt). This SUPERSEDES the message-is-last
+      // required_outcomes/honor-step model (eliminate-false-promises #1464): rather than DECLARE an
+      // outcome and let a post-hoc honor step fire+verify it (which brittle-exact-match false-failed a
+      // successful Oct-1-vs-Oct-2 renewal and then hard-BLOCKED the reply → dead silence on Sofia
+      // 83ee7005), Sol now EXECUTES the change herself, mid-session, and reads the REAL result before
+      // she writes a word. She can watch a failure and ADAPT in the same session — no cold re-session.
+      // The queue-execute worker writes a ticket_required_outcomes row per action reflecting the real
+      // terminal status (verified/failed), so the claim-guard's false-promise protection still holds.
+      `EXECUTING CHANGES — enqueue → poll → adapt (this is how you make ANY account change; never just describe it):`,
+      `  1. ENQUEUE the action: npx tsx scripts/agent-action-tools.ts enqueue ${ticketId} '<decision_json>'`,
+      `     decision_json is a direct-action SonnetDecision, e.g. {"action_type":"direct_action","reasoning":"customer asked to push next order to Oct 2","actions":[{"type":"change_next_date","contract_id":"<id>","date":"2026-10-02"}]}. It prints {"request_id":"…","status":"pending","dry_run":false}.`,
+      `  2. POLL for the REAL result: npx tsx scripts/agent-action-tools.ts poll <request_id>`,
+      `     It blocks until the deterministic worker (write creds) has run the action through the SAME production executor and verified it, then prints {"status":"done|failed","result":{…,"ok":true|false},"error":…}. result.ok is TRUE only when the action actually landed + verified.`,
+      `  3. READ THE RESULT AND ADAPT. If result.ok is true, your first_reply states what ACTUALLY happened, using the real values from the result ("I've moved your next coffee order to October 2nd"). If status is failed or result.ok is false, the change did NOT happen — do NOT promise it. Adapt in THIS session: fix the inputs and re-enqueue, hand off to a journey (chosen_path='journey'), or return needs_human — and write an honest reply ("I wasn't able to change that automatically; I've flagged it for our team to finish"). You may enqueue several actions across the session, one per call, adapting between them.`,
+      `  Enqueue is for DIRECT ACTIONS (account mutations: change_next_date, pause, resume, cancel, add_bag_to_next_order, apply_coupon, partial_refund, create_replacement, create_return, …) ONLY. Journeys, playbooks, needs_info and bare stateless replies stay on your chosen_path/plan — do NOT enqueue those. DRY RUN: if the enqueue prints "dry_run":true, the session is a rehearsal — actions are simulated, nothing really changes; still poll + reason as if real.`,
+      `NEVER-A-FALSE-PROMISE: every concrete outcome your first_reply claims (moved a date, issued a refund, applied a credit, cancelled, paused, added a bag, created a return/replacement) MUST correspond to an enqueue whose poll returned ok:true. If you didn't enqueue+confirm it, you may not claim it. There is NO required_outcomes field to emit — executing via the queue IS the proof.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"required_outcomes":[{"kind":"…","description":"…","target_ids":{…},"expected_db_state":{…}}],"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
@@ -23472,6 +23477,31 @@ async function main() {
   let lastApprovalSweep = 0; // approval-routing-engine M2: throttle the routed-inbox reconcile
   let lastReapSweep = 0; // stale-session-reaper: throttle the in-loop zombie sweep (0 ⇒ run on first tick)
   let reapSweepInFlight = false; // guard so a slow sweep never overlaps the next tick
+
+  // ── Sol cheap-execution: the EXECUTE-WORKER drain (agent_action_requests) ──
+  // Sol's read-only ticket-handle box session MUTATES by ENQUEUEing a validated decision
+  // (scripts/agent-action-tools.ts) and long-polling for the verified result. THIS interval is the
+  // deterministic worker with write creds that claims each pending row and runs it through the ONE
+  // executor ([[agent-action-queue]] executeActionRequest → runTicketDecision), writing the real
+  // outcome back. It runs on its OWN cadence (independent of the job-dispatch loop) so a box session
+  // that enqueues an action sees it drain within ~1.5s while it polls. In-flight-guarded + non-
+  // throwing: a drain error must never break the worker. See docs/brain (Sol cheap-execution).
+  let actionDrainInFlight = false;
+  setInterval(() => {
+    if (actionDrainInFlight) return;
+    actionDrainInFlight = true;
+    void (async () => {
+      try {
+        const { drainPendingOnce } = await import("../src/lib/agent-action-queue");
+        await drainPendingOnce(db, 10);
+      } catch (e) {
+        console.error("[action-drain] tick failed (continuing):", e instanceof Error ? e.message : e);
+      } finally {
+        actionDrainInFlight = false;
+      }
+    })();
+  }, 1500);
+
   for (;;) {
     try {
       // Vercel Ignored-Build-Step auto-heal on every tick (regression-of: per-build-vercel-preview-deploys):
