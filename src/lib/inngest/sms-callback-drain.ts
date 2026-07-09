@@ -44,6 +44,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendSMS } from "@/lib/twilio";
 import { unsubscribeFromSmsMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /** Lifecycle-stage rank — higher wins when dedup'ing multiple callbacks per MessageSid. */
 const STAGE_RANK: Record<string, number> = {
@@ -611,7 +612,7 @@ export const receivedSmsRollupCron = inngest.createFunction(
     triggers: [{ cron: "*/5 * * * *" }],
   },
   async ({ step }) => {
-    return await step.run("rollup", async () => {
+    const result = await step.run("rollup", async () => {
       const admin = createAdminClient();
       // Candidate set: delivered but not-yet-rolled-up. Ordered by
       // delivered_at so a partial batch still advances time monotonically
@@ -667,5 +668,15 @@ export const receivedSmsRollupCron = inngest.createFunction(
 
       return { emitted: withCustomer.length, flagged: rows.length };
     });
+
+    // Control Tower: end-of-run heartbeat. Fires on both the no-work
+    // path (emitted=flagged=0) and the processed-work path so the
+    // watchdog can distinguish a healthy idle tick from a dead
+    // schedule (received-sms-rollup-cron-heartbeat spec).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("received-sms-rollup-cron", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

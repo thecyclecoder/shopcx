@@ -532,6 +532,42 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
       return { ...base, color: "amber", statusText: "beat read unavailable — status unknown", violation: null };
     }
     const window = loop.livenessWindowMs ?? 26 * 60 * 60_000;
+    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace, refined by
+    // control-tower-cron-grace-uses-next-firing-after-registration, refined again by
+    // control-tower-registered-not-firing-observed-anchor-grace, and again by
+    // received-sms-rollup-cron-heartbeat Phase 3 Fix 2 to gate the never_fired path too):
+    // computed BEFORE the never_fired / registered_not_firing reds so a loop still inside its
+    // first-firing window can't be false-paged by EITHER deploy-anchored `deployAgeMs` or the
+    // watchdog-uptime `monitorUptimeMs` backstop. Without this ordering, a freshly-registered
+    // loop whose box worker has been up for > window (deployAgeMs > window) trips `never_fired`
+    // even when the loop entry itself is only minutes old — the exact received-sms-rollup-cron
+    // Fix-1 regression whose alert flipped reason='registered_not_firing' → 'never_fired' the
+    // moment Phase 2's registeredAt landed. Post-Fix-2 the same grace clock (max of computed
+    // first-firing and the empirical first_observed_at) governs both reds — the intent of the
+    // per-loop reference has always been "how long has this loop been registered", and that
+    // applies to BOTH the deploy-anchored AND the watchdog-anchored gates.
+    //
+    // `registeredAt` (a code constant, deploy-SURVIVING unlike deployAgeMs) is the WRONG grace
+    // clock on its own when it falls before the cron's hour-of-day: security-dep-watch
+    // (`0 4 * * *`) registered at 00:00 UTC has 4h before its first valid tick, so a 26h window
+    // measured from 00:00 trips at 02:00 the next day, 2h before it has actually had a chance
+    // to fire. We use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed from
+    // expectedCadence) — preserves the red for genuinely-dead schedules but removes the
+    // boundary false-page. And we additionally take the MAX with the empirical `first_observed_at`
+    // (from monitored_loops_first_seen) so a hand-edited registeredAt SET BEFORE the cron
+    // actually shipped (fleet-spend-governor: registeredAt 00:00 with cadence `10,40 * * * *`
+    // → computed first-firing 00:10 SAME day → grace evaporates the moment the deploy lands
+    // hours later) can never shorten the grace below "we have empirically seen this loop
+    // registered for at least one full window." Unset (legacy crons) ⇒ no extra gate → the
+    // reds below still apply.
+    const firstFiringMs = firstScheduledFiringMs(loop, firstObservedMs);
+    const sinceFirstFiringMs = firstFiringMs != null ? Date.now() - firstFiringMs : null;
+    if (everBeatCount === 0 && sinceFirstFiringMs != null && sinceFirstFiringMs <= window) {
+      const statusText = sinceFirstFiringMs >= 0
+        ? `awaiting first run — first scheduled firing ${fmtDur(sinceFirstFiringMs)} ago (within ${fmtDur(window)} cadence+grace)`
+        : `awaiting first run — first scheduled firing in ${fmtDur(-sinceFirstFiringMs)}`;
+      return { ...base, color: "amber", statusText, violation: null };
+    }
     if (everBeatCount === 0 && deployAgeMs != null && deployAgeMs > window) {
       return {
         ...base,
@@ -555,38 +591,11 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
     // set, the schedule just isn't active. monitorUptimeMs alone is NOT enough to say a cron has had a
     // window to fire, though: it's the watchdog's run-span, independent of when a given cron was ADDED,
     // so a cron shipped after the watchdog passed its window would false-trip on day one (the
-    // control-tower-registered-not-firing-newcron-grace signal). The registeredAt grace just below adds
-    // the missing per-loop reference; a registered cron that still produces nothing a full window past
-    // BOTH a provably-alive watchdog AND its own registration IS the problem we want to page.
+    // control-tower-registered-not-firing-newcron-grace signal). The newcron grace above gates this
+    // check too so a registered cron that still produces nothing a full window past BOTH a
+    // provably-alive watchdog AND its own registration IS the problem we want to page.
     // (monitorUptimeMs is conservative — beat retention can only shorten it, never inflate it — so it
     // never over-fires; null = unknown ⇒ stay amber.)
-    //
-    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace, refined by
-    // control-tower-cron-grace-uses-next-firing-after-registration, refined again by
-    // control-tower-registered-not-firing-observed-anchor-grace): monitorUptimeMs is the
-    // watchdog's OWN run-span, independent of when THIS cron was added — so a long-cadence cron
-    // shipped AFTER the watchdog passed its window would trip the moment it deploys, hours before
-    // its first scheduled tick. registeredAt (a code constant, deploy-SURVIVING unlike
-    // deployAgeMs) gives a per-loop "how long has this cron been registered" reference — but
-    // `registeredAt` itself is the WRONG grace clock when it falls before the cron's hour-of-day:
-    // security-dep-watch (`0 4 * * *`) registered at 00:00 UTC has 4h before its first valid tick,
-    // so a 26h window measured from 00:00 trips at 02:00 the next day, 2h before it has actually
-    // had a chance to fire. We use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed
-    // from expectedCadence) — preserves the red for genuinely-dead schedules but removes the
-    // boundary false-page. And we additionally take the MAX with the empirical
-    // `first_observed_at` (from monitored_loops_first_seen) so a hand-edited registeredAt SET
-    // BEFORE the cron actually shipped (fleet-spend-governor: registeredAt 00:00 with cadence
-    // `10,40 * * * *` → computed first-firing 00:10 SAME day → grace evaporates the moment the
-    // deploy lands hours later) can never shorten the grace below "we have empirically seen this
-    // loop registered for at least one full window." Unset (legacy crons) ⇒ no extra gate.
-    const firstFiringMs = firstScheduledFiringMs(loop, firstObservedMs);
-    const sinceFirstFiringMs = firstFiringMs != null ? Date.now() - firstFiringMs : null;
-    if (everBeatCount === 0 && sinceFirstFiringMs != null && sinceFirstFiringMs <= window) {
-      const statusText = sinceFirstFiringMs >= 0
-        ? `awaiting first run — first scheduled firing ${fmtDur(sinceFirstFiringMs)} ago (within ${fmtDur(window)} cadence+grace)`
-        : `awaiting first run — first scheduled firing in ${fmtDur(-sinceFirstFiringMs)}`;
-      return { ...base, color: "amber", statusText, violation: null };
-    }
     if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
       return {
         ...base,
