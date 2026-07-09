@@ -829,9 +829,13 @@ async function authorMarioFixSpec(
   );
 }
 
-/** Route a genuine Mario escalation to ADA (the platform director) — a REAL dashboard surface, not a dead
- *  audit row, and NEVER the CEO for routine platform work (reviewing/merging a green PR, reclaiming a stuck
- *  build). Deduped: at most one open card per spec, so a repeated escalation can't fan out. Best-effort. */
+/** Route a genuine Mario escalation to ADA (the platform director) as an ACTIONABLE target she can fix —
+ *  not a dead audit row, and NEVER the CEO for routine platform work. Creates a fresh `build` job for the
+ *  stuck spec, parked `needs_approval` with a `reclaim_stuck_build` action. `build` routes to platform, so
+ *  Ada's `enqueuePlatformDirectorJobs` sweep picks it up; `reclaim_stuck_build` is in-leash (`error_fix`) so
+ *  she AUTO-APPROVES it after her read-only investigation; on approval the job resumes and rebuilds the spec
+ *  on current `main` (clean branch → clean merge) — the build IS the reclaim. Ada is the reviewer+merger.
+ *  Deduped: no target if a build is already in-flight / awaiting her for this spec. Best-effort. */
 async function surfaceMarioEscalationToAda(
   admin: Admin,
   workspaceId: string,
@@ -839,22 +843,27 @@ async function surfaceMarioEscalationToAda(
   reasoning: string,
   jobId: string,
 ): Promise<boolean> {
-  const dedupeKey = `mario-escalation:${specSlug}`;
-  const { data: existing } = await admin
-    .from("dashboard_notifications")
+  // Dedupe: never stack a second build target when one is already queued/building/awaiting Ada.
+  const { data: activeBuild } = await admin
+    .from("agent_jobs")
     .select("id")
     .eq("workspace_id", workspaceId)
-    .eq("metadata->>dedupe_key", dedupeKey)
-    .eq("dismissed", false)
-    .maybeSingle();
-  if (existing) return false;
-  const { error } = await admin.from("dashboard_notifications").insert({
+    .eq("spec_slug", specSlug)
+    .eq("kind", "build")
+    .in("status", ["queued", "claimed", "building", "needs_approval", "queued_resume"])
+    .limit(1);
+  if (activeBuild && activeBuild.length > 0) return false;
+
+  const actionId = `mario-reclaim-${Date.now()}`;
+  const summary = `Reclaim & re-drive the stuck built-but-unmerged spec ${specSlug} (green: spec-test + security, but never merged). ${reasoning}`.slice(0, 500);
+  const { error } = await admin.from("agent_jobs").insert({
     workspace_id: workspaceId,
-    type: "agent_approval_request",
-    title: `Mario → Ada: ${specSlug}`,
-    body: `🔧 Mario hit a stall he can't plumb himself and is escalating to Ada (platform), not the CEO: ${reasoning}`.slice(0, 2000),
-    link: `/dashboard/roadmap/${specSlug}`,
-    metadata: { routed_to_function: MARIO_DIRECTOR_FUNCTION, escalation_kind: "mario_stall", dedupe_key: dedupeKey, spec_slug: specSlug, job_id: jobId, autonomous: true },
+    spec_slug: specSlug,
+    kind: "build",
+    status: "needs_approval",
+    created_by: null,
+    instructions: `Mario→Ada escalation (from mario job ${jobId}): reclaim the stuck built-but-unmerged spec [[${specSlug}]]. ${reasoning}`.slice(0, 4000),
+    pending_actions: [{ id: actionId, type: "reclaim_stuck_build", status: "pending", spec_slug: specSlug, summary }],
   });
   if (error) throw new Error(error.message);
   return true;
