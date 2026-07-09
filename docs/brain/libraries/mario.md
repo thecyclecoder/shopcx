@@ -65,6 +65,10 @@ Every OTHER silence (last event was `build_done` and no `phase_shipped` in 30min
 - [[../inngest/mario-stall-cron]] — the once-per-minute cron; iterates workspaces, calls `evaluateStalledSpecs` per workspace, calls `enqueueMarioJob` per candidate, applies a per-tick cap so a massive backlog doesn't overwhelm the mario lane.
 - Nowhere else. The SDK is Mario-owned; the M4 self-tuning agent (future) will read the thresholds table directly to widen an SLA — that write path does NOT go through this SDK.
 
+## The mario skill
+
+Mario the box-agent (M4) reads this SDK's brief off `agent_jobs.instructions` and reasons about the stall through the `.claude/skills/mario/SKILL.md` skill file — the vocabulary + verdict envelope + conservative-default contract the M4 spec's Phase 2 mandates. The runner (`scripts/builder-worker.ts` `runMarioJob`) tells the model `use the mario skill (cwd is the repo root)`; the skill file defines the read-only investigation flow + the five-key non-destructive vocabulary (`redrive_dropped_job`, `unstick_stale_status`, `release_cleared_blocker`, `requeue_unclaimed_job`, `queue_box_restart`) + the `MarioVerdict` JSON envelope + the "on ambiguity, escalate" default. See [[../../.claude/skills/mario/SKILL.md]].
+
 ## Related
 
-[[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../goals/mario-pipeline-plumbing]] · [[../tables/mario_thresholds]] · [[../tables/spec_timecard_events]] · [[./spec-timecards]] · [[./brain-roadmap]] · [[./specs-table]] · [[./agent-jobs]] · [[../inngest/mario-stall-cron]]
+[[../functions/platform]] (Mario's org home — reports to Ada under the platform function's charge list; org placement wired in [[../../src/lib/agents/personas.ts]] `PERSONAS['mario']` + [[../../src/lib/control-tower/registry.ts]] `MONITORED_LOOPS`) · [[../../.claude/skills/mario/SKILL.md]] (Phase 2 skill file — Mario's read-only investigation contract + JSON verdict envelope) · [[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../goals/mario-pipeline-plumbing]] · [[../tables/mario_thresholds]] · [[../tables/spec_timecard_events]] · [[./spec-timecards]] · [[./brain-roadmap]] · [[./specs-table]] · [[./agent-jobs]] · [[../inngest/mario-stall-cron]]

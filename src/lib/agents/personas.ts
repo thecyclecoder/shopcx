@@ -213,6 +213,19 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-900/40",
     dot: "bg-fuchsia-500", ring: "bg-fuchsia-50 dark:bg-fuchsia-900/20", accent: "text-fuchsia-600 dark:text-fuchsia-400",
   },
+  // mario-reactive-box-agent M4 Phase 5 — Mario, the reactive pipeline plumber. Reports to Ada
+  // (platform). Fired by mario-stall-cron on a stalled spec; investigates the timecard + blockers
+  // + live job status read-only, applies ONE non-destructive live fix from a bounded vocabulary,
+  // authors a critical fix-spec for the recurring class, self-tunes mario_thresholds on a false
+  // trigger. Conservative default: on ambiguity, escalate — never guess a mutation.
+  mario: {
+    key: "mario", name: "Mario", role: "Pipeline Plumber", emoji: "🔧",
+    personality: "The reactive pipeline plumber — investigates each detected stall against the timecard + blockers + live job, applies ONE non-destructive live fix from the bounded vocabulary, authors a critical fix-spec for the recurring class, and self-tunes the threshold on a false trigger. Autonomous within Ada's leash; escalates the destructive or ambiguous rather than guessing.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
+    mascotId: "default", avatarUrl: `${AV}mario-mario.jpg?v=1`,
+    chip: "bg-stone-100 text-stone-800 border-stone-200 dark:bg-stone-900/30 dark:text-stone-300 dark:border-stone-900/40",
+    dot: "bg-stone-500", ring: "bg-stone-50 dark:bg-stone-900/20", accent: "text-stone-600 dark:text-stone-400",
+  },
   db_health: {
     key: "db_health", name: "Devi", role: "DB Health", emoji: "🔵",
     personality: "Watches slow queries + growth, EXPLAIN-diagnoses, proposes the index.",
@@ -393,6 +406,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Watch each auto-merged deploy over a bounded canary window for deploy-correlated regressions",
     "Restore known-good fast — auto-revert the offending squash-merge on a clear regression",
     "Escalate anything ambiguous (an unsure verdict, a revert conflict, a rollback-then-reland loop) instead of guessing",
+  ],
+  mario: [
+    "Investigate each stall the M3 detector cron surfaces — cross-check the timecard + blockedBy + live agent_jobs row; drop legit waits",
+    "Apply ONE non-destructive live fix from the vocabulary (redrive_dropped_job / unstick_stale_status / release_cleared_blocker / requeue_unclaimed_job / queue_box_restart); never destructive",
+    "Author a critical `auto_build` fix-spec for the recurring stall class so the durable fix ships, not just the hot patch",
+    "Self-tune `mario_thresholds` on a false trigger (widen with a written reason); surface accuracy to Ada + escalate the ambiguous rather than guessing",
   ],
   build: [
     "Claim queued build jobs off the roadmap",

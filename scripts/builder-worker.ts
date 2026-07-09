@@ -163,6 +163,19 @@ const MAX_DEPLOY_REVIEW = 1;
 // One deploy-review pass: read-only diff walk + a few code Reads for each candidate signal (typically
 // 1-3). Minutes — same ballpark as a migration-fix / repair turn.
 const DEPLOY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
+// Mario reactive-fix jobs (mario-reactive-box-agent M4 Phase 1) run in their OWN concurrency-1 lane:
+// event-fired by the M3 stall-detector cron the moment `evaluateStalledSpecs` surfaces a genuine stall
+// (blocker-cleared, live job not in a wait status, not folded/deferred). A top-level Max `claude -p`
+// (mario skill) reads the MarioBrief off `instructions`, cross-checks the timecard + blockers + the
+// current agent_jobs row read-only, and emits ONE JSON verdict with a live_fix (from the M4 vocabulary),
+// a durable_fix_spec (when the stall class is likely recurring), and/or a threshold_adjustment (self-
+// tune on a false trigger). The WORKER (deterministic Node — Phase 3's `applyBoxMario` in src/lib/
+// mario.ts) is the ONLY mutator: kill-switch + loop-guard + non-destructive UPDATEs. Serialized so
+// two Marios never race a live fix on the same box.
+const MAX_MARIO = 1;
+// One mario pass: read-only timecard/blockers/agent_jobs walk + a proposed fix. Minutes — same ballpark
+// as deploy-review / migration-fix. Idle-kill window matches Reva's so a hung session frees the lane.
+const MARIO_TIMEOUT_MS = 15 * 60 * 1000;
 // CS Director hard-call jobs (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1) run in
 // their OWN concurrency-1 lane: enqueued by the box-escalation-triage no-quorum block (Phase 2), one
 // top-level Max `claude -p` (cs-director-call skill) per call. Reads the ticket + resolution events +
@@ -590,7 +603,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "ticket-analyze" | "prompt-review" | "playbook-compile";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -663,6 +676,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "ticket-handle",
   "prompt-review",
   "playbook-compile",
+  "mario",
 ]);
 
 async function admin() {
@@ -2691,7 +2705,7 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile", "prompt-review"]);
+const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile", "prompt-review", "mario"]);
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -3162,7 +3176,7 @@ const LANE_GROUPS = {
   other: {
     cap:
       MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST + MAX_SPEC_REVIEW +
-      MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
+      MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_MARIO + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
       MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
       MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
       MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE +
@@ -3170,7 +3184,7 @@ const LANE_GROUPS = {
       MAX_PROPOSED_MODEL_TIER,
     kinds: [
       "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test", "spec-review",
-      "migration-fix", "deploy-review", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
+      "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
       "media-buyer-grade", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
@@ -12673,6 +12687,210 @@ async function runDeployReviewJob(job: Job) {
   }
 }
 
+// ── Box-hosted Mario reactive-fix lane (mario-reactive-box-agent M4 Phase 1) ────
+// A kind='mario' job is ONE stall Mario (the reactive pipeline plumber) investigates. The M3
+// stall-detector cron (src/lib/inngest/mario-stall-cron.ts + src/lib/mario.ts `enqueueMarioJob`)
+// files one row per genuine stall with a MarioBrief JSON-encoded on `instructions`. The runner
+// (this lane) claims it, spawns a top-level Max `claude -p` on the mario skill (no ANTHROPIC_API_KEY;
+// keeps read-only DB / repo / brain access + web search on + git available), reads the brief +
+// cross-checks the timecard + blockers + agent_jobs read-only, and emits ONE JSON verdict —
+// { trigger_accurate, live_fix, durable_fix_spec, threshold_adjustment, escalate, reasoning }. The
+// worker (Phase 3's `applyBoxMario` in src/lib/mario.ts) is the ONLY mutator — kill-switch +
+// atomic claim-guard + loop-guard + non-destructive UPDATEs. Phase 1 ships the wiring + the
+// runner's parse-repair + fail-safe loop; Phase 3 flesh out `applyBoxMario`'s vocabulary.
+async function runMarioClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "mario", sandbox: "max", timeout: MARIO_TIMEOUT_MS });
+}
+
+// The MarioBrief is JSON-encoded onto `agent_jobs.instructions` by `enqueueMarioJob`. Instructions
+// carry the last 10 timecard events (newest-first) + blockedBy state (per-slug cleared bit) + the
+// current active-job status (or null). Parsed defensively so a malformed row still lets the runner
+// hand the job to the fail-safe (rather than throw before the session ever starts).
+interface MarioInstructions {
+  last_events?: Array<{
+    event_kind?: string;
+    phase_index?: number | null;
+    actor?: string;
+    at?: string;
+    wait_kind?: string | null;
+    waiting_on?: string | null;
+  }>;
+  blocked_by_state?: Array<{ slug: string; cleared: boolean }>;
+  current_job_status?: string | null;
+  from_event?: string;
+  to_event?: string;
+  gap_ms?: number;
+  sla_ms?: number;
+}
+
+// The read-only brief baked into Mario's prompt. Includes the spec identity (slug from the job row)
+// + the observed stall dimensions (from_event/to_event/gap/sla when the enqueuer stamped them onto
+// instructions) + the last 10 timecard events + blockedBy state + the current active-job status.
+// Mario runs `getTimecard` / `getSpecBlockers` on top of this via scripts/_probe-timecard.ts to
+// re-verify the enqueue was accurate — but this brief is enough to reason about the enqueue.
+function marioBrief(job: Job, inst: MarioInstructions): string {
+  const events = Array.isArray(inst.last_events) ? inst.last_events : [];
+  const blockers = Array.isArray(inst.blocked_by_state) ? inst.blocked_by_state : [];
+  return [
+    `MARIO STALL — spec_slug ${job.spec_slug} · workspace ${job.workspace_id.slice(0, 8)}`,
+    inst.from_event && inst.to_event
+      ? `  observed gap: ${inst.from_event} → ${inst.to_event} · gap_ms=${inst.gap_ms ?? "?"} · sla_ms=${inst.sla_ms ?? "?"}`
+      : `  observed gap: (from/to/sla not stamped on instructions — read them via getTimecard yourself)`,
+    `  current_job_status: ${inst.current_job_status ?? "(none)"}`,
+    ``,
+    `LAST TIMECARD EVENTS (${events.length}, newest first):`,
+    ...events.map((e) => `  • ${e.at} · ${e.event_kind}${e.phase_index != null ? ` (phase ${e.phase_index})` : ""} · actor=${e.actor}${e.wait_kind ? ` · wait=${e.wait_kind}${e.waiting_on ? `→${e.waiting_on}` : ""}` : ""}`),
+    ``,
+    `BLOCKEDBY STATE (${blockers.length}):`,
+    ...blockers.map((b) => `  • ${b.slug} — ${b.cleared ? "CLEARED" : "UNCLEARED"}`),
+  ].join("\n");
+}
+
+// Same-session JSON parse-repair re-prompt for Mario's verdict envelope. Mirrors Reva's
+// `deployReviewRepairPrompt` (deploy-guardian pattern): when the first attempt completed real
+// investigative work but flubbed the final JSON shape, re-prompt on the SAME session for ONLY the
+// verdict envelope. The model has all its findings in memory; it just needs to re-emit them in the
+// recognized shape. Re-investigation is explicitly forbidden.
+function marioRepairPrompt(): string {
+  return [
+    `Your previous message could not be parsed as the mario JSON verdict envelope.`,
+    `Return ONLY one valid JSON object — no prose before or after, no markdown, no commentary. If you must use a code fence the JSON must be the last thing in the message. Reuse the investigation you ALREADY produced; do NOT re-read files, do NOT re-run any tool.`,
+    ``,
+    `Exact envelope shape:`,
+    `  {"trigger_accurate":true|false,"live_fix":{"action":"<vocabulary key>","target":{"spec_slug"?,"job_id"?,"box_id"?},"reasoning":"<why>"}|null,"durable_fix_spec":{"slug","title","why","what","phases":[{"title","why","what","body","verification"}]}|null,"threshold_adjustment":{"from_event","to_event","new_sla_ms","reason"}|null,"escalate":true|false,"reasoning":"<2-4 sentences>"}`,
+    ``,
+    `Conservative default rule: on ambiguity, set trigger_accurate=false + escalate=true + live_fix=null. If you genuinely could not reach a verdict, return {"trigger_accurate":false,"live_fix":null,"durable_fix_spec":null,"threshold_adjustment":null,"escalate":true,"reasoning":"<one line on why>"}.`,
+  ].join("\n");
+}
+
+function marioPrompt(brief: string): string {
+  return [
+    `Use the mario skill (cwd is the repo root). You are Mario, the reactive pipeline plumber — a broad-autonomy read-only-investigate-then-non-destructively-fix box agent under Ada (Platform/DevOps Director) on Max. Web search on, no API key. You have full brain / \`src/\` / git powers and READ-ONLY prod DB. You NEVER mutate: you investigate, decide, and emit ONE JSON object. The worker (deterministic Node in src/lib/mario.ts — applyBoxMario) executes your typed verdict; never re-queue jobs, never write to agent_jobs / mario_thresholds / director_activity yourself, never call the specs SDK.`,
+    `The M3 stall-detector cron surfaced THIS spec as genuinely stalled (uncleared blocker cleared, live job not in a wait status, not folded). Your job: cross-check the enqueue was accurate, decide whether a non-destructive live fix will unstick the pipeline, propose a critical fix-spec when the stall class is likely recurring, and self-tune a threshold on a false trigger.`,
+    ``,
+    brief,
+    ``,
+    `Steps:`,
+    `  1. Cross-check the enqueue: call \`getTimecard\` (scripts/_probe-timecard.ts) + \`getSpecBlockers\` + read the current agent_jobs row for this spec. Verify the ledger's silence is REAL (a stall) vs a legit wait Mario should not have been fired on (widen the threshold).`,
+    `  2. If a live fix from the M4 vocabulary (redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | ...open slot) will unstick the pipeline, propose it. If the stall class is likely recurring, also propose a critical durable_fix_spec.`,
+    `  3. On ambiguity, escalate — never guess. Conservative default: trigger_accurate=false + escalate=true + live_fix=null.`,
+    ``,
+    `Final message = ONLY one JSON object matching this exact shape:`,
+    `  {"trigger_accurate":true|false,"live_fix":{"action":"<vocabulary key>","target":{"spec_slug"?,"job_id"?,"box_id"?},"reasoning":"<why>"}|null,"durable_fix_spec":{"slug","title","why","what","phases":[{"title","why","what","body","verification"}]}|null,"threshold_adjustment":{"from_event","to_event","new_sla_ms","reason"}|null,"escalate":true|false,"reasoning":"<2-4 sentences citing a real file:line or ledger row>"}`,
+  ].join("\n");
+}
+
+async function runMarioJob(job: Job) {
+  const tag = `[mario:${job.id.slice(0, 8)}]`;
+  const { failsafeStampMarioUnsure, applyBoxMario, normalizeMarioVerdict } = await import("../src/lib/mario");
+
+  let inst: MarioInstructions = {};
+  try {
+    inst = job.instructions ? (JSON.parse(job.instructions) as MarioInstructions) : {};
+  } catch {
+    // Malformed instructions — proceed with an empty brief; the model will get the fallback "read
+    // them via getTimecard yourself" line and the runner still tries the session before fail-safing.
+  }
+  console.log(`${tag} investigating stall for slug=${job.spec_slug} · from=${inst.from_event ?? "?"} → to=${inst.to_event ?? "?"} · gap=${inst.gap_ms ?? "?"}ms`);
+
+  const failsafeArgs = { jobId: job.id, workspaceId: job.workspace_id, specSlug: job.spec_slug };
+
+  try {
+    const brief = marioBrief(job, inst);
+    const prompt = marioPrompt(brief);
+    const firstRun = await runBoxLane(
+      (cfg, sid) => runMarioClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    let { session, resultText, isError, raw, usage, model } = firstRun;
+    const mDir = firstRun.configDir;
+    await meterAgentJob(job, mDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: mDir });
+
+    let parsed = extractJson<Record<string, unknown>>(resultText);
+    let verdict = normalizeMarioVerdict(parsed);
+
+    // Same-session JSON parse-repair (mirrors deploy-review's pattern): if attempt 1 landed
+    // unparseable JSON, re-prompt on the SAME session for ONLY the envelope. The model has its
+    // investigation in memory; it just needs to re-emit the recognized shape. Pinned to the same
+    // account (mDir) — a --resume can only land on the account that owns the session. Skipped when
+    // there is no session id (nothing to --resume against) or the first attempt landed a valid verdict.
+    if (!verdict && session) {
+      console.warn(`${tag} unparseable verdict — same-session parse-repair (attempt 2, JSON envelope only)`);
+      const repair = await runMarioClaude(marioRepairPrompt(), session, REPO_DIR, mDir ?? undefined, job.id);
+      await meterAgentJob(job, mDir ?? undefined, repair.usage, repair.model);
+      if (repair.session) await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: mDir });
+      session = repair.session ?? session;
+      resultText = repair.resultText;
+      raw = repair.raw;
+      isError = repair.isError;
+      parsed = extractJson<Record<string, unknown>>(resultText);
+      verdict = normalizeMarioVerdict(parsed);
+    }
+    console.log(`${tag} claude finished — trigger_accurate=${verdict?.trigger_accurate ?? "(none)"} · live_fix=${verdict?.live_fix?.action ?? "(none)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // Phase-1 fail-safe: no parseable verdict AFTER repair. Park the job needs_attention +
+      // write the mario_failsafe director_activity row. Never execute any live fix (absence of
+      // judgment ≠ evidence to act — the same conservative default Reva uses).
+      const fs = await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Mario box session (after parse-repair)" });
+      const fsLine = fs.stamped ? "fail-safe: job stamped needs_attention + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`;
+      // If the fail-safe stamp lost the CAS (row already terminal) we STILL update the log_tail so a
+      // human can see what happened — but never re-transition a terminal row.
+      if (!fs.stamped) {
+        await update(job.id, { log_tail: `${fsLine}\n\n${raw}`.slice(-2000) });
+      }
+      console.warn(`${tag} unparseable verdict (after parse-repair) — ${fsLine}`);
+      return;
+    }
+
+    // Phase 3's `applyBoxMario` will replace this branch with kill-switch + loop-guard + per-action
+    // mutators; the Phase-1 stub records the verdict on director_activity ('mario_fired') and returns
+    // {ok:true}. On {ok:false} the runner hands the job to the fail-safe — the applier never throws.
+    const applied = await applyBoxMario(db, job.id, verdict);
+    if (!applied.ok) {
+      const fs = await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: `apply no-op: ${applied.reason ?? "unknown"}` });
+      const fsLine = fs.stamped ? "fail-safe: job stamped needs_attention + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`;
+      await update(job.id, {
+        status: fs.stamped ? undefined : "completed",
+        error: `mario apply no-op: ${applied.reason ?? "unknown"}`,
+        log_tail: `${fsLine}\nreasoning=${verdict.reasoning}`.slice(-2000),
+      });
+      console.warn(`${tag} apply no-op (${applied.reason ?? "unknown"}) — ${fsLine}`);
+      return;
+    }
+
+    const summary = [
+      `trigger_accurate=${verdict.trigger_accurate}`,
+      verdict.live_fix ? `live_fix=${verdict.live_fix.action}` : "live_fix=none",
+      verdict.durable_fix_spec ? `durable_fix_spec=${verdict.durable_fix_spec.slug}` : "",
+      verdict.threshold_adjustment ? `widened=${verdict.threshold_adjustment.from_event}→${verdict.threshold_adjustment.to_event}:${verdict.threshold_adjustment.new_sla_ms}ms` : "",
+      verdict.escalate ? "escalate=true" : "",
+      verdict.reasoning ? verdict.reasoning : "",
+    ].filter(Boolean).join("\n");
+
+    if (isError) {
+      // The session errored but a verdict landed AND the applier recorded it. Complete with the
+      // error surfaced so a human can eyeball; the applied director_activity row isn't silently rolled back.
+      await update(job.id, { status: "completed", error: "mario session errored (verdict applied)", log_tail: summary.slice(-2000) });
+      console.log(`${tag} verdict applied (session errored — applied + logged): ${summary.split("\n")[0]}`);
+      return;
+    }
+    await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
+    console.log(`${tag} verdict applied: ${summary.split("\n")[0]}`);
+  } catch (e) {
+    // Runner catch-path fail-safe: a throw here means the session crashed / the pipeline threw before
+    // applyBoxMario could fire. Fire the fail-safe to guarantee the job doesn't stay stuck in a
+    // claimed/building state (which would starve the concurrency-1 lane forever).
+    try {
+      await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: `runner threw: ${e instanceof Error ? e.message : String(e)}` });
+    } catch (fsErr) {
+      console.error(`${tag} fail-safe on runner catch threw:`, fsErr instanceof Error ? fsErr.message : fsErr);
+    }
+    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Box-hosted CS Director hard-call lane (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1) ──
 // A kind='cs-director-call' job is ONE hard call the CS Director agent (💬 June) makes on an escalated
 // ticket the box-escalation-triage solver→skeptic sweep could NOT reach quorum on. Phase 2 of that spec
@@ -21560,6 +21778,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "spec-review") return runSpecReviewJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
+  if (job.kind === "mario") return runMarioJob(job);
   if (job.kind === "cs-director-call") return runCsDirectorCallJob(job);
   if (job.kind === "playbook-compile") return runPlaybookCompileJob(job);
   if (job.kind === "ticket-analyze") return runTicketAnalyzeJob(job);
@@ -22789,7 +23008,7 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
+    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
     `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
@@ -22842,6 +23061,7 @@ async function main() {
   const countSpecReview = () => [...active.values()].filter((v) => v.kind === "spec-review").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
+  const countMario = () => [...active.values()].filter((v) => v.kind === "mario").length;
   const countCsDirectorCall = () => [...active.values()].filter((v) => v.kind === "cs-director-call").length;
   const countPlaybookCompile = () => [...active.values()].filter((v) => v.kind === "playbook-compile").length;
   const countTicketAnalyze = () => [...active.values()].filter((v) => v.kind === "ticket-analyze").length;
@@ -23146,6 +23366,20 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed deploy-review ${job.id.slice(0, 8)} → ${countDeployReview() + 1}/${MAX_DEPLOY_REVIEW} deploy-review lane`);
+        launch(job);
+      }
+      // Fill the mario lane (mario-reactive-box-agent M4 Phase 1): event-fired by the M3 stall-detector
+      // cron the moment `evaluateStalledSpecs` surfaces a genuine stall. A top-level Max `claude -p`
+      // (mario skill) reads the MarioBrief read-only, decides, and emits ONE JSON verdict; Phase 3's
+      // applyBoxMario applies it under a kill-switch + loop-guard + non-destructive vocabulary. Serialized
+      // so two Marios never race a live fix on the same box. Gated on the Claude-down breaker — Mario
+      // needs Claude to reason about the timecard; parked jobs park blocked_on_dependency + drain on
+      // recovery, matching the deploy-review pattern.
+      while (!claudeDown && countMario() < MAX_MARIO) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["mario"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed mario ${job.id.slice(0, 8)} → ${countMario() + 1}/${MAX_MARIO} mario lane`);
         launch(job);
       }
       // Fill the cs-director-call lane (cs-director-third-rung-hard-calls-above-triage-quorum Phase 1):
