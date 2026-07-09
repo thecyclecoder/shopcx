@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveApproverLive } from "@/lib/agents/approval-router";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { isWorkspaceOwner } from "@/lib/media-buyer/arm-auth";
 
 // Media Buyer armed flip surface — Phase 1 of media-buyer-armed-flip-surface.
 //
@@ -72,8 +73,9 @@ async function assertWorkspaceOwner(
     .maybeSingle();
   // Owner-only: a missing membership OR a non-owner role (e.g. 'admin') is Forbidden. The
   // privileged mode flip must never be reachable by a non-owner — client-side button hiding
-  // is not a substitute for this server-side role gate.
-  if (!member || member.role !== "owner") {
+  // is not a substitute for this server-side role gate. See @/lib/media-buyer/arm-auth for
+  // the pure predicate + its unit test.
+  if (!isWorkspaceOwner(member)) {
     return { ok: false, res: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
   }
   return { ok: true };
