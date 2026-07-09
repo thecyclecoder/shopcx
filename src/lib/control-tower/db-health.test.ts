@@ -480,6 +480,81 @@ test("analyzeSlowQuery — tickets `tags @> $3` at 4ms×1.27M diagnosed high_cal
   assert.match(finding!.evidence, /GIN/);
 });
 
+test("analyzeSlowQuery — cumulative-over-floor but Δcalls/hr under flag → SELF-CLEARS (db-reduce-calls-q Fix 1)", () => {
+  // The named failing state from .box/spec-db-reduce-calls-q-1756037457588317045.md Fix 1: after the
+  // 2s TTL cache on getSpec landed, the DB Health Agent's next slow-query pass STILL flagged
+  // dbhealth:slowq:-1756037457588317045 as high_call_volume because pg_stat_statements is CUMULATIVE
+  // since the last stats reset (Supabase's postgres role isn't superuser, so pg_stat_reset() is
+  // denied). Cumulative calls 220,990 kept the SLOW_QUERY_MIN_TOTAL_MS 30s floor tripped even though
+  // the post-cache call RATE dropped. Mirror the temp_bytes rate flag: when a priorRow + reading age
+  // is available, compare Δcalls/hr + Δtotal_ms/hr against a rate flag; only THAT is the self-clearing
+  // predicate. Same shape as the tempBytesPrev / tempReadingAgeHours pattern in analyzeInstanceHealth.
+  const row = slowRow({
+    queryid: "-1756037457588317045",
+    query: "select spec, phases from public.get_spec_with_phases($1::uuid, $2::text)",
+    calls: 220_990,
+    total_exec_time: 32_000, // over SLOW_QUERY_MIN_TOTAL_MS (30_000) — cumulative flag WOULD fire
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+    rows: 179_473,
+  });
+  // Prior snapshot from the last box heartbeat, ~1h ago: +200 calls in the last hour is well under
+  // the SLOW_QUERY_MIN_CALLS_PER_HR flag → self-cleared.
+  const priorRow = slowRow({
+    queryid: "-1756037457588317045",
+    query: row.query,
+    calls: 220_790,
+    total_exec_time: 31_970,
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+    rows: 179_270,
+  });
+  const readingAgeHours = 1;
+  const cleared = analyzeSlowQuery(row, null, priorRow, readingAgeHours);
+  assert.equal(cleared, null, "post-fix rate under flag → the finding must self-clear even though cumulative total is over the 30s floor");
+
+  // Counter-check: without the prior row (first pass / stats reset / unreadable prior) → the
+  // cumulative flag STILL fires so we don't lose acute-incident detection on a fresh instance.
+  const stillFlagged = analyzeSlowQuery(row, null);
+  assert.ok(stillFlagged, "no prior snapshot → cumulative fallback still fires (preserves acute detection)");
+  assert.equal(stillFlagged!.cause, "high_call_volume");
+});
+
+test("analyzeSlowQuery — cumulative-over-floor + Δcalls/hr STILL over flag → keeps firing (active spike)", () => {
+  // The complement of the self-clear case: a query hammered at 60k calls/hr since the prior pass is
+  // an active spike, not a resolved one. Rate over the flag → keep flagging so a real growth doesn't
+  // get silently hidden by the rate branch.
+  const row = slowRow({
+    queryid: "-999",
+    query: "select id from t where c = $1",
+    calls: 500_000,
+    total_exec_time: 200_000,
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+  });
+  const priorRow = slowRow({
+    queryid: "-999",
+    query: row.query,
+    calls: 440_000, // +60k in the last hour — well over the calls-per-hr flag
+    total_exec_time: 170_000,
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+  });
+  const finding = analyzeSlowQuery(row, null, priorRow, 1);
+  assert.ok(finding, "an active spike over the rate flag must still fire, not get suppressed by the self-clear branch");
+  assert.equal(finding!.cause, "high_call_volume");
+});
+
+test("analyzeSlowQuery — counter reset between passes (row.calls < priorRow.calls) → fall back to cumulative", () => {
+  // pg_stat_statements CAN be reset (a superuser / pg_stat_statements_reset(queryid) call). When the
+  // current row is BELOW the prior, the delta is meaningless — don't over-apply the rate branch, just
+  // fall back to cumulative so a freshly-reset counter still detects a genuine cumulative overload.
+  const row = slowRow({ queryid: "-r", calls: 100_000, total_exec_time: 45_000, mean_exec_time: 0 });
+  const priorRow = slowRow({ queryid: "-r", calls: 500_000, total_exec_time: 250_000, mean_exec_time: 0 });
+  const finding = analyzeSlowQuery(row, null, priorRow, 1);
+  assert.ok(finding, "a counter reset must not silently suppress the cumulative flag");
+});
+
 test("analyzeSlowQuery — sms `message_sid = $1` at 31ms×157k diagnosed high_call_volume (never vacuum)", () => {
   // The other dismissed shape. mean < 50ms routes to volume; message_sid is an equality predicate
   // (no `@>`), so no GIN hint required. Vacuum must not be the fix.

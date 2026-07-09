@@ -246,6 +246,25 @@ export const SLOW_QUERY_MIN_MEAN_MS = 100;
 /** …but a cheap-per-call query run enough to dominate total DB time still qualifies. */
 export const SLOW_QUERY_MIN_TOTAL_MS = 30_000; // 30s cumulative in the stats window
 /**
+ * db-reduce-calls-q-1756037457588317045 Fix 1 — self-clearing rate flag.
+ *
+ * `pg_stat_statements.calls` / `total_exec_time` are CUMULATIVE since the last `pg_stat_reset()` — and
+ * Supabase's `postgres` role isn't superuser, so `pg_stat_reset()` is denied and the counter can't be
+ * zeroed after a fix (the same constraint the temp_bytes flag documents at `tempBytesPrev`). A pure
+ * cumulative flag therefore stays lit forever once tripped — a cache that reduces the call RATE would
+ * never clear the finding, so [[../specs/db-reduce-calls-q-1756037457588317045]] Phase 1 shipped, the
+ * pass ran, and the signature was STILL flagged with the identical `high_call_volume` impact.
+ *
+ * When a prior pass row + reading age are available, the analyzer prefers the RATE (Δcalls / Δhours,
+ * Δtotal_ms / Δhours) and BOTH must be under the flag for the finding to self-clear. Absent (first
+ * pass / stats-reset between passes / unreadable prior) ⇒ fall back to the cumulative flag (preserves
+ * acute-incident detection on a fresh instance). Sized so a genuinely-hammered hot query still fires
+ * (a poll at ~1 call/second sustained sits right on the calls flag; ~30s/hr matches the cumulative
+ * SLOW_QUERY_MIN_TOTAL_MS floor projected over one hour).
+ */
+export const SLOW_QUERY_MIN_CALLS_PER_HR = 3_600;
+export const SLOW_QUERY_MIN_TOTAL_MS_PER_HR = 30_000;
+/**
  * The slow-per-call vs high-call-volume boundary (the accuracy upgrade — db-health-agent-accuracy).
  * At/above this mean a query is a genuine PER-CALL problem (EXPLAIN → index/rewrite — the orders-class
  * win). BELOW it, a query only ranks high because it's *hammered* (e.g. 4ms × 1.27M calls = a hot
@@ -543,7 +562,12 @@ export function classifyExplainPlan(planText: string): ExplainClassification {
  * propose, but the cause falls back to a conservative "full_aggregate/seq_scan unknown" read of the
  * query text and the fix is a query-rewrite REVIEW rather than a specific index.
  */
-export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): DbHealthFinding | null {
+export function analyzeSlowQuery(
+  row: SlowQueryRow,
+  planText: string | null,
+  priorRow?: SlowQueryRow,
+  readingAgeHours?: number,
+): DbHealthFinding | null {
   // Gap 1 — a query we don't own (Supabase Realtime WAL decoder, PostgREST internals, pg_catalog /
   // information_schema, the realtime schema, supabase_admin) is NEVER our proposal. Filter first.
   if (isForeignQuery(row.query)) return null;
@@ -563,6 +587,27 @@ export function analyzeSlowQuery(row: SlowQueryRow, planText: string | null): Db
 
   const overFloor = row.mean_exec_time >= SLOW_QUERY_MIN_MEAN_MS || row.total_exec_time >= SLOW_QUERY_MIN_TOTAL_MS;
   if (!overFloor) return null;
+
+  // db-reduce-calls-q-1756037457588317045 Fix 1 — RATE self-clearing branch. `calls` / `total_exec_time`
+  // are cumulative since the last stats reset; a cache/batch fix reduces the RATE going forward but the
+  // cumulative counter can only rise (Supabase's postgres role can't call `pg_stat_reset()`). So when a
+  // priorRow + positive reading age are available, prefer the DELTA against the rate flag: if BOTH the
+  // per-hr call rate AND the per-hr total-exec-time rate are under the flag, the finding self-clears
+  // (the same shape analyzeInstanceHealth uses for `tempBytesPrev` / `tempReadingAgeHours`). A counter
+  // reset (`row.calls < priorRow.calls`) yields a negative delta — we DON'T self-clear on that (the
+  // rate branch is silent and the cumulative flag stays authoritative). Absent priorRow / non-positive
+  // reading age ⇒ fall back to cumulative (first pass on a fresh box preserves acute-incident detection).
+  if (priorRow && readingAgeHours !== undefined && readingAgeHours > 0) {
+    const dCalls = row.calls - priorRow.calls;
+    const dTotalMs = row.total_exec_time - priorRow.total_exec_time;
+    if (dCalls >= 0 && dTotalMs >= 0) {
+      const callsPerHr = dCalls / readingAgeHours;
+      const totalMsPerHr = dTotalMs / readingAgeHours;
+      if (callsPerHr < SLOW_QUERY_MIN_CALLS_PER_HR && totalMsPerHr < SLOW_QUERY_MIN_TOTAL_MS_PER_HR) {
+        return null;
+      }
+    }
+  }
 
   // Gap 2 — slow-per-call (a genuine per-call cost → EXPLAIN → index/rewrite, the orders-class win)
   // vs high-call-volume (fast per call but hammered → reduce calls / cache / a hot-predicate or GIN

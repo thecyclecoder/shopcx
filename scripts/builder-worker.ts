@@ -3712,11 +3712,54 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       return;
     }
 
+    // db-reduce-calls-q-1756037457588317045 Fix 1 — RATE self-clearing input. pg_stat_statements is
+    // CUMULATIVE and Supabase's postgres role can't `pg_stat_reset()`, so a cache/batch fix would never
+    // clear a `high_call_volume` finding on the cumulative flag alone. Load the prior slow-query beat's
+    // rowset (compact `{queryid, calls, total_exec_time}` snapshot; the same shape recorded below) so
+    // `analyzeSlowQuery` can prefer Δ/hr over the cumulative flag — a self-clear the instant the rate
+    // drops, mirroring the `tempBytesPrev` / `tempReadingAgeHours` pattern already in analyzeInstanceHealth.
+    // Best-effort — a lookup failure falls through to the cumulative flag (correctness-equivalent).
+    const priorByQueryid = new Map<string, import("../src/lib/control-tower/db-health").SlowQueryRow>();
+    let priorReadingAgeHours: number | undefined;
+    try {
+      const { data: priorBeatData } = await db
+        .from("loop_heartbeats")
+        .select("ran_at, produced")
+        .eq("loop_id", mod.DB_HEALTH_SLOWQ_LOOP_ID)
+        .eq("kind", "cron")
+        .eq("ok", true)
+        .order("ran_at", { ascending: false })
+        .limit(1);
+      const priorBeat = (priorBeatData ?? [])[0] as { ran_at?: string; produced?: unknown } | undefined;
+      if (priorBeat?.ran_at && priorBeat.produced && typeof priorBeat.produced === "object") {
+        const produced = priorBeat.produced as { slow_query_rows?: unknown };
+        if (Array.isArray(produced.slow_query_rows)) {
+          for (const r of produced.slow_query_rows as Array<Record<string, unknown>>) {
+            const qid = String(r.queryid ?? "");
+            if (!qid) continue;
+            priorByQueryid.set(qid, {
+              queryid: qid,
+              query: "", // prior snapshot only carries the delta counters; the current row supplies the text
+              calls: Number(r.calls ?? 0),
+              total_exec_time: Number(r.total_exec_time ?? 0),
+              mean_exec_time: 0,
+              stddev_exec_time: 0,
+              rows: 0,
+            });
+          }
+        }
+        const ageMs = Date.now() - new Date(priorBeat.ran_at).getTime();
+        if (ageMs > 0) priorReadingAgeHours = ageMs / 3_600_000;
+      }
+    } catch (e) {
+      console.warn("[db-health] prior slow-query beat lookup failed (cumulative fallback):", e instanceof Error ? e.message : String(e));
+    }
+
     const findings: import("../src/lib/control-tower/db-health").DbHealthFinding[] = [];
     for (const row of rows) {
       // Only EXPLAIN read-only SELECTs (plain EXPLAIN doesn't execute, but never go near a write).
       const plan = mod.isSafeSelect(row.query) ? await explainQuery(c, row.query) : null;
-      const finding = mod.analyzeSlowQuery(row, plan);
+      const finding = mod.analyzeSlowQuery(row, plan, priorByQueryid.get(row.queryid), priorReadingAgeHours);
       if (finding) findings.push(finding);
     }
 
@@ -3748,10 +3791,20 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
     const proposed = await surfaceDbHealthFindings(findings);
     const ranked = mod.dedupeFindings(findings);
     const slow_queries = ranked.slice(0, 10).map((f) => ({ queryid: f.signature.split(":").pop() || "", cause: f.cause, table: f.table, impact: f.impact }));
+    // db-reduce-calls-q-1756037457588317045 Fix 1 — persist the compact snapshot the NEXT pass will
+    // read as `priorByQueryid` for the rate self-clear branch. Covers every row we analyzed this pass
+    // (not just the top-10 findings), so a signature that already self-cleared this pass still has a
+    // baseline to rate-compare against next pass. `queryid + calls + total_exec_time` is all the rate
+    // math needs — no query text, no plan, bounded row count.
+    const slow_query_rows = rows.map((r) => ({
+      queryid: r.queryid,
+      calls: r.calls,
+      total_exec_time: r.total_exec_time,
+    }));
     await writeCronHeartbeat(
       mod.DB_HEALTH_SLOWQ_LOOP_ID,
       true,
-      { status: "ok", scanned: rows.length, findings: findings.length, proposed, slow_queries },
+      { status: "ok", scanned: rows.length, findings: findings.length, proposed, slow_queries, slow_query_rows },
       Date.now() - startedAt,
       `db-health slow-query — ${rows.length} scanned, ${mod.summarizeFindings(findings)}, ${proposed} proposed`,
     );
