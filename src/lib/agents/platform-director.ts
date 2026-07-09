@@ -117,6 +117,11 @@ const LEASH_ACTION_TYPES: Record<string, LeashCategory> = {
   repair_build: "error_fix",
   db_health_build: "db_health",
   apply_migration: "additive_migration",
+  // Mario escalates a stuck built-but-unmerged spec (a green build orphaned by a restart / stranded on a
+  // stale branch) to Ada when he doesn't self-service it. Reviewing+merging a green PR is routine platform
+  // work Ada owns — auto-approvable, never a CEO decision. The approved action re-drives the build (rebases
+  // onto current main → clean merge); the build itself is the reclaim.
+  reclaim_stuck_build: "error_fix",
 };
 
 /** A loosely-typed agent_jobs row as the worker/enqueuer reads it (Supabase returns untyped JSON). */
