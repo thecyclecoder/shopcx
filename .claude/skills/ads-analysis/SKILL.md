@@ -10,14 +10,24 @@ The read-only reasoning lens for "which ads win, which die." It encodes the exac
 ## Run it
 
 ```
-npx tsx scripts/analyze-ad-tests.ts <accountId> [<accountId> ...] [--ltv=<override>] [--days=30]
+npx tsx scripts/analyze-ad-tests.ts [<accountId> ...] [--ltv=N] [--days=30] [--cohort="MB —"]
 ```
 
 - No args → both Superfoods accounts: **Amazing Coffee `2352876514967984`** + **Superfood Tabs `196487894712827`**.
-- Prints, per account: every spend>0 ad with spend · purchases · CPA · frequency · CTR · **verdict + the one recommended action**, then the account roll-up (blended CPA, an `ACCOUNT UNPROFITABLE` flag when blended CPA > kill line) and the explicit RETIRE / PROMOTE lists.
-- Output ends with a reminder that nothing was changed.
+- Prints, per account: every spend>0 ad with spend · purchases · CPA · frequency · **destination + conversion-source tag** · **verdict + the one recommended action**, then the roll-up (blended CPA, `UNPROFITABLE` flag when blended > kill) and explicit RETIRE / SCALE lists.
+- `--cohort=<campaign substring>` → restrict to a cohort (e.g. `"MB —"` for the media-buyer test campaigns) and show the **add-to-cart leading-indicator funnel** (impr · linkCTR · clicks · ATC · IC · P · **clk→ATC%**). The winner separates at ATC well before purchases land — 2026-07-09 coffee test: skeptic v3 hit **50% clk→ATC vs 6%** for its siblings, a day before its first purchase.
 
-Under the hood: `getMetaUserToken` → `metaGraphRequest` (`/act_<id>/insights`, level=ad) for the numbers; `src/lib/ltv.ts` (`getMonthlyChurn` + `blendedLifetimeOrders`) + the latest complete `monthly_revenue_snapshots` row for the live LTV. See [[../../docs/brain/integrations/meta-marketing.md]] · [[../../docs/brain/libraries/ltv.md]].
+## Data model — where the numbers come from (this is the important part)
+
+All reads go through the SDK **`src/lib/ads/ad-insights-sdk.ts`** — no caller hand-rolls a Graph request or re-implements purchase counting. It composes two sources **by destination URL**:
+
+- **Spend** → always our own DB, [[../../docs/brain/tables/meta_attribution_daily.md]] (synced daily, no API cost).
+- **Conversions** → destination-aware. An ad whose `advertorial_page_id` is set ran to one of **our landers** → our DB's sessions/orders/roas are valid. An ad with `advertorial_page_id` null ran to the **Shopify PDP** → our internal order-match can't attribute it, so **Meta is the source of truth** (fetched via `fetchMetaAdInsights`, paginated + rate-limit backoff). The output tags each ad `[L]ander/[S]hopify` and conversion source `[d]b/[m]eta`.
+- **Funnel micro-metrics** (impressions, link CTR, add-to-cart) → Meta only (our DB doesn't carry them) — used by `--cohort`.
+- **⚠ Purchase counting:** the SDK counts the single canonical `purchase` action_type (= the Ads Manager "Purchases" column), **never** the sum of `purchase` + `offsite_conversion.fb_pixel_purchase` (those double-count — a 2026-07-09 bug reported skeptic-v3 as 2 when the dashboard showed 1). Always reconcile any headline number against an Ads Manager export before stating it as fact.
+- **Known gap / future:** PDP-order → ad reconciliation via Shopify's own reporting (`reconcilePdpOrdersFromShopify`, stubbed) would let our DB attribute Shopify-destination conversions and drop the Meta dependency.
+
+Live LTV: `src/lib/ltv.ts` (`getMonthlyChurn` + `blendedLifetimeOrders`) over the latest complete `monthly_revenue_snapshots` row. See [[../../docs/brain/integrations/meta-marketing.md]] · [[../../docs/brain/libraries/ltv.md]] · [[../../docs/brain/tables/meta_attribution_daily.md]].
 
 ## The ruleset it applies (from the methodology — thresholds are DERIVED, never hardcoded)
 
