@@ -866,7 +866,7 @@ async function queueBoxRestart(admin: Admin, boxId: string): Promise<void> {
  *  self-heal (`ensureWorktreeSlotFree`) frees a `BUILDS_DIR`-pinned branch before the rebuild; the narrower
  *  ephemeral `/tmp`-pinned case is handled by the `builder-worktree-self-heal` fix-spec. Routes through the
  *  sanctioned `queueRoadmapBuild` (owner-gated) so every blocker / active-build / review guard still applies. */
-async function reclaimAndRedrive(admin: Admin, workspaceId: string, specSlug: string): Promise<void> {
+export async function reclaimAndRedrive(admin: Admin, workspaceId: string, specSlug: string): Promise<void> {
   const { data: owner, error: ownerErr } = await admin
     .from("workspace_members")
     .select("user_id")
