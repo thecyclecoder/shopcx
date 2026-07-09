@@ -10652,7 +10652,62 @@ async function loadTicketHandleBrief(ticketId: string): Promise<string> {
   // never a guess from improvised SQL. Best-effort: a missing customer / SDK read failure leaves
   // the base brief unchanged.
   const cxBrief = await loadCxAgentSdkBrief(ticketId).catch(() => "");
-  return cxBrief ? `${base}\n\n${cxBrief}` : base;
+  // The mechanisms catalog — the active journeys / workflows / playbooks Sol can route to. Without
+  // it Sol is blind to the valid slugs/tags and can't pick `chosen_path='journey'|'workflow'`
+  // (e.g. the cancel-subscription journey — the highest-volume save flow). Best-effort.
+  const catalog = await loadMechanismsCatalog(ticketId).catch(() => "");
+  return [base, cxBrief, catalog].filter(Boolean).join("\n\n");
+}
+
+/**
+ * The mechanisms catalog block: every ACTIVE journey / workflow / playbook in the ticket's
+ * workspace (channel-filtered where the mechanism scopes channels), with its identifier + when-to-use
+ * so Sol can commit `chosen_path='journey'|'workflow'|'playbook'` to a REAL, dispatchable target.
+ * Journeys are self-service CTA flows (cancel-subscription is the flagship — the save flow), workflows
+ * are guided smart flows (order tracking, account login), playbooks are multi-step negotiations
+ * (refund, cancel-with-save). Read-only; empty block on any miss (Sol falls back to stateless).
+ */
+async function loadMechanismsCatalog(ticketId: string): Promise<string> {
+  const { data: t } = await db
+    .from("tickets")
+    .select("workspace_id, channel")
+    .eq("id", ticketId)
+    .maybeSingle();
+  const wsId = t?.workspace_id as string | undefined;
+  if (!wsId) return "";
+  const channel = (t?.channel as string | null) || null;
+  const chanOk = (channels: unknown): boolean => {
+    if (!channel) return true;
+    const arr = Array.isArray(channels) ? (channels as string[]) : [];
+    if (!arr.length) return true;
+    return arr.some((c) => (c ?? "").toLowerCase() === channel.toLowerCase());
+  };
+  const [jRes, wRes, pRes] = await Promise.all([
+    db.from("journey_definitions").select("slug, name, description, trigger_intent, channels").eq("workspace_id", wsId).eq("is_active", true).order("priority", { ascending: false }),
+    db.from("workflows").select("trigger_tag, name, template, channels").eq("workspace_id", wsId).eq("enabled", true),
+    db.from("playbooks").select("slug, name, description").eq("workspace_id", wsId).eq("is_active", true).order("priority", { ascending: false }),
+  ]);
+  const journeys = ((jRes.data ?? []) as Array<{ slug: string; name: string; description: string | null; trigger_intent: string | null; channels: unknown }>).filter((j) => chanOk(j.channels));
+  const workflows = ((wRes.data ?? []) as Array<{ trigger_tag: string; name: string; template: string | null; channels: unknown }>).filter((w) => chanOk(w.channels));
+  const playbooks = (pRes.data ?? []) as Array<{ slug: string; name: string; description: string | null }>;
+  if (!journeys.length && !workflows.length && !playbooks.length) return "";
+  const lines: string[] = [
+    "--- MECHANISMS CATALOG (the journeys / workflows / playbooks you can route to — use the EXACT identifier) ---",
+    "Pick chosen_path='journey' + plan.journey_slug=<slug> for a self-service CTA flow · 'workflow' + plan.workflow_tag=<trigger_tag> for a guided smart flow · 'playbook' + plan.playbook_slug=<slug> for a multi-step negotiation. If none fits, use 'stateless'.",
+  ];
+  if (journeys.length) {
+    lines.push("\nJOURNEYS (chosen_path='journey', plan.journey_slug):");
+    for (const j of journeys) lines.push(`- ${j.slug} — ${j.name}${j.description ? `: ${j.description}` : ""}${j.trigger_intent ? ` [intent: ${j.trigger_intent}]` : ""}`);
+  }
+  if (workflows.length) {
+    lines.push("\nWORKFLOWS (chosen_path='workflow', plan.workflow_tag):");
+    for (const w of workflows) lines.push(`- ${w.trigger_tag} — ${w.name}`);
+  }
+  if (playbooks.length) {
+    lines.push("\nPLAYBOOKS (chosen_path='playbook', plan.playbook_slug):");
+    for (const p of playbooks) lines.push(`- ${p.slug} — ${p.name}${p.description ? `: ${p.description}` : ""}`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -10769,6 +10824,11 @@ async function runTicketHandleJob(job: Job) {
       // with an empty slug — the writer will fail the Direction otherwise, and the ticket
       // burns the box turn.
       `PLAYBOOK OR HONEST STATELESS. If you choose chosen_path='playbook' you MUST set plan.playbook_slug to a real, existing slug (get_playbook / grep docs/brain/playbooks/README.md to confirm). NEVER return chosen_path='playbook' with an empty, whitespace-only, or invented slug — the writer rejects the Direction and the ticket burns this box turn. If no playbook clearly matches the ask, choose chosen_path='stateless' (single stateless reply) or chosen_path='needs_info' (ask for the missing piece) — that is the honest path. Same rule as policy review: the presence of a bounded proxy (playbook exists) is what authorizes the path — absence means take a different path, never fake the authorization.`,
+      // Journeys + workflows — the self-service mechanisms Sol routes to. The MECHANISMS CATALOG block
+      // above lists every active journey (slug) / workflow (trigger_tag) / playbook (slug) for this
+      // workspace + channel. Cancel is the flagship: a "cancel my subscription" ask routes to the
+      // cancel-subscription JOURNEY (the save flow), NOT a stateless reply and NOT a raw cancel action.
+      `JOURNEYS & WORKFLOWS. Prefer a real mechanism from the MECHANISMS CATALOG over a bare stateless reply when the ask matches one. chosen_path='journey' + plan.journey_slug=<exact slug> for a self-service CTA flow — a cancellation request routes to the cancel-subscription journey (the save flow: it offers pause/discount before cancelling), never a plain "you're cancelled" reply and never a raw cancel. Your first_reply is the journey's LEAD-IN (a short, warm one-liner); the worker ships it WITH the clickable CTA button as ONE message — do NOT also describe or paste a link. chosen_path='workflow' + plan.workflow_tag=<exact trigger_tag> for a guided smart flow (order tracking, account login, etc.); the workflow drives the messages. The writer rejects an unknown/empty slug or tag (journey_slug_unknown / workflow_tag_unknown), same as playbook — if nothing in the catalog fits, use 'stateless'.`,
       // Sol cheap-execution (enqueue→worker-execute→poll→adapt). This SUPERSEDES the message-is-last
       // required_outcomes/honor-step model (eliminate-false-promises #1464): rather than DECLARE an
       // outcome and let a post-hoc honor step fire+verify it (which brittle-exact-match false-failed a
@@ -10787,7 +10847,7 @@ async function runTicketHandleJob(job: Job) {
       `NEVER-A-FALSE-PROMISE: every concrete outcome your first_reply claims (moved a date, issued a refund, applied a credit, cancelled, paused, added a bag, created a return/replacement) MUST correspond to an enqueue whose poll returned ok:true. If you didn't enqueue+confirm it, you may not claim it. There is NO required_outcomes field to emit — executing via the queue IS the proof.`,
       ``,
       `Final message = ONLY one JSON object:`,
-      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
+      `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|journey|workflow|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
       `  {"status":"needs_human","reason":"<one line>"}`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
@@ -10873,10 +10933,11 @@ async function runTicketHandleJob(job: Job) {
       const intent = typeof d.intent === "string" ? d.intent.trim() : "";
       const contextSummary = typeof d.context_summary === "string" ? d.context_summary.trim() : "";
       const chosenPath = typeof d.chosen_path === "string" ? d.chosen_path : "";
-      const validPath = chosenPath === "playbook" || chosenPath === "stateless" || chosenPath === "needs_info";
+      const validPath = chosenPath === "playbook" || chosenPath === "journey" || chosenPath === "workflow" || chosenPath === "stateless" || chosenPath === "needs_info";
       // Re-assert the write-time invariant before mutating (learning #1): every required field must be
-      // present + chosen_path must be one of the three enum values. A missing/typo'd field fails the
-      // partial-UNIQUE insert downstream anyway, but bailing here gives a clearer error trail.
+      // present + chosen_path must be one of the enum values (playbook/journey/workflow/stateless/needs_info).
+      // A missing/typo'd field fails the partial-UNIQUE insert downstream anyway, but bailing here gives a
+      // clearer error trail.
       if (!intent || !contextSummary || !validPath) {
         await update(job.id, {
           status: "failed",
@@ -11134,17 +11195,72 @@ async function runTicketHandleJob(job: Job) {
             const { data: t } = await db.from("tickets").select("channel").eq("id", ticketId).single();
             const channel = (t?.channel as string | null) || "email";
             let sendOk = false;
+            // Journeys + workflows are delivered through the SAME executeSonnetDecision front door
+            // Sonnet uses in production ([[tickets-mutate]] launchJourney / runWorkflow) — so Sol's
+            // opening ships as ONE message (the journey's lead-in + CTA button; the workflow's own
+            // first step), never Sol's plain reply PLUS the mechanism's message. Those mechanisms
+            // OWN their ticket status (a journey awaits the CTA click; a workflow closes/holds per
+            // its steps), so the box does NOT force-close over them (mechanismManagesStatus). Only
+            // Sol's DIRECT replies (stateless / needs_info / playbook opening) get the plain send +
+            // every-message-closes rule. The bait + claim guards above already ran on `firstReply`,
+            // so the journey lead-in / workflow preamble is policy-checked before it ships.
+            let mechanismManagesStatus = false;
             try {
-              const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
-              await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
-              sendOk = true;
+              if (chosenPath === "journey") {
+                const jSlug = typeof (plan as { journey_slug?: unknown }).journey_slug === "string"
+                  ? ((plan as { journey_slug: string }).journey_slug).trim()
+                  : "";
+                const ctaTextRaw = (plan as { cta_text?: unknown }).cta_text;
+                const ctaText = typeof ctaTextRaw === "string" && ctaTextRaw.trim() ? ctaTextRaw.trim() : undefined;
+                if (!jSlug) throw new Error("journey Direction missing plan.journey_slug");
+                const { launchJourney } = await import("../src/lib/tickets-mutate");
+                // NB: never pass subscriptionId for cancel — launchJourney's own contract. We pass
+                // neither sub nor order hint here; the journey resolves its own target.
+                const res = await launchJourney(db, {
+                  workspaceId, ticketId, journey: jSlug, leadIn: firstReply, ctaText,
+                });
+                sendOk = res.messageSent;
+                mechanismManagesStatus = true;
+                console.log(`${tag} journey '${jSlug}' launched: messageSent=${res.messageSent} statusManaged=${res.statusManaged}`);
+              } else if (chosenPath === "workflow") {
+                const wTag = typeof (plan as { workflow_tag?: unknown }).workflow_tag === "string"
+                  ? ((plan as { workflow_tag: string }).workflow_tag).trim()
+                  : "";
+                if (!wTag) throw new Error("workflow Direction missing plan.workflow_tag");
+                const { runWorkflow } = await import("../src/lib/tickets-mutate");
+                const res = await runWorkflow(db, { workspaceId, ticketId, workflow: wTag });
+                sendOk = res.messageSent || res.statusManaged;
+                mechanismManagesStatus = true;
+                console.log(`${tag} workflow '${wTag}' ran: messageSent=${res.messageSent} statusManaged=${res.statusManaged}`);
+              } else {
+                const { deliverTicketMessage } = await import("../src/lib/ticket-delivery");
+                await deliverTicketMessage(db, workspaceId, ticketId, channel, firstReply, false);
+                sendOk = true;
+              }
             } catch (e) {
-              // A failed send does NOT unwind the Direction — the direction is durable, the reply is the
-              // customer-facing side-effect. Surface the error in log_tail so it's grep-able but complete
-              // the job (the Direction is authored; a human can retry the reply from the Improve tab).
+              // A failed delivery does NOT unwind the Direction — the direction is durable, the
+              // reply/mechanism is the customer-facing side-effect. Surface for grep and complete the
+              // job (a human can retry from the Improve tab).
               const msg = e instanceof Error ? e.message : String(e);
-              console.warn(`${tag} first_reply send failed (Direction still authored): ${msg}`);
+              console.warn(`${tag} first-touch delivery failed (chosen_path=${chosenPath}; Direction still authored): ${msg}`);
             }
+            // The journey/workflow is now live on the ticket (its CTA / steps drive subsequent turns
+            // via its own state). SUPERSEDE the live Direction so the inbound handler's
+            // sol-direction-apply path does NOT re-launch it on the customer's next reply — its
+            // journey branch (unified-ticket-handler ~2224) has no already-active guard, so a live
+            // journey Direction would fire launchJourney a SECOND time. (Playbooks are safe: the
+            // sol-playbook-shortcircuit handles the reply off active_playbook_id and returns before
+            // the apply path — so we leave the playbook Direction live, unchanged.)
+            if (mechanismManagesStatus && sendOk) {
+              try {
+                const { superseDirection } = await import("../src/lib/ticket-directions");
+                await superseDirection(db, ticketId, { workspace_id: workspaceId });
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} superseDirection after ${chosenPath} launch failed: ${msg}`);
+              }
+            }
+
             // ── Founder directive (2026-07-09): ARM the chosen mechanism, then CLOSE ──
             // After Sol's opening reply ships, the box (a) arms the playbook Sol chose so it takes
             // over on the customer's NEXT reply (reply-gated, silent — armPlaybook sends nothing;
@@ -11184,17 +11300,22 @@ async function runTicketHandleJob(job: Job) {
               }
             }
 
-            const { classifySolBoxTurnAction, closeTicketOnResolvingReply } = await import(
-              "../src/lib/ticket-directions"
-            );
-            const solTurnAction = classifySolBoxTurnAction({ chosen_path: chosenPath, send_ok: sendOk });
-            if (solTurnAction === "message_sent") {
-              try {
-                await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
-              } catch (e) {
-                // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.
-                const msg = e instanceof Error ? e.message : String(e);
-                console.warn(`${tag} close-on-resolving-reply failed (reply already shipped): ${msg}`);
+            // Journey/workflow own their own status via executeSonnetDecision — don't force-close over
+            // the mechanism's lifecycle. Only Sol's DIRECT replies (stateless / needs_info / playbook)
+            // get the every-message-closes rule.
+            if (!mechanismManagesStatus) {
+              const { classifySolBoxTurnAction, closeTicketOnResolvingReply } = await import(
+                "../src/lib/ticket-directions"
+              );
+              const solTurnAction = classifySolBoxTurnAction({ chosen_path: chosenPath, send_ok: sendOk });
+              if (solTurnAction === "message_sent") {
+                try {
+                  await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
+                } catch (e) {
+                  // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.
+                  const msg = e instanceof Error ? e.message : String(e);
+                  console.warn(`${tag} close-on-resolving-reply failed (reply already shipped): ${msg}`);
+                }
               }
             }
           }

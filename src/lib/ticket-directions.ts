@@ -11,7 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 type Admin = SupabaseClient;
 
-export type TicketDirectionPath = "playbook" | "journey" | "stateless" | "needs_info";
+export type TicketDirectionPath = "playbook" | "journey" | "workflow" | "stateless" | "needs_info";
 
 /**
  * Shape Sol writes into `ticket_directions.plan` — path-specific but pinned so the writer can
@@ -35,6 +35,14 @@ export interface TicketDirectionPlan {
    * catalog row Phase 2 will `launchJourneyForTicket`, not a prose "click below" reference.
    */
   journey_slug?: string;
+  /**
+   * Present when `chosen_path='workflow'` — the `trigger_tag` of the [[../tables/workflows]] row Sol
+   * chose from the mechanisms catalog (workflows have no slug; `trigger_tag`, e.g. `smart:account_login`,
+   * is the stable identifier the executor resolves). Validated against an `enabled` workflow in this
+   * workspace before the row lands; cheap-execution APPLIES it via [[sol-direction-apply]] /
+   * [[tickets-mutate]] `runWorkflow`.
+   */
+  workflow_tag?: string;
   /** Present when `chosen_path='stateless'` — usually `"send_stateless_reply"`. */
   action?: string;
   /** Present when `chosen_path='needs_info'` — the concrete list of missing pieces to ask for. */
@@ -76,7 +84,10 @@ export class TicketDirectionPlanError extends Error {
     | "playbook_slug_not_string"
     | "journey_slug_missing"
     | "journey_slug_unknown"
-    | "journey_slug_not_string";
+    | "journey_slug_not_string"
+    | "workflow_tag_missing"
+    | "workflow_tag_unknown"
+    | "workflow_tag_not_string";
   readonly slug?: string;
   constructor(
     code: TicketDirectionPlanError["code"],
@@ -226,6 +237,40 @@ async function validatePlanForPath(
         "journey_slug_unknown",
         `plan.journey_slug='${rawSlug}' does not match any active journey in this workspace`,
         { slug: rawSlug },
+      );
+    }
+    return;
+  }
+  if (chosen_path === "workflow") {
+    // Workflows have no slug — the stable identifier is `trigger_tag` (e.g. `smart:account_login`),
+    // the same handle [[tickets-mutate]] `runWorkflow` resolves. Confirm it points at an `enabled`
+    // workflow in this workspace so the typed rejection fires HERE, not at the executor.
+    const rawTag = plan.workflow_tag;
+    if (rawTag === undefined || rawTag === null) {
+      throw new TicketDirectionPlanError(
+        "workflow_tag_missing",
+        "chosen_path='workflow' requires plan.workflow_tag",
+      );
+    }
+    if (typeof rawTag !== "string" || rawTag.trim().length === 0) {
+      throw new TicketDirectionPlanError(
+        "workflow_tag_not_string",
+        "plan.workflow_tag must be a non-empty, non-whitespace string — no workflow match means chosen_path='stateless', never 'workflow' with an empty tag",
+      );
+    }
+    const { data, error } = await admin
+      .from("workflows")
+      .select("id")
+      .eq("workspace_id", workspace_id)
+      .eq("trigger_tag", rawTag)
+      .eq("enabled", true)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      throw new TicketDirectionPlanError(
+        "workflow_tag_unknown",
+        `plan.workflow_tag='${rawTag}' does not match any enabled workflow in this workspace`,
+        { slug: rawTag },
       );
     }
     return;
