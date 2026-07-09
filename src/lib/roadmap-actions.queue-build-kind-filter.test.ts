@@ -1,13 +1,21 @@
 /**
- * fix-queue-roadmap-build-kind-filter Phase 1 — the existing-job guard inside `queueRoadmapBuild`
- * must filter by `kind='build'`. Pins the named failing state from the spec: a live Mario job
- * (kind='mario', status='building') for slug X, and no live BUILD for X, must NOT be treated as
- * the existing active build — the fresh enqueue must fall through and insert a NEW kind='build'
- * row. Otherwise Mario's reclaim_and_redrive coalesces into the very job that is INVOKING it and
- * the reclaim silently drops (the sol-reads-moved ~19h stall).
+ * fix-queue-roadmap-build-kind-filter Phase 1 + Phase 2.
+ *
+ * Phase 1 — the existing-job guard inside `queueRoadmapBuild` must filter by `kind='build'`. Pins
+ * the named failing state from the spec: a live Mario job (kind='mario', status='building') for
+ * slug X, and no live BUILD for X, must NOT be treated as the existing active build — the fresh
+ * enqueue must fall through and insert a NEW kind='build' row. Otherwise Mario's
+ * `reclaim_and_redrive` coalesces into the very job that is INVOKING it and the reclaim silently
+ * drops (the sol-reads-moved ~19h stall).
+ *
+ * Phase 2 — regression test at the Mario boundary. `reclaimAndRedrive(admin, W, X)` from a live
+ * Mario job actually enqueues a fresh kind='build' row (positive), and NEVER double-inserts when
+ * a live build is already present (negative). This is the boundary the Phase-1 filter unblocks —
+ * without the filter, reclaimAndRedrive was a no-op that returned {alreadyActive:true} on the
+ * Mario job it was invoked FROM.
  *
  * Stubs the Supabase admin client + the brain-roadmap + specs-table dependencies via Node's
- * module cache BEFORE dynamic-importing roadmap-actions.
+ * module cache BEFORE dynamic-importing roadmap-actions + mario.
  *
  * Run:
  *   npx tsx --test src/lib/roadmap-actions.queue-build-kind-filter.test.ts
@@ -64,8 +72,13 @@ function makeFrom(table: string): QueryBuilder {
 
   function resolve(): unknown[] {
     if (table === "workspace_members") {
+      // assertOwner reads (workspace_id, user_id) → returns { role: 'owner' }.
       if (filters.workspace_id === WORKSPACE_ID && filters.user_id === OWNER_ID) {
         return [{ role: "owner" }];
+      }
+      // reclaimAndRedrive reads (workspace_id, role='owner') → returns { user_id }.
+      if (filters.workspace_id === WORKSPACE_ID && filters.role === "owner") {
+        return [{ user_id: OWNER_ID }];
       }
       return [];
     }
@@ -171,6 +184,8 @@ moduleAny._cache[require.resolve("@/lib/specs-table")] = {
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { queueRoadmapBuild } = require("@/lib/roadmap-actions") as typeof import("./roadmap-actions");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { reclaimAndRedrive } = require("@/lib/mario") as typeof import("./mario");
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -236,4 +251,51 @@ test("unchanged: a live kind='build' + instructions still enqueues a distinct fo
   assert.equal(result.queuedBehindActive, true, "the new instructions carve a follow-up build — unchanged behavior");
   const builds = world.agentJobs.filter((r) => r.kind === "build");
   assert.equal(builds.length, 2, "the follow-up build was inserted alongside the live one");
+});
+
+// ── Phase 2: Mario boundary — reclaim_and_redrive INTO queueRoadmapBuild ─────
+
+test("mario boundary — positive: reclaimAndRedrive with a live Mario job and NO build inserts a queued kind='build' row", async () => {
+  resetWorld();
+  // The named failing state: the mario_fixed director_activity fired reclaim_and_redrive from
+  // the RUNNING Mario job itself. Under the pre-fix guard, queueRoadmapBuild matched that Mario
+  // row and returned {alreadyActive:true} — a silent no-op. Under the Phase-1 fix, the guard is
+  // scoped to kind='build' so this Mario row is invisible and a fresh build lands.
+  world.agentJobs.push({
+    id: "mario-1",
+    workspace_id: WORKSPACE_ID,
+    spec_slug: SPEC_SLUG,
+    kind: "mario",
+    status: "building",
+    created_at: "2026-07-09T12:00:00Z",
+  });
+
+  await reclaimAndRedrive(stubAdmin as never, WORKSPACE_ID, SPEC_SLUG);
+
+  const builds = world.agentJobs.filter((r) => r.kind === "build");
+  assert.equal(builds.length, 1, "reclaimAndRedrive must insert exactly one fresh build row");
+  assert.equal(builds[0].workspace_id, WORKSPACE_ID);
+  assert.equal(builds[0].spec_slug, SPEC_SLUG);
+  assert.equal(builds[0].status, "queued", "the reclaim's fresh build lands as queued");
+  assert.equal(builds[0].created_by, OWNER_ID, "queueRoadmapBuild attributes the enqueue to the workspace owner");
+});
+
+test("mario boundary — negative: reclaimAndRedrive with a live BUILD already present does NOT double-insert", async () => {
+  // The coalesce still fires for the legit case — a build IS live, so reclaim rides it and does
+  // not carve a second row. This is unchanged Phase-1 behavior (the `alreadyActive` branch).
+  resetWorld();
+  world.agentJobs.push({
+    id: "build-1",
+    workspace_id: WORKSPACE_ID,
+    spec_slug: SPEC_SLUG,
+    kind: "build",
+    status: "building",
+    created_at: "2026-07-09T12:00:00Z",
+  });
+
+  await reclaimAndRedrive(stubAdmin as never, WORKSPACE_ID, SPEC_SLUG);
+
+  const builds = world.agentJobs.filter((r) => r.kind === "build");
+  assert.equal(builds.length, 1, "no second build row was inserted — the live build coalesces the reclaim");
+  assert.equal(builds[0].id, "build-1", "the pre-existing live build row is preserved as-is");
 });
