@@ -174,6 +174,10 @@ export interface RefundOrderResult {
   // Set to true when the wrapper returned early from a `dryRun`
   // preview — no SDK call was made, no side effects occurred.
   dryRun?: boolean;
+  // Set to true when a refund is already in flight on the order (a pending
+  // gateway refund, e.g. PayPal settling over a few days). No new refund was
+  // issued — the caller should surface "already processing", not a hard error.
+  alreadyPending?: boolean;
 }
 
 export async function refundOrder(
@@ -290,6 +294,7 @@ export async function refundOrder(
         method: (r.method as RefundMethod | undefined) ?? "shopify",
         error: r.error,
         needsManualShopifyRecord: r.needsManualShopifyRecord,
+        alreadyPending: r.alreadyPending,
       };
     }
   }

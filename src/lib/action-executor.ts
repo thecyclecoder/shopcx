@@ -194,6 +194,11 @@ export interface ActionResult {
   carrier?: string;
   refundAmountCents?: number;
   couponCode?: string;
+  // Set by refund handlers when a refund is already in flight on the order
+  // (a pending gateway refund, e.g. PayPal settling over a few business
+  // days). success stays false — no new money moved — but this is a benign
+  // "already processing" state, NOT a hard failure to escalate on.
+  alreadyPending?: boolean;
 }
 
 /**
@@ -1632,7 +1637,12 @@ export const directActionHandlers: Record<
     return {
       success: r.success,
       error: r.error,
-      summary: r.success ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}` : undefined,
+      alreadyPending: r.alreadyPending,
+      summary: r.success
+        ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}`
+        : r.alreadyPending
+          ? `Refund already in progress on this order — ${r.error}`
+          : undefined,
       // Drives {{refund_amount}} substitution in response_message. Without
       // this, the placeholder leaked through verbatim — see ticket
       // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund.
