@@ -11,6 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  classifyShaDirectionLocal,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
@@ -349,7 +350,7 @@ test("evalWorker stays GREEN with update-deferred status when behind+idle but qu
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker(), 3, false);
+    const result = evalWorker(workerLoop, idleBehindWorker(), 3, false, "worker-behind");
     assert.equal(result.color, "green");
     assert.equal(result.violation, null);
     assert.match(result.statusText, /update deferred · 3 queued/);
@@ -368,7 +369,7 @@ test("evalWorker flips RED at shaGrace when behind+idle and queue is empty (no d
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false);
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false, "worker-behind");
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "liveness");
     assert.match(result.statusText, /behind origin\/main/);
@@ -387,7 +388,7 @@ test("evalWorker flips RED at shaGrace under a MANUAL drain regardless of queued
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker(), 5, true);
+    const result = evalWorker(workerLoop, idleBehindWorker(), 5, true, "worker-behind");
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "liveness");
     assert.match(result.violation!.detail, /manual drain set/);
@@ -405,10 +406,92 @@ test("evalWorker still flags behind+busy as GREEN (existing behavior — never i
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker({ active_builds: 2 }), 0, false);
+    const result = evalWorker(workerLoop, idleBehindWorker({ active_builds: 2 }), 0, false, "worker-behind");
     assert.equal(result.color, "green");
     assert.equal(result.violation, null);
     assert.match(result.statusText, /building — update deferred/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+// ─── SHA-direction gate (control-tower-box-sha-direction-check) ───
+// A plain string mismatch can't distinguish "worker on stale code" from "worker on newer main
+// but Vercel deploy still lags." The originating false page (signal loop:box, verdict
+// monitor-false-positive): worker was running 6f43ec9e0 while VERCEL_GIT_COMMIT_SHA pointed at the
+// ancestor b3934ff — worker-AHEAD, healthy. evalWorker must red ONLY on a CONFIRMED worker-behind.
+
+test("classifyShaDirectionLocal returns 'same' when SHAs are prefix-equal or identical", () => {
+  assert.equal(classifyShaDirectionLocal("6f43ec9e0abc123", "6f43ec9e0"), "same");
+  assert.equal(classifyShaDirectionLocal("6f43ec9e0", "6f43ec9e0abc123"), "same");
+  assert.equal(classifyShaDirectionLocal("abc", "abc"), "same");
+});
+
+test("classifyShaDirectionLocal returns 'unknown' when either SHA is empty or they don't share a prefix", () => {
+  assert.equal(classifyShaDirectionLocal("", "abc"), "unknown");
+  assert.equal(classifyShaDirectionLocal("abc", ""), "unknown");
+  assert.equal(classifyShaDirectionLocal("", ""), "unknown");
+  // Non-prefix pairs are "unknown" locally — direction must be resolved by the GitHub compare API.
+  assert.equal(classifyShaDirectionLocal("6f43ec9e0", "b3934ff37"), "unknown");
+});
+
+test("evalWorker stays GREEN on worker-AHEAD (Vercel deploy lag) — the originating false page", () => {
+  // Deployed ancestor SHA (Vercel still on the previous commit), worker on the newer main head.
+  // Prior code compared strings and reddened; the fix returns GREEN with a "deploy lag" note.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "b3934ff37000000";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(
+      workerLoop,
+      idleBehindWorker({ running_sha: "6f43ec9e0" }),
+      0,
+      false,
+      "worker-ahead",
+    );
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /deploy lag/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker stays GREEN on UNKNOWN direction (compare API blip / diverged / missing token)", () => {
+  // Empty queue + past shaGrace: under the old prefix check this would already be RED (behind).
+  // The new gate refuses to red on an ambiguous compare — same conservative posture as
+  // deployAgeMs==null in evalCron. A confirmed worker-behind still reds (see test above).
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false, "unknown");
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.doesNotMatch(result.statusText, /behind origin\/main/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker stays GREEN on SAME direction (identical or prefix-equal SHAs)", () => {
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "aaaaaaa";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false, "same");
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /healthy · aaaaaaa/);
   } finally {
     Date.now = realNow;
     if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
