@@ -543,7 +543,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier" | "propose_policy_activation";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier" | "propose_policy_activation" | "reclaim_stuck_build";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -8345,6 +8345,13 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
         const r = await gh("PUT", `/repos/${REPO}/pulls/${job.pr_number}/merge`, { merge_method: "squash" });
         a.status = r.ok ? "done" : "failed";
         a.result = r.ok ? "merged" : `merge failed ${r.status}`;
+      } else if (a.type === "reclaim_stuck_build") {
+        // Mario→Ada escalation approved. THIS job IS a fresh `build` for the stuck spec (no session), so the
+        // resume that follows executeApprovedActions rebuilds it on current main → clean branch → clean merge.
+        // The action carries no command — approving it is Ada's review-and-merge decision; the build is the
+        // reclaim. Mark done so the resume proceeds to build.
+        a.status = "done";
+        a.result = "approved — resuming a fresh build for the stuck spec (rebases onto main → clean merge)";
       } else if (a.cmd) {
         const r = await runApprovedAction(a, cwd, 10 * 60 * 1000);
         a.status = r.code === 0 ? "done" : "failed";
