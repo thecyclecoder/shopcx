@@ -16,7 +16,7 @@ _None._
 
 ## API endpoints called
 
-- `/api/workspaces/:x/analytics/dunning`
+- `/api/workspaces/:x/analytics/dunning` — backed by [[../libraries/analytics-tile-rpcs]] `dunning_cycle_status_counts` RPC
 
 ## Permissions
 

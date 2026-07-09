@@ -4,6 +4,11 @@ Synced from Shopify. line_items, fulfillments, financial/fulfillment status, att
 
 **Primary key:** `id`
 
+## RPC aggregations
+
+Server-side RPCs for list queries + late-tracking + cart recovery:
+- [[../libraries/order-aggregation-rpcs]] — `orders_late_tracking` (SLA-filtered paginated list), `order_source_counts` (per-source rollup), `order_times_by_email` (cart-recovery post-reminder-purchase test, replaces paging loop truncation bug)
+
 ## Columns
 
 | Column | Type | Nullable | Notes |

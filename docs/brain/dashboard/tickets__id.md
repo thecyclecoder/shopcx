@@ -75,6 +75,10 @@ The sidebar renders multiple cards stacked vertically. Each is independently exp
 - Other tabs + sidebar: any role that can see tickets (owner / admin / agent / social).
 - Mutation buttons in sidebar respect role (e.g. only owner / admin can force-cancel a subscription on someone else's customer).
 
+## APIs and aggregations
+
+The ticket detail route `src/app/api/tickets/[id]/route.ts` calls [[../libraries/detail-view-rpcs]] for customer enrichment — `resolve_customer_link_group` (customer link expansion) and `ticket_users` (per-author display names) — to collapse the round-trip fan-out.
+
 ## Related
 
 [[../lifecycles/ticket-lifecycle]] · [[../lifecycles/ai-multi-turn]] · [[../lifecycles/research-and-heal]] · [[../orchestrator-tools]] · [[../customer-voice]] · [[../tables/tickets]] · [[../tables/ticket_messages]] · [[../tables/ticket_analyses]] · [[../tables/customer_events]] · [[tickets]]
