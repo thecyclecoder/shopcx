@@ -652,6 +652,25 @@ function isEscortableGoal(goal: GoalCard, specBySlug: Map<string, SpecCard>): bo
 }
 
 /**
+ * escort-drives-all-greenlit-goals-not-just-platform-owned — the ONE selection helper both the primary
+ * escort (`escortApprovedGoals`) and the backstop reconcile sweep (`reconcileReadyGoalMembers`) share so
+ * the two decision paths can never contradict each other. **Owner-agnostic** by design: Platform is the
+ * universal builder (CEO directive — every department's specs land through the same claude/build-* →
+ * agent_jobs → merge chain Platform owns), so the escort must drive every greenlit goal regardless of
+ * `goal.owner`. Removing the owner filter is the ACTUAL cause of the 2026-07-08 autonomous-media-buyer-
+ * supervision stall: even after the per-spec readiness fixes (blocker-cleared, durable-vale-stamp) landed,
+ * the growth-owned goal never entered the escort loop at all because `owner !== "platform"` was silently
+ * excluding it. Pure — no I/O — so the regression fixture pins the exact "non-platform-owned goal is in
+ * the escort set" case without a Supabase seam.
+ */
+export function selectEscortableGoals(
+  goals: GoalCard[],
+  specBySlug: Map<string, SpecCard>,
+): GoalCard[] {
+  return goals.filter((g) => isEscortableGoal(g, specBySlug));
+}
+
+/**
  * escort-reliably-dispatches-ready-goal-members Phase 2 — the PURE readiness predicate the async
  * `reconcileReadyGoalMembers` backstop sweep applies to every approved-goal member before it queues a build.
  * Kept PURE (no DB seam) so the "ready but undispatched → queue exactly one" decision is testable without a
@@ -710,10 +729,18 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   if (!workspaceId) return { goals: [], queued: [], escalated: [] };
 
   const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
-  const mine = goals.filter((g) => g.owner === PLATFORM);
 
   const specBySlug = new Map(specs.map((s) => [s.slug, s]));
 
+  // escort-drives-all-greenlit-goals-not-just-platform-owned: Platform is the UNIVERSAL builder (CEO
+  // directive — every department's specs land through the same claude/build-* → agent_jobs → merge chain
+  // Platform owns). The escort MUST drive every greenlit goal regardless of `owner`, or a growth-owned
+  // (or CS-owned, etc.) goal with ready specs sits forever — the exact stall the autonomous-media-buyer-
+  // supervision incident hit even after the per-spec readiness fixes (blocker-cleared, durable-vale-stamp)
+  // landed. Every downstream guard (specReviewDone via vale_review_passed_at, blocker-cleared per
+  // [[../spec-phase-provenance]], loop-guard, build-gate) is intact — only the goal-OWNER restriction
+  // is removed.
+  //
   // director-proposed-goals (Phase 1) + goal-escort-ready-at-0pct: the goal's lifecycle state — not `pct > 0` —
   // decides escortability.
   //   - `proposed` → awaits the CEO via its OWN Approval Request (the proposed-goal job). The escort does NOT
@@ -729,7 +756,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   // is now an explicit, self-surfacing artifact and a greenlit 0% goal is either awaiting-Pia (no specs yet)
   // or ready-to-build (decomposed) — the escort distinguishes the two by whether ≥1 spec is buildable.
 
-  const owned = mine.filter((g) => isEscortableGoal(g, specBySlug));
+  const owned = selectEscortableGoals(goals, specBySlug);
   if (!owned.length) return { goals: [], queued: [], escalated: [] };
 
   // Build-gate (director-executable-plans-and-priority): if an active directive gates builds until a spec
@@ -884,10 +911,13 @@ export async function reconcileReadyGoalMembers(admin: Admin): Promise<ReadyReco
   if (!workspaceId) return { scanned: 0, reconciled: [] };
 
   const [goals, { specs }] = await Promise.all([getGoals(), getRoadmap()]);
-  const mine = goals.filter((g) => g.owner === PLATFORM);
   const specBySlug = new Map(specs.map((s) => [s.slug, s]));
 
-  const owned = mine.filter((g) => isEscortableGoal(g, specBySlug));
+  // escort-drives-all-greenlit-goals-not-just-platform-owned: same broadening the primary escort uses —
+  // Platform builds every department's specs, so the backstop reconcile MUST sweep every greenlit goal's
+  // members, not only Platform-owned ones. Shares `selectEscortableGoals` with the primary lane so the two
+  // decision paths keep reading the same guards.
+  const owned = selectEscortableGoals(goals, specBySlug);
   if (!owned.length) return { scanned: 0, reconciled: [] };
 
   const reconciled: ReadyReconcileEntry[] = [];
