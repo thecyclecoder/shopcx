@@ -34,9 +34,15 @@ Files a `kind='mario'` [[../tables/agent_jobs]] row for a candidate, gated on "n
 Contract (from the spec):
 - **SELECT first.** `.eq('workspace_id', ...).eq('kind', 'mario').eq('spec_slug', ...).in('status', ACTIVE_STATUSES)` — the workspace + spec + active-status filter proves the row belongs to THIS spec (never a cross-workspace slug collision).
 - **If a row exists** → return `{ enqueued: false, reason: 'active_mario_exists' }` (no insert).
+- **Re-fire COOLDOWN** (`MARIO_REFIRE_COOLDOWN_MS`, 60 min) → return `{ enqueued: false, reason: 'refire_cooldown' }`. The active-mario dedupe only blocks a CONCURRENT job; the moment a mario job completes with an escalate (or a fix that didn't clear the stall), the stall persists and the next ~1-min sweep re-enqueues — a per-minute Max-session burn on the same spec that the `mario_fixed` loop-guard never catches (escalations are `mario_fired`, not `mario_fixed`). The cooldown suppresses a re-fire when a `mario_fired` row for this spec landed within the window, so Mario looks at a still-stalled spec at most once per hour.
 - **Else INSERT.** `agent_jobs { workspace_id, kind: 'mario', status: 'queued', spec_slug, instructions: JSON.stringify(candidate.brief) }`. Returns `{ enqueued: true, job_id }`.
 
 This is app-layer dedupe (SELECT-then-INSERT). Safe under the once-per-minute cron because at most one tick evaluates a given spec at a time. A cross-cron race would insert a second row; M4's own claim step is designed to no-op on that (first-claim-wins).
+
+## Self-service + escalation (applyBoxMario)
+
+- **`reclaim_and_redrive` live-fix** — the built-but-unmerged class (a spec spec-test-approved + security-clean but whose latest build is `failed`/orphaned and never merged). Enqueues a FRESH build via owner-gated `queueRoadmapBuild` (rebases onto current `main` → clean branch → clean merge). Lets Mario self-service reviewing+merging a green PR instead of escalating — routine platform work, not a CEO decision. The worker's `ensureWorktreeSlotFree` frees a `BUILDS_DIR`-pinned branch first; the ephemeral `/tmp`-pinned edge is the `builder-worktree-self-heal` fix-spec.
+- **Escalate → Ada.** When Mario escalates AND applied no live fix, `applyBoxMario` writes a `dashboard_notifications` card `routed_to_function='platform'` (deduped one-per-spec) so a genuine "beyond me" call reaches his supervisor Ada — never a dead audit row, never the CEO for routine platform work. Recorded as `mario_fired.metadata.escalated_to_ada`.
 
 ### Types
 

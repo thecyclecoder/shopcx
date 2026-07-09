@@ -99,6 +99,10 @@ export const ACTIVE_MARIO_STATUSES: ReadonlySet<string> = new Set(ACTIVE_STATUSE
 
 const BRIEF_EVENT_LIMIT = 10;
 
+/** Re-fire cooldown (see the guard in `enqueueMarioJob`): Mario looks at a still-stalled spec at most once
+ *  per hour, so an escalate / didn't-take fix can't spin the cron into a per-minute Max-session burn. */
+const MARIO_REFIRE_COOLDOWN_MS = 60 * 60 * 1000;
+
 /**
  * Read every (from_event, to_event) threshold row for a workspace. The evaluator
  * makes one `listStalledCandidates` scan per row.
@@ -394,6 +398,25 @@ export async function enqueueMarioJob(
   if (selectErr) throw selectErr;
   if (existing) return { enqueued: false, reason: "active_mario_exists" };
 
+  // Re-fire COOLDOWN. The active-mario dedupe above only blocks a CONCURRENT job — the moment a mario job
+  // COMPLETES with an escalate (or a fix that didn't clear the stall), the underlying stall persists, so
+  // the next ~1-min cron sweep re-enqueues, and Mario burns a Max session investigating the SAME spec every
+  // minute forever (an escalate loop the `mario_fixed` loop-guard never catches, because escalations are
+  // `mario_fired`, not `mario_fixed`). Suppress a re-fire when Mario ALREADY fired on this spec within the
+  // cooldown window: if it's still stalled an hour later, one look per hour is plenty; a live-fix that
+  // actually cleared it removes the spec from the candidate set anyway, so the cooldown only bites the
+  // unresolved (escalated / fix-didn't-take) case — exactly the loop we want to break.
+  const cooldownSince = new Date(Date.now() - MARIO_REFIRE_COOLDOWN_MS).toISOString();
+  const { data: recentFire } = await admin
+    .from("director_activity")
+    .select("id")
+    .eq("workspace_id", candidate.workspace_id)
+    .eq("spec_slug", candidate.spec_slug)
+    .eq("action_kind", "mario_fired")
+    .gte("created_at", cooldownSince)
+    .limit(1);
+  if (recentFire && recentFire.length > 0) return { enqueued: false, reason: "refire_cooldown" };
+
   const { data: inserted, error: insertErr } = await admin
     .from("agent_jobs")
     .insert({
@@ -443,7 +466,7 @@ const MARIO_ACTOR = "mario";
 
 /** One non-destructive live fix in the M4 vocabulary — the exact action key + its target. */
 export interface MarioLiveFix {
-  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | ...open slot. */
+  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | ...open slot. */
   action: string;
   /** The specific row/slug/box the action mutates — Phase 3 helpers each read exactly one field. */
   target: { spec_slug?: string; job_id?: string; box_id?: string };
@@ -722,6 +745,27 @@ async function queueBoxRestart(admin: Admin, boxId: string): Promise<void> {
   if (error) throw new Error(`queue_box_restart: ${error.message}`);
 }
 
+/** `reclaim_and_redrive` — unstick a spec whose LATEST build FAILED/orphaned (the built-but-unmerged class:
+ *  a build orphaned by a worker restart, or one left on a stale/conflicting branch). Unlike the status-flip
+ *  actions above, a `failed` build has NO in-flight row to flip — this enqueues a FRESH build, which rebases
+ *  onto current `main` → a clean, non-conflicting branch → a clean merge. The worker's own worktree
+ *  self-heal (`ensureWorktreeSlotFree`) frees a `BUILDS_DIR`-pinned branch before the rebuild; the narrower
+ *  ephemeral `/tmp`-pinned case is handled by the `builder-worktree-self-heal` fix-spec. Routes through the
+ *  sanctioned `queueRoadmapBuild` (owner-gated) so every blocker / active-build / review guard still applies. */
+async function reclaimAndRedrive(admin: Admin, workspaceId: string, specSlug: string): Promise<void> {
+  const { data: owner, error: ownerErr } = await admin
+    .from("workspace_members")
+    .select("user_id")
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .maybeSingle();
+  if (ownerErr) throw new Error(`reclaim_and_redrive: owner lookup failed: ${ownerErr.message}`);
+  if (!owner) throw new Error("reclaim_and_redrive: no workspace owner");
+  const { queueRoadmapBuild } = await import("@/lib/roadmap-actions");
+  const res = await queueRoadmapBuild(workspaceId, (owner as { user_id: string }).user_id, { slug: specSlug });
+  if (!res.ok) throw new Error(`reclaim_and_redrive: queueRoadmapBuild: ${res.error}`);
+}
+
 /** Widen the SLA row for `(workspace_id, from_event, to_event)` and stamp `last_widened_at` + reason.
  *  Compare-and-set on the (workspace, pair) unique key so a cross-workspace slug collision can't cross-write. */
 async function widenMarioThreshold(
@@ -783,6 +827,37 @@ async function authorMarioFixSpec(
     "planned",
     { intendedStatusSetBy: "mario", parentKind: "mandate", parentRef: `${MARIO_DIRECTOR_FUNCTION}#${MARIO_FIX_MANDATE_SLUG}` },
   );
+}
+
+/** Route a genuine Mario escalation to ADA (the platform director) — a REAL dashboard surface, not a dead
+ *  audit row, and NEVER the CEO for routine platform work (reviewing/merging a green PR, reclaiming a stuck
+ *  build). Deduped: at most one open card per spec, so a repeated escalation can't fan out. Best-effort. */
+async function surfaceMarioEscalationToAda(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string,
+  reasoning: string,
+  jobId: string,
+): Promise<boolean> {
+  const dedupeKey = `mario-escalation:${specSlug}`;
+  const { data: existing } = await admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("metadata->>dedupe_key", dedupeKey)
+    .eq("dismissed", false)
+    .maybeSingle();
+  if (existing) return false;
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: workspaceId,
+    type: "agent_approval_request",
+    title: `Mario → Ada: ${specSlug}`,
+    body: `🔧 Mario hit a stall he can't plumb himself and is escalating to Ada (platform), not the CEO: ${reasoning}`.slice(0, 2000),
+    link: `/dashboard/roadmap/${specSlug}`,
+    metadata: { routed_to_function: MARIO_DIRECTOR_FUNCTION, escalation_kind: "mario_stall", dedupe_key: dedupeKey, spec_slug: specSlug, job_id: jobId, autonomous: true },
+  });
+  if (error) throw new Error(error.message);
+  return true;
 }
 
 /**
@@ -881,6 +956,10 @@ export async function applyBoxMario(
             fixExecuted = true;
             break;
           }
+          case "reclaim_and_redrive":
+            await reclaimAndRedrive(admin, row.workspace_id, lf.target.spec_slug ?? row.spec_slug);
+            fixExecuted = true;
+            break;
           default:
             fixReason = `unknown action: ${lf.action}`;
         }
@@ -941,6 +1020,20 @@ export async function applyBoxMario(
       }
     }
 
+    // Escalation → ADA. When Mario escalates AND applied no live fix (a real "beyond me" call — e.g. a
+    // green PR that needs a review-and-merge decision, a spec wedged in a way outside his vocabulary),
+    // surface it to Ada (platform), NOT the CEO and NOT a dead audit row. Now that `reclaim_and_redrive`
+    // lets him self-service the built-but-unmerged class, a true escalation is rare — but when it happens
+    // it reaches his supervisor.
+    let escalatedToAda = false;
+    if (verdict.escalate && !fixExecuted && mode === "live") {
+      try {
+        escalatedToAda = await surfaceMarioEscalationToAda(admin, row.workspace_id, row.spec_slug, verdict.reasoning ?? "", jobId);
+      } catch (e) {
+        console.warn("[mario] escalate-to-Ada surface failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
     // Trigger-accuracy record — the query `mario_fired.metadata->>'trigger_accurate'` powers the
     // Phase-4 accuracy dashboard. Emitted on EVERY invocation regardless of mode.
     const { recordDirectorActivity } = await import("@/lib/director-activity");
@@ -958,6 +1051,7 @@ export async function applyBoxMario(
         durable_fix_spec_slug: verdict.durable_fix_spec?.slug ?? null,
         threshold_adjustment: verdict.threshold_adjustment ?? null,
         escalate: verdict.escalate,
+        escalated_to_ada: escalatedToAda,
         job_id: jobId,
         mode,
         fix_executed: fixExecuted,
