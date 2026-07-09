@@ -22,9 +22,11 @@ totals (a profile in a 3-account [[../tables/customer_links]] group sees the com
 
 Both functions aggregate SERVER-SIDE in `public.get_customer_stats_batch` (migration
 `20260708130000_customer_stats_batch_rpc.sql`), which joins `orders` to each input's
-`customer_links` group and returns finished scalars. It also ships the reusable
-`public.resolve_customer_link_group(p_customer_id uuid) → setof uuid` group-expansion primitive
+`customer_links` group and returns finished scalars. It also shipped the reusable
+`public.resolve_customer_link_group(p_customer_id uuid)` group-expansion primitive
 (customer-timeline and the storefront LTV proxy re-implement the same expansion in JS — converge them here).
+
+**Regression note (2026-07-09, migration `20261005180000_customer_stats_batch_rpc_unnest_link_group.sql`):** Phase 5 of the aggregation-layer RPC-ification redefined `resolve_customer_link_group` to return `uuid[]` (a scalar array) instead of `setof uuid`. `get_customer_stats_batch`'s `expanded` CTE now `cross join lateral unnest(public.resolve_customer_link_group(i.cid))` — the array is adapted back into a set of rows before the orders join, so `orders.customer_id = e.order_customer_id` is uuid=uuid again. Fixes Control Tower signature `vercel:348fa052bf4dc7e4` (`operator does not exist: uuid = uuid[]` — every ticket-detail hit 500ing). Aggregation semantics are byte-identical.
 
 **Why the RPC:** the previous JS did one unbounded `.from('orders').select(...).in('customer_id', [...])`
 then summed in JS. That read silently truncated at Supabase's **1000-row PostgREST cap**, so the
