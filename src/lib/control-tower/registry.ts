@@ -524,6 +524,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-5-min crons (window ~20 min) ─
   { id: "today-sync", kind: "cron", owner: "growth", label: "Today sync (Amazon + Meta)", description: "Keeps today's Amazon + Meta spend/order snapshots fresh.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
   { id: "ticket-unsnooze", kind: "cron", owner: "cs", label: "Ticket unsnooze", description: "Wakes snoozed tickets whose snooze window has passed.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  {
+    id: "received-sms-rollup-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "received-sms-rollup-cron",
+    description: "Auto-proposed monitored loop for the received-sms-rollup-cron cron (every 5 min (*/5 * * * *)). **REQUIRES OWNER CONFIRMATION** — inferOwner could not classify this loop id; the `owner: 'platform'` value below is a placeholder, NOT a confident guess. Set the true owner-function (growth / cs / retention / cmo / platform) before merging.",
+    expectedCadence: "every 5 min (*/5 * * * *)",
+    livenessWindowMs: 20 * MIN,
+  },
   // ─ Every-10-min crons (window ~40 min) ─
   { id: "abandoned-cart-reminder", kind: "cron", owner: "cmo", label: "Abandoned-cart reminder", description: "Sends abandoned-cart reminder sends on the rolling schedule.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * MIN },
   // ─ Every-15-min crons (window ~45 min) ─
