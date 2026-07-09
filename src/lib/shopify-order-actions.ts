@@ -41,6 +41,39 @@ function toGid(numericId: string, type: string): string {
 
 // ── Partial Refund by Amount ──
 
+/**
+ * A minimal shape of a Shopify order transaction, enough to reason about
+ * an in-flight refund. Exported for the pure `findPendingRefundTxn` helper's test.
+ */
+export interface ShopifyTxnLite {
+  id?: number | string;
+  kind?: string;
+  status?: string;
+  gateway?: string;
+  amount?: string;
+}
+
+/**
+ * Detect a refund transaction that's already in flight on the order — a `kind:'refund'`
+ * transaction whose gateway status is still `pending` (PayPal, and other async gateways,
+ * settle a refund over a few business days, so the refund exists but hasn't landed yet).
+ *
+ * Amy / SC133495 (2026-07): a $67.81 PayPal refund sat `pending` for a day; a second
+ * refund attempt hit Shopify's `{"base":["Transaction cannot be refunded"]}` — the balance
+ * was already fully allocated (sale − settled refund − pending refund = $0) — which the box
+ * surfaced as a cryptic hard-failure escalation. Detecting the pending refund lets the caller
+ * report "already processing" honestly instead of firing a duplicate Shopify won't accept.
+ *
+ * Returns the first pending refund txn (any positive amount — we never issue a second refund
+ * while one is settling; the balance math is the gateway's job and it will reject us anyway),
+ * or null when none is in flight.
+ */
+export function findPendingRefundTxn(transactions: ShopifyTxnLite[] | undefined | null): ShopifyTxnLite | null {
+  return (transactions || []).find(
+    (t) => t?.kind === "refund" && String(t?.status).toLowerCase() === "pending",
+  ) ?? null;
+}
+
 // INTERNAL — call via `refundOrder` from `@/lib/refund`.
 //
 // Fires the Shopify REST `POST /orders/{id}/refunds` mutation.
@@ -65,6 +98,11 @@ export async function partialRefundByAmount(
   needsBraintreeFallback?: boolean;
   braintreeTxnId?: string;
   needsManualShopifyRecord?: boolean;
+  // Set when a refund is already in flight on the order (a pending gateway
+  // refund, e.g. PayPal settling over a few days). We do NOT issue a
+  // duplicate; the caller reports "already processing" honestly instead of
+  // surfacing Shopify's cryptic "Transaction cannot be refunded".
+  alreadyPending?: boolean;
 }> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
   const amountDecimal = (amountCents / 100).toFixed(2);
@@ -99,6 +137,21 @@ export async function partialRefundByAmount(
       t.kind === "sale" && t.status === "success"
     ) || (txData?.transactions || [])[0];
     if (!saleTx) return { success: false, error: "No transaction found on order" };
+
+    // Already-in-flight guard (Amy / SC133495) — a refund whose gateway
+    // status is still `pending` (PayPal settles over a few business days)
+    // means money is ALREADY on its way back. Issuing another refund here
+    // hits Shopify's balance ceiling and returns the cryptic
+    // {"base":["Transaction cannot be refunded"]}, which the box escalates
+    // as a hard failure. Report it honestly instead of firing a duplicate.
+    const pendingRefund = findPendingRefundTxn(txData?.transactions as ShopifyTxnLite[]);
+    if (pendingRefund) {
+      return {
+        success: false,
+        alreadyPending: true,
+        error: `A refund of $${pendingRefund.amount} is already pending on this order (${String(pendingRefund.gateway || "gateway")} settlement in progress — refunds can take a few business days). Not issuing a duplicate.`,
+      };
+    }
 
     // SC128233 guard — Shopify's Braintree gateway is broken. Signal
     // the caller (`refundOrder`) to run the Braintree refund itself
