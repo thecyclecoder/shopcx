@@ -5,6 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveApproverLive } from "@/lib/agents/approval-router";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { isWorkspaceOwner } from "@/lib/media-buyer/arm-auth";
+import { flipMediaBuyerPolicyMode } from "@/lib/media-buyer/mode-flip";
 
 // Media Buyer armed flip surface — Phase 1 of media-buyer-armed-flip-surface.
 //
@@ -108,21 +109,17 @@ function snapshotBlendedCacLtv(reasons: unknown): Record<string, unknown> | null
   return metrics as Record<string, unknown>;
 }
 
+/**
+ * Thin adapter over the shared `flipMediaBuyerPolicyMode` helper — the arm/disarm route
+ * and [[../../../../../lib/media-buyer/self-correcting]] both drive the same mutation.
+ * Kept as a name-preserving wrapper so the route body stays a single-line call site.
+ */
 async function flipPolicyMode(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   mode: "armed" | "shadow",
 ): Promise<{ ok: boolean; updatedIds: string[]; error?: string }> {
-  const { data, error } = await admin
-    .from("iteration_policies")
-    .update({ mode })
-    .eq("workspace_id", workspaceId)
-    .eq("status", "active")
-    .is("campaign_id", null)
-    .select("id");
-  if (error) return { ok: false, updatedIds: [], error: error.message };
-  const ids = ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
-  return { ok: true, updatedIds: ids };
+  return flipMediaBuyerPolicyMode(admin, workspaceId, mode);
 }
 
 export async function POST(req: Request) {
