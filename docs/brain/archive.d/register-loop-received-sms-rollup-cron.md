@@ -1,0 +1,1 @@
+- **Register monitored loop: received-sms-rollup-cron** · verified 2026-07-09 · → [[../inngest/sms-callback-drain]]
