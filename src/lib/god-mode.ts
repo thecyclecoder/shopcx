@@ -908,14 +908,16 @@ export async function resolveFounderPhone(admin: Admin, workspaceId: string): Pr
 
 /**
  * The three god-mode SMS events. Distinct kinds keep the text deterministic +
- * make an integration test straightforward.
+ * make an integration test straightforward. Bodies are DELIBERATELY clean —
+ * professional-warm, no flirt, no emoji (a text can show on a lock screen). Eve's
+ * full flirty voice lives inside the app only.
  *
- *   • arm      — "God mode armed on {ws}. Cockpit: {url}"
- *   • approval — the 5-min REMINDER: "…has been waiting 5+ min for your approval"
- *                (single) or "{n} approvals have been waiting 5+ min" (batch).
+ *   • arm      — "Eve here — I'm online and ready. Tap in: {url}"
+ *   • approval — the 5-min REMINDER: "Eve here — one item needs your call (waiting
+ *                5+ min). Tap in:" (single) or "…{n} items need your call…" (batch).
  *                NOT sent on insert — only by `nudgeStalePendingApprovals` once a
  *                card sits unanswered past the threshold.
- *   • done     — "God mode session ended ({reason}). Re-arm in the app if needed."
+ *   • done     — "Eve here — I've clocked out ({reason}). Tap me back in the app anytime."
  *
  * "reply" is intentionally absent — the spec says plain box replies send NONE
  * (the Chat tab handles live watching). Only the approval nudge + session-done push.
@@ -941,20 +943,23 @@ export async function sendGodModeSMS(
     if (!to) return { sent: false, reason: "no founder phone configured" };
 
     const url = args.cockpitToken ? cockpitUrl(args.cockpitToken) : "";
+    // NOTE: SMS bodies are deliberately CLEAN — Eve's full flirty personality (and
+    // her emojis) live INSIDE the app (cockpit + tab replies), never in a text that
+    // might surface on a lock screen. Keep these professional-warm: no flirt, no emoji.
     let text = "";
     if (args.kind === "arm") {
-      text = `Hey boss, Eve here 💋 I'm all yours — come chat:`;
+      text = `Eve here — I'm online and ready. Tap in:`;
     } else if (args.kind === "approval") {
       // The 5-min reminder (never sent on insert — see nudgeStalePendingApprovals).
       const count = args.context?.count ?? 1;
       if (count > 1) {
-        text = `Babe, ${count} things need your call and have been waiting 5+ min — don't leave me hanging 😏`;
+        text = `Eve here — ${count} items need your call (waiting 5+ min). Tap in:`;
       } else {
-        text = `Babe, one thing needs your call — been waiting 5+ min. Come tell me what you want 😏`;
+        text = `Eve here — one item needs your call (waiting 5+ min). Tap in:`;
       }
     } else {
       const reason = args.context?.reason ?? "wrapped up";
-      text = `That's me clocked out, handsome (${reason}) 💅 Tap me back in the app whenever you need me.`;
+      text = `Eve here — I've clocked out (${reason}). Tap me back in the app anytime.`;
     }
     const body = url ? `${text}\n\n${url}` : text;
 
