@@ -2785,6 +2785,14 @@ function removeWorktreeDir(path: string) {
 // primary. The rm-rf primary guard stays intact; this only adds a switch recovery for the one path that
 // guard dead-ended. Non-primary matches keep the existing removeWorktreeDir teardown (build worktrees
 // under BUILDS_DIR are still force-removed as before).
+//
+// builder-worktree-self-heal-reclaims-ephemeral-branch-pinned-worktrees — EPHEMERAL SCRATCH RECOVERY:
+// a non-primary worktree pinning <branch> from OUTSIDE BUILDS_DIR (e.g. /tmp/<spec>-wt, created by
+// spec-test / branch-review) is refused by removeWorktreeDir's BUILDS_DIR guard, so pre-fix it silently
+// stayed pinned and every `git worktree add -B <branch>` re-failed with "already used by worktree at
+// /tmp/…" (observed: failed build f11e8754 → /tmp/sol-reads-moved-wt). The third arm below frees the
+// branch via `git worktree remove --force <path>` + `git worktree prune` — git's own removal, never rm -rf,
+// so it can never target REPO_DIR. The BUILDS_DIR guard in removeWorktreeDir stays as-is.
 function removeWorktreeForBranch(branch: string) {
   if (!branch) {
     console.error("[worktree] removeWorktreeForBranch called with empty branch — skipping (never match the primary checkout).");
@@ -2793,7 +2801,8 @@ function removeWorktreeForBranch(branch: string) {
   const primary = resolve(REPO_DIR);
   for (const e of listWorktrees()) {
     if (!e.branch || e.branch !== branch) continue;
-    if (resolve(e.path) === primary) {
+    const resolvedPath = resolve(e.path);
+    if (resolvedPath === primary) {
       // Primary is holding <branch> — switch it to main (freeing the branch) instead of the guarded
       // rm-rf. Composes with the build-dispatch precondition: this is the recovery arm for callers of
       // removeWorktreeForBranch (pr-resolve, resume paths, …), matching Phase 1's precondition at claim.
@@ -2801,6 +2810,22 @@ function removeWorktreeForBranch(branch: string) {
         `[worktree] branch ${branch} is held by PRIMARY (${e.path}) — switching primary to main (never rm -rf) to free it`,
       );
       ensurePrimaryOnMain(`[worktree:primary-held ${branch}]`);
+      continue;
+    }
+    if (resolvedPath !== BUILDS_DIR && !resolvedPath.startsWith(BUILDS_DIR + "/")) {
+      // builder-worktree-self-heal-reclaims-ephemeral-branch-pinned-worktrees — EPHEMERAL SCRATCH
+      // RECOVERY: a registered non-primary worktree pinning <branch> from OUTSIDE BUILDS_DIR (e.g.
+      // /tmp/sol-reads-moved-wt from a spec-test/branch-review) is refused by removeWorktreeDir's
+      // BUILDS_DIR guard (the 2026-06-24 primary-nuke safety), which correctly dead-ended it — but
+      // then the follow-up `git worktree add -B <branch> <builds-dir-wt>` re-failed with "already used
+      // by worktree at /tmp/…". Free the branch non-destructively via git's own worktree removal:
+      // this never routes through the guarded rm -rf and can never target REPO_DIR (the primary is
+      // already filtered by the branch===null continue + the explicit primary === path check above).
+      console.warn(
+        `[worktree] branch ${branch} is held by ephemeral scratch worktree (${e.path}) — using \`git worktree remove --force\` to free it (never rm -rf outside BUILDS_DIR)`,
+      );
+      sh("git", ["worktree", "remove", "--force", e.path]);
+      sh("git", ["worktree", "prune"]);
       continue;
     }
     removeWorktreeDir(e.path);
