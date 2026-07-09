@@ -1016,16 +1016,23 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .in("status", ["active", "paused", "cancelled"])
       .order("created_at", { ascending: false }),
-    // 180 days of order history so Sonnet has full visibility — old
-    // 5-order cap missed customers' relevant history. Surfaced on ticket
-    // 6e732303 (Veronica) where the playbook kept saying "no orders
-    // found" while the customer was citing 25-and-53-day-old order
-    // numbers. We also include subscription_id so each order can be
-    // labeled with which sub it belongs to (or "one-time" if null).
+    // Order history so Sonnet has full visibility — old 5-order cap
+    // missed customers' relevant history. Surfaced on ticket 6e732303
+    // (Veronica) where the playbook kept saying "no orders found" while
+    // the customer was citing 25-and-53-day-old order numbers. We also
+    // include subscription_id so each order can be labeled with which sub
+    // it belongs to (or "one-time" if null).
+    //
+    // We fetch the 25 most recent orders with NO date floor here and apply
+    // the "last 180 days OR at least the 3 most recent" window in code
+    // below. A hard .gte(180d) floor hid the fact that a disputed charge
+    // was a RENEWAL (an older first order sits outside 180d) — ticket
+    // 125741eb (marty), where Sol saw only the renewal and could read it
+    // as a first order. Always surfacing the last ≥3 restores the
+    // renewal-vs-first-order signal without unbounding old accounts.
     admin.from("orders")
       .select("order_number, total_cents, line_items, discount_codes, payment_details, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
-      .gte("created_at", new Date(Date.now() - 180 * 86400000).toISOString())
       .order("created_at", { ascending: false }).limit(25),
     // Loyalty record may live on ANY of the linked customer profiles.
     // Bug we fixed: previously this used .eq("customer_id", custId)
@@ -1050,6 +1057,19 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   ]);
 
   const parts: string[] = [];
+
+  // Window the order history: the last 180 days, but ALWAYS at least the 3
+  // most recent orders if they exist (so a disputed renewal never hides the
+  // older first order — the renewal-vs-first-order signal). `orders` arrives
+  // sorted created_at DESC, so the within-180d rows are a prefix; we show
+  // max(count-within-180d, 3) from the front.
+  const ORDER_WINDOW_MS = 180 * 86400000;
+  const orderCutoffIso = new Date(Date.now() - ORDER_WINDOW_MS).toISOString();
+  const allOrders = orders || [];
+  const within180Count = allOrders.filter(o => (o.created_at as string) >= orderCutoffIso).length;
+  const shownOrderCount = Math.max(within180Count, 3);
+  const shownOrders = allOrders.slice(0, shownOrderCount);
+  const showingOlderThan180 = shownOrders.length > within180Count;
 
   // Subscriptions
   if (subs?.length) {
@@ -1164,8 +1184,12 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       subLabel[s.id] = `${s.shopify_contract_id || s.id.slice(0, 8)} (${s.status})`;
     }
 
-    parts.push("\nRECENT ORDERS (last 180 days):");
-    for (const o of orders) {
+    parts.push(
+      showingOlderThan180
+        ? "\nRECENT ORDERS (last 180 days had fewer than 3 — showing the 3 most recent; some are older than 180 days):"
+        : "\nRECENT ORDERS (last 180 days):",
+    );
+    for (const o of shownOrders) {
       const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; total_cents?: number; line_total_cents?: number; sku?: string; variant_id?: string }[] || []);
       // Phase 1 of docs/brain/specs/orchestrator-surfaces-line-item-variant-
       // and-computed-per-unit-price.md — hand Sonnet a reconciled per-unit
