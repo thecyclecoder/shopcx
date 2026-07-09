@@ -84,6 +84,9 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/banned_meta_users]] — Meta DM / comment senders banned from messaging us. Workspace-scoped.
 - [[tables/email_events]] — Universal email tracking — sent, delivered, opened, clicked, bounced. Joined by `resend_email_id`.
 - [[tables/email_filters]] — Per-workspace inbound-email rules (spam/auto-replies to ignore).
+- [[tables/media_buyer_action_grades]] — Deterministic grades (decision + outcome quality) for each Media Buyer promote/kill/replenish action, scored against realized ROAS.
+- [[tables/media_buyer_sensor_trust]] — Per-(workspace, account) attribution-sensor trust band (green/yellow/red) + coverage/unresolved-share reasons; gates whether the Media Buyer may act.
+- [[tables/media_buyer_test_cohorts]] — Capped test ad set per account the Media Buyer publishes into (daily ceiling, thresholds green_min_coverage/yellow_min_coverage/max_unresolved_share).
 - [[tables/meta_ad_accounts]] — Meta Ads accounts connected to the workspace.
 - [[tables/meta_attribution_daily]] — Per-(meta_ad_id, variant, day) attributed spend + revenue (iteration engine Phase 2).
 - [[tables/meta_ads]] — Local mirror of Meta ad structure + status (iteration engine Phase 1).
