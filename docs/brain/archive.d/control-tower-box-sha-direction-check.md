@@ -1,0 +1,1 @@
+- **Control Tower box tile verifies SHA direction before calling self-update stuck** · verified 2026-07-09 · → [[../libraries/control-tower]]
