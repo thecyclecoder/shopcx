@@ -48,23 +48,51 @@ export async function GET(
     .eq("case_id", caseId)
     .order("created_at", { ascending: true });
 
-  // Load history
+  // Load history (acting-user email/name resolved below — auth.users is NOT embeddable via
+  // PostgREST, so the old `users:user_id(...)` embed 400'd and the user column silently read
+  // "System" for everyone).
   const { data: history } = await admin
     .from("fraud_case_history")
-    .select("*, users:user_id(email, raw_user_meta_data)")
+    .select("*")
     .eq("case_id", caseId)
     .order("created_at", { ascending: true });
 
-  // Load assigned member info
-  let assignedMember = null;
+  // Load assigned member (id + user_id; email resolved below)
+  let assignedMember: { id: string; user_id: string | null } | null = null;
   if (fraudCase.assigned_to) {
     const { data: m } = await admin
       .from("workspace_members")
-      .select("id, user_id, users:user_id(email, raw_user_meta_data)")
+      .select("id, user_id")
       .eq("id", fraudCase.assigned_to)
-      .single();
+      .maybeSingle();
     assignedMember = m;
   }
+
+  // Resolve emails/names in one call via the ticket_users RPC (SECURITY DEFINER,
+  // workspace_members ⋈ auth.users), then reshape into the { users: { email, raw_user_meta_data } }
+  // contract the fraud detail page reads (display_name → raw_user_meta_data.full_name).
+  const historyRows = (history || []) as Array<{ user_id: string | null }>;
+  const userIds = [
+    ...new Set(
+      [...historyRows.map((h) => h.user_id), assignedMember?.user_id ?? null].filter(
+        (v): v is string => !!v,
+      ),
+    ),
+  ];
+  const userMap = new Map<string, { email: string | null; raw_user_meta_data: { full_name?: string } }>();
+  if (userIds.length) {
+    const { data: us } = await admin.rpc("ticket_users", {
+      p_workspace: workspaceId,
+      p_user_ids: userIds,
+    });
+    for (const u of (us || []) as Array<{ user_id: string; display_name: string | null; email: string | null }>) {
+      userMap.set(u.user_id, { email: u.email, raw_user_meta_data: { full_name: u.display_name ?? undefined } });
+    }
+  }
+  const withUser = <T extends { user_id: string | null }>(row: T) => ({
+    ...row,
+    users: row.user_id ? userMap.get(row.user_id) ?? null : null,
+  });
 
   // Load workspace members for assignment dropdown
   const { data: members } = await admin
@@ -76,8 +104,8 @@ export async function GET(
   return NextResponse.json({
     case: fraudCase,
     matches: matches || [],
-    history: history || [],
-    assigned_member: assignedMember,
+    history: historyRows.map(withUser),
+    assigned_member: assignedMember ? withUser(assignedMember) : null,
     members: members || [],
   });
 }
