@@ -210,6 +210,16 @@ export type DirectorActionKind =
   // (director_function='growth'). metadata: { iso_week, meta_ad_account_id,
   // reasons, metrics, authorization_id, dedupe_key, autonomous:true }.
   | "media_buyer_arming_denied"
+  // media-buyer-self-correcting-mode-revert Phase 1 — the auto-revert that closes the
+  // goal `autonomous-media-buyer-supervision` M4 loop. Written by
+  // [[../libraries/media-buyer-self-correcting]] `checkMediaBuyerRegressionAndDisarm` on a
+  // sustained 7-day <5 rolling `overall_grade` streak (≥2 graded actions/day) — flips
+  // the workspace's active v1 iteration_policies row 'armed' → 'shadow' AND routes a CEO
+  // card via `escalateDiagnosisToCeo` (escalationKind='media_buyer_regressed_disarmed').
+  // Owned by Growth (director_function='growth'). metadata: { reason:'regression_auto_disarm',
+  // streak_days, avg_overall_grade, threshold:5, meta_ad_account_id, updated_policy_ids,
+  // autonomous:true }.
+  | "media_buyer_self_disarmed"
   // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the CS Director (💬 June) supervision
   // ledger for the per-ticket QC grader. One row per box-session verdict (applyAnalyzerVerdict
   // completed on the box lane, kind='ticket-analyze'), so June's activity feed / EOD recap /
