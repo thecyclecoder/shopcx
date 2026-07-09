@@ -222,7 +222,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
     key: "mario", name: "Mario", role: "Pipeline Plumber", emoji: "🔧",
     personality: "The reactive pipeline plumber — investigates each detected stall against the timecard + blockers + live job, applies ONE non-destructive live fix from the bounded vocabulary, authors a critical fix-spec for the recurring class, and self-tunes the threshold on a false trigger. Autonomous within Ada's leash; escalates the destructive or ambiguous rather than guessing.",
     pronouns: { subject: "he", object: "him", possessive: "his" },
-    mascotId: "default",
+    mascotId: "default", avatarUrl: `${AV}mario-mario.jpg?v=1`,
     chip: "bg-stone-100 text-stone-800 border-stone-200 dark:bg-stone-900/30 dark:text-stone-300 dark:border-stone-900/40",
     dot: "bg-stone-500", ring: "bg-stone-50 dark:bg-stone-900/20", accent: "text-stone-600 dark:text-stone-400",
   },
