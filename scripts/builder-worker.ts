@@ -10741,7 +10741,7 @@ async function runTicketHandleJob(job: Job) {
       // rulebook; get_policies re-fetches it live. Sol MUST reason against it and NEVER bait an
       // outcome the policy disallows (e.g. offering coffee-subscription returns when returns aren't
       // accepted). Absence of a clearly-applicable policy is not permission — it is needs_human.
-      `POLICY REVIEW IS MANDATORY. Before you choose a chosen_path or draft the first_reply, review the CURRENT POLICIES block above (re-fetch live via get_policies if unsure) and reason AGAINST them for the customer's ask. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
+      `POLICY REVIEW IS MANDATORY — AND YOU MUST RUN get_policies. Before you choose a chosen_path or draft the first_reply, you are REQUIRED to run \`npx tsx scripts/improve-box-tools.ts get_policies ${ticketId}\` (the live hard rulebook) and reason AGAINST it for the customer's ask. This is not optional and the CURRENT POLICIES snapshot above does not satisfy it — a completed Direction from a session that never called get_policies is BLOCKED and routed to a human. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, no cadence outside every 2 weeks / monthly / every 2 months, no promise of a pre-billing heads-up email, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
       // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
       // Tell Sol her DRAFT reply is machine-validated (src/lib/sol-policy-bait-guard.ts) before it
       // sends. A reply that (a) promises a remedy while your context_summary declares the ask
@@ -10789,8 +10789,24 @@ async function runTicketHandleJob(job: Job) {
     const parsed = parseSolFinalJson(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
-    if (parsed?.status === "needs_human") {
-      const reason = String(parsed.reason || "Sol punted to a human — no reason given.");
+    // get_policies is a REQUIRED step for ticket handling (founder rule: policies are HARD; the
+    // CURRENT POLICIES snapshot injected in the brief is NOT enough — Sol must actively read the
+    // live rulebook via get_policies before she commits a Direction). Fail-closed: a 'completed'
+    // Direction from a session that never invoked get_policies is downgraded to needs_human so a
+    // person reviews it, rather than shipping a reply that skipped the policy gate. This is the same
+    // message-is-last discipline as the honor/claim guards — a required gate not run = treat as unmet.
+    // Match the actual CLI invocation (a Bash tool_use command in the stream), not a bare mention of
+    // "get_policies" in prose — a false pass here would ship a reply that skipped the real read.
+    const policyReviewMissing =
+      parsed?.status === "completed" && !/improve-box-tools\.ts\s+get_policies/.test(raw);
+    if (policyReviewMissing) {
+      console.warn(`${tag} BLOCK: completed Direction but get_policies was never called — routing to needs_human (policy review required).`);
+    }
+
+    if (parsed?.status === "needs_human" || policyReviewMissing) {
+      const reason = policyReviewMissing
+        ? "Policy review not performed: get_policies (the required live policy rulebook read) was not called this session — routed to a human to re-review before any reply ships."
+        : String(parsed?.reason || "Sol punted to a human — no reason given.");
       // ── Phase 3 of portal-errors-route-to-sol-first-escalate-to-june-on-rail ──
       // Sol's rail-hit on a portal-error first-touch escalates the ticket to June's triage-
       // escalation lane (escalated_at set, escalated_to null, escalation_reason names the rail).
