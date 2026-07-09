@@ -947,6 +947,20 @@ export const directActionHandlers: Record<
       p.date = date;
     }
     const r = await subscriptionUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
+    // Mirror the intended day to our local row immediately (like the portal +
+    // appstleSkipNextOrder do). The Appstle reschedule endpoint doesn't write
+    // our table, and the next sync reads Appstle's store-anchored value — so
+    // without this, a poll/read right after execution sees the STALE date and
+    // Sol would speak to the wrong renewal. Store noon UTC so a UTC-rendered
+    // date shows the intended calendar day. Date-only inputs only (an ISO
+    // input already carries its own instant).
+    if (r.success && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      await ctx.admin
+        .from("subscriptions")
+        .update({ next_billing_date: `${date}T12:00:00Z`, updated_at: new Date().toISOString() })
+        .eq("workspace_id", ctx.workspaceId)
+        .eq("shopify_contract_id", p.contract_id!);
+    }
     return { ...r, summary: `Changed next billing date to ${date}` };
   },
 

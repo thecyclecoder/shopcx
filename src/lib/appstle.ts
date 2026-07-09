@@ -292,10 +292,19 @@ export async function appstleUpdateNextBillingDate(
   const creds = await getAppstleCredentials(workspaceId);
   if (!creds) return { success: false, error: "Appstle not configured" };
 
-  // Appstle expects ZonedDateTime (e.g. 2026-07-30T00:00:00Z). Date-only
-  // YYYY-MM-DD strings get rejected with a Java parse error. Normalize.
+  // Appstle expects ZonedDateTime (e.g. 2026-07-30T12:00:00Z). Date-only
+  // YYYY-MM-DD strings get rejected with a Java parse error, so we normalize.
+  //
+  // CRITICAL: anchor date-only intents at NOON UTC, not midnight. Appstle
+  // re-anchors the instant we send to the STORE's local timezone and keeps the
+  // calendar DAY. Midnight-UTC of a day is still the *previous evening* in any
+  // negative-offset US zone (e.g. 2026-10-02T00:00:00Z = Oct 1 ~17:00 PT), so
+  // Appstle floored "Oct 2" back to Oct 1 and stored 2026-10-01T08:00:00Z — a
+  // real off-by-one that mis-billed the wrong day (Sofia's ticket 83ee7005).
+  // Noon UTC is the SAME calendar day across every US zone (UTC-10 … UTC-4),
+  // so the intended day survives the store-local conversion.
   const isoDateTime = /^\d{4}-\d{2}-\d{2}$/.test(nextBillingDate)
-    ? `${nextBillingDate}T00:00:00Z`
+    ? `${nextBillingDate}T12:00:00Z`
     : nextBillingDate;
 
   try {
