@@ -12,10 +12,16 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Builder worktree self-heal reclaims ephemeral (/tmp) branch-pinned worktrees** · verified 2026-07-09 · → [[../libraries/builder-worker]]
+- **Control Tower box tile verifies SHA direction before calling self-update stuck** · verified 2026-07-09 · → [[../libraries/control-tower]]
 - **Control Tower: stop counting internal renewal orders as awaited fraud detector work** · verified 2026-07-09 · → [[../libraries/control-tower]]
 - **Fix get_customer_stats_batch: unnest resolve_customer_link_group's new uuid[] return type** · verified 2026-07-09 · → [[../libraries/customer-stats]]
+- **Reduce call volume / cache the hot query on query -1756037457588317045** · verified 2026-07-09 · → [[../libraries/specs-table]] · [[../libraries/db-health]]
+- **Build-escort drives EVERY greenlit goal, not only Platform-owned ones** · verified 2026-07-09 · → [[../libraries/platform-director]]
 - **Mario reactive box agent — live fix + durable fix-spec + self-tuning** · verified 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
 - **Mario stall-detector cron + self-owned thresholds** · verified 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
+- **Portal 'order now' fails on migrated/cancelled Appstle contracts and surfaces a false OOS error** · verified 2026-07-09 · → [[../lifecycles/customer-portal]]
+- **Make the Received SMS rollup cron emit Control Tower heartbeats** · verified 2026-07-09 · → [[../inngest/sms-callback-drain]]
 - **Register monitored loop: blueprint-build-submit-cron** · verified 2026-07-09 · → [[libraries/control-tower]]
 - **Register monitored loop: received-sms-rollup-cron** · verified 2026-07-09 · → [[../inngest/sms-callback-drain]]
 - **RPC-ify the aggregation layer — kill the 1000-row truncation bugs** · verified 2026-07-09 · → [[../libraries/customer-stats]]
@@ -612,6 +618,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Shopify theme management via ShopCX (AI-driven, GitHub-commit)** · verified 2026-06-18 · → [[recipes/edit-shopify-theme]]
 - **Storefront MVP — Amazing Coffee subscription funnel (internal subs · instrumentation · Meta CAPI · smart popup · checkout hardening)** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
 - **Storefront: survey chapter + converter-first PDP reorder** · verified 2026-06-18 · → [[lifecycles/storefront-checkout]]
+- **Autonomous media-buyer supervision — live** · folded 2026-07-09 · → [[lifecycles/media-buyer-arming]]
 - **Centralized Commerce SDK — one internal-aware layer for every customer-facing read & write** · folded 2026-07-05 · → [[lifecycles/commerce-sdk]]
 - **Ticket handling — guaranteed, observable, self-running** · folded 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **Mario — reactive pipeline-plumbing agent + spec timecards** · folded 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
