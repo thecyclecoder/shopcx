@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { subscriptionOrderNow } from "@/lib/commerce/subscription";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { guardAppstleOrderNow } from "@/lib/portal/order-now-guard";
 
 export async function POST(
   request: Request,
@@ -17,10 +18,18 @@ export async function POST(
 
   const admin = createAdminClient();
   const { data: sub } = await admin.from("subscriptions")
-    .select("id, shopify_contract_id, customer_id")
+    .select("id, shopify_contract_id, customer_id, is_internal, status")
     .eq("id", subId).eq("workspace_id", workspaceId).single();
 
   if (!sub) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  // Same gate as the portal handler — a cancelled Appstle contract's
+  // attempt-billing call surfaces a stale/misleading error (ticket 183d28b9).
+  // See [[/src/lib/portal/order-now-guard]].
+  const guard = guardAppstleOrderNow({ is_internal: sub.is_internal, status: sub.status });
+  if (guard.action === "block") {
+    return NextResponse.json({ error: guard.reason, message: guard.message }, { status: 409 });
+  }
 
   // Flavor-aware order-now: internal subs fire the Braintree renewal pipeline,
   // Appstle subs attempt the upcoming Appstle billing. Calling appstle directly
