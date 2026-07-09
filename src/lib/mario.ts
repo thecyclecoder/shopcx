@@ -263,7 +263,13 @@ export async function evaluateStalledSpecs(
     // raw override statuses, unlike the derived brain-roadmap SpecStatus that
     // normalizes `folded` → `shipped`).
     const specRow = await getSpecFromDb(c.workspace_id, c.spec_slug);
-    if (specRow && (specRow.status === "folded" || specRow.status === "deferred")) continue;
+    // (d0) NO `public.specs` row at all → PHANTOM: the triggering timecard event was backfilled from a
+    // `spec_status_history` row whose spec authorship FAILED (e.g. InvalidParentError at the chokepoint) and
+    // never became a real spec. There is no pipeline to plumb — drop it so Mario is never fired on a ghost.
+    // (Previously the `specRow && …` guard below short-circuited to false on a null row, letting the phantom
+    // survive the filter chain and enqueue a mario job — the false-trigger class from Mario's first sweep.)
+    if (!specRow) continue;
+    if (specRow.status === "folded" || specRow.status === "deferred") continue;
 
     // (e) fill the brief now that the candidate survived every filter.
     const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
@@ -666,9 +672,15 @@ async function widenMarioThreshold(
   return Array.isArray(updated) && updated.length > 0;
 }
 
+/** The platform mandate Mario's durable fix-specs live under. A spec's parent MUST be a mandate or a
+ *  milestone — the author chokepoint (`assertValidParent`) THROWS `InvalidParentError` on a BARE function
+ *  parent ("parent read as free text"). A bare-function parent was the silent-author-failure bug: every
+ *  proposed fix-spec threw at the chokepoint and was swallowed, so nothing persisted. */
+const MARIO_FIX_MANDATE_SLUG = "infra-devops-reliability"; // platform.md § "Infra & DevOps / reliability"
+
 /** Author a critical fix-spec via `authorSpecRowStructured` — owner='platform', critical, autoBuild.
- *  Parent is the platform function mandate (`[[../functions/platform]]`); Vale's `assertEveryPhaseHasBody`
- *  + `assertEveryNodeHasIntent` re-gate the payload at the DB write so a malformed proposal fails loud. */
+ *  Parent is the platform **mandate** (not a bare function — that throws InvalidParentError); Vale's
+ *  `assertEveryPhaseHasVerification` + `assertEveryNodeHasIntent` re-gate the payload at the DB write. */
 async function authorMarioFixSpec(
   workspaceId: string,
   fixSpec: MarioDurableFixSpec,
@@ -681,7 +693,7 @@ async function authorMarioFixSpec(
       title: fixSpec.title,
       summary: null,
       owner: MARIO_DIRECTOR_FUNCTION,
-      parent: "[[../functions/platform]]",
+      parent: `[[../functions/platform]] — "Infra & DevOps / reliability" mandate: Mario's durable pipeline-reliability fix so this stall class cannot recur.`,
       why: fixSpec.why,
       what: fixSpec.what,
       critical: true,
@@ -695,7 +707,7 @@ async function authorMarioFixSpec(
       })),
     },
     "planned",
-    { intendedStatusSetBy: "mario", parentKind: "function", parentRef: MARIO_DIRECTOR_FUNCTION },
+    { intendedStatusSetBy: "mario", parentKind: "mandate", parentRef: `${MARIO_DIRECTOR_FUNCTION}#${MARIO_FIX_MANDATE_SLUG}` },
   );
 }
 
@@ -827,11 +839,16 @@ export async function applyBoxMario(
     // Fix-spec authoring — runs even when loop-guarded (the recurrence is exactly WHY the durable
     // fix-spec is proposed). Never fires in surface_only / off.
     let durableSpecAuthored = false;
+    let durableSpecAuthorError: string | null = null;
     if (verdict.durable_fix_spec && mode === "live") {
       try {
         durableSpecAuthored = await authorMarioFixSpec(row.workspace_id, verdict.durable_fix_spec);
       } catch (e) {
-        console.warn("[mario] fix-spec author failed:", e instanceof Error ? e.message : e);
+        // LOUD, not silent: capture the failure so it surfaces on the mario_fired audit row (and Ada's
+        // feed) instead of vanishing into a console.warn nobody reads. A swallowed author-write is what
+        // let the same fix-spec be re-proposed every sweep with durable_spec_authored=false forever.
+        durableSpecAuthorError = e instanceof Error ? e.message : String(e);
+        console.warn(`[mario] fix-spec author FAILED (${verdict.durable_fix_spec.slug}): ${durableSpecAuthorError}`);
       }
     }
 
@@ -872,6 +889,7 @@ export async function applyBoxMario(
         fix_executed: fixExecuted,
         fix_reason: fixReason,
         durable_spec_authored: durableSpecAuthored,
+        durable_spec_author_error: durableSpecAuthorError,
         threshold_widened: thresholdWidened,
         loop_guard_triggered: loopGuardTriggered,
       },

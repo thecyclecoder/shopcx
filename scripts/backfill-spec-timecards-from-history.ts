@@ -387,10 +387,23 @@ async function backfillOneWorkspace(
     ...testRows,
   ];
 
-  // Dedupe: (a) against DB (existingKeys), (b) against ourselves (same-batch dupes).
+  // PHANTOM GUARD: only emit events for slugs that have a REAL `public.specs` row. A
+  // spec_status_history / agent_jobs / spec_test_runs row can exist for a slug whose spec
+  // authorship FAILED at the author chokepoint (e.g. InvalidParentError) and never persisted —
+  // projecting a `review_started` for it produced a ghost timecard with no following transition,
+  // which fired the M3 stall detector on a spec that never existed (Mario's first-sweep false
+  // triggers). `specsResult.slugById` is every real spec slug in this workspace.
+  const validSlugs = new Set(specsResult.slugById.values());
+
+  // Dedupe: (a) phantom slugs, (b) against DB (existingKeys), (c) against ourselves (same-batch dupes).
   const seenInBatch = new Set<string>();
   const toInsert: ProposedRow[] = [];
+  let phantomDropped = 0;
   for (const row of proposed) {
+    if (!validSlugs.has(row.spec_slug)) {
+      phantomDropped++;
+      continue;
+    }
     const k = keyOf(row);
     if (existingKeys.has(k)) continue;
     if (seenInBatch.has(k)) continue;
@@ -399,7 +412,7 @@ async function backfillOneWorkspace(
   }
 
   console.log(
-    `  → workspace ${workspace_id}: proposed=${proposed.length} already-backfilled=${existingKeys.size} to-insert=${toInsert.length}`,
+    `  → workspace ${workspace_id}: proposed=${proposed.length} phantom-dropped=${phantomDropped} already-backfilled=${existingKeys.size} to-insert=${toInsert.length}`,
   );
 
   if (!apply) {
