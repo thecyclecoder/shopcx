@@ -57,6 +57,7 @@ The workers who report to Ada and answer to her supervision. Every entry lands h
 ## Owned / contributed goals
 
 - **Centralized Commerce SDK** ✅ (folded → [[../lifecycles/commerce-sdk]]) — one internal-aware `src/lib/commerce` layer for every customer-facing commerce read & write. M1–M4 shipped: the two critical money bugs closed, the SDK core + money resolver ([[../libraries/pricing]]) landed, the differential harness proved zero `$NaN`/`$0`, and the dashboard/agent/AI/ticket surfaces migrated. M5 (customer-portal migration, LAST) remains the open final domino.
+- **Mario — reactive pipeline plumbing** ✅ (folded → [[../lifecycles/mario-pipeline-plumbing]]) — no spec silently stalls. M1–M5 shipped: the [[../tables/spec_timecard_events]] ledger + [[../libraries/spec-timecards]] SDK (M1/M2), the [[../inngest/mario-stall-cron]] outlier detector + self-owned [[../tables/mario_thresholds]] (M3), the Mario box agent ([[../libraries/mario]] `applyBoxMario` — live fix + `auto_build` fix-spec + threshold self-tune, [[../../.claude/skills/mario/SKILL.md]]) (M4), and the spec-detail timecard timeline (M5). Mario is now a live worker under Ada (charge list above).
 - Enables every other function — the build platform is what turns their specs into shipped code. Underpins [[../goals/ceo-mode]] (the engine that ships the capability-gap specs the CEO surfaces).
 
 ## Status

@@ -1,6 +1,6 @@
 # inngest/mario-stall-cron
 
-Mario's M3 detector tick ([[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../goals/mario-pipeline-plumbing]] M3). Every minute it iterates workspaces, calls [[../libraries/mario]] `evaluateStalledSpecs` per workspace to find specs whose next lifecycle step is genuinely overdue (deterministic — reads [[../tables/mario_thresholds]] + [[../tables/spec_timecard_events]] + [[../libraries/brain-roadmap]] `getSpecBlockers`), and enqueues one dedupe-guarded `kind='mario'` [[../tables/agent_jobs]] row per candidate. Runs in the Vercel/Inngest runtime alongside deploy-guardian-cron — no box token burn.
+Mario's M3 detector tick ([[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../lifecycles/mario-pipeline-plumbing]] M3). Every minute it iterates workspaces, calls [[../libraries/mario]] `evaluateStalledSpecs` per workspace to find specs whose next lifecycle step is genuinely overdue (deterministic — reads [[../tables/mario_thresholds]] + [[../tables/spec_timecard_events]] + [[../libraries/brain-roadmap]] `getSpecBlockers`), and enqueues one dedupe-guarded `kind='mario'` [[../tables/agent_jobs]] row per candidate. Runs in the Vercel/Inngest runtime alongside deploy-guardian-cron — no box token burn.
 
 **File:** `src/lib/inngest/mario-stall-cron.ts` · logic in [[../libraries/mario]] · SDK reads [[../libraries/spec-timecards]] · thresholds in [[../tables/mario_thresholds]]
 
@@ -41,4 +41,4 @@ One active mario job per spec_slug. `enqueueMarioJob` filters on `.eq("workspace
 
 ## Related
 
-[[../libraries/mario]] · [[../tables/mario_thresholds]] · [[../tables/spec_timecard_events]] · [[../libraries/spec-timecards]] · [[../libraries/specs-table]] · [[../libraries/brain-roadmap]] · [[../tables/agent_jobs]] · [[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../goals/mario-pipeline-plumbing]] · [[deploy-guardian-cron]]
+[[../libraries/mario]] · [[../tables/mario_thresholds]] · [[../tables/spec_timecard_events]] · [[../libraries/spec-timecards]] · [[../libraries/specs-table]] · [[../libraries/brain-roadmap]] · [[../tables/agent_jobs]] · [[../specs/spec-mario-stall-detector-cron-and-thresholds]] · [[../lifecycles/mario-pipeline-plumbing]] · [[deploy-guardian-cron]]

@@ -50,7 +50,8 @@ All workspace members. No role gate in the page itself; gated only by middleware
 ## Spec-detail timecard timeline
 
 The `[slug]/` sub-route ([[roadmap/[slug]]]) mounts `LifecycleTimeline` inside the detail card
-sidebar. That timeline is the M5 surface of the Mario pipeline — beyond the 5-node lifecycle
+sidebar. That timeline is the M5 surface of the Mario pipeline (end-to-end flow:
+[[../lifecycles/mario-pipeline-plumbing]]) — beyond the 5-node lifecycle
 row it also paints per-stage timing + open-wait rows off the timecard ledger:
 
 - **Data source.** `getTimecard(admin, workspace_id, spec_slug)` from [[../libraries/spec-timecards]]

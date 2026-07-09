@@ -1,6 +1,6 @@
 # libraries/spec-timecards
 
-Server SDK for the per-lifecycle-step ledger — Mario's M1 foundation ([[../tables/spec_timecard_events]] · [[../specs/spec-timecard-ledger-and-sdk]] · [[../goals/mario-pipeline-plumbing]]). The only writer for [[../tables/spec_timecard_events]]; two readers back the M3 stall-detector cron and the M5 spec-detail-page timeline. All writes route through a service-role client the caller passes in (`createAdminClient()` in the worker — per CLAUDE.md's "All writes go through `createAdminClient()`").
+Server SDK for the per-lifecycle-step ledger — Mario's M1 foundation ([[../tables/spec_timecard_events]] · [[../specs/spec-timecard-ledger-and-sdk]] · [[../lifecycles/mario-pipeline-plumbing]]). The only writer for [[../tables/spec_timecard_events]]; two readers back the M3 stall-detector cron and the M5 spec-detail-page timeline. All writes route through a service-role client the caller passes in (`createAdminClient()` in the worker — per CLAUDE.md's "All writes go through `createAdminClient()`").
 
 **File:** `src/lib/spec-timecards.ts`
 
@@ -104,4 +104,4 @@ The M3 stall-detector cron's scan. Fetches events for the (optionally) scoped wo
 
 ## Related
 
-[[../tables/spec_timecard_events]] · [[../specs/spec-timecard-ledger-and-sdk]] · [[../goals/mario-pipeline-plumbing]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_status_history]] · [[../tables/spec_test_runs]] · [[../tables/agent_jobs]] · [[../../CLAUDE]]
+[[../tables/spec_timecard_events]] · [[../specs/spec-timecard-ledger-and-sdk]] · [[../lifecycles/mario-pipeline-plumbing]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_status_history]] · [[../tables/spec_test_runs]] · [[../tables/agent_jobs]] · [[../../CLAUDE]]

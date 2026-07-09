@@ -1,0 +1,1 @@
+- **Mario — reactive pipeline-plumbing agent + spec timecards** · folded 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
