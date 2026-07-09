@@ -338,11 +338,76 @@ export function jobStuckSince(j: ActiveJob, workerStartedAt: string | null = nul
   return baseMs >= startedMs ? base : workerStartedAt;
 }
 
+/**
+ * SHA-direction between the deployed runtime (VERCEL_GIT_COMMIT_SHA) and the worker's `running_sha`.
+ * "same" ⇒ identical (or one is a prefix of the other); "worker-behind" ⇒ deployed is a descendant of
+ * running (the real self-update-stuck condition); "worker-ahead" ⇒ running is a descendant of deployed
+ * (the box has already pulled a newer main commit while Vercel still reports the previous one — deploy
+ * lag, NOT stuck); "unknown" ⇒ we can't classify (missing SHAs, unrelated commits, or the compare API
+ * failed). Only "worker-behind" produces the "self-update stuck" red — the false-positive that reddened
+ * a healthy box tile (signal loop:box, verdict monitor-false-positive): worker was running 6f43ec9e0
+ * while the deployed runtime still reported b3934ff, an ancestor of 6f43ec9e0.
+ */
+export type ShaDirection = "same" | "worker-behind" | "worker-ahead" | "unknown";
+
+/**
+ * Trivial local classification — no network call. Prefix-equal or identical ⇒ "same"; either side
+ * empty ⇒ "unknown". Every other case defers to the GitHub compare API (fetchShaDirection). Kept
+ * pure so it's the ONE definition the tests and the runtime share.
+ */
+export function classifyShaDirectionLocal(deployed: string, running: string): ShaDirection {
+  if (!deployed || !running) return "unknown";
+  const short = deployed.length <= running.length ? deployed : running;
+  const long = deployed.length <= running.length ? running : deployed;
+  if (long.slice(0, short.length) === short) return "same";
+  return "unknown";
+}
+
+const GH_REPO_FOR_COMPARE = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
+
+function ghCompareToken(): string | undefined {
+  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
+}
+
+/**
+ * Ask GitHub which side is ahead — the direction check evalWorker gates its "behind" red on. Fails
+ * CLOSED to "unknown" (missing token, unreachable API, unrelated SHAs) so a transient API error can
+ * never turn a healthy worker into a red page. Called once per snapshot from buildControlTowerSnapshot.
+ */
+export async function fetchShaDirection(deployed: string, running: string): Promise<ShaDirection> {
+  const local = classifyShaDirectionLocal(deployed, running);
+  if (local !== "unknown") return local;
+  if (!ghCompareToken() || !deployed || !running) return "unknown";
+  try {
+    // base = running, head = deployed. GitHub returns `status`: "identical" | "ahead" | "behind" | "diverged".
+    // "ahead"  ⇒ head (deployed) is ahead of base (running) ⇒ WORKER-BEHIND.
+    // "behind" ⇒ head (deployed) is behind base (running)   ⇒ WORKER-AHEAD (deploy lag — healthy).
+    const url = `https://api.github.com/repos/${GH_REPO_FOR_COMPARE}/compare/${encodeURIComponent(running)}...${encodeURIComponent(deployed)}`;
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${ghCompareToken()}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      cache: "no-store",
+    });
+    if (!r.ok) return "unknown";
+    const body = (await r.json()) as { status?: string };
+    if (body.status === "identical") return "same";
+    if (body.status === "ahead") return "worker-behind";
+    if (body.status === "behind") return "worker-ahead";
+    return "unknown"; // "diverged" or an unrecognized status — stay conservative.
+  } catch {
+    return "unknown";
+  }
+}
+
 export function evalWorker(
   loop: MonitoredLoop,
   row: WorkerRow | null,
   queuedCount = 0,
   manualDrain = false,
+  shaDirection: ShaDirection = "unknown",
 ): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
@@ -373,41 +438,49 @@ export function evalWorker(
     const reset = row.accounts.soonest_reset ? ` — soonest reset ${elapsed(row.accounts.soonest_reset)} away` : "";
     return { ...base, color: "amber", statusText: `all Max accounts capped — builds parked, auto-resume${reset}`, detail: row.detail ?? null, violation: null };
   }
-  // running_sha behind origin/main (deployed SHA) for longer than the grace window
-  // ⇒ self-update is broken (the worker is alive but stuck on old code). Only pages
-  // when the worker is IDLE — a busy worker legitimately DEFERS self-update until its
-  // in-flight lanes clear (sacrosanct), so behind-while-building is healthy, not stuck.
+  // SHA-direction gate (control-tower-box-sha-direction-check, signal loop:box, verdict
+  // monitor-false-positive). The prior check compared `deployed.slice(0, running.length) !== running`
+  // and reddened on ANY mismatch — false-paging on the healthy worker-ahead case where the box had
+  // already pulled a newer main commit while the deployed Vercel runtime was still reporting the
+  // previous ancestor (the originating incident: running 6f43ec9e0, deployed still on b3934ff). We
+  // now gate red ONLY on a CONFIRMED worker-behind (deployed is a descendant of running per the
+  // GitHub compare API): "worker-ahead" stays green with a deploy-lag note; "unknown" stays
+  // conservative — no red on an ambiguous compare (same posture as deployAgeMs==null).
   const deployed = process.env.VERCEL_GIT_COMMIT_SHA || "";
   const running = row.running_sha || "";
   const idle = (row.active_builds ?? 0) === 0;
-  const behind = !!deployed && !!running && deployed.slice(0, running.length) !== running;
+
+  // Worker-ahead ⇒ deploy lag, not stuck. Never red.
+  if (shaDirection === "worker-ahead") {
+    return { ...base, color: "green", statusText: `healthy · ${running || "?"} · deploy lag (Vercel on ${deployed.slice(0, 7)})`, detail: row.detail ?? null, violation: null };
+  }
+  // Only a CONFIRMED worker-behind enters the queue-aware / behind-red logic below. "same" and
+  // "unknown" both fall through to the healthy return at the bottom.
+  if (shaDirection !== "worker-behind") {
+    return { ...base, color: "green", statusText: `healthy · ${running || "?"} · last poll ${elapsed(row.last_poll_at)} ago`, detail: row.detail ?? null, violation: null };
+  }
   // Mirror the worker's queue-aware self-update deferral (scripts/builder-worker.ts:4290 —
   // self-restart-defers-to-idle): when the box is IDLE but `queued > 0` AND no manual drain is set,
   // the worker INTENTIONALLY parks the self-update until a sustained idle so a cascade of queued
-  // builds isn't restarted between specs. Reading that as "self-update stuck" was the monitor false
-  // positive (loop:box) — the worker is behaving exactly as designed. A MANUAL queue-restart
-  // (worker_controls.drain_for_update) still restarts at idle regardless of the queue (that's its
-  // purpose), so behindTooLong still reds at grace under a manual drain.
-  const queueDeferred = behind && idle && queuedCount > 0 && !manualDrain;
+  // builds isn't restarted between specs. A MANUAL queue-restart (worker_controls.drain_for_update)
+  // still restarts at idle regardless of the queue (that's its purpose), so behindTooLong still
+  // reds at grace under a manual drain.
+  const queueDeferred = idle && queuedCount > 0 && !manualDrain;
   if (queueDeferred) {
     return { ...base, color: "green", statusText: `idle — update deferred · ${queuedCount} queued (${running} → ${deployed.slice(0, 7)} on sustained idle)`, detail: row.detail ?? null, violation: null };
   }
   // Red when behind+idle AND past shaGrace AND not queue-deferred (queue empty OR manual drain set).
-  const behindTooLong = behind && idle && !queueDeferred && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
+  const behindTooLong = idle && !queueDeferred && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
   if (behindTooLong) {
     return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — self-update stuck for ${elapsed(row.started_at)}${manualDrain ? " (manual drain set)" : ""}.` } };
   }
-  // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring
-  // self-update until its lanes clear (sacrosanct — never kill an in-flight build). That's
-  // healthy, not a warning — keep it GREEN so a normal post-deploy build doesn't false-amber.
-  if (behind && !idle) {
+  // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring self-update
+  // until its lanes clear (sacrosanct — never kill an in-flight build).
+  if (!idle) {
     return { ...base, color: "green", statusText: `building — update deferred (${running} → ${deployed.slice(0, 7)} when idle)`, detail: row.detail ?? null, violation: null };
   }
   // Behind + IDLE but within grace ⇒ it should self-update on its next poll; brief amber.
-  if (behind) {
-    return { ...base, color: "amber", statusText: `updating — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: null };
-  }
-  return { ...base, color: "green", statusText: `healthy · ${running || "?"} · last poll ${elapsed(row.last_poll_at)} ago`, detail: row.detail ?? null, violation: null };
+  return { ...base, color: "amber", statusText: `updating — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: null };
 }
 
 /**
@@ -1430,6 +1503,15 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const queuedCount = activeJobs.filter((j) => j.status === "queued" || j.status === "queued_resume").length;
   const manualDrain = !!(workerCtrl as { drain_for_update: boolean } | null)?.drain_for_update;
 
+  // SHA-direction (control-tower-box-sha-direction-check, signal loop:box). Classify the box
+  // worker's running_sha vs VERCEL_GIT_COMMIT_SHA via the GitHub compare API BEFORE evalWorker
+  // decides "behind" — a plain prefix mismatch can't tell stale-code (worker-behind) from deploy
+  // lag (worker-ahead). Fails CLOSED to "unknown" (no red on an ambiguous compare, mirroring the
+  // deployAgeMs==null posture). Prefix-equal SHAs are resolved locally (no round-trip).
+  const deployedShaForDirection = process.env.VERCEL_GIT_COMMIT_SHA || "";
+  const runningShaForDirection = (workerRow as WorkerRow | null)?.running_sha ?? "";
+  const shaDirection = await fetchShaDirection(deployedShaForDirection, runningShaForDirection);
+
   // Empirical first-observed-at anchor (control-tower-registered-not-firing-observed-anchor-grace
   // P1). Build the loop_id → first_seen_at(ms) map from the read above, then best-effort upsert a
   // fresh row for every registered loop missing one — on-conflict-do-nothing so the FIRST tick that
@@ -1475,7 +1557,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const history = byLoop.get(loop.id) ?? [];
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
-    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain);
+    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
