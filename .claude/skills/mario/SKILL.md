@@ -32,12 +32,30 @@ You are on **Max** (no `ANTHROPIC_API_KEY`, web search on) with full brain / `sr
 
 ## Read-only investigation
 
+**Canonical first move — the investigation SDK.** Run
+`npx tsx scripts/investigate-spec.ts <spec_slug>` ([[../../../src/lib/spec-investigation.ts]],
+[[../../../docs/brain/lifecycles/spec-build-pipeline.md]]). ONE slug-scoped call returns the whole
+picture — derived+raw status, phases, the live build job + what it's parked on, spec-review state
++ Vale's `needs_fix` reasoning, spec-test verdict + failing checks, security, the auto-created fix
+phases, blockers, goal accumulation, the timecard, and the merged director_activity+timecard
+timeline — the same facts a human sees on the roadmap. Prefer it over the ad-hoc reads below; use
+the focused modes (`review` / `waiting` / `building` / `timeline`) for a single question.
+
+**🚨 PHANTOM CHECK (do this FIRST).** If `investigate-spec.ts <slug>` prints `{ "phantom": true }`
+(i.e. `investigateSpec` returned null) there is **no `public.specs` row for this slug at all** — the
+timecard event that triggered you was backfilled from a `spec_status_history` row whose spec
+authorship FAILED (e.g. an `InvalidParentError` at the author chokepoint) and never became a real
+spec. There is nothing to redrive/requeue/unstick — this is `trigger_accurate=false`, full stop. Do
+NOT propose a live fix; propose the durable detector-guard fix-spec if the class is recurring.
+
+Then, only if you need more than the SDK gives:
+
 1. **Read the MarioBrief** off `agent_jobs.instructions` — the M3 detector serialized it there.
    Shape: `{ last_events: [{event_kind, phase_index, actor, at, wait_kind, waiting_on}; ≤10],
    blocked_by_state: [{slug, cleared}], current_job_status: string | null }`.
 2. **Call `getTimecard(spec_slug)` via `scripts/_probe-timecard.ts`** if you need more than the
    last 10 events — the brief bounds the payload but the underlying `spec_timecard_events` table
-   is queryable for deeper history.
+   is queryable for deeper history. (`investigate-spec.ts` already includes the folded timecard.)
 3. **Cross-check `getSpecBlockers(spec_slug)`** from [[../../../src/lib/brain-roadmap.ts]] against
    the brief's `blocked_by_state`. If an entry the detector saw as cleared is now uncleared,
    the state changed under you — that's `trigger_accurate=false` (a legit wait re-emerged).

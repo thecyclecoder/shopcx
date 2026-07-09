@@ -654,6 +654,46 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
   return map;
 }
 
+/**
+ * SLUG-SCOPED security-review rollup — the single-spec fast path for the investigation SDK
+ * ([[spec-investigation]] / Mario). Identical `live`/`surfaced`/`completedClean` semantics as
+ * [[getSecurityStateBySlug]], but reads ONLY this slug's rows instead of scanning the whole
+ * workspace (the board path pulls up to 1000 rows to build a Record; a single-spec investigate
+ * doesn't need that). Returns the all-false absent state when no security-review row exists yet.
+ */
+export async function getSecurityStateForSlug(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+): Promise<SecurityStateBySlug> {
+  const state: SecurityStateBySlug = { live: false, surfaced: false, completedClean: false };
+  if (!slug || slug === SECURITY_DEP_WATCH_SLUG) return state;
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("status, instructions")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "security-review")
+    .eq("spec_slug", slug)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
+  const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
+  for (const row of (data ?? []) as Array<{ status: string; instructions?: string }>) {
+    let mode = "";
+    try {
+      mode = String(JSON.parse(String(row.instructions || "{}")).mode || "");
+    } catch {
+      /* not JSON — a diff review */
+    }
+    if (mode === "dep-watch") continue; // infra scan, not a per-spec gate
+    if (runningSet.has(row.status)) state.live = true;
+    else if (surfacedSet.has(row.status)) state.surfaced = true;
+    else if (row.status === "completed") state.completedClean = true;
+  }
+  if (state.live || state.surfaced) state.completedClean = false;
+  return state;
+}
+
 /** Per-branch security-review rollup — same shape as [[SecurityStateBySlug]] but keyed to the build's
  * `claude/*` branch (pre-merge `branch`-mode jobs carry `spec_branch === branch`). The pre-merge M4
  * promote gate reads this. */
