@@ -1,0 +1,1 @@
+- **Sol Reads "I Moved" as Address-Update + Replacement Offer, Not a Cancel Dead-End** · verified 2026-07-09 · → [[../lifecycles/ticket-lifecycle]]

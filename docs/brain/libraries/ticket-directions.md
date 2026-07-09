@@ -175,4 +175,4 @@ Verification bullets from the spec (Phase 1 / 2 / 3) — the moved-customer save
 
 ---
 
-[[../README]] · [[../tables/ticket_directions]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
+[[../README]] · [[../tables/ticket_directions]] · [[./move-replacement-offer]] · [[./sol-move-dead-end-guard]] · [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]] · [[../specs/sol-reads-moved-as-address-update-and-replacement-offer-not-cancel-deadend]] · [[../goals/sol-ticket-direction-then-cheap-execution]] · [[../functions/cs]] · [[../../CLAUDE]]
