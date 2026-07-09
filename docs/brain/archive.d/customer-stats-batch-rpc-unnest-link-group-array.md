@@ -1,0 +1,1 @@
+- **Fix get_customer_stats_batch: unnest resolve_customer_link_group's new uuid[] return type** · verified 2026-07-09 · → [[../libraries/customer-stats]]
