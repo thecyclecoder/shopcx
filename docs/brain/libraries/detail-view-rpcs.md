@@ -14,9 +14,9 @@ brain_refs:
   - [[libraries/customer-stats]]
 ---
 
-# Detail-view RPCs (Phase 5)
+# Detail-view RPCs
 
-Phase 5 of [[../specs/rpc-ify-aggregation-layer-fix-1000-row-truncation]] — two RPCs that collapse the tickets-detail round-trip fan-out and converge every "expand a customer to its link-group" call site on ONE SQL primitive. Migration: [`20261005170000_phase5_detail_view_rpcs.sql`](../../../supabase/migrations/20261005170000_phase5_detail_view_rpcs.sql). Both are `STABLE SECURITY DEFINER SET search_path = public`, `GRANT EXECUTE TO service_role, authenticated`.
+Two RPCs that collapse the tickets-detail round-trip fan-out and converge every "expand a customer to its link-group" call site on ONE SQL primitive (Phase 5 of the 1000-row truncation fix). Migration: [`20261005170000_phase5_detail_view_rpcs.sql`](../../../supabase/migrations/20261005170000_phase5_detail_view_rpcs.sql). Both are `STABLE SECURITY DEFINER SET search_path = public`, `GRANT EXECUTE TO service_role, authenticated`.
 
 ## 1. `public.resolve_customer_link_group(p_customer_id uuid) → uuid[]`
 

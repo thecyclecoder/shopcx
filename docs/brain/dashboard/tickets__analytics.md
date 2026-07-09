@@ -15,8 +15,8 @@ Measurement surface for the confidence-gated problem-lockin + selective-clarify 
 
 ## API endpoints called
 
-- `/api/tickets/analytics/selective-clarify`
-- `/api/tickets/analytics/sol-cost`
+- `/api/tickets/analytics/selective-clarify` — backed by [[../libraries/analytics-tile-rpcs]] `analytics_selective_clarify` RPC
+- `/api/tickets/analytics/sol-cost` — backed by [[../libraries/analytics-tile-rpcs]] `analytics_sol_cost` RPC
 
 The `sol-cost` endpoint returns:
 

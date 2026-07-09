@@ -16,7 +16,7 @@ brain_refs:
 
 # Crisis + growth egress RPCs
 
-Phase 4 of [[../specs/rpc-ify-aggregation-layer-fix-1000-row-truncation]] — two aggregate RPCs that kill the biggest "page all rows into JS then aggregate" egress sites the audit flagged. Migration: [`20261005160000_phase4_crisis_growth_rpcs.sql`](../../../supabase/migrations/20261005160000_phase4_crisis_growth_rpcs.sql). Both are `STABLE SECURITY DEFINER SET search_path = public` and `GRANT EXECUTE TO service_role, authenticated`.
+Two aggregate RPCs that kill the biggest "page all rows into JS then aggregate" egress sites the audit flagged (Phase 4 of the 1000-row truncation fix). Migration: [`20261005160000_phase4_crisis_growth_rpcs.sql`](../../../supabase/migrations/20261005160000_phase4_crisis_growth_rpcs.sql). Both are `STABLE SECURITY DEFINER SET search_path = public` and `GRANT EXECUTE TO service_role, authenticated`.
 
 ## 1. `public.crisis_affected_subs(p_workspace, p_variant_id, p_sku) → (affected_count bigint, monthly_revenue_cents bigint, sub_ids uuid[])`
 

@@ -15,7 +15,7 @@ brain_refs:
 
 # Order-aggregation RPCs
 
-Phase 3 of [[../specs/rpc-ify-aggregation-layer-fix-1000-row-truncation]] — five SQL primitives that fix aggregation correctness + kill unbounded [[../tables/orders]] egress from callers that previously paged or unbounded-selected the table. Migration: [`20261005150000_phase3_order_rpcs.sql`](../../../supabase/migrations/20261005150000_phase3_order_rpcs.sql).
+Five SQL primitives that fix aggregation correctness + kill unbounded [[../tables/orders]] egress from callers that previously paged or unbounded-selected the table (Phase 3 of the 1000-row truncation fix). Migration: [`20261005150000_phase3_order_rpcs.sql`](../../../supabase/migrations/20261005150000_phase3_order_rpcs.sql).
 
 All functions `SET search_path = public`. All read-only functions are `SECURITY DEFINER` + `GRANT EXECUTE TO service_role, authenticated`. The internal predicate `amplifier_is_late` is `IMMUTABLE` (composed inside other RPC WHERE clauses).
 

@@ -14,7 +14,7 @@ brain_refs:
 
 # Analytics-tile aggregation RPCs
 
-Phase 1 of [[../specs/rpc-ify-aggregation-layer-fix-1000-row-truncation]] — the four `public.*` aggregate RPCs that back the analytics tiles whose prior `.select()` scans were silently truncated at PostgREST's 1000-row cap. Every RPC is workspace-scoped by its first argument, `LANGUAGE sql STABLE SECURITY DEFINER`, `SET search_path = public`, and `GRANT EXECUTE` to `service_role` + `authenticated`. Migration: [`20261005135000_phase1_analytics_rpcs.sql`](../../../supabase/migrations/20261005135000_phase1_analytics_rpcs.sql).
+Four `public.*` aggregate RPCs that back the analytics tiles whose prior `.select()` scans were silently truncated at PostgREST's 1000-row cap (Phase 1 of the 1000-row truncation fix). Every RPC is workspace-scoped by its first argument, `LANGUAGE sql STABLE SECURITY DEFINER`, `SET search_path = public`, and `GRANT EXECUTE` to `service_role` + `authenticated`. Migration: [`20261005135000_phase1_analytics_rpcs.sql`](../../../supabase/migrations/20261005135000_phase1_analytics_rpcs.sql).
 
 Each replaces a fetch-then-aggregate-in-JS site the audit flagged after [[storefront-ltv-proxy]] fixed the biggest offender (`estimate_sub_ltv`, #1525). The mistake shape: a `.select(cols).eq('workspace_id', …)` with **no** `.range()` returns at most 1000 rows via PostgREST, so any JS aggregation on top (percentile, group-by, filter counts) reads a truncated source — the counts LOOK plausible and the tile silently drifts as the workspace grows.
 

@@ -13,7 +13,7 @@ brain_refs:
 
 # `public.list_subscriptions`
 
-Phase 2 of [[../specs/rpc-ify-aggregation-layer-fix-1000-row-truncation]] — the server-side subscription-list RPC that backs the `/dashboard/subscriptions` list view. Migration: [`20261005140000_list_subscriptions_rpc.sql`](../../../supabase/migrations/20261005140000_list_subscriptions_rpc.sql). Sole caller: [`src/app/api/workspaces/[id]/subscriptions/route.ts`](../../../src/app/api/workspaces/[id]/subscriptions/route.ts).
+Server-side subscription-list RPC that backs the `/dashboard/subscriptions` list view (Phase 2 of the 1000-row truncation fix). Migration: [`20261005140000_list_subscriptions_rpc.sql`](../../../supabase/migrations/20261005140000_list_subscriptions_rpc.sql). Sole caller: [`src/app/api/workspaces/[id]/subscriptions/route.ts`](../../../src/app/api/workspaces/[id]/subscriptions/route.ts).
 
 ## Why
 

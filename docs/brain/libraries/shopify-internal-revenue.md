@@ -33,6 +33,10 @@ async function getShopifyInternalNonRenewalRevenue(params: {
 3. For each non-renewal order, sums `price_cents × quantity` over the line items whose `variant_id` is
    in the group. Returns the group total + a `byProduct` split.
 
+## Server-side aggregation (RPC)
+
+The main entry point `getShopifyInternalNonRenewalRevenue` was refactored into the server-side `public.onsite_nonrenewal_revenue` RPC (Phase 4 of [[../libraries/crisis-growth-rpcs]]) to fix the paged-orders truncation bug. The JS wrapper still exists but now issues a single RPC call instead of paginating the orders table.
+
 ## Callers
 
 - [[acquisition-roas]] `computeAcqROAS` — the on-site channel of the AcqROAS numerator.
