@@ -1,0 +1,1 @@
+- **Builder worktree self-heal reclaims ephemeral (/tmp) branch-pinned worktrees** · verified 2026-07-09 · → [[../libraries/builder-worker]]
