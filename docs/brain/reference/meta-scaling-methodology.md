@@ -55,6 +55,17 @@ Learning phase = until an ad set gathers **~50 optimization events / 7-day windo
 
 Significant edits (reset learning): optimization event, targeting, add/remove creative, bid strategy, >20% budget, 7+ day pause, restructure.
 
+## Clear laggards — demote EARLY on leading indicators, but crown SLOWLY (2026-07-09, founder-directed)
+
+The $450 verdict floor is an **anti-fluke guard for a CONFIDENT call** — it does NOT mean you must burn $450 on an obvious laggard. The two directions are **asymmetric**, and conflating them is the expensive mistake:
+
+- **DEMOTE early (defensible, cheap to be wrong):** cut a laggard *before* the floor once it has spent **≥~20% of the floor (~$90+)** AND its **leading indicator is materially worse than the pack**. Our leading indicator is **cost-per-add-to-cart** — ATC is a recognized early purchase-intent signal (Meta's own diagnostic guidance; lower cost-per-ATC → lower CPA), readable *before* purchases accumulate. Practitioner cut-rules: cost-per-result >~30% above the pack, or CPC >2× pack, at ≥20% of threshold. **2026-07-09 coffee test:** skeptic v3 hit **7 ATC @ ~$15 cost-per-ATC vs 1 ATC @ ~$100** for its two siblings on ~$105 each — a ~7× spread, not a fluke → the two siblings were paused. (Tabs' three angles were all 0-ATC on ~$100 → a *null round*, paused entirely and refilled with fresh creative, not "concentrated onto a non-winner.")
+- **SCALE only when PROVEN (strict, expensive to be wrong):** a leading ATC signal is enough to **kill a loser** but NOT to **crown a winner**. **Never** build a scale ad set (or a >20% budget jump) until the ad clears the FULL floor — **≥$450 / ≥3 purchases at ≤ target CPA**. A leading indicator is not a proven winner; it stays *in the test* (nudge ≤+20% every 3-4 days, learning intact) until it earns the scale. The scale campaign is for graduates only.
+
+**Why asymmetric:** a false negative (killing a laggard that might've turned around) costs almost nothing — the bench is always refilling. A false positive (scaling a "winner" that regresses after $50) burns real budget. So **cut fast on leading signals, crown slowly on proven ones.**
+
+**Caveats:** high ATC + low purchases can mean checkout/landing friction, not a great creative — sanity-check the funnel before crediting the creative. And the 50-conversion "full confidence" bar (~$5,500/ad at our $110 CPA) is **unaffordable** — we cannot buy statistical certainty; we decide on cost-per-ATC + 3-5 conversions and accept directional calls. Sources: Meta Business Help (cost-per-ATC), AdManage/Flighted/Top Growth (early-cut + 3-5-conversion frameworks), LeadEnforce/Social Media Examiner (scale-without-reset).
+
 ## Debates we did NOT paper over
 
 - **Separate ABO test lab vs test-inside-Advantage+/ASC** — unresolved; majority runs a separate ABO lab (our choice). The consolidation-maximalist camp tests inside ASC and lets Meta arbitrate.
