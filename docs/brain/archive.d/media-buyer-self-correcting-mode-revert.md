@@ -1,0 +1,1 @@
+- **Media buyer self-correcting mode revert** · verified 2026-07-09 · → [[libraries/media-buyer-self-correcting]]
