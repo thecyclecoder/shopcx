@@ -90,7 +90,17 @@ The M3 stall-detector cron's scan. Fetches events for the (optionally) scoped wo
 
 ## Callers
 
-Empty for Phase 2 — the SDK ships without in-tree wiring. Mario M2 (`mario-lifecycle-chokepoint-wiring`) points every lifecycle chokepoint at {@link recordTimecardEvent}. Mario M3 (`mario-stall-detector-cron`) reads {@link listStalledCandidates}. Mario M5 (`mario-spec-detail-timeline`) reads {@link getTimecard}. This section will be updated as those wire-ins land.
+- **Spec-detail page** — [[../dashboard/roadmap]] · `src/app/dashboard/roadmap/[slug]/page.tsx`
+  calls `getTimecard(admin, workspace_id, slug)` inside its per-workspace `Promise.all` and
+  passes the returned `TimecardView` (steps, open_waits, total_elapsed_ms, first_event_at,
+  terminal_at) to `LifecycleTimeline`. The timeline paints per-stage duration labels,
+  inter-stage gap pills colored by `mario_thresholds` SLA (zinc / amber / rose), a
+  `WaitRow` per entry in `open_waits` (color: sky / amber / rose), and a top "Elapsed:" /
+  "Total:" badge driven by `first_event_at` / `terminal_at`. See
+  [[../specs/spec-detail-timecard-timeline]] Phase 4 (Fix 1).
+- Mario M2 (`mario-lifecycle-chokepoint-wiring`) points every lifecycle chokepoint at
+  {@link recordTimecardEvent}. Mario M3 (`mario-stall-detector-cron`) reads
+  {@link listStalledCandidates}.
 
 ## Related
 
