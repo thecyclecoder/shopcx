@@ -1,0 +1,1 @@
+- **A one-off spec that depends on goal-internal work blocks on the goal, not the member spec** · verified 2026-07-08 · → [[../project-management]] · [[../libraries/brain-roadmap]] · [[../lifecycles/spec-goal-branch-pm-flow]]

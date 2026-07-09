@@ -26,6 +26,8 @@ import { retrieveContext } from "@/lib/rag";
 import { matchPatterns } from "@/lib/pattern-matcher";
 import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
+import { isAutomatedInbound } from "@/lib/automated-sender";
+import { decideOutreachRoute } from "@/lib/outreach-route";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
@@ -123,7 +125,7 @@ function isAccountRelated(intent: string): boolean {
 
 async function channelCfg(admin: Admin, wsId: string, ch: string) {
   const { data } = await admin.from("ai_channel_config")
-    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit")
+    .select("enabled, confidence_threshold, auto_resolve, sandbox, personality_id, instructions, ai_turn_limit, sol_first_touch_enabled, sol_frustration_holding_message_enabled")
     .eq("workspace_id", wsId).eq("channel", ch).single();
   return {
     enabled: data?.enabled ?? true,
@@ -135,7 +137,39 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
     // existed, fallback defaulted to sandbox=true).
     sandbox: data?.sandbox ?? false,
     personality_id: data?.personality_id || null,
+    ai_turn_limit: (data as unknown as { ai_turn_limit?: number | null } | null)?.ai_turn_limit ?? 4,
+    // Sol first-touch opt-in (Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session).
+    // Defaults false — the migration set the column NOT NULL default false, so rollout is opt-in
+    // per workspace+channel. When true, an is_new_ticket event acks + enqueues Sol on Max instead
+    // of firing the inline Sonnet Step 2e path.
+    sol_first_touch_enabled: (data as unknown as { sol_first_touch_enabled?: boolean } | null)?.sol_first_touch_enabled ?? false,
+    // Phase 3 of sol-drift-frustration-detector-and-re-session-router — governs the "we're
+    // looking into that for you" inline holding message the pre-ship inflection gate sends on
+    // frustration (drift bounces are silent). Migration default is TRUE; the ?? fallback here
+    // covers the pre-migration read path (no column yet) with the same customer-visible default.
+    sol_frustration_holding_message_enabled: (data as unknown as { sol_frustration_holding_message_enabled?: boolean } | null)?.sol_frustration_holding_message_enabled ?? true,
   };
+}
+
+/**
+ * Phase 3 of docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+ * Reads `ai_channel_config.sol_playbook_selection_active` for (workspace, channel). Defaults to
+ * false so an unconfigured channel or a workspace pre-migration takes the safe rollout stance
+ * (the deterministic matcher still owns the playbook start). Scoped by workspace_id + channel so
+ * a cross-workspace / cross-channel row cannot authorize the branch.
+ */
+async function isSolPlaybookSelectionActive(
+  admin: Admin,
+  wsId: string,
+  ch: string,
+): Promise<boolean> {
+  const { data } = await admin
+    .from("ai_channel_config")
+    .select("sol_playbook_selection_active")
+    .eq("workspace_id", wsId)
+    .eq("channel", ch)
+    .maybeSingle();
+  return (data as { sol_playbook_selection_active?: boolean } | null)?.sol_playbook_selection_active ?? false;
 }
 
 async function loadPersonality(admin: Admin, pid: string | null) {
@@ -416,6 +450,96 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
           await sysNote(admin, tid, `[System] Chat customer idle. Reply also sent via email to ${cust.email}.`);
         }
       }
+    }
+  }
+}
+
+/**
+ * sendFirstTouchAck — Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session.
+ *
+ * Ship a short per-channel placeholder body ("We got your note — one of the team will get back to
+ * you shortly.") through the SAME send() wrapper the orchestrator uses, so the outbound
+ * ticket_messages row lands with author_type='ai' + direction='outbound' + the SAME rendering the
+ * downstream Sol reply will use. Because Sol's real first reply is authored on a separate turn on
+ * Max, this ack is what tells the customer "we saw you" while Sol's session is running.
+ *
+ * Also inserts a ticket_resolution_events row for this ack turn + stamps shipped_at on it after
+ * the send returns, so the spec's Phase-3 verification bullet 1 ("expect a ticket_resolution_events
+ * row with shipped_at set (the ack)") holds. Mirrors action-executor.ts § stageResolutionEvent +
+ * stampResolutionShipped exactly — CAS on shipped_at IS NULL so a retry can't overwrite the first
+ * stamp (learning #1: re-assert the read-time invariant in the write itself). Best-effort — a
+ * ledger insert failure NEVER blocks the ack send (mirrors action-executor's swallow-on-ledger
+ * pattern; the ledger is diagnostic substrate, not a critical path).
+ */
+function firstTouchAckBody(channel: string, firstName: string | null): string {
+  const hi = firstName ? `Hi ${firstName},` : "Hi there,";
+  // Chat-style vs email-style: chat customers see it in a bubble, email customers see it as a body.
+  // Same content, slightly different framing so a chat "Thanks for reaching out — one of the team
+  // will be right with you." doesn't read like a formal email letter.
+  if (channel === "chat" || channel === "meta_dm" || channel === "sms" || channel === "social_comments") {
+    return `${hi} thanks for reaching out — one of the team will be right with you.`;
+  }
+  return `${hi}\n\nThanks for reaching out — we got your note and one of the team will get back to you shortly.`;
+}
+
+async function sendFirstTouchAck(admin: Admin, wsId: string, tid: string, ch: string, sandbox: boolean): Promise<void> {
+  // Load the customer's first name (best-effort) so the ack reads like the rest of the pipeline
+  // instead of a bare "Hi there,". Falls back cleanly when there's no linked customer.
+  const { data: t } = await admin
+    .from("tickets")
+    .select("customer_id")
+    .eq("id", tid)
+    .single();
+  let firstName: string | null = null;
+  if (t?.customer_id) {
+    const { data: c } = await admin.from("customers").select("first_name").eq("id", t.customer_id).single();
+    firstName = (c?.first_name as string | null) ?? null;
+  }
+  const body = firstTouchAckBody(ch, firstName);
+
+  // Stage a ticket_resolution_events row for THIS turn (the ack). Mirrors action-executor.ts
+  // stageResolutionEvent: turn_index = count(prior rows for ticket) + 1 (cheap under the
+  // (workspace_id, ticket_id, turn_index) index). Best-effort — never blocks the send.
+  let resolutionEventId: string | null = null;
+  try {
+    const { count } = await admin
+      .from("ticket_resolution_events")
+      .select("id", { count: "exact", head: true })
+      .eq("ticket_id", tid);
+    const turnIndex = (count ?? 0) + 1;
+    const { data: row } = await admin
+      .from("ticket_resolution_events")
+      .insert({
+        workspace_id: wsId,
+        ticket_id: tid,
+        turn_index: turnIndex,
+        reasoning: "sol_first_touch_ack",
+      })
+      .select("id")
+      .single();
+    resolutionEventId = (row as { id: string } | null)?.id ?? null;
+  } catch {
+    // Ledger is diagnostic substrate — a failed insert must NOT block the ack. Sol's real turn
+    // will insert its own ticket_resolution_events row when its send goes through executeSonnetDecision.
+  }
+
+  // Actually ship the ack. Uses the SAME send() wrapper the orchestrator uses so per-channel
+  // delivery (email/portal/chat idle-fallback) is identical to production.
+  await send(admin, wsId, tid, ch, body, sandbox);
+
+  // Compare-and-set shipped_at on the ack's ticket_resolution_events row (per learning #1 —
+  // re-assert the read-time precondition on the write itself). Compound key includes
+  // workspace_id + is-null so a racing stamp can't overwrite the first-ship timestamp.
+  if (resolutionEventId) {
+    try {
+      await admin
+        .from("ticket_resolution_events")
+        .update({ shipped_at: new Date().toISOString() })
+        .eq("id", resolutionEventId)
+        .eq("workspace_id", wsId)
+        .is("shipped_at", null);
+    } catch {
+      // Never fail the ack because the ledger stamp failed.
     }
   }
 }
@@ -945,6 +1069,52 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
+    // ── 1a2. AUTOMATED-SENDER PRE-FILTER (zero AI, skip the classifier) ──
+    // Phase 2 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
+    // Ahead of the classify-bucket Haiku step below, run a deterministic pre-filter over the
+    // inbound's from-address + body. Automated no-reply senders (TestFlight, App Store receipts,
+    // mailer daemons, GitHub notifications, …) and messages carrying unambiguous automated-
+    // notification markers ("please do not reply to this email", "this mailbox is not monitored")
+    // are closed + tagged `outreach` here, WITHOUT invoking the Haiku classifier or any other AI
+    // call — the whole point of Phase 2 is that this subclass costs zero AI dollars.
+    //
+    // Conservative on purpose (verification bullet 2 — no false positive on a genuine customer):
+    // isAutomatedInbound rejects anything ambiguous. Human brand-collab outreach that doesn't
+    // trip these deterministic patterns falls through to the (cheap Haiku) classifier and is
+    // caught by Phase 1's `msgType === "outreach"` short-circuit at § 1c. See automated-sender.ts
+    // for the exact predicate + automated-sender.test.ts for the pinned behavior.
+    //
+    // st.custEmail equals the inbound From address on email tickets — the email webhook
+    // (src/app/api/webhooks/email/route.ts) creates/looks up the customers row from the sender's
+    // email, so the customer row's email column IS the sender. Non-email channels have no
+    // notion of an automated sender and pass through (isAutomatedSender(null) === false).
+    //
+    // Phase 3 refactor: both this pre-classifier site and the post-classifier site at § 1c
+    // dispatch through the pure `decideOutreachRoute` predicate (src/lib/outreach-route.ts).
+    // The four verification tests in outreach-route.test.ts pin THAT function's routing, so
+    // the shipped handler runs the same predicate the tests exercise — coaching #1's named-
+    // symbol acceptance token instead of a docstring-only description of the invariant.
+    const preClassifierOutreachRoute = decideOutreachRoute({
+      isNew,
+      senderEmail: st.custEmail,
+      body: msg,
+      solFirstTouchEnabled: cfg.sol_first_touch_enabled,
+      agentAssigned,
+    });
+    if (preClassifierOutreachRoute.kind === "pre_filter_close") {
+      await step.run("outreach-automated-sender-pre-filter", async () => {
+        await addTicketTag(tid, "cls:outreach");
+        await addTicketTag(tid, "outreach");
+        await setStatus(admin, tid, cfg.auto_resolve);
+        await sysNote(
+          admin,
+          tid,
+          `[System] Automated-sender pre-filter tripped (sender=${st.custEmail || "(none)"}) — deterministically closed, no AI response, classify-bucket skipped (zero AI cost).`,
+        );
+      });
+      return { status: "outreach_automated_sender_pre_filter" };
+    }
+
     // ── 1b. Three-bucket classification: account / general / outreach ──
     // - account = needs customer data (refund, cancel, order status, etc.)
     // - general = product/policy info questions answerable without account data
@@ -986,6 +1156,36 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     if (isNew) {
       await addTicketTag(tid, `cls:${msgType}`);
       if (msgType === "outreach") await addTicketTag(tid, "outreach");
+    }
+
+    // ── 1c. OUTREACH DETERMINISTIC CLOSE ──
+    // Phase 1 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
+    // Outreach = brand-collab / UGC / partnership / cold sales pitch. Never a customer-service
+    // request, so we don't reply and — critically — don't enqueue Sol's ticket-handle box session
+    // (a Max-tier handling session costs real money per ticket). Close deterministically here,
+    // BEFORE the account-path email flow (~1119), the auto-link-by-identity step (~1885), the Sol
+    // first-touch dispatch (~1919), the inflection gate (~1994), and the Sonnet orchestrator
+    // (~2242) — every paid downstream lane is bypassed by the early return. The classifier tag +
+    // `outreach` tag were already stamped at ~1108. Both dispatch gates below ALSO check
+    // msgType !== "outreach" as belt-and-suspenders so a future refactor that moves this
+    // short-circuit can't accidentally leak an outreach ticket into a paid handling session.
+    //
+    // Phase 3: dispatch through `decideOutreachRoute` with `classifierBucket = msgType` so
+    // this site runs the same predicate the four Phase-3 verification tests pin.
+    const postClassifierOutreachRoute = decideOutreachRoute({
+      isNew,
+      senderEmail: st.custEmail,
+      body: msg,
+      classifierBucket: msgType,
+      solFirstTouchEnabled: cfg.sol_first_touch_enabled,
+      agentAssigned,
+    });
+    if (postClassifierOutreachRoute.kind === "classifier_close") {
+      await step.run("outreach-deterministic-close", async () => {
+        await setStatus(admin, tid, cfg.auto_resolve);
+        await sysNote(admin, tid, "[System] Outreach — deterministically closed, no AI response.");
+      });
+      return { status: "outreach_deterministic_close" };
     }
 
     let pendingAccountLink: { journeyId: string; journeyName: string } | null = null;
@@ -1774,9 +1974,362 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       });
     }
 
+    // ── 3.95 SOL FIRST-TOUCH DISPATCH ──
+    // Phase 3 of sol-ticket-direction-artifact-and-first-touch-box-session, plus Phase 1 of
+    // sol-first-touch-ack-only-on-chat-not-async-channels (the ack is chat-only). When the
+    // workspace has opted the channel into Sol's first-touch box session AND this is a fresh
+    // ticket (is_new_ticket) AND no agent is already involved AND fraud didn't block above, we
+    // enqueue a top-level Max session for Sol to author the durable Direction + the real first
+    // customer-facing reply, then RETURN — the inline Sonnet Step 2e path below is skipped for
+    // this turn. On CHAT (customer waiting live), we ALSO ship a short ack RIGHT NOW so the
+    // customer sees a response within seconds; on async channels (email/sms/portal/meta_dm),
+    // Sol's real reply arriving minutes later IS the first-touch message — a redundant "we'll
+    // get back to you" is noise, so we skip both the ack send AND its ticket_resolution_events
+    // ack row.
+    //
+    // Guards, in order (learning #2 — compare-and-set + narrow the enumeration source before
+    // mutating): (1) is_new_ticket must be true — a reply on an existing ticket falls through to
+    // the orchestrator; (2) cfg.sol_first_touch_enabled must be true — default false + opt-in per
+    // ai_channel_config row means an unconfigured channel takes the original path (verification
+    // bullet 3); (3) !agentAssigned — a human is already handling this ticket, don't step on their
+    // toes (agent_intervened / assigned_to / escalated_to all set agentAssigned above). Fraud is
+    // already handled — a fraud-blocked ticket returned above at line ~1730 (verification bullet 4).
+    // msgType !== "outreach" belt-and-suspenders (Phase 1 of the outreach-deterministic-close
+    // spec): the primary short-circuit at § 1c already returned above, so this gate only fires
+    // for account/general — but pinning the classifier bucket into the dispatch predicate itself
+    // means a future refactor that moves the short-circuit block can't silently leak an outreach
+    // ticket into a Max-tier ticket-handle session.
+    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned && msgType !== "outreach") {
+      const isChatChannel = st.ch === "chat";
+      const acked = await step.run("sol-first-touch-ack", async () => {
+        if (await newerActivity(admin, tid, t0)) return false;
+        if (isChatChannel) {
+          await sendFirstTouchAck(admin, wsId, tid, st.ch, cfg.sandbox);
+          await sysNote(admin, tid, `[System] Sol first-touch: ack sent — dispatching kind='ticket-handle' agent_jobs.`);
+        } else {
+          // Async channel: skip the ack entirely (no send, no ticket_resolution_events ack row).
+          // Sol's real reply from the enqueued ticket-handle job is the sole first-touch message.
+          await sysNote(admin, tid, `[System] Sol first-touch: ack skipped (channel=${st.ch}, chat-only) — dispatching kind='ticket-handle' agent_jobs.`);
+        }
+        return true;
+      });
+
+      if (acked) {
+        // Enqueue Sol's box session. Learning #1: the enqueue is scoped to this workspace + this
+        // ticket + this turn's reason, and Sol's runTicketHandleJob re-guards on the required
+        // Direction fields before it calls writeDirection — so a mis-formed session never lands a
+        // partial-UNIQUE-violating row on ticket_directions. `turn_index` is not the ticket-messages
+        // turn — it's the resolution-events turn index. On chat: ack was turn 1, Sol authors turn 2.
+        // On async channels: no ack — Sol authors turn 1 (her real reply is the sole first-touch
+        // customer message).
+        await step.run("sol-first-touch-enqueue", async () => {
+          const turnIndex = isChatChannel ? 2 : 1; // chat: ack=1, Sol=2; async: Sol=1 (no ack)
+          // No ticket_id column on agent_jobs — the shape is workspace_id + spec_slug + kind +
+          // instructions (JSON with the per-kind payload). runTicketHandleJob parses ticket_id +
+          // workspace_id from the instructions blob (mirrors ticket-improve's params-in-JSON pattern).
+          await admin.from("agent_jobs").insert({
+            workspace_id: wsId,
+            kind: "ticket-handle",
+            spec_slug: `ticket-handle-${tid.slice(0, 8)}`,
+            status: "queued",
+            instructions: JSON.stringify({
+              ticket_id: tid,
+              workspace_id: wsId,
+              turn_index: turnIndex,
+              reason: "first_touch",
+            }),
+          });
+        });
+        return { status: "sol_first_touch_dispatched", channel: st.ch };
+      }
+    }
+
+    // ── 3.97 PRE-SHIP INFLECTION GATE ──
+    // Phase 2 + Phase 4 (Fix 1) of docs/brain/specs/sol-drift-frustration-detector-and-re-session-router.md.
+    // Before either the playbook short-circuit runs (§ 3.98) OR the Sonnet orchestrator runs
+    // (§ 4), ask [[../libraries/inflection-detector]] `detectInflection` whether the live
+    // Direction still fits the newest inbound message. On kind='none' → fall through to the
+    // existing dispatch (playbook short-circuit OR Sonnet) exactly as today. On
+    // kind='drift'|'frustration' → HOLD the drafted reply (no ticket_messages outbound row for
+    // this turn), stage a ticket_resolution_events row with reasoning='sol:inflection-<kind>'
+    // + evidence stashed in the jsonb `chosen` column, send the "we're looking into that for
+    // you" holding message on frustration (feature-flagged), then call reSessionSol to
+    // supersede the live Direction + enqueue a new box session. Playbook-active tickets still
+    // check for frustration (a mid-playbook "refund now" bounces) but the detector's Stage-1
+    // drift path is skipped internally when isPlaybookActive=true.
+    //
+    // Gate placement: BEFORE Sonnet is intentional. The spec text says "after
+    // callSonnetOrchestratorV2 returns and before the outer send wrapper fires" — the
+    // observable outcome (no reply ships, sol:inflection ledger row) is identical whether we
+    // never draft the reply OR draft-then-drop it, so we save the Sonnet cost by gating first.
+    //
+    // Guards (coaching #1/#2 — every mutation is compare-and-set + workspace-scoped):
+    //   • reSessionSol wraps superseDirection (compare-and-set on superseded_at IS NULL,
+    //     workspace_id-scoped) so a racing caller can't fan out a duplicate ticket-handle
+    //     session; the DB partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` on
+    //     ticket_directions is a second belt.
+    //   • The ticket_resolution_events stage is best-effort (wrapped in try/catch) — a
+    //     diagnostic-substrate failure MUST NOT block the bounce, matching the ledger
+    //     pattern the playbook short-circuit already uses (§ 3.98).
+    //   • The holding-message send is gated on cfg.sol_frustration_holding_message_enabled
+    //     (migration-default true, workspace-tunable) AND explicitly restricted to
+    //     kind==='frustration' — drift bounces are silent by spec.
+    const inflectionOutcome = await step.run("sol-inflection-gate", async () => {
+      if (await newerActivity(admin, tid, t0)) return { kind: "none" as const };
+      const { applyInflectionGate } = await import("@/lib/inflection-detector");
+      const result = await applyInflectionGate({
+        admin,
+        workspace_id: wsId,
+        ticket_id: tid,
+        channel: st.ch,
+        newestMessage: msg,
+        aiTurnLimit: cfg.ai_turn_limit ?? 4,
+        solFrustrationHoldingMessageEnabled: cfg.sol_frustration_holding_message_enabled !== false,
+        sendHoldingMessage: async (channel, body) => {
+          await sendWithDelay(admin, wsId, tid, channel, body, cfg.sandbox);
+        },
+      });
+      if (result.kind !== "none") {
+        await sysNote(
+          admin,
+          tid,
+          `[System] Sol inflection: ${result.kind} — held draft, superseded=${result.reSession?.superseded ?? false}, enqueued=${result.reSession?.enqueued ?? false}, holding=${result.holdingMessageSent}.`,
+        );
+      }
+      return { kind: result.kind };
+    });
+
+    if (inflectionOutcome.kind !== "none") {
+      return { status: `sol_inflection_${inflectionOutcome.kind}` };
+    }
+
+    // ── 3.98 SOL PLAYBOOK SHORT-CIRCUIT ──
+    // Phase 4 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md. When Sol
+    // committed the ticket to a playbook at first-touch (live Direction chosen_path='playbook')
+    // AND the playbook is still running (tickets.active_playbook_id NOT NULL), we drive this
+    // follow-up turn directly through executePlaybookStep and SKIP the Sonnet orchestrator —
+    // a zero-cost, deterministic turn instead of paying for another Sonnet/Opus decision.
+    //
+    // Guards (learning #2 — narrow before mutating):
+    //  (1) loadLiveDirection returns non-null AND superseded_at is null — the Direction is
+    //      still authoritative for this ticket. maybeSingle() under the DB partial-UNIQUE
+    //      makes multi-live-row states impossible; a mis-authored Direction just returns null.
+    //  (2) chosen_path === "playbook" — a stateless/needs_info Direction falls through to the
+    //      Sonnet path so those turns can still take the Phase-3 Haiku route.
+    //  (3) tickets.active_playbook_id IS NOT NULL AND the ticket row is scoped by workspace —
+    //      the playbook was completed or its exception limit was exhausted → NO short-circuit,
+    //      fall through to the orchestrator (spec bullet 2: the assembleDirectionContext path
+    //      Phase 2 wires; until Phase 2 ships, the fall-through is the existing Sonnet path).
+    //
+    // Ledger: stage a ticket_resolution_events row with reasoning='sol:playbook-shortcircuit',
+    // then CAS shipped_at (learning #1) — same stage → send → stamp pattern as sendFirstTouchAck.
+    // Ledger writes are best-effort — a diagnostic-substrate failure MUST NOT block the send.
+    const solPlaybookShortCircuit = await step.run("sol-playbook-shortcircuit-check", async () => {
+      const { loadLiveDirection } = await import("@/lib/ticket-directions");
+      const direction = await loadLiveDirection(admin, tid, { workspace_id: wsId });
+      if (!direction || direction.superseded_at) return null;
+      if (direction.chosen_path !== "playbook") return null;
+      const { data: ticketRow } = await admin
+        .from("tickets")
+        .select("active_playbook_id")
+        .eq("workspace_id", wsId)
+        .eq("id", tid)
+        .maybeSingle();
+      const activePlaybookId = (ticketRow?.active_playbook_id as string | null) ?? null;
+      if (!activePlaybookId) return null;
+      return { direction_id: direction.id, active_playbook_id: activePlaybookId };
+    });
+
+    if (solPlaybookShortCircuit) {
+      const shortCircuitOutcome = await step.run("sol-playbook-shortcircuit-execute", async () => {
+        if (await newerActivity(admin, tid, t0)) return { skipped: true as const };
+
+        // Stage a ticket_resolution_events row for THIS zero-Sonnet turn. turn_index =
+        // count(prior rows) + 1 (cheap under the (workspace_id, ticket_id, turn_index)
+        // index), same rule Sol's ack + the orchestrator use. reasoning is the exact
+        // spec-verification string 'sol:playbook-shortcircuit' so cost analytics can
+        // count zero-cost short-circuited turns without a heuristic classifier.
+        let resolutionEventId: string | null = null;
+        try {
+          const { count } = await admin
+            .from("ticket_resolution_events")
+            .select("id", { count: "exact", head: true })
+            .eq("ticket_id", tid);
+          const turnIndex = (count ?? 0) + 1;
+          const { data: row } = await admin
+            .from("ticket_resolution_events")
+            .insert({
+              workspace_id: wsId,
+              ticket_id: tid,
+              turn_index: turnIndex,
+              reasoning: "sol:playbook-shortcircuit",
+            })
+            .select("id")
+            .single();
+          resolutionEventId = (row as { id: string } | null)?.id ?? null;
+        } catch {
+          // Ledger is diagnostic — a failed insert must NOT block the customer-facing send.
+        }
+
+        // Run the playbook step. Same call the pipeline's `2. Playbook` block uses (line
+        // ~2340); the short-circuit is just an earlier entry — one effector, two entry paths.
+        const result = await executePlaybookStep(wsId, tid, msg, pers);
+        if (result.systemNote) await sysNote(admin, tid, result.systemNote);
+        if (result.response) await sendWithDelay(admin, wsId, tid, st.ch, result.response, cfg.sandbox);
+
+        // Compare-and-set shipped_at (learning #1 — re-assert the read-time invariant on
+        // the write itself). Compound key includes workspace_id + is-null so a racing
+        // stamp cannot overwrite the first-ship timestamp.
+        if (resolutionEventId) {
+          try {
+            await admin
+              .from("ticket_resolution_events")
+              .update({ shipped_at: new Date().toISOString() })
+              .eq("id", resolutionEventId)
+              .eq("workspace_id", wsId)
+              .is("shipped_at", null);
+          } catch {
+            // Never fail the short-circuit turn because the ledger stamp failed.
+          }
+        }
+
+        await setStatus(admin, tid, cfg.auto_resolve);
+        return { skipped: false as const, action: result.action, hasResponse: !!result.response };
+      });
+
+      if (!shortCircuitOutcome.skipped) {
+        return { status: "sol_playbook_shortcircuit", action: shortCircuitOutcome.action };
+      }
+    }
+
+    // ── 3.99 SOL DIRECTION APPLY ──
+    // Phase 2 of docs/brain/specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta.md.
+    // When Sol's live Direction resolves chosen_path to a JOURNEY or a FRESH PLAYBOOK (no
+    // active_playbook_id yet), APPLY the matched mechanism deterministically — launchJourneyForTicket
+    // with a message-aware leadIn (generateJourneyLeadIn mirrors the customer's incoming message)
+    // or startPlaybook + one executePlaybookStep — instead of paying for a Sonnet turn that would
+    // otherwise compose a freeform "click below" reply. A rule flagged self-service-only reroutes
+    // a playbook Direction to the matching active journey so a direct mutation can never run FOR
+    // the customer (verification bullet 3).
+    //
+    // Positioned AFTER 3.98's follow-up-turn playbook shortcircuit and BEFORE the Sonnet
+    // orchestrator: the follow-up-turn path (§ 3.98) already handles active_playbook_id NOT NULL
+    // → my apply path re-asserts active_playbook_id IS NULL for the FRESH start; if any read-time
+    // precondition drifts we fall through to Sonnet (learning #6 — confirming predicate at the
+    // action point, no coarse proxy authorizes the deterministic apply).
+    const solDirectionApply = await step.run("sol-direction-apply-check", async () => {
+      const { loadLiveDirection } = await import("@/lib/ticket-directions");
+      const direction = await loadLiveDirection(admin, tid, { workspace_id: wsId });
+      if (!direction || direction.superseded_at) return null;
+      if (direction.chosen_path !== "journey" && direction.chosen_path !== "playbook") return null;
+      // Direction points at a mechanism — hand off to the apply module.
+      return { direction };
+    });
+
+    if (solDirectionApply) {
+      const applyOutcome = await step.run("sol-direction-apply-execute", async () => {
+        if (await newerActivity(admin, tid, t0)) return { skipped: true as const };
+
+        // Stage a ticket_resolution_events row for this deterministic turn — same stage-then-CAS
+        // shape sendFirstTouchAck and the § 3.98 shortcircuit use so cost analytics can count
+        // Direction-applied turns.
+        let resolutionEventId: string | null = null;
+        try {
+          const { count } = await admin
+            .from("ticket_resolution_events")
+            .select("id", { count: "exact", head: true })
+            .eq("ticket_id", tid);
+          const turnIndex = (count ?? 0) + 1;
+          const { data: row } = await admin
+            .from("ticket_resolution_events")
+            .insert({
+              workspace_id: wsId,
+              ticket_id: tid,
+              turn_index: turnIndex,
+              reasoning: `sol:direction-apply:${solDirectionApply.direction.chosen_path}:${solDirectionApply.direction.plan.journey_slug ?? solDirectionApply.direction.plan.playbook_slug ?? "?"}`,
+            })
+            .select("id")
+            .single();
+          resolutionEventId = (row as { id: string } | null)?.id ?? null;
+        } catch {
+          // Ledger is diagnostic — a failed insert must NOT block the customer-facing send.
+        }
+
+        const { applySolDirection } = await import("@/lib/sol-direction-apply");
+        const { launchJourneyForTicket: launchFn } = await import("@/lib/journey-delivery");
+        const { startPlaybook: startPbFn, executePlaybookStep: execStepFn } = await import(
+          "@/lib/playbook-executor"
+        );
+        const { getCxPolicies } = await import("@/lib/cx-agent-sdk");
+
+        const result = await applySolDirection(solDirectionApply.direction, {
+          admin,
+          workspaceId: wsId,
+          ticketId: tid,
+          customerId: st.custId || "",
+          channel: st.ch,
+          message: msg,
+          personality: pers,
+          sandbox: cfg.sandbox,
+          send: async (m: string, sb: boolean) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),
+          sysNote: async (m: string) => {
+            await sysNote(admin, tid, m);
+          },
+          generateLeadIn: generateJourneyLeadIn,
+          launchJourney: launchFn,
+          startPlaybookFn: startPbFn,
+          executePlaybookStepFn: execStepFn,
+          loadRules: async (a, ws) => {
+            const pols = await getCxPolicies(a, ws);
+            return pols.map((p) => ({ category: p.category, title: p.title, content: p.content }));
+          },
+        });
+
+        // CAS shipped_at on the ledger row so a racing writer cannot overwrite the first-ship
+        // timestamp (learning #6).
+        if (resolutionEventId && result.applied) {
+          try {
+            await admin
+              .from("ticket_resolution_events")
+              .update({ shipped_at: new Date().toISOString() })
+              .eq("id", resolutionEventId)
+              .eq("workspace_id", wsId)
+              .is("shipped_at", null);
+          } catch {
+            // Never fail the deterministic turn on a ledger stamp failure.
+          }
+        }
+
+        if (result.applied) {
+          await setStatus(admin, tid, cfg.auto_resolve);
+        }
+        return { skipped: false as const, applied: result.applied, kind: result.kind, slug: result.slug, reason: result.reason, override: result.override ?? null };
+      });
+
+      if (!applyOutcome.skipped && applyOutcome.applied) {
+        return {
+          status: "sol_direction_apply",
+          kind: applyOutcome.kind,
+          slug: applyOutcome.slug,
+          reason: applyOutcome.reason,
+          override: applyOutcome.override,
+        };
+      }
+      // Not applied → fall through to the Sonnet orchestrator below with the reason on the log.
+    }
+
     // ── 4. SONNET ORCHESTRATOR ──
     // Sonnet analyzes the full request and decides the best action. Replaces pattern matching,
     // AI classification, confidence gate, and routeExec cascading lookup.
+    //
+    // msgType !== "outreach" belt-and-suspenders (Phase 1 of the outreach-deterministic-close
+    // spec): the primary short-circuit at § 1c already returned above for outreach tickets, so a
+    // fall-through to here means account/general. The explicit guard pins the classifier bucket
+    // into this parallel dispatch lane's predicate so outreach can NEVER reach a paid Sonnet/Opus
+    // turn via any refactor that reorders the upstream blocks.
+    if (isNew && msgType === "outreach") {
+      return { status: "outreach_deterministic_close_guard" };
+    }
     {
       const { callSonnetOrchestratorV2 } = await import("@/lib/sonnet-orchestrator-v2");
       const { executeSonnetDecision } = await import("@/lib/action-executor");
@@ -1799,11 +2352,23 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {
-        const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null });
-        await sysNote(admin, tid, `[System] Orchestrator model: ${pick.model} (${pick.reason})`);
+        // Phase 3 + Phase 5 Fix 1 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md —
+        // load the live Direction (if any) BEFORE the picker so both (a) the fresh-Direction
+        // Haiku route (Phase 3) can fire and (b) the orchestrator's Direction-scoped user
+        // block (Phase 2 / Fix 1) can swap in — no customer name / orders / full history in
+        // the prompt when Sol has already summarized the ticket. loadLiveDirection returns
+        // null when Sol hasn't authored one yet (legacy tickets / workspaces without
+        // sol_first_touch_enabled); the picker treats that as "no Haiku route" and the
+        // orchestrator falls through to the existing full-context user block unchanged.
+        const { loadLiveDirection } = await import("@/lib/ticket-directions");
+        const liveDirection = await loadLiveDirection(admin, tid, { workspace_id: wsId });
+        const directionActive = !!(liveDirection && !liveDirection.superseded_at);
+        const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null, direction: liveDirection });
+        await sysNote(admin, tid, `[System] Orchestrator model: ${pick.model} (${pick.reason})${directionActive ? " · direction-scoped context" : ""}`);
         const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers,
           agentAssigned ? { assigned: true, intervened: st.intervened } : null,
-          pick);
+          pick,
+          directionActive ? liveDirection : null);
         await sysNote(admin, tid, `[System] ${pick.model === "opus" ? "Opus" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });
@@ -1836,9 +2401,42 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           case "closed":
             await sysNote(admin, tid, "[System] Ticket closed via close_ticket action — no customer reply expected.");
             break;
-          case "message_sent":
-            await setStatus(admin, tid, cfg.auto_resolve);
+          case "message_sent": {
+            // Phase 4 of eliminate-false-promises-no-claim-ships-until-executed-and-verified:
+            // the resolution completion gate. A ticket cannot auto-close while any
+            // ticket_required_outcomes row is not status='verified'. Judy's failure was exactly
+            // this — bag/credit both failed to run yet the ticket auto-resolved because auto-close
+            // keyed off "reply sent" instead of "DB items done". Escalate instead of close when
+            // there are unfinished items, naming them verbatim in escalation_reason.
+            const { assertOutcomesCompleteBeforeClose, escalateTicketOnIncompleteOutcomes } = await import("@/lib/outcome-completion-gate");
+            const completion = await assertOutcomesCompleteBeforeClose({
+              admin,
+              workspace_id: wsId,
+              ticket_id: tid,
+            });
+            if (completion.ok) {
+              await setStatus(admin, tid, cfg.auto_resolve);
+            } else {
+              const escalated = await escalateTicketOnIncompleteOutcomes({
+                admin,
+                workspace_id: wsId,
+                ticket_id: tid,
+                verdict: completion,
+              });
+              if (escalated) {
+                await sysNote(
+                  admin,
+                  tid,
+                  `[System] Auto-close BLOCKED by outcome-completion gate — ${completion.unfinished_items.length} required outcome(s) unfinished (${completion.unfinished_items.map((u) => `${u.kind}[${u.status}]`).join(", ")}). Escalated for human resolution.`,
+                );
+              } else {
+                // CAS lost (racing writer already progressed the ticket). Fall through to the
+                // normal close — the other writer's state is authoritative.
+                await setStatus(admin, tid, cfg.auto_resolve);
+              }
+            }
             break;
+          }
           case "no_action_agent":
             // Orchestrator took no customer-facing action on an agent-involved
             // ticket — the assigned agent needs a signal a customer message is
@@ -2155,6 +2753,62 @@ async function routeExec(
 
   // 2. Playbook
   if (hasCust && !social) {
+    // ── 2a. SOL-CHOSEN PLAYBOOK ──
+    // Phase 2 of docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+    // Gated by Phase 3's per-channel flag `ai_channel_config.sol_playbook_selection_active`
+    // (default false — safe-rollout stance). When true AND Sol's live Direction names a playbook
+    // slug at first-touch AND the ticket is not already running one, the deterministic matcher
+    // stays quiet — we resolve the slug against public.playbooks (workspace-scoped) and dispatch
+    // directly. When the flag is false the resolver is short-circuited BEFORE the DB reads so
+    // rollout can decouple Sol authoring Directions (sol_first_touch_enabled=true) from Sol
+    // OWNING the dispatch (sol_playbook_selection_active=true).
+    // The reasoning stamp on ticket_resolution_events splits by source
+    // ('sol:session-chose-playbook:{slug}' vs 'sol:matcher-chose-playbook:{slug}') so Phase 4's
+    // analytics tile can measure the shift. If the flag is off OR resolveSolChosenPlaybook
+    // returns null (no live Direction, stateless/needs_info, active_playbook_id already set,
+    // or slug unknown), we fall through to the matcher unchanged.
+    const solSelectionActive = await isSolPlaybookSelectionActive(admin, wsId, ch);
+    const { resolveSolChosenPlaybook } = await import("@/lib/ticket-directions");
+    const solChoice = solSelectionActive ? await resolveSolChosenPlaybook(admin, wsId, tid) : null;
+    if (solChoice) {
+      const { data: pbName } = await admin
+        .from("playbooks").select("name").eq("id", solChoice.playbook_id).maybeSingle();
+      const displayName = (pbName as { name: string } | null)?.name ?? solChoice.slug;
+      await sysNote(admin, tid, `[System] → Playbook: ${displayName} (sol:session-chose)`);
+      await startPlaybook(admin, tid, solChoice.playbook_id, { seed_context: solChoice.seed_context });
+      await addTicketTag(tid, `pb:${displayName.toLowerCase().replace(/\s+/g, "_")}`);
+      await markFirstTouch(tid, "ai");
+
+      // Ledger stamp — the exact reasoning string Phase 4's tile splits on. Best-effort:
+      // a diagnostic-substrate failure MUST NOT block the customer-facing send.
+      try {
+        const { count } = await admin
+          .from("ticket_resolution_events")
+          .select("id", { count: "exact", head: true })
+          .eq("ticket_id", tid);
+        const turn_index = (count ?? 0) + 1;
+        await admin
+          .from("ticket_resolution_events")
+          .insert({
+            workspace_id: wsId,
+            ticket_id: tid,
+            turn_index,
+            reasoning: `sol:session-chose-playbook:${solChoice.slug}`,
+            chosen: { playbook_id: solChoice.playbook_id, playbook_slug: solChoice.slug, source: "sol_session" },
+          });
+      } catch {
+        // Ledger is diagnostic — never fail the dispatch because the stamp failed.
+      }
+
+      if (await newerActivity(admin, tid, t0)) return;
+      const result = await executePlaybookStep(wsId, tid, msg, pers);
+      if (result.systemNote) await sysNote(admin, tid, result.systemNote);
+      if (result.response) await sendWithDelay(admin, wsId, tid, ch, result.response, cfg.sandbox);
+      await setStatus(admin, tid, cfg.auto_resolve);
+      return;
+    }
+
+    // ── 2b. DETERMINISTIC MATCHER ──
     // Matcher-defer guard (playbook-compiler-loop § Phase 3 —
     // matcher-defers-on-uncertainty). Below DEFER_THRESHOLD (DB-driven, default
     // 0.65) the matcher returns null and we fall through to Sonnet —
@@ -2178,6 +2832,31 @@ async function routeExec(
       await startPlaybook(admin, tid, pbMatch.id);
       await addTicketTag(tid, `pb:${pbMatch.name.toLowerCase().replace(/\s+/g, "_")}`);
       await markFirstTouch(tid, "ai");
+
+      // Ledger stamp — mirror the Sol-chosen path so Phase 4's tile can split by source.
+      // The slug is derived from the matched playbook's row so the two prefixes reference
+      // the same identifier space. Best-effort per the same rule as above.
+      try {
+        const { data: pbRow } = await admin
+          .from("playbooks").select("slug").eq("id", pbMatch.id).maybeSingle();
+        const matchedSlug = (pbRow as { slug: string } | null)?.slug ?? pbMatch.name.toLowerCase().replace(/\s+/g, "_");
+        const { count } = await admin
+          .from("ticket_resolution_events")
+          .select("id", { count: "exact", head: true })
+          .eq("ticket_id", tid);
+        const turn_index = (count ?? 0) + 1;
+        await admin
+          .from("ticket_resolution_events")
+          .insert({
+            workspace_id: wsId,
+            ticket_id: tid,
+            turn_index,
+            reasoning: `sol:matcher-chose-playbook:${matchedSlug}`,
+            chosen: { playbook_id: pbMatch.id, playbook_slug: matchedSlug, source: "matcher" },
+          });
+      } catch {
+        // Ledger is diagnostic — never fail the dispatch because the stamp failed.
+      }
 
       // Execute first step immediately
       // delay moved to send()

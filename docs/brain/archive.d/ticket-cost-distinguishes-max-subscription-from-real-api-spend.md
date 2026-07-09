@@ -1,0 +1,1 @@
+- **Ticket cost counts only real API spend, not Max box sessions — across Sol, Cora, and June** · verified 2026-07-08 · → [[../libraries/ticket-analyzer#max-vs-api-ticket-cost--0-marginal-for-a-box-lane]] · [[../libraries/ai-usage#gotchas]] · [[../libraries/fleet-cost#apibilled-is-the-contract-other-surfaces-reuse--do-not-invent-a-parallel-concept]]

@@ -1,0 +1,1 @@
+- **Harden the Vera agent — roll persistent coaching into its mandate** · verified 2026-07-08 · → [[../libraries/spec-test-runs]]

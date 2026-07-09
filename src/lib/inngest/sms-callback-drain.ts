@@ -44,6 +44,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendSMS } from "@/lib/twilio";
 import { unsubscribeFromSmsMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /** Lifecycle-stage rank — higher wins when dedup'ing multiple callbacks per MessageSid. */
 const STAGE_RANK: Record<string, number> = {
@@ -611,7 +612,7 @@ export const receivedSmsRollupCron = inngest.createFunction(
     triggers: [{ cron: "*/5 * * * *" }],
   },
   async ({ step }) => {
-    return await step.run("rollup", async () => {
+    const result = await step.run("rollup", async () => {
       const admin = createAdminClient();
       // Candidate set: delivered but not-yet-rolled-up. Ordered by
       // delivered_at so a partial batch still advances time monotonically
@@ -653,12 +654,29 @@ export const receivedSmsRollupCron = inngest.createFunction(
       // Mark ALL candidates (with or without customer) as rolled up.
       // received_sms_logged_at is the idempotency flag — after this
       // update they exit the candidate set forever.
-      await admin
-        .from("sms_campaign_recipients")
-        .update({ received_sms_logged_at: new Date().toISOString() })
-        .in("id", rows.map((r) => r.id));
+      // Chunk the id list — a single `.in("id", [...all])` built a ~40 KB query
+      // string on a large candidate batch, which the gateway rejects with 400.
+      // (An empty batch also skips the update: the loop simply doesn't run.)
+      const rolledUpAt = new Date().toISOString();
+      const rolledUpIds = rows.map((r) => r.id);
+      for (let i = 0; i < rolledUpIds.length; i += 100) {
+        await admin
+          .from("sms_campaign_recipients")
+          .update({ received_sms_logged_at: rolledUpAt })
+          .in("id", rolledUpIds.slice(i, i + 100));
+      }
 
       return { emitted: withCustomer.length, flagged: rows.length };
     });
+
+    // Control Tower: end-of-run heartbeat. Fires on both the no-work
+    // path (emitted=flagged=0) and the processed-work path so the
+    // watchdog can distinguish a healthy idle tick from a dead
+    // schedule (received-sms-rollup-cron-heartbeat spec).
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("received-sms-rollup-cron", { ok: true, produced: result });
+    });
+
+    return result;
   },
 );

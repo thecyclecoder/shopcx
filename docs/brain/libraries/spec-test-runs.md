@@ -195,6 +195,14 @@ classification prompt in `runSpecTestJob` (`scripts/builder-worker.ts`); this is
   prod-write ban. The richer browser + sandboxed behavioral modes layered on top live in
   [[spec-test-sandbox]] ([[../specs/spec-test-deep-verification]]).
 
+## Durable mandate (agent-mandate-hardening-spec-test)
+
+Two permanent rules that override any tendency to bail or auto-pass, baked into `runSpecTestJob` (scripts/builder-worker.ts):
+
+- **Fresh sessions are the normal starting state.** A spec-test session is ALWAYS stateless — "no prior verification context / no security review context available in this session" is the EXPECTED entry condition, NEVER a reason to bail with a prose response and no verdicts. When you encounter this, re-derive the spec's `## Verification` bullets from the materialized spec file (`.box/spec-<slug>.md`) yourself, classify each bullet, and **run the non-destructive checks in-session**: `npx tsc --noEmit`, `gh` CI status, read-only DB probes, GET endpoints, the browser check, the sandbox toolkit, AND the spec's own read-only harness (e.g., `npx tsx scripts/commerce-diff-sample.ts` when the spec ships one — the harness's own header declares "READ-ONLY BY CONSTRUCTION"). Emit the per-check `agent_verdict` JSON. Refusing to fabricate a false-✅ is correct; the fix is to actually run the checks.
+
+- **Runtime-behavior bullets are never auto-pass off static signals.** When a bullet asserts a runtime BEHAVIOR (a failure-path surfacing on `worker_heartbeats.detail`, a post-deploy box backstop firing, an approved action executing), a ✅ off "the code that would do X exists", "a Ready preview is up", or "an unrelated healthy heartbeat" is a false positive that will be caught. Either **drive the exact named state** — trigger the failure branch (sandbox or forced-fault harness), run a sandbox behavioral invocation, or defer a live-DB outcome to a post-deploy read-only probe — and put that observed state in the evidence field, **OR classify the bullet `needs_human`** with a note. Never conflate "code exists" with "behavior happened".
+
 ## Callers
 
 - `scripts/builder-worker.ts` → `runSpecTestJob` — writes runs; calls `reflectSpecGreenChecks` then `autoFoldVerifiedSpecs` after.

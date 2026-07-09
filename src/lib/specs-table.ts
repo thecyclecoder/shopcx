@@ -215,6 +215,12 @@ export interface ListSpecsFilter {
   /** Pass `null` to filter to standalone specs (no milestone link), a uuid to filter to one milestone, or
    *  omit to ignore. */
   milestone_id?: string | null;
+  /** list-specs-with-phases-rpc — server-side scope filter passed to the `list_specs_with_phases` RPC.
+   *  `'active'` = boardable specs (`status IS NULL OR status <> 'folded'`); `'archived'` = folded specs;
+   *  `'all'` = every spec. Defaults to `'all'` so pre-RPC listSpecs semantics (folded-inclusive) are
+   *  preserved for the callers that need them (director-kpis, spec-dispose audits). Boardable readers
+   *  should prefer the [[getActiveSpecs]] wrapper. */
+  scope?: "active" | "archived" | "all";
 }
 
 interface SpecRowDb {
@@ -324,61 +330,158 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
 }
 
 /**
- * One spec by (workspace, slug) — the parent `specs` row joined with its `spec_phases` ordered by position.
- * Returns `null` when no row matches. Read by authenticated users (RLS) — the admin client just bypasses RLS.
+ * db-reduce-calls-q-1756037457588317045 — very-short-TTL in-process cache for `getSpec` reads.
+ *
+ * The `public.get_spec_with_phases(uuid, text)` RPC was the top DB-time query by call volume in the
+ * box's `pg_stat_statements` sample (215k calls, 0ms mean, 31s total). Per-call cost is already fine
+ * (index scan on `specs_ws_slug`) — the win is FEWER calls. Many code paths call `getSpec(ws, slug)`
+ * two-or-three times within one request (`queueRoadmapBuild` reads the row twice; every
+ * `brain-roadmap.getSpec` wraps the same underlying read; the box worker's tick handlers re-read the
+ * same spec inside a burst of nearby jobs). This module-level cache collapses those tight-window
+ * duplicates without lengthening the freshness window meaningfully.
+ *
+ * Design invariants:
+ *  - **TTL is short (2s)** — bounds any staleness a caller could observe to under one poll tick, even
+ *    if a mutation happens through a path this SDK cannot see (a raw SQL migration, an admin script
+ *    outside this module). All in-module writers below invalidate proactively; the TTL is the belt.
+ *  - **Every writer in this file calls `invalidateSpecCache(ws, slug)` on success.** The read-after-
+ *    write pattern in `author-spec.ts` (`getSpec` → `upsertSpec` → `getSpec` to verify persistence)
+ *    stays correct because `upsertSpec`'s invalidation forces the second read to hit the RPC.
+ *  - **Null results are cached** so a nonexistent slug in a tight retry loop doesn't hammer the RPC
+ *    either. Null entries invalidate the same way — a write for that (ws, slug) evicts the null.
+ *  - **`clearSpecCacheForTests()` is exported** so tests that share process state can reset.
  */
-export async function getSpec(workspaceId: string, slug: string): Promise<SpecRow | null> {
-  const admin = createAdminClient();
-  const { data: spec, error } = await admin
-    .from("specs")
-    .select(SPEC_COLUMNS)
-    .eq("workspace_id", workspaceId)
-    .eq("slug", slug)
-    .maybeSingle();
-  if (error) throw error;
-  if (!spec) return null;
-  const specDb = spec as SpecRowDb;
-  const { data: phases, error: pErr } = await admin
-    .from("spec_phases")
-    .select(PHASE_COLUMNS)
-    .eq("spec_id", specDb.id)
-    .order("position", { ascending: true });
-  if (pErr) throw pErr;
-  return specRowFromDb(specDb, (phases ?? []) as SpecPhaseRow[]);
+const SPEC_CACHE_TTL_MS = 2_000;
+
+type SpecCacheEntry = { row: SpecRow | null; expiresAt: number };
+const specCache = new Map<string, SpecCacheEntry>();
+
+function specCacheKey(workspaceId: string, slug: string): string {
+  return `${workspaceId}::${slug}`;
+}
+
+function readSpecCache(workspaceId: string, slug: string): { hit: true; row: SpecRow | null } | { hit: false } {
+  const key = specCacheKey(workspaceId, slug);
+  const entry = specCache.get(key);
+  if (!entry) return { hit: false };
+  if (Date.now() >= entry.expiresAt) {
+    specCache.delete(key);
+    return { hit: false };
+  }
+  return { hit: true, row: entry.row };
+}
+
+function writeSpecCache(workspaceId: string, slug: string, row: SpecRow | null): void {
+  specCache.set(specCacheKey(workspaceId, slug), { row, expiresAt: Date.now() + SPEC_CACHE_TTL_MS });
+}
+
+/** Evict a cached (workspace, slug) entry. Called by every writer in this module on success. */
+export function invalidateSpecCache(workspaceId: string, slug: string): void {
+  specCache.delete(specCacheKey(workspaceId, slug));
+}
+
+/** Test-only cache reset. Never called by production code paths. */
+export function clearSpecCacheForTests(): void {
+  specCache.clear();
 }
 
 /**
- * Every spec in a workspace, optionally filtered. Phases for each are joined in one extra round-trip and
- * grouped by `spec_id`. Sorted client-side by slug for a stable order.
+ * One spec by (workspace, slug) — the parent `specs` row joined with its `spec_phases` ordered by position.
+ * Returns `null` when no row matches. Read by authenticated users (RLS) — the admin client just bypasses RLS.
+ *
+ * cut-internal-egress-pooler-and-spec-rpcs Phase 2 — sourced from the `get_spec_with_phases(uuid, text)`
+ * RPC (supabase/migrations/20261004120000_get_spec_with_phases_rpc.sql). The RPC does the specs+phases
+ * join SERVER-SIDE and returns one `(spec jsonb, phases jsonb)` row, replacing the pre-Phase-2 two
+ * PostgREST round trips (`.from('specs')` then `.from('spec_phases')`) — the same set_config preamble +
+ * auth churn `list_specs_with_phases` already retired for [[listSpecs]]. On the box the pooled path
+ * (Phase-1 pg-pool → single pooled query) is preferred; anywhere the pool is unavailable falls back
+ * to the supabase-js RPC path. Returned SpecRow shape is byte-identical to the pre-Phase-2 path.
+ *
+ * db-reduce-calls-q-1756037457588317045 — a 2-second module-level cache (see the block above) collapses
+ * tight-window duplicate reads for the same (ws, slug). Every writer in this module invalidates its
+ * slug, so a read-after-write on the same request sees fresh data.
+ */
+export async function getSpec(workspaceId: string, slug: string): Promise<SpecRow | null> {
+  const cached = readSpecCache(workspaceId, slug);
+  if (cached.hit) return cached.row;
+  // Pooled path (box worker + any runtime with pooler creds): one round trip, no PostgREST preamble.
+  // `undefined` = pool unavailable / query error → fall through to supabase-js; `null` = no such slug.
+  try {
+    const { getSpecWithPhases } = await import("@/lib/pg-pool");
+    const pooled = await getSpecWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, slug);
+    if (pooled === null) {
+      writeSpecCache(workspaceId, slug, null);
+      return null;
+    }
+    if (pooled !== undefined) {
+      const row = specRowFromDb(pooled.spec, pooled.phases);
+      writeSpecCache(workspaceId, slug, row);
+      return row;
+    }
+  } catch {
+    /* fall through to supabase-js RPC */
+  }
+  const admin = createAdminClient();
+  const { data, error } = await admin.rpc("get_spec_with_phases", {
+    p_workspace_id: workspaceId,
+    p_slug: slug,
+  });
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  const row = rows[0];
+  if (!row || !row.spec) {
+    writeSpecCache(workspaceId, slug, null);
+    return null;
+  }
+  const result = specRowFromDb(row.spec, (row.phases ?? []) as SpecPhaseRow[]);
+  writeSpecCache(workspaceId, slug, result);
+  return result;
+}
+
+/**
+ * Every spec in a workspace, optionally filtered — sourced from the `list_specs_with_phases(uuid, text)`
+ * RPC (supabase/migrations/20261001120000_list_specs_with_phases_rpc.sql). The RPC does the specs+phases
+ * join SERVER-SIDE and streams `(spec jsonb, phases jsonb)` rows back, so no id array crosses the wire —
+ * retiring the interim `.in("spec_id", [ids])` batching that PR #1429 + #1430 landed to work around the
+ * ~16KB undici header cap (UND_ERR_HEADERS_OVERFLOW) once the workspace held a few hundred specs.
+ *
+ * `filter.scope` picks the server-side row set (`'active'` | `'archived'` | `'all'` — default `'all'` to
+ * preserve pre-RPC folded-inclusive semantics); the remaining `status` / `owner` / `milestone_id`
+ * filters are applied in-memory after the RPC returns and are cheap on the bounded result set. Sorted
+ * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
   const admin = createAdminClient();
-  let q = admin.from("specs").select(SPEC_COLUMNS).eq("workspace_id", workspaceId);
-  if (filter.status) q = q.eq("status", filter.status);
-  if (filter.owner) q = q.eq("owner", filter.owner);
-  if (filter.milestone_id !== undefined) {
-    q = filter.milestone_id === null ? q.is("milestone_id", null) : q.eq("milestone_id", filter.milestone_id);
-  }
-  const { data: specs, error } = await q;
+  const { data, error } = await admin.rpc("list_specs_with_phases", {
+    p_workspace_id: workspaceId,
+    p_scope: filter.scope ?? "all",
+  });
   if (error) throw error;
-  const specRows = (specs ?? []) as SpecRowDb[];
-  if (!specRows.length) return [];
-  const ids = specRows.map((s) => s.id);
-  const { data: phases, error: pErr } = await admin
-    .from("spec_phases")
-    .select(PHASE_COLUMNS)
-    .in("spec_id", ids)
-    .order("position", { ascending: true });
-  if (pErr) throw pErr;
-  const byId = new Map<string, SpecPhaseRow[]>();
-  for (const p of (phases ?? []) as SpecPhaseRow[]) {
-    const list = byId.get(p.spec_id) ?? [];
-    list.push(p);
-    byId.set(p.spec_id, list);
+  const rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  let out = rows.map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]));
+  if (filter.status) out = out.filter((r) => r.status === filter.status);
+  if (filter.owner) out = out.filter((r) => r.owner === filter.owner);
+  if (filter.milestone_id !== undefined) {
+    const wanted = filter.milestone_id;
+    out = wanted === null
+      ? out.filter((r) => r.milestone_id === null)
+      : out.filter((r) => r.milestone_id === wanted);
   }
-  return specRows
-    .map((s) => specRowFromDb(s, byId.get(s.id) ?? []))
-    .sort((a, b) => a.slug.localeCompare(b.slug));
+  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/** Every BOARDABLE spec — thin wrapper over [[listSpecs]] with `scope='active'`, i.e. `status IS NULL OR
+ *  status <> 'folded'` filtered server-side by the `list_specs_with_phases` RPC. Prefer this over
+ *  `listSpecs` on the board / pipeline / claim-gate readers that never want folded rows across the wire. */
+export async function getActiveSpecs(workspaceId: string): Promise<SpecRow[]> {
+  return listSpecs(workspaceId, { scope: "active" });
+}
+
+/** Every spec in a workspace, folded rows included — thin wrapper over [[listSpecs]] with `scope='all'`.
+ *  Same folded-inclusive set the pre-RPC `listSpecs()` returned; use this on readers that need the full
+ *  set (director-kpis owner attribution, spec-dispose audits, drift). */
+export async function getAllSpecs(workspaceId: string): Promise<SpecRow[]> {
+  return listSpecs(workspaceId, { scope: "all" });
 }
 
 /**
@@ -537,6 +640,7 @@ export async function upsertSpec(
     }
   }
 
+  invalidateSpecCache(workspaceId, row.slug);
   return { spec_id: specId, phase_ids: phaseIds };
 }
 
@@ -560,6 +664,9 @@ export async function movePhase(
     .update({ spec_id: newSpecId, position: newPosition, updated_at: new Date().toISOString() })
     .eq("id", phaseId);
   if (error) throw error;
+  // db-reduce-calls: the phase left one spec and joined another; both parents' cached SpecRows are now
+  // stale. The move signature is keyed by phaseId (not slug), so the safe move is to bound staleness on
+  // the TTL rather than resolve the two slugs with extra queries. movePhase is a low-volume primitive.
 }
 
 /**
@@ -597,6 +704,27 @@ export async function stampPhaseShipped(
     .eq("spec_id", (spec as { id: string }).id)
     .eq("position", position);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
+  // spec-timecard-chokepoint-instrumentation Phase 1 — one phase_shipped per ship. Placed at the top of
+  // the canonical leaf write (auto-promotion, one-shot merge webhook, and goal atomic promotion all
+  // route here), so a single insert covers every path without instrumenting each caller. Best-effort —
+  // recordTimecardEvent swallows insert errors so a timecard blip never blocks the ship.
+  try {
+    const { recordTimecardEvent } = await import("./spec-timecards");
+    await recordTimecardEvent(admin, {
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      phase_index: position,
+      event_kind: "phase_shipped",
+      actor: "worker",
+      metadata: {
+        merge_sha: provenance.merge_sha,
+        ...(provenance.pr != null ? { pr: provenance.pr } : {}),
+      },
+    });
+  } catch (e) {
+    console.warn(`[timecards] phase_shipped emit failed spec=${slug} pos=${position}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**
@@ -658,6 +786,7 @@ export async function stampPhaseBuilt(
     .eq("spec_id", specId)
     .eq("position", position);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -770,6 +899,7 @@ export async function markRemainingPhasesShipped(workspaceId: string, slug: stri
     .eq("spec_id", specId)
     .in("position", toFlip);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
   return toFlip;
 }
 
@@ -808,6 +938,7 @@ export async function restampPhases(
       .eq("position", p.position);
     if (error) throw error;
   }
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -863,6 +994,7 @@ export async function appendFixPhases(
     if (error) throw error;
     positions.push(pos);
   }
+  invalidateSpecCache(workspaceId, slug);
   return { appended: positions.length, positions };
 }
 
@@ -980,6 +1112,7 @@ export async function setSpecStatus(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -1000,6 +1133,39 @@ export async function setSpecBlockers(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
+}
+
+/**
+ * spec-review-pass-always-stamps-review-passed-flag Phase 1 — the narrow SDK writer that stamps the
+ * DURABLE `specs.vale_review_passed_at` timestamp (build-gate-durable-review-signal). The primary
+ * pass path already dual-writes this via [[spec-card-state]] `markSpecCardValePassed` →
+ * `dualWriteSpecRow`, but that path is best-effort (a mirror hiccup is silently swallowed). This
+ * writer is the INVARIANT GUARD called by [[../agents/spec-review]] `assertDurableReviewPassStamp`
+ * after the pass to force the stamp when the mirror write dropped it — errors THROW so the caller
+ * refuses to record a `spec_review_passed` `director_activity` row when the durable stamp isn't in
+ * place. Returns `true` when the write actually stamped the row (was NULL, now `now()`), `false`
+ * when a racing writer already stamped it (the compare-and-set `.is(vale_review_passed_at,null)`
+ * matched 0 rows) or the row is missing (folded). Idempotent: caller should read first and only
+ * call this when the current stored value is NULL.
+ */
+export async function stampSpecValeReviewPassed(
+  workspaceId: string,
+  slug: string,
+): Promise<boolean> {
+  const admin = createAdminClient();
+  const stampedAt = new Date().toISOString();
+  const { data, error } = await admin
+    .from("specs")
+    .update({ vale_review_passed_at: stampedAt, updated_at: stampedAt })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .is("vale_review_passed_at", null)
+    .select("id");
+  if (error) throw error;
+  const stamped = (data ?? []).length > 0;
+  if (stamped) invalidateSpecCache(workspaceId, slug);
+  return stamped;
 }
 
 /**
@@ -1038,6 +1204,7 @@ export async function setSpecParent(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -1060,6 +1227,7 @@ export async function setSpecAutoBuild(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -1085,6 +1253,7 @@ export async function stampSpecMergeProvenance(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -1112,6 +1281,7 @@ export async function stampSpecGoalBranchSha(
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
 }
 
 /**
@@ -1210,61 +1380,38 @@ export interface SpecPhaseAnomalies {
 /**
  * Integrity-scan reader for the spec_phases anomaly sweep (the reconciler's surface-don't-auto-correct
  * rail): returns (a) ORPHAN spec_phases rows whose parent `specs` row is missing, and (b) PROVENANCE-GAP
- * phases — `status='shipped'` with both `pr` and `merge_sha` null. Resolves `spec_id → {slug, workspace}`
- * internally so callers never touch raw PM tables. Read-only; folded specs are excluded from the gap set
- * (a folded spec is archived, its provenance no longer actionable). Orphans are global by nature (no parent
- * row to read a workspace from), so the orphan set is not workspace-filtered.
+ * phases — `status='shipped'` with both `pr` and `merge_sha` null. Sourced from the
+ * `list_spec_phase_anomalies(uuid)` RPC (supabase/migrations/20261003120000_list_spec_phase_anomalies_rpc.sql):
+ * the spec_phases LEFT JOIN specs runs SERVER-SIDE, so no id array crosses the wire — retiring the
+ * residual `.in("id", specIds.slice(...))` batch loop that dodged the ~16KB undici header cap
+ * (UND_ERR_HEADERS_OVERFLOW). Read-only; folded specs are excluded from the gap set (a folded spec is
+ * archived, its provenance no longer actionable). Orphans are global by nature (no parent row to read
+ * a workspace from), so the orphan set is not workspace-filtered.
  */
 export async function listSpecPhaseAnomalies(workspaceId: string): Promise<SpecPhaseAnomalies> {
   const admin = createAdminClient();
-
-  // Read all phases (id, spec_id, position, status) + the live spec id→{slug, workspace, status} map, then
-  // intersect: orphans are phases whose spec_id is absent from the live set.
-  const { data: allPhases, error: pErr } = await admin
-    .from("spec_phases")
-    .select("id, spec_id, position, status, pr, merge_sha");
-  if (pErr) throw pErr;
-  const phaseRows = (allPhases ?? []) as {
-    id: string;
+  const { data, error } = await admin.rpc("list_spec_phase_anomalies", {
+    p_workspace_id: workspaceId,
+  });
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{
+    kind: "orphan" | "provenance_gap";
+    phase_id: string;
     spec_id: string;
     position: number;
     status: Phase;
-    pr: number | null;
-    merge_sha: string | null;
-  }[];
+    slug: string | null;
+    workspace_id: string | null;
+  }>;
 
   const orphans: OrphanPhaseAnomaly[] = [];
   const provenanceGaps: ProvenanceGapAnomaly[] = [];
-  if (!phaseRows.length) return { orphans, provenanceGaps };
-
-  const specIds = Array.from(new Set(phaseRows.map((p) => p.spec_id)));
-  const { data: liveSpecs, error: sErr } = await admin
-    .from("specs")
-    .select("id, slug, workspace_id, status")
-    .in("id", specIds);
-  if (sErr) throw sErr;
-  const liveById = new Map<string, { slug: string; workspace_id: string; status: SpecStatus }>();
-  for (const s of (liveSpecs ?? []) as { id: string; slug: string; workspace_id: string; status: SpecStatus }[]) {
-    liveById.set(s.id, { slug: s.slug, workspace_id: s.workspace_id, status: s.status });
-  }
-
-  for (const p of phaseRows) {
-    const parent = liveById.get(p.spec_id);
-    if (!parent) {
-      orphans.push({ phase_id: p.id, spec_id: p.spec_id, position: p.position, status: p.status });
-      continue;
-    }
-    // Provenance gap: shipped phase, no pr + no merge_sha, in the requested workspace, non-folded parent.
-    if (
-      p.status === "shipped" &&
-      p.pr === null &&
-      p.merge_sha === null &&
-      parent.workspace_id === workspaceId &&
-      parent.status !== "folded"
-    ) {
-      provenanceGaps.push({ slug: parent.slug, workspace_id: parent.workspace_id, position: p.position });
+  for (const r of rows) {
+    if (r.kind === "orphan") {
+      orphans.push({ phase_id: r.phase_id, spec_id: r.spec_id, position: r.position, status: r.status });
+    } else if (r.slug !== null && r.workspace_id !== null) {
+      provenanceGaps.push({ slug: r.slug, workspace_id: r.workspace_id, position: r.position });
     }
   }
-
   return { orphans, provenanceGaps };
 }

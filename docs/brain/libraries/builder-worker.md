@@ -138,6 +138,57 @@ The `KNOWN_JOB_KINDS` constant next to the `Job.kind` union enumerates every kin
 
 When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.
 
+## Ephemeral worktree recovery — `removeWorktreeForBranch` third arm (builder-worktree-self-heal-reclaims-ephemeral-branch-pinned-worktrees)
+
+The **branch-side** cleanup helper `removeWorktreeForBranch(branch)` is called before every `git worktree add -B <branch>` to free any stale worktree that's still pinning `<branch>`. It has three arms:
+
+1. **Primary-held branch** — if the primary repo holds `<branch>`, switch it to main via `ensurePrimaryOnMain` instead of force-removing (the 2026-06-24 safety guard against deleting the live repo — see [[../recipes/build-box-setup]] § "The worker once deleted its own live repo").
+2. **Ephemeral worktree** (NEW) — if a non-primary worktree holds `<branch>` from OUTSIDE `BUILDS_DIR` (e.g. `/tmp/sol-reads-moved-wt` created by spec-test or branch-review), free it non-destructively via `git worktree remove --force <path>` + `git worktree prune`. This recovers the branch without routing through the guarded `rm -rf`, so the BUILDS_DIR safety guard stays intact and the removal can never target `REPO_DIR` (the primary is already filtered by the branch===null check + the explicit primary===path comparison above). Observed failure: a build resume re-failed with `fatal: '<branch>' is already used by worktree at /tmp/…` because the stale `/tmp/` tree (registered in git but the dir no longer existed) was not being cleared.
+3. **Build worktree** — if a worktree under `BUILDS_DIR` holds `<branch>`, force-remove it via `removeWorktreeDir` (existing arm, unchanged).
+
+After all three arms, a final `git worktree prune` reconciles any stale admin entries.
+
+## Idempotent worktree add — `ensureWorktreeSlotFree` (builder-worktree-prune-before-add)
+
+Every build lane's `git worktree add -B <branch> <wt> <base>` (the fresh path AND the resume path in `runBuildJob`) is preceded by `ensureWorktreeSlotFree(wt)`. It's the PATH-side complement to `removeWorktreeForBranch` (the branch-side helper): the branch-side clears any admin entry holding `<branch>`, the path-side clears any admin entry OR orphan dir at `<wt>` — because `git worktree add` fails with `'<wt>' already exists` whenever the target directory pre-exists, regardless of whether it's a tracked worktree.
+
+The wedge this exists to prevent (2026-07-08 media-buyer-sensor-trust-probe): the target dir `builds/build-<slug>/` pre-existed as an ORPHAN — a lingering `tsconfig.tsbuildinfo` file inside, NOT a registered worktree — from a prior attempt that crashed after the file was written but before the worktree was registered. The bare `git worktree remove --force <wt>` call was a no-op (nothing to remove; the dir was never registered), and the follow-up `git worktree add` failed with `'<wt>' already exists`. `removeWorktreeForBranch` did not help because the branch was never held — only the DIR was orphaned on disk.
+
+`ensureWorktreeSlotFree(wt)` performs the recovery a human would do:
+
+1. `git worktree prune` — reconcile admin state with disk state (a registered worktree whose dir was manually deleted still lists; prune clears that).
+2. If `<wt>` IS a registered worktree, `removeWorktreeDir(<wt>)` — force-remove admin entry + best-effort dir remove.
+3. Else if `<wt>` exists on disk (the orphan case), `rm -rf <wt>` — guarded to `BUILDS_DIR` via the same resolve check `removeWorktreeDir` uses.
+4. Final `git worktree prune` — a registered-remove may have left an admin entry if the dir was already gone.
+
+SAFETY. The helper hard-refuses any path that isn't `BUILDS_DIR` or a child of it (matches `removeWorktreeDir`'s guard, which once destroyed the primary repo — see the 2026-06-24 incident recorded on `removeWorktreeDir`). A caller that passes `REPO_DIR` or any non-`builds/` path gets a `[worktree] ensureWorktreeSlotFree REFUSING …` log and a no-op — the guarded rm-rf can never touch the primary checkout.
+
+## Phase-push recovery — fetch-tip + rebase-retry + single-owner-per-branch ([[../specs/build-worker-rebase-before-push-no-lost-phase-on-branch-race]])
+
+Every phase build accumulates a commit(-set) onto the persistent per-spec branch `claude/build-{slug}` (see [[../lifecycles/spec-goal-branch-pm-flow]] § 2). Three invariants keep a phase build from being lost on a branch race:
+
+1. **Base each phase on the current remote branch tip.** Before `git worktree add -B <branch> <wt> origin/<branch>`, `runBuildJob` does an EXPLICIT `git fetch origin <branch>` (both the fresh AND the resume paths) once `remoteHasBranch` is confirmed. The blanket `git fetch origin` at dispatch entry is too coarse — a concurrent push between it and the worktree add would leave `origin/<branch>` stale (or entirely absent for a branch born after the fetch), so the phase would build on a base older than the true remote tip and its follow-up push would non-fast-forward. The extending-tip log line prints the resolved base SHA so operators can confirm `base == remote branch HEAD` at build start.
+
+2. **Rebase-and-retry ONCE on a non-fast-forward push.** The phase push at end of `runBuildJob` is wrapped: on `git push` failure with stderr matching `non-fast-forward | (fetch first) | rejected.*fetch first | Updates were rejected`, the worker runs `git fetch origin <branch>` + `git rebase origin/<branch>` and retries the push once. `log_tail` records `rebase-retry SUCCESS on <branch> — phase landed on top of the sibling push (no phase work lost)`. A **non-recoverable** push error (auth / network / policy — anything not matching the non-ff regex) still marks the job `failed` with the ORIGINAL push stderr. A **rebase CONFLICT** aborts the rebase (`git rebase --abort`, leaving the worktree clean for the reaper) and marks the job `needs_attention` with BOTH the push and rebase output captured — the phase commit is real work; a silent drop strands the spec mid-build and needs a human to re-kick (real: spec `cx-box-agents-sol-cora-june-...-no-raw-sql`, jobs `a30ad1e5` pushed phase 1 → `a2520180` failed on non-ff and threw its phase away).
+
+3. **Single-owner-per-branch — proactive slug-scoped orphan reap.** At most one build ever holds `claude/build-{slug}` at a time. `reapStaleSiblingBuildsForSlug(slug, { excludeJobId })` finds any active build row (`status ∈ REAP_STALE_STATUSES` — `building`/`claimed`/`queued_resume`) for the slug whose heartbeat is stale (`>= REAP_STALE_MS`, the same cutoff `reapStaleSessions` uses) and transitions it to `failed` via a **compare-and-set** update (`.in("status", REAP_STALE_STATUSES)` on the write closes the read→write race + any concurrent reaper). It's wired into two seams:
+    - **`hasActiveBuildForSlug(slug)`** (the auto-build dedup guard) — reap runs FIRST so a dead `building` row can't masquerade as active and either (a) falsely block a legitimate re-enqueue OR (b) end up co-live with a new build the stale-session sweep re-queues seconds later.
+    - **`dispatchJob` build path** (called with `excludeJobId = job.id`) — right after claim, before the worktree add, so a freshly-claimed build can never co-exist with a sibling orphan pointing at the same branch. The stale-heartbeat filter alone is safe (a live session in another process bumps its heartbeat every M minutes via `runBoxSession`, so a live process's row is never eligible); the `excludeJobId` ensures we never reap ourselves.
+
+    The orphan lands terminal (`failed`) — the spec's sanctioned "terminal state OR `queued_resume`". Terminal + the sibling-reap running before both the re-enqueue check AND the fresh claim's worktree add together enforce the invariant: the two verification bullets (orphaning + re-enqueue yields exactly one active build; the reaped orphan never sits in a live `building` state racing the new job) hold.
+
+Phases 1 + 2 defend the git-level branch race; Phase 3 defends the row-level queue race. All three run BEFORE any side effect (worktree side effects for phase 1; the push itself for phase 2; the claim gate + worktree add for phase 3), so a wedged state doesn't need a Control-Tower-level backstop for the common case.
+
+## The shared `update(id, patch)` — the `agent_jobs` write chokepoint
+
+Every job kind funnels its status/error/log_tail transitions through `update(id, patch)`. The function is the single seam where a queue-state PATCH becomes real, so both invariants below sit here — no per-lane plumbing.
+
+1. **needs-input-must-carry-a-question** — reject an empty `needs_input` park (no `questions[]` AND no `pending_actions[]`) and repair to `needs_attention` on the fly. Preserved by [[../specs/agent-jobs-update-retry-and-error-surface]] Phase 1.
+
+2. **Bounded retry + typed failure surface on a transient Supabase 5xx** ([[../specs/agent-jobs-update-retry-and-error-surface]] Phase 1). The write goes through `writeAgentJobsUpdateWithRetry` ([[agent-jobs-update-retry]]): it inspects Supabase's `{ error, status }` response instead of firing-and-forgetting, retries the transient class (Cloudflare 521 / edge 5xx / thrown `fetch failed` / `ECONNRESET` / `ETIMEDOUT`) with bounded exponential backoff (default 4 attempts, 250 ms base), and on exhaustion throws `AgentJobsUpdateError` carrying the `jobId` + `attemptedStatus` + last Supabase error. A PostgREST `PGRST*` code or a bug-shaped throw (e.g. `TypeError`) fails fast — retrying a bug just delays the surface. Motivated by the Control Tower's Management-Logs signature `supabase-logs:68fda858b6ae7a63` (repeated `521 PATCH /rest/v1/agent_jobs`), which used to silently drop the transition so the build system's queue lied about what happened.
+
+After a successful write the `needs_attention` classifier fan-out (`stampNeedsAttentionClass`) still runs unchanged — the retry sits INSIDE the guard and BEFORE the classifier, so both existing behaviors are preserved.
+
 ## Related
 
 [[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]

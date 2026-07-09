@@ -233,7 +233,9 @@ export async function handleDisputeEvent(
       }).catch(() => {});
     }
   } else {
-    // disputes/update — update existing row
+    // disputes/update — update existing row, or upsert if this is the first
+    // time we've seen the dispute (Shopify only guarantees delivery for events
+    // after webhook registration, so a create we never saw is normal — not an error).
     const { data: existing } = await admin
       .from("chargeback_events")
       .select("id, status, auto_action_taken")
@@ -241,32 +243,58 @@ export async function handleDisputeEvent(
       .eq("shopify_dispute_id", disputeId)
       .maybeSingle();
 
+    let chargebackEventId: string | null = null;
+
     if (!existing) {
-      console.error(`disputes/update for unknown dispute ${disputeId}`);
-      return;
+      const { data: inserted } = await admin
+        .from("chargeback_events")
+        .insert({
+          workspace_id: workspaceId,
+          shopify_dispute_id: disputeId,
+          shopify_order_id: shopifyOrderId,
+          dispute_type: disputeType,
+          reason,
+          network_reason_code: networkReasonCode,
+          amount_cents: amountCents,
+          currency,
+          status,
+          evidence_due_by: evidenceDueBy,
+          evidence_sent_on: evidenceSentOn,
+          finalized_on: finalizedOn,
+          raw_payload: payload,
+          initiated_at: initiatedAt,
+        })
+        .select("id")
+        .single();
+
+      chargebackEventId = inserted?.id ?? null;
+    } else {
+      await admin
+        .from("chargeback_events")
+        .update({
+          status,
+          evidence_sent_on: evidenceSentOn,
+          finalized_on: finalizedOn,
+          raw_payload: payload,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing.id);
+
+      chargebackEventId = existing.id;
     }
 
-    await admin
-      .from("chargeback_events")
-      .update({
-        status,
-        evidence_sent_on: evidenceSentOn,
-        finalized_on: finalizedOn,
-        raw_payload: payload,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id);
+    if (!chargebackEventId) return;
 
     // Fire outcome events
     if (status === "won") {
       inngest.send({
         name: "chargeback/won",
-        data: { chargebackEventId: existing.id, workspaceId },
+        data: { chargebackEventId, workspaceId },
       }).catch(() => {});
     } else if (status === "lost") {
       inngest.send({
         name: "chargeback/lost",
-        data: { chargebackEventId: existing.id, workspaceId },
+        data: { chargebackEventId, workspaceId },
       }).catch(() => {});
     }
   }
@@ -514,24 +542,68 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     if (data) customerId = data.id;
   }
 
-  // Simplify line items
+  // Simplify line items — Phase 2 of the order-confirmation-emails
+  // spec adds `variant_title`, `total_discount_cents`, and `product_id`
+  // so the resolver (`src/lib/order-confirmation-data.ts`) can render
+  // the confirmation email without a GraphQL round-trip. `variant_id`
+  // (Shopify id) is still the primary variant key for the UUID join.
   const lineItems = ((payload.line_items as Record<string, unknown>[]) || []).map((li) => ({
     title: li.title,
     quantity: li.quantity,
     price_cents: dollarsToCents(li.price as string),
     sku: li.sku || null,
     variant_id: li.variant_id ? String(li.variant_id) : null,
+    variant_title: (li.variant_title as string | null) || null,
+    total_discount_cents: dollarsToCents(li.total_discount as string),
+    product_id: li.product_id ? String(li.product_id) : null,
   }));
 
-  // Check if order already exists (to distinguish create vs update)
+  // Check if order already exists (to distinguish create vs update).
+  // Also pull `payment_details` so the Phase-2 checkout-breakdown
+  // fields (subtotal/tax/shipping/discount) MERGE with the
+  // gateway/card metadata the fraud-detector writes later — we must
+  // not clobber `card_bin`/`gateway`/etc when this webhook re-fires
+  // on an order/update.
   const { data: existingOrder } = await admin
     .from("orders")
-    .select("id, financial_status")
+    .select("id, financial_status, payment_details")
     .eq("workspace_id", workspaceId)
     .eq("shopify_order_id", shopifyOrderId)
     .single();
   const isNewOrder = !existingOrder;
   const previousFinancialStatus = existingOrder?.financial_status || null;
+  const existingPaymentDetails =
+    existingOrder?.payment_details && typeof existingOrder.payment_details === "object"
+      ? (existingOrder.payment_details as Record<string, unknown>)
+      : {};
+
+  // Checkout-breakdown fields for the row to be self-sufficient
+  // (order-confirmation-data resolver skips the Shopify GraphQL call
+  // when these are present — see `usedGraphQL` in Phase 1). Prefer
+  // summing `shipping_lines[].price` (per-carrier detail) and fall
+  // back to Shopify's `total_shipping_price_set.shop_money.amount`
+  // when the array is empty (some renewals).
+  const shippingLines = (payload.shipping_lines as { price?: string | number | null }[] | null) || [];
+  const shippingLinesTotalCents = shippingLines.reduce(
+    (s, l) => s + dollarsToCents((l?.price ?? null) as string | null),
+    0,
+  );
+  const shippingTotalSetAmount =
+    (payload.total_shipping_price_set as
+      | { shop_money?: { amount?: string | null } | null }
+      | null
+      | undefined)?.shop_money?.amount ?? null;
+  const shippingCents =
+    shippingLinesTotalCents > 0
+      ? shippingLinesTotalCents
+      : dollarsToCents(shippingTotalSetAmount);
+  const mergedPaymentDetails = {
+    ...existingPaymentDetails,
+    subtotal_cents: dollarsToCents(payload.subtotal_price as string),
+    tax_cents: dollarsToCents(payload.total_tax as string),
+    shipping_cents: shippingCents,
+    discount_cents: dollarsToCents(payload.total_discounts as string),
+  };
 
   // Extract delivery status from fulfillments
   // shipment_status values: confirmed, in_transit, out_for_delivery, delivered, failure
@@ -574,6 +646,7 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       financial_status: (payload.financial_status as string) || null,
       fulfillment_status: (payload.fulfillment_status as string) || null,
       line_items: lineItems,
+      payment_details: mergedPaymentDetails,
       source_name: (payload.source_name as string) || null,
       tags: (payload.tags as string) || null,
       fulfillments: rawFulfillments.map((f) => ({
@@ -723,6 +796,21 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       inngest.send({
         name: "demographics/enrich-single",
         data: { workspace_id: workspaceId, customer_id: customerId },
+      }).catch(() => {});
+    }
+
+    // Order-confirmation email (Klaviyo replacement — Phase 4 of the
+    // shopify-order-confirmation-emails spec). Fire-and-forget through
+    // Inngest so the daily 50–100 subscription-renewal burst is
+    // throttled (concurrency:5 + throttle:8/s) instead of hammering
+    // Resend from the webhook path. Gated on `isNewOrder` + `paid`
+    // financial status so we only send on a brand-new paid order;
+    // the handler is idempotent on `orders.order_confirmation_email_id`
+    // so a webhook retry is safe.
+    if (savedOrder && (payload.financial_status as string) === "paid") {
+      inngest.send({
+        name: "order/confirmation.requested",
+        data: { workspaceId, orderId: savedOrder.id },
       }).catch(() => {});
     }
   }

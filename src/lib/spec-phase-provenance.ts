@@ -85,3 +85,39 @@ export function phaseBuiltOnBranch(p: Pick<SpecPhase, "status" | "build_sha">): 
 export function branchBuiltCount(card: Pick<SpecCard, "phases">): number {
   return card.phases.filter(phaseBuiltOnBranch).length;
 }
+
+/**
+ * escort-reliably-dispatches-ready-goal-members Phase 1 — TRUE iff the target spec has been TRULY SHIPPED via
+ * phase-provenance stamps (every non-rejected phase carries `pr` OR `merge_sha`, or the one-shot card-level
+ * `shippedPr` is set). Independent of derived card status — an `in_testing` overlay or a base rollup that
+ * hasn't caught up cannot mask a truly-shipped card here.
+ *
+ * Use in place of `target.status === "shipped"` for the "is this blocker actually landed?" predicate — the
+ * check callers (`resolveBlockedBy`, escort readiness scans) need to trust the merge-hook stamp, not a
+ * derived rollup that may not reflect it yet.
+ */
+export function isCardShippedByPhaseProvenance(
+  card: Pick<SpecCard, "phases" | "shippedPr">,
+): boolean {
+  const relevant = card.phases.filter((p) => p.status !== "rejected");
+  if (!relevant.length) return (card.shippedPr ?? null) !== null;
+  return relevant.every((p) => phaseHasProvenance(p));
+}
+
+/**
+ * escort-reliably-dispatches-ready-goal-members Phase 1 — TRUE iff the target spec has landed on its GOAL
+ * BRANCH (`specs.goal_branch_sha` stamped). This is the intra-goal serializer's clearance for a GOAL-MATE
+ * dependent: the goal branch now carries this spec's diff, so a downstream goal-mate can build off it.
+ * The derived card status stays `in_progress` until the whole goal ships to main, so a goal-mate cleared
+ * check must NOT key on `target.status === "shipped"` — that stall is the exact ready-member dispatch gap
+ * this predicate closes.
+ *
+ * ONLY use for GOAL-MATE blocker relationships (dependent + blocker in the same goal). An outside dependent
+ * must wait for the atomic goal→main promotion — use [[isCardShippedByPhaseProvenance]] OR the
+ * `kind:"goal"` `goals.main_merge_sha` predicate the outside-dependent normalizer already installs.
+ */
+export function isCardAccumulatedOnGoalBranch(
+  card: Pick<SpecCard, "goalBranchSha">,
+): boolean {
+  return (card.goalBranchSha ?? null) !== null;
+}

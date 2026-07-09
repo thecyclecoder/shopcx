@@ -3,6 +3,20 @@
  * the orders table. We previously stored these as denormalized columns on the
  * customers row, but they kept drifting (Shopify webhooks with missing/zero
  * order_count would zero them out). Always read via this helper.
+ *
+ * Aggregation runs SERVER-SIDE in the `get_customer_stats_batch(p_customer_ids uuid[])`
+ * RPC (supabase/migrations/20260708130000_customer_stats_batch_rpc.sql). The previous
+ * implementation expanded customer_links groups in JS then did one unbounded
+ * `.in('customer_id', [...])` over orders and summed in JS — that read silently
+ * truncated at Supabase's 1000-row response cap, so the customers-list LTV/order-count
+ * columns were undercounted whenever a page's customers had >1000 orders between them
+ * (the same bug class as the estimate_sub_ltv incident). The RPC sees every row.
+ *
+ * Semantics (unchanged from the JS version — pure truncation fix):
+ *   - LTV excludes ONLY financial_status = 'refunded' (lowercase). NULL counts, and — as before —
+ *     uppercase 'REFUNDED'/'PARTIALLY_REFUNDED' also still count (a known casing gap, tracked separately).
+ *   - total_orders counts all orders; first/last_order_at are min/max(created_at) over all orders.
+ *   - Linked accounts (same customer_links group) roll up into each member's totals.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -14,118 +28,46 @@ export interface CustomerStats {
   last_order_at: string | null;
 }
 
-/**
- * Compute LTV + order count from the orders table. Includes linked-account
- * customers (same group_id in customer_links) so multi-profile customers see
- * their full history.
- *
- * Excludes orders with financial_status = "refunded" (full refunds) from LTV.
- * Partial refunds still count at full amount — we don't currently store the
- * net-of-refund amount on the order row.
- */
-export async function getCustomerStats(customerId: string): Promise<CustomerStats> {
-  const admin = createAdminClient();
-
-  // Find linked customer group (if any)
-  const ids = [customerId];
-  const { data: link } = await admin.from("customer_links")
-    .select("group_id").eq("customer_id", customerId).maybeSingle();
-  if (link?.group_id) {
-    const { data: members } = await admin.from("customer_links")
-      .select("customer_id").eq("group_id", link.group_id);
-    for (const m of members || []) {
-      if (!ids.includes(m.customer_id)) ids.push(m.customer_id);
-    }
-  }
-
-  const { data: orders } = await admin.from("orders")
-    .select("total_cents, financial_status, created_at")
-    .in("customer_id", ids);
-
-  let ltv = 0;
-  let count = 0;
-  let earliest: string | null = null;
-  let latest: string | null = null;
-  for (const o of orders || []) {
-    count++;
-    if (o.financial_status !== "refunded") ltv += o.total_cents || 0;
-    if (!earliest || o.created_at < earliest) earliest = o.created_at;
-    if (!latest || o.created_at > latest) latest = o.created_at;
-  }
-
-  return { ltv_cents: ltv, total_orders: count, first_order_at: earliest, last_order_at: latest };
+interface StatsRpcRow {
+  input_customer_id: string;
+  ltv_cents: number | string | null;
+  total_orders: number | string | null;
+  first_order_at: string | null;
+  last_order_at: string | null;
 }
 
+const ZERO: CustomerStats = { ltv_cents: 0, total_orders: 0, first_order_at: null, last_order_at: null };
+
 /**
- * Batch version — fetches stats for many customers at once and rolls up
- * linked-account totals (so a profile in a 3-account group sees combined
- * orders/LTV across all 3, matching getCustomerStats behavior).
- *
- * Three queries regardless of page size:
- *   1. customer_links for the input ids → discover groups
- *   2. customer_links for each discovered group_id → all member ids
- *   3. orders for the union of (input ids ∪ all member ids)
+ * Batch version — one round trip, aggregated server-side, cap-free. Rolls up linked-account
+ * totals (a profile in a 3-account group sees combined orders/LTV across all 3). Returns a
+ * Map with an entry for every input id (zeroed when the customer has no orders).
  */
 export async function getCustomerStatsBatch(customerIds: string[]): Promise<Map<string, CustomerStats>> {
   const out = new Map<string, CustomerStats>();
   if (customerIds.length === 0) return out;
   const admin = createAdminClient();
 
-  // 1) Find which input ids belong to a link group
-  const { data: ownLinks } = await admin.from("customer_links")
-    .select("customer_id, group_id").in("customer_id", customerIds);
+  const { data, error } = await admin.rpc("get_customer_stats_batch", { p_customer_ids: customerIds });
+  if (error) throw new Error(`get_customer_stats_batch RPC failed: ${error.message}`);
 
-  // 2) Expand each group to all its members
-  const groupIds = [...new Set((ownLinks || []).map(l => l.group_id))];
-  const groupMembers = new Map<string, string[]>(); // group_id → all member customer_ids
-  if (groupIds.length) {
-    const { data: allMembers } = await admin.from("customer_links")
-      .select("group_id, customer_id").in("group_id", groupIds);
-    for (const m of allMembers || []) {
-      const arr = groupMembers.get(m.group_id) || [];
-      arr.push(m.customer_id);
-      groupMembers.set(m.group_id, arr);
-    }
+  for (const r of (data ?? []) as StatsRpcRow[]) {
+    out.set(r.input_customer_id, {
+      ltv_cents: Number(r.ltv_cents) || 0,
+      total_orders: Number(r.total_orders) || 0,
+      first_order_at: r.first_order_at,
+      last_order_at: r.last_order_at,
+    });
   }
-
-  // Build per-input expansion: input_id → list of customer_ids whose orders count toward it
-  const expand = new Map<string, string[]>();
-  const ownGroup = new Map<string, string>(); // input_id → group_id (if any)
-  for (const l of ownLinks || []) ownGroup.set(l.customer_id, l.group_id);
-  const allOrderCustomerIds = new Set<string>();
-  for (const cid of customerIds) {
-    const gid = ownGroup.get(cid);
-    const members = gid ? (groupMembers.get(gid) || [cid]) : [cid];
-    expand.set(cid, members);
-    for (const m of members) allOrderCustomerIds.add(m);
-  }
-
-  // 3) Single orders query covering all expanded customer ids
-  const { data: orders } = await admin.from("orders")
-    .select("customer_id, total_cents, financial_status, created_at")
-    .in("customer_id", [...allOrderCustomerIds]);
-
-  // Bucket orders by customer_id
-  const ordersByCust = new Map<string, { total_cents: number; financial_status: string | null; created_at: string }[]>();
-  for (const o of orders || []) {
-    const arr = ordersByCust.get(o.customer_id as string) || [];
-    arr.push({ total_cents: o.total_cents || 0, financial_status: o.financial_status, created_at: o.created_at });
-    ordersByCust.set(o.customer_id as string, arr);
-  }
-
-  // Roll up per input customer (combining their group's members)
-  for (const cid of customerIds) {
-    const stats: CustomerStats = { ltv_cents: 0, total_orders: 0, first_order_at: null, last_order_at: null };
-    for (const memberId of expand.get(cid) || [cid]) {
-      for (const o of ordersByCust.get(memberId) || []) {
-        stats.total_orders++;
-        if (o.financial_status !== "refunded") stats.ltv_cents += o.total_cents;
-        if (!stats.first_order_at || o.created_at < stats.first_order_at) stats.first_order_at = o.created_at;
-        if (!stats.last_order_at || o.created_at > stats.last_order_at) stats.last_order_at = o.created_at;
-      }
-    }
-    out.set(cid, stats);
-  }
-
+  // The RPC returns a row per input, but stay defensive so callers can always .get(id).
+  for (const cid of customerIds) if (!out.has(cid)) out.set(cid, { ...ZERO });
   return out;
+}
+
+/**
+ * Single-customer stats. Delegates to the batch RPC (shared SQL, same cap-free semantics).
+ */
+export async function getCustomerStats(customerId: string): Promise<CustomerStats> {
+  const stats = await getCustomerStatsBatch([customerId]);
+  return stats.get(customerId) ?? { ...ZERO };
 }

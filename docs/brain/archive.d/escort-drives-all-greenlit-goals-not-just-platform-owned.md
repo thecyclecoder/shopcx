@@ -1,0 +1,1 @@
+- **Build-escort drives EVERY greenlit goal, not only Platform-owned ones** · verified 2026-07-09 · → [[../libraries/platform-director]]

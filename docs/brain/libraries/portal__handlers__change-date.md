@@ -16,9 +16,9 @@ const changeDate: RouteHandler
 
 _No internal callers found via static scan._
 
-## Gotchas
+## Guard
 
-_None documented._
+[[portal__failed-payment-guard]] — blocks mutations on failed-payment Appstle contracts (internal subs exempt).
 
 ---
 

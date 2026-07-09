@@ -1,0 +1,1 @@
+- **Goal-member build enqueue-time admission gate (Phase 1) + release-on-completion (Phase 2)** · verified 2026-07-08 · → [[../lifecycles/spec-goal-branch-pm-flow]]

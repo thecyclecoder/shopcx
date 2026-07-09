@@ -960,7 +960,7 @@ export async function POST(request: NextRequest) {
         workspace_id: cart.workspace_id,
         type: "fraud_alert",
         title: `${order.order_number} held — fraud review required`,
-        message: `Order paid via Braintree but NOT released to fulfillment. Rules fired: ${ruleTypes}. Dismiss the case to release it to Amplifier.`,
+        body: `Order paid via Braintree but NOT released to fulfillment. Rules fired: ${ruleTypes}. Dismiss the case to release it to Amplifier.`,
       }).then(() => undefined, () => undefined);
     }
   } catch (err) {

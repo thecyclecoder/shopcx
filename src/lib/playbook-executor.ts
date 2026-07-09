@@ -619,6 +619,10 @@ async function executeStep(
     case "cancel_subscription":
       return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers, policyRules);
 
+    case "pause_subscription":
+    case "pause":
+      return handlePauseSubscription(wsId, subs, ctx, step, dataContext, pers, policyRules);
+
     case "issue_store_credit":
       return handleIssueStoreCredit(admin, wsId, customer, orders, ctx, step, tid);
 
@@ -698,17 +702,23 @@ async function fetchCustomerData(admin: Admin, wsId: string, custId: string): Pr
 }
 
 async function fetchOrders(admin: Admin, wsId: string, custId: string, config: Record<string, unknown>): Promise<OrderData[]> {
-  // Floor at 180 days so the orchestrator has full visibility into the
-  // customer's order history — not just the policy window. Surfaced on
-  // ticket 6e732303 (Veronica, May 8): customer's two orders were 25
-  // and 53 days old; the old 21-day lookback hid both and the playbook
-  // kept saying "no recent orders found" while the customer kept giving
-  // us order numbers. Even with a 35-day floor we'd still miss anything
-  // older. The policy check later correctly classifies each order as
-  // in/out of policy, so fetching more is safe — we just want Sonnet
-  // to see the full picture.
+  // Window: the last 180 days, but ALWAYS at least the 3 most recent
+  // orders if they exist — the same rule the box's get_customer_account
+  // uses (sonnet-orchestrator-v2 getCustomerAccount). A hard 180-day floor
+  // gives the orchestrator full recent visibility but can still HIDE a
+  // disputed renewal's older first order (ticket 125741eb, marty: the
+  // renewal was in-window, the January first order wasn't → the playbook
+  // could read the renewal as a first order). Floor at 180 days AND
+  // guarantee the last ≥3 so the renewal-vs-first-order signal survives.
+  //
+  // Earlier fix (ticket 6e732303, Veronica): a 21-day lookback hid two
+  // 25-/53-day-old orders and the playbook kept saying "no recent orders
+  // found." The 180-day window already covers that; this just adds the
+  // last-3 fallback for accounts whose history is older than 180 days.
+  // Downstream policy classification labels each order in/out of policy,
+  // so surfacing a few older orders is safe.
   const lookbackDays = Math.max(Number(config.lookback_days) || 180, 180);
-  const since = new Date(Date.now() - lookbackDays * 86400000).toISOString();
+  const cutoffIso = new Date(Date.now() - lookbackDays * 86400000).toISOString();
 
   // Include linked customer orders
   const linkedIds = [custId];
@@ -718,14 +728,18 @@ async function fetchOrders(admin: Admin, wsId: string, custId: string, config: R
     for (const g of grp || []) if (!linkedIds.includes(g.customer_id)) linkedIds.push(g.customer_id);
   }
 
+  // Fetch the most recent orders with NO date floor, then window in code so
+  // we can keep the last ≥3 even when they fall outside the lookback.
   const { data } = await admin.from("orders")
     .select("id, order_number, shopify_order_id, created_at, total_cents, financial_status, fulfillment_status, delivery_status, line_items, fulfillments, source_name, subscription_id")
     .eq("workspace_id", wsId)
     .in("customer_id", linkedIds)
-    .gte("created_at", since)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(50);
 
-  return (data || []) as OrderData[];
+  const all = (data || []) as OrderData[];
+  const within = all.filter(o => String(o.created_at) >= cutoffIso).length;
+  return all.slice(0, Math.max(within, 3));
 }
 
 async function fetchSubscriptions(admin: Admin, wsId: string, custId: string): Promise<SubscriptionData[]> {
@@ -2284,6 +2298,70 @@ async function handleCancelSubscription(
   };
 }
 
+// docs/brain/specs/refund-playbook-skips-pause-step-when-subscription-already-cancelled.md
+// Refund-playbook pause step decider. When the target sub is already
+// cancelled there is nothing to pause — skip (no action, no claim) and
+// advance. Firing appstle-pause on a cancelled sub previously left the
+// step's "I've paused your subscription" reply unbacked, which the
+// claim-guard blocked and escalated (ticket 472310cc).
+export function decidePauseSubscriptionStep(
+  subs: Array<{ shopify_contract_id: string; status: string }>,
+  identifiedContractId: string | undefined,
+  stepOrder: number,
+): { action: "advance"; newStep: number; reason: string } | { action: "pause"; contractId: string } {
+  if (!identifiedContractId) {
+    return { action: "advance", newStep: stepOrder + 1, reason: "no identified subscription" };
+  }
+  const sub = subs.find(s => s.shopify_contract_id === identifiedContractId);
+  if (!sub) {
+    return { action: "advance", newStep: stepOrder + 1, reason: "identified subscription not found" };
+  }
+  if (sub.status === "cancelled") {
+    return { action: "advance", newStep: stepOrder + 1, reason: "subscription already cancelled" };
+  }
+  return { action: "pause", contractId: identifiedContractId };
+}
+
+async function handlePauseSubscription(
+  wsId: string, subs: SubscriptionData[], ctx: Record<string, unknown>,
+  step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
+): Promise<PlaybookExecResult> {
+  const identifiedSub = ctx.identified_subscription as string | undefined;
+  const decision = decidePauseSubscriptionStep(subs, identifiedSub, step.step_order);
+
+  if (decision.action === "advance") {
+    return {
+      action: "advance", newStep: decision.newStep,
+      systemNote: `[Playbook] Pause step skipped — ${decision.reason}. Advancing.`,
+    };
+  }
+
+  const { appstleSubscriptionAction } = await import("@/lib/appstle");
+  const result = await appstleSubscriptionAction(
+    wsId, decision.contractId, "pause", "Customer requested via playbook", "AI Playbook",
+  );
+
+  if (!result.success) {
+    return {
+      action: "escalate_api_failure",
+      error: `Failed to pause subscription: ${decision.contractId}`,
+      systemNote: `[Playbook] Pause failed for ${decision.contractId}: ${result.error || "unknown"}`,
+    };
+  }
+
+  const response = await aiGenerate(
+    basePrompt(step, pers, policyRules),
+    `Customer data:\n${dataCtx}\n\nPaused subscription: ${decision.contractId}\n\nConfirm the pause in one short sentence.`,
+  );
+
+  return {
+    action: "advance", newStep: step.step_order + 1, response,
+    context: { sub_paused: decision.contractId },
+    systemNote: `[Playbook] Paused subscription: ${decision.contractId}.`,
+    backedActions: ["pause_timed", "pause"],
+  };
+}
+
 async function handleIssueStoreCredit(
   admin: Admin, wsId: string, customer: CustomerData, orders: OrderData[],
   ctx: Record<string, unknown>, step: PlaybookStep, tid: string,
@@ -2691,8 +2769,23 @@ export async function assertPlaybookStepConfidence(
 
 // ── Start a playbook on a ticket ──
 
+/**
+ * Stamps the ticket onto a playbook: sets `active_playbook_id`, resets step + exception counters,
+ * seeds `playbook_context`, and applies the `pb` / `pb:<slug>` tags. Called by the deterministic
+ * signal matcher (matchPlaybook / matchPlaybookScored) AND — Phase 2 of
+ * [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] — by
+ * unified-ticket-handler's Sol-chosen branch when the live Direction names a `playbook_slug`.
+ *
+ * The optional `seed_context` merges into the fresh `playbook_context` at step 0 so the executor
+ * doesn't have to re-derive ids Sol already picked (Sol writes them on `plan.playbook_seed_context`
+ * — typically `{ order_id, subscription_id, customer_id }`). The merge is shallow and Sol's keys
+ * DO NOT overwrite existing context (there is no existing context — this is a fresh start), so
+ * this is functionally "seed the initial context object". Legacy signal-matched calls omit the
+ * argument and get the pre-Phase-2 behavior (empty `{}`) unchanged.
+ */
 export async function startPlaybook(
   admin: Admin, ticketId: string, playbookId: string,
+  opts?: { seed_context?: Record<string, unknown> },
 ): Promise<void> {
   const [{ data: ticket }, { data: playbook }] = await Promise.all([
     admin.from("tickets").select("tags").eq("id", ticketId).single(),
@@ -2705,10 +2798,13 @@ export async function startPlaybook(
   if (!newTags.includes("pb")) newTags.push("pb");
   if (!newTags.includes(pbTag)) newTags.push(pbTag);
 
+  const seedContext =
+    opts?.seed_context && typeof opts.seed_context === "object" ? opts.seed_context : {};
+
   await admin.from("tickets").update({
     active_playbook_id: playbookId,
     playbook_step: 0,
-    playbook_context: {},
+    playbook_context: seedContext,
     playbook_exceptions_used: 0,
     tags: newTags,
   }).eq("id", ticketId);

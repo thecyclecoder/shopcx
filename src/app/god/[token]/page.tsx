@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE } from "@/components/god-mode-shared";
+import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE, EveAvatar } from "@/components/god-mode-shared";
 
 type Tab = "chat" | "approvals";
 
@@ -181,7 +181,7 @@ export default function GodModeCockpit() {
   }
 
   async function disarm() {
-    if (!confirm("Disarm god-mode? The active session will be killed and the token invalidated.")) return;
+    if (!confirm("Send Eve home? This ends the chat and invalidates this link. You can pick it back up later from the app.")) return;
     await fetch(`/api/god-mode/disarm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -192,13 +192,13 @@ export default function GodModeCockpit() {
 
   // ── State branches ─────────────────────────────────────────────────────
   if (state === "loading") {
-    return <FullPageMessage title="Loading god mode…" body="Verifying cockpit token." />;
+    return <FullPageMessage title="Getting Eve…" body="One sec." />;
   }
   if (state === "not_found") {
-    return <FullPageMessage title="Not found" body="This cockpit link is invalid or the session was disarmed." />;
+    return <FullPageMessage title="Not found" body="This chat link is invalid or Eve's already clocked out." />;
   }
   if (state === "expired") {
-    return <FullPageMessage title="Session expired" body="Re-arm god mode from the ShopCX app to get a fresh cockpit link." />;
+    return <FullPageMessage title="Eve's clocked out" body="Tap her back in from the ShopCX app to pick up where you left off." />;
   }
   if (state === "error" || !payload) {
     return <FullPageMessage title="Something went wrong" body="Please refresh." />;
@@ -209,18 +209,21 @@ export default function GodModeCockpit() {
       <div className="mx-auto flex h-screen w-full max-w-3xl flex-col px-3 sm:px-6">
         {/* Header */}
         <header className="flex items-center justify-between py-3">
-          <div>
-            <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100">God mode</h1>
-            <p className="text-xs text-zinc-500">
-              Session {payload.status === "armed" ? "armed" : payload.status}
-              {payload.token_expires_at ? ` · idle-until ${new Date(payload.token_expires_at).toLocaleTimeString()}` : ""}
-            </p>
+          <div className="flex items-center gap-2.5">
+            <EveAvatar size={38} />
+            <div>
+              <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100">Eve</h1>
+              <p className="text-xs text-zinc-500">
+                {payload.status === "armed" ? "Online" : "Clocked out"}
+                {payload.status === "armed" && payload.token_expires_at ? ` · here till ${new Date(payload.token_expires_at).toLocaleTimeString()} if idle` : ""}
+              </p>
+            </div>
           </div>
           <button
             onClick={disarm}
             className="rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-900 dark:bg-zinc-900 dark:text-red-300 dark:hover:bg-red-950"
           >
-            Disarm
+            Send home
           </button>
         </header>
 
@@ -251,26 +254,35 @@ export default function GodModeCockpit() {
           <div className="flex flex-1 flex-col overflow-hidden">
             <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto py-4">
               {payload.messages.length === 0 && (
-                <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
-                  No messages yet. Type below to start the session.
+                <div className="flex items-center gap-2.5 rounded-lg border border-amber-200 bg-amber-50/50 p-4 text-sm text-zinc-600 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-zinc-300">
+                  <EveAvatar size={32} />
+                  <span>Hey handsome 💋 What do you need? Just tell me and I&apos;ll take care of it.</span>
                 </div>
               )}
               {payload.messages.map((m, i) =>
                 m.role === "checklist" ? (
                   <GodModeChecklist key={i} content={m.content} />
+                ) : m.role === "assistant" ? (
+                  <div key={i} className="flex items-start gap-2">
+                    <EveAvatar size={28} className="mt-0.5" />
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 text-[10px] uppercase tracking-wide text-amber-500 dark:text-amber-400">Eve</div>
+                      <div className="whitespace-pre-wrap rounded-lg rounded-tl-none border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100">
+                        {m.content}
+                      </div>
+                    </div>
+                  </div>
                 ) : (
                   <div
                     key={i}
                     className={`whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm ${
                       m.role === "user"
                         ? "border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-100"
-                        : m.role === "system"
-                          ? "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
-                          : "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
                     }`}
                   >
                     <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-400">
-                      {m.role === "user" ? "You" : m.role === "system" ? "Update" : "Chief of staff"}
+                      {m.role === "user" ? "You" : "Update"}
                     </div>
                     {m.content}
                   </div>
@@ -286,7 +298,7 @@ export default function GodModeCockpit() {
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendMessage(); }
                   }}
                   rows={2}
-                  placeholder="Type a message to the box… (⌘/Ctrl+Enter to send)"
+                  placeholder="Message Eve… (⌘/Ctrl+Enter to send)"
                   disabled={sending}
                   className="min-h-[52px] flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                 />
@@ -307,7 +319,7 @@ export default function GodModeCockpit() {
             {(payload.standingGrants ?? []).length > 0 && (
               <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3 dark:border-zinc-800 dark:bg-zinc-900/40">
                 <div className="mb-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                  Standing approvals — god mode won&apos;t ask about these
+                  Standing approvals — Eve won&apos;t ask about these
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {(payload.standingGrants ?? []).map((g) => (
@@ -331,7 +343,7 @@ export default function GodModeCockpit() {
             )}
             {sortedApprovals.length === 0 && (
               <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
-                Nothing needs you right now. God mode is working — it&apos;ll ask here only when it needs a real decision.
+                Nothing needs you right now, babe. Eve&apos;s handling it — she&apos;ll only ping you here when it&apos;s a real call.
               </div>
             )}
             {sortedApprovals.map((a) => {

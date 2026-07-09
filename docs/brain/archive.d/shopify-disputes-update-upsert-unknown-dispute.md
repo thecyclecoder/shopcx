@@ -1,0 +1,1 @@
+- **Upsert chargeback_events on disputes/update when the dispute is unknown, instead of dropping the webhook** · verified 2026-07-08 · → [[../lifecycles/chargeback-pipeline]]

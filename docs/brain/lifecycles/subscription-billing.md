@@ -36,17 +36,18 @@ Window is 1 hour so we have buffer + can amortize across the hour evenly via con
 
 ## Internal scheduler — Phase 2: line item resolution
 
-Pricing is **derived, never baked**. The renewal calls the pricing engine
+Pricing is **derived, never baked** — **unless** the sub carries a configured grandfathered lock, in which case that lock is authoritative. The renewal calls the pricing engine
 ([[../libraries/pricing]] · `resolveSubscriptionPricing`), which is the single
 source of truth shared with the portal display. For each due sub:
 
 1. **Resolve each line** from `subscription.items` JSONB — items are catalog
-   **references** (variant + product UUIDs, quantity), not prices.
+   **references** (variant + product UUIDs, quantity), not prices — unless the item carries a lock (see below).
 2. **Derive the price per line** = `base × (1 − quantity-break%) × (1 − S&S%)`,
    where `base` = `items[].price_override_cents` (grandfathered lock) ?? catalog
    `product_variants.price_cents`, the break is the **mix-and-match** tier for the
    total quantity sharing the line's [[../tables/pricing_rules]], and S&S is the
    rule's `subscribe_discount_pct` (else `workspaces.subscription_discount_pct`).
+   **When an item carries a post-discount lock (`price_cents` set, no `price_override_cents`), rule decomposition is SKIPPED and `unit = price_cents` verbatim** — the sub's own configured per-unit is the authoritative renewal price. See the renewal-price contract in [[../libraries/pricing]] § The principle. This is what protects a grandfathered customer whose catalog price has since risen from silently being charged the current standard.
 3. **Snapshot** the engine's per-line charged prices onto the order's line items
    (an order is a historical record, so it bakes the price; the sub never does).
 4. **Apply discount** if `applied_discounts` JSONB has an active code. One coupon
@@ -66,6 +67,19 @@ source of truth shared with the portal display. For each due sub:
    rate. **Protection** line if
    `shipping_protection_added=true` (passthrough; excluded from the discountable
    product subtotal). **Compute pre-tax total**.
+
+## Internal scheduler — Phase 2.5: overcharge guard (fail-safe)
+
+Belt & suspenders to the configured-lock contract above. After line-item resolution and **before** coupon resolution / Avalara commit / pending-transaction insert / Braintree sale, the renewal calls [[../libraries/subscription-renewal-guard]] `checkRenewalOverchargeGuard(items, pricing.lines)`. Per product line, it compares the engine's computed `unit_cents` against that item's configured ceiling — `price_cents` if set, else `price_override_cents`, else uncapped (live-catalog opt-in). Gifts (unit $0 by design) and shipping protection (flag-billed, not a catalog line) never contribute.
+
+If **any** product line's computed unit exceeds its ceiling — a divergence between what the engine computed and what the sub is configured for — the renewal is **HELD**:
+
+- `emitRenewalOutcomeHeartbeat("skipped_other")` — outcome accounted for in Control Tower's distribution beats.
+- [[../tables/customer_events]] `subscription.renewal_held_overcharge_guard` — subscription_id, reason (`overcharge_above_configured`), computed vs configured totals, offending lines.
+- Return `{ skipped: true, reason: "overcharge_guard_held" }` — the charge is **NEVER** submitted to Braintree at the higher amount.
+- `next_billing_date` is **intentionally NOT advanced** — a fix + re-run picks the sub back up on the next daily cron tick.
+
+Why this exists: with the Phase 1 engine change (`price_cents` / `price_override_cents` flow through as the authoritative unit), a grandfathered customer's rate should never be exceeded — but if a future repricing regression reintroduces catalog decomposition on a locked line, this guard catches it before the customer is charged. Fail-safe: a grandfathered customer is never silently overcharged.
 
 ## Internal scheduler — Phase 3: tax quote
 
@@ -163,6 +177,7 @@ Cancelled subs migrate too (using the local row when Appstle is unreadable). The
 
 **Comp migration (no-PM path).** `migrateContractToInternalComp(workspaceId, contractId, { compNote })` ([[migrate-to-internal]]) flips **one** Appstle contract → internal **comp** sub **without** the billable-PM requirement (a comp sub never charges, so "must be billable" doesn't apply). Reuses translate-lines + cancel-contract, then sets `comp=true` + `comp_note` + every item `price_override_cents=0` (base $0), preserving items/cadence/next date and the `customer_id` (no billable reassignment). **No `migration_audit` is recorded** — the 8-check audit's `card_pinned` check expects a billable card a comp sub deliberately lacks.
 
+
 ## Pause / resume / skip — both paths
 
 Customer-facing mutations are unified:
@@ -187,6 +202,28 @@ These rules are non-obvious and a wrong move charges the customer immediately at
 - **Billing-date slot is `08:00:00Z`** (store midnight Pacific). A bare `YYYY-MM-DD` becomes `T00:00:00Z` and Appstle snaps it a day early (asked 06-15, got 06-14). Pass the full `...T08:00:00Z`.
 - **`"UserGeneratedError: The subscription contract has changed"` (HTTP 400) is transient** — it fires when a follow-up edit lands before a prior mutation (e.g. a quantity change) has settled. Retry once the contract settles.
 - **The DB lags Appstle.** `subscriptions.items` / `subscriptions.next_billing_date` sync asynchronously and can show stale values right after a mutation — **verify against a live Appstle contract fetch**, not the local row.
+
+## Failed-payment mutation block is Appstle-only
+
+Shipped ([[../specs/portal-failed-payment-block-exempts-internal-and-offers-inline-card-update]], derived from ticket 115350d5 on sub `e1d4f32b` / `internal-d0bd95b7651b493b`). The portal's change-date + frequency handlers rejected on `last_payment_status='failed'` **without** checking `is_internal`, over-blocking internal subs whose mutation would in fact succeed (proven live: the same sub's date moved Oct 1 → Oct 6 with `{success:true}` and the flag untouched). The block only makes sense for **Appstle** contracts, where Shopify owns the charge and the card must be replaced upstream before a modification can safely land.
+
+**Guard** ([[../libraries/portal__failed-payment-guard]]) — called by [[../libraries/portal__handlers__change-date]] and [[../libraries/portal__handlers__frequency]]. The predicate `shouldBlockForFailedPayment` returns `true` **only** for `{is_internal: false, last_payment_status: 'failed'}`. Internal subs pass through regardless of the flag; Appstle subs with a healthy last payment also pass through. The single `resolveSub`-returned row carries both fields, so the handler doesn't re-query `subscriptions`. Unit-tested in `src/lib/portal/failed-payment-guard.test.ts`.
+
+**Portal recovery UX** ([[customer-portal]] § Payment methods · Failed-payment block recovery). When the block correctly fires (Appstle sub, genuine failure), the real-portal detail screen renders an inline **"Update payment method"** primary CTA on the error overlay — no dead-end text. The customer's in-flight mutation is stashed in `sessionStorage` under the sub's **UUID** (invariant across migration; keying by `contract.id` would break because `migrateContractToInternal` rewrites `shopify_contract_id` to `internal-<hex>`). The CTA deep-links to `/payment-methods?add=1&forSub=<uuid>&retryOnSuccess=1`; the payment section vaults the card with `migrate: true` so [[migrate-to-internal]] sweeps the sub onto internal rails synchronously, then pins the new card via `setSubscriptionPaymentMethod` (its `is_internal` guard now passes) and redirects back with `?retry=1`. The subscription-detail screen consumes the marker, replays the pending change-date / frequency mutation through the top-level action overlay, and refreshes the contract — the customer's original intent completes in one flow. The Shopify-extension portal is sunset and out of scope.
+
+## Order-now (bill_now) — async verify → recover → migrate → retry → Sol confirms last
+
+Order-now / bill_now is IMMEDIATE for internal (Braintree) subs but DELAYED for Appstle — the vendor accepts the trigger, then charges asynchronously and can DECLINE minutes later. Historically `subscriptionOrderNow` returned `{success:true}` on the trigger ack alone, so a later decline was invisible to the ticket ledger and the customer had already been told her order was on the way (ticket 0a9e4d7f — Judy). The full order-now flow now honors message-is-last across five phases; every phase lives in [[../libraries/order-now-verify]] with the sibling [[../libraries/sol-outcome-claim-guard]] / [[../libraries/outcome-completion-gate]] send-guards enforcing "no confirmation before a verified paid order."
+
+1. **Async-aware fire** ([[../libraries/order-now-verify]] `subscriptionOrderNowVerified`) — fires the underlying `subscriptionOrderNow` AND schedules `commerce/order-now.verify` on Inngest with a flavor-specific delay (30s internal, 5m Appstle). Returns `pending: true` for Appstle so [[../libraries/action-executor]] `bill_now`'s return-time `verified_outcome='confirmed'` stamp is SKIPPED — the async verify owns the verdict.
+2. **Real-outcome read** ([[../inngest/order-now-verify]]) — after the delay, reads customer_events (`subscription.billing-failure` / `subscription.billing-success`) + subscriptions (`last_payment_status`) + orders (new paid order since `fired_at`) and computes `paid | declined | unknown` via the pure `computeOrderNowVerdict` predicate. Unknown re-schedules once (attempt+1, capped at 3) so the ledger row terminally resolves — no perpetually-pending rows.
+3. **Decline → recovery journey** — a `declined` verdict fires the update-payment-method recovery journey EXACTLY ONCE via `dispatchRecoveryOnDecline` → [[../libraries/payment-recovery-email]]. The dispatcher's confirming-predicate guard soft-skips when a `dunning.recovery_email_sent` `customer_events` row already exists for this customer since `fired_at` — dunning's `billing-failure` webhook path may already have delivered the same recovery email, and we send-once (see [[dunning]] § Recovery email + post-update charge).
+4. **Journey completion → migrate → deterministic retry** — when the recovery journey completes, the card is Braintree-vaulted and the sub migrates Appstle→internal ([[../libraries/vault-and-migrate-payment-method]] · [[migrate-to-internal]]), then a plain-Node retry of order-now runs on the internal (immediate) rail — no box/Sol session needed. Idempotency-guarded so a re-drive can't create a second order.
+5. **Sol confirms last** — a `paid` verdict runs Sol's end-state pass (`dispatchConfirmationOnVerified`); only when EVERY invariant holds (paid order found, non-zero line items, non-zero total, sub active, last_payment_status='succeeded') does the ledger stamp `verified_outcome='confirmed'`, which is the signal [[../libraries/sol-outcome-claim-guard]] reads to unblock the customer confirmation reply. A drifted end state stamps `drifted` with the failed checks — [[../libraries/outcome-completion-gate]] escalates instead of Sol confirming a lie.
+
+Wired-in callers: [[../libraries/action-executor]] `directActionHandlers.bill_now` (routes through `subscriptionOrderNowVerified`; sets `ctx._resolutionOutcomePending=true` for Appstle so the executor's synchronous stamp is bypassed), portal / ticket-UI entry points (call `scheduleOrderNowVerify` after their own fire). Ledger row stamped via compare-and-set on `verified_at IS NULL` (idempotent — a re-drive of the verify event can't overwrite an earlier verdict). Event contract: `commerce/order-now.verify` with `{ workspace_id, subscription_id, contract_id, fired_at, is_internal, resolution_event_id?, ticket_id?, customer_id?, attempt }` ([[../inngest/registered-functions]]).
+
+Cross-refs: [[dunning]] § Recovery email + post-update charge (the recovery-email path both Phase 3 dunning and order-now Phase 2 share), [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] (the sibling message-is-last gate this integrates with), [[../lifecycles/ticket-lifecycle]] § Message-is-last (ordered WHAT → HONOR → MESSAGE → GATE pipeline).
 
 ## When dunning meets a charge
 
@@ -213,6 +250,7 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 |---|---|
 | `src/lib/internal-subscription.ts` | Internal scheduler core |
 | `src/lib/inngest/internal-subscription-renewals.ts` | Hourly cron |
+| `src/lib/subscription-renewal-guard.ts` | Pre-charge overcharge guard (fail-safe) |
 | `src/lib/appstle.ts` | Appstle helpers with is_internal short-circuit |
 | `src/lib/integrations/braintree.ts` | Gateway + transaction.sale + refund + void |
 | `src/lib/avalara.ts` | Tax client |
@@ -239,6 +277,14 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 
 **Subscription overcharge remediation** ([[../specs/subscription-overcharge-remediation]], [[../libraries/subscription-overcharge]]): detection signal `{charged, expected, delta, dropped_base}` surfaced into the orchestrator + escalation-triage; remediation = partial_refund(delta) → restore grandfathered base (Appstle heal / internal `price_override_cents`, never migrate-to-internal) → customer_reply. `update_line_item_price` direct action now routes internal subs.
 
+**Order-confirmation emails on renewal (Klaviyo replacement)** ([[../specs/shopify-order-confirmation-emails]] Phase 4): every newly-seen + paid Shopify `orders/create` webhook (including the daily 50–100 Appstle-renewal fan-out) now enqueues an `order/confirmation.requested` event handled by [[../inngest/order-confirmation]] — flood-safe (concurrency 5 per workspace + 8/s throttle under Resend's ~10 req/s ceiling), idempotent on `orders.order_confirmation_email_id`, and resolves totals + line-item images through [[../libraries/order-confirmation-data]]. Appstle webhooks are untouched — everything keys off the Shopify order the renewal always produces. On send, the resulting Resend id + `order_confirmation_sent_at` stamp on the order and a mirrored [[../tables/email_events]] row drive the existing `/api/webhooks/resend-events` delivered/opened pipeline.
+
+**Failed-payment mutation block scoped to Appstle + inline card-update recovery** ([[../specs/portal-failed-payment-block-exempts-internal-and-offers-inline-card-update]], derived from ticket 115350d5 on sub `e1d4f32b`). The change-date + frequency portal guards now key on `is_internal` — the block only fires for Appstle contracts with `last_payment_status='failed'` (via [[../libraries/portal__failed-payment-guard]] called by [[../libraries/portal__handlers__change-date]] + [[../libraries/portal__handlers__frequency]]). When the block DOES apply, the real portal renders an inline "Update payment method" CTA that migrates the sub to internal via [[migrate-to-internal]], pins the new card, and auto-replays the previously-blocked mutation — the customer's original intent lands in one flow instead of a text dead-end. See § Failed-payment mutation block is Appstle-only above.
+
+**Renewal charges the sub's configured (grandfathered) price** ([[../specs/subscription-renewal-honors-configured-grandfathered-price-never-bills-standard]], derived from ticket 5402b5d4). The engine honors `items[].price_cents` as an authoritative post-discount lock (Phase 1), and a pre-charge overcharge guard ([[../libraries/subscription-renewal-guard]]) holds any renewal whose computed unit exceeds the sub's configured ceiling before it reaches Braintree (Phase 2). Contract: **a renewal's per-unit is the sub's configured line price + `applied_discounts` — never the product's current standard catalog price**; a computed amount exceeding the configured total is **held** (not billed), `next_billing_date` is not advanced, and a `subscription.renewal_held_overcharge_guard` [[../tables/customer_events]] row is logged for review.
+
+**Order-now async verify → recover → migrate → retry → Sol confirms last** ([[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]], derived from ticket 0a9e4d7f — Judy). See § Order-now (bill_now) above for the full trace. Appstle bill_now no longer reports success on the trigger ack: the fire wraps `subscriptionOrderNow` via [[../libraries/order-now-verify]] `subscriptionOrderNowVerified`, then [[../inngest/order-now-verify]] re-reads the real outcome after a 5m delay (30s for internal) and either stamps `verified_outcome='confirmed'` (after Sol's end-state pass), dispatches the update-payment-method recovery journey exactly once (declined branch, guarded against dunning-webhook double-send), or terminally resolves `drifted` (unknown after 3 attempts). The customer never gets a "your order shipped" confirmation before a verified paid order exists — the message-is-last gate ([[../libraries/sol-outcome-claim-guard]]) reads `verified_outcome='confirmed'` and blocks the reply otherwise; a drift escalates via [[../libraries/outcome-completion-gate]].
+
 **Recent activity:**
 - `2bce67a4` Returns: refund instantly on delivered using stored net_refund_cents (touches transactions)
 - `49cfd939` Orchestrator: add bill_now action + auto-fallback in change_next_date
@@ -247,4 +293,4 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 
 ## Related
 
-[[commerce-sdk]] · [[storefront-checkout]] · [[dunning]] · [[return-pipeline]] · [[chargeback-pipeline]] · [[../integrations/appstle]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../libraries/appstle-pricing]] · [[../libraries/migration-audit]] · [[../tables/subscriptions]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/dunning_cycles]] · [[../tables/migration_audits]] · [[../tables/order_refunds]] · [[../dashboard/migrations]] · [[../inngest/internal-subscription-renewals]] · [[../inngest/portal-auto-resume]] · [[../inngest/migration-audit-retry]] · [[../inngest/migration-integrity-sweep]] · [[../inngest/refund-settlement-reconcile]]
+[[commerce-sdk]] · [[storefront-checkout]] · [[dunning]] · [[return-pipeline]] · [[chargeback-pipeline]] · [[customer-portal]] · [[../libraries/portal__failed-payment-guard]] · [[../integrations/appstle]] · [[../integrations/braintree]] · [[../integrations/avalara]] · [[../libraries/appstle-pricing]] · [[../libraries/migration-audit]] · [[../tables/subscriptions]] · [[../tables/orders]] · [[../tables/transactions]] · [[../tables/dunning_cycles]] · [[../tables/migration_audits]] · [[../tables/order_refunds]] · [[../dashboard/migrations]] · [[../inngest/internal-subscription-renewals]] · [[../inngest/portal-auto-resume]] · [[../inngest/migration-audit-retry]] · [[../inngest/migration-integrity-sweep]] · [[../inngest/refund-settlement-reconcile]]

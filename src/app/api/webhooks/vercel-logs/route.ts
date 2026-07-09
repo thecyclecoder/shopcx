@@ -29,6 +29,7 @@ import {
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
+  isTransientSupabaseEdgeHtmlBody,
   isTransientUndiciHeadersTimeout,
 } from "@/lib/control-tower/error-feed";
 
@@ -149,23 +150,46 @@ export async function POST(request: Request) {
   // many brand-new signatures would push a single POST past 300s and Vercel would kill the
   // function with a Runtime Timeout — which is itself a level='error' log the drain then
   // re-delivered to this same endpoint (the failure self-fed). Now we group in-memory, ACK
-  // 200 as soon as the groups map is built, and do the heavy work in after() — it runs on
-  // the same Lambda invocation but no longer counts against the drain's response deadline.
+  // 200 as soon as the groups map is built, and do the heavy work in after(). after() still
+  // runs on the same Lambda invocation (so it counts against Vercel's 300s maxDuration —
+  // the original after() move only got it off the RESPONSE deadline), so the loop below is
+  // bounded by a 250s wall-clock deadline to guarantee the Lambda exits cleanly under a real
+  // storm and never re-feeds a Runtime Timeout back through this same drain.
   after(async () => {
     // Liveness: a verified delivery (even a clean batch with zero errors) proves the drain
     // is wired + live, so the Control Tower panel can show green "connected" instead of a
     // misleading green "0 errors" while disconnected. Best-effort — never blocks the 200.
     await recordFeedDelivery("vercel");
 
+    // Wall-clock deadline for the per-group fan-out. Vercel's default Lambda maxDuration is
+    // 300s and after() runs on the SAME invocation — an unbounded loop over a large groups
+    // map can still push us past that cap, which Vercel then re-delivers as a Runtime
+    // Timeout error log through this same drain (self-feeding). 250_000 ms leaves a 50s
+    // safety margin. When we trip it we bail cleanly with a warn; the deferred groups are
+    // dropped on the floor for this invocation (the next batch that re-fires the same
+    // signature will re-open them via recordError's dedup key).
+    const started = Date.now();
+    let processed = 0;
+
     for (const g of groups.values()) {
+      if (Date.now() - started > 250_000) {
+        console.warn(
+          "[vercel-logs] after() deadline hit, deferring %d/%d groups",
+          groups.size - processed,
+          groups.size,
+        );
+        break;
+      }
       // Inngest STEP-RETRY noise (a `step.run` throwing to trigger its own retry — attempt
       // N/M with N<M; the function body never finally-failed) OR a Shopify webhook HMAC-
       // failure log on /api/webhooks/shopify(-returns) (a one-off probe with an invalid
       // signature — Shopify's own wiring check, a scanner, a stale-secret retry) OR a
       // Supabase Cloudflare-edge SSL-handshake HTML blob leaked into an app-layer
       // `console.error` (the shortlink route's best-effort click-logging RPC — the redirect
-      // itself already ships fine): classify it `transient` so recordError auto-resolves a
-      // first sighting (no page) and only escalates to a real open+page on recurrence
+      // itself already ships fine) OR a Supabase-edge Cloudflare 5xx HTML body leaked into
+      // console.error text (`<!DOCTYPE html>` + `supabase.co` + `Web server`/521-524 — the
+      // next beat idempotently heals): classify it `transient` so recordError auto-resolves
+      // a first sighting (no page) and only escalates to a real open+page on recurrence
       // within the window — one-off blips are dropped while a function that throws on every
       // retry / a chronic signing bug / a chronic upstream Supabase edge outage still
       // surfaces.
@@ -173,6 +197,7 @@ export async function POST(request: Request) {
         isTransientInngestStepRetryThrow(g.path, g.message) ||
         isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
         isTransientSupabaseEdgeHandshakeError(g.message) ||
+        isTransientSupabaseEdgeHtmlBody(g.message) ||
         isTransientUndiciHeadersTimeout(g.message);
       await recordError({
         source: "vercel",
@@ -191,6 +216,7 @@ export async function POST(request: Request) {
         occurrences: g.count,
         transient,
       });
+      processed++;
     }
   });
 

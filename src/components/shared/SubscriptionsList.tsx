@@ -23,7 +23,7 @@ export interface SubscriptionData {
   last_payment_status: string | null;
   items: SubscriptionItemData[];
   delivery_price_cents?: number;
-  applied_discounts?: { id: string; type: string; title: string; value: number; valueType: string }[];
+  applied_discounts?: { id: string; type: string; title?: string; code?: string; value: number; valueType: string }[];
   created_at?: string;
   updated_at?: string;
 }
@@ -34,6 +34,20 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 const FALLBACK_BADGE = "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
+
+/**
+ * Format a subscription discount's value for display. Value conventions differ by source (same rule
+ * the portal's SubscriptionDetailScreen documents): internal coupons store `fixed_amount` in CENTS,
+ * Appstle-synced ones store `FIXED_AMOUNT` in DOLLARS. Percentages are 0-100 either way. The old
+ * `formatCents(value * 100)` assumed the Appstle dollars convention and rendered an internal cents
+ * coupon 100x too high (a $15.00 LOYALTY coupon showed as −$1,500).
+ */
+function formatDiscountValue(d: { type?: string; valueType?: string; value: number }): string {
+  const isPct = d.valueType === "PERCENTAGE" || d.type === "percentage";
+  if (isPct) return `${d.value}%`;
+  // internal fixed_amount → value already in cents; Appstle FIXED_AMOUNT → value in dollars.
+  return d.type === "fixed_amount" ? formatCents(d.value) : formatCents(d.value * 100);
+}
 
 interface SubscriptionsListProps {
   subscriptions: SubscriptionData[];
@@ -97,7 +111,7 @@ export default function SubscriptionsList({
               <div className="mt-1 space-y-0.5">
                 {sub.applied_discounts.map((d, i) => (
                   <p key={i} className="truncate text-sm text-emerald-600 dark:text-emerald-400">
-                    {d.title} −{d.valueType === "PERCENTAGE" ? `${d.value}%` : formatCents(d.value * 100)}
+                    {d.title || d.code} −{formatDiscountValue(d)}
                   </p>
                 ))}
               </div>
@@ -190,8 +204,8 @@ export default function SubscriptionsList({
               {sub.applied_discounts.map((d, i) => (
                 <span key={i} className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400">
                   <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" /><path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6z" /></svg>
-                  {d.title}
-                  <span className="text-emerald-600">−{d.valueType === "PERCENTAGE" ? `${d.value}%` : formatCents(d.value * 100)}</span>
+                  {d.title || d.code}
+                  <span className="text-emerald-600">−{formatDiscountValue(d)}</span>
                 </span>
               ))}
             </div>

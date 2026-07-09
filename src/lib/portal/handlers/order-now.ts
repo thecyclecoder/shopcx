@@ -2,6 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { appstleGetUpcomingOrders, appstleAttemptBilling } from "@/lib/appstle";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { guardAppstleOrderNow } from "@/lib/portal/order-now-guard";
 
 export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -41,7 +42,17 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     return jsonOk({ ok: true, route, contractId, patch: {} });
   }
 
-  // Appstle subs: attempt the upcoming Appstle billing.
+  // Appstle subs: attempt the upcoming Appstle billing. First gate on status —
+  // a cancelled Appstle contract will surface a stale/misleading error from
+  // `attempt-billing` (ticket 183d28b9 — Ellyn hit "All 1 products in this
+  // subscription are currently out of stock" on a cancelled contract that had
+  // been migrated to an internal sub). Mirrors the internal branch's status
+  // gate above; see [[../order-now-guard]].
+  const guard = guardAppstleOrderNow({ is_internal: resolved.is_internal, status: resolved.status });
+  if (guard.action === "block") {
+    return jsonErr({ error: guard.reason, message: guard.message }, 409);
+  }
+
   const ordersRes = await appstleGetUpcomingOrders(auth.workspaceId, String(contractId));
   if (!ordersRes.success || !ordersRes.orders?.length) {
     return jsonErr({ error: "no_upcoming_orders", message: "No upcoming orders found to bill." }, 400);

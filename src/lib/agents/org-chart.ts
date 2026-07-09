@@ -121,9 +121,11 @@ const NEVER_FIRED_GRACE_MS = 2 * DAY;
 /** Default owner for an unioned orphan lane: the Platform director (Ada) owns the agent fleet. */
 const ORPHAN_OWNER = "platform";
 
-/** A director's OWN job kinds — how it "turns on" (its standing pass, its coaching chat, its goal proposals),
- *  NOT agents it supervises. Never rostered as worker cards (the CEO finds them confusing under the director). */
-const DIRECTOR_INFRA_KINDS = new Set(["platform-director", "director-coach", "proposed-goal"]);
+/** A director's OWN job kinds — how it "turns on" (its standing pass, its coaching chat, its goal proposals,
+ *  the CS director's escalation sweep), NOT agents it supervises. Never rostered as worker cards (the CEO
+ *  finds them confusing under the director). `triage-escalations` is June's (CS Director) OWN escalation
+ *  triage — it IS June, not a separate agent below her (org-chart-cs-roster-fix). */
+const DIRECTOR_INFRA_KINDS = new Set(["platform-director", "director-coach", "proposed-goal", "triage-escalations"]);
 
 /** A director's supervisory SWEEP job kinds — a director grading/coaching the layer BELOW it
  *  (`agent-grade`/`agent-coach` = Ada over her platform workers; `director-grade` = the CEO over the
@@ -174,6 +176,8 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
   for (const l of MONITORED_LOOPS) {
     if (l.kind !== "agent-kind" || !l.agentKind) continue;
     const kind = l.agentKind;
+    if (l.personaKind) continue; // has a personaKind → merged into that persona card in source 2 (e.g. ticket-improve → Sol)
+    if (DIRECTOR_INFRA_KINDS.has(kind)) continue; // a director's OWN work (e.g. triage-escalations = June), not a worker card
     if (seen.has(kind)) continue;
     seen.add(kind);
     entries.push({
@@ -197,7 +201,9 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
   //    surfaces a live persona under the CEO seat with beats-based liveness.
   const byPersona = new Map<string, MonitoredLoop[]>();
   for (const l of MONITORED_LOOPS) {
-    if ((l.kind === "cron" || l.kind === "reactive") && l.personaKind) {
+    // agent-kind lanes with a personaKind merge here too (e.g. ticket-handle + ticket-improve → ONE Sol
+    // card), alongside persona-backed crons/reactive lanes — org-chart-cs-roster-fix.
+    if ((l.kind === "cron" || l.kind === "reactive" || l.kind === "agent-kind") && l.personaKind) {
       const arr = byPersona.get(l.personaKind) ?? [];
       arr.push(l);
       byPersona.set(l.personaKind, arr);
@@ -220,10 +226,12 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
       description: persona.personality,
       loopIds: loops.map((l) => l.id),
       jobKind: pk, // also counts agent_jobs of this kind (0 for a pure cron like monitor)
-      cronBacked: true,
+      // cronBacked only when a merged loop is actually cron/reactive (Control Tower owns its
+      // death-detection). A persona merged purely from agent-kind lanes (e.g. Sol) is on-demand → false.
+      cronBacked: loops.some((l) => l.kind === "cron" || l.kind === "reactive"),
       registeredAt,
       flagged: false, // a registered cron — drift is the audit's job, not a UI chip
-      loopKind: loops[0].kind, // "cron" | "reactive" | "inline-agent" — the type chip
+      loopKind: loops[0].kind, // "cron" | "reactive" | "agent-kind" | "inline-agent" — the type chip
     });
   }
 

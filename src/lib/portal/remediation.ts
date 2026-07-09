@@ -23,7 +23,7 @@
  * `portal-action-healer` cron, so behaviour is identical.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { appstleUpdateNextBillingDate } from "@/lib/appstle";
+import { appstleUpdateNextBillingDate, appstleUpdateBillingInterval } from "@/lib/appstle";
 
 const PORTAL_FAIL_TAG = "portal-action-failed";
 // Route slugs the portal uses for a cancel (see src/lib/portal/handlers/index.ts).
@@ -204,6 +204,27 @@ export async function healPortalAction(
       const label = new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
       return { success: true, detail: `next order date set to ${label}` };
     }
+    case "frequency": {
+      // Mirror the changedate shape: replay the same appstle call the portal
+      // handler makes. appstleUpdateBillingInterval has a same-value no-op guard
+      // (subscriptions.billing_interval + count already match → returns success
+      // without hitting Appstle), so a replay of a change that already landed is
+      // harmless and closes the ticket instead of escalating a transient failure
+      // whose retry the customer already completed themselves.
+      const contractId = String(ctx.payload?.contractId || "");
+      const intervalRaw = String(ctx.payload?.interval || "").toUpperCase();
+      const intervalCount = Number(ctx.payload?.intervalCount || 0);
+      if (!contractId) return { success: false, error: "missing contractId in payload" };
+      if (!intervalCount || !Number.isFinite(intervalCount)) {
+        return { success: false, error: "missing intervalCount in payload" };
+      }
+      if (intervalRaw !== "DAY" && intervalRaw !== "WEEK" && intervalRaw !== "MONTH" && intervalRaw !== "YEAR") {
+        return { success: false, error: `invalid interval "${String(ctx.payload?.interval ?? "")}" (expected DAY/WEEK/MONTH/YEAR)` };
+      }
+      const r = await appstleUpdateBillingInterval(workspaceId, contractId, intervalRaw, intervalCount);
+      if (!r.success) return { success: false, error: r.error || "frequency update failed" };
+      return { success: true, detail: `frequency set to every ${intervalCount} ${intervalRaw.toLowerCase()}(s)` };
+    }
     default:
       return { success: false, unsupported: true, error: `no replay implemented for route "${ctx.route}"` };
   }
@@ -271,6 +292,85 @@ async function changedateSelfResolved(
       return { resolved: true, reason: `customer wanted her next order sooner and an order landed on this subscription right after the error (${String(orders[0].created_at).slice(0, 10)}) — the date change is moot` };
     }
   }
+  return { resolved: false };
+}
+
+/**
+ * Did the frequency change the customer wanted already land — without us?
+ * The real case (ticket a7f9c0ed): a transient Appstle failure spawned a
+ * portal-action-failed ticket for a frequency change; the customer retried and
+ * the change went through. By the time the healer looks at the stale ticket the
+ * subscription is already on the requested interval + count, so escalating it
+ * to a human is noise.
+ *
+ * Two signals, both scoped to the exact subscription:
+ *   (a) a `portal.subscription.frequency_changed` customer_event for this
+ *       contract at or after the ticket was created (the customer's successful
+ *       retry — the frequency handler logs this event on every success), or
+ *   (b) the subscriptions row's stored billing_interval + billing_interval_count
+ *       already match the ctx request payload (covers a change that landed by
+ *       any path — portal retry, webhook, or an internal fix — since the
+ *       failure). This mirrors the same-value no-op guard in
+ *       appstleUpdateBillingInterval, so what would be a no-op replay is
+ *       recognized as already-landed here and closes without the API call.
+ */
+export async function frequencySelfResolved(
+  admin: SupabaseClient,
+  workspaceId: string,
+  ctx: FailureContext,
+  ticket: TicketRow,
+): Promise<{ resolved: boolean; reason?: string }> {
+  const contractId = String(ctx.payload?.contractId || "");
+  if (!contractId) return { resolved: false };
+  const failTime = ticket.created_at;
+
+  // (a) Customer re-did the frequency change successfully after the error.
+  if (ticket.customer_id) {
+    const { data: changed } = await admin
+      .from("customer_events")
+      .select("created_at, properties")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", ticket.customer_id)
+      .eq("event_type", "portal.subscription.frequency_changed")
+      .gte("created_at", failTime)
+      .limit(20);
+    const reDid = ((changed || []) as { created_at: string; properties: Record<string, unknown> }[]).find(
+      (e) => String(e.properties?.shopify_contract_id || "") === contractId,
+    );
+    if (reDid) {
+      return {
+        resolved: true,
+        reason: `customer successfully changed the frequency herself after the error (${String(reDid.created_at).slice(0, 10)})`,
+      };
+    }
+  }
+
+  // (b) The subscription already matches the requested frequency (by any path).
+  // Bail if the request payload is malformed — without a target interval+count
+  // we can't tell "already matches" from "unknown state", so we shouldn't claim
+  // resolved. The heal path will validate + surface the same shape mismatch.
+  const requestedInterval = String(ctx.payload?.interval || "").toUpperCase();
+  const requestedCount = Number(ctx.payload?.intervalCount || 0);
+  if (!requestedInterval || !requestedCount || !Number.isFinite(requestedCount)) {
+    return { resolved: false };
+  }
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("billing_interval, billing_interval_count")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (
+    sub &&
+    String(sub.billing_interval || "").toUpperCase() === requestedInterval &&
+    Number(sub.billing_interval_count) === requestedCount
+  ) {
+    return {
+      resolved: true,
+      reason: `the subscription is already on every ${requestedCount} ${requestedInterval.toLowerCase()}(s) — the frequency change landed without us`,
+    };
+  }
+
   return { resolved: false };
 }
 
@@ -452,6 +552,19 @@ export async function remediatePortalTicket(
   // now"). Re-applying a stale date they no longer need would be wrong.
   if (ctx.route === "changedate" || ctx.route === "change_date") {
     const sr = await changedateSelfResolved(admin, ticket.workspace_id, ctx, ticket);
+    if (sr.resolved) {
+      await sysNote(admin, ticket.id, `[Auto-resolve] Self-resolved — ${sr.reason}. Closing without re-running the action.`);
+      await addTag(admin, ticket, "auto-dismissed");
+      await closeTicket(admin, ticket.id);
+      return { action: "dismissed", reason: sr.reason || "self-resolved" };
+    }
+  }
+  // Same shape for frequency: if the customer's retry already landed (a
+  // frequency_changed event after the failure, or the subscription's stored
+  // billing_interval + count already match the request payload), close instead
+  // of replaying — see [[frequencySelfResolved]].
+  if (ctx.route === "frequency") {
+    const sr = await frequencySelfResolved(admin, ticket.workspace_id, ctx, ticket);
     if (sr.resolved) {
       await sysNote(admin, ticket.id, `[Auto-resolve] Self-resolved — ${sr.reason}. Closing without re-running the action.`);
       await addTag(admin, ticket, "auto-dismissed");

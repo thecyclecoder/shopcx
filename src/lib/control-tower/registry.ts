@@ -509,12 +509,58 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Sub-minute / minute crons (window ~10 min) ─
   { id: "claude-status-poll-cron", kind: "cron", owner: "platform", label: "Claude status poll", description: "Polls status.claude.com for the Claude API + Claude Code components → drives the Claude-down breaker.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "deploy-guardian-cron", kind: "cron", owner: "platform", label: "Deploy guardian", description: "Evaluates each auto-merged deploy's canary watch over its window → healthy/regressed/unsure verdict (deploy-health-rollback-guardian).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "deploy-guardian" /* Reva — surfaces under Ada in the agents roster (agent-roster-sync source 2) */ },
+  // Reva's canary-INVESTIGATION box-session (reva-box-session-causal-rollback). The deploy-guardian
+  // cron above fires a kind='deploy-review' job when a canary window closes non-healthy; the job is a
+  // read-only diff walk on Max → typed revert/keep verdict (builder-worker.ts runDeployReviewJob). Same
+  // agent as the cron (Reva), so personaKind:'deploy-guardian' MERGES it into her one card (org-chart
+  // source 2, byPersona), and agentKind:'deploy-review' REGISTERS the job kind so it stops surfacing as a
+  // flagged "unregistered" worker card (org-chart source 3). Reactive + a loose window: a quiet
+  // deploy-review is healthy (most deploys are fine and never trigger an investigation) — the cron's beats
+  // carry Reva's liveness.
+  { id: "deploy-review-agent", kind: "reactive", owner: "platform", agentKind: "deploy-review", personaKind: "deploy-guardian", label: "Deploy review", description: "Reva's box-session investigation of a non-healthy canary — read-only diff walk → typed revert/keep verdict (reva-box-session-causal-rollback).", expectedCadence: "on a non-healthy canary verdict", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
+  // mario-reactive-box-agent M4 Phase 5 — org placement. Mario is a broad-autonomy reactive
+  // box-session agent under Ada (platform). The mario-stall-cron detector (below, per-minute)
+  // fires a kind='mario' agent_jobs row for a genuinely stalled spec; the box lane
+  // (scripts/builder-worker.ts runMarioJob) claims it, spawns a top-level Max `claude -p` on
+  // the mario skill (read-only investigate), extracts a typed JSON verdict, and applyBoxMario
+  // (src/lib/mario.ts) is the ONLY mutator. Same persona as the cron (personaKind:'mario') so
+  // the two loops MERGE into ONE Mario card on the org chart (agent-roster-sync source 2,
+  // byPersona), and agentKind:'mario' REGISTERS the job kind so it stops surfacing as a
+  // flagged "unregistered" worker card (source 3). Loose liveness window — most ticks are quiet
+  // (the pipeline is moving); the cron's per-minute beats carry Mario's liveness.
+  { id: "mario-agent", kind: "reactive", owner: "platform", agentKind: "mario", personaKind: "mario", label: "Mario reactive fix", description: "Mario's box-session investigation of a stall the M3 detector surfaced — read-only timecard/blockers/agent_jobs walk → typed non-destructive live fix + optional durable fix-spec + optional threshold widen verdict (mario-reactive-box-agent M4).", expectedCadence: "on a mario-stall-cron enqueue", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
+  // The M3 detector tick — every minute, evaluates timecard-based stall candidates against
+  // mario_thresholds and enqueues one kind='mario' job per surviving candidate. Emits a cron
+  // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the
+  // heartbeat has a MONITORED_LOOPS entry, and personaKind:'mario' merges the beats into
+  // Mario's org-chart card (same pattern as deploy-guardian-cron ⇒ Reva above).
+  { id: "mario-stall-cron", kind: "cron", owner: "platform", label: "Mario stall detector", description: "Per-minute detector tick: evaluates timecard-based stall candidates against mario_thresholds and enqueues one kind='mario' box job per surviving stall (mario-stall-detector-cron-and-thresholds).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "mario" /* Mario — surfaces under Ada in the agents roster (agent-roster-sync source 2) */, registeredAt: "2026-07-08T00:00:00Z" },
   { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
   // ─ Every-5-min crons (window ~20 min) ─
   { id: "today-sync", kind: "cron", owner: "growth", label: "Today sync (Amazon + Meta)", description: "Keeps today's Amazon + Meta spend/order snapshots fresh.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
   { id: "ticket-unsnooze", kind: "cron", owner: "cs", label: "Ticket unsnooze", description: "Wakes snoozed tickets whose snooze window has passed.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  {
+    // Owner-confirmed (received-sms-rollup-cron-heartbeat Phase 2): the spec's owner is
+    // platform (Infra & DevOps / reliability). Auto-proposal boilerplate stripped; label + description
+    // now reflect the real function ([[../inngest/sms-callback-drain]] receivedSmsRollupCron).
+    // registeredAt REFRESHED (Phase 3 Fix 2) to the Fix-2 ship window so the newcron grace anchors
+    // to when Phase 1's emit-heartbeat step actually lands on prod — the Fix-1 anchor
+    // ("2026-07-09T01:22:22Z") had already aged out by the Fix-1 preview probe, so the tile went
+    // RED never_fired (deployAgeMs > window) instead of holding AMBER "awaiting first run". Paired
+    // with the evalCron reorder in monitor.ts that gates BOTH never_fired and registered_not_firing
+    // on this grace, the alert auto-resolves the moment prod re-evaluates the tile after ship and
+    // the first cron tick's beat lands within the 20-min window.
+    id: "received-sms-rollup-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "Received SMS rollup",
+    description: "Moves delivered SMS recipients into profile_events for segmentation + campaign reporting (received-sms-rollup-cron-heartbeat). End-of-run heartbeat lets the watchdog distinguish a healthy idle tick from a dead Inngest schedule.",
+    expectedCadence: "every 5 min (*/5 * * * *)",
+    livenessWindowMs: 20 * MIN,
+    registeredAt: "2026-07-09T04:00:00Z",
+  },
   // ─ Every-10-min crons (window ~40 min) ─
   { id: "abandoned-cart-reminder", kind: "cron", owner: "cmo", label: "Abandoned-cart reminder", description: "Sends abandoned-cart reminder sends on the rolling schedule.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * MIN },
   // ─ Every-15-min crons (window ~45 min) ─
@@ -592,6 +638,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "security-diff-backstop-cron", kind: "cron", owner: "platform", label: "Security diff backstop (if-due)", description: "Cheap 15-min backstop for Vault's post-merge diff security review (fix-vault-post-merge-diff-backstop-7fbde0): re-sweeps recently-merged claude/* builds and enqueues a diff-mode security review for any orphaned merge SHA. Idempotent via the 14d SHA dedup inside enqueueSecurityReviewJob.", expectedCadence: "every 15m (*/15 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-07-02T00:00:00Z" },
+  {
+    id: "blueprint-build-submit-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "blueprint-build-submit-cron",
+    description: "Auto-proposed monitored loop for the blueprint-build-submit-cron cron (daily (15 11 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (15 11 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-07-08T20:15:12.164Z",
+  },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR, personaKind: "research" },
   {
@@ -677,6 +733,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // (a newly-added daily cron hasn't had its first tick yet — see control-tower-registered-not-firing-new-cron-grace).
   { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR, outputAssertion: "segment-coverage" },
+  {
+    id: "refund-settlement-reconcile",
+    kind: "cron",
+    owner: "platform",
+    label: "refund-settlement-reconcile",
+    description: "Auto-proposed monitored loop for the refund-settlement-reconcile cron (daily (15 6 * * *)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "daily (15 6 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-07-08T08:15:04.399Z",
+  },
   // SMS Marketing Agent (Margo, under Iris/CMO) — daily cadence engine. personaKind surfaces it
   // as a worker under Iris on the org chart. registeredAt claims the new-cron grace (dormant until
   // sms_marketing_policy.active=true, so it fires the heartbeat but takes no send action yet).
@@ -688,6 +754,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 8 * DAY },
   { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
+  {
+    id: "playbook-compiler",
+    kind: "cron",
+    owner: "platform",
+    label: "playbook-compiler",
+    description: "Auto-proposed monitored loop for the playbook-compiler cron (weekly (0 12 * * 1)). Confirm the owner-function + cadence/window.",
+    expectedCadence: "weekly (0 12 * * 1)",
+    livenessWindowMs: 8 * DAY,
+    registeredAt: "2026-07-08T08:15:04.473Z",
+  },
   // ─ Yearly cron (window ~370 days) ─
 
   // ── CEO's executive-assistant agent (owner=ceo) ─────────────────────────────
@@ -838,7 +914,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:fold", kind: "agent-kind", owner: "platform", agentKind: "fold", label: "Agent — fold", description: "Spec → brain fold batches.", expectedCadence: "on demand", stuckThresholdMs: 45 * MIN },
   { id: "agent:product-seed", kind: "agent-kind", owner: "cmo", agentKind: "product-seed", label: "Agent — product seed", description: "Product none → published pipeline.", expectedCadence: "on demand", stuckThresholdMs: 90 * MIN },
   { id: "agent:spec-chat", kind: "agent-kind", owner: "platform", agentKind: "spec-chat", label: "Agent — spec chat", description: "Roadmap authoring-chat turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
-  { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", label: "Agent — ticket improve", description: "CX ticket-improve turns.", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  // Sol — the first-touch ticket handler (Direction artifact + first reply). Her OWN worker card under
+  // June (CS Director). ticket-improve below is ALSO Sol's work → personaKind:'ticket-handle' MERGES it
+  // into this one Sol card (byPersona) instead of a standalone "Agent — ticket improve".
+  { id: "agent:ticket-handle", kind: "agent-kind", owner: "cs", agentKind: "ticket-handle", personaKind: "ticket-handle", label: "Sol — Ticket Handler", description: "First-touch ticket Direction + reply (Sol).", expectedCadence: "on an inbound ticket", stuckThresholdMs: 30 * MIN, registeredAt: "2026-07-08T00:00:00Z" },
+  { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", personaKind: "ticket-handle", label: "Agent — ticket improve", description: "CX ticket-improve turns (Sol).", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
   // Per-ticket QC-grader box lane (ticket-analyzer-becomes-box-agent-under-june Phase 1) — the
   // supervised agent under 💬 June (CS Director) that replaced the analyzer's direct fetch to
   // api.anthropic.com. Enqueued by ticket-analysis-cron; drained by scripts/builder-worker.ts →

@@ -43,6 +43,186 @@ export const REPEAT_ERROR_THRESHOLD = 3;
 /** After this many coaching attempts on the SAME class that still recurs → escalate to the CEO. */
 export const COACHING_ATTEMPTS_BEFORE_ESCALATE = 2;
 
+// ── Blameless box-outage classifier ───────────────────────────────────────────────────────────────
+// agent-coach-auto-resolves-blameless-box-outage-grade-batches-instead-of-escalating Phase 1.
+//
+// A worker's low grade CAN come from the BOX going down mid-run rather than a real worker mistake:
+// the Claude CLI drops with `authentication_failed` / `Not logged in` when its account credentials
+// evict, the Claude-down breaker trips (`Claude is down (breaker tripped) — auto-resumes on recovery`),
+// or the same identical box-level runtime error stamps every action in the same window. Those are
+// INFRA failures — the worker never actually reached its judgment layer. Coaching them wastes a slot
+// and (worse) parks a needs_attention card that pages the CEO each cycle while the outage grades
+// age out.
+//
+// The classifier here is PURE: it takes the coach batch's low grades (each with the grader's
+// reasoning + the underlying agent_jobs row's error / log_tail) and returns { blameless } — a batch
+// is blameless-outage iff EVERY low grade matches a box-level infra signature AND NONE reflects a
+// genuine worker-attributable slip. One real judgment slip in the batch means the whole batch stays
+// COACHABLE — a real low grade that merely CO-OCCURRED with an outage grade must not be masked.
+//
+// Phase 2 wires this into `runAgentCoachingPass` + `runAgentCoachJob` — Phase 1 lands the classifier
+// + its test only.
+export const BLAMELESS_OUTAGE_SIGNATURES: { key: string; pattern: RegExp }[] = [
+  { key: "cli_auth_failed", pattern: /authentication[_ ]failed/i },
+  { key: "cli_not_logged_in", pattern: /not logged in/i },
+  { key: "cli_login_prompt", pattern: /please\s*(run|use|log\s*in).{0,20}\/?login/i },
+  { key: "claude_breaker_tripped", pattern: /claude is down.{0,40}breaker tripped/i },
+  { key: "breaker_tripped", pattern: /breaker tripped/i },
+  { key: "blocked_on_dependency_claude", pattern: /blocked_on_dependency.{0,40}claude/i },
+];
+
+/** Concrete anti-signals: strings the batch carries that PROVE at least one low grade is a genuine
+ *  worker slip, even if a co-occurring outage signature also matched. When one of these appears in
+ *  a low grade's grader reasoning, we treat the low grade as WORKER-attributable — not blameless.
+ *  Kept CONSERVATIVE (the false-negative direction) so a real coachable batch never gets swallowed
+ *  by outage co-occurrence; the classifier's job is to protect against the false-positive of
+ *  coaching an outage, not to auto-clear every close-call. */
+const WORKER_ATTRIBUTABLE_MARKERS: RegExp[] = [
+  /wrong\s+(disposition|verdict|call|route|choice)/i,
+  /mis(-|)?diagnosed|misjudged|missed a real/i,
+  /false[- ]positive|false[- ]negative/i,
+  /root[- ]cause.{0,30}not\s+identified/i,
+  /rebuild\s+churn|repeat\s+churn/i,
+  /symptom(-|,)?\s*not\s*root/i,
+];
+
+export interface CoachBatchLowGrade {
+  /** agent_action_grades.id — the row the coach batch groups over. */
+  gradeId: string;
+  /** The grader's stored reasoning (paraphrased LLM text). */
+  gradeReasoning: string | null;
+  /** The underlying concluded agent_jobs.error, if any. */
+  jobError: string | null;
+  /** The underlying concluded agent_jobs.log_tail, if any. */
+  jobLogTail: string | null;
+}
+
+export interface BlamelessOutageVerdict {
+  blameless: boolean;
+  /** The signature key that dominates the batch when blameless (highest count); null when not blameless. */
+  dominantSignature: string | null;
+  /** Per-grade evidence — which signature matched (if any), and whether a worker-attributable marker fired. */
+  perGrade: Array<{ gradeId: string; matchedSignature: string | null; workerAttributable: boolean }>;
+  /** Terse reason string suitable for a director_activity metadata field / log tail. */
+  reason: string;
+}
+
+function detectOutageSignature(text: string): string | null {
+  for (const s of BLAMELESS_OUTAGE_SIGNATURES) if (s.pattern.test(text)) return s.key;
+  return null;
+}
+
+function hasWorkerAttributableMarker(text: string): boolean {
+  for (const p of WORKER_ATTRIBUTABLE_MARKERS) if (p.test(text)) return true;
+  return false;
+}
+
+/**
+ * Classify a coach batch's low grades — blameless-outage iff EVERY low grade matches one of the
+ * box-level infra signatures AND NONE carries a worker-attributable marker. An empty batch is not
+ * blameless (nothing to auto-resolve). A single genuine slip in the batch (per WORKER_ATTRIBUTABLE_
+ * MARKERS) demotes the whole batch to NOT blameless — the outage grades ride with the real slip and
+ * the normal coach → route-to-repair → escalate path runs untouched.
+ */
+export function classifyBlamelessOutageBatch(lows: CoachBatchLowGrade[]): BlamelessOutageVerdict {
+  if (!lows.length) {
+    return { blameless: false, dominantSignature: null, perGrade: [], reason: "empty_batch" };
+  }
+  const perGrade = lows.map((l) => {
+    const blob = `${l.gradeReasoning ?? ""}\n${l.jobError ?? ""}\n${l.jobLogTail ?? ""}`;
+    return {
+      gradeId: l.gradeId,
+      matchedSignature: detectOutageSignature(blob),
+      workerAttributable: hasWorkerAttributableMarker(blob),
+    };
+  });
+
+  const unmatched = perGrade.find((g) => g.matchedSignature === null);
+  if (unmatched) {
+    return {
+      blameless: false,
+      dominantSignature: null,
+      perGrade,
+      reason: `low_grade_${unmatched.gradeId}_matched_no_box_outage_signature`,
+    };
+  }
+  const workerSlip = perGrade.find((g) => g.workerAttributable);
+  if (workerSlip) {
+    return {
+      blameless: false,
+      dominantSignature: null,
+      perGrade,
+      reason: `low_grade_${workerSlip.gradeId}_carries_worker_attributable_marker`,
+    };
+  }
+  // Every low grade matched a box-outage signature and none is worker-attributable — blameless. Pick
+  // the dominant signature (the one most low grades share) for the audit trail.
+  const counts = new Map<string, number>();
+  for (const g of perGrade) counts.set(g.matchedSignature!, (counts.get(g.matchedSignature!) ?? 0) + 1);
+  const dominant = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0][0];
+  return {
+    blameless: true,
+    dominantSignature: dominant,
+    perGrade,
+    reason: `all_${lows.length}_low_grades_matched_box_outage_signature_${dominant}`,
+  };
+}
+
+// ── Phase 2: dedup window + pure decision fn for auto-resolving a blameless batch ────────────────
+//
+// The classifier says "blameless." The wiring says WHAT the coach does with that verdict:
+//
+//   1. If the classifier says NOT blameless → the existing coach path runs untouched (route to Repair
+//      for a code-bug class · coach for a guidance gap · roll into a fix spec after the loop guard).
+//   2. If the classifier says blameless AND there is NO recent `blameless_outage` audit row for this
+//      (workspace, agent_kind) → mint ONE audit row (`agent_coaching_log` with kind='blameless_outage',
+//      recheck_status='stuck' since there is nothing to re-check on an outage) so the run is accounted
+//      for, and mark the coach job `completed`. NEVER `needs_attention` — an outage is not a park.
+//   3. If a recent `blameless_outage` audit row already exists inside BLAMELESS_OUTAGE_DEDUP_MS → the
+//      recurring outage grades aging out must NOT re-mint a card every cycle: just mark the coach job
+//      `completed` and reference the existing audit row. This is the dedup the spec calls out.
+//
+// The decision function is PURE — it takes the classifier verdict and the recent audit rows and returns
+// the action. The DB writes happen at the call site (runAgentCoachJob).
+export const BLAMELESS_OUTAGE_DEDUP_MS = 24 * 60 * 60 * 1000;
+
+export interface BlamelessOutageAuditRow {
+  id: string;
+  /** ISO timestamp — `agent_coaching_log.created_at`. */
+  createdAt: string;
+}
+
+export type CoachBatchOutcome =
+  | { action: "proceed_to_coach"; reason: string }
+  | { action: "record_blameless_outage"; dominantSignature: string; reason: string }
+  | { action: "auto_resolve_deduped"; existingId: string; reason: string };
+
+/**
+ * Given the classifier verdict + any recent `blameless_outage` audit rows for (workspace, agent_kind),
+ * decide what the coach lane does with this batch. Pure — no DB / IO — so the runAgentCoachJob wiring
+ * is fully testable without stubbing Supabase.
+ *
+ * `now` is injectable so a test can freeze time; production callers use `Date.now()` (the default).
+ */
+export function decideBlamelessOutageOutcome(
+  verdict: BlamelessOutageVerdict,
+  recentAuditRows: BlamelessOutageAuditRow[],
+  now: number = Date.now(),
+): CoachBatchOutcome {
+  if (!verdict.blameless) return { action: "proceed_to_coach", reason: verdict.reason };
+  const cutoff = now - BLAMELESS_OUTAGE_DEDUP_MS;
+  const dedup = recentAuditRows.find((r) => {
+    const t = new Date(r.createdAt).getTime();
+    return Number.isFinite(t) && t >= cutoff;
+  });
+  if (dedup) return { action: "auto_resolve_deduped", existingId: dedup.id, reason: verdict.reason };
+  return {
+    action: "record_blameless_outage",
+    dominantSignature: verdict.dominantSignature ?? "unknown_box_outage",
+    reason: verdict.reason,
+  };
+}
+
 /** Dispositions that are JUDGMENT calls (a wrong one is a guidance gap → coachable). */
 const DISMISSAL_VERDICTS = new Set([
   "transient",

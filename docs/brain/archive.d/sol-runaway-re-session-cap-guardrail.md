@@ -1,0 +1,1 @@
+- **Anti-runaway cap on Sol re-sessions (frustration-always-bounces bounded)** · verified 2026-07-08 · → [[../tables/ticket_directions]] · [[../tables/ai_channel_config]] · [[../lifecycles/ticket-lifecycle]] · [[../libraries/cs-director-digest]] · [[../dashboard/tickets]]

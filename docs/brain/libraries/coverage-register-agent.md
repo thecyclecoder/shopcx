@@ -35,6 +35,12 @@ Both register + exempt close the gap permanently. The build is queued ONLY on th
 
 `getOpenCoverageRegistrations(admin, workspaceId)` → `CoverageRegisterItem[]` (READ-ONLY) — the open proposals (`needs_approval`) with the inferred owner/cadence + the register slug. Drives the Control Tower **"Coverage registration"** feed ([[../dashboard/control-tower]]), rendered just below the Coverage self-audit section.
 
+## Hardened owner-classification + error-handling (rolled from coaching)
+
+- **Owner classification is now explicit, never a silent guess** — `inferOwner` explicitly classifies research/creative/acquisition/lander/scout crons as `growth` (was falling through to the boilerplate `platform` default, mis-owning entries like `acquisition-research-cadence-cron`). If `inferOwner` cannot classify a loop id (does not match any domain regex), it returns `null`; `inferLoopEntry` then sets `description: "**REQUIRES OWNER CONFIRMATION** — inferOwner could not classify…"` with explicit instructions for the owner to set the true owner before merging, instead of a silent placeholder.
+- **Spec authoring is re-verified** — `runCoverageRegisterJob` wraps `markNewSpecInReview` + build-enqueue in try/catch, then re-reads the row via `specs-table.getSpec(workspaceId, slug)` to confirm it was actually created. If `getSpec` returns null (author failure), the job parks `needs_attention` with a step-specific diagnosis, never equating "invoked the author helper" with "spec created".
+- **All failures carry remediation paths** — any spec-authoring or build-enqueue failure includes `renderEntrySnippet(instructions.entry)` as a one-tap manual-paste remediation path (the exact TS to add to `MONITORED_LOOPS`), so an owner seeing `needs_attention` has an immediate fallback, never a bare one-word error or a MissingVerification escape as generic "no verdict". Diagnosis always states which step failed (markNewSpecInReview / build-enqueue / empty spec body) + the concrete error.
+
 ## Gotchas
 
 - **No migration** — `coverage-register` is a free-text [[../tables/agent_jobs]] `kind` (like `repair` / `db_health`); the proposal parks in the existing `pending_actions` jsonb (`type:'coverage_register'`, `decision`, `spec_slug`). The box claims it only once the route flips it to `queued_resume` (claim_agent_job claims `queued`/`queued_resume`).

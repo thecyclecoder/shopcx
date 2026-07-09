@@ -117,6 +117,8 @@ Validation: `safeJSONParse()` parses + schema-checks. Bad JSON → fall back to 
 - Set `tickets.escalated_to`, `escalation_reason`, `escalated_at`.
 - Log to [[../tables/escalation_gaps]] if the escalation looks suspect (e.g. low-information message that Sonnet probably could have handled).
 
+Above the confidence gate sits the CS Director hard-call lane ([[../libraries/cs-director]] § Phase-2 executor). An escalated ticket reaches June via the `cs-director-call` box lane; her verdict flows through `applyBoxCsDirectorCall` (in `src/lib/cs-director.ts`) — `approve_remedy` fires the real commerce action via `executeSonnetDecision` and only THEN delivers the customer message via `deliverTicketMessage` (execute-then-message rule from the derived-from ticket `115350d5`), `author_spec` writes through the specs SDK chokepoint, and `escalate_founder` returns the linkage-back payload for the runner-minted CEO card (single-writer principle).
+
 ## Phase 5 — execute
 
 `src/lib/action-executor.ts` dispatches on `action_type`:

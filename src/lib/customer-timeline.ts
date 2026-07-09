@@ -132,10 +132,12 @@ interface CustomerRow {
 }
 
 async function resolveLinkedCustomerIds(admin: ReturnType<typeof createAdminClient>, customerId: string): Promise<string[]> {
-  const { data: link } = await admin.from("customer_links").select("group_id").eq("customer_id", customerId).maybeSingle();
-  if (!link?.group_id) return [customerId];
-  const { data: group } = await admin.from("customer_links").select("customer_id").eq("group_id", link.group_id);
-  return (group || []).map((r: { customer_id: string }) => r.customer_id);
+  // Phase 5 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md:
+  // convergence on public.resolve_customer_link_group so every caller expands
+  // customer_ids the SAME way. Returns [customerId] when the customer is
+  // unlinked; the RPC guarantees that fallback.
+  const { data } = await admin.rpc("resolve_customer_link_group", { p_customer_id: customerId });
+  return Array.isArray(data) && data.length > 0 ? (data as string[]) : [customerId];
 }
 
 /**
@@ -200,20 +202,30 @@ function fmtVariant(item: { title?: string; variant_title?: string; quantity?: n
  */
 type VariantLookup = Map<string, { title: string; variant_title: string | null }>;
 
-async function buildVariantLookup(admin: ReturnType<typeof createAdminClient>, workspaceId: string): Promise<VariantLookup> {
+// Phase 5 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md:
+// bound the product_variants scan to the variant_ids that actually appear in
+// this customer's window. The prior implementation loaded EVERY variant in the
+// workspace + EVERY product in one shot, which PostgREST truncated at 1000
+// once the catalog crossed that. Now only the ids we need cross the wire, and
+// the products fetch is scoped to those variants' product_ids.
+async function buildVariantLookup(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  variantIds: string[],
+): Promise<VariantLookup> {
   const lookup: VariantLookup = new Map();
-  // product_variants has the canonical mapping; products.variants JSONB is a legacy mirror.
+  const dedupedVids = Array.from(new Set(variantIds.map((v) => String(v)).filter(Boolean)));
+  if (dedupedVids.length === 0) return lookup;
   const { data: variants } = await admin
     .from("product_variants")
     .select("shopify_variant_id, title, product_id")
-    .eq("workspace_id", workspaceId);
+    .eq("workspace_id", workspaceId)
+    .in("shopify_variant_id", dedupedVids);
   if (!variants) return lookup;
-  // We also need product titles, so fetch products and join.
   const productIds = Array.from(new Set(variants.map((v: { product_id: string }) => v.product_id).filter(Boolean)));
-  const { data: products } = await admin
-    .from("products")
-    .select("id, title")
-    .in("id", productIds);
+  const { data: products } = productIds.length
+    ? await admin.from("products").select("id, title").in("id", productIds)
+    : { data: [] };
   const productTitles = new Map<string, string>();
   for (const p of products || []) productTitles.set(p.id, p.title || "");
   for (const v of variants as Array<{ shopify_variant_id: string; title: string; product_id: string }>) {
@@ -224,6 +236,43 @@ async function buildVariantLookup(admin: ReturnType<typeof createAdminClient>, w
     });
   }
   return lookup;
+}
+
+// Collect every variant_id we'll need to render nicely — orders.line_items,
+// subscriptions.items, and events.properties (newVariants / oldVariants /
+// oldVariantDetails). The set is small (usually <20) even for busy customers.
+function collectVariantIdsFromContext(
+  orders: OrderRow[],
+  subs: SubRow[],
+  events: EventRow[],
+): string[] {
+  const out = new Set<string>();
+  for (const o of orders) {
+    for (const li of o.line_items || []) {
+      if (li.variant_id != null) out.add(String(li.variant_id));
+    }
+  }
+  for (const s of subs) {
+    for (const it of s.items || []) {
+      if (it.variant_id != null) out.add(String(it.variant_id));
+    }
+  }
+  for (const e of events) {
+    const props = (e.properties || {}) as Record<string, unknown>;
+    const newVariants = props.newVariants as Record<string, number> | undefined;
+    if (newVariants) for (const k of Object.keys(newVariants)) out.add(String(k));
+    const oldVariants = props.oldVariants as Array<number | string> | undefined;
+    if (Array.isArray(oldVariants)) for (const v of oldVariants) out.add(String(v));
+    const oldVariantDetails = props.oldVariantDetails as Array<{ variant_id?: string | number }> | undefined;
+    if (Array.isArray(oldVariantDetails)) {
+      for (const v of oldVariantDetails) if (v?.variant_id != null) out.add(String(v.variant_id));
+    }
+    const items = props.items as Array<{ variant_id?: string | number }> | undefined;
+    if (Array.isArray(items)) {
+      for (const it of items) if (it?.variant_id != null) out.add(String(it.variant_id));
+    }
+  }
+  return [...out];
 }
 
 function variantLabel(variantId: string, lookup: VariantLookup): string {
@@ -550,7 +599,6 @@ export async function buildCustomerTimeline(
   const windowStart = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
   const linkedIds = await resolveLinkedCustomerIds(admin, customerId);
-  const variantLookup = await buildVariantLookup(admin, workspaceId);
 
   const [customerRes, ordersRes, subsRes, eventsRes, returnsRes, dunningRes] = await Promise.all([
     admin.from("customers").select("id, email, first_name, last_name, ltv_cents, retention_score").eq("id", customerId).single(),
@@ -567,6 +615,12 @@ export async function buildCustomerTimeline(
   const events = (eventsRes.data || []) as EventRow[];
   const returns = (returnsRes.data || []) as ReturnRow[];
   const dunningCycles = (dunningRes.data || []) as Array<{ id: string; shopify_contract_id: string; status: string; started_at: string | null }>;
+
+  // Bound the variant catalog fetch to just the ids that appear in this
+  // customer's window — the prior implementation loaded every variant in
+  // the workspace and truncated at 1000.
+  const variantIdsInScope = collectVariantIdsFromContext(orders, subs, events);
+  const variantLookup = await buildVariantLookup(admin, workspaceId, variantIdsInScope);
 
   // Build the timeline by merging all sources, then sort chronologically.
   const orderEntries = buildOrderTimelineEntries(orders, variantLookup);

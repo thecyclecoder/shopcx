@@ -29,6 +29,36 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 // remainder drain on the next hourly tick.
 const JUNE_REVIEW_ENQUEUE_CAP_PER_TICK = Number(process.env.JUNE_REVIEW_ENQUEUE_CAP_PER_TICK || 20);
 
+/**
+ * Ticket-level eligibility for June's escalation triage — pinned in a unit test so the invariant
+ * is reviewable in isolation without a DB.
+ *
+ * Phase 1 of docs/brain/specs/guard-block-escalations-reach-junes-triage-not-left-unreviewed:
+ * every routine-owned escalated ticket qualifies for June's review REGARDLESS of what escalated it.
+ * The `escalation_reason` field is NOT read — an orchestrator escalation, an analyzer rail hit, and
+ * a playbook guard-block (e.g. `blocked_unbacked_claim:cancel`) are all eligible on the same terms.
+ * A guard-block ticket that sat open + escalated with zero triage_runs is the failing state this
+ * predicate exists to prevent.
+ *
+ * Returns true when the ticket is a triage candidate:
+ *   - `escalated_at` is set (a hand-off to the routine actually happened)
+ *   - `escalated_to` is null (the routine — not a specific human — owns it)
+ *   - `status` is not archived/closed (a closed ticket has no live escalation to triage)
+ *
+ * Dedupe against inflight `cs-director-call` jobs and prior `triage_runs` is orthogonal — those
+ * gates live at the enqueue site and are escalation-source-agnostic in the same way.
+ */
+export function passesJuneReviewSelection(ticket: {
+  escalated_at: string | null;
+  escalated_to: string | null;
+  status: string | null;
+}): boolean {
+  if (!ticket.escalated_at) return false;
+  if (ticket.escalated_to !== null) return false;
+  if (ticket.status === "archived" || ticket.status === "closed") return false;
+  return true;
+}
+
 export const triageEscalationsCron = inngest.createFunction(
   {
     id: "triage-escalations-cron",
@@ -43,15 +73,30 @@ export const triageEscalationsCron = inngest.createFunction(
     const result = await step.run("enqueue-june-review-jobs", async () => {
       // Routine-owned escalated tickets: escalated_at set, escalated_to null (analyzer routed to
       // the routine, not a human), not archived/closed. Ordered oldest-first so a large backlog
-      // drains in escalation order across ticks.
+      // drains in escalation order across ticks. `escalation_reason` is fetched for logging /
+      // downstream shape but MUST NOT gate eligibility — see {@link passesJuneReviewSelection}.
       const { data: tickets } = await admin
         .from("tickets")
-        .select("id, workspace_id, escalated_at")
+        .select("id, workspace_id, escalated_at, escalated_to, status, escalation_reason")
         .not("escalated_at", "is", null)
         .is("escalated_to", null)
         .not("status", "in", '("archived","closed")')
         .order("escalated_at", { ascending: true });
-      const rows = (tickets || []) as { id: string; workspace_id: string }[];
+      // Defense-in-depth: the SQL filter above already narrows to ticket-level eligibility, but the
+      // pure predicate re-asserts the invariant on the fetched rows so a future SQL edit that
+      // accidentally leaks an ineligible ticket (e.g. escalated_to set by a race) can't reach
+      // enqueue. Crucially, the predicate NEVER reads escalation_reason — a guard-block escalation
+      // (blocked_unbacked_claim:*) is a triage candidate on the SAME terms as an analyzer-rail
+      // escalation. Phase 1 of guard-block-escalations-reach-junes-triage-not-left-unreviewed.
+      const fetched = (tickets || []) as {
+        id: string;
+        workspace_id: string;
+        escalated_at: string | null;
+        escalated_to: string | null;
+        status: string | null;
+        escalation_reason: string | null;
+      }[];
+      const rows = fetched.filter(passesJuneReviewSelection);
       if (!rows.length) return { eligible: 0, deferred: 0, enqueued: 0 };
       const ticketIds = rows.map((t) => t.id);
 

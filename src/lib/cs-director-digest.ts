@@ -144,6 +144,115 @@ async function readCsDirectorVerdicts(
   }
 }
 
+/**
+ * Read the count of Sol re-session cap-hits in the window + the workspace's alarm threshold.
+ * Fix 1 (Phase 4) of [[../specs/sol-runaway-re-session-cap-guardrail]] — supplies the input
+ * for `composeCapHitEscalation` below. Best-effort: on any read failure returns `{count:0,
+ * threshold:null}` so a transient outage never blocks the digest.
+ *
+ * `threshold` is the MAX of all `ai_channel_config.sol_cap_hit_alarm` values across the
+ * workspace's channels (a workspace with any channel opted out via a higher threshold still
+ * gets the systemic warning at the loosest bound). If no config row exists, the default `5`
+ * (matching the column default) is used.
+ */
+async function readCapHitCountAndAlarm(
+  admin: Admin,
+  workspaceId: string,
+  since: string,
+  until: string,
+): Promise<{ count: number; threshold: number; kinds: { frustration: number; drift: number } }> {
+  try {
+    const { data: rows, error } = await admin
+      .from("ticket_resolution_events")
+      .select("ticket_id, chosen")
+      .eq("workspace_id", workspaceId)
+      .eq("reasoning", "sol:cap-hit")
+      .gte("staged_at", since)
+      .lt("staged_at", until);
+    if (error) {
+      console.warn("[cs-director-digest] cap-hit count read failed:", error.message);
+      return { count: 0, threshold: 5, kinds: { frustration: 0, drift: 0 } };
+    }
+    const events = (rows ?? []) as Array<{
+      ticket_id: string;
+      chosen: Record<string, unknown> | null;
+    }>;
+    const kinds = { frustration: 0, drift: 0 };
+    for (const ev of events) {
+      const k = (ev.chosen ?? {})["kind"];
+      if (k === "frustration") kinds.frustration += 1;
+      else if (k === "drift") kinds.drift += 1;
+    }
+
+    let threshold = 5;
+    try {
+      const { data: cfgRows } = await admin
+        .from("ai_channel_config")
+        .select("sol_cap_hit_alarm")
+        .eq("workspace_id", workspaceId);
+      const cfgs = (cfgRows ?? []) as Array<{ sol_cap_hit_alarm: number | null }>;
+      const values = cfgs
+        .map((c) => c.sol_cap_hit_alarm)
+        .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+      if (values.length > 0) threshold = Math.max(...values);
+    } catch {
+      // ai_channel_config unavailable — fall back to the schema default (5).
+    }
+
+    return { count: events.length, threshold, kinds };
+  } catch (err) {
+    console.warn(
+      "[cs-director-digest] cap-hit count read threw:",
+      err instanceof Error ? err.message : err,
+    );
+    return { count: 0, threshold: 5, kinds: { frustration: 0, drift: 0 } };
+  }
+}
+
+/**
+ * Compose ONE `early_warning` storyline when the workspace's rolling cap-hit count in the
+ * digest window strictly EXCEEDS `sol_cap_hit_alarm`. Fix 1 (Phase 4) of
+ * [[../specs/sol-runaway-re-session-cap-guardrail]] — the spec's own words: "When
+ * cap_hits.total_7d exceeds a workspace-tunable threshold ... post an internal-note
+ * escalation to the CS Director digest so June sees it in the next digest cycle".
+ *
+ * Below-threshold windows return `[]` — no storyline noise on healthy weeks. This is a
+ * SYSTEMIC storyline (like recurring-problem `early_warning`s), not a per-ticket
+ * escalation, so it lives on the digest's `storylines` array alongside the other
+ * composer sources rather than paging in real time.
+ */
+function composeCapHitEscalation(input: {
+  count: number;
+  threshold: number;
+  kinds: { frustration: number; drift: number };
+}): CsStoryline[] {
+  if (input.count <= input.threshold) return [];
+  const evidenceBits: string[] = [
+    `${input.count} cap-hits in the window`,
+    `threshold ${input.threshold}`,
+  ];
+  if (input.kinds.frustration || input.kinds.drift) {
+    evidenceBits.push(`frustration ${input.kinds.frustration} · drift ${input.kinds.drift}`);
+  }
+  return [
+    {
+      kind: "early_warning",
+      title: trim("Sol re-session cap hit (systemic)", 160),
+      evidence: trim(evidenceBits.join(" · "), MAX_EVIDENCE_LEN),
+      // A recurring cap-hit is a bounded-proxy signal (frustration is bouncing to Sol at a
+      // rate the cap is now catching) — the founder acts by widening the leash OR by
+      // codifying a new rule that catches the pattern earlier. Default `add_policy`
+      // matches the other systemic `early_warning` storylines.
+      proposed_action: {
+        type: "add_policy",
+        payload: {
+          policy_draft: `Sol re-session cap hit ${input.count}x — frustration ${input.kinds.frustration}, drift ${input.kinds.drift}. Investigate the pathological tickets and either widen sol_max_resessions or add a rule that catches the pattern earlier.`,
+        },
+      },
+    },
+  ];
+}
+
 /** Read the ticket_resolution_events rows in the window. Best-effort; empty on failure. */
 async function readResolutionEvents(
   admin: Admin,
@@ -302,14 +411,16 @@ export async function composeCsDirectorDigest(
     };
   }
 
-  const [verdicts, events] = await Promise.all([
+  const [verdicts, events, capHits] = await Promise.all([
     readCsDirectorVerdicts(admin, workspaceId, since, until),
     readResolutionEvents(admin, workspaceId, since, until),
+    readCapHitCountAndAlarm(admin, workspaceId, since, until),
   ]);
 
   const storylines = [
     ...composeEarlyWarnings(events),
     ...composePrecedentCalls(verdicts),
+    ...composeCapHitEscalation(capHits),
   ];
 
   try {

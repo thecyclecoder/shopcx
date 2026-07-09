@@ -78,8 +78,11 @@ export function newCockpitToken(): string {
   return randomBytes(24).toString("hex");
 }
 
-/** Sliding-TTL bump — every GET/message/approve/turn extends the token this long. */
-export const SLIDING_TTL_MS = 20 * 60 * 1000;
+/** Sliding-TTL bump — every GET/message/approve/turn extends the token this long.
+ *  2h idle window: the founder often steps away for a long stretch (a pickleball game
+ *  runs ~45 min) and shouldn't come back to a dead session. The 12h absolute ceiling
+ *  below still hard-caps a forgotten session. */
+export const SLIDING_TTL_MS = 120 * 60 * 1000;
 /** Hard ceiling — arm() + 12h. Never bumped; the reaper force-disarms past this. */
 export const ABSOLUTE_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -170,12 +173,53 @@ type Admin = SupabaseClient;
  */
 export async function armSession(
   admin: Admin,
-  args: { workspaceId: string; createdBy: string },
+  args: { workspaceId: string; createdBy: string; resumeSessionId?: string },
 ): Promise<GodModeSessionRow> {
   const now = new Date();
   const token = newCockpitToken();
   const tokenExpiresAt = new Date(now.getTime() + SLIDING_TTL_MS).toISOString();
   const absoluteExpiresAt = new Date(now.getTime() + ABSOLUTE_TTL_MS).toISOString();
+
+  // ── Resume a past chat ──────────────────────────────────────────────────
+  // Revive a disarmed/expired session (keeping its full transcript + box_session_id
+  // so the ACTUAL conversation continues where it left off — Eve picks up mid-thought).
+  // Fresh cockpit token + fresh sliding/absolute TTLs; clears disarmed_at. The
+  // `.eq("workspace_id")` guard makes a cross-workspace resumeSessionId a no-op (never
+  // revive another tenant's chat).
+  if (args.resumeSessionId) {
+    // The one-armed-session-per-workspace partial UNIQUE index means we must first
+    // stand down any currently-armed session before flipping the target to 'armed'.
+    const { data: current } = await admin
+      .from("god_mode_sessions")
+      .select("id")
+      .eq("workspace_id", args.workspaceId)
+      .eq("status", "armed")
+      .maybeSingle();
+    if (current && current.id !== args.resumeSessionId) {
+      await admin
+        .from("god_mode_sessions")
+        .update({ status: "disarmed", cockpit_token: null, disarmed_at: now.toISOString(), last_activity_at: now.toISOString() })
+        .eq("id", current.id);
+    }
+    const { data: revived, error } = await admin
+      .from("god_mode_sessions")
+      .update({
+        status: "armed",
+        cockpit_token: token,
+        token_expires_at: tokenExpiresAt,
+        absolute_expires_at: absoluteExpiresAt,
+        last_activity_at: now.toISOString(),
+        armed_at: now.toISOString(),
+        disarmed_at: null,
+      })
+      .eq("id", args.resumeSessionId)
+      .eq("workspace_id", args.workspaceId)
+      .select("*")
+      .single();
+    if (error || !revived) throw new Error(`arm(resume) failed: ${error?.message ?? "no row"}`);
+    void sendGodModeSMS(admin, { workspaceId: args.workspaceId, kind: "arm", cockpitToken: token });
+    return revived as GodModeSessionRow;
+  }
 
   const { data: existing } = await admin
     .from("god_mode_sessions")
@@ -255,7 +299,7 @@ export async function disarmSession(
     workspaceId: sessionRow.workspace_id,
     kind: "done",
     cockpitToken: sessionRow.cockpit_token,
-    context: { reason: "disarmed" },
+    context: { reason: "you sent me home" },
   });
   const { data: updated, error } = await admin
     .from("god_mode_sessions")
@@ -281,6 +325,36 @@ export async function getActiveSession(admin: Admin, workspaceId: string): Promi
     .eq("status", "armed")
     .maybeSingle();
   return (data as GodModeSessionRow | null) ?? null;
+}
+
+/**
+ * Recent past chats for the workspace — powers the "resume a chat with Eve" picker.
+ * Returns a light shape (no full transcript) + a preview of the first founder message.
+ * Empty chats (no real back-and-forth) are dropped — nothing to resume. Most-recently
+ * ended first.
+ */
+export async function listPastSessions(
+  admin: Admin,
+  workspaceId: string,
+  limit = 8,
+): Promise<{ id: string; armed_at: string; disarmed_at: string | null; message_count: number; preview: string }[]> {
+  const { data } = await admin
+    .from("god_mode_sessions")
+    .select("id, armed_at, disarmed_at, messages")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["disarmed", "expired"])
+    .order("disarmed_at", { ascending: false, nullsFirst: false })
+    .limit(limit);
+  const rows = (data as { id: string; armed_at: string; disarmed_at: string | null; messages: unknown }[] | null) ?? [];
+  return rows
+    .map((r) => {
+      const msgs = Array.isArray(r.messages) ? (r.messages as GodModeMessage[]) : [];
+      const firstUser = msgs.find((m) => m.role === "user");
+      const preview = (firstUser?.content ?? "").slice(0, 80);
+      const message_count = msgs.filter((m) => m.role === "user" || m.role === "assistant").length;
+      return { id: r.id, armed_at: r.armed_at, disarmed_at: r.disarmed_at, message_count, preview };
+    })
+    .filter((r) => r.message_count > 0);
 }
 
 /** Load a session by cockpit token (the /god/[token] path). Returns null on unknown token. */
@@ -834,14 +908,16 @@ export async function resolveFounderPhone(admin: Admin, workspaceId: string): Pr
 
 /**
  * The three god-mode SMS events. Distinct kinds keep the text deterministic +
- * make an integration test straightforward.
+ * make an integration test straightforward. Bodies are DELIBERATELY clean —
+ * professional-warm, no flirt, no emoji (a text can show on a lock screen). Eve's
+ * full flirty voice lives inside the app only.
  *
- *   • arm      — "God mode armed on {ws}. Cockpit: {url}"
- *   • approval — the 5-min REMINDER: "…has been waiting 5+ min for your approval"
- *                (single) or "{n} approvals have been waiting 5+ min" (batch).
+ *   • arm      — "Eve here — I'm online and ready. Tap in: {url}"
+ *   • approval — the 5-min REMINDER: "Eve here — one item needs your call (waiting
+ *                5+ min). Tap in:" (single) or "…{n} items need your call…" (batch).
  *                NOT sent on insert — only by `nudgeStalePendingApprovals` once a
  *                card sits unanswered past the threshold.
- *   • done     — "God mode session ended ({reason}). Re-arm in the app if needed."
+ *   • done     — "Eve here — I've clocked out ({reason}). Tap me back in the app anytime."
  *
  * "reply" is intentionally absent — the spec says plain box replies send NONE
  * (the Chat tab handles live watching). Only the approval nudge + session-done push.
@@ -867,22 +943,23 @@ export async function sendGodModeSMS(
     if (!to) return { sent: false, reason: "no founder phone configured" };
 
     const url = args.cockpitToken ? cockpitUrl(args.cockpitToken) : "";
+    // NOTE: SMS bodies are deliberately CLEAN — Eve's full flirty personality (and
+    // her emojis) live INSIDE the app (cockpit + tab replies), never in a text that
+    // might surface on a lock screen. Keep these professional-warm: no flirt, no emoji.
     let text = "";
     if (args.kind === "arm") {
-      text = `God mode armed. Cockpit:`;
+      text = `Eve here — I'm online and ready. Tap in:`;
     } else if (args.kind === "approval") {
       // The 5-min reminder (never sent on insert — see nudgeStalePendingApprovals).
       const count = args.context?.count ?? 1;
       if (count > 1) {
-        text = `God mode: ${count} approvals have been waiting 5+ min for your reply. Approvals tab:`;
+        text = `Eve here — ${count} items need your call (waiting 5+ min). Tap in:`;
       } else {
-        const tool = args.context?.toolName ?? "An approval";
-        const risk = args.context?.risk ?? "write";
-        text = `God mode: ${tool} (${risk}) has been waiting 5+ min for your approval. Approvals tab:`;
+        text = `Eve here — one item needs your call (waiting 5+ min). Tap in:`;
       }
     } else {
-      const reason = args.context?.reason ?? "ended";
-      text = `God mode session ${reason}. Re-arm in the app if needed.`;
+      const reason = args.context?.reason ?? "wrapped up";
+      text = `Eve here — I've clocked out (${reason}). Tap me back in the app anytime.`;
     }
     const body = url ? `${text}\n\n${url}` : text;
 
@@ -1010,7 +1087,7 @@ export async function reapGodModeSessions(admin: Admin): Promise<{
         workspaceId: s.workspace_id,
         kind: "done",
         cockpitToken: s.cockpit_token,
-        context: { reason: "hit its 12h ceiling" },
+        context: { reason: "12 hours is my max" },
       });
       await admin
         .from("god_mode_sessions")
@@ -1041,7 +1118,7 @@ export async function reapGodModeSessions(admin: Admin): Promise<{
         workspaceId: s.workspace_id,
         kind: "done",
         cockpitToken: s.cockpit_token,
-        context: { reason: "idled out" },
+        context: { reason: "you went quiet on me" },
       });
       await admin
         .from("god_mode_sessions")

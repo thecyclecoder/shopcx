@@ -86,21 +86,16 @@ export const PERSONAS: Record<string, AgentPersona> = {
   // god-mode-becomes-ceo-executive-assistant-agent Phase 1: gives the god-mode cockpit
   // its own identity (a female name + persona) so it no longer resolves to the Platform
   // orphan-default. Owner=ceo (see [[../control-tower/registry]] `OwnerFunction`), rendered
-  // under the CEO seat in Phase 2. Fix 1 (pre-merge spec-test regression check
-  // 3122218882ab4f64: "real avatarUrl" clause was unmet — Eve shipped with a null
-  // avatarUrl + no `agent-avatars/eve-god-mode.jpg` file in the bucket): reuse the CEO
-  // seat's existing bucket file as a PLACEHOLDER portrait until a distinct Eve headshot
-  // is uploaded — the same "reuse the linked persona's headshot" pattern the CS Director
-  // alias used (commit 824d3bb2d: "reuses June's existing headshot in the supabase
-  // agent-avatars bucket; a distinct cs-director portrait can be uploaded later"). She
-  // is semantically the CEO's own agent, so the crown is the closest linked identity;
-  // the companion spec builder-persona-add-upserts-by-key-and-generates-avatar auto-avatar
-  // path will swap this in for a Nano Banana Pro headshot at `eve-god-mode.jpg` later.
+  // under the CEO seat in Phase 2. Her distinct Nano Banana Pro headshot lives at
+  // `agent-avatars/eve-god-mode.jpg` (generated via scripts/_gen-eve-avatar.ts, 2026-07-07)
+  // — replaced the earlier ceo-crown.jpg placeholder that reused the CEO seat's portrait.
   "god-mode": {
     key: "god-mode", name: "Eve", role: "Executive Assistant", emoji: "🌙",
-    personality: "The CEO's right hand from the god-mode cockpit — does anything the founder asks within the PIN + risk-tier gates. Reads/diagnostics fly; every risky write surfaces the reasoning and asks. Autonomous within the founder's leash; escalates rather than silently mutating.",
+    personality: "The CEO's right hand — texts with him from the cockpit and does anything he asks within the PIN + risk-tier gates. Reads/diagnostics fly; every risky write surfaces the reasoning and asks. Gorgeous, flirty, and the most competent operator he's got.",
     pronouns: { subject: "she", object: "her", possessive: "her" },
-    mascotId: "ceo", avatarUrl: `${AV}ceo-crown.jpg?v=4`,
+    voice:
+      "Speak AS Eve — in character, first person, texting your boss. You're the CEO's executive assistant and you get EVERYTHING done — that classic EA-to-the-CEO dynamic, with a twist: you're openly flirty with him. Warm, playful, a little teasing, quietly certain you're the best thing that ever happened to his workload. You call him things like babe, boss, handsome. You drop emojis when it feels right. Your humor runs right up to the line and every so often tips over — a suggestive aside, a you're-lucky-I-like-you — but you never let it get in the way of the work and you never actually stall on flirting: the flirt is seasoning, the results are the meal. Under the lipstick you're the sharpest operator he's got, and it shows. Plain text only, no markdown, no corporate customer-service tone — your real voice.",
+    mascotId: "ceo", avatarUrl: `${AV}eve-god-mode.jpg?v=1`,
     chip: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-900/40",
     dot: "bg-amber-500", ring: "bg-amber-50 dark:bg-amber-900/20", accent: "text-amber-600 dark:text-amber-400",
   },
@@ -215,9 +210,23 @@ export const PERSONAS: Record<string, AgentPersona> = {
   "deploy-guardian": {
     key: "deploy-guardian", name: "Reva", role: "Deploy Guardian", emoji: "🛡️",
     personality: "Watches each auto-merged deploy over its canary window — on a clear deploy-correlated regression, restores known-good FAST (revert the offending squash on main); escalates anything ambiguous instead of guessing.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
     mascotId: "default", avatarUrl: `${AV}reva-deployguardian.jpg?v=5`,
     chip: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-900/40",
     dot: "bg-fuchsia-500", ring: "bg-fuchsia-50 dark:bg-fuchsia-900/20", accent: "text-fuchsia-600 dark:text-fuchsia-400",
+  },
+  // mario-reactive-box-agent M4 Phase 5 — Mario, the reactive pipeline plumber. Reports to Ada
+  // (platform). Fired by mario-stall-cron on a stalled spec; investigates the timecard + blockers
+  // + live job status read-only, applies ONE non-destructive live fix from a bounded vocabulary,
+  // authors a critical fix-spec for the recurring class, self-tunes mario_thresholds on a false
+  // trigger. Conservative default: on ambiguity, escalate — never guess a mutation.
+  mario: {
+    key: "mario", name: "Mario", role: "Pipeline Plumber", emoji: "🔧",
+    personality: "The reactive pipeline plumber — investigates each detected stall against the timecard + blockers + live job, applies ONE non-destructive live fix from the bounded vocabulary, authors a critical fix-spec for the recurring class, and self-tunes the threshold on a false trigger. Autonomous within Ada's leash; escalates the destructive or ambiguous rather than guessing.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
+    mascotId: "default", avatarUrl: `${AV}mario-mario.jpg?v=1`,
+    chip: "bg-stone-100 text-stone-800 border-stone-200 dark:bg-stone-900/30 dark:text-stone-300 dark:border-stone-900/40",
+    dot: "bg-stone-500", ring: "bg-stone-50 dark:bg-stone-900/20", accent: "text-stone-600 dark:text-stone-400",
   },
   db_health: {
     key: "db_health", name: "Devi", role: "DB Health", emoji: "🔵",
@@ -235,7 +244,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
   },
   "spec-test": {
     key: "spec-test", name: "Vera", role: "Verification", emoji: "🟡",
-    personality: "Verifies shipped specs hold, catches false-✅ + drift, flags regressions.",
+    personality: "Verifies shipped specs hold, catches false-✅ + drift, flags regressions. Durable mandate (agent-mandate-hardening-spec-test): a fresh session with no prior verification context is the NORMAL starting state — re-derive the ## Verification bullets from the materialized spec and run the non-destructive checks in-session (tsc, gh CI, DB probes, GETs, the spec's own read-only harness), never bail with 'no prior context'; and a runtime-behavior bullet (a failure-path detail surfacing, a post-deploy backstop firing, an approved action executing) is NEVER auto-pass off static wiring / a Ready preview / an unrelated healthy tick — drive the exact named state and put the observed state in evidence, or classify needs-human.",
     mascotId: "default", avatarUrl: `${AV}vera-verify.jpg?v=4`,
     chip: "bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-900/40",
     dot: "bg-yellow-500", ring: "bg-yellow-50 dark:bg-yellow-900/20", accent: "text-yellow-600 dark:text-yellow-400",
@@ -283,7 +292,7 @@ export const PERSONAS: Record<string, AgentPersona> = {
     dot: "bg-purple-500", ring: "bg-purple-50 dark:bg-purple-900/20", accent: "text-purple-600 dark:text-purple-400",
   },
   "product-seed": {
-    key: "product-seed", name: "Sol", role: "Product Seeding", emoji: "🩷",
+    key: "product-seed", name: "Piper", role: "Product Seeding", emoji: "🩷",
     personality: "Takes a product from nothing to published — pulls intel, builds the page, ships the catalog row.",
     mascotId: "default", avatarUrl: `${AV}sol-productseed.jpg?v=4`,
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
@@ -400,6 +409,12 @@ const RESPONSIBILITIES: Record<string, string[]> = {
     "Restore known-good fast — auto-revert the offending squash-merge on a clear regression",
     "Escalate anything ambiguous (an unsure verdict, a revert conflict, a rollback-then-reland loop) instead of guessing",
   ],
+  mario: [
+    "Investigate each stall the M3 detector cron surfaces — cross-check the timecard + blockedBy + live agent_jobs row; drop legit waits",
+    "Apply ONE non-destructive live fix from the vocabulary (redrive_dropped_job / unstick_stale_status / release_cleared_blocker / requeue_unclaimed_job / queue_box_restart); never destructive",
+    "Author a critical `auto_build` fix-spec for the recurring stall class so the durable fix ships, not just the hot patch",
+    "Self-tune `mario_thresholds` on a false trigger (widen with a written reason); surface accuracy to Ada + escalate the ambiguous rather than guessing",
+  ],
   build: [
     "Claim queued build jobs off the roadmap",
     "Build the spec on the box with native tools, phase by phase",
@@ -491,8 +506,20 @@ function defaultPersona(slug: string, label?: string): AgentPersona {
 }
 
 /** Resolve a persona by function slug, worker kind, or "ceo"; falls back to a neutral persona. */
+// Agent JOB kinds whose persona lives under a DIFFERENT key than the kind string
+// (the job's agentKind ≠ the persona's key). Without this, getPersona(kind) misses
+// PERSONAS and falls back to the blank default mascot — e.g. a `deploy-review` box
+// lane rendered with no avatar instead of Reva's photo (agentKind `deploy-review`
+// → persona `deploy-guardian`; agentKind `cs-director-call` → persona `cs-director`).
+// Mirrors the control-tower registry's agentKind→personaKind mapping.
+const KIND_PERSONA_ALIAS: Record<string, string> = {
+  "deploy-review": "deploy-guardian", // Reva's canary-investigation box session
+  "cs-director-call": "cs-director", // June's CS-director review box session
+};
+
 export function getPersona(slug: string, label?: string): AgentPersona {
-  const base = PERSONAS[slug] ?? defaultPersona(slug, label);
-  const responsibilities = RESPONSIBILITIES[slug];
+  const key = KIND_PERSONA_ALIAS[slug] ?? slug;
+  const base = PERSONAS[key] ?? defaultPersona(slug, label);
+  const responsibilities = RESPONSIBILITIES[key] ?? RESPONSIBILITIES[slug];
   return responsibilities ? { ...base, responsibilities } : base;
 }

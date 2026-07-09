@@ -1,0 +1,1 @@
+- **Grader treats infra/outage failures as blameless — not low grades** · verified 2026-07-08 · → [[libraries/agent-grader#blameless-infra-failure-skip-grader--coach]] · → [[operational-rules#-north-star--supervisable-autonomy]]

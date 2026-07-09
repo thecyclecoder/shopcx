@@ -21,6 +21,11 @@ Keep every subscriber billed correctly and on-plan — the subscription engine n
 Reduce voluntary + involuntary churn via the cancel-flow, dunning recovery, and reactivation. (Currently shipped as lifecycles; future specs land here.)
 - **Owns lifecycles:** [[../lifecycles/cancel-flow]], [[../lifecycles/dunning]].
 
+### Transactional & lifecycle messaging
+Own the customer-lifecycle emails Klaviyo used to send, now that Klaviyo is sunset — order confirmations, shipping notifications, and the transactional/lifecycle sends that keep customers informed and trusting the brand between purchases. Every send is on-brand (mirrors the in-house storefront template), tracked (we can confirm we sent it), and flood-safe (batches the ~4am renewal wave without hammering Resend).
+- **Metric:** transactional-send coverage → 100% of eligible orders; deliverability (delivered / opened) via [[../tables/email_events]]; zero double-sends.
+- **Owns library:** [[../libraries/email-storefront]] (order confirmation + shipping notification sends).
+
 ## Owned / contributed goals
 
 - Contributes to [[../goals/ceo-mode]] — the Retention director seat (subscriber base = the recurring-revenue engine behind enterprise value).

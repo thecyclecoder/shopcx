@@ -39,22 +39,34 @@ export async function GET() {
     return NextResponse.json({ error: "Owner, admin, or CS manager role required" }, { status: 403 });
   }
 
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-  const { data: rows } = await admin
-    .from("ticket_resolution_events")
-    .select("verified_outcome")
-    .eq("workspace_id", workspaceId)
-    .gte("staged_at", since);
-
-  const byOutcome: Record<string, number> = { confirmed: 0, unbacked: 0, drifted: 0, clarified: 0, unknown: 0 };
-  let total = 0;
-  for (const r of rows ?? []) {
-    total += 1;
-    const outcome = (r as { verified_outcome: string | null }).verified_outcome ?? "unknown";
-    byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1;
-  }
-  const clarified = byOutcome.clarified ?? 0;
+  // Phase 1 of docs/brain/specs/rpc-ify-aggregation-layer-fix-1000-row-truncation.md.
+  // Prior code fetched every ticket_resolution_events row in the 7-day window and
+  // tallied verified_outcome in JS — PostgREST's 1000-row cap truncated the source
+  // set on any busy workspace, so the "Selective-clarify rate (target ~6%)" tile
+  // shrank as volume grew. Server-side GROUP BY now.
+  const { data: rpcRows } = await admin.rpc("analytics_selective_clarify", {
+    p_workspace: workspaceId,
+    p_days: 7,
+  });
+  const agg = (Array.isArray(rpcRows) ? rpcRows[0] : rpcRows) as {
+    total: number | string | null;
+    confirmed: number | string | null;
+    unbacked: number | string | null;
+    drifted: number | string | null;
+    clarified: number | string | null;
+    unknown_count: number | string | null;
+  } | null;
+  const num = (v: number | string | null | undefined) =>
+    v === null || v === undefined ? 0 : Number(v) || 0;
+  const byOutcome: Record<string, number> = {
+    confirmed: num(agg?.confirmed),
+    unbacked: num(agg?.unbacked),
+    drifted: num(agg?.drifted),
+    clarified: num(agg?.clarified),
+    unknown: num(agg?.unknown_count),
+  };
+  const total = num(agg?.total);
+  const clarified = byOutcome.clarified;
   const rate = total > 0 ? clarified / total : 0;
 
   return NextResponse.json({

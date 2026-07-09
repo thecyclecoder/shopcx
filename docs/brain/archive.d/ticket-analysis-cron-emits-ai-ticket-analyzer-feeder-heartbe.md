@@ -1,0 +1,1 @@
+- **Wire the ticket-analysis cron back to the ai:ticket-analyzer feeder heartbeat** · verified 2026-07-08 · → [[inngest/ticket-analysis-cron]]

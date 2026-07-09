@@ -23,10 +23,42 @@ interface SelectiveClarify {
   target: number;
 }
 
+interface PlaybookSelectionSplit {
+  window_days: number;
+  total_session_chosen: number;
+  total_matcher_chosen: number;
+  per_slug: Record<string, { session_chosen: number; matcher_chosen: number }>;
+}
+
+interface SolCostStats { count: number; median_cents: number; p95_cents: number }
+interface SolCostCsat { count: number; avg: number | null }
+interface SolCost {
+  window_days: number;
+  catherine_baseline_cents: number;
+  shadow_baseline_cents: number | null;
+  cost: { overall: SolCostStats; pre_sol: SolCostStats; sol: SolCostStats };
+  csat: { pre_sol: SolCostCsat; sol: SolCostCsat };
+  resessions: Array<{ supersede_count: number; tickets: number }>;
+  // Phase 3 of docs/brain/specs/sol-runaway-re-session-cap-guardrail.md.
+  cap_hits: {
+    total_7d: number;
+    per_playbook_slug: Record<string, number>;
+    per_inflection_kind: { frustration: number; drift: number };
+  };
+}
+
+function centsToDollars(n: number): string {
+  return `$${(n / 100).toFixed(2)}`;
+}
+
 function AnalyticsInner() {
   const workspace = useWorkspace();
   const [data, setData] = useState<SelectiveClarify | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [solCost, setSolCost] = useState<SolCost | null>(null);
+  const [solCostError, setSolCostError] = useState<string | null>(null);
+  const [split, setSplit] = useState<PlaybookSelectionSplit | null>(null);
+  const [splitError, setSplitError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -37,6 +69,20 @@ function AnalyticsInner() {
       })
       .then((d) => { if (alive) setData(d as SelectiveClarify); })
       .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : "load failed"); });
+    void fetch("/api/tickets/analytics/sol-cost")
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.json();
+      })
+      .then((d) => { if (alive) setSolCost(d as SolCost); })
+      .catch((e: unknown) => { if (alive) setSolCostError(e instanceof Error ? e.message : "load failed"); });
+    void fetch("/api/tickets/analytics/playbook-selection-split")
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.json();
+      })
+      .then((d) => { if (alive) setSplit(d as PlaybookSelectionSplit); })
+      .catch((e: unknown) => { if (alive) setSplitError(e instanceof Error ? e.message : "load failed"); });
     return () => { alive = false; };
   }, []);
 
@@ -97,6 +143,194 @@ function AnalyticsInner() {
         )}
         {!data && !error && (
           <p className="mt-2 text-xs text-zinc-400">Loading…</p>
+        )}
+      </div>
+
+      {/* Session-chosen vs signal-matched playbook selection — Phase 4 of
+          docs/brain/specs/sol-session-chosen-playbook-selection-retire-brittle-triggers.md.
+          Reads /api/tickets/analytics/playbook-selection-split, which aggregates
+          ticket_resolution_events.reasoning prefixed with 'sol:session-chose-playbook:' vs
+          'sol:matcher-chose-playbook:' over the last 7 days. The tile renders totals + a
+          top-5-slug split so we can watch Sol's session-based selection displace the
+          deterministic matcher as the flag rolls out. */}
+      <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-baseline justify-between">
+          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            Playbook selection <span className="text-zinc-400">(session-chosen vs signal-matched, 7d)</span>
+          </p>
+          {split && (
+            <span className="text-[10px] text-zinc-500">
+              session {split.total_session_chosen.toLocaleString()} · matcher {split.total_matcher_chosen.toLocaleString()}
+            </span>
+          )}
+        </div>
+        {splitError && (
+          <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">Couldn&apos;t load ({splitError}).</p>
+        )}
+        {!split && !splitError && (
+          <p className="mt-2 text-xs text-zinc-400">Loading…</p>
+        )}
+        {split && (
+          <>
+            <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+              <div className="rounded border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900 dark:bg-emerald-950">
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Session-chosen (Sol)</p>
+                <p className="mt-0.5 font-mono text-2xl text-zinc-800 dark:text-zinc-200">
+                  {split.total_session_chosen.toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950">
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Signal-matched (matcher)</p>
+                <p className="mt-0.5 font-mono text-2xl text-zinc-800 dark:text-zinc-200">
+                  {split.total_matcher_chosen.toLocaleString()}
+                </p>
+              </div>
+            </div>
+            {(() => {
+              const top = Object.entries(split.per_slug)
+                .map(([slug, counts]) => ({
+                  slug,
+                  session_chosen: counts.session_chosen,
+                  matcher_chosen: counts.matcher_chosen,
+                  total: counts.session_chosen + counts.matcher_chosen,
+                }))
+                .sort((a, b) => b.total - a.total)
+                .slice(0, 5);
+              if (top.length === 0) {
+                return (
+                  <p className="mt-3 text-[10px] text-zinc-500">
+                    No session-chosen or signal-matched playbook starts in the last {split.window_days} days.
+                  </p>
+                );
+              }
+              return (
+                <div className="mt-3">
+                  <p className="text-[10px] uppercase tracking-wide text-zinc-500">Top 5 slugs</p>
+                  <table className="mt-1 w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[10px] uppercase text-zinc-500">
+                        <th className="py-1 pr-2 font-normal">Slug</th>
+                        <th className="py-1 pr-2 text-right font-normal">Session</th>
+                        <th className="py-1 pr-2 text-right font-normal">Matcher</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {top.map((row) => (
+                        <tr key={row.slug} className="border-t border-zinc-100 dark:border-zinc-800">
+                          <td className="py-1 pr-2 font-mono text-zinc-700 dark:text-zinc-300">{row.slug}</td>
+                          <td className="py-1 pr-2 text-right font-mono text-zinc-800 dark:text-zinc-200">
+                            {row.session_chosen.toLocaleString()}
+                          </td>
+                          <td className="py-1 pr-2 text-right font-mono text-zinc-800 dark:text-zinc-200">
+                            {row.matcher_chosen.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </>
+        )}
+      </div>
+
+      {/* Sol economics tile — median + p95 per-ticket AI cost, split by pre-Sol vs Sol cohort,
+          referenced against the Catherine $8.92 baseline. Phase 3 of
+          docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md. */}
+      <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-baseline justify-between">
+          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            Sol economics <span className="text-zinc-400">(per-ticket AI cost)</span>
+          </p>
+          {solCost && (
+            <span className="text-[10px] text-zinc-500">
+              Catherine baseline {centsToDollars(solCost.catherine_baseline_cents)}
+              {solCost.shadow_baseline_cents !== null
+                ? ` · shadow ${centsToDollars(solCost.shadow_baseline_cents)}`
+                : ""}
+            </span>
+          )}
+        </div>
+        {solCostError && (
+          <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">Couldn&apos;t load ({solCostError}).</p>
+        )}
+        {!solCost && !solCostError && (
+          <p className="mt-2 text-xs text-zinc-400">Loading…</p>
+        )}
+        {solCost && (
+          <>
+            <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+              <div className="rounded border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950">
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Pre-Sol cohort</p>
+                <p className="mt-0.5 font-mono text-sm text-zinc-800 dark:text-zinc-200">
+                  median {centsToDollars(solCost.cost.pre_sol.median_cents)} · p95 {centsToDollars(solCost.cost.pre_sol.p95_cents)}
+                </p>
+                <p className="mt-0.5 text-[10px] text-zinc-500">
+                  {solCost.cost.pre_sol.count.toLocaleString()} tickets · CSAT{" "}
+                  {solCost.csat.pre_sol.avg !== null ? solCost.csat.pre_sol.avg.toFixed(2) : "—"}
+                  {" "}({solCost.csat.pre_sol.count.toLocaleString()} rated)
+                </p>
+              </div>
+              <div
+                className={`rounded border p-3 ${
+                  solCost.cost.sol.count === 0
+                    ? "border-dashed border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950"
+                    : "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950"
+                }`}
+              >
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Sol cohort</p>
+                {solCost.cost.sol.count === 0 ? (
+                  <p className="mt-0.5 text-xs text-zinc-500">
+                    No Sol tickets in the window yet — Direction artifact not written.
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-0.5 font-mono text-sm text-zinc-800 dark:text-zinc-200">
+                      median {centsToDollars(solCost.cost.sol.median_cents)} · p95 {centsToDollars(solCost.cost.sol.p95_cents)}
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-zinc-500">
+                      {solCost.cost.sol.count.toLocaleString()} tickets · CSAT{" "}
+                      {solCost.csat.sol.avg !== null ? solCost.csat.sol.avg.toFixed(2) : "—"}
+                      {" "}({solCost.csat.sol.count.toLocaleString()} rated)
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+            <p className="mt-3 text-[10px] text-zinc-500">
+              Reference line: Catherine baseline {centsToDollars(solCost.catherine_baseline_cents)} — the pre-Sol median we&apos;re trying to beat at equal-or-better CSAT.
+              {solCost.shadow_baseline_cents !== null && (
+                <>
+                  {" "}Shadow replay median: {centsToDollars(solCost.shadow_baseline_cents)}.
+                </>
+              )}
+            </p>
+            {solCost.resessions.length > 0 && (
+              <div className="mt-3">
+                <p className="text-[10px] uppercase tracking-wide text-zinc-500">Re-session histogram (Sol tickets by supersede count)</p>
+                <div className="mt-1 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                  {solCost.resessions.map((b) => (
+                    <div
+                      key={b.supersede_count}
+                      className="rounded border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-950"
+                    >
+                      <p className="text-[10px] text-zinc-500">{b.supersede_count} re-session{b.supersede_count === 1 ? "" : "s"}</p>
+                      <p className="mt-0.5 font-mono text-sm text-zinc-800 dark:text-zinc-200">
+                        {b.tickets.toLocaleString()}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Phase 3 of docs/brain/specs/sol-runaway-re-session-cap-guardrail.md —
+                fixed 7-day rolling window over ticket_resolution_events sol:cap-hit rows. */}
+            <p className="mt-3 text-[10px] text-zinc-500">
+              Sol cap-hits (7d): <span className="font-mono text-zinc-700 dark:text-zinc-300">{solCost.cap_hits.total_7d.toLocaleString()}</span>
+              {" "}(frustration {solCost.cap_hits.per_inflection_kind.frustration.toLocaleString()} · drift {solCost.cap_hits.per_inflection_kind.drift.toLocaleString()})
+            </p>
+          </>
         )}
       </div>
     </div>

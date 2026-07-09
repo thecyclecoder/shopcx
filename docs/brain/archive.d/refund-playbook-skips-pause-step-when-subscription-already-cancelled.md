@@ -1,0 +1,1 @@
+- **Refund playbook skips the pause step when the subscription is already cancelled** · verified 2026-07-08 · → [[../lifecycles/cancel-flow]]

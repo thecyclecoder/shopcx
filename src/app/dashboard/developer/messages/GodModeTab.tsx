@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE } from "@/components/god-mode-shared";
+import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE, EveAvatar } from "@/components/god-mode-shared";
 
 interface GodMessage { role: "user" | "assistant" | "system" | "checklist"; content: string; ts: string }
 interface GodApproval {
@@ -36,6 +36,7 @@ interface GodApproval {
   decided_at: string | null;
 }
 interface GodStandingGrant { category: string; created_at: string }
+interface GodPastSession { id: string; armed_at: string; disarmed_at: string | null; message_count: number; preview: string }
 interface GodSession {
   id: string;
   status: "armed" | "disarmed" | "expired";
@@ -49,6 +50,7 @@ interface GodPayload {
   messages?: GodMessage[];
   approvals?: GodApproval[];
   standingGrants?: GodStandingGrant[];
+  pastSessions?: GodPastSession[];
 }
 
 const STATUS_BADGE = DEC_STATUS_BADGE;
@@ -97,14 +99,18 @@ export default function GodModeTab() {
     });
   }, [payload]);
 
-  async function arm() {
+  async function arm(resumeSessionId?: string) {
     if (busy) return;
     setBusy("arming");
     try {
-      const r = await fetch(`/api/god-mode/arm`, { method: "POST" });
+      const r = await fetch(`/api/god-mode/arm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(resumeSessionId ? { resumeSessionId } : {}),
+      });
       if (!r.ok) {
         const j = (await r.json().catch(() => ({}))) as { error?: string };
-        alert(`Arm failed: ${j.error ?? r.statusText}`);
+        alert(`Couldn't reach Eve: ${j.error ?? r.statusText}`);
         return;
       }
       await load();
@@ -115,7 +121,7 @@ export default function GodModeTab() {
 
   async function disarm() {
     if (busy) return;
-    if (!confirm("Disarm god mode? The active session will be killed and its cockpit token invalidated.")) return;
+    if (!confirm("Send Eve home? This ends the chat and invalidates her link. You can pick it back up later.")) return;
     setBusy("disarming");
     try {
       await fetch(`/api/god-mode/disarm`, { method: "POST" });
@@ -211,21 +217,51 @@ export default function GodModeTab() {
 
   if (loading) return <div className="p-6 text-center text-xs text-zinc-400">Loading…</div>;
 
-  // ── Not armed — show the Arm CTA. ─────────────────────────────────────
+  // ── Not armed — show the Chat-with-Eve CTA + resume past chats. ────────
   if (!payload?.armed) {
+    const past = payload?.pastSessions ?? [];
     return (
       <div className="flex flex-col items-center justify-center gap-3 p-8 text-center">
-        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">God mode is disarmed</div>
+        <EveAvatar size={56} />
+        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Eve&apos;s off the clock</div>
         <p className="max-w-md text-xs text-zinc-500">
-          Arm your chief of staff — a full-power session that does the work and only checks with you on genuine CEO-grade calls (in plain language). Truly destructive actions still need your PIN. Auto-disarms after ~20 min idle; hard ceiling at 12 hours.
+          Your executive assistant — she does the work and only checks with you on genuine CEO-grade calls, in plain language. Truly destructive actions still need your PIN. She sticks around through 2 hours of quiet; hard stop at 12 hours.
         </p>
         <button
-          onClick={arm}
+          onClick={() => arm()}
           disabled={busy !== null}
-          className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+          className="rounded-md bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-60"
         >
-          {busy === "arming" ? "Arming…" : "Arm god mode"}
+          {busy === "arming" ? "Getting Eve…" : "Chat with Eve"}
         </button>
+
+        {past.length > 0 && (
+          <div className="mt-4 w-full max-w-md text-left">
+            <div className="mb-1.5 text-[11px] font-semibold text-zinc-500">Pick up a past chat</div>
+            <div className="space-y-1.5">
+              {past.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => arm(p.id)}
+                  disabled={busy !== null}
+                  className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 bg-white p-2 text-left hover:border-amber-300 hover:bg-amber-50/40 disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-amber-900/50 dark:hover:bg-amber-950/20"
+                >
+                  <EveAvatar size={26} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[12px] text-zinc-800 dark:text-zinc-200">
+                      {p.preview || "(no message)"}
+                    </span>
+                    <span className="block text-[10px] text-zinc-400">
+                      {p.message_count} message{p.message_count === 1 ? "" : "s"}
+                      {p.disarmed_at ? ` · ${new Date(p.disarmed_at).toLocaleDateString()}` : ""}
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">Resume →</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -236,19 +272,20 @@ export default function GodModeTab() {
 
   return (
     <div className="flex flex-1 flex-col">
-      {/* Session header — status + Disarm */}
-      <div className="mb-2 flex items-center justify-between rounded-md border border-red-200 bg-red-50/40 px-2.5 py-1.5 dark:border-red-900/40 dark:bg-red-950/20">
-        <div className="text-[11px] text-red-800 dark:text-red-300">
-          <span className="font-semibold">GOD MODE ARMED</span>
-          {session.token_expires_at ? ` · idle-until ${new Date(session.token_expires_at).toLocaleTimeString()}` : ""}
-          {pendingCount > 0 ? ` · ${pendingCount} pending approval${pendingCount > 1 ? "s" : ""}` : ""}
+      {/* Session header — status + Send home */}
+      <div className="mb-2 flex items-center justify-between rounded-md border border-amber-200 bg-amber-50/50 px-2.5 py-1.5 dark:border-amber-900/40 dark:bg-amber-950/20">
+        <div className="flex items-center gap-1.5 text-[11px] text-amber-800 dark:text-amber-300">
+          <EveAvatar size={18} />
+          <span className="font-semibold">EVE&apos;S ON</span>
+          {session.token_expires_at ? ` · here till ${new Date(session.token_expires_at).toLocaleTimeString()} if idle` : ""}
+          {pendingCount > 0 ? ` · ${pendingCount} waiting on you` : ""}
         </div>
         <button
           onClick={disarm}
           disabled={busy !== null}
-          className="rounded-md border border-red-300 bg-white px-2 py-0.5 text-[11px] font-medium text-red-700 hover:bg-red-50 disabled:opacity-60 dark:border-red-900 dark:bg-zinc-900 dark:text-red-300 dark:hover:bg-red-950"
+          className="rounded-md border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-60 dark:border-amber-900 dark:bg-zinc-900 dark:text-amber-300 dark:hover:bg-amber-950"
         >
-          {busy === "disarming" ? "Disarming…" : "Disarm / kill"}
+          {busy === "disarming" ? "Sending home…" : "Send home"}
         </button>
       </div>
 
@@ -359,7 +396,7 @@ export default function GodModeTab() {
       {(payload.standingGrants ?? []).length > 0 && (
         <div className="mb-3 rounded-lg border border-zinc-200 bg-zinc-50/60 p-2.5 dark:border-zinc-800 dark:bg-zinc-900/40">
           <div className="mb-1 text-[11px] font-semibold text-zinc-700 dark:text-zinc-300">
-            Standing approvals — god mode won&apos;t ask about these
+            Standing approvals — Eve won&apos;t ask about these
           </div>
           <div className="flex flex-wrap gap-1.5">
             {(payload.standingGrants ?? []).map((g) => (
@@ -386,25 +423,33 @@ export default function GodModeTab() {
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto rounded-lg border border-zinc-100 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
         {messages.length === 0 && (
           <p className="py-6 text-center text-[11px] text-zinc-400">
-            No messages yet. Type below to start the god-mode session.
+            Say the word, boss 💋 Tell Eve what you need below.
           </p>
         )}
         {messages.map((m, i) =>
           m.role === "checklist" ? (
             <GodModeChecklist key={i} content={m.content} />
+          ) : m.role === "assistant" ? (
+            <div key={i} className="flex items-start gap-1.5">
+              <EveAvatar size={22} className="mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="mb-0.5 text-[10px] uppercase tracking-wide text-amber-500 dark:text-amber-400">Eve</div>
+                <div className="whitespace-pre-wrap rounded-lg rounded-tl-none border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100">
+                  {m.content}
+                </div>
+              </div>
+            </div>
           ) : (
             <div
               key={i}
               className={`whitespace-pre-wrap rounded-lg border px-2 py-1.5 text-xs ${
                 m.role === "user"
                   ? "border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-100"
-                  : m.role === "system"
-                    ? "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
-                    : "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+                  : "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
               }`}
             >
               <div className="mb-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
-                {m.role === "user" ? "You" : m.role === "system" ? "Update" : "Chief of staff"}
+                {m.role === "user" ? "You" : "Update"}
               </div>
               {m.content}
             </div>
@@ -419,7 +464,7 @@ export default function GodModeTab() {
           value={composer}
           onChange={(e) => setComposer(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendMessage(); } }}
-          placeholder="Message the box under god-mode… (⌘/Ctrl+Enter to send)"
+          placeholder="Message Eve… (⌘/Ctrl+Enter to send)"
           disabled={sending}
           className="min-h-16 flex-1 resize-none rounded-md border border-zinc-200 px-2 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-950"
         />

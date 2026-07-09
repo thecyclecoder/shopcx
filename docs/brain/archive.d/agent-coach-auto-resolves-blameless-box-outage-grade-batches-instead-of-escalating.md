@@ -1,0 +1,1 @@
+- **Agent-coach auto-resolves a blameless box-outage grade batch instead of escalating to the CEO** · verified 2026-07-08 · → [[../libraries/agent-coaching#blameless-box-outage-auto-resolve-skip-coaching-no-ceo-escalation]]

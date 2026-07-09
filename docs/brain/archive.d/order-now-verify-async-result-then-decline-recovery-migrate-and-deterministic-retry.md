@@ -1,0 +1,1 @@
+- **Order-now must verify the async charge result, route a decline to the update-payment journey, then deterministically retry on the migrated internal sub — Sol confirms last** · verified 2026-07-08 · → [[../lifecycles/subscription-billing]]

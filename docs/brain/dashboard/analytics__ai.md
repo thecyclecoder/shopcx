@@ -16,7 +16,7 @@ _None._
 
 ## API endpoints called
 
-- `/api/workspaces/:x/analytics/ai`
+- `/api/workspaces/:x/analytics/ai` — backed by [[../libraries/analytics-tile-rpcs]] `ai_ticket_analytics` RPC
 
 ## Permissions
 

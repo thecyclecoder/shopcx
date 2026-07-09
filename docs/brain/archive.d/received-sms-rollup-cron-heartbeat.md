@@ -1,0 +1,1 @@
+- **Make the Received SMS rollup cron emit Control Tower heartbeats** · verified 2026-07-09 · → [[../inngest/sms-callback-drain]]

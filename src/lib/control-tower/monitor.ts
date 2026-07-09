@@ -338,11 +338,76 @@ export function jobStuckSince(j: ActiveJob, workerStartedAt: string | null = nul
   return baseMs >= startedMs ? base : workerStartedAt;
 }
 
+/**
+ * SHA-direction between the deployed runtime (VERCEL_GIT_COMMIT_SHA) and the worker's `running_sha`.
+ * "same" ⇒ identical (or one is a prefix of the other); "worker-behind" ⇒ deployed is a descendant of
+ * running (the real self-update-stuck condition); "worker-ahead" ⇒ running is a descendant of deployed
+ * (the box has already pulled a newer main commit while Vercel still reports the previous one — deploy
+ * lag, NOT stuck); "unknown" ⇒ we can't classify (missing SHAs, unrelated commits, or the compare API
+ * failed). Only "worker-behind" produces the "self-update stuck" red — the false-positive that reddened
+ * a healthy box tile (signal loop:box, verdict monitor-false-positive): worker was running 6f43ec9e0
+ * while the deployed runtime still reported b3934ff, an ancestor of 6f43ec9e0.
+ */
+export type ShaDirection = "same" | "worker-behind" | "worker-ahead" | "unknown";
+
+/**
+ * Trivial local classification — no network call. Prefix-equal or identical ⇒ "same"; either side
+ * empty ⇒ "unknown". Every other case defers to the GitHub compare API (fetchShaDirection). Kept
+ * pure so it's the ONE definition the tests and the runtime share.
+ */
+export function classifyShaDirectionLocal(deployed: string, running: string): ShaDirection {
+  if (!deployed || !running) return "unknown";
+  const short = deployed.length <= running.length ? deployed : running;
+  const long = deployed.length <= running.length ? running : deployed;
+  if (long.slice(0, short.length) === short) return "same";
+  return "unknown";
+}
+
+const GH_REPO_FOR_COMPARE = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
+
+function ghCompareToken(): string | undefined {
+  return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
+}
+
+/**
+ * Ask GitHub which side is ahead — the direction check evalWorker gates its "behind" red on. Fails
+ * CLOSED to "unknown" (missing token, unreachable API, unrelated SHAs) so a transient API error can
+ * never turn a healthy worker into a red page. Called once per snapshot from buildControlTowerSnapshot.
+ */
+export async function fetchShaDirection(deployed: string, running: string): Promise<ShaDirection> {
+  const local = classifyShaDirectionLocal(deployed, running);
+  if (local !== "unknown") return local;
+  if (!ghCompareToken() || !deployed || !running) return "unknown";
+  try {
+    // base = running, head = deployed. GitHub returns `status`: "identical" | "ahead" | "behind" | "diverged".
+    // "ahead"  ⇒ head (deployed) is ahead of base (running) ⇒ WORKER-BEHIND.
+    // "behind" ⇒ head (deployed) is behind base (running)   ⇒ WORKER-AHEAD (deploy lag — healthy).
+    const url = `https://api.github.com/repos/${GH_REPO_FOR_COMPARE}/compare/${encodeURIComponent(running)}...${encodeURIComponent(deployed)}`;
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${ghCompareToken()}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      cache: "no-store",
+    });
+    if (!r.ok) return "unknown";
+    const body = (await r.json()) as { status?: string };
+    if (body.status === "identical") return "same";
+    if (body.status === "ahead") return "worker-behind";
+    if (body.status === "behind") return "worker-ahead";
+    return "unknown"; // "diverged" or an unrecognized status — stay conservative.
+  } catch {
+    return "unknown";
+  }
+}
+
 export function evalWorker(
   loop: MonitoredLoop,
   row: WorkerRow | null,
   queuedCount = 0,
   manualDrain = false,
+  shaDirection: ShaDirection = "unknown",
 ): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
@@ -373,41 +438,49 @@ export function evalWorker(
     const reset = row.accounts.soonest_reset ? ` — soonest reset ${elapsed(row.accounts.soonest_reset)} away` : "";
     return { ...base, color: "amber", statusText: `all Max accounts capped — builds parked, auto-resume${reset}`, detail: row.detail ?? null, violation: null };
   }
-  // running_sha behind origin/main (deployed SHA) for longer than the grace window
-  // ⇒ self-update is broken (the worker is alive but stuck on old code). Only pages
-  // when the worker is IDLE — a busy worker legitimately DEFERS self-update until its
-  // in-flight lanes clear (sacrosanct), so behind-while-building is healthy, not stuck.
+  // SHA-direction gate (control-tower-box-sha-direction-check, signal loop:box, verdict
+  // monitor-false-positive). The prior check compared `deployed.slice(0, running.length) !== running`
+  // and reddened on ANY mismatch — false-paging on the healthy worker-ahead case where the box had
+  // already pulled a newer main commit while the deployed Vercel runtime was still reporting the
+  // previous ancestor (the originating incident: running 6f43ec9e0, deployed still on b3934ff). We
+  // now gate red ONLY on a CONFIRMED worker-behind (deployed is a descendant of running per the
+  // GitHub compare API): "worker-ahead" stays green with a deploy-lag note; "unknown" stays
+  // conservative — no red on an ambiguous compare (same posture as deployAgeMs==null).
   const deployed = process.env.VERCEL_GIT_COMMIT_SHA || "";
   const running = row.running_sha || "";
   const idle = (row.active_builds ?? 0) === 0;
-  const behind = !!deployed && !!running && deployed.slice(0, running.length) !== running;
+
+  // Worker-ahead ⇒ deploy lag, not stuck. Never red.
+  if (shaDirection === "worker-ahead") {
+    return { ...base, color: "green", statusText: `healthy · ${running || "?"} · deploy lag (Vercel on ${deployed.slice(0, 7)})`, detail: row.detail ?? null, violation: null };
+  }
+  // Only a CONFIRMED worker-behind enters the queue-aware / behind-red logic below. "same" and
+  // "unknown" both fall through to the healthy return at the bottom.
+  if (shaDirection !== "worker-behind") {
+    return { ...base, color: "green", statusText: `healthy · ${running || "?"} · last poll ${elapsed(row.last_poll_at)} ago`, detail: row.detail ?? null, violation: null };
+  }
   // Mirror the worker's queue-aware self-update deferral (scripts/builder-worker.ts:4290 —
   // self-restart-defers-to-idle): when the box is IDLE but `queued > 0` AND no manual drain is set,
   // the worker INTENTIONALLY parks the self-update until a sustained idle so a cascade of queued
-  // builds isn't restarted between specs. Reading that as "self-update stuck" was the monitor false
-  // positive (loop:box) — the worker is behaving exactly as designed. A MANUAL queue-restart
-  // (worker_controls.drain_for_update) still restarts at idle regardless of the queue (that's its
-  // purpose), so behindTooLong still reds at grace under a manual drain.
-  const queueDeferred = behind && idle && queuedCount > 0 && !manualDrain;
+  // builds isn't restarted between specs. A MANUAL queue-restart (worker_controls.drain_for_update)
+  // still restarts at idle regardless of the queue (that's its purpose), so behindTooLong still
+  // reds at grace under a manual drain.
+  const queueDeferred = idle && queuedCount > 0 && !manualDrain;
   if (queueDeferred) {
     return { ...base, color: "green", statusText: `idle — update deferred · ${queuedCount} queued (${running} → ${deployed.slice(0, 7)} on sustained idle)`, detail: row.detail ?? null, violation: null };
   }
   // Red when behind+idle AND past shaGrace AND not queue-deferred (queue empty OR manual drain set).
-  const behindTooLong = behind && idle && !queueDeferred && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
+  const behindTooLong = idle && !queueDeferred && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
   if (behindTooLong) {
     return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — self-update stuck for ${elapsed(row.started_at)}${manualDrain ? " (manual drain set)" : ""}.` } };
   }
-  // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring
-  // self-update until its lanes clear (sacrosanct — never kill an in-flight build). That's
-  // healthy, not a warning — keep it GREEN so a normal post-deploy build doesn't false-amber.
-  if (behind && !idle) {
+  // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring self-update
+  // until its lanes clear (sacrosanct — never kill an in-flight build).
+  if (!idle) {
     return { ...base, color: "green", statusText: `building — update deferred (${running} → ${deployed.slice(0, 7)} when idle)`, detail: row.detail ?? null, violation: null };
   }
   // Behind + IDLE but within grace ⇒ it should self-update on its next poll; brief amber.
-  if (behind) {
-    return { ...base, color: "amber", statusText: `updating — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: null };
-  }
-  return { ...base, color: "green", statusText: `healthy · ${running || "?"} · last poll ${elapsed(row.last_poll_at)} ago`, detail: row.detail ?? null, violation: null };
+  return { ...base, color: "amber", statusText: `updating — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: null };
 }
 
 /**
@@ -459,6 +532,42 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
       return { ...base, color: "amber", statusText: "beat read unavailable — status unknown", violation: null };
     }
     const window = loop.livenessWindowMs ?? 26 * 60 * 60_000;
+    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace, refined by
+    // control-tower-cron-grace-uses-next-firing-after-registration, refined again by
+    // control-tower-registered-not-firing-observed-anchor-grace, and again by
+    // received-sms-rollup-cron-heartbeat Phase 3 Fix 2 to gate the never_fired path too):
+    // computed BEFORE the never_fired / registered_not_firing reds so a loop still inside its
+    // first-firing window can't be false-paged by EITHER deploy-anchored `deployAgeMs` or the
+    // watchdog-uptime `monitorUptimeMs` backstop. Without this ordering, a freshly-registered
+    // loop whose box worker has been up for > window (deployAgeMs > window) trips `never_fired`
+    // even when the loop entry itself is only minutes old — the exact received-sms-rollup-cron
+    // Fix-1 regression whose alert flipped reason='registered_not_firing' → 'never_fired' the
+    // moment Phase 2's registeredAt landed. Post-Fix-2 the same grace clock (max of computed
+    // first-firing and the empirical first_observed_at) governs both reds — the intent of the
+    // per-loop reference has always been "how long has this loop been registered", and that
+    // applies to BOTH the deploy-anchored AND the watchdog-anchored gates.
+    //
+    // `registeredAt` (a code constant, deploy-SURVIVING unlike deployAgeMs) is the WRONG grace
+    // clock on its own when it falls before the cron's hour-of-day: security-dep-watch
+    // (`0 4 * * *`) registered at 00:00 UTC has 4h before its first valid tick, so a 26h window
+    // measured from 00:00 trips at 02:00 the next day, 2h before it has actually had a chance
+    // to fire. We use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed from
+    // expectedCadence) — preserves the red for genuinely-dead schedules but removes the
+    // boundary false-page. And we additionally take the MAX with the empirical `first_observed_at`
+    // (from monitored_loops_first_seen) so a hand-edited registeredAt SET BEFORE the cron
+    // actually shipped (fleet-spend-governor: registeredAt 00:00 with cadence `10,40 * * * *`
+    // → computed first-firing 00:10 SAME day → grace evaporates the moment the deploy lands
+    // hours later) can never shorten the grace below "we have empirically seen this loop
+    // registered for at least one full window." Unset (legacy crons) ⇒ no extra gate → the
+    // reds below still apply.
+    const firstFiringMs = firstScheduledFiringMs(loop, firstObservedMs);
+    const sinceFirstFiringMs = firstFiringMs != null ? Date.now() - firstFiringMs : null;
+    if (everBeatCount === 0 && sinceFirstFiringMs != null && sinceFirstFiringMs <= window) {
+      const statusText = sinceFirstFiringMs >= 0
+        ? `awaiting first run — first scheduled firing ${fmtDur(sinceFirstFiringMs)} ago (within ${fmtDur(window)} cadence+grace)`
+        : `awaiting first run — first scheduled firing in ${fmtDur(-sinceFirstFiringMs)}`;
+      return { ...base, color: "amber", statusText, violation: null };
+    }
     if (everBeatCount === 0 && deployAgeMs != null && deployAgeMs > window) {
       return {
         ...base,
@@ -482,38 +591,11 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
     // set, the schedule just isn't active. monitorUptimeMs alone is NOT enough to say a cron has had a
     // window to fire, though: it's the watchdog's run-span, independent of when a given cron was ADDED,
     // so a cron shipped after the watchdog passed its window would false-trip on day one (the
-    // control-tower-registered-not-firing-newcron-grace signal). The registeredAt grace just below adds
-    // the missing per-loop reference; a registered cron that still produces nothing a full window past
-    // BOTH a provably-alive watchdog AND its own registration IS the problem we want to page.
+    // control-tower-registered-not-firing-newcron-grace signal). The newcron grace above gates this
+    // check too so a registered cron that still produces nothing a full window past BOTH a
+    // provably-alive watchdog AND its own registration IS the problem we want to page.
     // (monitorUptimeMs is conservative — beat retention can only shorten it, never inflate it — so it
     // never over-fires; null = unknown ⇒ stay amber.)
-    //
-    // NEWLY-ADDED-CRON GRACE (control-tower-registered-not-firing-newcron-grace, refined by
-    // control-tower-cron-grace-uses-next-firing-after-registration, refined again by
-    // control-tower-registered-not-firing-observed-anchor-grace): monitorUptimeMs is the
-    // watchdog's OWN run-span, independent of when THIS cron was added — so a long-cadence cron
-    // shipped AFTER the watchdog passed its window would trip the moment it deploys, hours before
-    // its first scheduled tick. registeredAt (a code constant, deploy-SURVIVING unlike
-    // deployAgeMs) gives a per-loop "how long has this cron been registered" reference — but
-    // `registeredAt` itself is the WRONG grace clock when it falls before the cron's hour-of-day:
-    // security-dep-watch (`0 4 * * *`) registered at 00:00 UTC has 4h before its first valid tick,
-    // so a 26h window measured from 00:00 trips at 02:00 the next day, 2h before it has actually
-    // had a chance to fire. We use the first scheduled firing AT-OR-AFTER `registeredAt` (parsed
-    // from expectedCadence) — preserves the red for genuinely-dead schedules but removes the
-    // boundary false-page. And we additionally take the MAX with the empirical
-    // `first_observed_at` (from monitored_loops_first_seen) so a hand-edited registeredAt SET
-    // BEFORE the cron actually shipped (fleet-spend-governor: registeredAt 00:00 with cadence
-    // `10,40 * * * *` → computed first-firing 00:10 SAME day → grace evaporates the moment the
-    // deploy lands hours later) can never shorten the grace below "we have empirically seen this
-    // loop registered for at least one full window." Unset (legacy crons) ⇒ no extra gate.
-    const firstFiringMs = firstScheduledFiringMs(loop, firstObservedMs);
-    const sinceFirstFiringMs = firstFiringMs != null ? Date.now() - firstFiringMs : null;
-    if (everBeatCount === 0 && sinceFirstFiringMs != null && sinceFirstFiringMs <= window) {
-      const statusText = sinceFirstFiringMs >= 0
-        ? `awaiting first run — first scheduled firing ${fmtDur(sinceFirstFiringMs)} ago (within ${fmtDur(window)} cadence+grace)`
-        : `awaiting first run — first scheduled firing in ${fmtDur(-sinceFirstFiringMs)}`;
-      return { ...base, color: "amber", statusText, violation: null };
-    }
     if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
       return {
         ...base,
@@ -581,8 +663,41 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
 //     running but producing nothing useful — e.g. erroring on every ticket).
 // A genuinely-idle agent (no work waiting, no runs) is GREEN — no false positives.
 
+// control-tower-fraud-detector-workprobe-exclude-internal-renewals (signal
+// loop:ai:fraud-detector, verdict monitor-false-positive): source_name values
+// written by the internal subscription-renewal loop (see
+// src/lib/inngest/internal-subscription-renewals.ts — the regular renewal path
+// stamps `internal_subscription_renewal`, the $0 comp path stamps
+// `internal_subscription_comp_renewal`). Those orders are created by the billing
+// renewal cron and NEVER emit `fraud/order.check`, so `checkOrderForFraud` never
+// runs for them by design. Counting them as fraud-detector work makes a quiet
+// renewal-only window read as "work=1 / 0 beats" and false-fires `idle_while_work`
+// on the `ai:fraud-detector` tile. Real Shopify webhooks pass their upstream
+// `source_name` through and DO fire the fraud gate (shopify-webhooks.ts:776);
+// internal storefront checkouts stamp `source_name="storefront"` and call
+// `checkOrderForFraud` directly (src/app/api/checkout/route.ts:946) — both stay
+// in the probe's work count. Standing pattern for this class of monitor
+// false-positive: mirror the source filter at the probe, not a JS post-filter.
+export const INTERNAL_RENEWAL_ORDER_SOURCE_NAMES = [
+  "internal_subscription_renewal",
+  "internal_subscription_comp_renewal",
+] as const;
+
+/**
+ * True iff an `orders` row is upstream work the fraud detector is expected to
+ * screen. Internal renewal orders are the ONE class we exclude — every other
+ * shape (Shopify webhook, storefront, unknown/null `source_name`) DOES route
+ * through `checkOrderForFraud` and stays in the work count. Kept as a pure
+ * predicate so the DB-side probe filter and the unit test share one definition.
+ */
+export function isOrderAwaitingFraudScreen(order: { source_name?: string | null }): boolean {
+  const src = order.source_name ?? null;
+  if (src === null) return true;
+  return !(INTERNAL_RENEWAL_ORDER_SOURCE_NAMES as readonly string[]).includes(src);
+}
+
 /** Per-inline-agent window state: upstream work + ok/errored beat counts + latest/history. */
-interface InlineAgentState {
+export interface InlineAgentState {
   /** independent upstream-demand count over the window (the inlineWorkSignal probe). */
   work: number;
   /** successful beats in the window. */
@@ -595,7 +710,7 @@ interface InlineAgentState {
   history: LoopHistoryRow[];
 }
 
-function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefined): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+export function evalInlineAgent(loop: MonitoredLoop, state: InlineAgentState | undefined): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const s = state ?? { work: 0, okCount: 0, errCount: 0, latest: null, history: [] };
   const base = {
     id: loop.id,
@@ -713,10 +828,21 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             return count ?? 0;
           }
           case "orders-awaiting-fraud-screen": {
+            // Feeder-surface mirror (control-tower-fraud-detector-workprobe-exclude-internal-renewals,
+            // signal loop:ai:fraud-detector). Real fraud-detector work = orders whose creation path
+            // fires `fraud/order.check` → `checkOrderForFraud`. Shopify webhooks
+            // (src/lib/shopify-webhooks.ts:776) and the storefront checkout route
+            // (src/app/api/checkout/route.ts:946) both do so; the internal subscription-renewal cron
+            // (src/lib/inngest/internal-subscription-renewals.ts) does NOT. So exclude the two
+            // internal-renewal source_name markers here — the same predicate that
+            // isOrderAwaitingFraudScreen enforces in JS. NULL source_name stays in the count
+            // (defensive: unknown-source orders are treated as real; matches the pre-fix behavior).
+            const excluded = INTERNAL_RENEWAL_ORDER_SOURCE_NAMES.map((n) => `"${n}"`).join(",");
             const { count } = await admin
               .from("orders")
               .select("id", { count: "exact", head: true })
-              .gte("created_at", sinceIso);
+              .gte("created_at", sinceIso)
+              .or(`source_name.is.null,source_name.not.in.(${excluded})`);
             return count ?? 0;
           }
           case "tickets-awaiting-decision": {
@@ -724,7 +850,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // callSonnetOrchestratorV2. Inbound traffic with 0 successful decision beats means
             // the per-ticket decision agent went silent (couldn't reply or act on anyone).
             //
-            // Three legitimate-bypass classes are subtracted because each one is an inbound
+            // Four legitimate-bypass classes are subtracted because each one is an inbound
             // customer message that, by design, will NOT produce an ai:orchestrator beat:
             //
             // (1) CSAT-reopen path (control-tower-ticket-decision-workprobe-scope): not every
@@ -752,18 +878,36 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     ai:orchestrator tile red. An active-playbook ticket has a designated handler
             //     that already owns the message.
             //
-            // A still-OPEN, no-playbook ticket with no beat keeps counting, so a genuine
-            // orchestrator outage (inbound traffic piling up on tickets nothing can close or
-            // hand to a playbook) still alerts; a normally-served ticket that the orchestrator
-            // closed has its own ok beat, so dropping it from the work count never manufactures
-            // a false negative.
+            // (4) Sol first-touch dispatch (ticket-decision-workprobe-exclude-sol-first-touch,
+            //     see sol-ticket-direction-artifact-and-first-touch-box-session): a first-touch
+            //     inbound on a channel with sol_first_touch_enabled=true is served by a Sol
+            //     ticket-handle agent_job — unified-ticket-handler.ts:498-522 acks the customer
+            //     and writes a ticket_resolution_events row with reasoning='sol_first_touch_ack',
+            //     then enqueues kind='ticket-handle' where the box authors the Direction + first
+            //     reply. callSonnetOrchestratorV2 never runs on that inbound so no ai:orchestrator
+            //     beat is emitted. On Superfoods every channel has the flag on, so a single quiet-
+            //     window Sol-first-touch inbound would flip the tile red on healthy traffic.
+            //     The ticket_resolution_events row is the durable server-side ground-truth ledger
+            //     of that dispatch (see docs/brain/tables/ticket_resolution_events.md).
             //
-            // All three exclusions are expressed as a single positive-match
-            // (closed OR csat:reopened OR active_playbook_id IS NOT NULL) subtraction — NULL-safe
-            // (tickets with NULL/empty tags or NULL active_playbook_id still count) and
-            // overlap-free (a csat:reopened ticket that later closes is counted once, not
-            // double-subtracted), unlike a negated array filter.
-            const [allRes, excludedRes] = await Promise.all([
+            // A still-OPEN, no-playbook, no-Sol-first-touch ticket with no beat keeps counting,
+            // so a genuine orchestrator outage (inbound traffic piling up on tickets nothing can
+            // close or hand to a playbook / Sol) still alerts; a normally-served ticket that the
+            // orchestrator closed has its own ok beat, so dropping it from the work count never
+            // manufactures a false negative.
+            //
+            // The first three exclusions are expressed as a single positive-match on the
+            // tickets row (closed OR csat:reopened OR active_playbook_id IS NOT NULL) —
+            // NULL-safe (tickets with NULL/empty tags or NULL active_playbook_id still count)
+            // and overlap-free (a csat:reopened ticket that later closes is counted once, not
+            // double-subtracted). The Sol-first-touch class lives on a sibling table
+            // (ticket_resolution_events), so it runs as a parallel query joining
+            // ticket_messages → tickets → ticket_resolution_events(reasoning='sol_first_touch_ack').
+            // Overlap between the two exclusion sets (e.g. a Sol-first-touch ticket that later
+            // closed) can double-subtract, which is safe: it only lowers the work count further,
+            // never inflates it, so the tile still can't false-fire idle_while_work — and a
+            // genuinely orchestrator-owned ticket sits in neither set, so no false negatives.
+            const [allRes, excludedRes, solFirstTouchRes] = await Promise.all([
               admin
                 .from("ticket_messages")
                 .select("id", { count: "exact", head: true })
@@ -777,8 +921,18 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .or("status.eq.closed,tags.cs.{csat:reopened},active_playbook_id.not.is.null", { referencedTable: "tickets" }),
+              admin
+                .from("ticket_messages")
+                .select("id, tickets!inner(id, ticket_resolution_events!inner(id))", { count: "exact", head: true })
+                .eq("direction", "inbound")
+                .eq("author_type", "customer")
+                .gte("created_at", sinceIso)
+                .eq("tickets.ticket_resolution_events.reasoning", "sol_first_touch_ack"),
             ]);
-            return Math.max(0, (allRes.count ?? 0) - (excludedRes.count ?? 0));
+            return Math.max(
+              0,
+              (allRes.count ?? 0) - (excludedRes.count ?? 0) - (solFirstTouchRes.count ?? 0),
+            );
           }
           default:
             return 0;
@@ -1358,6 +1512,15 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const queuedCount = activeJobs.filter((j) => j.status === "queued" || j.status === "queued_resume").length;
   const manualDrain = !!(workerCtrl as { drain_for_update: boolean } | null)?.drain_for_update;
 
+  // SHA-direction (control-tower-box-sha-direction-check, signal loop:box). Classify the box
+  // worker's running_sha vs VERCEL_GIT_COMMIT_SHA via the GitHub compare API BEFORE evalWorker
+  // decides "behind" — a plain prefix mismatch can't tell stale-code (worker-behind) from deploy
+  // lag (worker-ahead). Fails CLOSED to "unknown" (no red on an ambiguous compare, mirroring the
+  // deployAgeMs==null posture). Prefix-equal SHAs are resolved locally (no round-trip).
+  const deployedShaForDirection = process.env.VERCEL_GIT_COMMIT_SHA || "";
+  const runningShaForDirection = (workerRow as WorkerRow | null)?.running_sha ?? "";
+  const shaDirection = await fetchShaDirection(deployedShaForDirection, runningShaForDirection);
+
   // Empirical first-observed-at anchor (control-tower-registered-not-firing-observed-anchor-grace
   // P1). Build the loop_id → first_seen_at(ms) map from the read above, then best-effort upsert a
   // fresh row for every registered loop missing one — on-conflict-do-nothing so the FIRST tick that
@@ -1403,7 +1566,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const history = byLoop.get(loop.id) ?? [];
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
-    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain);
+    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
@@ -1568,6 +1731,32 @@ export async function runControlTowerMonitor(): Promise<MonitorResult> {
       } else {
         // Newly red → open an incident + page owners. The partial unique index is
         // the backstop against a racing double-open (concurrency-1 cron makes it rare).
+        //
+        // Snapshot-vs-write race guard (cron_freshness only): the snapshot's beats
+        // read happens ~ms before this insert. For a cron whose livenessWindowMs is
+        // ~2× its cadence, the next scheduled firing's heartbeat can land in the same
+        // second the alert row is being written (loop:portal-auto-resume-cron — 20:15
+        // UTC beat wrote at 20:15:12.049, snapshot-based alert would have written at
+        // 20:15:12.281 → false page). Re-read the single most recent beat right at
+        // the write moment; if it's now within the window, the cron has already
+        // recovered mid-tick — skip the insert. A truly stale cron still has no
+        // fresh beat, so the assertion is unchanged for real failures.
+        if (loop.violation.reason === "cron_freshness") {
+          const { data: fresh } = await admin
+            .from("loop_heartbeats")
+            .select("ran_at")
+            .eq("loop_id", loop.id)
+            .order("ran_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (fresh?.ran_at) {
+            const def = MONITORED_LOOPS.find((l) => l.id === loop.id);
+            const windowMs = def?.livenessWindowMs ?? 26 * 60 * 60_000;
+            if (Date.now() - new Date(fresh.ran_at).getTime() <= windowMs) {
+              continue;
+            }
+          }
+        }
         const { error } = await admin.from("loop_alerts").insert({
           loop_id: loop.id,
           kind: loop.kind,

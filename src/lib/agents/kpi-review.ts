@@ -87,9 +87,6 @@ const TOLERANCE_OVERRIDES: Record<string, number> = {
   error_mttr_hours: 0.05,
   idea_to_merge_hours: 0.05,
   time_to_approve_hours: 0.05,
-  // Per-worker grade aggregates pick up grading writes between snapshots.
-  worker_grade_rollup: 0.05,
-  director_call_grade: 0.05,
   // Loop health is a CURRENT-STATE point read — open loop_alerts and the latest-beat-per-loop set
   // churn in the seconds between the snapshot write and the audit re-run.
   loop_health: 0.05,

@@ -1,0 +1,1 @@
+- **Control Tower: stop counting internal renewal orders as awaited fraud detector work** · verified 2026-07-09 · → [[../libraries/control-tower]]

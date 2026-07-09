@@ -66,7 +66,7 @@ The sidebar renders multiple cards stacked vertically. Each is independently exp
 - **Reply via Improve tab**: open Improve → click "Regenerate AI suggestion with context" → type a hint → review → Approve & Send. Same pattern as social-comments.
 - **Issue replacement**: Actions section → "Create replacement" → pick variant + quantity → ships free. Backed by [[../recipes/issue-replacement]].
 - **Heal**: Improve tab → if the AI flagged a verification gap, recipes from [[../lifecycles/research-and-heal]] surface here with manual-execute buttons.
-- **Escalate**: Details section → "Escalated To" dropdown. **🤖 AI Routine** sits at the top (the first-class default) — selecting it routes the ticket to the idle-triage routine (`escalated_at` set, `escalated_to = null`, via a `{ escalate_to_routine: true }` PATCH to `/api/tickets/[id]`), which the hourly cron picks up ([[../inngest/triage-escalations]]). Picking a specific person instead sets `escalated_to = their uuid` (human-owned; the routine skips it). "Not escalated" clears both. The header renders **"AI Routine"** (not blank) whenever `escalated_at` is set with `escalated_to` null. See [[../specs/escalate-to-routine-by-default]].
+- **Escalate**: Details section → "Escalated To" dropdown. The routine escalation surfaces as **💬 June** (CS Director) with her headshot — the ticket UI resolves the routine target to the [[../libraries/cs-director|CS Director]] persona (`PERSONAS['cs-director']` in `src/lib/agents/personas.ts`) via `resolveEscalationPersona` in `src/lib/ticket-escalation-persona.ts`, so the field shows the real reviewer (June — the third-rung hard-caller above the [[../specs/box-escalation-triage|escalation-triage]] quorum, per [[../specs/cs-director-third-rung-hard-calls-above-triage-quorum]]) rather than a generic "🤖 AI Routine" label. The identity block above the select renders `PersonaAvatar` from [[../libraries/agent-personas|agent-personas]] (the same org/roster renderer — June's `avatarUrl` = `agent-avatars/june-cs.jpg`) + her 💬 emoji + name + role. Selecting it still routes to the idle-triage routine (`escalated_at` set, `escalated_to = null`, via a `{ escalate_to_routine: true }` PATCH to `/api/tickets/[id]`), which the hourly cron picks up ([[../inngest/triage-escalations]]) — June's hard-call runs when quorum can't resolve it. Picking a specific person instead sets `escalated_to = their uuid` (human-owned; the routine skips it). "Not escalated" clears both. See [[../specs/escalate-to-routine-by-default]].
 - **Unmerge / merge**: Actions → Merge into another ticket (drops to archived with `merged_into` set) or unarchive.
 
 ## Permissions
@@ -74,6 +74,10 @@ The sidebar renders multiple cards stacked vertically. Each is independently exp
 - **Improve tab + API logs tab**: owner / admin only.
 - Other tabs + sidebar: any role that can see tickets (owner / admin / agent / social).
 - Mutation buttons in sidebar respect role (e.g. only owner / admin can force-cancel a subscription on someone else's customer).
+
+## APIs and aggregations
+
+The ticket detail route `src/app/api/tickets/[id]/route.ts` calls [[../libraries/detail-view-rpcs]] for customer enrichment — `resolve_customer_link_group` (customer link expansion) and `ticket_users` (per-author display names) — to collapse the round-trip fan-out.
 
 ## Related
 

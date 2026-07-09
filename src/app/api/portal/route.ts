@@ -19,6 +19,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // Phase 2: every subscription mutation is gated while the first-delivery window
 // holds — the route list lives with the gate itself so it can be unit-tested.
 import { MUTATION_GATED_ROUTES } from "@/lib/portal/mutation-guard";
+// Phase 1 of portal-errors-route-to-sol-first-escalate-to-june-on-rail: on the
+// happy path a portal error creates a Sol first-touch ticket-handle job (not a
+// triage-escalations job) — see [[../../../lib/portal/enqueue-sol-first-touch]].
+import { enqueueSolFirstTouchForPortalError } from "@/lib/portal/enqueue-sol-first-touch";
 
 function jsonErr(body: Record<string, unknown>, status = 400) {
   return NextResponse.json({ ok: false, ...body }, { status });
@@ -202,6 +206,7 @@ async function handle(req: NextRequest) {
             const errText = body?.message || body?.detail;
             const note = `[System] Customer's portal action failed and could not self-serve.\nAction: ${route}\nError: ${body?.error || response.status}${errText ? ` — ${errText}` : ""}\nDetails: ${JSON.stringify(requestPayload || {})}`;
             let ticketId = existing?.id as string | undefined;
+            let ticketIsNew = false;
             if (!ticketId) {
               const { data: ticket } = await adminDb
                 .from("tickets")
@@ -217,6 +222,7 @@ async function handle(req: NextRequest) {
                 .select("id")
                 .single();
               ticketId = ticket?.id as string | undefined;
+              ticketIsNew = Boolean(ticketId);
             }
             if (ticketId) {
               await adminDb.from("ticket_messages").insert({
@@ -226,6 +232,31 @@ async function handle(req: NextRequest) {
                 author_type: "system",
                 body: note,
               });
+              // Phase 1 of portal-errors-route-to-sol-first-escalate-to-june-on-rail:
+              // route the portal error to Sol's first-touch ticket-handle path so she
+              // authors the durable Direction (intent = portal-error remediation) and
+              // ships the customer-facing fix. The June-triage path stays available as
+              // Sol's Phase 3 rail hit — no triage-escalations job on the happy path.
+              // Dedupe lives inside the helper (skips when an in-flight ticket-handle
+              // job already covers this ticket), so a retry that reuses the last-hour
+              // open ticket never fans out a second Sol session.
+              try {
+                await enqueueSolFirstTouchForPortalError(adminDb, {
+                  workspace_id: auth.workspaceId,
+                  ticket_id: ticketId,
+                  route,
+                  error_code: typeof body?.error === "string" ? body.error : null,
+                });
+              } catch (e) {
+                // Never wedge the customer-facing HTTP response on a Sol enqueue miss —
+                // the ticket is already created; the auto-heal cron will still surface
+                // the ticket. Log and continue.
+                console.error(
+                  "[portal] sol first-touch enqueue failed (non-fatal):",
+                  e instanceof Error ? e.message : e,
+                  { ticketId, route, isNew: ticketIsNew },
+                );
+              }
             }
           } catch (e) {
             console.error("[portal] error-ticket create failed (non-fatal):", e instanceof Error ? e.message : e);

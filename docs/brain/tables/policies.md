@@ -53,6 +53,16 @@ const { count } = await admin.from("policies")
   .gte("created_at", since);
 ```
 
+## How Sol uses this (first-touch box session)
+
+Sol's ticket-handle box session ([[../libraries/ticket-directions]] · `.claude/skills/ticket-handle/SKILL.md`) reads this table on turn 1 — `loadActivePoliciesBlock(workspace_id)` in `scripts/builder-worker.ts` `loadTicketHandleBrief` selects `slug, name, internal_summary WHERE is_active = true AND superseded_by IS NULL ORDER BY slug` and appends the rows as a `CURRENT POLICIES` block in her prompt (same select shape sonnet-orchestrator-v2 uses at `:465` and ticket-analyzer at `:248` — one rulebook the entire agent layer reads from). `get_policies` in `src/lib/improve-tools.ts` re-fetches live.
+
+Three durable rules (folded from [[../specs/sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session]] · derived-from-ticket 87ce35a1):
+
+1. **Policy review is mandatory.** `context_summary` MUST name the specific policy (by slug or name) Sol evaluated the ask against, and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. Absence of a clearly-applicable policy = `needs_human`, not permission.
+2. **Never bait or promise an out-of-policy outcome.** [[../libraries/sol-policy-bait-guard]] validates Sol's DRAFT `first_reply` before the send fires — an out-of-policy verdict + a promised remedy is BLOCKED, and any reply that stacks multiple returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life).
+3. **Real playbook or honest stateless.** `chosen_path='playbook'` requires a real workspace-existing `playbook_slug`; the writer rejects an empty / whitespace / invented slug. When no playbook matches, Sol chooses `stateless` (or `needs_info`) — never fakes a playbook path.
+
 ## Gotchas
 
 - 5 canonical policies. Replaces ~60 scattered `sonnet_prompts` rules.
@@ -64,4 +74,4 @@ const { count } = await admin.from("policies")
 
 ---
 
-[[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
+[[../README]] · [[../libraries/ticket-directions]] · [[../libraries/sol-policy-bait-guard]] · [[../../CLAUDE]] · [[../../DATABASE]]

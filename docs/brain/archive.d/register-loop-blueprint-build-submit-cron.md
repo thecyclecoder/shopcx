@@ -1,0 +1,1 @@
+- **Register monitored loop: blueprint-build-submit-cron** · verified 2026-07-09 · → [[libraries/control-tower]]

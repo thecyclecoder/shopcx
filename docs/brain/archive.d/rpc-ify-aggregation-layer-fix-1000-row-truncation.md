@@ -1,0 +1,1 @@
+- **RPC-ify the aggregation layer — kill the 1000-row truncation bugs** · verified 2026-07-09 · → [[../libraries/customer-stats]]

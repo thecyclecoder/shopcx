@@ -46,6 +46,10 @@ function timelineToText(t: CustomerTimeline) : string
 
 ### `AnomalySeverity` — type
 
+## Server-side aggregation (RPC)
+
+The customer link-group expansion (`resolveLinkedCustomerIds`) was refactored to call the server-side `public.resolve_customer_link_group` RPC (Phase 5 of [[../libraries/detail-view-rpcs]]), replacing the prior two-hop JS scan. This collapses the customer-detail round-trip fan-out and converges every link-group expansion onto one SQL primitive.
+
 ## Callers
 
 - `src/app/api/tickets/[id]/timeline/route.ts`

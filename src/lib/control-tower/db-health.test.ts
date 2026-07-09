@@ -15,15 +15,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   analyzeInstanceHealth,
+  analyzeRequestVolume,
   analyzeSlowQuery,
   buildFixSpecMarkdown,
   classifyExplainPlan,
   enqueueDbHealthProposal,
   getDbHealthPanel,
   isForeignQuery,
+  isInfrastructuralQuery,
   isMaintenanceCommand,
   type InstanceHealthInput,
   type DbHealthFinding,
+  type RequestVolumeInput,
   type SlowQueryRow,
 } from "./db-health";
 import type { createAdminClient } from "@/lib/supabase/admin";
@@ -477,6 +480,81 @@ test("analyzeSlowQuery — tickets `tags @> $3` at 4ms×1.27M diagnosed high_cal
   assert.match(finding!.evidence, /GIN/);
 });
 
+test("analyzeSlowQuery — cumulative-over-floor but Δcalls/hr under flag → SELF-CLEARS (db-reduce-calls-q Fix 1)", () => {
+  // The named failing state from .box/spec-db-reduce-calls-q-1756037457588317045.md Fix 1: after the
+  // 2s TTL cache on getSpec landed, the DB Health Agent's next slow-query pass STILL flagged
+  // dbhealth:slowq:-1756037457588317045 as high_call_volume because pg_stat_statements is CUMULATIVE
+  // since the last stats reset (Supabase's postgres role isn't superuser, so pg_stat_reset() is
+  // denied). Cumulative calls 220,990 kept the SLOW_QUERY_MIN_TOTAL_MS 30s floor tripped even though
+  // the post-cache call RATE dropped. Mirror the temp_bytes rate flag: when a priorRow + reading age
+  // is available, compare Δcalls/hr + Δtotal_ms/hr against a rate flag; only THAT is the self-clearing
+  // predicate. Same shape as the tempBytesPrev / tempReadingAgeHours pattern in analyzeInstanceHealth.
+  const row = slowRow({
+    queryid: "-1756037457588317045",
+    query: "select spec, phases from public.get_spec_with_phases($1::uuid, $2::text)",
+    calls: 220_990,
+    total_exec_time: 32_000, // over SLOW_QUERY_MIN_TOTAL_MS (30_000) — cumulative flag WOULD fire
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+    rows: 179_473,
+  });
+  // Prior snapshot from the last box heartbeat, ~1h ago: +200 calls in the last hour is well under
+  // the SLOW_QUERY_MIN_CALLS_PER_HR flag → self-cleared.
+  const priorRow = slowRow({
+    queryid: "-1756037457588317045",
+    query: row.query,
+    calls: 220_790,
+    total_exec_time: 31_970,
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+    rows: 179_270,
+  });
+  const readingAgeHours = 1;
+  const cleared = analyzeSlowQuery(row, null, priorRow, readingAgeHours);
+  assert.equal(cleared, null, "post-fix rate under flag → the finding must self-clear even though cumulative total is over the 30s floor");
+
+  // Counter-check: without the prior row (first pass / stats reset / unreadable prior) → the
+  // cumulative flag STILL fires so we don't lose acute-incident detection on a fresh instance.
+  const stillFlagged = analyzeSlowQuery(row, null);
+  assert.ok(stillFlagged, "no prior snapshot → cumulative fallback still fires (preserves acute detection)");
+  assert.equal(stillFlagged!.cause, "high_call_volume");
+});
+
+test("analyzeSlowQuery — cumulative-over-floor + Δcalls/hr STILL over flag → keeps firing (active spike)", () => {
+  // The complement of the self-clear case: a query hammered at 60k calls/hr since the prior pass is
+  // an active spike, not a resolved one. Rate over the flag → keep flagging so a real growth doesn't
+  // get silently hidden by the rate branch.
+  const row = slowRow({
+    queryid: "-999",
+    query: "select id from t where c = $1",
+    calls: 500_000,
+    total_exec_time: 200_000,
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+  });
+  const priorRow = slowRow({
+    queryid: "-999",
+    query: row.query,
+    calls: 440_000, // +60k in the last hour — well over the calls-per-hr flag
+    total_exec_time: 170_000,
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+  });
+  const finding = analyzeSlowQuery(row, null, priorRow, 1);
+  assert.ok(finding, "an active spike over the rate flag must still fire, not get suppressed by the self-clear branch");
+  assert.equal(finding!.cause, "high_call_volume");
+});
+
+test("analyzeSlowQuery — counter reset between passes (row.calls < priorRow.calls) → fall back to cumulative", () => {
+  // pg_stat_statements CAN be reset (a superuser / pg_stat_statements_reset(queryid) call). When the
+  // current row is BELOW the prior, the delta is meaningless — don't over-apply the rate branch, just
+  // fall back to cumulative so a freshly-reset counter still detects a genuine cumulative overload.
+  const row = slowRow({ queryid: "-r", calls: 100_000, total_exec_time: 45_000, mean_exec_time: 0 });
+  const priorRow = slowRow({ queryid: "-r", calls: 500_000, total_exec_time: 250_000, mean_exec_time: 0 });
+  const finding = analyzeSlowQuery(row, null, priorRow, 1);
+  assert.ok(finding, "a counter reset must not silently suppress the cumulative flag");
+});
+
 test("analyzeSlowQuery — sms `message_sid = $1` at 31ms×157k diagnosed high_call_volume (never vacuum)", () => {
   // The other dismissed shape. mean < 50ms routes to volume; message_sid is an equality predicate
   // (no `@>`), so no GIN hint required. Vacuum must not be the fix.
@@ -598,4 +676,146 @@ test("Phase 2 panel — an enqueued instance proposal shows up in getDbHealthPan
   assert.ok(match, `expected the enqueued instance finding to appear in panel.proposals; got ${JSON.stringify(panel.proposals)}`);
   assert.equal(match!.cause, "rollback_error_rate");
   assert.equal(match!.category, "instance");
+});
+
+// ── db-health-request-volume + temp-spill-attribution (2026-07-08 Devi re-tool) ──
+
+const SET_CONFIG_PREAMBLE =
+  "select set_config('search_path', $1, true), set_config('role', $2, true), set_config('request.jwt.claims', $3, true), set_config('request.method', $4, true)";
+const SUBSCRIPTIONS_SCAN =
+  'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."customer_id", "public"."subscriptions"."items" FROM "public"."subscriptions" WHERE "public"."subscriptions"."workspace_id" = $1 ORDER BY "public"."subscriptions"."created_at" ASC LIMIT $2 OFFSET $3 )';
+
+test("isInfrastructuralQuery flags the PostgREST set_config preamble + GoTrue reads, not app queries", () => {
+  assert.equal(isInfrastructuralQuery(SET_CONFIG_PREAMBLE), true);
+  assert.equal(isInfrastructuralQuery("SELECT set_config($2, $1, $3)"), true);
+  assert.equal(isInfrastructuralQuery("SELECT identities.identity_data FROM identities WHERE user_id = $1"), true);
+  assert.equal(isInfrastructuralQuery("SELECT x FROM auth.sessions WHERE id = $1"), true);
+  assert.equal(isInfrastructuralQuery(SUBSCRIPTIONS_SCAN), false);
+  assert.equal(isInfrastructuralQuery("SELECT id FROM public.orders WHERE workspace_id = $1"), false);
+  // A PostgREST mutation CTE that references set_config for response headers is an APP write, NOT the
+  // preamble — must not be swept in (else Devi would silently stop proposing fixes for that INSERT).
+  assert.equal(
+    isInfrastructuralQuery('WITH pgrst_source AS (INSERT INTO "public"."account_usage_snapshots"("account") SELECT set_config($2, $1, $3))'),
+    false,
+  );
+});
+
+test("analyzeSlowQuery returns null for an infrastructural query even when it dominates total time", () => {
+  const row: SlowQueryRow = {
+    queryid: "-7821780334453251234",
+    query: SET_CONFIG_PREAMBLE,
+    calls: 8_000_000,
+    total_exec_time: 264_000, // 264s — well over the 30s total floor
+    mean_exec_time: 0.03,
+    stddev_exec_time: 1.3,
+    rows: 8_000_000,
+  };
+  assert.equal(analyzeSlowQuery(row, null), null, "the set_config preamble must never become a reduce_calls proposal");
+});
+
+test("temp_spill_pressure NAMES the dominant offender + points at the app query (attribution)", () => {
+  const input: InstanceHealthInput = {
+    ...incidentInput(),
+    tempOffenders: [
+      { queryid: "-3890044173419587747", query: SUBSCRIPTIONS_SCAN, calls: 35_293, tempBytes: 314 * GB },
+      { queryid: "1", query: "select refresh_customer_segments($1,$2)", calls: 2, tempBytes: 17 * 1024 * 1024 },
+    ],
+  };
+  const temp = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(temp, "expected a temp_spill_pressure finding");
+  assert.match(temp!.evidence, /Top temp-spill offenders/);
+  assert.match(temp!.evidence, /subscriptions/); // the offender is named
+  assert.match(temp!.evidence, /dominant spiller \(queryid -3890044173419587747\) is an APP query/);
+});
+
+test("temp_spill_pressure still fires (aggregate) when NO offenders were captured", () => {
+  const temp = analyzeInstanceHealth(incidentInput()).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(temp, "the aggregate temp flag must fire without offenders");
+  assert.doesNotMatch(temp!.evidence, /Top temp-spill offenders/);
+});
+
+test("analyzeRequestVolume fires above the flag + names the top callers (with infra label)", () => {
+  const input: RequestVolumeInput = {
+    windowHours: 100,
+    totalCalls: 18_000_000, // 180K/hr ≥ 100K flag
+    totalRows: 18_000_000, // 180K/hr ≥ 100K flag
+    topByCalls: [
+      { queryid: "-7821780334453251234", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 },
+      { queryid: "spec", query: 'SELECT "public"."specs"."id" FROM "public"."specs" WHERE workspace_id = $1', calls: 1_300_000, rows: 1_300_000 },
+    ],
+    topByRows: [
+      { queryid: "-7821780334453251234", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 },
+    ],
+  };
+  const f = analyzeRequestVolume(input);
+  assert.ok(f, "expected a request_volume_pressure finding above the flag");
+  assert.equal(f!.cause, "request_volume_pressure");
+  assert.equal(f!.fixKind, "reduce_calls");
+  assert.match(f!.impact, /req\/hr/);
+  assert.match(f!.evidence, /rows shipped/);
+  assert.match(f!.evidence, /\[infrastructural\]/); // the set_config preamble is labelled, not proposed as fixable
+});
+
+test("analyzeRequestVolume returns null under the flag and for a too-short window", () => {
+  assert.equal(
+    analyzeRequestVolume({ windowHours: 100, totalCalls: 100, totalRows: 100, topByCalls: [], topByRows: [] }),
+    null,
+    "under both flags ⇒ no finding",
+  );
+  assert.equal(
+    analyzeRequestVolume({ windowHours: 0.2, totalCalls: 9_000_000, totalRows: 9_000_000, topByCalls: [], topByRows: [] }),
+    null,
+    "too-short window ⇒ noisy rate, skip",
+  );
+});
+
+test("the request_volume_pressure spec renders escalation guidance (aggregate, not a per-query index)", () => {
+  const f = analyzeRequestVolume({
+    windowHours: 100,
+    totalCalls: 18_000_000,
+    totalRows: 18_000_000,
+    topByCalls: [{ queryid: "q", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 }],
+    topByRows: [{ queryid: "q", query: SET_CONFIG_PREAMBLE, calls: 8_000_000, rows: 8_000_000 }],
+  });
+  assert.ok(f);
+  const md = buildFixSpecMarkdown(f!);
+  assert.match(md, /aggregate request-volume/i);
+  assert.match(md, /aggregate RPC/); // the durable lever is called out
+});
+
+// ── db-health-temp-spill-rate (2026-07-08): self-clearing temp detection ──
+
+test("temp_spill_pressure fires on the RATE when a prior reading is present", () => {
+  const input: InstanceHealthInput = {
+    ...healthyInput(),
+    tempBytes: 500 * GB,        // huge cumulative — but that's not the signal now
+    tempBytesPrev: 490 * GB,    // +10 GB
+    tempReadingAgeHours: 0.25,  // in 15 min → 40 GB/hr ≥ 2 GB/hr flag
+  };
+  const t = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(t, "a high spill RATE must fire temp_spill_pressure");
+  assert.match(t!.impact, /\/hr/);
+  assert.match(t!.evidence, /Spill RATE:/);
+});
+
+test("temp_spill_pressure SELF-CLEARS: huge cumulative temp_bytes but ~0 recent spill ⇒ no finding", () => {
+  const input: InstanceHealthInput = {
+    ...healthyInput(),
+    tempBytes: 500 * GB,                 // the un-resettable cumulative counter is still enormous
+    tempBytesPrev: 500 * GB - 0.1 * GB,  // but only 0.1 GB spilled recently
+    tempReadingAgeHours: 0.25,           // 0.4 GB/hr < 2 GB/hr flag → NOT active
+  };
+  const findings = analyzeInstanceHealth(input);
+  assert.equal(
+    findings.find((f) => f.cause === "temp_spill_pressure"),
+    undefined,
+    "once the spill stops, the rate drops below the flag and the finding clears even though the cumulative counter can't be reset",
+  );
+});
+
+test("temp_spill_pressure falls back to the cumulative flag when there is no prior reading", () => {
+  const input: InstanceHealthInput = { ...healthyInput(), tempBytes: 200 * GB }; // no prev → cumulative 100 GB flag
+  const t = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
+  assert.ok(t, "with no prior reading the cumulative flag must still catch an acute incident");
+  assert.match(t!.evidence, /cumulative fallback/);
 });

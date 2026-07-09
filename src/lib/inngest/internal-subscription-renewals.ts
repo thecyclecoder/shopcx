@@ -22,6 +22,11 @@ import { emitCronHeartbeat, emitRenewalOutcomeHeartbeat, aggregateRenewalOutcome
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
+import {
+  checkRenewalOverchargeGuard,
+  type RenewalGuardItem,
+  type RenewalGuardLine,
+} from "@/lib/subscription-renewal-guard";
 
 // ─── Daily cron (3 AM Central) ──────────────────────────────────────
 // 9 AM UTC is 3 AM CST in winter, 4 AM CDT in summer. We accept the
@@ -514,6 +519,51 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         price_cents: l.unit_cents,
       }));
     const subtotalCents = pricing.product_subtotal_cents;
+
+    // ── Phase 2 fail-safe: overcharge guard ─────────────────────
+    // Never bill above the sub's own configured line total. A grandfathered
+    // customer's configured ceiling is `price_cents` (post-discount lock) or
+    // `price_override_cents` (pre-discount base) per item; items with neither
+    // are uncapped (live-catalog opt-in). If the engine's computed unit for any
+    // product line exceeds its ceiling — a divergence between what the engine
+    // said and what the sub is configured for — HOLD the renewal: skip the
+    // charge, log a customer_event for review, emit an outcome heartbeat. The
+    // sub's next_billing_date is NOT advanced so a fix + re-run picks it back
+    // up. Belt & suspenders to the Phase 1 engine change: if a future repricing
+    // bug reintroduces catalog decomposition, this guard catches it BEFORE the
+    // customer is charged. See docs/brain/specs/subscription-renewal-honors-
+    // configured-grandfathered-price-never-bills-standard.md.
+    const guard = checkRenewalOverchargeGuard(
+      (subForPricing.items as unknown as RenewalGuardItem[]) || [],
+      pricing.lines as unknown as RenewalGuardLine[],
+    );
+    if (!guard.ok) {
+      await step.run("emit-outcome-overcharge-guard-hold", () =>
+        emitRenewalOutcomeHeartbeat("skipped_other"),
+      );
+      await step.run("log-overcharge-guard-hold", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: (ctx.sub.customer_id as string | null) ?? null,
+          eventType: "subscription.renewal_held_overcharge_guard",
+          source: "internal_subscription_renewal",
+          summary:
+            `Renewal held — computed product subtotal $${(guard.computed_product_cents / 100).toFixed(2)} ` +
+            `exceeds configured cap $${(guard.configured_cap_cents / 100).toFixed(2)} on ${guard.offending_lines.length} line(s). ` +
+            `Not submitted to Braintree; review the sub's configured line prices.`,
+          properties: {
+            subscription_id,
+            reason: guard.reason,
+            computed_product_cents: guard.computed_product_cents,
+            configured_cap_cents: guard.configured_cap_cents,
+            offending_lines: guard.offending_lines,
+          },
+        });
+      });
+      return { skipped: true, reason: "overcharge_guard_held" };
+    }
+
     // Free shipping is a pricing-rule decision; falls back to the sub's locked rate.
     const shippingCents = pricing.shipping_cents;
     const protectionCents = ctx.sub.shipping_protection_added

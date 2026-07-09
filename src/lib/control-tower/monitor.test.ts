@@ -10,8 +10,25 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evalAgentKind, evalCron, evalWorker, extractCronExpr, firstScheduledFiringMs, jobStuckSince, nextFiringAtOrAfter, parseCronExpr, type ActiveJob, type WorkerRow } from "./monitor";
-import type { MonitoredLoop } from "./registry";
+import {
+  classifyShaDirectionLocal,
+  evalAgentKind,
+  evalCron,
+  evalInlineAgent,
+  evalWorker,
+  extractCronExpr,
+  firstScheduledFiringMs,
+  INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
+  isOrderAwaitingFraudScreen,
+  jobStuckSince,
+  nextFiringAtOrAfter,
+  parseCronExpr,
+  type ActiveJob,
+  type InlineAgentState,
+  type LoopHistoryRow,
+  type WorkerRow,
+} from "./monitor";
+import { INLINE_AGENT_IDS, MONITORED_LOOPS, type MonitoredLoop } from "./registry";
 
 test("extractCronExpr pulls the 5-field expression from expectedCadence", () => {
   assert.equal(extractCronExpr("daily (0 4 * * *)"), "0 4 * * *");
@@ -294,6 +311,69 @@ test("evalCron still flips RED for a genuinely-dead cron once the observed-ancho
   }
 });
 
+// ─── Newcron grace gates BOTH reds (received-sms-rollup-cron-heartbeat Phase 3 Fix 2) ───
+// A newly-registered cron whose box worker has been up for > window (deployAgeMs > window)
+// used to trip `never_fired` before the awaiting-first-tick grace could fire — the exact
+// received-sms-rollup-cron regression where Fix 1's registeredAt landed but the tile still went
+// RED never_fired because `deployAgeMs > window` was checked first. Fix 2 reorders evalCron so
+// the grace check gates BOTH never_fired AND registered_not_firing, matching the intent of the
+// per-loop reference ("how long has this loop been registered") on both anchors.
+const receivedSmsRollupLoop: MonitoredLoop = {
+  id: "received-sms-rollup-cron",
+  kind: "cron",
+  owner: "platform",
+  label: "Received SMS rollup",
+  description: "Moves delivered SMS recipients into profile_events for segmentation + campaign reporting.",
+  expectedCadence: "every 5 min (*/5 * * * *)",
+  livenessWindowMs: 20 * 60_000,
+  registeredAt: "2026-07-09T04:00:00Z",
+};
+
+test("evalCron HOLDS AMBER for received-sms-rollup-cron when registeredAt is fresh but deployAgeMs and monitorUptimeMs are past window (Fix 2)", () => {
+  // The received-sms-rollup-cron Fix-2 regression scenario end-to-end:
+  //   - registeredAt 2026-07-09T04:00:00Z (fresh anchor Fix 2 lands on)
+  //   - cadence `*/5 * * * *` → computed first firing 04:00
+  //   - livenessWindowMs 20 min
+  //   - first_observed_at 2026-07-09T00:35:00Z (loop entry landed earlier that morning)
+  //   - deployAgeMs 6h — the box worker restarted 6h ago and has been up on this SHA since;
+  //     under the pre-Fix-2 ordering this WOULD flip the tile RED never_fired.
+  //   - watchdog has been alive 30h → monitorUptimeMs > window
+  //   - 0 beats ever (latest=null, everBeatCount=0)
+  // "Now" is 2026-07-09T04:05:00Z — only 5 min past registeredAt-firing, well inside the 20-min
+  // grace. Fix 2 reordering: the grace check runs BEFORE never_fired / registered_not_firing, so
+  // both reds are skipped and the tile stays AMBER "awaiting first run" until the first beat lands.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-09T04:05:00Z");
+  try {
+    const firstObservedMs = Date.parse("2026-07-09T00:35:00Z");
+    const deployAgeMs = 6 * 60 * 60_000; // 6h — well past 20-min window
+    const monitorUptimeMs = 30 * 60 * 60_000; // 30h — well past 20-min window
+    const result = evalCron(receivedSmsRollupLoop, null, deployAgeMs, 0, false, monitorUptimeMs, firstObservedMs);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /awaiting first run/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron still flips RED never_fired once the newcron grace itself expires (Fix 2 regression guard)", () => {
+  // Same loop, but "now" is well past the 20-min grace window. deployAgeMs > window remains > window
+  // → the reordered evalCron falls through the grace check and hits the never_fired red. Confirms
+  // the reorder doesn't muzzle a genuinely-dead cron; it only holds amber while the grace is live.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-09T05:00:00Z");
+  try {
+    const firstObservedMs = Date.parse("2026-07-09T00:35:00Z");
+    const deployAgeMs = 6 * 60 * 60_000;
+    const result = evalCron(receivedSmsRollupLoop, null, deployAgeMs, 0, false, null, firstObservedMs);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "never_fired");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 // ─── Queue-aware self-update deferral (control-tower-self-update-tile-queue-aware) ───
 // evalWorker mirrors scripts/builder-worker.ts:4290 — an idle worker BEHIND origin/main
 // while {queued, queued_resume} > 0 is intentionally parking its self-update until a
@@ -333,7 +413,7 @@ test("evalWorker stays GREEN with update-deferred status when behind+idle but qu
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker(), 3, false);
+    const result = evalWorker(workerLoop, idleBehindWorker(), 3, false, "worker-behind");
     assert.equal(result.color, "green");
     assert.equal(result.violation, null);
     assert.match(result.statusText, /update deferred · 3 queued/);
@@ -352,7 +432,7 @@ test("evalWorker flips RED at shaGrace when behind+idle and queue is empty (no d
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false);
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false, "worker-behind");
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "liveness");
     assert.match(result.statusText, /behind origin\/main/);
@@ -371,7 +451,7 @@ test("evalWorker flips RED at shaGrace under a MANUAL drain regardless of queued
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker(), 5, true);
+    const result = evalWorker(workerLoop, idleBehindWorker(), 5, true, "worker-behind");
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "liveness");
     assert.match(result.violation!.detail, /manual drain set/);
@@ -389,7 +469,7 @@ test("evalWorker still flags behind+busy as GREEN (existing behavior — never i
   process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
   Date.now = () => Date.parse("2026-06-25T12:00:00Z");
   try {
-    const result = evalWorker(workerLoop, idleBehindWorker({ active_builds: 2 }), 0, false);
+    const result = evalWorker(workerLoop, idleBehindWorker({ active_builds: 2 }), 0, false, "worker-behind");
     assert.equal(result.color, "green");
     assert.equal(result.violation, null);
     assert.match(result.statusText, /building — update deferred/);
@@ -398,4 +478,148 @@ test("evalWorker still flags behind+busy as GREEN (existing behavior — never i
     if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
     else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
   }
+});
+
+// ─── SHA-direction gate (control-tower-box-sha-direction-check) ───
+// A plain string mismatch can't distinguish "worker on stale code" from "worker on newer main
+// but Vercel deploy still lags." The originating false page (signal loop:box, verdict
+// monitor-false-positive): worker was running 6f43ec9e0 while VERCEL_GIT_COMMIT_SHA pointed at the
+// ancestor b3934ff — worker-AHEAD, healthy. evalWorker must red ONLY on a CONFIRMED worker-behind.
+
+test("classifyShaDirectionLocal returns 'same' when SHAs are prefix-equal or identical", () => {
+  assert.equal(classifyShaDirectionLocal("6f43ec9e0abc123", "6f43ec9e0"), "same");
+  assert.equal(classifyShaDirectionLocal("6f43ec9e0", "6f43ec9e0abc123"), "same");
+  assert.equal(classifyShaDirectionLocal("abc", "abc"), "same");
+});
+
+test("classifyShaDirectionLocal returns 'unknown' when either SHA is empty or they don't share a prefix", () => {
+  assert.equal(classifyShaDirectionLocal("", "abc"), "unknown");
+  assert.equal(classifyShaDirectionLocal("abc", ""), "unknown");
+  assert.equal(classifyShaDirectionLocal("", ""), "unknown");
+  // Non-prefix pairs are "unknown" locally — direction must be resolved by the GitHub compare API.
+  assert.equal(classifyShaDirectionLocal("6f43ec9e0", "b3934ff37"), "unknown");
+});
+
+test("evalWorker stays GREEN on worker-AHEAD (Vercel deploy lag) — the originating false page", () => {
+  // Deployed ancestor SHA (Vercel still on the previous commit), worker on the newer main head.
+  // Prior code compared strings and reddened; the fix returns GREEN with a "deploy lag" note.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "b3934ff37000000";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(
+      workerLoop,
+      idleBehindWorker({ running_sha: "6f43ec9e0" }),
+      0,
+      false,
+      "worker-ahead",
+    );
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /deploy lag/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker stays GREEN on UNKNOWN direction (compare API blip / diverged / missing token)", () => {
+  // Empty queue + past shaGrace: under the old prefix check this would already be RED (behind).
+  // The new gate refuses to red on an ambiguous compare — same conservative posture as
+  // deployAgeMs==null in evalCron. A confirmed worker-behind still reds (see test above).
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false, "unknown");
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.doesNotMatch(result.statusText, /behind origin\/main/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker stays GREEN on SAME direction (identical or prefix-equal SHAs)", () => {
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "aaaaaaa";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    const result = evalWorker(workerLoop, idleBehindWorker(), 0, false, "same");
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /healthy · aaaaaaa/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+// ─── ai:fraud-detector work probe — exclude internal renewal orders ───
+// control-tower-fraud-detector-workprobe-exclude-internal-renewals
+// (signal loop:ai:fraud-detector, verdict monitor-false-positive).
+// The originating false page was: one item awaited the fraud detector while it
+// was silent — but the item was an `orders` row written by the internal
+// subscription-renewal cron (source_name='internal_subscription_renewal'),
+// which by design never emits `fraud/order.check` and therefore never calls
+// `checkOrderForFraud`. The probe was counting it as fraud-detector work.
+
+test("isOrderAwaitingFraudScreen excludes internal renewal source_name values", () => {
+  // The two internal-renewal source_name markers stamped by
+  // src/lib/inngest/internal-subscription-renewals.ts are the ONLY orders we
+  // exclude — nothing else in the count changes.
+  for (const src of INTERNAL_RENEWAL_ORDER_SOURCE_NAMES) {
+    assert.equal(isOrderAwaitingFraudScreen({ source_name: src }), false, src);
+  }
+});
+
+test("isOrderAwaitingFraudScreen keeps every Shopify/web/unknown source_name in the count", () => {
+  // Real Shopify webhooks pass upstream `source_name` through (web/pos/tiktok/…);
+  // the storefront checkout route stamps 'storefront'; and older/unknown-source
+  // orders (source_name null) stay counted — same as the pre-fix behavior, so
+  // a genuine detector outage on those paths still flips the tile red.
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "web" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "storefront" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "pos" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: "tiktok" }), true);
+  assert.equal(isOrderAwaitingFraudScreen({ source_name: null }), true);
+  assert.equal(isOrderAwaitingFraudScreen({}), true);
+});
+
+test("evalInlineAgent stays GREEN on a renewal-only window with no ai:fraud-detector beat", () => {
+  // The originating condition (signal loop:ai:fraud-detector): 6h window with
+  // zero fraud-detector beats but internal renewal orders present. The tightened
+  // probe now returns work=0 for that window (renewals excluded at the DB layer
+  // by the same predicate), so evalInlineAgent falls through to genuinely-idle
+  // green — no idle_while_work violation, no false red tile for Platform.
+  const fraudLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.fraudDetector);
+  assert.ok(fraudLoop, "ai:fraud-detector loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 0, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(fraudLoop!, state);
+  assert.equal(result.color, "green");
+  assert.equal(result.violation, null);
+});
+
+test("evalInlineAgent still flips RED on a real Shopify/web order with no ai:fraud-detector beat", () => {
+  // No-false-negative guard: a real Shopify/web order in-window still counts
+  // (the probe only excludes the two internal-renewal markers), so a genuine
+  // fraud-detector outage — work=1, 0 successful beats, history not empty —
+  // still surfaces idle_while_work on the tile.
+  const fraudLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.fraudDetector);
+  assert.ok(fraudLoop, "ai:fraud-detector loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 1, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(fraudLoop!, state);
+  assert.equal(result.color, "red");
+  assert.equal(result.violation?.reason, "idle_while_work");
 });

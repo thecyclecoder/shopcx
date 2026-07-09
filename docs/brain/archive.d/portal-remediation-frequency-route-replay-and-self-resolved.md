@@ -1,0 +1,1 @@
+- **Portal remediation: add a frequency-route replay + self-resolved so retries-that-worked auto-close** · verified 2026-07-08 · → [[../libraries/portal__remediation]]

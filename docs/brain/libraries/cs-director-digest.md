@@ -24,6 +24,7 @@ Rolls up the CS Director's per-week signal into one row per (workspace, week) so
   - `author_spec` → `add_rule` (a specific analyzer/rule gap — a `sonnet_prompts` seed until the spec ships)
   - `approve_remedy` → `null` (informational — the CS Director acted in leash)
 - **`ticket_resolution_events`** — the `problem` text is normalized (whitespace collapsed + lowercased) and grouped. A problem that appears on ≥ `RECURRING_PROBLEM_THRESHOLD` (=3) DISTINCT tickets in the window becomes one `early_warning` storyline; `proposed_action.type` defaults to `add_policy` (the systemic fix is written policy, not a per-call leash tweak).
+- **`ticket_resolution_events` `reasoning='sol:cap-hit'`** — Fix 1 of [[../specs/sol-runaway-re-session-cap-guardrail]]. The rolling count of Sol re-session cap-hits in the window is compared against the workspace's [[../tables/ai_channel_config]] `sol_cap_hit_alarm` (max across channels; default `5`). When the count STRICTLY EXCEEDS the threshold, ONE `early_warning` storyline titled "Sol re-session cap hit (systemic)" is emitted with `evidence` = "{count} cap-hits in the window · threshold {N} · frustration {x} · drift {y}" and `proposed_action.type='add_policy'` (the systemic fix is either widening `sol_max_resessions` or codifying a rule that catches the pattern earlier). Below-threshold windows emit nothing.
 
 Both sources are best-effort — a failed read logs + returns `[]` for that source; the digest still ships with the surviving storylines. Never throws.
 

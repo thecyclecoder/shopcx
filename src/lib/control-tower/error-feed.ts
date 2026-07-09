@@ -410,7 +410,7 @@ export function isTransientClientNetworkAbort(
  */
 export function isTransientSupabaseLogNoise(
   kind: "postgres" | "auth" | "api",
-  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown },
+  ctx: { statusCode?: unknown; severity?: unknown; message?: unknown; eventMessage?: unknown },
 ): boolean {
   if (kind === "api") {
     // Edge/gateway 5xx — saturation collateral; the recur window catches a chronic 5xx.
@@ -459,21 +459,44 @@ export function isTransientSupabaseLogNoise(
     // the `dial ... i/o timeout` shape too. Recur-window escalation still applies: a chronic
     // dial-timeout spike (a real upstream outage) recurs inside the window and pages.
     const msg = String(ctx.message ?? "").toLowerCase();
-    if (!msg.trim()) return false;
-    return (
-      msg.includes("context canceled") ||
-      msg.includes("context deadline exceeded") ||
-      msg.includes("operation was canceled") ||
-      /\bdial\b[^\n]*\bcanceled\b/.test(msg) ||
-      /\bdial\b[^\n]*i\/o timeout/.test(msg) ||
+    // The same browser-abort marker ALSO surfaces on GoTrue's /authorize (PKCE flow-state)
+    // path where the marker lives INSIDE event_message JSON's `error` field instead of the
+    // top-level `msg` — msg is only `500: Error creating flow state` and the real cause
+    // (`context canceled`, `operation was canceled`, etc.) is buried in the JSON blob
+    // ([[../specs/error-feed-scope-supabase-authorize-flow-state-context-cance]] — Control
+    // Tower signature `supabase-logs:a30ffe4489dd6ffb`). Defensively JSON-parse eventMessage
+    // (bad JSON is a no-op — msg-only path still applies) and fold its inner `error` string
+    // into the same regex/substring set below so a user closing the Google-login tab stops
+    // minting page-worthy incidents. A real /authorize failure whose inner error is NOT a
+    // browser-abort marker (e.g. `invalid JWT`, `signature mismatch`, non-abort 5xx) still
+    // pages on first sighting.
+    let innerError = "";
+    if (typeof ctx.eventMessage === "string" && ctx.eventMessage.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(ctx.eventMessage);
+        if (parsed && typeof parsed === "object" && "error" in parsed) {
+          const err = (parsed as { error: unknown }).error;
+          if (typeof err === "string") innerError = err.toLowerCase();
+        }
+      } catch {
+        // Defensive: malformed / non-JSON event_message — no-op, fall back to msg-only.
+      }
+    }
+    if (!msg.trim() && !innerError.trim()) return false;
+    const isAbortShape = (s: string): boolean =>
+      s.includes("context canceled") ||
+      s.includes("context deadline exceeded") ||
+      s.includes("operation was canceled") ||
+      /\bdial\b[^\n]*\bcanceled\b/.test(s) ||
+      /\bdial\b[^\n]*i\/o timeout/.test(s) ||
       // GoTrue's own gateway-timeout phrasing when the auth API can't return in time under
       // load: `504: Processing this request timed out, please retry after a moment.` Same
       // transient class as the context-deadline shape above (restore of the reverted
       // error-feed-scope-supabase-auth-504-gateway-timeout-transient — falsely rolled back
       // 2026-07-04). A one-off pages nobody; a chronic 504 spike (a real outage) recurs and
       // still surfaces. Invalid JWT / rate-limit / signature mismatch remain first-sight pages.
-      msg.includes("processing this request timed out")
-    );
+      s.includes("processing this request timed out");
+    return isAbortShape(msg) || (innerError.length > 0 && isAbortShape(innerError));
   }
   return false;
 }
@@ -510,6 +533,108 @@ export function isForeignGoTrueEdgeNoise(
   const raw = typeof statusCode === "string" ? statusCode.trim() : statusCode;
   const status = Number(raw);
   return Number.isFinite(status) && status === 504;
+}
+
+/**
+ * Foreign-app noise — Supabase's own GoTrue `/user` saturating on its Postgres backend,
+ * arriving on the app-level auth_logs feed. The auth-log sibling of
+ * [[isForeignGoTrueEdgeNoise]] (which drops the same blip on the Cloudflare edge_logs).
+ * We do not run GoTrue and hold ZERO levers on its gateway; both shapes below are a healed
+ * foreign-app blip a user never sees (a normal `supabase.auth.getUser()` just retries and
+ * succeeds), so DROP AT CAPTURE — no error_event / loop_alert / signature / repair fan-out.
+ * Consumed by the `auth` LogQuery's `mapRow` in [[./supabase-log-poll]] — the mapRow
+ * contract treats `null` as `drop, do not record`, matching the `api` mapRow's edge-noise
+ * drop. `eventMessage` is OPTIONAL: the context-deadline shape is msg-only (one call site
+ * passes just the message), the 504 shape needs the request JSON.
+ *
+ * Five distinct GoTrue-saturation signatures, ANY of which drops (each surfaced as
+ * transient before, but recurred inside `TRANSIENT_RECUR_WINDOW_MS` and paged a Platform
+ * owner in a loop they can't fix):
+ *
+ *  (a) context-deadline ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]],
+ *      `supabase-logs:9f39fe11dd105b2a`, 39 occ / 6 days) — the `/user` handler 504s waiting
+ *      on its Postgres backend after ~14.8s and emits `level:'error'` with the EXACT phrase
+ *      `Unhandled server error: context deadline exceeded` (case-insensitive, trimmed).
+ *
+ *  (b) 504 gateway-timeout ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]],
+ *      `supabase-logs:9d5fae2f5f92ec3d`, 46 occ / 7 days) — msg starts with
+ *      `504: Processing this request timed out` AND the request JSON (`eventMessage`) carries
+ *      BOTH `"path":"/user"` AND `"method":"GET"`.
+ *
+ *  (c) localhost dial-timeout ([[../specs/error-feed-drop-supabase-gotrue-auth-log-localhost-dial-time]],
+ *      `supabase-logs:0ca9220a8f0d2405`, 7 occ / 9h) — GoTrue's `/user` handler can't reach
+ *      its own local Postgres inside its dial timer and emits `Unhandled server error:
+ *      failed to connect to \`host=localhost user=supabase_auth_admin database=postgres\`:
+ *      dial error (dial tcp [::1]:5432: i/o timeout | operation was canceled)`. Msg starts
+ *      with `Unhandled server error: failed to connect to` AND contains BOTH the
+ *      `host=localhost` and `user=supabase_auth_admin` markers (the unambiguous GoTrue →
+ *      its-own-Postgres shape — never OUR pooler, which is a remote host) AND a
+ *      `dial ... (i/o timeout | operation was canceled)` phrase.
+ *
+ *  (d) `/user` SELECT-on-auth.users browser-abort passthrough
+ *      ([[../specs/error-feed-drop-supabase-gotrue-auth-log-unable-to-fetch-rec]],
+ *      `supabase-logs:f5b02a707c3d4e49`, 8 occ / 4 days) — when the parent HTTP request
+ *      context dies mid-query on GoTrue's `/user` SELECT-on-`auth.users` path (browser tab
+ *      closed, navigation away, React StrictMode double-mount aborting an in-flight
+ *      `supabase.auth.getUser()`), GoTrue emits the EXACT phrase `Unhandled server error:
+ *      unable to fetch records: context canceled` (case-insensitive, trimmed). Already
+ *      routed through `isTransientSupabaseLogNoise` via the `context canceled` substring,
+ *      but the signature recurs inside `TRANSIENT_RECUR_WINDOW_MS` on a healthy loop, so
+ *      the transient class isn't enough — drop AT CAPTURE. The phrase is unique to
+ *      GoTrue's SELECT-on-`auth.users` code path; nothing in OUR code can emit it.
+ *
+ *  (e) outer-request-timeout ([[../specs/error-feed-drop-supabase-gotrue-timeout-context-canceled]],
+ *      `supabase-logs:c9eb05fd1d3fb82c`, 15 occ / 7 days) — msg-only mirror of shape (a):
+ *      the trimmed + lowercased msg equals `unhandled server error: timeout: context canceled`.
+ *      The `timeout:` prefix is Go's phrasing for GoTrue's own outer-request-timeout wrapper
+ *      firing on its Postgres backend (same foreign-owned saturation class as (a); we hold
+ *      zero levers on Supabase's managed auth service, and the transient recur-window
+ *      empirically fails to absorb the ~2/day cadence). Narrowly gated to the exact phrase
+ *      so plain `context canceled` (real browser-abort noise, still transient) is untouched.
+ *
+ * Narrowly gated so everything actionable still surfaces / pages on first sight: a plain
+ * `context canceled` on a non-/user path (any msg other than the exact (d) or (e) phrase)
+ * stays transient via `isTransientSupabaseLogNoise`; a `dial ... i/o timeout` /
+ * `dial ... canceled` on a REMOTE host (a real Postgres pooler on our side — not the
+ * `host=localhost user=supabase_auth_admin` GoTrue-internal shape) stays transient too;
+ * `invalid JWT`, rate limits, signature mismatches, a 504 on `/token` / `/admin`, a
+ * non-504 5xx, or a 504 on `/user` with a non-GET (mutation) method all carry different
+ * shapes and stay captured.
+ */
+export function isForeignGoTrueAuthLogNoise(
+  msg: string | null | undefined,
+  eventMessage?: string | null | undefined,
+): boolean {
+  // (a) context-deadline shape — msg-only, exact phrase.
+  const text = (msg ?? "").trim().toLowerCase();
+  if (text === "unhandled server error: context deadline exceeded") return true;
+  // (d) /user SELECT-on-auth.users browser-abort — msg-only, exact phrase.
+  if (text === "unhandled server error: unable to fetch records: context canceled") return true;
+  // (e) outer-request-timeout shape — msg-only mirror of (a), gated on the exact phrase
+  // (the `timeout:` prefix is GoTrue's outer-timeout wrapper; plain `context canceled`
+  // stays transient).
+  if (text === "unhandled server error: timeout: context canceled") return true;
+  // (b) 504 gateway-timeout shape — msg 504-prefix + request JSON path /user + method GET.
+  const m = (msg ?? "").trimStart();
+  if (m.startsWith("504: Processing this request timed out")) {
+    const em = eventMessage ?? "";
+    if (em.includes('"path":"/user"') && em.includes('"method":"GET"')) return true;
+  }
+  // (c) localhost dial-timeout shape — GoTrue → its own localhost Postgres, dial timer fires
+  // before the TCP handshake completes (i/o timeout) or the parent context dies mid-dial
+  // (operation was canceled). The `host=localhost` + `user=supabase_auth_admin` markers
+  // together pin this to Supabase-internal dialing; a dial failure against OUR remote
+  // Postgres pooler carries different host/user markers and is kept (still transient).
+  const lower = m.toLowerCase();
+  if (
+    lower.startsWith("unhandled server error: failed to connect to") &&
+    lower.includes("host=localhost") &&
+    lower.includes("user=supabase_auth_admin") &&
+    /\bdial\b[^\n]*(?:i\/o timeout|operation was canceled)/.test(lower)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -594,6 +719,54 @@ export function isTransientUndiciHeadersTimeout(message: string | null | undefin
   if (!text) return false;
   if (!text.includes("TypeError: fetch failed")) return false;
   return text.includes("HeadersTimeoutError") || text.includes("UND_ERR_HEADERS_TIMEOUT");
+}
+
+/**
+ * Transient Supabase-edge Cloudflare 5xx HTML body noise — the vercel-drain sibling to
+ * `isTransientUndiciHeadersTimeout` / `isTransientSupabaseLogNoise`, factored here so the
+ * vercel-logs route can reuse it
+ * ([[../specs/error-feed-drop-supabase-edge-html-body-noise-reland]] — re-land of PR #1115
+ * after a false-positive Reva revert on 2026-07-04; this classifier is a pure text-matcher
+ * on incoming Vercel-drain logs with zero runtime side-effect, so the 07/04 cron-freshness
+ * signals Reva correlated with the deploy cannot have been causally caused by it — both the
+ * stale crons and this classifier sit downstream of the same 07/04 Supabase edge outage).
+ *
+ * When Supabase's edge is momentarily unreachable, its Cloudflare tier returns a `521 Web
+ * server is down` HTML error page instead of the usual JSON. supabase-js reports that back
+ * as an error whose message IS the raw HTML body, and callers like
+ * `computePlatformScorecard` throw with a message like
+ * `platform_scorecard_snapshots upsert failed: ? <!DOCTYPE html>...supabase.co | 521: Web
+ * server is`. The scorecard cron catches this and moves on, and the next daily beat
+ * idempotently heals via the done-guard + `(workspace_id, metric_key, cadence,
+ * snapshot_date)` upsert — nothing is broken. Minting a fresh OPEN paged incident + repair
+ * fan-out for a single such log churns Platform owners on a healthy loop that already
+ * recovered (Control Tower `vercel:a0844c1b5be72bb7` / `vercel:848a7b6d02c1e88c`).
+ *
+ * `true` ONLY when the message carries BOTH the `<!DOCTYPE html>` marker AND a Supabase-
+ * edge-Cloudflare signature (`supabase.co` alongside a Cloudflare 5xx status word: `Web
+ * server` / `521` / `522` / `523` / `524`) — the exact and only shape the Cloudflare edge
+ * emits for this class. A supabase-js JSON error (`PostgrestError` / `code`/`hint`/`details`
+ * payload) stays captured / paged; a bare `<!DOCTYPE html>` HTML-parse failure from an
+ * unrelated upstream carries no `supabase.co` marker and stays captured / paged too.
+ *
+ * Wired in `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which
+ * auto-resolves a first sighting (recorded for visibility, NOT paged, no repair fan-out)
+ * and escalates to a real open+page ONLY if the SAME signature recurs within
+ * `TRANSIENT_RECUR_WINDOW_MS` — so a one-off edge blip is dropped while a chronic Supabase
+ * outage (would recur every beat) still surfaces.
+ */
+export function isTransientSupabaseEdgeHtmlBody(message: string | null | undefined): boolean {
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.includes("<!DOCTYPE html>")) return false;
+  if (!text.includes("supabase.co")) return false;
+  return (
+    text.includes("Web server") ||
+    text.includes("521") ||
+    text.includes("522") ||
+    text.includes("523") ||
+    text.includes("524")
+  );
 }
 
 export interface RecordErrorInput {
@@ -806,6 +979,14 @@ export function feedLoopId(source: ErrorSource): string {
 // storming the table into DB-saturation 500s (signature supabase-logs:6f16957ed72e1f38).
 const FEED_BEAT_MIN_INTERVAL_MS = 60_000;
 const lastFeedBeatAt = new Map<string, number>();
+// Bounded client-side timeout on the record_feed_beat RPC. Under Vercel drain firehose bursts the
+// Supabase gateway occasionally holds a same-minute racer past its edge deadline and returns a 504
+// that the vercel-drain feed then re-ingests — a self-echoing error signature about the very beat
+// the RPC exists to observe (Control Tower `supabase-logs:0356e510f43cf142`). 3s is well above p99
+// for a one-line ON CONFLICT DO NOTHING and well under the gateway deadline, so the timer only
+// ever trips on a genuinely stuck response and cuts the 504 off before it can self-feed
+// ([[../specs/record-feed-beat-bounded-client-timeout-no-hung-liveness-rpc]]).
+const FEED_BEAT_RPC_TIMEOUT_MS = 3_000;
 
 export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admin): Promise<void> {
   const loopId = feedLoopId(source);
@@ -813,17 +994,39 @@ export async function recordFeedDelivery(source: ErrorSource, adminClient?: Admi
   // Fast path: this warm instance beat for this source < 1 min ago → skip (no DB call).
   const lastLocal = lastFeedBeatAt.get(loopId) ?? 0;
   if (now - lastLocal < FEED_BEAT_MIN_INTERVAL_MS) return;
-  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs.
+  // Mark before the DB call so a burst on THIS instance can't queue N concurrent RPCs. This
+  // ALSO makes the bounded-timeout path below safe to swallow silently: if the RPC is aborted
+  // at 3s we've already done the "one call per warm instance per minute" bookkeeping, so the
+  // next call within 60s fast-paths regardless, and the DB's UNIQUE partial index
+  // `loop_heartbeats_feed_minute_uidx` already guarantees at-most-one same-minute row across
+  // cold instances — a swallowed timeout can't corrupt liveness state.
   lastFeedBeatAt.set(loopId, now);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FEED_BEAT_RPC_TIMEOUT_MS);
   try {
     const admin = adminClient ?? createAdminClient();
     // Atomic cross-instance throttle: the DB collapses every same-minute racer to one row. A
     // burst that all gets past the fast path (cold/concurrent instances) no-ops at the DB
     // instead of all inserting — no read-then-write race, no insert storm.
-    const { error } = await admin.rpc("record_feed_beat", { p_loop_id: loopId });
-    if (error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, error.message);
+    //
+    // Bounded client-side timeout: race the RPC against a 3s AbortController timer (the same
+    // pattern used in packing-slip-message.ts / claude-health.ts / meta-product-match.ts). A
+    // best-effort liveness beat must never monopolize a serverless invocation for a minute or
+    // fabricate a 504 error signature about itself; on timeout resolve as a silent no-op —
+    // NOT a console.warn, a timeout is expected best-effort behaviour, not an error to
+    // surface. The existing warn path stays for genuine non-timeout RPC errors.
+    const raced = await Promise.race<{ kind: "rpc"; error: { message: string } | null } | { kind: "timeout" }>([
+      admin.rpc("record_feed_beat", { p_loop_id: loopId }).then((r) => ({ kind: "rpc", error: r.error })),
+      new Promise((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve({ kind: "timeout" }), { once: true });
+      }),
+    ]);
+    if (raced.kind === "timeout") return; // silent no-op — see comment above
+    if (raced.error) console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, raced.error.message);
   } catch (e) {
     console.warn(`[error-feed] feed-delivery beat failed for ${source}:`, e instanceof Error ? e.message : e);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

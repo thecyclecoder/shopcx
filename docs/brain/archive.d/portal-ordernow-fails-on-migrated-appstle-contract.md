@@ -1,0 +1,1 @@
+- **Portal 'order now' fails on migrated/cancelled Appstle contracts and surfaces a false OOS error** · verified 2026-07-09 · → [[../lifecycles/customer-portal]]

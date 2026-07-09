@@ -11,7 +11,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
-import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
+import { SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
+import { renderDirectionSystemPrompt, prefixDirectionContextReasoning } from "@/lib/ai-context";
+import type { TicketDirection } from "@/lib/ticket-directions";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
 import { currentDateContext } from "@/lib/ai-date-context";
 import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/product-intelligence/publish";
@@ -22,6 +24,11 @@ import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrown
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
   opus: OPUS_MODEL,
+  // Phase 3 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md — the
+  // model-picker's fresh-Direction route returns 'haiku' when the ticket has a
+  // fresh + high-confidence + stateless Direction, so the orchestrator must
+  // recognise the tier to actually route the call.
+  haiku: HAIKU_MODEL,
 } as const;
 export type OrchestratorModelKey = keyof typeof MODEL_IDS;
 
@@ -308,6 +315,83 @@ ${summary}
 Everything below is the conversation SINCE that lock-in — the tail. Rely on this summary for prior state; only the tail changes turn-to-turn.`;
 }
 
+/**
+ * Phase 1 of docs/brain/specs/orchestrator-surfaces-line-item-variant-and-computed-per-unit-price.md.
+ *
+ * Compute the actual charged total per order line and its rounded
+ * per-unit price so the orchestrator never has to multiply MSRP-ish
+ * fields to infer what the customer really paid.
+ *
+ * Preference order per line:
+ *   1. `line_total_cents` / `total_cents` when the row already carries it
+ *      (internal + amplifier orders stamp both).
+ *   2. Pro-rata attribution from the order's chargeable subtotal —
+ *      `payment_details.subtotal_cents` when present, else
+ *      `orders.total_cents` — split by each line's (price_cents × qty)
+ *      weight so a multi-line order does not collapse everything onto
+ *      one line.
+ *   3. Fall back to `price_cents × qty` when nothing else is available.
+ */
+export type OrchestratorOrderLineForCompute = {
+  quantity?: number | null;
+  price_cents?: number | null;
+  total_cents?: number | null;
+  line_total_cents?: number | null;
+};
+
+/**
+ * Phase 2 of docs/brain/specs/orchestrator-surfaces-line-item-variant-and-
+ * computed-per-unit-price.md — resolve the customer-facing variant/flavor
+ * for one order line item.
+ *
+ * Preference order:
+ *   1. `variant_title` stamped on the row (internal/amplifier orders).
+ *   2. `products.variants[].title` resolved via `variant_id` from a
+ *      pre-loaded map (Shopify-synced rows carry variant_id only — the
+ *      pre-fix render fell through to no variant at all here, forcing
+ *      Sonnet to infer 'Berry' from the product title).
+ *   3. `null` — nothing to surface; the render should omit the variant
+ *      parenthetical rather than emit an empty one.
+ */
+export function resolveLineVariantTitle(
+  line: { variant_title?: string | null; variant_id?: string | null },
+  variantTitleMap: Map<string, string>,
+): string | null {
+  const stamped = (line.variant_title || "").trim();
+  if (stamped) return stamped;
+  const vid = line.variant_id ? String(line.variant_id) : "";
+  const resolved = vid ? (variantTitleMap.get(vid) || "").trim() : "";
+  return resolved || null;
+}
+export function computeChargedLineTotals(
+  order: {
+    total_cents?: number | null;
+    payment_details?: { subtotal_cents?: number | null } | null | unknown;
+  },
+  lines: OrchestratorOrderLineForCompute[],
+): Array<{ chargedTotalCents: number; perUnitCents: number }> {
+  const pd = (order.payment_details as { subtotal_cents?: number | null } | null) || null;
+  const orderCharged = (pd?.subtotal_cents ?? order.total_cents ?? 0) || 0;
+  const weights = lines.map(l => Math.max(0, (l.price_cents || 0) * (l.quantity || 0)));
+  const totalWeight = weights.reduce((s, w) => s + w, 0);
+  return lines.map((l, idx) => {
+    const qty = Math.max(1, l.quantity || 1);
+    const stored = l.line_total_cents ?? l.total_cents ?? null;
+    let chargedTotal: number;
+    if (stored != null) {
+      chargedTotal = stored;
+    } else if (totalWeight > 0 && orderCharged > 0) {
+      chargedTotal = Math.round(orderCharged * (weights[idx] / totalWeight));
+    } else {
+      chargedTotal = (l.price_cents || 0) * qty;
+    }
+    return {
+      chargedTotalCents: chargedTotal,
+      perUnitCents: Math.round(chargedTotal / qty),
+    };
+  });
+}
+
 async function buildPreContext(
   workspaceId: string,
   ticketId: string,
@@ -316,6 +400,15 @@ async function buildPreContext(
   channel: string,
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
+  // Phase 5 Fix 1 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md.
+  // When a live Direction is passed (superseded_at NULL), the user block is built
+  // from the Direction's intent + context_summary + guardrails INSTEAD of the
+  // customer-name/orders/full-history block. Sol summarized the ticket at
+  // first-touch so re-fetching wastes tokens on data the model would re-summarize
+  // identically. The shared system prefix stays byte-identical (cache-friendly);
+  // only the volatile user block changes shape. See docs/brain/inngest/unified-ticket-handler.md
+  // § Step 2e (Direction-scoped branch).
+  directionOverride?: TicketDirection | null,
 ): Promise<{ system: string; userBlockPrefix: string | null; userBlock: string }> {
   const admin = createAdminClient();
 
@@ -655,8 +748,10 @@ Run all three in one direct_action turn. If the context shows NO overcharge, do 
 
 RETIRED ACTION (hard rule — do NOT emit): The direct-action type "skip_next_order" has been RETIRED. It ran against a dead upstream endpoint and failed ~88% of the time. Never include an action with type "skip_next_order" in your response. Route the intent by what the customer actually wants:
 - The customer wants their next box LATER ("push it to next month", "skip the next one", "not ready yet", "delay") → emit direct_action with type "change_next_date" and a date roughly one billing cycle out (the next-next-scheduled-date).
-- The customer wants their next box NOW ("send today", "asap", "ship it now", "I'm out") → emit direct_action with type "bill_now".
+- The customer wants their next box NOW ("send today", "asap", "ship it now", "I'm out") → emit direct_action with type "bill_now" (equivalent: "order_now" — both names route to the same subscriptionOrderNow charge; the customer-facing / portal name is "order_now").
 - If neither reading fits, escalate rather than emit skip_next_order.
+
+ORDER-NOW / BILL-NOW IS ALWAYS REACHABLE (hard rule — never claim non-existence): Order-now (a.k.a. bill_now) is a real, always-available direct-action for ANY active subscription — it fires subscriptionOrderNow / orderNowByContract to charge the current upcoming order immediately. It is NOT emergency-only, NOT crisis-only, NOT limited to a subset of customers. If you offered to ship a customer's order sooner and then reason yourself out of it ("no bill_now action exists", "that action is only for emergencies", "we can't do that from here"), STOP — that is a hallucination, not a policy. Either emit the direct_action (with contract_id) — the selective-clarify gate will insert a confirm-first turn when confidence is low — or, if a real policy blocks it (e.g. the customer has no active sub, the sub is paused/cancelled, dunning is in flight), state the concrete blocker and offer the in-policy alternative. Never renege on an offer by inventing a nonexistent capability limit. (Ticket 0a9e4d7f, Judy — Sol offered, then reneged: "no bill_now action exists for non-emergency requests" — the failure this rule retires.)
 
 CLARIFICATION TURNS (hard rule — a clarification is a COMPLETE message, not a bare question):
 When you set needs_clarification=true, your response_message is what the customer actually receives — it is NOT a placeholder or a stub, and clarification_question is NEVER what gets sent. Write response_message as a complete customer-facing message under the [[docs/brain/customer-voice.md]] rules (short paragraphs, max 2 sentences each, plain text, no markdown, no re-greeting on follow-ups), in this shape:
@@ -719,6 +814,29 @@ ${guidanceBlock}
 
 ` : ""}${convoHeader}
 ${convoBlock || `Customer: ${message.slice(0, 300)}`}`;
+
+  // Phase 5 Fix 1 Direction-scoped user block. When a non-superseded live Direction
+  // is passed, the caller has already committed to Sol's summary as the durable
+  // per-turn state — the customer-name / orders / full-history block above becomes
+  // dead cost. Swap the userBlock (only) with the Direction's rendered suffix +
+  // just the newest inbound message. Keep the shared system prefix + userBlockPrefix
+  // untouched so the 1-hour cache breakpoint still hits. On chosen_path='playbook'
+  // WITHOUT an active_playbook_id (the Phase 4 short-circuit fall-through), the
+  // playbook step is omitted deliberately — assembleDirectionContext returns
+  // playbook_snapshot=null in that case, and this branch mirrors that.
+  if (directionOverride && !directionOverride.superseded_at) {
+    const directionSuffix = renderDirectionSystemPrompt(directionOverride, null);
+    const directionUserBlock = `${currentDateContext()}
+
+${directionSuffix}${guidanceBlock ? `
+
+AGENT GUIDANCE (binding for this ticket — written by a human agent who knows context the system doesn't. Follow these even if they conflict with default reasoning):
+${guidanceBlock}` : ""}
+
+NEWEST INBOUND (Sol's Direction above summarizes everything prior — do NOT re-fetch customer / orders / prior history):
+Customer: ${message.slice(0, 2000)}`;
+    return { system, userBlockPrefix: null, userBlock: directionUserBlock };
+  }
 
   return { system, userBlockPrefix, userBlock };
 }
@@ -898,16 +1016,23 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .in("status", ["active", "paused", "cancelled"])
       .order("created_at", { ascending: false }),
-    // 180 days of order history so Sonnet has full visibility — old
-    // 5-order cap missed customers' relevant history. Surfaced on ticket
-    // 6e732303 (Veronica) where the playbook kept saying "no orders
-    // found" while the customer was citing 25-and-53-day-old order
-    // numbers. We also include subscription_id so each order can be
-    // labeled with which sub it belongs to (or "one-time" if null).
+    // Order history so Sonnet has full visibility — old 5-order cap
+    // missed customers' relevant history. Surfaced on ticket 6e732303
+    // (Veronica) where the playbook kept saying "no orders found" while
+    // the customer was citing 25-and-53-day-old order numbers. We also
+    // include subscription_id so each order can be labeled with which sub
+    // it belongs to (or "one-time" if null).
+    //
+    // We fetch the 25 most recent orders with NO date floor here and apply
+    // the "last 180 days OR at least the 3 most recent" window in code
+    // below. A hard .gte(180d) floor hid the fact that a disputed charge
+    // was a RENEWAL (an older first order sits outside 180d) — ticket
+    // 125741eb (marty), where Sol saw only the renewal and could read it
+    // as a first order. Always surfacing the last ≥3 restores the
+    // renewal-vs-first-order signal without unbounding old accounts.
     admin.from("orders")
       .select("order_number, total_cents, line_items, discount_codes, payment_details, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
-      .gte("created_at", new Date(Date.now() - 180 * 86400000).toISOString())
       .order("created_at", { ascending: false }).limit(25),
     // Loyalty record may live on ANY of the linked customer profiles.
     // Bug we fixed: previously this used .eq("customer_id", custId)
@@ -932,6 +1057,19 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   ]);
 
   const parts: string[] = [];
+
+  // Window the order history: the last 180 days, but ALWAYS at least the 3
+  // most recent orders if they exist (so a disputed renewal never hides the
+  // older first order — the renewal-vs-first-order signal). `orders` arrives
+  // sorted created_at DESC, so the within-180d rows are a prefix; we show
+  // max(count-within-180d, 3) from the front.
+  const ORDER_WINDOW_MS = 180 * 86400000;
+  const orderCutoffIso = new Date(Date.now() - ORDER_WINDOW_MS).toISOString();
+  const allOrders = orders || [];
+  const within180Count = allOrders.filter(o => (o.created_at as string) >= orderCutoffIso).length;
+  const shownOrderCount = Math.max(within180Count, 3);
+  const shownOrders = allOrders.slice(0, shownOrderCount);
+  const showingOlderThan180 = shownOrders.length > within180Count;
 
   // Subscriptions
   if (subs?.length) {
@@ -1019,11 +1157,20 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       }
     }
     const msrpMap = new Map<string, number>(); // variant_id → MSRP cents
+    // Phase 2 of docs/brain/specs/orchestrator-surfaces-line-item-variant-
+    // and-computed-per-unit-price.md — resolve the variant title from
+    // products.variants[].title so Sonnet + the analyzer see 'Berry'
+    // instead of having to infer flavor from the product title. Shopify
+    // sync stamps `variant_id` on the stored line but not `variant_title`
+    // (only originalUnitPriceSet), so the model was left guessing.
+    const variantTitleMap = new Map<string, string>(); // variant_id → title
     if (variantIds.size > 0) {
       const { data: products } = await admin.from("products").select("variants").eq("workspace_id", wsId);
       for (const p of products || []) {
-        for (const v of (p.variants as { id?: string; price_cents?: number }[] || [])) {
-          if (v.id && v.price_cents != null) msrpMap.set(String(v.id), v.price_cents);
+        for (const v of (p.variants as { id?: string; title?: string; price_cents?: number }[] || [])) {
+          if (!v.id) continue;
+          if (v.price_cents != null) msrpMap.set(String(v.id), v.price_cents);
+          if (v.title) variantTitleMap.set(String(v.id), v.title);
         }
       }
     }
@@ -1037,25 +1184,42 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       subLabel[s.id] = `${s.shopify_contract_id || s.id.slice(0, 8)} (${s.status})`;
     }
 
-    parts.push("\nRECENT ORDERS (last 180 days):");
-    for (const o of orders) {
-      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; sku?: string; variant_id?: string }[] || []);
-      const itemStr = lineItems.map(i => {
+    parts.push(
+      showingOlderThan180
+        ? "\nRECENT ORDERS (last 180 days had fewer than 3 — showing the 3 most recent; some are older than 180 days):"
+        : "\nRECENT ORDERS (last 180 days):",
+    );
+    for (const o of shownOrders) {
+      const lineItems = (o.line_items as { title?: string; variant_title?: string; quantity?: number; price_cents?: number; total_cents?: number; line_total_cents?: number; sku?: string; variant_id?: string }[] || []);
+      // Phase 1 of docs/brain/specs/orchestrator-surfaces-line-item-variant-
+      // and-computed-per-unit-price.md — hand Sonnet a reconciled per-unit
+      // (line total ÷ qty) so it never divides MSRP-ish price_cents by
+      // hand. `charged[i]` also carries the line total for the surface
+      // note. Ticket cd2e4a9a exposed the pre-fix drift: a $44.74 / 2-unit
+      // order surfaced as $22.46/unit (Shopify originalUnitPriceSet, pre-
+      // discount) instead of the actual $22.37/unit.
+      const charged = computeChargedLineTotals(o as { total_cents?: number | null; payment_details?: { subtotal_cents?: number | null } | null }, lineItems);
+      const itemStr = lineItems.map((i, idx) => {
         const qty = i.quantity || 1;
-        const realizedCents = i.price_cents || 0;
-        const titleFull = `${i.title || "?"}${i.variant_title ? ` (${i.variant_title})` : ""}`;
+        const perUnitCents = charged[idx].perUnitCents;
+        const lineTotalCents = charged[idx].chargedTotalCents;
+        // Prefer a stamped variant_title (internal/amplifier orders carry
+        // it) then fall back to the resolved products.variants[].title
+        // for Shopify-synced lines whose row only carries variant_id.
+        const resolvedVariantTitle = resolveLineVariantTitle(i, variantTitleMap);
+        const titleFull = `${i.title || "?"}${resolvedVariantTitle ? ` (variant: ${resolvedVariantTitle})` : ""}`;
         const msrp = i.variant_id ? msrpMap.get(String(i.variant_id)) : undefined;
         if (msrp) {
           const standardCents = Math.round(msrp * 0.75);
           const floorCents = Math.round(msrp * 0.5);
           const flag =
-            realizedCents < floorCents ? " [BELOW 50% FLOOR — not allowed anymore]" :
-            Math.abs(realizedCents - floorCents) <= 10 ? " [AT FLOOR — minimum allowed]" :
-            realizedCents < standardCents ? " [grandfathered, above floor]" :
+            perUnitCents < floorCents ? " [BELOW 50% FLOOR — not allowed anymore]" :
+            Math.abs(perUnitCents - floorCents) <= 10 ? " [AT FLOOR — minimum allowed]" :
+            perUnitCents < standardCents ? " [grandfathered, above floor]" :
             "";
-          return `${titleFull} x${qty} @ $${(realizedCents / 100).toFixed(2)}/unit realized (MSRP $${(msrp / 100).toFixed(2)} | standard sub $${(standardCents / 100).toFixed(2)} | 50% floor $${(floorCents / 100).toFixed(2)})${flag}`;
+          return `${titleFull} x${qty} @ $${(perUnitCents / 100).toFixed(2)}/unit realized (line total $${(lineTotalCents / 100).toFixed(2)} | MSRP $${(msrp / 100).toFixed(2)} | standard sub $${(standardCents / 100).toFixed(2)} | 50% floor $${(floorCents / 100).toFixed(2)})${flag}`;
         }
-        return `${titleFull} x${qty} @ $${(realizedCents / 100).toFixed(2)}/unit realized`;
+        return `${titleFull} x${qty} @ $${(perUnitCents / 100).toFixed(2)}/unit realized (line total $${(lineTotalCents / 100).toFixed(2)})`;
       }).join(", ");
       const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fulfillments = (o.fulfillments as { tracking_number?: string; status?: string }[] || []);
@@ -1086,7 +1250,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       parts.push(`- #${o.order_number} | ${date} | total $${((o.total_cents || 0) / 100).toFixed(2)} | ${o.financial_status || "?"}${sourceLabel}${subTag} | ${itemStr}${coupons}${tracking} | shopify_order_id: ${o.shopify_order_id || "?"}`);
     }
     parts.push(`PRICING TERMINOLOGY (use customer-facing language):
-- "Realized price" = what the customer actually pays per unit (the per-unit price on the order). Use this when speaking to customers.
+- "Realized price" = what the customer actually pays per unit (the per-unit price on the order). Use this when speaking to customers. Each line surfaces it computed as line total ÷ quantity, so never re-derive per-unit by multiplying anything — use the number shown.
 - "Base price" = an internal-only concept (realized / 0.75). NEVER mention "base price" in customer messages.
 - MSRP = the variant's listed retail price.
 - Standard subscription price = MSRP × 0.75 (the default 25% subscriber discount).
@@ -1928,14 +2092,29 @@ export async function callSonnetOrchestratorV2(
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
   modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
+  // Phase 5 Fix 1 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md.
+  // When passed non-null + non-superseded, buildPreContext swaps the customer/orders/
+  // full-history user block for the Direction's rendered suffix, and the returned
+  // decision.reasoning is prefixed with 'sol:direction-context' so stageResolutionEvent
+  // stamps the ticket_resolution_events ledger with the spec-verification tag.
+  directionOverride?: TicketDirection | null,
 ): Promise<SonnetDecision> {
   const startedAt = Date.now();
   let decision: SonnetDecision | null = null;
   let threw: unknown = null;
   try {
     decision = await runOrchestratorDecision(
-      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice,
+      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice, directionOverride,
     );
+    if (directionOverride && !directionOverride.superseded_at && decision) {
+      // Prefix the reasoning so downstream stageResolutionEvent stamps
+      // ticket_resolution_events.reasoning starting with 'sol:direction-context' — the
+      // exact string the spec Phase 2 / Fix-1 verification asserts on. Guarded on the
+      // same predicate buildPreContext used above so a superseded direction never
+      // taints the ledger tag. prefixDirectionContextReasoning is pure + pinned to a
+      // constant in ai-context.ts so a unit test can assert the exact tag byte-for-byte.
+      decision = { ...decision, reasoning: prefixDirectionContextReasoning(decision.reasoning) };
+    }
     return decision;
   } catch (err) {
     threw = err;
@@ -1966,6 +2145,7 @@ async function runOrchestratorDecision(
   personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
   agentContext?: { assigned: boolean; intervened: boolean } | null,
   modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
+  directionOverride?: TicketDirection | null,
 ): Promise<SonnetDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -1980,7 +2160,7 @@ async function runOrchestratorDecision(
   };
 
   try {
-    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext);
+    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext, directionOverride);
     // Cache-control breakpoints, 1-hour TTL. The heavy, shared payload
     // (tools + system rules/policies/handlers, ~40-50K tokens) is now
     // byte-identical for every ticket in the workspace, so the first

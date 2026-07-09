@@ -1,0 +1,1 @@
+- **Inflection detector (drift + frustration) → re-session Sol** · verified 2026-07-08 · → [[../libraries/inflection-detector]] · [[../lifecycles/ticket-lifecycle]] · [[../inngest/unified-ticket-handler]]

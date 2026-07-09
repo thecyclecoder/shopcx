@@ -9,9 +9,11 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
+import { assertCtaBackedByLaunch } from "@/lib/sol-cta-reference-guard";
 import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
+import { usageCostCents } from "@/lib/ai-usage";
 
 // ── Types ──
 
@@ -165,6 +167,15 @@ export interface ActionContext {
   // this row so every branch shares one write-ahead ledger row per turn.
   // See docs/brain/tables/ticket_resolution_events.md.
   _resolutionEventId?: string;
+  // Internal: set by a direct action whose REAL outcome is async and
+  // can't be known at the executor's return time (bill_now on Appstle
+  // is the archetype — the vendor accepts the trigger then can decline
+  // minutes later). When true, the executor SKIPS stamping the
+  // resolution_event verified_outcome — an out-of-band Inngest verify
+  // (commerce-order-now-verify) reads the real outcome and stamps the
+  // ledger row when the verdict is known. See
+  // docs/brain/libraries/order-now-verify.md.
+  _resolutionOutcomePending?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -214,35 +225,167 @@ export interface ActionResult {
  * "{{coupon_code}}" string and the downstream API call fails.
  *
  * The map mirrors substituteActionPlaceholders (the message-side helper).
+ *
+ * Fallback code-thread (atomic redeem→apply — ticket 0a9e4d7f, Judy):
+ * when the action is `apply_(loyalty_)coupon` and it has NO real `code`
+ * (missing, empty, or still an unsubstituted `{{coupon_code}}` /
+ * `[COUPON_CODE]` token because Sonnet omitted the template), thread the
+ * `couponCode` from a prior successful `redeem_points` directly. Points
+ * must never be spent without the coupon actually landing on the target.
+ *
+ * Exported for unit tests; the direct call sites are the executor loops
+ * in {@link executeActionsInline} and {@link handleDirectAction}.
  */
-function substituteActionParams(
+export function substituteActionParams(
   action: ActionParams,
   results: { action: ActionParams; result: ActionResult }[],
 ): ActionParams {
   const map: Record<string, string> = {};
+  let lastCoupon: string | undefined;
   for (const { result } of results) {
     if (!result.success) continue;
-    if (result.couponCode) map.coupon_code = result.couponCode;
+    if (result.couponCode) {
+      map.coupon_code = result.couponCode;
+      lastCoupon = result.couponCode;
+    }
     if (result.trackingNumber) map.tracking_number = result.trackingNumber;
     if (result.carrier) map.carrier = result.carrier;
     if (result.labelUrl) map.label_url = result.labelUrl;
   }
-  if (Object.keys(map).length === 0) return action;
 
-  const sub = (v: string): string => {
-    let out = v;
-    for (const [k, val] of Object.entries(map)) {
-      out = out.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, "g"), val);
-      out = out.replace(new RegExp(`\\[\\s*${k.toUpperCase()}\\s*\\]`, "g"), val);
-    }
-    return out;
-  };
   const cloned = { ...action } as unknown as Record<string, unknown>;
-  for (const key of Object.keys(cloned)) {
-    const v = cloned[key];
-    if (typeof v === "string") cloned[key] = sub(v);
+
+  if (Object.keys(map).length > 0) {
+    const sub = (v: string): string => {
+      let out = v;
+      for (const [k, val] of Object.entries(map)) {
+        out = out.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, "g"), val);
+        out = out.replace(new RegExp(`\\[\\s*${k.toUpperCase()}\\s*\\]`, "g"), val);
+      }
+      return out;
+    };
+    for (const key of Object.keys(cloned)) {
+      const v = cloned[key];
+      if (typeof v === "string") cloned[key] = sub(v);
+    }
   }
+
+  if (
+    lastCoupon &&
+    (action.type === "apply_loyalty_coupon" || action.type === "apply_coupon")
+  ) {
+    const looksReal = (s: unknown): boolean =>
+      typeof s === "string" && s.length > 0 && !/\{\{|\[/.test(s);
+    if (!looksReal(cloned.code) && !looksReal(cloned.coupon_code)) {
+      cloned.code = lastCoupon;
+    }
+  }
+
   return cloned as unknown as ActionParams;
+}
+
+/**
+ * Roll back a loyalty redemption when the paired apply_(loyalty_)coupon
+ * did not land — re-credit points and mark the redemption `rolled_back`
+ * so points are never spent without the coupon actually applying. The
+ * atomic redeem→apply contract (ticket 0a9e4d7f, Judy). See
+ * [[../libraries/loyalty]].
+ *
+ * Detection: (a) any apply_(loyalty_)coupon result marked failure, OR
+ * (b) an apply_(loyalty_)coupon that succeeded but is listed in
+ * verifyFailures (self-heal verify+retry gave up). The prior successful
+ * `redeem_points` in the same turn is the source of the code we roll
+ * back — its `couponCode` result points at the exact loyalty_redemptions
+ * row.
+ *
+ * Safety: only rolls back a redemption whose current status is `active`.
+ * The apply_loyalty_coupon internal regen path (line ~1051) mutates the
+ * original row to `expired` when it re-mints; leaving that alone here
+ * avoids double-refunding a regen sequence — Phase 2 will fold the
+ * regen-then-fail edge case in.
+ *
+ * Exported for unit tests. Idempotent — if the redemption is already
+ * non-active, nothing happens.
+ */
+export async function rollbackLoyaltyRedemptionOnApplyFailure(
+  ctx: Pick<ActionContext, "admin" | "workspaceId" | "ticketId">,
+  results: { action: ActionParams; result: ActionResult }[],
+  verifyFailures: string[],
+  sysNote: SysNoteFn,
+): Promise<void> {
+  const isApplyType = (t: string): boolean =>
+    t === "apply_loyalty_coupon" || t === "apply_coupon";
+
+  const applyFailed = results.some(
+    (r) => isApplyType(r.action.type) && !r.result.success,
+  );
+  const applyVerifyFailed = verifyFailures.some((f) =>
+    f.startsWith("apply_loyalty_coupon:") || f.startsWith("apply_coupon:"),
+  );
+  if (!applyFailed && !applyVerifyFailed) return;
+
+  const redeem = results.find(
+    (r) =>
+      r.action.type === "redeem_points" &&
+      r.result.success &&
+      typeof r.result.couponCode === "string" &&
+      r.result.couponCode.length > 0,
+  );
+  const code = redeem?.result.couponCode;
+  if (!code) return;
+
+  const { data: red } = await ctx.admin
+    .from("loyalty_redemptions")
+    .select("id, member_id, points_spent, status")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("discount_code", code)
+    .maybeSingle();
+  if (!red || red.status !== "active") return;
+
+  const { data: member } = await ctx.admin
+    .from("loyalty_members")
+    .select("id, workspace_id, points_balance, points_earned, points_spent")
+    .eq("id", red.member_id)
+    .single();
+  if (!member) return;
+
+  // Re-credit inline against ctx.admin (not earnPoints — that helper
+  // instantiates its own admin client, which is fine in prod but breaks
+  // the unit test's in-memory fake admin). Matches earnPoints's write
+  // shape: an 'adjustment' transaction row + a re-read-then-update on
+  // loyalty_members so a concurrent balance change isn't clobbered.
+  await ctx.admin.from("loyalty_transactions").insert({
+    workspace_id: member.workspace_id,
+    member_id: member.id,
+    points_change: red.points_spent,
+    type: "adjustment",
+    description: `Rollback: apply_loyalty_coupon failed for ${code} (ticket ${ctx.ticketId})`,
+    order_id: null,
+  });
+  const { data: current } = await ctx.admin
+    .from("loyalty_members")
+    .select("points_balance, points_earned")
+    .eq("id", member.id)
+    .single();
+  const curBal = (current?.points_balance as number | undefined) ?? member.points_balance;
+  const curEarned = (current?.points_earned as number | undefined) ?? member.points_earned;
+  await ctx.admin
+    .from("loyalty_members")
+    .update({
+      points_balance: curBal + red.points_spent,
+      points_earned: curEarned + red.points_spent,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", member.id);
+
+  await ctx.admin
+    .from("loyalty_redemptions")
+    .update({ status: "rolled_back" })
+    .eq("id", red.id);
+
+  await sysNote(
+    `[Rollback] apply_loyalty_coupon didn't land — re-credited ${red.points_spent} pts, marked ${code} rolled_back.`,
+  );
 }
 
 /**
@@ -804,6 +947,20 @@ export const directActionHandlers: Record<
       p.date = date;
     }
     const r = await subscriptionUpdateNextBillingDate(ctx.workspaceId, p.contract_id!, date);
+    // Mirror the intended day to our local row immediately (like the portal +
+    // appstleSkipNextOrder do). The Appstle reschedule endpoint doesn't write
+    // our table, and the next sync reads Appstle's store-anchored value — so
+    // without this, a poll/read right after execution sees the STALE date and
+    // Sol would speak to the wrong renewal. Store noon UTC so a UTC-rendered
+    // date shows the intended calendar day. Date-only inputs only (an ISO
+    // input already carries its own instant).
+    if (r.success && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      await ctx.admin
+        .from("subscriptions")
+        .update({ next_billing_date: `${date}T12:00:00Z`, updated_at: new Date().toISOString() })
+        .eq("workspace_id", ctx.workspaceId)
+        .eq("shopify_contract_id", p.contract_id!);
+    }
     return { ...r, summary: `Changed next billing date to ${date}` };
   },
 
@@ -813,11 +970,65 @@ export const directActionHandlers: Record<
    * "I'm out of product". Does NOT change next_billing_date — after
    * the charge, the schedule advances by one cycle. Flavor-aware:
    * internal subs fire the Braintree renewal pipeline, Appstle subs
-   * attempt the upcoming Appstle billing (subscriptionOrderNow).
+   * attempt the upcoming Appstle billing.
+   *
+   * Order-now on Appstle is DELAYED — the vendor accepts the trigger,
+   * then charges asynchronously and can decline. Route through
+   * `subscriptionOrderNowVerified` so the fire schedules an async
+   * `commerce/order-now.verify` re-check that reads the REAL outcome
+   * and stamps the ticket_resolution_events row only on a verified
+   * paid order. When the wrapper returns `pending: true` we mark the
+   * ctx flag so the executor's return-time stamp is SKIPPED — the
+   * async verify owns the verdict from here (spec Phase 1:
+   * order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry).
    */
   bill_now: async (ctx, p) => {
-    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "bill_now missing contract_id" };
+    const { subscriptionOrderNowVerified } = await import("@/lib/commerce/order-now-verify");
+    const result = await subscriptionOrderNowVerified(ctx.workspaceId, p.contract_id, {
+      resolution_event_id: ctx._resolutionEventId,
+      ticket_id: ctx.ticketId,
+      customer_id: ctx.customerId,
+    });
+    if (result.success && result.pending) ctx._resolutionOutcomePending = true;
+    return {
+      success: result.success,
+      error: result.error,
+      summary: result.summary,
+    };
+  },
+
+  /**
+   * order_now — customer-facing name for bill_now. The portal handler
+   * (src/lib/portal/handlers/order-now.ts) and portal/mutation-guard.ts
+   * both name the same capability "order_now", so it is the natural
+   * emission for Sol / the orchestrator when a customer says "ship it
+   * now" / "send today". Without this key, an `order_now` emission
+   * landed on the "Unknown action type" branch and the LLM rationalized
+   * the miss as "no bill_now action exists for non-emergency requests"
+   * (ticket 0a9e4d7f, Judy). Same flavor-aware subscriptionOrderNow
+   * implementation as bill_now — both routes charge the current upcoming
+   * order; the schedule advances by one cycle after the charge. Covered
+   * by the selective-clarify irreversible set below so a low-confidence
+   * emission gets a confirm-first turn before the charge fires.
+   */
+  /**
+   * order_now — customer-facing name for bill_now. The portal handler
+   * (src/lib/portal/handlers/order-now.ts) and portal/mutation-guard.ts
+   * both name the same capability "order_now", so it is the natural
+   * emission for Sol / the orchestrator when a customer says "ship it
+   * now" / "send today". Without this key, an `order_now` emission
+   * landed on the "Unknown action type" branch and the LLM rationalized
+   * the miss as "no bill_now action exists for non-emergency requests"
+   * (ticket 0a9e4d7f, Judy). Same flavor-aware subscriptionOrderNow
+   * implementation as bill_now — both routes charge the current upcoming
+   * order; the schedule advances by one cycle after the charge. Covered
+   * by the selective-clarify irreversible set below so a low-confidence
+   * emission gets a confirm-first turn before the charge fires.
+   */
+  order_now: async (ctx, p) => {
+    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
+    if (!p.contract_id) return { success: false, error: "order_now missing contract_id" };
     return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
   },
 
@@ -2448,6 +2659,12 @@ export async function executeSonnetDecision(
   // Phase 1 lands the substrate with those columns NULL.
   // Spec: docs/brain/specs/ticket-resolution-events-writeahead-ledger-and-decision-schema-extension.md
   await stageResolutionEvent(ctx, decision);
+  // Turn-start cutoff for the per-turn AI-cost stamp below. Any ai_token_usage
+  // row written under this executor run — orchestrator, playbook compiler,
+  // sub-Haiku, etc. — carries created_at >= turnStartedAt, so summing rows
+  // above this bound + matching ticket_id yields THIS turn's cost delta.
+  // Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
+  const turnStartedAt = new Date().toISOString();
   const stampedSend: SendFn = async (m, sb) => {
     await send(m, sb);
     await stampResolutionShipped(ctx);
@@ -2553,6 +2770,26 @@ export async function executeSonnetDecision(
         await escalateTicket(ctx, `blocked_unbacked_claim:${unbackedClaim}`);
         break;
       }
+      // CTA-reference guard — Phase 3 of docs/brain/specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta.md.
+      // A message that references a CTA ("click the button below", "use the link", "click here",
+      // etc.) is UNBACKED on the ai_response / kb_response paths because they attach no journey;
+      // no journey_sessions row is written this turn. Block the send + escalate with the
+      // 'cta_tail' claim reason so triage-escalations routes the job to needs_attention on the
+      // same terms as every other blocked_unbacked_claim:* variant. Fail-safe: the underlying
+      // guard fails-open on a DB probe error, so a transient read failure cannot strand a legit
+      // reply.
+      const ctaAssess = await assertCtaBackedByLaunch({
+        admin: ctx.admin,
+        workspace_id: ctx.workspaceId,
+        ticket_id: ctx.ticketId,
+        message: decision.response_message,
+        turn_started_at: turnStartedAt,
+      });
+      if (!ctaAssess.ok) {
+        await sysNote(`[Guard] ${ctaAssess.reason}`);
+        await escalateTicket(ctx, `blocked_unbacked_claim:cta_tail`);
+        break;
+      }
       if (decision.response_message) {
         await trackedSend(decision.response_message, ctx.sandbox);
       }
@@ -2589,11 +2826,24 @@ export async function executeSonnetDecision(
   // is derived from whether a customer-facing message actually shipped.
   // Escalate paths leave verified_outcome NULL — the agent takes over and
   // the row stays open until the outcome is known (M4 closes it out).
-  if (ctx._escalatedThisRun !== true) {
+  //
+  // Also NULL when ctx._resolutionOutcomePending is set: a bill_now on an
+  // Appstle sub triggered but the real charge is minutes away — the async
+  // commerce-order-now-verify Inngest job stamps the verdict once known
+  // (docs/brain/libraries/order-now-verify.md).
+  if (ctx._escalatedThisRun !== true && !ctx._resolutionOutcomePending) {
     if (messageSent || statusManaged || ctx._closedThisRun === true) {
       await stampResolutionVerified(ctx, "confirmed");
     }
   }
+
+  // Sum this turn's ai_token_usage rows for this ticket and add to
+  // tickets.ai_cost_cents. Same 'never fail the executor on a ledger
+  // error' invariant as the resolution-events stampers above — swallow
+  // errors, never re-throw. Feeds the Sol-economics analytics tile the
+  // spec's later phases add.
+  // Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
+  await stampTicketAiCost(ctx, turnStartedAt);
 
   return {
     messageSent,
@@ -2704,6 +2954,63 @@ async function stampResolutionVerified(
       .is("verified_at", null);
   } catch {
     // Never fail the executor because the ledger stamp failed.
+  }
+}
+
+// ── Per-turn AI cost stamp ──
+//
+// Sums the ai_token_usage rows this turn produced (matching ticket_id +
+// created_at >= turn start) into whole cents via usageCostCents() and adds
+// the delta to tickets.ai_cost_cents. Feeds the Sol-economics analytics tile
+// the spec's later phases add: median + p95 per-ticket AI cost, split by
+// pre-Sol vs Sol cohort, compared against the Catherine $8.92 baseline.
+//
+// Never throws — the executor's ledger-error invariant covers this. If the
+// stamp fails (network blip, RPC missing pre-migration, whatever) we still
+// return the successful turn to the customer.
+//
+// Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
+
+interface AiTokenUsageRow {
+  model: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cache_read_tokens: number | null;
+}
+
+async function stampTicketAiCost(
+  ctx: ActionContext,
+  turnStartedAt: string,
+): Promise<void> {
+  try {
+    const { data: rows } = await ctx.admin
+      .from("ai_token_usage")
+      .select("model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens")
+      .eq("ticket_id", ctx.ticketId)
+      .gte("created_at", turnStartedAt);
+    if (!rows || rows.length === 0) return;
+    let totalCents = 0;
+    for (const r of rows as AiTokenUsageRow[]) {
+      totalCents += usageCostCents(r.model, {
+        input_tokens: r.input_tokens ?? 0,
+        output_tokens: r.output_tokens ?? 0,
+        cache_creation_tokens: r.cache_creation_tokens ?? 0,
+        cache_read_tokens: r.cache_read_tokens ?? 0,
+      });
+    }
+    const delta = Math.round(totalCents);
+    if (delta <= 0) return;
+    // Atomic SQL-side increment via add_ticket_ai_cost RPC — see
+    // supabase/migrations/20260929120000_tickets_ai_cost_cents.sql. Handles
+    // the rare cross-ticket merge re-fire race without a lost update.
+    await ctx.admin.rpc("add_ticket_ai_cost", {
+      p_ticket_id: ctx.ticketId,
+      p_delta: delta,
+    });
+  } catch {
+    // Never fail the executor because the cost stamp failed. Same
+    // invariant as the resolution-events stampers above.
   }
 }
 
@@ -2826,13 +3133,16 @@ async function handleDirectAction(
     await sysNote(`Action failed: ${f.action.type} — ${f.result.error}`);
   }
 
+  // Hoisted so the atomic redeem+apply rollback can see the verify verdict
+  // regardless of which branch we took below.
+  const verifyFailures: string[] = [];
+
   if (failures.length === 0) {
     // Self-heal: verify each action actually took effect BEFORE we send
     // the AI's prefab "I did it" message. Earlier flow sent the message
     // optimistically and then verified — the customer would see a fake
     // success even when the action silently didn't stick.
     await new Promise(resolve => setTimeout(resolve, 3000));
-    const verifyFailures: string[] = [];
 
     // Verify-and-retry safety.
     //
@@ -2887,10 +3197,20 @@ async function handleDirectAction(
     // retried cleanly), 'drifted' when a claim couldn't be backed by a DB
     // read. Runs BEFORE the return-time stamp so this more-specific
     // verdict wins the idempotent-once compare-and-set.
-    if (verifyFailures.length === 0) {
-      await stampResolutionVerified(ctx, "confirmed");
-    } else {
-      await stampResolutionVerified(ctx, "drifted");
+    //
+    // Exception: an async action (bill_now on Appstle) has a real outcome
+    // that's minutes away — the direct action returned success on the
+    // trigger ack alone. When ctx._resolutionOutcomePending is set the
+    // out-of-band commerce-order-now-verify Inngest job owns the ledger
+    // stamp; the executor MUST NOT stamp 'confirmed' here or the async
+    // verdict's compare-and-set silently no-ops later
+    // (docs/brain/libraries/order-now-verify.md).
+    if (!ctx._resolutionOutcomePending) {
+      if (verifyFailures.length === 0) {
+        await stampResolutionVerified(ctx, "confirmed");
+      } else {
+        await stampResolutionVerified(ctx, "drifted");
+      }
     }
 
     // Send the customer-facing confirmation only AFTER verify+retry have
@@ -2925,6 +3245,20 @@ async function handleDirectAction(
     await send(errorMsg, ctx.sandbox);
     await escalateTicket(ctx, `Direct action failures: ${failures.map((f) => `${f.action.type}: ${f.result.error}`).join("; ")}`);
   }
+
+  // Atomic redeem+apply guardrail (ticket 0a9e4d7f, Judy): if
+  // redeem_points succeeded but the paired apply_(loyalty_)coupon
+  // didn't LAND — initial handler failure OR self-heal verify+retry
+  // failure — re-credit the spent points and mark the redemption
+  // rolled_back. Points are never spent without a coupon actually on
+  // the target. Runs after both branches finalize their side effects.
+  try {
+    await rollbackLoyaltyRedemptionOnApplyFailure(ctx, results, verifyFailures, sysNote);
+  } catch (err) {
+    await sysNote(
+      `[Rollback] loyalty redemption rollback threw — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /**
@@ -2937,51 +3271,75 @@ async function handleDirectAction(
  * switch reads.
  */
 export async function verifyActionInDB(
-  ctx: Pick<ActionContext, "admin" | "ticketId">,
+  ctx: Pick<ActionContext, "admin" | "ticketId"> & Partial<Pick<ActionContext, "workspaceId" | "customerId">>,
   action: ActionParams,
 ): Promise<boolean> {
   const admin = ctx.admin;
 
+  // Scope helpers — Phase 1 of docs/brain/specs/secure-sol-required-outcomes-dispatch.md. When the
+  // caller supplied workspaceId / customerId (the honor step passes both from ActionContext), add
+  // them to subscription/order reads so a target that belongs to a different tenant or a
+  // different customer legitimately returns zero rows (→ verified=false) instead of confirming
+  // an unscoped identifier. Existing callers that pass only { admin, ticketId } are unaffected —
+  // the eq() calls are skipped when the field is undefined. Typed as `unknown` because
+  // Supabase's builder generic tree overflows tsc's instantiation-depth limit if we type-thread
+  // the concrete query type — the switch arms upcast to unknown on entry and cast back to the
+  // builder shape here.
+  type ScopableQuery = { eq: (col: string, val: unknown) => ScopableQuery };
+  const scopeSub = (q: unknown): ScopableQuery => {
+    let out = q as ScopableQuery;
+    if (ctx.workspaceId) out = out.eq("workspace_id", ctx.workspaceId);
+    if (ctx.customerId) out = out.eq("customer_id", ctx.customerId);
+    return out;
+  };
+  const scopeOrder = scopeSub;
+
   switch (action.type) {
     case "cancel": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "cancelled";
     }
     case "pause":
     case "crisis_pause": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "paused";
     }
     case "resume":
     case "reactivate": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "active";
     }
     case "partial_refund":
     case "redeem_points_as_refund": {
       // Check if order financial_status changed
       if (!action.shopify_order_id) return true;
-      const { data } = await admin.from("orders")
-        .select("financial_status").eq("shopify_order_id", action.shopify_order_id).single();
+      const q = scopeOrder(admin.from("orders")
+        .select("financial_status").eq("shopify_order_id", action.shopify_order_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { financial_status?: string } | null }> }).maybeSingle();
       return data?.financial_status === "partially_refunded" || data?.financial_status === "refunded";
     }
     case "pause_timed": {
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("status").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("status").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { status?: string } | null }> }).maybeSingle();
       return data?.status === "paused";
     }
     case "apply_coupon":
     case "apply_loyalty_coupon": {
       if (!action.contract_id || !action.code) return true;
-      const { data } = await admin.from("subscriptions")
-        .select("applied_discounts").eq("shopify_contract_id", action.contract_id).single();
+      const q = scopeSub(admin.from("subscriptions")
+        .select("applied_discounts").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { applied_discounts?: { title?: string }[] } | null }> }).maybeSingle();
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
     }
@@ -3023,9 +3381,10 @@ export async function verifyActionInDB(
       // (skip_next_order is retired by the sibling M3 spec, so this
       // case exists just for the transition window.)
       if (!action.contract_id) return true;
-      const { data } = await admin.from("subscriptions")
+      const q = scopeSub(admin.from("subscriptions")
         .select("next_billing_date")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { next_billing_date?: string } | null }> }).maybeSingle();
       const nbd = data?.next_billing_date;
       if (!nbd) return false;
       return new Date(String(nbd)).getTime() > Date.now();
@@ -3040,9 +3399,10 @@ export async function verifyActionInDB(
       // next_billing_date as verified — the customer's intent (get
       // product ASAP) was satisfied by the order-now dispatch.
       if (!action.contract_id || !action.date) return true;
-      const { data } = await admin.from("subscriptions")
+      const q = scopeSub(admin.from("subscriptions")
         .select("next_billing_date")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { next_billing_date?: string } | null }> }).maybeSingle();
       const nbd = data?.next_billing_date;
       if (!nbd) return false;
       const requested = String(action.date).slice(0, 10);
@@ -3060,9 +3420,10 @@ export async function verifyActionInDB(
       // The spec calls them `billing_policy_interval` / `billing_policy_interval_count`;
       // per CLAUDE.md "the database is the spec" — we use the live shape.
       if (!action.contract_id || !action.interval) return true;
-      const { data } = await admin.from("subscriptions")
+      const q = scopeSub(admin.from("subscriptions")
         .select("billing_interval, billing_interval_count")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { billing_interval?: string; billing_interval_count?: number } | null }> }).maybeSingle();
       if (!data) return false;
       const wantInterval = String(action.interval).toUpperCase();
       const gotInterval = String(data.billing_interval || "").toUpperCase();
@@ -3085,9 +3446,10 @@ export async function verifyActionInDB(
       // quantity, price_cents } — the columns the spec's phase-2 bullets
       // name. Verify against that array.
       if (!action.contract_id) return true;
-      const { data: sub } = await admin.from("subscriptions")
+      const qSub = scopeSub(admin.from("subscriptions")
         .select("items")
-        .eq("shopify_contract_id", action.contract_id).single();
+        .eq("shopify_contract_id", action.contract_id));
+      const { data: sub } = await (qSub as unknown as { maybeSingle: () => Promise<{ data: { items?: unknown } | null }> }).maybeSingle();
       type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
       const items = (sub?.items || []) as Line[];
 

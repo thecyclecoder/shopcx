@@ -21,8 +21,11 @@ export async function GET(
 
   const admin = createAdminClient();
 
+  // billing_source (Phase 3 of ticket-cost-distinguishes-max-subscription-from-real-api-spend) is
+  // returned so the panel can render a subtle 'on Max (subscription)' indicator instead of a
+  // fabricated dollar figure — the fleet-cost apiBilled rule surfaced to the ticket UI.
   const { data: latest } = await admin.from("ticket_analyses")
-    .select("id, score, admin_score, admin_score_reason, admin_corrected_at, issues, action_items, summary, model, cost_cents, ai_message_count, window_start, window_end, created_at, trigger")
+    .select("id, score, admin_score, admin_score_reason, admin_corrected_at, issues, action_items, summary, model, cost_cents, ai_message_count, window_start, window_end, created_at, trigger, billing_source")
     .eq("ticket_id", ticketId)
     .eq("workspace_id", workspaceId)
     .order("window_end", { ascending: false })

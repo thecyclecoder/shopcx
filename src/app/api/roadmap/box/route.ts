@@ -126,6 +126,17 @@ interface AccountsSnapshot {
   events: { at: string; type: string; account: string; detail: string }[];
 }
 
+// build-box-page-reflects-real-per-lane-group-usage Phase 2 — per-lane-group cap map, written by the
+// box worker's heartbeat as a single jsonb blob. Each entry is a NAMED lane group (build_plan /
+// customer_service / director / fold / other) with its OWN cap and the set of `agent_jobs.kind`
+// values that count against it. The page + BoxChip render each group against its OWN cap by
+// filtering worker.lanes on the group's kind-set, so the "13/10 in use" nonsense the pre-existing
+// build_lanes/fold_lanes scalar caps produced can't recur. NULL for legacy heartbeat rows written
+// before the column existed — the page falls back to build_lanes/fold_lanes then.
+interface LaneGroups {
+  [group: string]: { cap: number; kinds: string[] };
+}
+
 /**
  * Pull the human-readable failure reason out of a job's log_tail. A `claude -p` run stores its
  * result JSON (`{is_error, api_error_status, result}`) — surface the 529 / Max-limit / API message
@@ -184,7 +195,7 @@ export async function GET() {
   const admin = createAdminClient();
   const { data: hb } = await admin
     .from("worker_heartbeats")
-    .select("running_sha, status, active_builds, detail, last_poll_at, started_at, build_lanes, fold_lanes, lanes, accounts")
+    .select("running_sha, status, active_builds, detail, last_poll_at, started_at, build_lanes, fold_lanes, lane_groups, lanes, accounts")
     .eq("id", "box")
     .maybeSingle();
   // Queue-restart drain state (worker_controls) — so the box page can show "draining" + toggle it.
@@ -209,6 +220,11 @@ export async function GET() {
         started_at: hb.started_at as string | null,
         build_lanes: (hb.build_lanes as number | null) ?? 0,
         fold_lanes: (hb.fold_lanes as number | null) ?? 0,
+        // build-box-page-reflects-real-per-lane-group-usage Phase 2 — pass the per-group cap map
+        // through so the page + BoxChip render each lane group against its OWN cap (kind-set) from
+        // this single source of truth instead of hardcoding MAX_* in the UI. NULL for legacy rows
+        // written before the column existed (the page then falls back to build_lanes/fold_lanes).
+        lane_groups: (hb.lane_groups as LaneGroups | null) ?? null,
         lanes: (hb.lanes as LaneRow[] | null) ?? [],
         // accounts is `{}` until the worker first writes a snapshot; normalize to null so the UI shows
         // nothing (rather than an empty grid) on a single-account / legacy box.

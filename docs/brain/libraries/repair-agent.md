@@ -8,6 +8,32 @@ The queue plumbing + autonomy policy behind the **Repair Agent** box agent ([[..
 
 The agent optimizes the bounded proxy "clear the error." Auto-spawning code builds from a noisy/flapping feed (many PRs + merge churn + cost) is the exact Goodhart failure ([[../operational-rules]] § North star). So the diagnosis + fix-spec is the high-value low-risk half the agent does autonomously; **building** (writes code / opens PRs / applies migrations) stays owner-gated ([[../specs/build-approval-gates]]). The DEFAULT authors the fix spec to main and **surfaces** it for one-tap owner Build; only a narrow mechanical allow-list auto-queues.
 
+## Mandate — hardened coaching (agent-mandate-hardening-repair)
+
+The repair agent's verdict logic has been hardened to embed the accumulated coaching from low grades into permanent behavior:
+
+### Pending-verification gate — do NOT mark complete until fix deploys and metrics recover
+
+**Pattern:** When a diagnosis surfaces an existing fix (spec, PR, or referenced issue) that is already in-flight or pending deploy, do NOT return `"real-bug"` + author a new spec. Instead return `"needs-human"` with a one-line note: `"pending verification — awaiting deploy of [[<spec-or-PR>]] + <specific post-deploy signal, e.g. the KPI returning to baseline / the error signature not recurring for one cycle>"`. A human confirms and closes after the fix lands and the metric stabilizes; the agent does NOT close speculatively.
+
+**Why:** A fix that hasn't deployed hasn't *held* — marking a repair complete before production validates the outcome conflates "a solution exists" with "the problem is resolved." The rubric requires the error didn't recur, which cannot be confirmed until production reflects the change and the metric recovers. This gate forces the agent to own the full repair cycle rather than treating deploy as someone else's problem.
+
+**In code:** `scripts/builder-worker.ts` ~15079–15081 in the `runRepairJob` prompt. Only `"transient"` (for genuine one-off recoveries with NO pending fix) skips this gate. Any reason mentioning "pending deploy", "already-fixed", "resolved-by", "queued", or "in-flight" becomes `"needs-human"` (pending verification), not `"transient"` or a new `"real-bug"` spec.
+
+### Root-cause grouping — one guard per shared root cause, not N specs per signature
+
+**Pattern:** When multiple error signatures share a ROOT CAUSE (implicated file + failure mode), extend the SINGLE existing guard — never author new specs for each signature. Example: three separate `loop:kpi_drift:metric_a`, `loop:kpi_drift:metric_b`, `loop:kpi_drift:metric_c` incidents can all stem from ONE stale-KPI-snapshot row. The single fix to `platform-director-cron.ts`'s done-guard heals every metric_key+cadence at once; the repair agent recognizes this pattern and either appends to the existing guard spec or resolves the later signatures as "resolved-by [[existing-guard-spec]]" with no new build.
+
+**Why:** Authoring N separate fixes that re-edit the same file, pass, and merge in rapid churn wastes build slots and creates merge conflicts. The grade-3 coaching pattern: author one spec that extends the existing guard; resolve all sibling signatures as "resolved-by" to that one spec, deferring to the single merge without duplication.
+
+**In code:** `src/lib/repair-agent.ts` `rootCauseKey(target, verdict)` collapses sibling signatures onto one `implicated-file::failure-mode` key. `groupOrAuthorRepairSpec` checks for a sibling repair spec authored in the window that covers the SAME `rootCauseKey` (implicated file + failure mode); if found, this signature is *added to it* (`**Repair-signature:**` lines) rather than authoring a near-duplicate. Same-slug stays idempotent. The job persists `{ root_cause, authored_slug }` to its `instructions` JSON so later repairs recognize it.
+
+### Validation discipline — transient only for genuine one-offs, never for "pending deploy"
+
+**Pattern:** Return `"transient"` ONLY when the error is a genuine one-off that already recovered by itself — a momentary upstream timeout, a deploy-boundary race that self-cleared — with NO pending fix behind it. If the reason mentions "pending deploy", "already-fixed", "resolved-by", "queued", "in-flight", or "auto-queued", the verdict is NOT transient; use `"needs-human"` instead (pending verification).
+
+**Why:** Marking a pending-fix as transient closes the loop speculatively, leaving the root cause unvalidated if the fix doesn't land or doesn't address the drift signature. Requiring an explicit verification gate before closing ensures the diagnosis links to a deployable fix and production confirms recovery.
+
 ## Exports
 
 - `type RepairVerdict = "real-bug" | "monitor-false-positive" | "foreign-app-noise" | "transient" | "needs-human"` — the box's per-error verdict (it cites the root cause for each).

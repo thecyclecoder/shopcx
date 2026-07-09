@@ -25,10 +25,16 @@ export function ActionOverlay({
   phase,
   description,
   onClose,
+  primaryAction,
 }: {
   phase: ActionPhase;
   description?: string | null;
   onClose: () => void;
+  /** Optional primary CTA rendered on the error phase (above Close), e.g.
+   *  "Update payment method" when the mutation was blocked by
+   *  payment_failed_update_blocked. When set, Close becomes a secondary
+   *  link so the CTA is the obvious next step, not a text dead-end. */
+  primaryAction?: { label: string; onClick: () => void } | null;
 }) {
   // Auto-dismiss success after a beat — the customer doesn't need to
   // click "Close" every time. Keep error sticky so the message lands.
@@ -75,7 +81,14 @@ export function ActionOverlay({
             <div className="sp-action-overlay__sub">
               {description || "We're submitting a ticket on your behalf so an agent can handle this for you."}
             </div>
-            <button type="button" className="sp-action-overlay__btn" onClick={onClose}>Close</button>
+            {primaryAction ? (
+              <>
+                <button type="button" className="sp-action-overlay__btn" onClick={primaryAction.onClick}>{primaryAction.label}</button>
+                <button type="button" className="sp-action-overlay__btn-secondary" onClick={onClose}>Close</button>
+              </>
+            ) : (
+              <button type="button" className="sp-action-overlay__btn" onClick={onClose}>Close</button>
+            )}
           </>
         )}
       </div>
@@ -186,6 +199,22 @@ export function ActionOverlay({
         }
         .sp-action-overlay__btn:hover { background: #1f2937; }
         .sp-action-overlay__btn:active { background: #374151; }
+
+        .sp-action-overlay__btn-secondary {
+          display: block;
+          width: 100%;
+          margin-top: 8px;
+          padding: 10px 0;
+          border: none;
+          border-radius: 10px;
+          background: transparent;
+          color: #6b7280;
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          font-family: inherit;
+        }
+        .sp-action-overlay__btn-secondary:hover { color: #111827; }
       `}</style>
     </div>
   );

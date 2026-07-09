@@ -6,16 +6,16 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 260 |
-| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 96 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 265 |
+| [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 98 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 388 |
-| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 38 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 425 |
+| [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 39 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 10 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
-| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 49 + README |
+| [recipes/](recipes/) | How-to pages for common operational tasks — helper + signature + example + gotchas | 51 + README |
 | [incidents/](incidents/) | Post-mortems — timeline, root cause, the fixes, and the durable lessons | 1 |
-| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 90 + 39 settings |
+| [dashboard/](dashboard/) | One page per dashboard route family + per `settings/*` page — purpose, features, API endpoints called, permissions, files | 92 + 39 settings |
 | [functions/](functions/) | One page per org-chart function (Growth, CMO, Retention, CFO, Logistics, CS — the CEO-mode directors — plus Platform/Eng, the build org) — the permanent owner of work. Lists its perpetual mandates + the specs/goals it owns. Doubles as the CEO-mode director-agent charter. | 6 |
 | [goals/](goals/) | One page per finite company goal / BHAG (e.g. CEO mode) — outcome, success metric, and the milestone → spec decomposition. Rolls up to 100% then closes. | 0 |
 | [specs/](specs/) | Roadmap specs for in-flight or planned features. Every spec declares an **owner** (one function) + **parent** (a function mandate or a goal milestone). When a spec ships, content folds into the relevant lifecycle/table/library pages and the spec file is deleted. | 0 |
@@ -277,6 +277,7 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/iteration_runs]] — Iteration engine's per-account daily-run audit log (status/timing/per-stage counts); the supervisable-autonomy record for the whole engine (Phase 5).
 - [[tables/iteration_scorecards_daily]] — Deterministic daily ad/adset/campaign/variant/angle scorecards the iteration engine reads (Phase 3).
 - [[tables/slack_notification_rules]] — Per-workspace Slack notification routing rules (which events go to which channel).
+- [[tables/spec_timecard_events]] — Append-only per-lifecycle-step ledger for every spec (created, review, build, ship, spec-test, security, fold, waits). Mario's M1 foundation — powers the M3 stall detector + the M5 detail-page timeline. See [[specs/spec-timecard-ledger-and-sdk]].
 - [[tables/sync_jobs]] — Background sync job state (Shopify bulk ops, Appstle pulls) — progress, status, error.
 
 ## Inngest functions (`inngest/`)

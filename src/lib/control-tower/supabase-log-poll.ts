@@ -30,6 +30,7 @@ import {
   signatureFor,
   isTransientSupabaseLogNoise,
   isForeignGoTrueEdgeNoise,
+  isForeignGoTrueAuthLogNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -168,8 +169,25 @@ const LOG_QUERIES: LogQuery[] = [
       "where metadata.level in ('error','fatal') " +
       `order by t.timestamp desc limit ${ROW_LIMIT}`,
     mapRow: (row) => {
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` 504 on the
+      // auth_logs surface ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]]).
+      // Same choice as the edge_logs twin below — foreign-owned surface, no lever from us;
+      // the transient class still recurred inside the recur window and escalated. Narrow to
+      // (msg 504-prefix + `"path":"/user"` + `"method":"GET"`) so a real GoTrue outage on
+      // other paths (/token, /admin), a non-504 error, or a real auth-signature bug on
+      // /user is still captured normally.
+      if (isForeignGoTrueAuthLogNoise(str(row.msg), str(row.event_message))) return null;
       const severity = str(row.severity) || "error";
       const message = str(row.msg) || str(row.event_message) || "auth error";
+      // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` handler timing
+      // out on its Postgres backend ([[../specs/error-feed-drop-supabase-gotrue-auth-log-context-deadline-us]]).
+      // Foreign-owned surface, no lever from our side; the transient-recur window still
+      // escalated the chronic saturation (Control Tower `supabase-logs:9f39fe11dd105b2a`,
+      // 39 occurrences across 6 days). Narrowly gated to the exact
+      // `Unhandled server error: context deadline exceeded` phrase so any actionable
+      // GoTrue class (invalid JWT, rate limit, dial failure on other paths) still
+      // surfaces. Mirrors the `api` mapRow's `isForeignGoTrueEdgeNoise` drop above.
+      if (isForeignGoTrueAuthLogNoise(message)) return null;
       return {
         keyParts: ["auth", severity, message],
         title: `auth ${severity}: ${message}`,
@@ -177,7 +195,12 @@ const LOG_QUERIES: LogQuery[] = [
         // Auth errors mostly page on first sighting; the helper narrowly scopes GoTrue's
         // `context canceled` / `context deadline exceeded` (browser-abort noise) into the
         // transient class so ordinary page navigations don't mint incidents.
-        transient: isTransientSupabaseLogNoise("auth", { message }),
+        // Pass event_message through so the auth branch can also inspect the inner `error`
+        // field for browser-abort markers on the /authorize (PKCE flow-state) shape whose
+        // top-level msg is only `500: Error creating flow state` — the real cause lives in
+        // event_message JSON ([[../specs/error-feed-scope-supabase-authorize-flow-state-context-cance]],
+        // Control Tower signature `supabase-logs:a30ffe4489dd6ffb`).
+        transient: isTransientSupabaseLogNoise("auth", { message, eventMessage: str(row.event_message) }),
       };
     },
   },

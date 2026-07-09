@@ -3,10 +3,17 @@
  * internal sub costs, used by BOTH the portal display and the renewal scheduler.
  *
  * Philosophy (Dylan, 2026-06): a subscription stores catalog *references*, not
- * baked prices. The only price a sub row may carry is a **grandfathered override**
- * (`items[].price_override_cents`). Everything else is derived live from the
- * catalog + the product's pricing rule, so a price change in the catalog or a
- * rule flows through automatically — nothing is hard-coded into the row.
+ * baked prices — unless the sub carries a CONFIGURED / GRANDFATHERED lock. Two
+ * lock shapes on `items[]` (both authoritative — a renewal never re-prices off
+ * the current catalog when either is set, so a grandfathered customer is never
+ * silently overcharged when a catalog price rises):
+ *   1. `price_override_cents` — pre-discount grandfathered base. S&S + quantity
+ *      break still apply on top (the engine reproduces the customer's rate).
+ *   2. `price_cents` — baked per-unit charge. Used verbatim as the unit price;
+ *      catalog rule decomposition is skipped entirely on that line (coupons on
+ *      applied_discounts still apply through the caller).
+ * When neither lock is present, the price is derived live from the catalog +
+ * the product's pricing rule, so a catalog change flows through automatically.
  *
  * Rules, applied per line (multiplicative — see docs/brain/specs/storefront-mvp.md):
  *   base   = price_override_cents (grandfathered) ?? catalog product_variants.price_cents
@@ -15,6 +22,7 @@
  *            → the qty-2 tier). Lines with no rule get no break.
  *   sns%   = pricing_rule.subscribe_discount_pct, else workspace.subscription_discount_pct
  *   unit   = round(base × (1 − break%/100) × (1 − sns%/100))
+ * (Lock shape 2 above shortcuts this — `unit = price_cents` verbatim, no decomp.)
  *
  * Shipping protection + free gifts are NOT catalog-rule products: protection is a
  * passthrough add-on (its stored price, no discount) and is billed via the
@@ -39,8 +47,11 @@ export interface PricingItem {
   is_gift?: boolean;
   /** Grandfathered locked base (pre-discount). Absent → use catalog price. */
   price_override_cents?: number | null;
-  /** Legacy baked price — read only as a pre-migration fallback when a variant
-   *  isn't found in the catalog. New code never writes this. */
+  /** Configured/grandfathered baked unit price (post-discount). When set (and
+   *  no `price_override_cents`), this is the AUTHORITATIVE renewal unit — the
+   *  catalog + rule decomposition is skipped so a grandfathered customer is
+   *  never silently overcharged when a catalog price rises. Historical Appstle
+   *  migrations + some legacy internal-sub writes carry this. */
   price_cents?: number | null;
 }
 
@@ -252,6 +263,31 @@ export async function resolveSubscriptionPricing(
     }
 
     const hasOverride = i.price_override_cents != null;
+    // A baked per-unit price on the sub item is a CONFIGURED / GRANDFATHERED
+    // lock — the customer's authoritative renewal rate. Honor it verbatim
+    // instead of re-pricing off the current catalog: a catalog price that has
+    // risen since acquisition would silently overcharge a grandfathered
+    // customer through the S&S / quantity-break / offer decomposition path.
+    // Only kicks in when no `price_override_cents` is set (that path already
+    // preserves grandfathering by locking the pre-discount base).
+    // Docs/brain spec: subscription-renewal-honors-configured-grandfathered-price-never-bills-standard.
+    const hasBakedUnit = !hasOverride && i.price_cents != null && Number(i.price_cents) > 0;
+    if (hasBakedUnit) {
+      const unit = Number(i.price_cents);
+      // Strikethrough = catalog MSRP when available (for "you save" math); falls
+      // back to the locked unit so we never render a strike BELOW the charged.
+      const strike = v?.price_cents && v.price_cents > unit ? Number(v.price_cents) : unit;
+      return {
+        ...common,
+        kind: "product" as const,
+        base_cents: strike,
+        unit_cents: unit,
+        break_pct: 0,
+        sns_pct: 0,
+        is_grandfathered: strike > unit,
+      };
+    }
+
     // Pre-migration safety: if a variant isn't in the catalog yet, fall back to
     // the legacy baked price so nothing prices to $0 mid-rollout.
     const base = hasOverride ? Number(i.price_override_cents) : (v?.price_cents ?? i.price_cents ?? 0);
