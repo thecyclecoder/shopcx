@@ -136,6 +136,39 @@ Shape (matches [[../../../src/lib/mario.ts]] `MarioDurableFixSpec`):
 }
 ```
 
+## Verification repair — the promote-gate-held / loop-guard class
+
+A NEW candidate class the detector surfaces (`from_event='spec_test_verdict'`, `to_event='promoted'`,
+brief `current_job_status='spec_test_issues_loop_guard'`): a spec that PASSED review + build but is HELD
+unmerged because its pre-merge spec-test verdicted `issues` and the fix loop-guard fired
+(`director_activity` `escalated`, signature `fixes-as-phases-loop-guard`) — "a deeper issue than another
+Fix N can solve". **The usual root cause is a MALFORMED verification**, not a code bug: a bullet that
+requires a live-runtime observation ("re-trigger the cron and watch the Control Tower tile") the pre-merge
+preview can't do (so the spec-test agent auto-FAILs it instead of treating it as `needs_human`), or an
+auto-generated Fix phase whose verification re-checks the origin's OWN future `spec_test_runs` row
+(self-referential, un-passable). Read the failing checks + the spec's phases. If the verification is
+malformed, propose `verdict.verification_repair` — the CORRECTED, locally-checkable verification per REAL
+phase. The worker re-authors the spec with it (dropping the Fix phases), which re-opens it → re-review →
+rebuild → the pre-merge spec-test now has a passable check → it promotes. Write each corrected bullet as
+either an **auto** check (a code-read assertion, e.g. "reading `<file>`, `<fn>` calls `<x>` on both return
+paths — present + reachable") OR an explicit **needs_human** runtime bullet (advisory, never a gate fail).
+If the check is genuinely un-writable as a local unit, mark it needs_human — do NOT phrase a runtime
+observation as an imperative auto-check.
+
+Shape (matches [[../../../src/lib/mario.ts]] `MarioVerificationRepair`):
+
+```json
+{
+  "spec_slug": "the-stuck-spec-slug",
+  "phases": [ { "title": "Phase 1 — …", "verification": "- auto: reading <file>, <assertion>\n- needs_human: <runtime observation>" } ],
+  "reasoning": "why the original verification was un-passable pre-merge and how the rewrite fixes it"
+}
+```
+
+Match a phase by exact `title` (or 1-based `position`). If it's NOT a malformed verification (a real code
+bug the fix phases couldn't solve), do NOT repair the verification — propose a `durable_fix_spec` or
+escalate instead.
+
 ## Threshold self-tuning — when a false trigger fires
 
 When your investigation concludes the M3 detector fired too aggressively for this
@@ -197,6 +230,7 @@ NEVER wrap it in prose, code fences, or a heading — the runner parses your ter
     "reasoning": "The kind='build' row for this spec has been in status='building' for 90 minutes but no worker heartbeat — Bo died mid-run. Redriving is safe (idempotent build restart)."
   },
   "durable_fix_spec": null,
+  "verification_repair": null,
   "threshold_adjustment": null,
   "escalate": false,
   "reasoning": "Timecard shows build_done at 14:12, no phase_shipped since. blockedBy fully cleared. No wait status on the live job. The stall is real; the live_fix restores forward progress without destructive intent."

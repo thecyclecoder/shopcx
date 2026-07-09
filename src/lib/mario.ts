@@ -233,6 +233,69 @@ async function readFailedBuildStalls(
   return out;
 }
 
+/** Grace before a loop-guard-escalated spec is treated as a stall — same shape as the failed-build grace. */
+const MARIO_PROMOTE_GATE_GRACE_MS = 20 * 60 * 1000;
+/** How far back to scan for loop-guard escalations (bounds the director_activity read). */
+const MARIO_PROMOTE_GATE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * THIRD candidate source (promote-gate held / loop-guard escalated). A spec can pass every step — review,
+ * build, spec-test — yet be HELD unmerged because its spec-test verdict was `issues` and the pre-merge fix
+ * loop-guard fired (`PRE_MERGE_FIX_LOOP_GUARD_MAX` fix phases already, still red → "a deeper issue than
+ * another Fix N can solve", `director_activity` action_kind='escalated', metadata.signature=
+ * 'fixes-as-phases-loop-guard'). Its LAST timecard event is a terminal verdict (`spec_test_verdict` /
+ * `security_verdict`) — no open `from → to` gap — and its build COMPLETED (not failed), so neither the
+ * timecard thresholds nor the failed-build source sees it. This reads the escalation signal straight from
+ * `director_activity`, then confirms the spec is STILL held (latest spec_test_run verdict is still `issues`)
+ * so a since-resolved spec never re-fires. The caller runs these through the SAME (b)/(c)/(d) drop filters.
+ */
+async function readPromoteGateHeldStalls(
+  admin: Admin,
+  workspace_id: string,
+  graceMs: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; age_ms: number }>> {
+  const now = Date.now();
+  const { data: escRows, error } = await admin
+    .from("director_activity")
+    .select("spec_slug, created_at")
+    .eq("workspace_id", workspace_id)
+    .eq("action_kind", "escalated")
+    .eq("metadata->>signature", "fixes-as-phases-loop-guard")
+    .gte("created_at", new Date(now - MARIO_PROMOTE_GATE_LOOKBACK_MS).toISOString())
+    .order("created_at", { ascending: false })
+    .limit(500);
+  if (error) throw error;
+  // Latest escalation per spec, past the grace window.
+  const latestBySlug = new Map<string, string>();
+  for (const r of (escRows ?? []) as Array<{ spec_slug: string | null; created_at: string }>) {
+    if (!r.spec_slug || latestBySlug.has(r.spec_slug)) continue;
+    latestBySlug.set(r.spec_slug, r.created_at);
+  }
+  const aged = [...latestBySlug.entries()].filter(([, at]) => now - Date.parse(at) > graceMs);
+  if (aged.length === 0) return [];
+
+  // Confirm STILL held: the latest spec_test_run for the slug must still be `issues`. A spec whose next
+  // spec-test flipped to `approved` (e.g. its verification was repaired) is resolved — never re-fire it.
+  const slugs = aged.map(([slug]) => slug);
+  const { data: runs } = await admin
+    .from("spec_test_runs")
+    .select("spec_slug, agent_verdict, run_at")
+    .eq("workspace_id", workspace_id)
+    .in("spec_slug", slugs)
+    .order("run_at", { ascending: false })
+    .limit(1000);
+  const latestVerdict = new Map<string, string>();
+  for (const r of (runs ?? []) as Array<{ spec_slug: string; agent_verdict: string }>) {
+    if (!latestVerdict.has(r.spec_slug)) latestVerdict.set(r.spec_slug, r.agent_verdict);
+  }
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  for (const [slug, at] of aged) {
+    if (latestVerdict.get(slug) !== "issues") continue; // resolved / no run → not held
+    out.push({ workspace_id, spec_slug: slug, age_ms: now - Date.parse(at) });
+  }
+  return out;
+}
+
 /**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
@@ -320,6 +383,24 @@ export async function evaluateStalledSpecs(
         // Pre-seed the failure signal so the brief surfaces it even when the ledger is empty for this spec;
         // step (e) preserves it when there is no ACTIVE job (readCurrentJobStatus returns null on `failed`).
         brief: { last_events: [], blocked_by_state: [], current_job_status: "failed" },
+      });
+    }
+
+    // (a3) THIRD candidate source — promote-gate held / loop-guard escalated (see readPromoteGateHeldStalls).
+    const held = await readPromoteGateHeldStalls(admin, ws, MARIO_PROMOTE_GATE_GRACE_MS);
+    for (const hb of held) {
+      const key = `${hb.workspace_id}::${hb.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: hb.workspace_id,
+        spec_slug: hb.spec_slug,
+        // Semantic: the spec-test verdicted `issues` but the spec never promoted (held after loop-guard).
+        from_event: "spec_test_verdict",
+        to_event: "promoted",
+        gap_ms: hb.age_ms,
+        sla_ms: MARIO_PROMOTE_GATE_GRACE_MS,
+        brief: { last_events: [], blocked_by_state: [], current_job_status: "spec_test_issues_loop_guard" },
       });
     }
   }
@@ -483,6 +564,18 @@ export interface MarioDurableFixSpec {
   phases: Array<{ title: string; why: string; what: string; body: string; verification: string }>;
 }
 
+/** A repair of a spec's MALFORMED verification — the un-passable-pre-merge / self-referential checks that
+ *  spin the pre-merge fix loop-guard (a runtime-only "re-trigger the cron and watch the tile" bullet the
+ *  spec-test agent mis-classifies as an auto-fail; or a Fix phase whose verification re-checks the origin's
+ *  own future spec_test_runs). Mario proposes CORRECTED, locally-checkable verification per REAL phase; the
+ *  applier re-authors the spec with it and DROPS the auto-generated Fix phases (which caused the loop). */
+export interface MarioVerificationRepair {
+  spec_slug: string;
+  /** Corrected verification for each real (kind='phase') phase — matched by exact `title` or 1-based `position`. */
+  phases: Array<{ title?: string; position?: number; verification: string }>;
+  reasoning: string;
+}
+
 /** The self-tuning widen Mario proposes when a false trigger fires — Phase 3 gates on a non-empty reason. */
 export interface MarioThresholdAdjustment {
   from_event: string;
@@ -500,6 +593,7 @@ export interface MarioVerdict {
   trigger_accurate: boolean;
   live_fix: MarioLiveFix | null;
   durable_fix_spec: MarioDurableFixSpec | null;
+  verification_repair: MarioVerificationRepair | null;
   threshold_adjustment: MarioThresholdAdjustment | null;
   escalate: boolean;
   reasoning: string;
@@ -515,6 +609,7 @@ export const MARIO_CONSERVATIVE_DEFAULT_VERDICT: MarioVerdict = {
   trigger_accurate: false,
   live_fix: null,
   durable_fix_spec: null,
+  verification_repair: null,
   threshold_adjustment: null,
   escalate: true,
   reasoning: "unparseable verdict",
@@ -580,6 +675,25 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
     }
   }
 
+  let verification_repair: MarioVerificationRepair | null = null;
+  if (r.verification_repair && typeof r.verification_repair === "object") {
+    const v = r.verification_repair as Record<string, unknown>;
+    const spec_slug = typeof v.spec_slug === "string" ? v.spec_slug : "";
+    const rawPhases = Array.isArray(v.phases) ? v.phases : [];
+    const phases = rawPhases
+      .map((p) => {
+        const o = (p || {}) as Record<string, unknown>;
+        const verification = typeof o.verification === "string" ? o.verification : "";
+        const position = typeof o.position === "number" ? o.position : undefined;
+        const title = typeof o.title === "string" ? o.title : undefined;
+        return { title, position, verification };
+      })
+      .filter((p) => p.verification.trim().length > 0 && (p.title || p.position != null));
+    if (spec_slug && phases.length > 0) {
+      verification_repair = { spec_slug, phases, reasoning: typeof v.reasoning === "string" ? v.reasoning : "" };
+    }
+  }
+
   let threshold_adjustment: MarioThresholdAdjustment | null = null;
   if (r.threshold_adjustment && typeof r.threshold_adjustment === "object") {
     const t = r.threshold_adjustment as Record<string, unknown>;
@@ -597,7 +711,7 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
     }
   }
 
-  return { trigger_accurate, live_fix, durable_fix_spec, threshold_adjustment, escalate, reasoning };
+  return { trigger_accurate, live_fix, durable_fix_spec, verification_repair, threshold_adjustment, escalate, reasoning };
 }
 
 /** The result `applyBoxMario` hands back to the runner. */
@@ -829,6 +943,49 @@ async function authorMarioFixSpec(
   );
 }
 
+/** Repair a spec's MALFORMED verification (the promote-gate-held / loop-guard class). Re-authors the spec
+ *  with Mario's corrected, locally-checkable verification for each REAL phase and DROPS the auto-generated
+ *  Fix phases (whose self-referential verification caused the loop). The re-author re-opens the spec →
+ *  Vale re-reviews → it rebuilds → the pre-merge spec-test now has a passable check → it promotes. This is
+ *  the same mechanism a human uses to fix a malformed verification; Mario proposes the corrected checks. */
+async function repairSpecVerification(admin: Admin, workspaceId: string, repair: MarioVerificationRepair): Promise<boolean> {
+  const { getSpec } = await import("@/lib/specs-table");
+  const { authorSpecRowStructured } = await import("@/lib/author-spec");
+  const cur = await getSpec(workspaceId, repair.spec_slug);
+  if (!cur) throw new Error(`repair_verification: spec ${repair.spec_slug} not found`);
+  const realPhases = (cur.phases ?? []).filter((p) => p.kind !== "fix");
+  if (realPhases.length === 0) throw new Error("repair_verification: no non-fix phases to repair");
+
+  const byTitle = new Map(repair.phases.filter((p) => p.title).map((p) => [p.title as string, p.verification]));
+  const byPos = new Map(repair.phases.filter((p) => p.position != null).map((p) => [p.position as number, p.verification]));
+  const phases = realPhases.map((p) => ({
+    title: p.title,
+    // Intent gate needs non-empty why/what per phase — fall back to spec-level intent (a repair-agent spec
+    // often authored phases with empty why/what before the intent gate landed).
+    why: (p.why && p.why.trim()) || cur.why || `Phase ${p.position} of ${cur.title}.`,
+    what: (p.what && p.what.trim()) || cur.what || cur.title,
+    body: (p.body && p.body.trim()) || p.title,
+    // Mario's corrected verification for this phase (by title or position); else keep the current one. The
+    // Verification gate throws on an empty string, so a phase Mario left uncorrected must already have one.
+    verification: byTitle.get(p.title) ?? byPos.get(p.position) ?? p.verification ?? "",
+  }));
+
+  // Preserve a typed mandate parent when the spec has one; else fall back to the owner's reliability
+  // mandate (the common case for repair-agent/platform specs). A bare-function parent throws
+  // InvalidParentError, so we never pass one through.
+  const hasTypedMandate = cur.parent_kind === "mandate" && typeof cur.parent_ref === "string" && cur.parent_ref.includes("#");
+  const parentRef = hasTypedMandate ? (cur.parent_ref as string) : `${cur.owner}#infra-devops-reliability`;
+  const parentProse = cur.parent && cur.parent.includes("mandate") ? cur.parent : `[[../functions/${cur.owner}]] — "Infra & DevOps / reliability" mandate: verification repair.`;
+
+  return await authorSpecRowStructured(
+    workspaceId,
+    repair.spec_slug,
+    { title: cur.title, summary: cur.summary, owner: cur.owner, parent: parentProse, why: cur.why ?? cur.title, what: cur.what ?? cur.title, blocked_by: [], autoBuild: true, phases },
+    "planned",
+    { intendedStatusSetBy: "mario", parentKind: "mandate", parentRef },
+  );
+}
+
 /** Route a genuine Mario escalation to ADA (the platform director) as an ACTIONABLE target she can fix —
  *  not a dead audit row, and NEVER the CEO for routine platform work. Creates a fresh `build` job for the
  *  stuck spec, parked `needs_approval` with a `reclaim_stuck_build` action. `build` routes to platform, so
@@ -1014,6 +1171,18 @@ export async function applyBoxMario(
       }
     }
 
+    // Verification repair — re-author a spec's malformed verification (promote-gate-held / loop-guard class).
+    let verificationRepaired = false;
+    let verificationRepairError: string | null = null;
+    if (verdict.verification_repair && mode === "live") {
+      try {
+        verificationRepaired = await repairSpecVerification(admin, row.workspace_id, verdict.verification_repair);
+      } catch (e) {
+        verificationRepairError = e instanceof Error ? e.message : String(e);
+        console.warn(`[mario] verification repair FAILED (${verdict.verification_repair.spec_slug}): ${verificationRepairError}`);
+      }
+    }
+
     // Threshold self-tune — Phase 3 gate: only when trigger_accurate=false AND reason is non-empty.
     let thresholdWidened = false;
     if (
@@ -1035,7 +1204,7 @@ export async function applyBoxMario(
     // lets him self-service the built-but-unmerged class, a true escalation is rare — but when it happens
     // it reaches his supervisor.
     let escalatedToAda = false;
-    if (verdict.escalate && !fixExecuted && mode === "live") {
+    if (verdict.escalate && !fixExecuted && !verificationRepaired && mode === "live") {
       try {
         escalatedToAda = await surfaceMarioEscalationToAda(admin, row.workspace_id, row.spec_slug, verdict.reasoning ?? "", jobId);
       } catch (e) {
@@ -1067,6 +1236,8 @@ export async function applyBoxMario(
         fix_reason: fixReason,
         durable_spec_authored: durableSpecAuthored,
         durable_spec_author_error: durableSpecAuthorError,
+        verification_repaired: verificationRepaired,
+        verification_repair_error: verificationRepairError,
         threshold_widened: thresholdWidened,
         loop_guard_triggered: loopGuardTriggered,
       },
