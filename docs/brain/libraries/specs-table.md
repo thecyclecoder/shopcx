@@ -75,6 +75,21 @@ supabase-js has no transaction surface, so `upsertSpec` is a sequence of writes 
 
 **CI-enforced** by `scripts/_check-specs-phases-no-client-in-batching.ts` (chained into `predeploy`): a reintroduced `.in("id", <array>)` or `.in("spec_slug", <array>)` in `src/lib/specs-table.ts` or `src/lib/brain-roadmap.ts` fails the build. Genuinely-bounded LITERAL arrays (`.in("id", ["a","b"])`) still pass — a variable, `.slice(...)` batch, or spread does not.
 
+## `getSpec` — 2-second in-process cache ([[../specs/db-reduce-calls-q-1756037457588317045]])
+
+`getSpec(workspaceId, slug)` reads through a module-level TTL cache before hitting the RPC. The `public.get_spec_with_phases(uuid, text)` query topped the box's `pg_stat_statements` sample at 215,257 calls (0ms mean, 31s total DB time) — per-call cost was already fine (index scan on `specs_ws_slug`); the fix is FEWER calls, not a cheaper one. Common code paths that were duplicate-reading the same (ws, slug) inside one request:
+
+- `queueRoadmapBuild` (`src/lib/roadmap-actions.ts`) — a `getSpecRow` at the top plus two `brain-roadmap.getSpec` reads further down, each internally re-calling this SDK `getSpec` on the same slug.
+- `brain-roadmap.getSpec(slug, wsId)` — every wrapper call bounces to this SDK `getSpec` under the hood.
+- The box worker's tick handlers — nearby jobs on the same spec re-read it inside a burst.
+
+Design invariants ([[../specs/db-reduce-calls-q-1756037457588317045]]):
+
+- **TTL is 2 seconds.** Bounds staleness to under one poll tick even if a mutation happens through a path this SDK cannot see (a raw SQL migration, an admin script outside this module).
+- **Every writer in this file invalidates the cached (ws, slug) on success** — `upsertSpec` / `stampPhaseShipped` / `stampPhaseBuilt` / `markRemainingPhasesShipped` / `restampPhases` / `appendFixPhases` / `setSpecStatus` / `setSpecBlockers` / `stampSpecValeReviewPassed` / `setSpecParent` / `setSpecAutoBuild` / `stampSpecMergeProvenance` / `stampSpecGoalBranchSha` all call `invalidateSpecCache(workspaceId, slug)` after their DB write. The read-after-write pattern in [[author-spec]] (`getSpec` → `upsertSpec` → `getSpec` to verify persistence) stays correct because `upsertSpec`'s invalidation forces the second read to hit the RPC. `movePhase` alone relies on the TTL (its signature is keyed by phase id, not slug, so it can't invalidate cheaply — the 2s bound is enough for a low-volume primitive).
+- **Null results are cached** so a nonexistent slug in a tight retry loop doesn't hammer the RPC either. Same invalidation rules apply.
+- **`clearSpecCacheForTests()`** is exported for tests that share process state.
+
 ## Gotchas
 
 - **The trigger is the rail.** Don't write `specs.status='shipped'` directly while a phase is still `planned` — the next phase write will roll it back. That's the DB-enforced rule that kills the [[../specs/spec-review-agent]] "shipped with 1 phase" class.
@@ -85,4 +100,4 @@ supabase-js has no transaction surface, so `upsertSpec` is a sequence of writes 
 
 ## Related
 
-[[../tables/specs]] · [[../tables/spec_phases]] · [[brain-roadmap]] · [[spec-card-state]] · [[../recipes/backfill-specs-from-markdown]] · [[../specs/spec-body-table-and-backfill]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-phase-pr-provenance]] · [[../specs/spec-fold-from-db-row]] · [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] · [[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] · [[../goals/db-driven-specs]]
+[[../tables/specs]] · [[../tables/spec_phases]] · [[brain-roadmap]] · [[spec-card-state]] · [[../recipes/backfill-specs-from-markdown]] · [[../specs/spec-body-table-and-backfill]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-phase-pr-provenance]] · [[../specs/spec-fold-from-db-row]] · [[../specs/list-specs-with-phases-rpc-retire-in-array-client-join]] · [[../specs/retire-residual-in-array-batching-to-server-side-rpcs]] · [[../specs/db-reduce-calls-q-1756037457588317045]] · [[../goals/db-driven-specs]]
