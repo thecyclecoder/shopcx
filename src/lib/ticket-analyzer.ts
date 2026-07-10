@@ -22,6 +22,7 @@ import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import { insertAnalysis, getLatestForTicket } from "@/lib/ticket-analyses-table";
+import { runCheapTriagePass, recordCheapPassClean } from "@/lib/cora-triage-pass";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -641,6 +642,23 @@ export async function enqueueTicketAnalyzeJob(
     .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"])
     .limit(1);
   if (inflight && inflight.length) return { ok: false, reason: "already_in_flight" };
+
+  // Cheap triage tier — a single inline Haiku call in front of the expensive Max box session.
+  // Only the autonomous `auto_close` sweep goes through it (a `manual` rescore or a reopen-close
+  // always forces the deep grade). It runs AFTER every skip/lock/dedup gate above, so it inherits
+  // the same candidate set as the deep analyzer (closed + Sol-handled + settled) and never
+  // double-fires against an in-flight ticket. A CLEAN verdict writes a lightweight grade + stamps
+  // last_analyzed_at and STOPS here (never touches June — the only escalation the cheap tier can
+  // make is enqueuing this deep session, which it does by falling through). A needs_review verdict
+  // OR any hard failure (null → no API key / transport error / unreadable) FAILS OPEN to the deep
+  // enqueue below — the cheap pass never silently suppresses a ticket it couldn't clear.
+  if (trigger === "auto_close") {
+    const run = await runCheapTriagePass(admin, ticketId);
+    if (run && !run.triage.needsReview) {
+      await recordCheapPassClean(admin, t.workspace_id, ticketId, run, trigger);
+      return { ok: false, reason: "cheap_pass_clean" };
+    }
+  }
 
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: t.workspace_id,
