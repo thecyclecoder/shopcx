@@ -26,6 +26,7 @@ await applyDiscountWithReplace({
 - **Grandfathered subs ARE allowed loyalty coupons.** The price floor only blocks sale coupons. Pass `source: "loyalty"` (or use the loyalty-apply handler directly) to skip the floor check.
 - **One coupon per sub still applies.** If there's already a loyalty coupon active, it gets replaced. Customer surfaces this in their portal.
 - **Don't apply twice.** The redemption ledger should already show one applied redemption — re-applying the same code is a no-op on Shopify's side but creates a confusing customer history.
+- **Self-heal regeneration is idempotent — Shopify verify-fail→retry never double-deducts.** The [[../libraries/portal__handlers__loyalty-apply-subscription]] handler's self-heal path regenerates a new code when Shopify rejects the original (stale or other reason). Multiple retries (verify failure + caller timeout) can trigger multiple regen attempts; `claimRegenSpendSlot` ([[../libraries/action-executor]]) gates the spend atomically so only the first regen winner calls `spendPoints`, and retry callers apply the successor code instead. One applied coupon = exactly one points spend (spec: [[../specs/loyalty-coupon-apply-self-heal-must-not-double-deduct-points]] Phase 2).
 - **Internal subs** apply in our DB; no Appstle call.
 
 ## Related
