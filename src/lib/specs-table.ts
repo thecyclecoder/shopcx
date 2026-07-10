@@ -20,6 +20,15 @@
  *  - `upsertSpec` replaces a spec's `spec_phases` by `(spec_id, position)` — phases at the same
  *    position retain their stable id (and pr/merge_sha unless explicitly overridden). New positions
  *    INSERT, vanished positions DELETE.
+ *  - `upsertSpec` is SELF-GATING (harden-spec-submission): before any write it asserts that every phase
+ *    ends up with a non-empty `verification` (the load-bearing field `renderSpecRow` turns into the
+ *    `### Verification` markdown Vale reviews + Vera tests) and the spec has a non-empty `why` + `what`,
+ *    using EFFECTIVE values (the value the caller passes, or the already-stored value on a preserve-update).
+ *    This turns "author through [[author-spec]]" from a CONVENTION into a runtime chokepoint: a RAW
+ *    `upsertSpec(...)` from a session/script that skips the [[author-spec]] gates now THROWS
+ *    `UngatedSpecAuthorError` instead of silently landing an untestable, intent-less spec (the class that
+ *    produced the 2026-07 needs_fix batch). The gates in [[author-spec]] still run first (nicer errors +
+ *    brain-refs + parent resolution) — this is the belt-and-suspenders floor that no path can skip.
  *
  * Service-role only (RLS allows read for authenticated; ALL ops for service_role). All callers go
  * through `createAdminClient()`.
@@ -28,6 +37,26 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Phase } from "@/lib/brain-roadmap";
 
 export type { Phase } from "@/lib/brain-roadmap";
+
+/**
+ * Thrown by `upsertSpec` when a spec would land with an empty per-phase `verification` or an empty
+ * spec-level `why` / `what` (harden-spec-submission). Loud + specific (slug + the offending fields) so a
+ * caller that skipped the [[author-spec]] chokepoint fails at the write instead of silently persisting an
+ * un-buildable / unreadable spec. Fix: author through `authorSpecRowStructured` / `submitSpec` (the
+ * [[submit-spec]] skill), never raw `upsertSpec`.
+ */
+export class UngatedSpecAuthorError extends Error {
+  constructor(slug: string, problems: string[]) {
+    super(
+      `upsertSpec refused to write spec \`${slug}\`: ${problems.join("; ")}. ` +
+        `Every phase needs a non-empty verification (>=1 observable acceptance check — agents test it), and ` +
+        `the spec needs why + what (the human-readable intent on the spec detail page). Author through ` +
+        `\`authorSpecRowStructured\` / \`submitSpec\` (the submit-spec ` +
+        `skill) — never raw \`upsertSpec\` — so the Verification + Intent gates run.`,
+    );
+    this.name = "UngatedSpecAuthorError";
+  }
+}
 
 /** The full enum the `specs.status` column accepts (CHECK-constrained in migration). */
 export type SpecStatus = "in_review" | "planned" | "in_progress" | "shipped" | "deferred" | "folded";
@@ -497,12 +526,115 @@ export async function getAllSpecs(workspaceId: string): Promise<SpecRow[]> {
  * Not atomic across the parent + child writes (supabase-js has no transaction surface). Re-running the
  * same `upsertSpec` is idempotent (the read-modify-write of phases by position is deterministic).
  */
+/**
+ * harden-spec-submission — the runtime gate. Reject an author write whose EFFECTIVE per-phase
+ * `verification`, or the spec's `why`/`what`, is empty. Effective = the value the caller passes, or (when
+ * the field is OMITTED on a preserve-update) the value already stored — so a narrow, status-only re-author
+ * of an already-gated spec still passes, while a fresh or content-changing write with empty
+ * verification/intent THROWS. Runs BEFORE any DB write so nothing partial lands.
+ *
+ * Scope is deliberate: `verification` is the load-bearing per-phase field (agents test it), and `why`/`what`
+ * are the human-readable spec intent Dylan requires to understand a spec on the detail page. Per-phase
+ * `why`/`what` is NOT required here — the markdown author path leaves phase intent NULL and enforcing it
+ * would halt those lanes; per-phase intent stays a structured-path nicety. Fix phases (`appendFixPhases`)
+ * never route through upsertSpec, so they're untouched.
+ */
+/** The stored fields the guard reads through to on a preserve-update. */
+export interface ExistingSpecForGate {
+  why?: string | null;
+  what?: string | null;
+}
+export interface ExistingPhaseForGate {
+  verification: string | null;
+  why: string | null;
+  what: string | null;
+}
+
+/**
+ * PURE decision half of the runtime gate (harden-spec-submission) — no DB. Given the write payload plus the
+ * already-stored spec/phase values, return the list of authoring problems (empty when the write is fully
+ * authored). Effective value = provided, or the stored value when the field is OMITTED (undefined) on a
+ * preserve-update; an explicit `null` is treated as clearing → a problem. Exported so it can be unit-tested
+ * without a Supabase client.
+ */
+export function computeUpsertAuthoringProblems(
+  row: Pick<SpecRowInput, "why" | "what">,
+  phases: Pick<SpecPhaseInput, "position" | "title" | "verification" | "why" | "what">[],
+  existingSpec: ExistingSpecForGate | null,
+  existingByPos: Map<number, ExistingPhaseForGate>,
+): string[] {
+  const nonEmpty = (v: unknown): boolean => typeof v === "string" && v.trim().length > 0;
+  const eff = <T>(provided: T | undefined, existing: T | undefined): T | undefined =>
+    provided !== undefined ? provided : existing;
+  const problems: string[] = [];
+  // Spec-level intent — enforced by BOTH author paths already (markdown throws MissingIntentError on a
+  // missing `**Why:**`/`**What:**`; structured runs `assertEveryNodeHasIntent`). Requiring it here is
+  // redundant for the sanctioned paths and only bites a raw bypass.
+  if (!nonEmpty(eff(row.why, existingSpec?.why ?? undefined))) problems.push("spec `why` (plain-language intent) is empty");
+  if (!nonEmpty(eff(row.what, existingSpec?.what ?? undefined))) problems.push("spec `what` (plain-language intent) is empty");
+  if (!phases.length) problems.push("spec has no phases (nothing to build or test)");
+  for (const p of phases) {
+    const prev = existingByPos.get(p.position);
+    const label = `phase ${p.position}${p.title ? ` (${p.title})` : ""}`;
+    // Per-phase VERIFICATION is the one load-bearing per-phase field: `renderSpecRow` synthesizes the
+    // `### Verification` markdown FROM this column, and that render is exactly what Vale reviews + Vera
+    // spec-tests. An empty column → no `### Verification` in the render → Vale bounces it needs_fix and Vera
+    // has 0 checks. This is the 2026-07 needs_fix class. Redundant with `assertEveryPhaseHasVerification`
+    // on both author paths; only bites a raw bypass.
+    //
+    // We DELIBERATELY do NOT require per-phase `why`/`what` here: the markdown author path
+    // (`authorSpecRowFromMarkdown`, ~11 box-worker lanes) legitimately leaves phase intent NULL (it only
+    // carries spec-level intent), so enforcing it would halt those lanes. Per-phase intent stays a
+    // structured-path concern (`assertEveryNodeHasIntent`), not a floor invariant.
+    if (!nonEmpty(eff(p.verification, prev?.verification ?? undefined))) problems.push(`${label} has no verification`);
+  }
+  return problems;
+}
+
+async function assertUpsertFullyAuthored(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  row: SpecRowInput,
+  phases: SpecPhaseInput[],
+): Promise<void> {
+  // Resolve the existing spec + its phases so a preserve-update (omitted field) reads through to the stored
+  // value instead of being seen as empty.
+  const { data: existingSpec } = await admin
+    .from("specs")
+    .select("id, why, what")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", row.slug)
+    .maybeSingle();
+  const existingByPos = new Map<number, ExistingPhaseForGate>();
+  if ((existingSpec as { id?: string } | null)?.id) {
+    const { data: exPhases } = await admin
+      .from("spec_phases")
+      .select("position, verification, why, what")
+      .eq("spec_id", (existingSpec as { id: string }).id);
+    for (const p of (exPhases ?? []) as Array<{ position: number } & ExistingPhaseForGate>) {
+      existingByPos.set(p.position, { verification: p.verification, why: p.why, what: p.what });
+    }
+  }
+  const problems = computeUpsertAuthoringProblems(
+    row,
+    phases,
+    existingSpec as ExistingSpecForGate | null,
+    existingByPos,
+  );
+  if (problems.length) throw new UngatedSpecAuthorError(row.slug, problems);
+}
+
 export async function upsertSpec(
   workspaceId: string,
   row: SpecRowInput,
   phases: SpecPhaseInput[],
 ): Promise<UpsertSpecResult> {
   const admin = createAdminClient();
+  // harden-spec-submission — self-gating floor. Throws `UngatedSpecAuthorError` before any write if a phase
+  // would land with empty verification/why/what (or the spec with empty why/what). The [[author-spec]]
+  // chokepoint already asserts this and passes complete data, so this is a no-op for the sanctioned path and
+  // a hard stop for a raw bypass.
+  await assertUpsertFullyAuthored(admin, workspaceId, row, phases);
   const upsertRow: Record<string, unknown> = {
     workspace_id: workspaceId,
     slug: row.slug,

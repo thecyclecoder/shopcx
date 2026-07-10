@@ -66,6 +66,7 @@ Every row's investigation entry point is a [[../libraries/spec-investigation]] c
 
 ## Status / open work
 
+- ✅ **Spec submission hardened at the writer (harden-spec-submission hotfix).** [[../libraries/specs-table]] `upsertSpec` now SELF-GATES: it throws `UngatedSpecAuthorError` before any write if a phase's effective `verification` is empty, the spec's effective `why`/`what` is empty, or there are zero phases — so a raw bypass of the [[../libraries/author-spec]] gates can no longer land an untestable spec (the failure mode behind the 4 verification-NULL specs of 2026-07-10). `submitSpec` is the new canonical alias for `authorSpecRowStructured`. Mario gained a 4th detector source (`readReviewFailedVerificationStalls`) that auto-repairs review-failed / missing-verification specs (the pre-guard stragglers) through the existing `verification_repair` verb — see [[mario-pipeline-plumbing]] / [[../libraries/mario]].
 - ✅ SDK live (`spec-investigation.ts`), slug-scoped single-spec path (`pipeline-doctor.diagnoseSpec` + `getLaneOccupancy`), slug-scoped `security-agent.getSecurityStateForSlug`.
 - ⏳ Mario's box session investigates through this SDK ([[mario-pipeline-plumbing]]).
 - ⏳ Known outstanding pipeline bugs (tracked): timecard backfill seeds events for slugs with no `public.specs` row; the stall detector's phantom guard (`mario.ts`); Mario's fix-spec author-write silently failing.
