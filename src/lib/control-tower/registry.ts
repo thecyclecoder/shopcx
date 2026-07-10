@@ -765,6 +765,17 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 8 * DAY,
     registeredAt: "2026-07-08T08:15:04.473Z",
   },
+  // ─ Monthly crons (window ~32 days) ─
+  {
+    id: "qb-snapshot-refresh",
+    kind: "cron",
+    owner: "platform",
+    label: "qb-snapshot-refresh",
+    description: "Auto-proposed monitored loop for the qb-snapshot-refresh cron (monthly (0 8 16 * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
+    expectedCadence: "monthly (0 8 16 * *)",
+    livenessWindowMs: 32 * DAY,
+    registeredAt: "2026-07-10T16:15:05.195Z",
+  },
   // ─ Yearly cron (window ~370 days) ─
 
   // ── CEO's executive-assistant agent (owner=ceo) ─────────────────────────────
