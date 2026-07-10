@@ -711,8 +711,12 @@ export async function runMediaBuyerLoop(
     losers = await detectMetaCpaLosers(admin, {
       workspaceId: opts.workspaceId,
       metaAdAccountId: opts.metaAdAccountId,
-      crownMaxCpaCents: policy.crown_max_cpa_cents as number,
       earlyTrimMinSpendCents: policy.early_trim_min_spend_cents ?? policy.pause_min_spend_cents,
+      // Leading-signal thresholds — defaults derived from the Amazing Coffee laggard analysis (winners
+      // ≤$65/ATC & ≤$60 CPM; laggards ≥$100/ATC & ≥$110 CPM), tunable per policy.
+      trimMaxCostPerAtcCents: policy.trim_max_cost_per_atc_cents ?? 8000, // $80 cost-per-ATC
+      trimMaxCpmCents: policy.trim_max_cpm_cents ?? 10000, // $100 CPM
+      crownMaxCpaCents: policy.crown_max_cpa_cents ?? 15000, // converter guard — protect winners-in-progress
     });
   } else {
   const { data: loserRows } = await admin

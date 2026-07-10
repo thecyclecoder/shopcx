@@ -31,6 +31,10 @@ interface AdsetScorecard {
   spend_cents: number;
   purchases: number;
   revenue_cents: number;
+  /** Cumulative lifetime leading-signal inputs (Σ meta_insights_daily) — the early-trim reads these. */
+  impressions: number;
+  clicks: number;
+  add_to_cart: number;
   atc_rate: number | null;
   snapshot_date: string;
 }
@@ -79,25 +83,28 @@ async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, met
   const adsetIds = active.map((a) => a.object_id);
   const { data: ins } = await admin
     .from("meta_insights_daily")
-    .select("meta_object_id, spend_cents, purchases, revenue_cents")
+    .select("meta_object_id, spend_cents, purchases, revenue_cents, impressions, clicks, add_to_cart")
     .eq("workspace_id", workspaceId)
     .eq("meta_ad_account_id", metaAdAccountId)
     .eq("level", "adset")
     .in("meta_object_id", adsetIds)
     .gte("snapshot_date", sinceIso);
-  const life = new Map<string, { spend: number; purch: number; rev: number }>();
+  const life = new Map<string, { spend: number; purch: number; rev: number; imp: number; clk: number; atc: number }>();
   for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
     const k = String(r.meta_object_id);
-    const cur = life.get(k) ?? { spend: 0, purch: 0, rev: 0 };
+    const cur = life.get(k) ?? { spend: 0, purch: 0, rev: 0, imp: 0, clk: 0, atc: 0 };
     cur.spend += Number(r.spend_cents ?? 0);
     cur.purch += Number(r.purchases ?? 0);
     cur.rev += Number(r.revenue_cents ?? 0);
+    cur.imp += Number(r.impressions ?? 0);
+    cur.clk += Number(r.clicks ?? 0);
+    cur.atc += Number(r.add_to_cart ?? 0);
     life.set(k, cur);
   }
 
   return active.map((a) => {
-    const l = life.get(a.object_id) ?? { spend: 0, purch: 0, rev: 0 };
-    return { id: a.id, object_id: a.object_id, label: a.label, atc_rate: a.atc_rate, snapshot_date: snapshotDate, spend_cents: l.spend, purchases: l.purch, revenue_cents: l.rev };
+    const l = life.get(a.object_id) ?? { spend: 0, purch: 0, rev: 0, imp: 0, clk: 0, atc: 0 };
+    return { id: a.id, object_id: a.object_id, label: a.label, atc_rate: a.atc_rate, snapshot_date: snapshotDate, spend_cents: l.spend, purchases: l.purch, revenue_cents: l.rev, impressions: l.imp, clicks: l.clk, add_to_cart: l.atc };
   });
 }
 
@@ -205,21 +212,53 @@ export async function detectMetaCpaWinners(admin: Admin, opts: MetaCpaWinnerOpti
   return winners;
 }
 
+/** Clicks an adset needs before "0 add-to-carts" is a meaningful dud signal (vs just no traffic yet). */
+const MIN_CLICKS_FOR_ZERO_ATC = 20;
+/** Add-to-carts needed before cost-per-ATC is trustworthy — 1 ATC is noise (a converter can undercount
+ *  ATCs, e.g. Tabs Test 02: 1 ATC but 2 purchases @ $47 CPP). Below this, cost-per-ATC can't trigger. */
+const MIN_ATC_FOR_COST_SIGNAL = 3;
+
 export interface MetaCpaLoserOptions {
   workspaceId: string;
   metaAdAccountId: string;
-  crownMaxCpaCents: number;
   earlyTrimMinSpendCents: number;
+  /** Trim if cost-per-ATC (spend ÷ add_to_cart) exceeds this — the PRIMARY leading signal. */
+  trimMaxCostPerAtcCents: number;
+  /** Trim if CPM (spend per 1000 impressions) exceeds this — Meta disfavoring the ad (secondary). */
+  trimMaxCpmCents: number;
+  /** Converter guard: NEVER trim an adset already producing purchases at CPP ≤ this (the crown CPA) —
+   *  it's a winner-in-progress, protect it even if a leading signal looks bad. */
+  crownMaxCpaCents: number;
 }
 
-/** Losers on Meta's reported signal — trim early: an adset that has spent ≥ earlyTrimMinSpendCents with
- *  either no purchases yet OR a CPA already worse than the crown CPA is clearly not converting. Each
- *  loser cites its dominant child ad so the audit names the creative in decline. */
+/**
+ * Losers on Meta's LEADING signals — trim early on the signs Meta doesn't like the ad, long BEFORE the
+ * lagging cost-per-purchase would tell you. An active adset past `earlyTrimMinSpendCents` is a clear
+ * laggard when ANY of:
+ *   • cost-per-ATC (spend ÷ add_to_cart) > `trimMaxCostPerAtcCents` — the strongest signal (validated on
+ *     Amazing Coffee: winners $18–65/ATC, laggards $100–152; CTR alone lies), OR
+ *   • CPM > `trimMaxCpmCents` — Meta charging a premium = poor relevance/auction, OR
+ *   • it has real clicks (≥ MIN_CLICKS_FOR_ZERO_ATC) but ZERO add-to-carts (only when the account has ATC
+ *     data at all — guards against pre-backfill false positives).
+ * Each loser cites its dominant child ad so the audit names the creative in decline.
+ */
 export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOptions): Promise<MediaBuyerLoser[]> {
   const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
-  const losing = rows.filter(
-    (r) => r.spend_cents >= opts.earlyTrimMinSpendCents && (r.purchases === 0 || r.spend_cents / r.purchases > opts.crownMaxCpaCents),
-  );
+  const accountHasAtc = rows.some((r) => r.add_to_cart > 0); // ATC ingested/backfilled → the 0-ATC rule is safe
+  const losing = rows.filter((r) => {
+    if (r.spend_cents < opts.earlyTrimMinSpendCents) return false;
+    // Converter guard: NEVER trim an adset already converting at/below the crown CPA — it's a
+    // winner-in-progress (e.g. Tabs Test 02: cost-per-ATC $94 but 2 purchases @ $47 CPP). Leading
+    // signals only trim adsets that are NOT yet proving out on purchases.
+    if (r.purchases > 0 && r.spend_cents / r.purchases <= opts.crownMaxCpaCents) return false;
+    const cpm = r.impressions > 0 ? (r.spend_cents / r.impressions) * 1000 : 0;
+    // Cost-per-ATC only trusted with a real ATC sample (≥ MIN_ATC_FOR_COST_SIGNAL) — 1 ATC is noise.
+    const costPerAtc = r.add_to_cart >= MIN_ATC_FOR_COST_SIGNAL ? r.spend_cents / r.add_to_cart : null;
+    const highCostPerAtc = costPerAtc != null && costPerAtc > opts.trimMaxCostPerAtcCents;
+    const highCpm = cpm > opts.trimMaxCpmCents;
+    const clicksNoAtc = accountHasAtc && r.clicks >= MIN_CLICKS_FOR_ZERO_ATC && r.add_to_cart === 0;
+    return highCostPerAtc || highCpm || clicksNoAtc;
+  });
   const losers: MediaBuyerLoser[] = [];
   for (const r of losing) {
     const { data: ads } = await admin
