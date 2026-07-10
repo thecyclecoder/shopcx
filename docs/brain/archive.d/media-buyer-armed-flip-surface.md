@@ -1,0 +1,1 @@
+- **Media-buyer armed flip surface** · verified 2026-07-10 · → [[lifecycles/media-buyer-arming]]
