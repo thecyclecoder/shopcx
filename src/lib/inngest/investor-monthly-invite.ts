@@ -10,11 +10,14 @@ import { generateInvestorMagicLink, isInvestorRole } from "@/lib/investors/auth"
 import { buildInvestorPerformance, renderInvestorEmailHtml, renderInvestorSms } from "@/lib/investor-update";
 import { sendInvestorUpdateEmail } from "@/lib/email";
 import { sendSMS } from "@/lib/twilio";
+import { backfillPnlSnapshots } from "@/lib/quickbooks";
+import { QB_REFRESH_MONTHS } from "./qb-snapshot-refresh";
 
 interface SendEventData {
   workspaceId?: string; // limit to one workspace
   onlyCustomerId?: string; // send to a single investor (test / re-send)
   skipSms?: boolean;
+  skipRefresh?: boolean; // skip the pre-send QBO re-pull (test sends)
 }
 
 export const investorMonthlyInvite = inngest.createFunction(
@@ -45,6 +48,21 @@ export const investorMonthlyInvite = inngest.createFunction(
     const errors: string[] = [];
 
     for (const ws of workspaces) {
+      // Freshen the books before we report. The 20th is past the ~15th QBO close,
+      // so the latest closed month is final; re-pulling the trailing 6 also folds
+      // in any late entries that changed older months. Non-fatal — if QBO is down
+      // we still send from the last-good snapshots.
+      if (!data.skipRefresh) {
+        await step.run(`refresh-${ws.id}`, async () => {
+          try {
+            await backfillPnlSnapshots(ws.id, QB_REFRESH_MONTHS, admin);
+            return { ok: true };
+          } catch (e) {
+            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          }
+        });
+      }
+
       const result = await step.run(`send-${ws.id}`, async () => {
         const perf = await buildInvestorPerformance(ws.id, admin);
         if (!perf) return { emailed: 0, texted: 0, errors: [`no snapshots for ${ws.id}`] };

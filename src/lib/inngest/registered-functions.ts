@@ -53,6 +53,7 @@ import { portalAutoResume, portalAutoResumeCron } from "@/lib/inngest/portal-aut
 import { amazonSyncOrders, amazonSyncAsins, amazonDailySyncCron } from "@/lib/inngest/amazon-sync";
 import { monthlyRevenueSnapshot } from "@/lib/inngest/monthly-revenue-snapshot";
 import { investorMonthlyInvite } from "@/lib/inngest/investor-monthly-invite";
+import { qbSnapshotRefresh } from "@/lib/inngest/qb-snapshot-refresh";
 import { metaSyncSpend, metaDailySyncCron } from "@/lib/inngest/meta-sync";
 import { metaSyncPerformance, metaPerformanceDailyCron, metaAttributionRefresh, metaScorecardsRefresh, metaDecisionEngine, metaIterationRun, metaExecuteRecommendation } from "@/lib/inngest/meta-performance";
 import { storefrontExperimentsRefresh, storefrontExperimentsRefreshCron } from "@/lib/inngest/storefront-experiments";
@@ -210,6 +211,7 @@ export const registeredInngestFunctions = [
   amazonDailySyncCron,
   monthlyRevenueSnapshot,
   investorMonthlyInvite,
+  qbSnapshotRefresh,
   metaSyncSpend,
   metaDailySyncCron,
   metaSyncPerformance,

@@ -17,12 +17,13 @@ A private, READ-ONLY financial portal at **`/investors`** that renders the exact
 | Self-service | `src/app/investors/expired/page.tsx` + `src/app/api/investors/request/route.ts` | "email me a fresh link" — always returns ok (never reveals who's on the list) |
 | Narrative | [[../libraries/investor-update]] (`src/lib/investor-update.ts`) | Turns the numbers into what's-working / needs-help / what-we're-building bullets + the email HTML + SMS |
 | Senders | [[../libraries/email]] `sendInvestorUpdateEmail` / `sendInvestorLinkEmail`; [[../integrations/twilio]] `sendSMS` | Deliver the email + text |
-| Monthly push | [[../inngest/investor-monthly-invite]] | Cron on the **20th** (+ `investors/send-invites` event) — one email + text per investor |
+| Monthly push | [[../inngest/investor-monthly-invite]] | Cron on the **20th** (+ `investors/send-invites` event) — trailing-6 QBO refresh, then one email + text per investor |
+| Books freshness | [[../inngest/qb-snapshot-refresh]] | Cron on the **16th** (after the ~15th close) — re-pull the trailing 6 closed months so late entries are folded in |
 
 ## The flow
 
 1. **Tag.** A customer gets `comp_role='investor'|'owner'` (script `scripts/_seed-investor-owners.ts`, or any comp-role write). That single flag is the whole allowlist.
-2. **Monthly push (the 20th).** [[../inngest/investor-monthly-invite]] finds every investor/owner, builds the performance story from [[../tables/qb_pnl_snapshots]] (trailing-12 vs prior-12), mints a personal magic link (`…/investors/enter?token=…`), and sends the email ([[../libraries/investor-update]] `renderInvestorEmailHtml`) + SMS (`renderInvestorSms`).
+2. **Monthly push (the 20th).** [[../inngest/investor-monthly-invite]] first **re-pulls the trailing 6 closed months from QuickBooks** (`backfillPnlSnapshots(ws, 6)`) so the report is fresh — the 20th is past the ~15th books-close, and re-grabbing 6 folds in any late entries that changed older months. Then it finds every investor/owner, builds the performance story from [[../tables/qb_pnl_snapshots]] (trailing-12 vs prior-12), mints a personal magic link (`…/investors/enter?token=…`), and sends the email ([[../libraries/investor-update]] `renderInvestorEmailHtml`) + SMS (`renderInvestorSms`). A standing [[../inngest/qb-snapshot-refresh]] job also refreshes on the **16th** so the CFO dashboard stays current regardless of the send.
 3. **Click.** The link hits `/investors/enter` → `verifyMagicToken` → re-check `comp_role` (a revoked investor can't ride an old link in) → set signed httpOnly `investors_session` cookie (30-day) → redirect to `/investors`.
 4. **View.** The proxy sees the cookie and serves `/investors`; the page renders the charts, fed by cookie-gated `/api/investors/pnl`.
 5. **Lapsed link.** Anything missing/expired → `/investors/expired`, where they can request a fresh link (`/api/investors/request` → `sendInvestorLinkEmail`).
