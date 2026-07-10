@@ -14,6 +14,7 @@ import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
 import { usageCostCents } from "@/lib/ai-usage";
+import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 
 // ── Types ──
 
@@ -2156,7 +2157,11 @@ export const directActionHandlers: Record<
     }
     const province = (a.province || a.state || "").toUpperCase().slice(0, 2);
     const zip = a.zip || a.postal_code || "";
-    const country = (a.country || a.country_code || "US").toUpperCase().slice(0, 2);
+    // Route through normalizeCountryToIso2 — a stored country of
+    // "United States" was previously sliced to "UN" here, then handed
+    // downstream. That's what stranded SC132221's Jun-23 replacement
+    // for 17 days at address_confirmed.
+    const country = normalizeCountryToIso2(a.country || a.country_code || null);
 
     const summaries: string[] = [];
     let anySuccess = false;

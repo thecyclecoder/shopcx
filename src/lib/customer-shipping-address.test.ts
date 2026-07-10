@@ -174,6 +174,39 @@ test("empty override object (no address1) doesn't hijack the priority chain — 
   assert.equal(resolved!.diverged, true);
 });
 
+test("[SC132221] normalizeAddress with country='United States' (no country_code) yields countryCode='US', not the sliced-to-2-chars 'UN' that stranded Evan H.'s replacement for 17 days", () => {
+  const evan = normalizeAddress({
+    first_name: "Evan", last_name: "H",
+    address1: "1 Somewhere St",
+    city: "Anytown",
+    province_code: "OR",
+    zip: "97000",
+    country: "United States",
+    // country_code: absent — the SC132221 shape.
+  });
+  assert.ok(evan);
+  assert.equal(evan!.countryCode, "US");
+  assert.notEqual(evan!.countryCode, "UN");
+});
+
+test("normalizeAddress with country='us' (lowercase 2-letter) still yields 'US'", () => {
+  const a = normalizeAddress({
+    address1: "1 Somewhere St", city: "Anytown", province_code: "OR", zip: "97000",
+    country: "us",
+  });
+  assert.ok(a);
+  assert.equal(a!.countryCode, "US");
+});
+
+test("normalizeAddress with blank country falls back to the store default 'US' (never yields the empty string that would blow up Shopify)", () => {
+  const a = normalizeAddress({
+    address1: "1 Somewhere St", city: "Anytown", province_code: "OR", zip: "97000",
+    country: "", country_code: "",
+  });
+  assert.ok(a);
+  assert.equal(a!.countryCode, "US");
+});
+
 test("formatDivergenceNote produces a human-readable line naming the from/to and the citing order", () => {
   const resolved = pickCanonicalShippingAddress({
     defaultAddress: KIRKLAND,
