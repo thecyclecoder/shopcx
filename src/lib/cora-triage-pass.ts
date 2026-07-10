@@ -30,6 +30,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 import { cleanEmailBody } from "@/lib/email-cleaner";
 import { insertAnalysis } from "@/lib/ticket-analyses-table";
+import { normalizeMessyTurnSignals, recordSolMessyTurns } from "@/lib/sol-coaching-signal";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -49,6 +50,13 @@ export interface TriageResult {
   needsReview: boolean;
   /** Terminal-state failure-mode tags (subset of TRIAGE_SIGNALS, plus "parse_error" on fallback). */
   signals: string[];
+  /**
+   * MESSY-MIDDLE (recovered) patterns — a subset of [[sol-coaching-signal]] `SOL_MESSY_TURN_SIGNALS`.
+   * These describe stumbles that were RECOVERED by the end (so they never drive escalation); they feed
+   * June's coaching aggregation via `recordSolMessyTurns` on the clean-close path. Distinct from
+   * `signals` (terminal failures that DO escalate).
+   */
+  coachingSignals: string[];
   /** Coarse 1–10 grade for measurement continuity (the deep session refines it when it runs). */
   score: number;
   /** One-line human-readable rationale. */
@@ -91,9 +99,21 @@ export function buildTriagePrompt(transcript: string): { system: string; user: s
     "If the ticket ended resolved and the customer is not left hanging, needs_review = false even if",
     "the path was bumpy. When you are genuinely UNSURE, set needs_review = true (better to over-review).",
     "",
+    "SEPARATELY, note any MESSY-MIDDLE stumbles that were RECOVERED by the end — the ending was fine, but",
+    "the path had a fixable slip. These NEVER change needs_review (the customer was fine); they are pure",
+    "coaching signal so a recurring Sol gap can be fixed at the source. Use coaching_signals, a subset of:",
+    "- contradiction_recovered: stated a wrong/contradictory position, then corrected it",
+    "- policy_misstate_recovered: mis-stated a policy mid-turn, then got it right",
+    "- slow_resolution: took materially more turns than the ask warranted",
+    "- repeated_clarification: re-asked for info the customer had already given",
+    "- wrong_tool_recovered: took the wrong action/tool first, then the right one",
+    "- tone_miss_recovered: an empathy/tone miss that didn't sink the outcome",
+    "Leave coaching_signals empty when the path was clean. A recovered stumble goes ONLY in coaching_signals,",
+    "never in signals (signals is exclusively for BAD ENDINGS).",
+    "",
     "Reply with ONLY a JSON object, no prose:",
-    '{"needs_review": boolean, "signals": string[], "score": integer 1-10, "summary": "one sentence"}',
-    "signals must be a subset of the six names above (empty array when needs_review is false).",
+    '{"needs_review": boolean, "signals": string[], "coaching_signals": string[], "score": integer 1-10, "summary": "one sentence"}',
+    "signals must be a subset of the six terminal-failure names above (empty array when needs_review is false).",
   ].join("\n");
 
   const user = `Closed support conversation (oldest → newest):\n\n${transcript}\n\nClassify it.`;
@@ -110,6 +130,7 @@ export function parseTriageResult(text: string): TriageResult {
   const fallback: TriageResult = {
     needsReview: true,
     signals: ["parse_error"],
+    coachingSignals: [],
     score: 5,
     summary: "triage output could not be parsed — failing open to a deep review",
   };
@@ -130,15 +151,21 @@ export function parseTriageResult(text: string): TriageResult {
   const signals = Array.isArray(o.signals)
     ? o.signals.filter((s): s is string => typeof s === "string" && allowed.has(s))
     : [];
+  // coaching_signals are the recovered-mid-turn patterns — normalized against the shared vocab; an
+  // unknown tag is dropped, never a parse failure (they don't affect the escalation decision).
+  const coachingSignals = normalizeMessyTurnSignals(
+    Array.isArray(o.coaching_signals) ? (o.coaching_signals as unknown[]).map(String) : [],
+  );
   const scoreNum = typeof o.score === "number" && Number.isFinite(o.score) ? Math.round(o.score) : 5;
   const score = Math.min(10, Math.max(1, scoreNum));
   const summary = typeof o.summary === "string" && o.summary.trim() ? o.summary.trim() : "(no summary)";
 
   // A needs_review=true with no signals is still a valid trip (the model wasn't sure which bucket);
-  // a needs_review=false with signals is contradictory → fail open.
+  // a needs_review=false with terminal signals is contradictory → fail open. coaching_signals never
+  // make it contradictory (they are explicitly the "ended fine but messy" case).
   if (o.needs_review === false && signals.length > 0) return fallback;
 
-  return { needsReview: o.needs_review, signals, score, summary };
+  return { needsReview: o.needs_review, signals, coachingSignals, score, summary };
 }
 
 /**
@@ -276,4 +303,17 @@ export async function recordCheapPassClean(
     .update({ last_analyzed_at: new Date().toISOString() })
     .eq("id", ticketId)
     .eq("workspace_id", workspaceId);
+
+  // Clean ENDING, but did Haiku see recovered mid-turn stumbles? Emit ONE coaching signal so June can
+  // digest repeat patterns — the cheap pass owns this ticket (it did not flag it for a deep session),
+  // so Cora will never also emit for it (no double-count). No-op when the path was clean. See
+  // [[sol-coaching-signal]].
+  await recordSolMessyTurns(admin, {
+    workspaceId,
+    ticketId,
+    tier: "cheap",
+    signals: run.triage.coachingSignals,
+    score: run.triage.score,
+    summary: run.triage.summary,
+  });
 }

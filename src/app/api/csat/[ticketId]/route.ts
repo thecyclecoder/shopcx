@@ -151,6 +151,20 @@ export async function POST(
       }
     }
 
+    // A ≤3 rating on a ticket the customer confirmed RESOLVED is an end-result miss the cheap triage
+    // pass never saw (it runs before the survey). Force a DEEP Cora session directly via the "low_csat"
+    // trigger — it bypasses the cheap pass (only "auto_close" runs it) and re-grades the handling with
+    // the customer's own dissatisfaction as ground truth. Best-effort + fire-and-forget: a grading
+    // enqueue must never fail the customer's survey submit.
+    if (rating <= 3) {
+      try {
+        const { analyzeTicket } = await import("@/lib/ticket-analyzer");
+        await analyzeTicket(ticketId, "low_csat");
+      } catch (err) {
+        console.warn("[csat] low-CSAT Cora enqueue failed:", err);
+      }
+    }
+
     return NextResponse.json({ ok: true, action: "rated", points_awarded: awarded });
   }
 

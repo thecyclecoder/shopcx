@@ -16,6 +16,10 @@ The cheap pass NEVER reaches June (CS Director). Its ONLY escalation is spawning
 
 The pass flags only END-state failures, not the messy middle — the same principle as `hasResolvedActionClose` on [[ticket-analyzer]] (founder decision, 2026-07: "escalate on getting it wrong at the END, not mid-turn"). Support is a process; customers describe things messily and agents legitimately state a reasonable-but-wrong interim position, then correct as facts arrive. A turn-1 stumble that was RECOVERED by the end is NOT a trip. `TRIAGE_SIGNALS` (the exported allowed set) are all terminal failure modes: `customer_unresolved`, `customer_frustrated_end`, `unkept_promise`, `out_of_policy_offer`, `false_outcome_claim`, `wrong_outcome`.
 
+## Coaching signal on a clean-but-messy close
+
+The classifier returns `coachingSignals` (a subset of [[sol-coaching-signal]] `SOL_MESSY_TURN_SIGNALS`) SEPARATELY from `signals` — recovered mid-turn stumbles that never change `needsReview` (the customer ended fine) but are worth learning from. On the clean-close path (`recordCheapPassClean`), the cheap pass emits ONE `sol_messy_turns` [[../tables/director_activity]] row (tier `cheap`) via `recordSolMessyTurns` so June can digest repeat patterns. The cheap pass owns the tickets it did NOT flag, so Cora never also emits for them — no double-count. See [[sol-coaching-signal]] + [[cs-director-digest]].
+
 ## Recall-biased gate
 
 The gate fails OPEN: an unparseable classifier output, a missing `needs_review` field, a contradictory verdict (clean but with signals), or a hard runtime failure (no API key, transport error, empty transcript) all route to the deep session. The cheap pass NEVER silently suppresses a ticket it couldn't confidently clear — better an over-review than a missed terminal failure.
