@@ -386,6 +386,7 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // cadence pass. Deterministic-Node lane (no Max session), light on I/O — one
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
+const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
 // media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
 // grading pass. Deterministic-Node; scores media-buyer director_activity rows
 // against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
@@ -612,7 +613,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -683,6 +684,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "media-buyer-grade",
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
+  "ad-creative",
   "ticket-analyze",
   "ticket-handle",
   "prompt-review",
@@ -3233,7 +3235,7 @@ const LANE_GROUPS = {
       MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_MARIO + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
       MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
       MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
-      MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE +
+      MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE + MAX_AD_CREATIVE +
       MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
       MAX_PROPOSED_MODEL_TIER,
     kinds: [
@@ -3241,7 +3243,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -19758,6 +19760,41 @@ async function runMediaBuyerJob(job: Job) {
 }
 
 /**
+ * ad-creative lane (Dahlia — the Ad Creative Agent). Deterministic-Node pass that keeps Bianca's
+ * ready-to-test bin stocked: for the target product(s) it generates fully-backed statics
+ * (product-intelligence → creative-brief → Nano Banana Pro), vision-QAs each render, and inserts the
+ * passers into the bin (ad_campaigns status='ready' + a static ad_videos child + a Shopify PDP lander).
+ * No Max session; the only metered calls are image gen + one vision-QA pass per creative.
+ *
+ * Instructions JSON (optional): { product_id?: string, count?: number } — the cadence cron sends one
+ * job per thin-bin product with its deficit. With no product_id, tops up every intelligence-backed
+ * product to the bin floor.
+ */
+async function runAdCreativeJob(job: Job) {
+  const tag = `[ad-creative:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: { product_id?: string; count?: number } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade to workspace-wide top-up */
+  }
+  try {
+    const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
+    const result = await runAdCreativeLoop(a, { workspaceId: job.workspace_id, productId: instr.product_id, count: instr.count });
+    console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
+    await update(job.id, {
+      status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
+      log_tail: JSON.stringify(result.stocked).slice(-4000),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${tag} threw: ${msg}`);
+    await update(job.id, { status: "failed", log_tail: msg.slice(-4000) });
+  }
+}
+
+/**
  * media-buyer-grade lane (media-buyer-test-winner-loop Phase 3). Deterministic-Node
  * grading pass over concluded Media Buyer director_activity rows. Reads each row's
  * decision-time signals (source_meta_ad_id, roas at decision time, policy version),
@@ -21227,8 +21264,12 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
     // authoring model). The agent's proposed `parent` was `extends [[../specs/security-dependency-agent]]` —
     // a prose string pointing at a SPEC, which Vale rejects ("Parent is not a function mandate or goal
     // milestone"), and the old markdown carried no why/what, so EVERY security fix churned Vale forever (the
-    // 3 stuck pr-resolve specs on 2026-07-02). We IGNORE the agent's parent and set a valid platform-security
-    // mandate here; intent → summary, and a plain why/what pair the gate accepts. The vuln detail + fix +
+    // 3 stuck pr-resolve specs on 2026-07-02). We IGNORE the agent's parent and pin the platform-security
+    // mandate here — TYPED (`parentKind:'mandate'` + `parentRef:'platform#security'`) so it resolves against
+    // `### Platform security {#security}` in `docs/brain/functions/platform.md`. (Earlier this prose named a
+    // "platform security mandate" that DIDN'T EXIST as a heading + passed no typed parent, so Vale bounced
+    // every security fix on parent-not-resolvable — the platform-security-mandate hotfix added the heading +
+    // the typed ref.) intent → summary, and a plain why/what pair the gate accepts. The vuln detail + fix +
     // `Fixes:` link live in the phase BODY (where file:line/code is allowed), not in why/what.
     const whereDiff = source.kind === "diff" ? "merged" : "unmerged branch";
     const vBullets = (Array.isArray(s.verification) ? s.verification : []).filter((b) => typeof b === "string" && b.trim());
@@ -21255,9 +21296,9 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
         {
           title,
           summary: (s.intent || `Close the vulnerability the ${whereDiff} diff for ${parentSlug} introduced.`).trim(),
-          owner: String(s.owner || "[[../functions/platform]]"),
+          owner: String(s.owner || "platform"),
           parent:
-            "[[../functions/platform]] — platform security mandate: keep merged and pre-merge diffs free of introduced vulnerabilities",
+            '[[../functions/platform]] — "Platform security" mandate: keep merged + pre-merge diffs free of introduced vulnerabilities.',
           why: `A security review of the ${whereDiff} diff for ${parentSlug} found a genuine vulnerability that must be closed before it ships or stays on main.`,
           what: "A single scoped code fix closes the flagged vulnerability, verified by re-reviewing the diff.",
           blocked_by: [],
@@ -21273,7 +21314,7 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
           ],
         },
         "planned",
-        { intendedStatusSetBy: "security-agent" },
+        { intendedStatusSetBy: "security-agent", parentKind: "mandate", parentRef: "platform#security" },
       );
       if (!ok) {
         console.warn(`[security] structured author returned false for ${slug}`);
@@ -22711,6 +22752,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "audit-spec-shipped-state") return runAuditSpecShippedStateJob(job);
   if (job.kind === "ceo-authorized-out-of-leash") return runCeoAuthorizedOutOfLeashJob(job);
   if (job.kind === "media-buyer") return runMediaBuyerJob(job);
+  if (job.kind === "ad-creative") return runAdCreativeJob(job);
   if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
@@ -23915,7 +23957,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -23986,6 +24028,7 @@ async function main() {
   const countDrContent = () => [...active.values()].filter((v) => v.kind === "dr-content").length;
   const countMediaBuyer = () => [...active.values()].filter((v) => v.kind === "media-buyer").length;
   const countMediaBuyerGrade = () => [...active.values()].filter((v) => v.kind === "media-buyer-grade").length;
+  const countAdCreative = () => [...active.values()].filter((v) => v.kind === "ad-creative").length;
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
@@ -24557,6 +24600,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed media-buyer-grade ${job.id.slice(0, 8)} → ${countMediaBuyerGrade() + 1}/${MAX_MEDIA_BUYER_GRADE} media-buyer-grade lane`);
+        launch(job);
+      }
+      // Fill the ad-creative lane (Dahlia — the Ad Creative Agent): deterministic-Node pass that
+      // generates + vision-QAs fresh statics and stocks Bianca's ready-to-test bin. Same concurrency
+      // shape as media-buyer; the daily ad-creative-cadence cron enqueues one job per thin-bin product.
+      while (countAdCreative() < MAX_AD_CREATIVE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ad-creative"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ad-creative ${job.id.slice(0, 8)} → ${countAdCreative() + 1}/${MAX_AD_CREATIVE} ad-creative lane`);
         launch(job);
       }
       // Fill the sensor-trust-probe lane (media-buyer-sensor-trust-probe Phase 2):

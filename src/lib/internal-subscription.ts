@@ -201,6 +201,10 @@ type Item = {
   sku?: string;
   selling_plan?: string | null;
   line_id?: string;
+  /** True → a $0 gift line. The pricing engine forces `unit_cents: 0`. */
+  is_gift?: boolean;
+  /** True → rides the next renewal order, then the renewal engine drops it. */
+  one_time_next_renewal?: boolean;
 };
 
 const VARIANT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -225,12 +229,18 @@ async function resolveVariant(variantIdOrShopify: string): Promise<ResolvedVaria
   const col = VARIANT_UUID_RE.test(raw) ? "id" : "shopify_variant_id";
   const { data: v } = await admin
     .from("product_variants")
-    .select("id, product_id, title, sku, products(title)")
+    .select("id, product_id, title, sku")
     .eq(col, raw)
     .maybeSingle();
   if (!v) return null;
-  const product = (v.products as { title?: string } | { title?: string }[] | null) || null;
-  const productTitle = Array.isArray(product) ? product[0]?.title : product?.title;
+  // Resolve the product title with a direct lookup rather than a PostgREST
+  // embed — the `products(title)` embed intermittently returned null (the gift
+  // line then displayed as a bare "Gift"), so a two-step read is more reliable.
+  let productTitle: string | undefined;
+  if (v.product_id) {
+    const { data: p } = await admin.from("products").select("title").eq("id", v.product_id).maybeSingle();
+    productTitle = (p?.title as string) || undefined;
+  }
   return {
     id: v.id as string,
     product_id: v.product_id as string,
@@ -276,6 +286,78 @@ export async function internalSubAddItem(
       },
     ];
   }
+  await admin
+    .from("subscriptions")
+    .update({ items: nextItems, updated_at: new Date().toISOString() })
+    .eq("id", sub.id);
+  return { success: true };
+}
+
+/**
+ * Build the internal `subscriptions.items[]` record for a ONE-TIME add-on
+ * (gift or paid) that rides the NEXT renewal then drops off. Pure — no I/O.
+ *
+ * `one_time_next_renewal: true` is the flag the internal renewal engine
+ * ([[inngest/internal-subscription-renewals]]) filters out after the order
+ * ships (see its "Drop any one_time_next_renewal items now that they've
+ * shipped" step), so the item appears on exactly one order.
+ *
+ * FREE gift (`free: true`): `is_gift: true` — the pricing engine
+ * (src/lib/pricing.ts) unconditionally prices a gift line at `unit_cents: 0`,
+ * so no price fields are needed to guarantee $0.
+ *
+ * PAID one-time (`free: false`): when `priceCents` is given it becomes the
+ * grandfathered `price_override_cents` base; otherwise the field is omitted
+ * and the pricing engine derives the live catalog price at renewal.
+ */
+export function buildOneTimeGiftItem(
+  resolved: ResolvedVariant | null,
+  fallbackVariantId: string,
+  quantity: number,
+  opts: { free?: boolean; priceCents?: number | null } = {},
+): Item {
+  const free = opts.free !== false; // default true — the gift case
+  const item: Item = {
+    variant_id: resolved?.id || String(fallbackVariantId),
+    product_id: resolved?.product_id,
+    title: resolved?.title || "Gift",
+    variant_title: resolved?.variant_title || undefined,
+    sku: resolved?.sku || undefined,
+    quantity: Math.max(1, Math.floor(quantity || 1)),
+    one_time_next_renewal: true,
+  };
+  if (free) {
+    item.is_gift = true;
+  } else if (opts.priceCents != null) {
+    item.price_override_cents = Math.max(0, Math.round(opts.priceCents));
+  }
+  return item;
+}
+
+/**
+ * Append a ONE-TIME gift (or paid) item to an internal subscription's next
+ * renewal. The item ships once then drops off. Internal subs are OUR DB — no
+ * Appstle round-trip. See [[buildOneTimeGiftItem]] for the record shape.
+ *
+ * Always appends a NEW line (never merges into an existing recurring line) so
+ * the one-time gift sits alongside any recurring line for the same variant.
+ */
+export async function internalSubAddOneTimeGift(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  quantity: number,
+  opts: { free?: boolean; priceCents?: number | null } = {},
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const sub = await loadInternalSub(workspaceId, contractId);
+  if (!sub) return { success: false, error: "Internal subscription not found" };
+  if (sub.status !== "active") return { success: false, error: `Subscription is ${sub.status}, not active` };
+
+  const resolved = await resolveVariant(String(variantId));
+  const items: Item[] = (sub.items as Item[]) || [];
+  const giftItem = buildOneTimeGiftItem(resolved, String(variantId), quantity, opts);
+  const nextItems = [...items, giftItem];
   await admin
     .from("subscriptions")
     .update({ items: nextItems, updated_at: new Date().toISOString() })

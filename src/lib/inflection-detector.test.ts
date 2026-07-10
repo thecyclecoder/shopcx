@@ -187,3 +187,104 @@ test("Haiku transient failure on 'maybe' falls back to 'none' (do not bounce on 
   assert.equal(result.evidence.stage, 2);
   assert.equal(result.evidence.reason, "haiku_unavailable_fallback_none");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2 of checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol.
+// A CHECKOUT-STUCK message flags Sol back in (kind='drift', which the router
+// converts to a reSessionSol call) even when there's no live Direction and even
+// mid-playbook — a customer stuck at the Shopify checkout needs a fresh
+// assisted-purchase Direction, not the cheap orchestrator's stateless reply.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("Phase 2: aa0b6697 fixture (Shop Pay OTP never arrived) → drift, no Haiku call, stage1_checkout_stuck", async () => {
+  let called = 0;
+  const result = await detectInflection(
+    baseInput({
+      newestMessage:
+        "Hi, I was trying to order but the Shop Pay verification code never arrived on my phone, so I can't check out. Can you help?",
+      haiku: async () => {
+        called++;
+        return { kind: "drift", reason: "should not be called" };
+      },
+    }),
+  );
+  assert.equal(result.kind, "drift", "aa0b6697 checkout-stuck fixture must flag Sol back in");
+  assert.equal(called, 0, "Stage 2 must not run — checkout-stuck is a definite Stage-1 signal");
+  assert.equal(result.evidence.stage, 1);
+  assert.equal(result.evidence.reason, "stage1_checkout_stuck");
+  assert.ok(
+    (result.evidence.cues ?? []).length >= 1,
+    "evidence must carry the winning checkout-stuck cue id",
+  );
+});
+
+test("Phase 2: 'stuck at the payment screen' → drift (stage1_checkout_stuck)", async () => {
+  const result = await detectInflection(
+    baseInput({
+      newestMessage: "Been stuck on the payment page for 20 minutes — help?",
+      haiku: async () => null,
+    }),
+  );
+  assert.equal(result.kind, "drift");
+  assert.equal(result.evidence.reason, "stage1_checkout_stuck");
+});
+
+test("Phase 2: checkout-stuck fires even mid-playbook — Sol still needs re-session", async () => {
+  const result = await detectInflection(
+    baseInput({
+      isPlaybookActive: true,
+      newestMessage: "I can't check out on your site — the checkout page just spins.",
+      haiku: async () => null,
+    }),
+  );
+  assert.equal(
+    result.kind,
+    "drift",
+    "checkout-stuck must NOT be silenced by playbook-active (unlike ordinary drift)",
+  );
+  assert.equal(result.evidence.reason, "stage1_checkout_stuck");
+});
+
+test("Phase 2: checkout-stuck fires even with NO live Direction (fresh ticket, no intent)", async () => {
+  const result = await detectInflection(
+    baseInput({
+      direction: null,
+      newestMessage: "How do I finish my order? I'm stuck at the OTP step.",
+      haiku: async () => null,
+    }),
+  );
+  assert.equal(
+    result.kind,
+    "drift",
+    "checkout-stuck must fire even without a live Direction to compare against",
+  );
+});
+
+test("Phase 2: FRUSTRATION still wins over checkout-stuck when BOTH fire (highest-value trigger)", async () => {
+  const result = await detectInflection(
+    baseInput({
+      newestMessage:
+        "This is ridiculous, the Shop Pay verification code isn't arriving — refund me now.",
+      haiku: async () => null,
+    }),
+  );
+  assert.equal(
+    result.kind,
+    "frustration",
+    "frustration must outrank checkout-stuck when both fire, mirroring the drift tie-break",
+  );
+});
+
+test("Phase 2: NEGATIVE — a plain order-status question does not fire checkout-stuck", async () => {
+  const result = await detectInflection(
+    baseInput({
+      newestMessage: "Where is my order? Any tracking update?",
+      haiku: async () => null,
+    }),
+  );
+  assert.equal(
+    result.kind,
+    "none",
+    "a plain order-status question must not trip checkout-stuck",
+  );
+});

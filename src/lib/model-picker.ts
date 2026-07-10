@@ -17,6 +17,7 @@
  *
  * Returns { model, reason } so we can stamp `purpose` on ai_token_usage with the routing rationale.
  */
+import { classifyCheckoutStuck } from "@/lib/checkout-stuck-intent";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { TicketDirection } from "@/lib/ticket-directions";
 
@@ -34,6 +35,16 @@ export interface ModelSignals {
   linksCount: number;
   activeSubsCount: number;
   recentMergesCount: number;
+
+  // Phase 2 of [[checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+  // True when the latest inbound customer message is CHECKOUT-STUCK (per
+  // [[checkout-stuck-intent]] `classifyCheckoutStuck`). When true, the picker MUST NOT let
+  // any future rule escalate away from Sonnet — a checkout question is not a Sonnet→Opus
+  // problem, it is a re-session-Sol problem. Earliest gate in `pickModelFromSignals`; it
+  // short-circuits BEFORE the hard-signal ladder so recentMergesCount>0 (Latrina's aa0b6697
+  // case) can no longer drift the reason string away from `checkout-stuck`. The re-session
+  // half of Phase 2 lives in [[inflection-detector]].
+  isCheckoutStuck?: boolean;
 
   // Phase 3 (M2 sol-cheap-execution-over-ticket-direction): the Direction-driven Haiku
   // route. When every leg of the predicate is true — a fresh, high-confidence, stateless
@@ -70,6 +81,14 @@ const COMPLEX_TAGS_EXACT = ["wb", "dunning:active"];
  *   3. Otherwise → Sonnet (default).
  */
 export function pickModelFromSignals(signals: ModelSignals): ModelPick {
+  // Phase 2 of [[checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+  // A CHECKOUT-STUCK message always stays on Sonnet — earliest gate so no future rule (a
+  // reintroduced Opus tier, a new "hard" signal, the Haiku fast-path) can escalate or
+  // relax away from it. The re-session router ([[inflection-detector]]) also fires; the
+  // model tweak is the belt while Sol takes over. Reason string is verbatim
+  // `checkout-stuck` so ai_token_usage.purpose surfaces the audit slice cleanly.
+  if (signals.isCheckoutStuck) return { model: "sonnet", reason: "checkout-stuck" };
+
   const reasons: string[] = [];
 
   if (signals.aiTurnCount >= 1) reasons.push(`turn>=${signals.aiTurnCount}`);
@@ -142,9 +161,15 @@ export async function pickOrchestratorModel(params: {
   // assembleDirectionContext. undefined → picker loads it itself; null → picker treats
   // the ticket as directionless (skips both the fetch and the Haiku route).
   direction?: TicketDirection | null;
+  // Phase 2 of [[checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+  // The Inngest pipeline already has the newest inbound customer message text in `msg`; passing
+  // it in lets the picker classify checkout-stuck without a second DB read. undefined → picker
+  // skips the classifier (isCheckoutStuck falls back to `false`); null/"" → same.
+  newestMessage?: string | null;
 }): Promise<ModelPick> {
   const { workspaceId, ticketId, customerId } = params;
   const admin = createAdminClient();
+  const isCheckoutStuck = classifyCheckoutStuck(params.newestMessage ?? null).matched;
 
   const { data: ticket } = await admin
     .from("tickets")
@@ -241,6 +266,7 @@ export async function pickOrchestratorModel(params: {
     linksCount,
     activeSubsCount,
     recentMergesCount,
+    isCheckoutStuck,
     direction,
     latestConfidence,
     problemLockinThreshold,
