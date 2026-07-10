@@ -121,24 +121,23 @@ export function inferOwner(loopId: string): OwnerFunction | null {
   return null;
 }
 
-/** Build the full inferred MONITORED_LOOPS entry for an unregistered cron loop. Pure + deterministic. */
+/** Build the full inferred MONITORED_LOOPS entry for an unregistered cron loop. Pure + deterministic.
+ *
+ * coverage-register-always-platform (CEO directive, 2026-07): a monitored-loop entry is ALWAYS `platform`-
+ * owned. The tile answers "is this cron still ALIVE" — a platform/infra-reliability concern that Ada owns —
+ * regardless of which function's business the cron serves (a growth cron's LIVENESS is still platform's to
+ * watch). So we no longer call `inferOwner` for the entry owner, and there is no low-confidence placeholder /
+ * "REQUIRES OWNER CONFIRMATION" path: the owner is `platform`, confidently, every time. (`inferOwner` is kept
+ * as a legacy domain classifier but is no longer used to own a loop tile.) */
 export function inferLoopEntry(loopId: string, cadence: string, nowIso?: string): InferredLoopEntry {
   const { label, windowMs } = inferCadence(cadence);
-  const inferred = inferOwner(loopId);
-  const confidentOwner = inferred !== null;
-  const owner: OwnerFunction = inferred ?? "platform";
-  const description = confidentOwner
-    ? `Auto-proposed monitored loop for the ${loopId} cron (${label}). Confirm the owner-function + cadence/window.`
-    // Low-confidence fallback: inferOwner couldn't classify the id → we're SHOWING `owner: 'platform'`
-    // only because the type demands a value; the owner MUST override before merging. Bake-in from the
-    // coaching that shipped acquisition-research-* / creative-finder-* with the boilerplate default.
-    : `Auto-proposed monitored loop for the ${loopId} cron (${label}). **REQUIRES OWNER CONFIRMATION** — inferOwner could not classify this loop id; the \`owner: 'platform'\` value below is a placeholder, NOT a confident guess. Set the true owner-function (growth / cs / retention / cmo / platform) before merging.`;
+  const owner: OwnerFunction = "platform"; // always platform — loop liveness is a platform-reliability concern.
   const entry: InferredLoopEntry = {
     id: loopId,
     kind: "cron",
     owner,
     label: loopId,
-    description,
+    description: `Auto-proposed monitored loop for the ${loopId} cron (${label}). Owned by platform (loop liveness monitoring); confirm the cadence/window.`,
     expectedCadence: label,
     livenessWindowMs: windowMs,
   };
@@ -148,12 +147,12 @@ export function inferLoopEntry(loopId: string, cadence: string, nowIso?: string)
 }
 
 /**
- * Was the inferred entry's `owner` produced with confidence, or did we fall through to the low-
- * confidence `platform` placeholder? Callers (dashboards / one-tap materialize) can render an
- * explicit "requires owner confirmation" banner when this is false.
+ * A monitored-loop entry's owner is ALWAYS `platform` now (coverage-register-always-platform), so the owner
+ * is always confident — kept for the callers that gate an "owner confirmation" banner (now always true → no
+ * banner). `inferOwner` remains a legacy domain classifier but no longer decides a loop tile's owner.
  */
-export function isOwnerConfident(loopId: string): boolean {
-  return inferOwner(loopId) !== null;
+export function isOwnerConfident(_loopId: string): boolean {
+  return true;
 }
 
 /** Render a liveness window in the registry's `N * UNIT` house style. */
@@ -198,7 +197,10 @@ export function buildRegisterSpecBody(entry: InferredLoopEntry): string {
 
 **Owner:** [[../functions/${entry.owner}]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).
 
-The coverage self-audit found a cron \`createFunction\` served in code (\`${entry.id}\`, ${entry.expectedCadence}) with **no \`MONITORED_LOOPS\` tile** — an unregistered loop. This spec adds the inferred registry entry so the loop becomes a real monitored tile. Confirm the inferred **owner-function** (\`${entry.owner}\`) + cadence/window before merging.
+**Why:** The \`${entry.id}\` cron runs in code with no monitored-loop tile, so if it silently stops firing nothing alerts us — a blind spot in platform coverage.
+**What:** Adds the \`${entry.id}\` entry to \`MONITORED_LOOPS\` so the loop becomes a health-tracked tile that alerts when it misses its ${entry.expectedCadence} cadence.
+
+The coverage self-audit found a cron \`createFunction\` served in code (\`${entry.id}\`, ${entry.expectedCadence}) with **no \`MONITORED_LOOPS\` tile** — an unregistered loop. This spec adds the inferred registry entry so the loop becomes a real monitored tile. Confirm the cadence/window before merging.
 
 ## Phase 1 — add the MONITORED_LOOPS entry ⏳
 In \`src/lib/control-tower/registry.ts\`, add this entry to \`MONITORED_LOOPS\` (in the Inngest crons group):
@@ -223,6 +225,9 @@ export function buildExemptSpecBody(loopId: string, owner: OwnerFunction): strin
   return `# Exempt loop from coverage monitoring: ${loopId} ⏳
 
 **Owner:** [[../functions/${owner}]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).
+
+**Why:** The coverage self-audit keeps flagging \`${loopId}\` as an unregistered loop, but the owner reviewed it and it does not need liveness monitoring — a registered exemption records "intentionally unmonitored" instead of leaving the gap flagged forever.
+**What:** Adds \`${loopId}\` to \`INTENTIONALLY_UNMONITORED_CRONS\` so the coverage audit stops flagging it as an unregistered loop.
 
 The owner marked \`${loopId}\` **intentionally-unmonitored** — a registered exemption so the coverage self-audit stops flagging it (silence is never the default; this is the owner-confirmed exception).
 

@@ -4421,10 +4421,11 @@ async function runDbHealthJob(job: Job) {
 //      instructions.entry so the owner has a one-tap remediation path. Never let a MissingVerification
 //      throw escape as a generic "agent produced no verdict" backstop, and never park with a bare
 //      one-word error — a coverage gap left with no explanation reads as unresolved-and-abandoned.
-//   4. When the underlying entry falls through to inferOwner's low-confidence platform placeholder
-//      (see coverage-register-agent.ts inferOwner returning null on unknown ids), the description
-//      already flags "REQUIRES OWNER CONFIRMATION" — no additional gate needed here; the owner sees
-//      the warning in the fix spec body before tapping Build.
+//   4. coverage-register-always-platform (CEO directive, 2026-07): a monitored-loop entry is ALWAYS
+//      `platform`-owned (loop LIVENESS is a platform-reliability concern). inferLoopEntry no longer uses
+//      inferOwner's per-domain guess or a low-confidence "REQUIRES OWNER CONFIRMATION" placeholder — the
+//      owner is platform, every time. The register/exempt bodies carry **Why:**/**What:** intent so they
+//      author cleanly through the intent-gated chokepoint (the upsertSpec self-gate requires spec why/what).
 async function runCoverageRegisterJob(job: Job) {
   const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
   let instr: {
