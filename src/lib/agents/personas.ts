@@ -154,6 +154,22 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-violet-100 text-violet-800 border-violet-200 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-900/40",
     dot: "bg-violet-500", ring: "bg-violet-50 dark:bg-violet-900/20", accent: "text-violet-600 dark:text-violet-400",
   },
+  cfo: {
+    key: "cfo", name: "Grace", role: "CFO", emoji: "💰",
+    personality: "Owns the numbers the CEO north star is measured in — revenue, margin, cash, CAC, LTV, unit economics. Reconciles what the other directors spend against what the business actually earns. Operates + authors, never builds.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}grace-cfo.jpg?v=1`,
+    chip: "bg-teal-100 text-teal-800 border-teal-200 dark:bg-teal-900/30 dark:text-teal-300 dark:border-teal-900/40",
+    dot: "bg-teal-500", ring: "bg-teal-50 dark:bg-teal-900/20", accent: "text-teal-600 dark:text-teal-400",
+  },
+  logistics: {
+    key: "logistics", name: "Marco", role: "Logistics", emoji: "📦",
+    personality: "Owns inventory, replenishment, and fulfillment — keeps the shelf stocked ahead of demand and every order moving. Turns stockout risk and shipping cost into things the CEO north star can see. Operates + authors, never builds.",
+    pronouns: { subject: "he", object: "him", possessive: "his" },
+    mascotId: "default", avatarUrl: `${AV}marco-logistics.jpg?v=1`,
+    chip: "bg-orange-100 text-orange-800 border-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-900/40",
+    dot: "bg-orange-500", ring: "bg-orange-50 dark:bg-orange-900/20", accent: "text-orange-600 dark:text-orange-400",
+  },
   // ── CS workers (agent_jobs kinds) — report to June/CS ────────────────────────
   "ticket-handle": {
     key: "ticket-handle", name: "Sol", role: "Ticket Handler", emoji: "🧭",

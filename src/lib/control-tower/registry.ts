@@ -46,7 +46,7 @@ export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent" | "reac
  * dunning / portal crons → retention; the meta + social loops → growth/cmo; the ticket handler +
  * triage → cs; the build/spec-test/migration-fix agents + the data-infra/monitoring crons → platform).
  */
-export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo" | "ceo";
+export type OwnerFunction = "platform" | "growth" | "retention" | "cs" | "cmo" | "cfo" | "logistics" | "ceo";
 // `ceo` is the founder-owned lane — reserved for tools that answer DIRECTLY to the CEO seat,
 // not to a director. Today: the god-mode cockpit's executive-assistant agent (Eve). Deliberately
 // NOT in `OWNER_FUNCTIONS` — the CEO isn't a department that gets a rollup Health tile; she owns
