@@ -26,8 +26,9 @@
  * Usage (from the ticket-analyze skill):
  *   npx tsx scripts/analyzer-research-tools.ts <tool> <ticket_id> [json_input]
  *
- * Tools: get_customer_account · get_product_knowledge · get_product_nutrition · get_returns ·
- *        get_ticket_analysis
+ * Tools (full parity with Sol's read surface, 2026-07-10): get_customer_account · get_returns ·
+ *        get_chargebacks · get_email_history · get_crisis_status · get_dunning_status ·
+ *        get_product_knowledge · get_product_nutrition · get_ticket_analysis · get_policies
  *
  * Prints the tool's text result to stdout. See docs/brain/specs/cora-gets-readonly-research-power-to-verify-claims-before-grading.md.
  */
@@ -46,18 +47,23 @@ if (existsSync(envPath)) {
   }
 }
 
-// The bounded allowlist. Deliberately narrower than the improve-tools set — Cora's job is
-// to VERIFY a specific transcript claim, not to open-endedly investigate the whole account.
-// Covers the exact surfaces the spec names: product (variants/flavors/pricing) · order +
-// line-item (actual charged amounts, via get_customer_account's orders block) · subscription
-// + customer (get_customer_account) · latest analysis (get_ticket_analysis). Brain/policy
-// read happens via Claude Code's native Read/Grep against docs/brain/, not here.
+// The read-only allowlist — the SAME full data surface Sol (the first-touch handler) sees, per the
+// founder directive (2026-07-10): Cora and June must never grade/decide on less data than Sol had.
+// All ten delegate to the shared read-only executor (executeToolCallImprove → sonnet-orchestrator-v2
+// executeToolCall / improve-tools) — the exact code path Sol's improve-box-tools uses. VOLUME is still
+// bounded per grade by ANALYZER_RESEARCH_CAP below (targeted verification, not open-ended investigation
+// — that's the quality bound; the TOOL SET is now full parity, no longer a subset).
 const READ_TOOLS = new Set([
   "get_customer_account",
+  "get_returns",
+  "get_chargebacks",
+  "get_email_history",
+  "get_crisis_status",
+  "get_dunning_status",
   "get_product_knowledge",
   "get_product_nutrition",
-  "get_returns",
   "get_ticket_analysis",
+  "get_policies",
 ]);
 
 // Phase 3 — per-grade cap. Each ticket-analyze session is one grade on one ticket, so a

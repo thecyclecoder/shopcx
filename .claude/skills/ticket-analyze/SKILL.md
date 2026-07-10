@@ -37,21 +37,29 @@ is in your prompt):
 npx tsx scripts/analyzer-research-tools.ts <tool> <ticket_id> [json_input]
 ```
 
-Tools (all read-only, all delegate to the shared executor `src/lib/improve-tools.ts`):
+Tools (all read-only, all delegate to the shared executor `src/lib/improve-tools.ts`). You have the
+**SAME full data surface as Sol** (the first-touch handler) — never grade on less data than Sol saw:
 
 - `get_customer_account` — the customer's subscriptions (with per-line variant_id, realized
   price, MSRP/floor context), the last 180 days of orders (with `line_items` including per-unit
   price, discount codes, financial_status, subscription linkage), loyalty balance, and marketing
   consent. **This is where you find the "actual charged per-unit amounts" the AI's per-unit
   claims must reconcile against.**
+- `get_returns` — returns/exchanges on file for the customer.
+- `get_chargebacks` — chargebacks/disputes on file (verify a "we refunded / you disputed" claim).
+- `get_email_history` — prior email correspondence (verify a "we told you / you were notified" claim).
+- `get_crisis_status` — active crisis/recall/incident state for the customer's products.
+- `get_dunning_status` — failed-payment / dunning state (verify a billing-failure or retry claim).
 - `get_product_knowledge` — product info (title, description, positioning). `json_input`:
   `{"query":"<product name or keyword>"}`.
 - `get_product_nutrition` — per-variant Supplement Facts (variant title / flavor / servings /
   key nutrients). **This is where you verify a flavor/variant claim** (e.g. "Berry" is a real
   Superfoods flavor vs. a hallucinated one). `json_input`: `{"query":"<product name or keyword>"}`.
-- `get_returns` — returns/exchanges on file for the customer.
 - `get_ticket_analysis` — the latest prior analysis for this ticket (score, issues, summary).
   Useful when you're re-grading and want to see what changed.
+- `get_policies` — the active policy set (returns / refunds / consumable-returnability / exception
+  ceilings). Argless = all active, or `{"slug":"<slug>"}` for one. **Verify a policy claim against the
+  real rulebook** instead of trusting the transcript — the same policies Sol and the orchestrator read.
 
 **Brain / policy read is native.** Use Claude Code's `Read` / `Grep` against `docs/brain/`
 (policies, playbooks, journeys, integrations, tables) whenever the AI made a policy claim you
