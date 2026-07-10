@@ -334,3 +334,100 @@ export function assertSolAssistedPurchaseReplyNeverClaimsPlaced(
   }
   return { ok: true };
 }
+
+// ── Phase 5: fast-default invariant — no "try another card" dead-end ─────
+
+export interface SolAssistedPurchaseFastDefaultContext {
+  /**
+   * True only when the ticket has been classified as CHECKOUT-STUCK (per
+   * [[checkout-stuck-intent]] `classifyCheckoutStuck`). The fast-default guard
+   * fires ONLY on checkout-stuck tickets — every other ticket can legitimately
+   * say "try another card" (e.g. a dunning ticket) without the guard blocking.
+   */
+  isCheckoutStuck: boolean;
+  /** Sol's DRAFT customer-facing reply for the current turn. */
+  firstReply: string;
+}
+
+export type SolAssistedPurchaseFastDefaultAssessment =
+  | { ok: true }
+  | {
+      ok: false;
+      kind: "checkout_stuck_dead_end_reply";
+      reason: string;
+      matched_phrase: string;
+    };
+
+/**
+ * Patterns that recreate the Latrina aa0b6697 dead-end — telling a checkout-
+ * stuck customer to "try another card / PayPal / Shop Pay" instead of
+ * concierging the purchase on our Braintree minisite. Intentionally narrow
+ * (first-person suggestion or imperative — matches "try another card",
+ * "you could try PayPal", "try using Shop Pay", "have you tried a different
+ * card") — a REFERENCE to what the customer already tried ("you mentioned
+ * Shop Pay") does NOT match. That would defeat the guard's purpose (which is
+ * to prevent Sol from PROPOSING the failing rails, not from acknowledging
+ * them).
+ */
+const DEAD_END_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  {
+    pattern: /\btry(?:\s+(?:using|with|another|a\s+different))?\s+(?:a\s+)?(?:another|different)\s+card\b/i,
+    label: "try another / a different card",
+  },
+  {
+    pattern: /\b(?:you\s+(?:could|can|might)\s+|please\s+)?try\s+(?:using\s+)?pay\s*pal\b/i,
+    label: "try PayPal",
+  },
+  {
+    pattern: /\b(?:you\s+(?:could|can|might)\s+|please\s+)?try\s+(?:using\s+)?shop\s*pay\b/i,
+    label: "try Shop Pay",
+  },
+  {
+    pattern: /\btry\s+(?:using\s+)?(?:a\s+)?different\s+(?:payment\s+)?method\b/i,
+    label: "try a different payment method",
+  },
+  {
+    pattern: /\bhave\s+you\s+tried\s+(?:a\s+)?(?:different|another)\s+(?:card|payment)\b/i,
+    label: "have you tried a different card / payment",
+  },
+  {
+    pattern: /\buse\s+(?:a\s+)?different\s+(?:card|payment\s+method|browser)\s+to\s+(?:check\s*out|complete|finish)\b/i,
+    label: "use a different card / payment to check out",
+  },
+];
+
+/**
+ * Pure fast-default guard — Phase 5 of
+ * [[../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+ * The founder directive (2026-07-10): ANY checkout issue must default, as fast
+ * as possible, to us CONCIERGING the purchase — never a stateless "try another
+ * card / try PayPal / try Shop Pay" dead-end. The Latrina aa0b6697 incident is
+ * the recorded failure mode this guard blocks.
+ *
+ * The box worker calls this after `assertSolAssistedPurchaseReplyNeverClaimsPlaced`
+ * on a checkout-stuck ticket. A reply that suggests the customer keep fighting
+ * the failing checkout (instead of routing them to the add-payment-method
+ * journey) is BLOCKED — Direction stays durable, reply is NOT delivered, ticket
+ * escalates to June. On any non-checkout-stuck ticket the guard is a no-op
+ * (returns `ok:true` unconditionally) — a dunning reply legitimately says "try
+ * another card".
+ */
+export function assertSolFastDefaultToConcierge(
+  ctx: SolAssistedPurchaseFastDefaultContext,
+): SolAssistedPurchaseFastDefaultAssessment {
+  if (!ctx.isCheckoutStuck) return { ok: true };
+  const reply = ctx.firstReply ?? "";
+  if (!reply) return { ok: true };
+  for (const p of DEAD_END_PATTERNS) {
+    if (p.pattern.test(reply)) {
+      return {
+        ok: false,
+        kind: "checkout_stuck_dead_end_reply",
+        reason:
+          "checkout-stuck ticket — Sol's reply suggests the customer keep fighting the failing checkout ('try another card / try PayPal / try Shop Pay') instead of routing them to the add-payment-method journey. The founder directive is: default to concierging the purchase, never dead-end.",
+        matched_phrase: p.label,
+      };
+    }
+  }
+  return { ok: true };
+}

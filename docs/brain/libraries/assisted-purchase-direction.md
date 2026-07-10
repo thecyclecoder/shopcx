@@ -136,8 +136,31 @@ export function interpretAssistedCreateResult(input: {
 
 Exactly-one-order-at-the-right-price: the seed migration (`supabase/migrations/20260707150000_seed_assisted_purchase_playbook.sql`) inserts exactly ONE `create_order` / `create_subscription` step per playbook; the interpreter emits `backedActions:[actionType]` (a one-element array) on success; the executor advances to `action:'complete'` (terminal). No path emits two placement dispatches per playbook execution.
 
+## Phase 5 — fast-default guard + analytics slice
+
+Phase 5 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]. The whole path must be the reflex for any checkout issue — minimize turns to the payment journey, no "try another card" dead-end.
+
+### `assertSolFastDefaultToConcierge` — the never-dead-end guard
+
+```ts
+export function assertSolFastDefaultToConcierge(ctx: {
+  isCheckoutStuck: boolean;
+  firstReply: string;
+}): { ok: true } | { ok: false; kind: "checkout_stuck_dead_end_reply"; reason: string; matched_phrase: string };
+```
+
+Pure predicate the worker's pre-send chain runs AFTER `assertSolAssistedPurchaseReplyNeverClaimsPlaced`. On a checkout-stuck ticket, a reply that suggests the customer keep fighting the failing rails (`try another card`, `try PayPal`, `try Shop Pay`, `try a different payment method`, `have you tried a different card`, `use a different card to check out`) is BLOCKED — Direction stays durable, reply is NOT delivered, ticket escalates to June. On a non-checkout-stuck ticket the guard is a no-op (a dunning reply legitimately says "try another card").
+
+Distinction between PROPOSE and REFERENCE: "I saw you mentioned Shop Pay — I can just place this for you" PASSES (a reference to what the customer already tried), while "You could try Shop Pay" BLOCKS (a suggestion to keep fighting).
+
+### Analytics — the concierge-flow funnel
+
+[[assisted-purchase-analytics]] `buildAssistedPurchaseFunnelSql` + `buildAssistedPurchaseFunnelParams` — pure SQL builder + params vector returning one row: `checkout_stuck_tickets`, `assisted_purchase_started`, `orders_placed`, `recovered_revenue_cents`, plus the three ratios (`start_rate`, `placement_rate`, `end_to_end_conversion`). CTEs key off the durable signals — `sol:inflection-drift` + `stage1_checkout_stuck` (Phase 2), `plan.journey_slug='add-payment-method'` (Phase 3), the two session-chosen-only playbook slugs (Phase 4), and `tickets.playbook_context->>'assisted_purchase_completed'='true'` (Phase 4 execute-then-confirm signal).
+
 ## Related
 
 - [[checkout-stuck-intent]] — the Phase-1 predicate that recognizes the intent.
 - [[model-picker]] · [[inflection-detector]] — Phase 2 (Sonnet + Sol re-session).
-- Phase 5 — analytics slice + [[../lifecycles/storefront-checkout]] update + concierge-flow recipe.
+- [[assisted-purchase-analytics]] — Phase 5 funnel SQL builder.
+- [[../recipes/checkout-stuck-concierge-flow]] — the operational recipe folded from all five phases.
+- [[../lifecycles/storefront-checkout]] — the storefront path this concierge flow routes around.

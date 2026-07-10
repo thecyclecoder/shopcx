@@ -24,6 +24,7 @@ import {
   ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS,
   ASSISTED_PURCHASE_STAGES,
   assertSolAssistedPurchaseReplyNeverClaimsPlaced,
+  assertSolFastDefaultToConcierge,
   buildAssistedPurchaseFirstTurnDirection,
   isSessionChosenOnlyPlaybook,
 } from "./assisted-purchase-direction";
@@ -263,4 +264,100 @@ test("Phase 4: the two session-chosen-only slugs match ASSISTED_PURCHASE_PLAYBOO
     true,
     "the Subscribe & Save playbook slug must be session-chosen-only",
   );
+});
+
+// ── Phase 5: fast-default guard — no "try another card" dead-end ─────────
+
+test("Phase 5: on a NON checkout-stuck ticket, the guard is a no-op (dunning can say 'try another card')", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: false,
+    firstReply: "Your card was declined — could you try another card or Shop Pay?",
+  });
+  assert.equal(r.ok, true, "non-checkout-stuck tickets must not be blocked by this guard");
+});
+
+test("Phase 5: 'try another card' on checkout-stuck → BLOCK (Latrina aa0b6697 recorded dead-end)", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Sorry about that! Could you try another card or use PayPal instead?",
+  });
+  assert.equal(r.ok, false);
+  if (r.ok === false) {
+    assert.equal(r.kind, "checkout_stuck_dead_end_reply");
+    assert.match(r.matched_phrase, /try another/i);
+  }
+});
+
+test("Phase 5: 'try a different card' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Could you try a different card at checkout?",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("Phase 5: 'try PayPal' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "You could try PayPal — that often works when card checkout is stuck.",
+  });
+  assert.equal(r.ok, false);
+  if (r.ok === false) assert.match(r.matched_phrase, /PayPal/i);
+});
+
+test("Phase 5: 'try Shop Pay' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Have you been able to try Shop Pay? Sometimes that works.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("Phase 5: 'try a different payment method' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Please try a different payment method and see if that works.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("Phase 5: 'have you tried a different card' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Have you tried a different card at the OTP step?",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("Phase 5: 'use a different card to check out' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Please use a different card to check out on our site.",
+  });
+  assert.equal(r.ok, false);
+});
+
+// Negative — the concierge lead-in + a REFERENCE to what the customer already
+// tried both PASS.
+
+test("Phase 5: the warm concierge lead-in passes on a checkout-stuck ticket", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: ASSISTED_PURCHASE_LEAD_IN,
+  });
+  assert.equal(r.ok, true, "the concierge lead-in is the whole point — must not trip the guard");
+});
+
+test("Phase 5: acknowledging what the customer already mentioned Shop Pay → PASS (reference, not suggestion)", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply:
+      "I saw you mentioned Shop Pay — I can just place this for you on my side so you don't have to fight that screen.",
+  });
+  assert.equal(r.ok, true, "a reference (not a suggestion) must pass");
+});
+
+test("Phase 5: empty reply on checkout-stuck → PASS (nothing to block)", () => {
+  const r = assertSolFastDefaultToConcierge({ isCheckoutStuck: true, firstReply: "" });
+  assert.equal(r.ok, true);
 });
