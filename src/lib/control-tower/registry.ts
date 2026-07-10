@@ -691,6 +691,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // the goals/autonomous-media-buyer-supervision M2 policy → no Meta writes.
   { id: "media-buyer-cadence-cron", kind: "cron", owner: "growth", label: "Media buyer daily cadence", description: "Daily fan-out: enqueues one kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per workspace (shadow-default under the M2 policy).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-08T13:00:00Z" },
   { id: "ad-creative-cadence-cron", kind: "cron", owner: "growth", label: "Ad creative daily cadence", description: "Daily fan-out: enqueues one kind='ad-creative' agent_jobs row per intelligence-backed product whose ready-to-test bin is below the floor, so Dahlia keeps Bianca's bin stocked.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-10T11:00:00Z" },
+  { id: "budget-watch-cron", kind: "cron", owner: "growth", label: "Ad budget increase tripwire (SMS)", description: "Every ~10min: checks each active meta_ad_account's total live daily budget (Meta ground truth) and SMSes the founder on any increase — the spend runaway tripwire.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * 60 * 1000, registeredAt: "2026-07-10T18:00:00Z" },
   // media-buyer-grade-daily-cron spec, Phase 1: daily fan-out that enqueues one
   // kind='media-buyer-grade' agent_jobs row per workspace with ≥1 UNGRADED settled
   // (>= 3d old) Media Buyer director_activity row — the deterministic grader lane
