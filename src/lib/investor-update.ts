@@ -114,7 +114,7 @@ export async function buildInvestorPerformance(
     (revenueYoYPct >= 0 ? working : needsHelp).push(
       revenueYoYPct >= 0
         ? `Sales over the last year came to ${money(ttmRevenue)} — ${pct(revenueYoYPct)} versus the year before.`
-        : `Sales over the last year were ${money(ttmRevenue)}, down ${pct(Math.abs(revenueYoYPct))} from the year before — the top line needs to re-accelerate.`,
+        : `Sales over the last year were ${money(ttmRevenue)}, down ${Math.round(Math.abs(revenueYoYPct) * 100)}% from the year before — the top line needs to re-accelerate.`,
     );
   }
   if (adEfficiencyNow !== null && adEfficiencyPrior !== null) {
@@ -140,7 +140,7 @@ export async function buildInvestorPerformance(
     const leaner = ttmFixed <= priorFixed;
     (leaner ? working : needsHelp).push(
       leaner
-        ? `The fixed cost of running the business held at ${money(ttmFixed)} for the year — steady even as we grew.`
+        ? `The fixed cost of running the business held at ${money(ttmFixed)} for the year — spending stayed disciplined.`
         : `Fixed running costs rose to ${money(ttmFixed)} for the year, up from ${money(priorFixed)} — worth keeping an eye on.`,
     );
   }
