@@ -1,22 +1,21 @@
 /**
- * agent-mandate-hardening-coverage-register — bake-in of the 9 accumulated coaching points that the
- * ephemeral appended agent_instructions couldn't make stick. These tests pin the DURABLE mandate:
+ * coverage-register-agent tests. Two durable contracts:
  *
- *   1. inferOwner catches known growth crons (research/creative/acquisition/lander/scout) — the
- *      previous narrow regex fell through to "platform" for acquisition-research-cadence-cron and
- *      creative-finder-*, so entries shipped with the wrong owner + boilerplate placeholder.
- *   2. inferOwner returns null for truly unknown ids (not a false "platform" default). Callers use
- *      isOwnerConfident() to render the "REQUIRES OWNER CONFIRMATION" warning in the fix spec body
- *      before the owner taps Build.
- *   3. inferLoopEntry uses `platform` as an EXPLICIT low-confidence placeholder when inferOwner
- *      returns null AND flags "REQUIRES OWNER CONFIRMATION" in the description, so a fallthrough
- *      entry cannot silently sail as a confident guess.
+ *   A) `inferOwner` is a legacy DOMAIN classifier (growth/cs/retention/cmo/platform, else null) — still
+ *      correct, still tested, but NO LONGER decides a loop tile's owner.
+ *   B) coverage-register-always-platform (CEO directive, 2026-07): a monitored-loop ENTRY is ALWAYS
+ *      `platform`-owned (loop LIVENESS is a platform-reliability concern regardless of the cron's business
+ *      domain). So `inferLoopEntry` always sets owner=`platform`, with no low-confidence placeholder / no
+ *      "REQUIRES OWNER CONFIRMATION"; `isOwnerConfident` is always true; and the register/exempt spec bodies
+ *      carry `**Why:**`/`**What:**` intent so they author cleanly through the intent-gated chokepoint (the
+ *      upsertSpec self-gate requires spec-level why/what — a null-intent coverage spec used to throw).
  *
  * Run: npx tsx --test src/lib/coverage-register-agent.test.ts
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inferOwner, inferLoopEntry, isOwnerConfident } from "./coverage-register-agent";
+import { inferOwner, inferLoopEntry, isOwnerConfident, buildRegisterSpecBody, buildExemptSpecBody } from "./coverage-register-agent";
+import { extractIntentHeaders, extractPhaseBodies } from "./author-spec";
 
 test("inferOwner: growth crons — research / creative / acquisition / lander / scout / brand", () => {
   // The named failing state from the accumulated coaching: acquisition-research-cadence-cron and
@@ -69,26 +68,36 @@ test("inferOwner: returns null on unclassifiable ids — never a silent 'platfor
   assert.equal(inferOwner(""), null);
 });
 
-test("inferLoopEntry: confident owner → normal description", () => {
-  const entry = inferLoopEntry("acquisition-research-cadence-cron", "0 10 * * *");
-  assert.equal(entry.owner, "growth");
-  assert.ok(!entry.description.includes("REQUIRES OWNER CONFIRMATION"), "confident entry must NOT carry the low-confidence warning");
-  assert.ok(entry.description.includes("Confirm the owner-function"), "confident entry keeps the light 'confirm' nudge");
+test("inferLoopEntry: owner is ALWAYS platform (coverage-register-always-platform)", () => {
+  // A monitored loop's LIVENESS is a platform-reliability concern, regardless of the cron's business
+  // domain — so the tile owner is always platform, even for a growth-shaped id. No placeholder, no warning.
+  for (const id of ["acquisition-research-cadence-cron", "ticket-auto-archive", "dunning-payday-retry-cron", "xyzzy-cadence", "quux-tick"]) {
+    const entry = inferLoopEntry(id, "0 10 * * *");
+    assert.equal(entry.owner, "platform", `${id} → platform`);
+    assert.ok(!entry.description.includes("REQUIRES OWNER CONFIRMATION"), `${id}: no low-confidence warning`);
+    assert.ok(!entry.description.toLowerCase().includes("placeholder"), `${id}: no placeholder language`);
+  }
 });
 
-test("inferLoopEntry: low-confidence fallthrough → owner=platform placeholder + REQUIRES OWNER CONFIRMATION", () => {
-  // The mandate: a cron id inferOwner can't classify does NOT ship as a confident 'platform' guess.
-  // Type demands a value, so 'platform' rides as a PLACEHOLDER and the description makes the low-
-  // confidence state explicit — the owner MUST override before merging.
-  const entry = inferLoopEntry("xyzzy-cadence", "0 5 * * *");
-  assert.equal(entry.owner, "platform");
-  assert.ok(entry.description.includes("REQUIRES OWNER CONFIRMATION"), "low-confidence entry MUST warn the owner in the description");
-  assert.ok(entry.description.includes("placeholder"), "low-confidence entry MUST call out that platform is a placeholder");
-});
-
-test("isOwnerConfident: mirrors inferOwner nullness", () => {
+test("isOwnerConfident: always true (owner is always the confident platform)", () => {
   assert.equal(isOwnerConfident("acquisition-research-cadence-cron"), true);
-  assert.equal(isOwnerConfident("ticket-auto-archive"), true);
-  assert.equal(isOwnerConfident("control-tower-monitor"), true);
-  assert.equal(isOwnerConfident("xyzzy-cadence"), false);
+  assert.equal(isOwnerConfident("xyzzy-cadence"), true);
+  assert.equal(isOwnerConfident(""), true);
+});
+
+test("register + exempt spec bodies carry **Why:**/**What:** intent AND a phase Verification (authors through the gate)", () => {
+  // Regression guard for the null-intent break: the upsertSpec self-gate requires spec-level why/what, so a
+  // coverage spec body with no intent throws. Both bodies must carry it, and the register body a Verification.
+  const entry = inferLoopEntry("some-loop-cron", "0 8 16 * *", "2026-07-10T00:00:00.000Z");
+  const reg = buildRegisterSpecBody(entry);
+  const regIntent = extractIntentHeaders(reg);
+  assert.ok(regIntent.why && regIntent.why.trim(), "register body has **Why:**");
+  assert.ok(regIntent.what && regIntent.what.trim(), "register body has **What:**");
+  const phases = extractPhaseBodies(reg);
+  assert.ok(phases[0]?.verification && phases[0].verification.trim(), "register phase 1 carries a Verification");
+
+  const ex = buildExemptSpecBody("some-loop-cron", entry.owner);
+  const exIntent = extractIntentHeaders(ex);
+  assert.ok(exIntent.why && exIntent.why.trim(), "exempt body has **Why:**");
+  assert.ok(exIntent.what && exIntent.what.trim(), "exempt body has **What:**");
 });
