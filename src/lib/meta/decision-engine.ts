@@ -99,8 +99,12 @@ export interface IterationPolicy {
   crown_max_cpa_cents: number | null;
   /** ...AND ≥ this much Meta spend (cents) — the verdict floor (e.g. 45000 = $450). */
   crown_min_spend_cents: number | null;
-  /** Trim a loser early once it has ≥ this spend (cents) with a clearly-bad CPA (e.g. 20000 = $200). */
+  /** Trim a loser early once it has ≥ this spend (cents), judged on the LEADING signals below. */
   early_trim_min_spend_cents: number | null;
+  /** Early trim if cost-per-ATC (spend ÷ add_to_cart) > this (cents) — the primary leading signal. */
+  trim_max_cost_per_atc_cents: number | null;
+  /** ...or if CPM (spend per 1000 impressions) > this (cents) — Meta disfavoring the ad. */
+  trim_max_cpm_cents: number | null;
 }
 
 export type AutonomousActionType =
@@ -247,6 +251,8 @@ export async function loadActivePolicy(
       crown_max_cpa_cents: p.crown_max_cpa_cents == null ? null : Number(p.crown_max_cpa_cents),
       crown_min_spend_cents: p.crown_min_spend_cents == null ? null : Number(p.crown_min_spend_cents),
       early_trim_min_spend_cents: p.early_trim_min_spend_cents == null ? null : Number(p.early_trim_min_spend_cents),
+      trim_max_cost_per_atc_cents: p.trim_max_cost_per_atc_cents == null ? null : Number(p.trim_max_cost_per_atc_cents),
+      trim_max_cpm_cents: p.trim_max_cpm_cents == null ? null : Number(p.trim_max_cpm_cents),
     };
   } catch {
     return null;
