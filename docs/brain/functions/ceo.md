@@ -2,7 +2,7 @@
 
 The permanent seat at the **top of the org chart** — the human founder (Dylan). Every autonomous tool answers to a role agent; every role agent answers to the CEO (CEO → role agent → tool, the [[../operational-rules]] § North star). This is the function that owns **company objectives**, the **final approval authority** (the fail-safe every out-of-leash escalation routes to — `CEO` in [[../libraries/approval-inbox|approval-inbox]] / `approval-router.ts`), and the **founder-level executive tooling** that has no departmental home because it IS the founder's own cockpit.
 
-Distinguished from the departmental functions (Growth/CMO/Retention/CS/Platform) by *altitude*, not kind of work: the directors run their departments and author specs for the tools they need; the CEO sets the objectives those departments serve, breaks ties the leashes can't, and — until the autonomous executive layer exists — is the human-in-the-loop that remediates incidents and approves the irreversible.
+Distinguished from the departmental functions (Growth/CMO/Retention/CS/CFO/Logistics/Platform) by *altitude*, not kind of work: the directors run their departments and author specs for the tools they need; the CEO sets the objectives those departments serve, breaks ties the leashes can't, and — until the autonomous executive layer exists — is the human-in-the-loop that remediates incidents and approves the irreversible.
 
 > **Sunset trajectory.** The [[../goals/ceo-mode|CEO-mode]] goal is the program that stands an autonomous executive layer (CEO synthesizer + director agents) up underneath this seat. As those land, founder-level *manual* tooling owned here (e.g. God Mode) is explicitly retired — this function shrinks toward pure objective-setting + the irreversible-approval circuit-breaker. It is a permanent OWNER, but its manually-operated surface is deliberately temporary.
 
@@ -39,4 +39,4 @@ Charter doc. The human-founder seat at the top of the CEO → role-agent → too
 
 ---
 
-[[../README]] · [[platform]] · [[growth]] · [[cmo]] · [[retention]] · [[cs]] · [[../goals/ceo-mode]] · [[../operational-rules]] · [[../project-management]]
+[[../README]] · [[platform]] · [[growth]] · [[cmo]] · [[retention]] · [[cs]] · [[cfo]] · [[logistics]] · [[../goals/ceo-mode]] · [[../operational-rules]] · [[../project-management]]
