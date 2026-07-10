@@ -1,6 +1,6 @@
 # libraries/portal/escalate-sol-rail-hit
 
-Escalate a portal-error ticket to June's triage-escalation lane when Sol hits her leash. Phase 3 of [[../specs/portal-errors-route-to-sol-first-escalate-to-june-on-rail]] — the RAIL. On a portal-error first-touch (`agent_jobs.instructions.reason === "portal_error"` — the Phase-1 enqueue shape from [[./portal__enqueue-sol-first-touch]]), when Sol returns `{"status":"needs_human","reason":"…"}` — she can't resolve within her leash (a judgment call / an approval beyond her authority / a remediation that keeps failing) — the worker (deterministic Node — the only mutator) sets the ticket into the routine escalation lane [[../inngest/triage-escalations]] picks up on its next tick and enqueues a `cs-director-call` for. That IS the third-rung escalation ladder (orchestrator/Sol → triage → CS Director June → founder); Phase 3's contribution is just seating Sol on the FIRST rung for portal errors instead of the intake routing straight past her.
+Escalate a ticket to June's triage-escalation lane when Sol hits her leash. Originally portal-only (Phase 3 of [[../specs/portal-errors-route-to-sol-first-escalate-to-june-on-rail]]); now the **general** path for EVERY Sol rail-hit via `escalateSolRailHit(admin, {workspace_id, ticket_id, sol_reason, rail})` (`rail`: `first_touch` | `inflection` | `portal` → selects the `escalation_reason` prefix `sol_rail_hit` / `sol_portal_rail_hit`). `escalateSolPortalRailHit` remains as a deprecated `rail:'portal'` alias. When Sol returns `{"status":"escalate_to_june","reason":"…"}` — OR a guard/honor block kills her reply, OR the policy gate wasn't run — she can't resolve within her leash, so the worker (deterministic Node — the only mutator) sets the ticket into the routine escalation lane [[../inngest/triage-escalations]] picks up on its next tick and enqueues a `cs-director-call` for June. That IS the escalation ladder (Sol → June → founder). **There is no "needs human" in CS** — no human does mutations; June is the CS final call and loops in the founder (via Eve's SMS) only when she needs to.
 
 **File:** `src/lib/portal/escalate-sol-rail-hit.ts`
 
@@ -40,7 +40,7 @@ The escalation carries only the REASON — that is enough to identify the rail S
 
 ## Callers
 
-- `scripts/builder-worker.ts` — `runTicketHandleJob`, needs_human branch, gated on `params.reason === "portal_error"`. Called BEFORE the `agent_jobs` `needs_attention` status transition so a failed escalate cannot wedge the punt.
+- `scripts/builder-worker.ts` — `runTicketHandleJob`, the `escalate_to_june` branch AND the blocked-reply (guard/honor) branch, for EVERY rail (`rail: params.reason === "portal_error" ? "portal" : "first_touch"`). Called BEFORE the `agent_jobs` `needs_attention` status transition so a failed escalate cannot wedge the escalate.
 
 ## Related
 

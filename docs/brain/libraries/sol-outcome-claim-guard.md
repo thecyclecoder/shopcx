@@ -2,7 +2,7 @@
 
 `src/lib/sol-outcome-claim-guard.ts` — Phase 3 of the **message-is-last** pipeline. The terminal send guard: a customer-facing message may CLAIM an outcome (e.g. "I added a second bag to your next order", "I applied a $15 credit", "here is your prepaid return label") only if the ticket's [[../tables/ticket_required_outcomes]] row for that outcome is `status='verified'`. A message that asserts an unverified claim is BLOCKED (never reaches the customer) and the turn's [[../tables/ticket_resolution_events]] row is stamped `verified_outcome='unbacked'` — the M1 inline-verify bounce the brain used to mark "none yet". See [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]].
 
-Sibling to [[sol-policy-bait-guard]]: both are deterministic backstops on Sol's DRAFT reply, both preserve the Direction (Sol's reasoning stays durable for the grader/coach), both route a blocked reply to the Improve tab where a human re-drafts. The distinction:
+Sibling to [[sol-policy-bait-guard]]: both are deterministic backstops on Sol's DRAFT reply, both preserve the Direction (Sol's reasoning stays durable for the grader/coach), both escalate a blocked reply to June (the CS final call) to re-draft. The distinction:
 - **sol-policy-bait-guard** fires when the reply mismatches Sol's own POLICY VERDICT (out-of-policy promises, multi-remedy stacks).
 - **sol-outcome-claim-guard** fires when the reply mismatches the DB TRUTH (a claim without a verified backing row).
 
@@ -37,7 +37,7 @@ Patterns do NOT match:
 - OFFERS (`I can add a bag if you want`) — no completion / commitment
 - POLICY REFERENCES (`subscription renewals aren't eligible for return`) — same design as [[sol-policy-bait-guard]]'s promise-vs-reference distinction.
 
-Coverage is intentionally conservative: false negatives (a novel phrasing slips through) are recoverable via the Phase-4 completion gate; false positives (a legit reply is blocked) would strand tickets in needs_human on every phrasing edge case.
+Coverage is intentionally conservative: false negatives (a novel phrasing slips through) are recoverable via the Phase-4 completion gate; false positives (a legit reply is blocked) would strand tickets escalated to June on every phrasing edge case.
 
 ## Tests
 

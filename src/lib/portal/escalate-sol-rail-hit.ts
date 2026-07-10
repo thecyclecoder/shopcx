@@ -1,12 +1,12 @@
 /**
- * Escalate a portal-error ticket to June's triage-escalation lane when Sol hits her leash.
+ * Escalate a ticket to June's triage-escalation lane when Sol hits her leash. (Originally portal-only —
+ * Phase 3 of [[../../../docs/brain/specs/portal-errors-route-to-sol-first-escalate-to-june-on-rail]] —
+ * now the general path for EVERY Sol rail-hit; see `escalateSolRailHit` below.)
  *
- * Phase 3 of [[../../../docs/brain/specs/portal-errors-route-to-sol-first-escalate-to-june-on-rail]].
- * On a portal-error first-touch (`agent_jobs.instructions.reason === "portal_error"`, the Phase-1 enqueue
- * shape from [[./enqueue-sol-first-touch]]), when Sol returns `{"status":"needs_human","reason":"..."}` —
- * i.e. she can't resolve within her leash (a judgment call / an approval beyond her authority / a
- * remediation that keeps failing) — the worker (deterministic Node — the only mutator) escalates the
- * ticket to the routine lane the [[../inngest/triage-escalations]] cron picks up:
+ * When Sol returns `{"status":"escalate_to_june","reason":"..."}` — i.e. she can't resolve within her
+ * leash (a judgment call / an approval beyond her authority / a remediation that keeps failing) — the
+ * worker (deterministic Node — the only mutator) escalates the ticket to the routine lane the
+ * [[../inngest/triage-escalations]] cron picks up:
  *   `escalated_at = now`, `escalated_to = null`, `escalation_reason = 'sol_portal_rail_hit: <sol reason>'`.
  *
  * That is the SAME third-rung escalation ladder (orchestrator/Sol → triage → CS Director June → founder);
@@ -29,13 +29,25 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 /** Stable prefix on `tickets.escalation_reason` for a Sol portal rail-hit. The June review reads this
  *  prefix off the ticket to know which rung the escalate came from. */
 export const SOL_PORTAL_RAIL_HIT_REASON_PREFIX = "sol_portal_rail_hit";
+/** General prefix for a first-touch / inflection box-session rail-hit (the non-portal path). */
+export const SOL_RAIL_HIT_REASON_PREFIX = "sol_rail_hit";
+
+/** Which rail the box session hit — selects the `escalation_reason` prefix. Portal keeps its distinct
+ *  prefix for audit continuity; a first-touch / inflection rail-hit uses the general `sol_rail_hit`. */
+export type SolRail = "portal" | "first_touch" | "inflection";
+
+function reasonPrefixForRail(rail: SolRail): string {
+  return rail === "portal" ? SOL_PORTAL_RAIL_HIT_REASON_PREFIX : SOL_RAIL_HIT_REASON_PREFIX;
+}
 
 export interface EscalateInput {
   workspace_id: string;
   ticket_id: string;
-  /** The `reason` line Sol returned in her `{"status":"needs_human","reason":"..."}` verdict. Used
-   *  verbatim as the tail of `escalation_reason`; June's session reads this to see WHY Sol punted. */
+  /** The `reason` line Sol returned in her escalate verdict. Used verbatim as the tail of
+   *  `escalation_reason`; June's session reads this to see WHY Sol escalated. */
   sol_reason: string;
+  /** Which rail the box session hit — selects the prefix. Defaults to `first_touch`. */
+  rail?: SolRail;
 }
 
 export interface EscalateOutcome {
@@ -48,22 +60,36 @@ export interface EscalateOutcome {
 
 /**
  * Build the exact `escalation_reason` written to the ticket. Trims the Sol reason and prefixes with
- * `sol_portal_rail_hit:` so a grep against the DB or a June-review log line surfaces every portal
- * rail-hit uniformly. When Sol's reason is empty/whitespace we fall back to a stable placeholder so
- * the escalation_reason column is never blank (`ticket_resolution_events`'s reasoning column is a
- * `text` — a blank reason is legal but noise on a human-facing view).
+ * the rail's stable prefix so a grep against the DB or a June-review log line surfaces every rail-hit
+ * uniformly. When Sol's reason is empty/whitespace we fall back to a stable placeholder so the
+ * escalation_reason column is never blank.
  */
-export function buildSolPortalRailHitReason(solReason: string): string {
+export function buildSolRailHitReason(solReason: string, rail: SolRail = "first_touch"): string {
   const trimmed = (solReason || "").trim();
   const tail = trimmed.length > 0 ? trimmed : "(no reason given)";
-  return `${SOL_PORTAL_RAIL_HIT_REASON_PREFIX}: ${tail}`;
+  return `${reasonPrefixForRail(rail)}: ${tail}`;
 }
 
-export async function escalateSolPortalRailHit(
+/** @deprecated portal-specific alias — use `buildSolRailHitReason(reason, 'portal')`. */
+export function buildSolPortalRailHitReason(solReason: string): string {
+  return buildSolRailHitReason(solReason, "portal");
+}
+
+/**
+ * Escalate a ticket to June's triage lane when Sol hits a rail she can't resolve within her leash.
+ * There is NO "needs human" in CS — no human does mutations; the ONLY human touch is the founder
+ * APPROVING something June routes via Eve's SMS. So EVERY Sol rail-hit (first-touch, inflection, or
+ * portal) escalates to JUNE, the CS final call: `escalated_at` set, `escalated_to` null, so the
+ * [[../inngest/triage-escalations]] cron enqueues a `cs-director-call` (June review) on its next tick.
+ * Even the wildest edge case (a legal team contacting us) escalates to June — June then decides whether
+ * to loop in the founder via Eve. Compare-and-set (`.is('escalated_at', null)`): the first escalate
+ * wins; a later rail-hit is a no-op rather than clobbering the audit trail.
+ */
+export async function escalateSolRailHit(
   admin: SupabaseClient,
   input: EscalateInput,
 ): Promise<EscalateOutcome> {
-  const escalationReason = buildSolPortalRailHitReason(input.sol_reason);
+  const escalationReason = buildSolRailHitReason(input.sol_reason, input.rail ?? "first_touch");
   const now = new Date().toISOString();
 
   // Compare-and-set on the ticket. `.is('escalated_at', null)` refuses to overwrite an existing
@@ -99,4 +125,12 @@ export async function escalateSolPortalRailHit(
     .maybeSingle();
   if (!probe) return { escalated: false, reason: "not_found" };
   return { escalated: false, reason: "already_escalated" };
+}
+
+/** @deprecated portal-specific alias — use `escalateSolRailHit(admin, { ..., rail: 'portal' })`. */
+export async function escalateSolPortalRailHit(
+  admin: SupabaseClient,
+  input: EscalateInput,
+): Promise<EscalateOutcome> {
+  return escalateSolRailHit(admin, { ...input, rail: "portal" });
 }

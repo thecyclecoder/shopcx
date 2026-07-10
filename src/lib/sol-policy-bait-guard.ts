@@ -9,7 +9,7 @@
  * first_reply still promises the disallowed remedy — or the reply stacks multiple returns /
  * refunds in one turn — the send is BLOCKED. The Direction stays durable (Sol's reasoning is
  * preserved for grader/coach visibility) but the customer never sees the baited turn — the
- * ticket routes to needs_human so a person re-drafts via the Improve tab.
+ * ticket escalates to June (the CS final call), who re-drafts a compliant reply.
  *
  * Derived-from-ticket 87ce35a1: Sol offered a customer TWO coffee-subscription returns after
  * her own reasoning acknowledged renewals aren't returnable. Both signals fire on that reply:

@@ -10657,7 +10657,7 @@ async function runTicketHandleClaude(prompt: string, sessionId: string | null, c
 // before choosing an outcome — the same policy text the analyzer + orchestrator already read
 // (docs/brain/tables/policies.md). Without this block, Sol offered coffee returns the return policy
 // disallows because her session never saw the rule (ticket 87ce35a1). Best-effort: a policies-load
-// error surfaces as a note in the brief so Sol treats "unknown" as needs_human rather than guessing.
+// error surfaces as a note in the brief so Sol treats "unknown" as escalate-to-June rather than guessing.
 async function loadTicketHandleBrief(ticketId: string): Promise<string> {
   // Reuse loadImproveBrief verbatim — the shape (subject, status, tags, customer, latest analysis, last
   // N messages) is exactly what Sol needs on turn 1. Keeping ONE brief-builder means the two Sol lanes
@@ -10762,7 +10762,7 @@ async function loadCxAgentSdkBrief(ticketId: string): Promise<string> {
 // keeping the header consistent means Sol reasons about "policy" the same way every other layer
 // does. Returns "" on empty / on error (the brief is still useful without it; the prompt below
 // still hard-requires policy review regardless — an empty block means Sol must fetch via
-// get_policies or fall through to needs_human rather than guess).
+// get_policies or escalate to June rather than guess).
 async function loadActivePoliciesBlock(workspaceId: string): Promise<string> {
   try {
     const { data, error } = await db
@@ -10789,17 +10789,17 @@ function parseSolFinalJson(text: string): any | null {
   return parsed;
 }
 
-// Sol-session visibility (sol-session-internal-notes): stamp an INTERNAL note on the ticket at every
-// box-session boundary — start, complete, escalated-to-human, and failure — so the ticket UI shows what
-// Sol did in-session. Before this, a Sol session that punted to needs_human (e.g. 977b1510 — the customer
-// was genuinely owed one more unit, but fulfilling it would exceed the self-serve exchange cap, so Sol
-// correctly escalated) left NO trace on the ticket: from the dashboard it looked like nothing happened.
-// The note is a ticket_messages row with visibility='internal' (same shape as escalation.ts addInternalNote)
-// — it renders in the ticket's internal-note lane, never reaches the customer. Best-effort: a note-insert
-// failure NEVER wedges the job (mirrors the sol_handled_at / send / close fall-throughs) — Sol's real work
-// is the Direction + reply, this is only observability. The box session is identified by the short job id,
-// the same token the worker's `[handle:xxxxxxxx]` log tag uses, so a note ties back to the worker logs.
-async function stampSolSessionNote(ticketId: string, body: string): Promise<void> {
+// Agent-session visibility (agent-session-internal-notes): stamp an INTERNAL note on the ticket at every
+// box-session boundary — start, complete, escalate, and failure — so the ticket UI shows which agent
+// (Sol / Cora / June) touched it and what they did. Before this, a session that escalated (e.g. 977b1510 —
+// Sol correctly escalated an owed unit that was over the self-serve exchange cap) left NO trace on the
+// ticket: from the dashboard it looked like nothing happened. The note is a ticket_messages row with
+// visibility='internal' (same shape as escalation.ts addInternalNote) — it renders in the ticket's
+// internal-note lane, never reaches the customer. Best-effort: a note-insert failure NEVER wedges the job
+// (mirrors the sol_handled_at / send / close fall-throughs) — the agent's real work is the Direction /
+// grade / decision; this is only observability. The session is identified by the short job id, the same
+// token the worker's `[handle|analyze|csdir:xxxxxxxx]` log tag uses, so a note ties back to the worker logs.
+async function stampAgentSessionNote(ticketId: string, body: string): Promise<void> {
   try {
     const { error } = await db.from("ticket_messages").insert({
       ticket_id: ticketId,
@@ -10808,9 +10808,9 @@ async function stampSolSessionNote(ticketId: string, body: string): Promise<void
       author_type: "system",
       visibility: "internal",
     });
-    if (error) console.warn(`[sol-note] insert failed for ${ticketId}: ${error.message}`);
+    if (error) console.warn(`[agent-note] insert failed for ${ticketId}: ${error.message}`);
   } catch (e) {
-    console.warn(`[sol-note] insert threw for ${ticketId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[agent-note] insert threw for ${ticketId}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -10835,7 +10835,7 @@ async function runTicketHandleJob(job: Job) {
   // Session-start stamp — fires before the (expensive, timeout-prone) box session so even a hang / crash
   // / timeout leaves a "Sol is reviewing this" trace on the ticket. The failure branches below then add
   // the terminal note; a session that vanishes mid-run leaves only this start note, which is the signal.
-  await stampSolSessionNote(ticketId, `Sol is reviewing this ticket in session ${sessShort}.`);
+  await stampAgentSessionNote(ticketId, `Sol is reviewing this ticket in session ${sessShort}.`);
 
   try {
     const brief = await loadTicketHandleBrief(ticketId);
@@ -10855,8 +10855,8 @@ async function runTicketHandleJob(job: Job) {
       // REQUIRE policy review before Sol commits. The CURRENT POLICIES block in the brief above is the
       // rulebook; get_policies re-fetches it live. Sol MUST reason against it and NEVER bait an
       // outcome the policy disallows (e.g. offering coffee-subscription returns when returns aren't
-      // accepted). Absence of a clearly-applicable policy is not permission — it is needs_human.
-      `POLICY REVIEW IS MANDATORY — AND YOU MUST RUN get_policies. Before you choose a chosen_path or draft the first_reply, you are REQUIRED to run \`npx tsx scripts/improve-box-tools.ts get_policies ${ticketId}\` (the live hard rulebook) and reason AGAINST it for the customer's ask. This is not optional and the CURRENT POLICIES snapshot above does not satisfy it — a completed Direction from a session that never called get_policies is BLOCKED and routed to a human. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, no cadence outside every 2 weeks / monthly / every 2 months, no promise of a pre-billing heads-up email, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, return needs_human rather than guess.`,
+      // accepted). Absence of a clearly-applicable policy is not permission — escalate to June.
+      `POLICY REVIEW IS MANDATORY — AND YOU MUST RUN get_policies. Before you choose a chosen_path or draft the first_reply, you are REQUIRED to run \`npx tsx scripts/improve-box-tools.ts get_policies ${ticketId}\` (the live hard rulebook) and reason AGAINST it for the customer's ask. This is not optional and the CURRENT POLICIES snapshot above does not satisfy it — a completed Direction from a session that never called get_policies is BLOCKED and escalated to June. Your context_summary MUST name the specific policy (by slug or name) you evaluated the ask against and state whether the ask is in-policy, in-policy with a bounded exception, or out-of-policy. If the ask is out-of-policy, your plan + first_reply propose the in-policy alternative — you NEVER bait, offer, or promise a remedy policy disallows (no returns where returns aren't accepted, no refund-without-return, no expedited shipping, no cadence outside every 2 weeks / monthly / every 2 months, no promise of a pre-billing heads-up email, etc.). If no policy clearly speaks to the ask AND the situation is not squarely inside the ticket-handle skill's stateless treatments, escalate to June rather than guess.`,
       // Phase 2 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
       // Tell Sol her DRAFT reply is machine-validated (src/lib/sol-policy-bait-guard.ts) before it
       // sends. A reply that (a) promises a remedy while your context_summary declares the ask
@@ -10864,7 +10864,7 @@ async function runTicketHandleJob(job: Job) {
       // return incident) is BLOCKED — the customer never sees it, and a human re-drafts via
       // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
       // pass the guard; the block is only for baited promises.
-      `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket routes to needs_human. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
+      `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket escalates to June. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
       // Phase 3 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
       // Sol MUST resolve a concrete existing playbook_slug when chosen_path='playbook' — the
       // writer rejects a missing / empty / whitespace-only / unknown slug with typed errors
@@ -10891,13 +10891,14 @@ async function runTicketHandleJob(job: Job) {
       `     decision_json is a direct-action SonnetDecision, e.g. {"action_type":"direct_action","reasoning":"customer asked to push next order to Oct 2","actions":[{"type":"change_next_date","contract_id":"<id>","date":"2026-10-02"}]}. It prints {"request_id":"…","status":"pending","dry_run":false}.`,
       `  2. POLL for the REAL result: npx tsx scripts/agent-action-tools.ts poll <request_id>`,
       `     It blocks until the deterministic worker (write creds) has run the action through the SAME production executor and verified it, then prints {"status":"done|failed","result":{…,"ok":true|false},"error":…}. result.ok is TRUE only when the action actually landed + verified.`,
-      `  3. READ THE RESULT AND ADAPT. If result.ok is true, your first_reply states what ACTUALLY happened, using the real values from the result ("I've moved your next coffee order to October 2nd"). If status is failed or result.ok is false, the change did NOT happen — do NOT promise it. Adapt in THIS session: fix the inputs and re-enqueue, hand off to a journey (chosen_path='journey'), or return needs_human — and write an honest reply ("I wasn't able to change that automatically; I've flagged it for our team to finish"). You may enqueue several actions across the session, one per call, adapting between them.`,
+      `  3. READ THE RESULT AND ADAPT. If result.ok is true, your first_reply states what ACTUALLY happened, using the real values from the result ("I've moved your next coffee order to October 2nd"). If status is failed or result.ok is false, the change did NOT happen — do NOT promise it. Adapt in THIS session: fix the inputs and re-enqueue, hand off to a journey (chosen_path='journey'), or escalate to June (status='escalate_to_june') — and write an honest reply ("I wasn't able to change that automatically; I've flagged it for our team to finish"). You may enqueue several actions across the session, one per call, adapting between them.`,
       `  Enqueue is for DIRECT ACTIONS (account mutations: change_next_date, pause, resume, cancel, add_bag_to_next_order, apply_coupon, partial_refund, create_replacement, create_return, …) ONLY. Journeys, playbooks, needs_info and bare stateless replies stay on your chosen_path/plan — do NOT enqueue those. DRY RUN: if the enqueue prints "dry_run":true, the session is a rehearsal — actions are simulated, nothing really changes; still poll + reason as if real.`,
       `NEVER-A-FALSE-PROMISE: every concrete outcome your first_reply claims (moved a date, issued a refund, applied a credit, cancelled, paused, added a bag, created a return/replacement) MUST correspond to an enqueue whose poll returned ok:true. If you didn't enqueue+confirm it, you may not claim it. There is NO required_outcomes field to emit — executing via the queue IS the proof.`,
       ``,
       `Final message = ONLY one JSON object:`,
       `  {"status":"completed","direction":{"intent":"…","context_summary":"…","chosen_path":"playbook|journey|workflow|stateless|needs_info","plan":{…},"guardrails":{…}},"first_reply":"<plain-text customer-facing reply, no markdown, no 'Sol' signature>","proposed_spec":{"slug":"…","title":"…","intent":"…","problem":"…","mandate":"…"}?}`,
-      `  {"status":"needs_human","reason":"<one line>"}`,
+      `  {"status":"escalate_to_june","reason":"<one line — WHY you can't resolve within your leash; June makes the final call>"}`,
+      `There is NO "human" fallback in CS — no human does mutations. When the ask is beyond your leash (a judgment call, an approval over your authority, a rail you can't clear, even a legal/edge case), you ESCALATE TO JUNE with status 'escalate_to_june'. June is the CS final call; she loops in the founder via Eve's SMS only when SHE needs to. Never say "a human will handle it" or route to a human queue.`,
       `See the ticket-handle skill for chosen_path + plan + guardrails shape, and the dual-output rule for when to include proposed_spec on a portal-error ticket.`,
     ].join("\n");
 
@@ -10912,62 +10913,66 @@ async function runTicketHandleJob(job: Job) {
     // get_policies is a REQUIRED step for ticket handling (founder rule: policies are HARD; the
     // CURRENT POLICIES snapshot injected in the brief is NOT enough — Sol must actively read the
     // live rulebook via get_policies before she commits a Direction). Fail-closed: a 'completed'
-    // Direction from a session that never invoked get_policies is downgraded to needs_human so a
-    // person reviews it, rather than shipping a reply that skipped the policy gate. This is the same
-    // message-is-last discipline as the honor/claim guards — a required gate not run = treat as unmet.
+    // Direction from a session that never invoked get_policies is escalated to June so she reviews it,
+    // rather than shipping a reply that skipped the policy gate. This is the same message-is-last
+    // discipline as the honor/claim guards — a required gate not run = treat as unmet.
     // Match the actual CLI invocation (a Bash tool_use command in the stream), not a bare mention of
     // "get_policies" in prose — a false pass here would ship a reply that skipped the real read.
     const policyReviewMissing =
       parsed?.status === "completed" && !/improve-box-tools\.ts\s+get_policies/.test(raw);
     if (policyReviewMissing) {
-      console.warn(`${tag} BLOCK: completed Direction but get_policies was never called — routing to needs_human (policy review required).`);
+      console.warn(`${tag} BLOCK: completed Direction but get_policies was never called — escalating to June (policy review required).`);
     }
 
-    if (parsed?.status === "needs_human" || policyReviewMissing) {
+    // Sol's escalate verdict. There is NO "needs human" in CS — no human ever does mutations; the ONLY
+    // human touch is the founder APPROVING something June routes via Eve's SMS. So when Sol hits a rail
+    // she can't resolve within her leash she escalates to JUNE (the CS final call). Accept the current
+    // `escalate_to_june` verdict and the legacy `needs_human` alias (a box that hasn't pulled the new
+    // skill yet still routes correctly).
+    const solEscalates =
+      parsed?.status === "escalate_to_june" || parsed?.status === "needs_human" || policyReviewMissing;
+    if (solEscalates) {
       const reason = policyReviewMissing
-        ? "Policy review not performed: get_policies (the required live policy rulebook read) was not called this session — routed to a human to re-review before any reply ships."
-        : String(parsed?.reason || "Sol punted to a human — no reason given.");
-      // ── Phase 3 of portal-errors-route-to-sol-first-escalate-to-june-on-rail ──
-      // Sol's rail-hit on a portal-error first-touch escalates the ticket to June's triage-
-      // escalation lane (escalated_at set, escalated_to null, escalation_reason names the rail).
-      // The [[../src/lib/inngest/triage-escalations]] cron picks up the routine-owned escalate on
-      // its next tick and enqueues a cs-director-call — the third-rung escalation ladder Sol now
-      // occupies the first rung of for portal errors. The escalate helper is a compare-and-set
-      // (workspace_id-scoped + .is('escalated_at', null) + .select('id')): a ticket that was
-      // already escalated by a prior sol_resession_cap_hit / auto-heal escalate keeps that reason
-      // (Learning #2 — refuse to overwrite the existing state). Non-portal ticket-handle jobs
-      // (first_touch / inflection) stay on the existing needs_attention path — the rail-hit
-      // escalate is portal-only.
+        ? "Policy review not performed: get_policies (the required live policy rulebook read) was not called this session — escalated to June to re-review before any reply ships."
+        : String(parsed?.reason || "Sol escalated to June — no reason given.");
+      // EVERY Sol rail-hit escalates the ticket to June's triage lane (escalated_at set, escalated_to
+      // null, escalation_reason names the rail) — the [[../src/lib/inngest/triage-escalations]] cron
+      // picks up the routine-owned escalate on its next tick and enqueues a cs-director-call (June's
+      // review), source-agnostic. This is the CEO → June → Sol ladder: Sol's supervisor is June, and
+      // June — if she needs the founder (a money call over the approval threshold, or a heads-up like a
+      // legal team reaching out) — routes it to the founder via Eve's SMS. Even the wildest edge case
+      // still terminates at June, never a human-does-the-work park. The escalate is a compare-and-set
+      // (workspace_id-scoped + .is('escalated_at', null)): a ticket already escalated by a prior
+      // sol_resession_cap_hit / auto-heal escalate keeps that reason (refuse to overwrite the trail).
       let escalationLine = "";
-      if (params.reason === "portal_error") {
-        const { escalateSolPortalRailHit } = await import("../src/lib/portal/escalate-sol-rail-hit");
-        try {
-          const out = await escalateSolPortalRailHit(db, {
-            workspace_id: workspaceId,
-            ticket_id: ticketId,
-            sol_reason: parsed.reason ? String(parsed.reason) : "",
-          });
-          if (out.escalated) {
-            escalationLine = `Portal rail-hit → June triage: ${out.reason}\n`;
-            console.log(`${tag} portal rail-hit: escalated ticket ${ticketId} to June (${out.reason})`);
-          } else {
-            escalationLine = `Portal rail-hit escalate no-op: ${out.reason}\n`;
-            console.warn(`${tag} portal rail-hit escalate no-op (${out.reason}) for ticket ${ticketId}`);
-          }
-        } catch (e) {
-          // Never wedge the job status on an escalate failure — the needs_attention lane below
-          // still captures the punt so the CS Director can look. Surface the error for grep-ability.
-          const msg = e instanceof Error ? e.message : String(e);
-          escalationLine = `Portal rail-hit escalate failed: ${msg}\n`;
-          console.warn(`${tag} portal rail-hit escalate failed for ticket ${ticketId}: ${msg}`);
+      const { escalateSolRailHit } = await import("../src/lib/portal/escalate-sol-rail-hit");
+      try {
+        const out = await escalateSolRailHit(db, {
+          workspace_id: workspaceId,
+          ticket_id: ticketId,
+          sol_reason: reason,
+          rail: params.reason === "portal_error" ? "portal" : "first_touch",
+        });
+        if (out.escalated) {
+          escalationLine = `Sol rail-hit → June: ${out.reason}\n`;
+          console.log(`${tag} rail-hit: escalated ticket ${ticketId} to June (${out.reason})`);
+        } else {
+          escalationLine = `Sol rail-hit escalate no-op: ${out.reason}\n`;
+          console.warn(`${tag} rail-hit escalate no-op (${out.reason}) for ticket ${ticketId}`);
         }
+      } catch (e) {
+        // Never wedge the job on an escalate failure — surface the error for grep-ability. The ticket
+        // stays escalatable and the note below still records what happened.
+        const msg = e instanceof Error ? e.message : String(e);
+        escalationLine = `Sol rail-hit escalate failed: ${msg}\n`;
+        console.warn(`${tag} rail-hit escalate failed for ticket ${ticketId}: ${msg}`);
       }
-      await stampSolSessionNote(ticketId, `Sol's session ${sessShort} is complete — escalated to a human. Reason: ${reason}`);
+      await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} is complete — escalated to June (the CS final call). Reason: ${reason}`);
       await update(job.id, {
         status: "needs_attention",
-        needs_attention_class: "sol_needs_human",
+        needs_attention_class: "sol_escalated_to_june",
         error: reason,
-        log_tail: `Sol needs_human: ${reason}\n${escalationLine}\n${raw.slice(-1800)}`.slice(-2000),
+        log_tail: `Sol escalated to June: ${reason}\n${escalationLine}\n${raw.slice(-1800)}`.slice(-2000),
       });
       return;
     }
@@ -10989,7 +10994,7 @@ async function runTicketHandleJob(job: Job) {
       // A missing/typo'd field fails the partial-UNIQUE insert downstream anyway, but bailing here gives a
       // clearer error trail.
       if (!intent || !contextSummary || !validPath) {
-        await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: returned an incomplete direction (intent=${!!intent}, context=${!!contextSummary}, path=${chosenPath || "none"}).`);
+        await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: returned an incomplete direction (intent=${!!intent}, context=${!!contextSummary}, path=${chosenPath || "none"}).`);
         await update(job.id, {
           status: "failed",
           error: `Sol returned an incomplete direction (intent=${!!intent}, context_summary=${!!contextSummary}, chosen_path=${chosenPath || "(none)"})`,
@@ -11020,7 +11025,7 @@ async function runTicketHandleJob(job: Job) {
         // here (23505). Fail the job with the DB error so the CS director sees the collision instead
         // of quietly forking two live rows.
         const msg = e instanceof Error ? e.message : String(e);
-        await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: could not persist the direction (${msg}).`);
+        await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: could not persist the direction (${msg}).`);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
       }
@@ -11079,7 +11084,7 @@ async function runTicketHandleJob(job: Job) {
           });
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          honorBlockLine = `Sol reply BLOCKED by required-outcomes insert failure: ${msg}. Direction authored; a human re-drafts via Improve.`;
+          honorBlockLine = `Sol reply BLOCKED by required-outcomes insert failure: ${msg}. Direction authored; escalated to June (the CS final call).`;
           console.warn(`${tag} ${honorBlockLine}`);
           await update(job.id, {
             log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11091,7 +11096,7 @@ async function runTicketHandleJob(job: Job) {
       // The honor step walks each row in authored order, dispatches the action via the shared
       // directActionHandlers, and verifies via verifyActionInDB. Actions run to completion (or fail
       // loudly) FIRST — the reply-drafting step is NOT reached while any item is pending. A failed
-      // item routes the ticket to needs_human naming the unfinished item (Judy 0a9e4d7f: bag/credit
+      // item escalates the ticket to June naming the unfinished item (Judy 0a9e4d7f: bag/credit
       // would fire OR fail loudly here — never a reply promising them while neither ran).
       if (outcomeItems.length > 0 && honorBlockLine === null) {
         const { data: tCustomer } = await db
@@ -11106,7 +11111,7 @@ async function runTicketHandleJob(job: Job) {
           // The ticket disappeared / cross-workspace mismatch. Block hard — every downstream mutator
           // is workspace-scoped and would silently no-op, but the reply-drafting step would still
           // ship. Fail closed.
-          honorBlockLine = `Sol reply BLOCKED: ticket ${ticketId} not found in workspace ${workspaceId}. Direction authored; a human re-drafts via Improve.`;
+          honorBlockLine = `Sol reply BLOCKED: ticket ${ticketId} not found in workspace ${workspaceId}. Direction authored; escalated to June (the CS final call).`;
           console.warn(`${tag} ${honorBlockLine}`);
           await update(job.id, {
             log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11114,7 +11119,7 @@ async function runTicketHandleJob(job: Job) {
         } else if (!customerId) {
           // No linked customer — the executor can't dispatch a customer-scoped action. Block the
           // reply so an unverifiable claim can't ship; the Improve tab picks up the ticket.
-          honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; a human re-drafts via Improve.`;
+          honorBlockLine = `Sol reply BLOCKED by honor step: ticket has no linked customer, ${outcomeItems.length} required_outcomes cannot dispatch. Direction authored; escalated to June (the CS final call).`;
           console.warn(`${tag} ${honorBlockLine}`);
           await update(job.id, {
             log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11135,7 +11140,7 @@ async function runTicketHandleJob(job: Job) {
               items: outcomeItems,
             });
             if (verdict.ok === false) {
-              honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: ${verdict.reason}. Direction authored; a human re-drafts via Improve.`;
+              honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: ${verdict.reason}. Direction authored; escalated to June (the CS final call).`;
               console.warn(`${tag} ${honorBlockLine}`);
               await update(job.id, {
                 log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11145,7 +11150,7 @@ async function runTicketHandleJob(job: Job) {
             // Validator blew up — fail closed. The message-is-last invariant treats any
             // uncertainty as unverified.
             const msg = e instanceof Error ? e.message : String(e);
-            honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: validator threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: validator threw (${msg}). Direction authored; escalated to June (the CS final call).`;
             console.warn(`${tag} ${honorBlockLine}`);
             await update(job.id, {
               log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11171,7 +11176,7 @@ async function runTicketHandleJob(job: Job) {
                 [...honor.failed_items, ...honor.carried_forward_failed]
                   .map((f) => `${f.kind}:${f.description}${f.failed_reason ? ` (${f.failed_reason})` : ""}`)
                   .join(" | ") || "(none named)";
-              honorBlockLine = `Sol reply BLOCKED by honor step: ${honor.failed_items.length} failed / ${honor.carried_forward_failed.length} carried-forward. Failed: ${failedNames}. Direction authored; a human re-drafts via Improve.`;
+              honorBlockLine = `Sol reply BLOCKED by honor step: ${honor.failed_items.length} failed / ${honor.carried_forward_failed.length} carried-forward. Failed: ${failedNames}. Direction authored; escalated to June (the CS final call).`;
               console.warn(`${tag} ${honorBlockLine}`);
               await update(job.id, {
                 log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11182,7 +11187,7 @@ async function runTicketHandleJob(job: Job) {
             // ship a claim we couldn't verify; erroring is the same as unverified from the send
             // gate's perspective.
             const msg = e instanceof Error ? e.message : String(e);
-            honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; a human re-drafts via Improve.`;
+            honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; escalated to June (the CS final call).`;
             console.warn(`${tag} ${honorBlockLine}`);
             await update(job.id, {
               log_tail: `${honorBlockLine}\nDRAFT reply (blocked, not delivered):\n${(typeof parsed.first_reply === "string" ? parsed.first_reply : "").slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11203,12 +11208,12 @@ async function runTicketHandleJob(job: Job) {
       // reply that promises an out-of-policy remedy — or stacks multiple returns/refunds in one turn
       // (the 87ce35a1 coffee-return incident: Sol offered TWO returns after acknowledging renewals
       // aren't returnable) — is blocked here. Direction stays durable (Sol's reasoning is preserved
-      // for the grader + coach), but the customer never sees the baited turn — the ticket routes to
-      // needs_human via the Improve tab, where a person re-drafts against the actual rulebook.
+      // for the grader + coach), but the customer never sees the baited turn — the ticket escalates
+      // to June (the CS final call), who owns the re-draft against the actual rulebook.
       const firstReply = typeof parsed.first_reply === "string" ? parsed.first_reply.trim() : "";
       // The honor step above sets honorBlockLine when a required_outcome failed to verify — the
       // message-is-last invariant refuses to compose OR send a reply when any promise is unbacked.
-      // The Direction is still durable; the ticket routes to needs_human via the Improve tab.
+      // The Direction is still durable; the ticket escalates to June.
       if (firstReply && honorBlockLine === null) {
         const { assessSolReplyBaitRisk } = await import("../src/lib/sol-policy-bait-guard");
         const bait = assessSolReplyBaitRisk({ contextSummary, plan, firstReply });
@@ -11257,13 +11262,15 @@ async function runTicketHandleJob(job: Job) {
           hasActiveSubscription,
         });
         if (bait.ok === false) {
-          const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; escalated to June (the CS final call).`;
+          honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
           console.warn(`${tag} ${blockLine}`);
           await update(job.id, {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
           });
         } else if (moveGuard.ok === false) {
-          const blockLine = `Sol reply BLOCKED by move-dead-end guard [${moveGuard.kind}]: ${moveGuard.reason}. Matched phrase: ${JSON.stringify(moveGuard.matched_phrase)}. Direction authored; a human re-drafts via Improve.`;
+          const blockLine = `Sol reply BLOCKED by move-dead-end guard [${moveGuard.kind}]: ${moveGuard.reason}. Matched phrase: ${JSON.stringify(moveGuard.matched_phrase)}. Direction authored; escalated to June (the CS final call).`;
+          honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
           console.warn(`${tag} ${blockLine}`);
           await update(job.id, {
             log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11288,7 +11295,8 @@ async function runTicketHandleJob(job: Job) {
             const claimSummary = claimVerdict.blocked_claims
               .map((c) => `${c.kind}[status=${c.current_status}]:${JSON.stringify(c.matched_phrase.slice(0, 60))}`)
               .join(" | ");
-            const blockLine = `Sol reply BLOCKED by outcome-claim guard: ${claimVerdict.reason}. Claims: ${claimSummary}. Direction authored; a human re-drafts via Improve.`;
+            const blockLine = `Sol reply BLOCKED by outcome-claim guard: ${claimVerdict.reason}. Claims: ${claimSummary}. Direction authored; escalated to June (the CS final call).`;
+            honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
             console.warn(`${tag} ${blockLine}`);
             await update(job.id, {
               log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
@@ -11540,6 +11548,35 @@ async function runTicketHandleJob(job: Job) {
         }
       }
 
+      // ── Blocked reply → escalate to June (never a silent complete) ──
+      // If any guard (policy-bait / move-dead-end / outcome-claim) or the honor step blocked the reply,
+      // `honorBlockLine` is set and NO customer reply shipped. Previously the box fell through to a
+      // `completed` job here — a durable Direction with no reply and no escalation, the exact silent
+      // dead-end 977b1510 exhibited. A blocked reply IS a rail-hit: escalate the ticket to June (the CS
+      // final call) and DON'T stamp sol_handled_at (Sol did not actually respond). June's cs-director-call
+      // (via the triage-escalations cron) re-drafts a compliant reply and closes the ticket.
+      if (honorBlockLine !== null) {
+        const { escalateSolRailHit } = await import("../src/lib/portal/escalate-sol-rail-hit");
+        try {
+          await escalateSolRailHit(db, {
+            workspace_id: workspaceId,
+            ticket_id: ticketId,
+            sol_reason: honorBlockLine,
+            rail: params.reason === "portal_error" ? "portal" : "first_touch",
+          });
+        } catch (e) {
+          console.warn(`${tag} blocked-reply escalate to June failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} is complete — reply blocked, escalated to June (the CS final call). ${honorBlockLine}`);
+        await update(job.id, {
+          status: "needs_attention",
+          needs_attention_class: "sol_escalated_to_june",
+          error: honorBlockLine,
+          log_tail: `${honorBlockLine}\n${raw.slice(-1800)}`.slice(-2000),
+        });
+        return;
+      }
+
       // ── Phase 1 of cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence ──
       // Deterministic Sol-handled stamp — the HARNESS-CONTROLLED signal Cora's feeder consumes in
       // Phase 2 (ticket-analysis-cron passesCoraSelectionGate). The mid-session writeDirection call
@@ -11564,7 +11601,7 @@ async function runTicketHandleJob(job: Job) {
         console.warn(`${tag} sol_handled_at stamp threw: ${msg}`);
       }
 
-      await stampSolSessionNote(ticketId, `Sol's session ${sessShort} is complete — chosen path: ${chosenPath}.`);
+      await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} is complete — chosen path: ${chosenPath}.`);
       await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
       return;
     }
@@ -11572,7 +11609,7 @@ async function runTicketHandleJob(job: Job) {
     // No recognizable verdict. If the agent actually produced output (prose, not a hard run error),
     // it over-ran the single-turn envelope — surface a failure without a park so a human can look.
     if (!isError) {
-      await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict).`);
+      await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict).`);
       await update(job.id, {
         status: "failed",
         error: "Sol first-touch returned no completed direction JSON",
@@ -11580,10 +11617,10 @@ async function runTicketHandleJob(job: Job) {
       });
       return;
     }
-    await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: the box session errored with no direction.`);
+    await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: the box session errored with no direction.`);
     await update(job.id, { status: "failed", error: "Sol first-touch errored with no direction", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
+    await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
@@ -13781,6 +13818,7 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
 
 async function runCsDirectorCallJob(job: Job) {
   const tag = `[cs-director:${job.id.slice(0, 8)}]`;
+  const sessShort = job.id.slice(0, 8);
   let inst: CsDirectorCallInstructions = {};
   try {
     inst = job.instructions ? (JSON.parse(job.instructions) as CsDirectorCallInstructions) : {};
@@ -13805,6 +13843,11 @@ async function runCsDirectorCallJob(job: Job) {
     `${tag} judging ticket ${ticketId.slice(0, 8)}${triageRunId ? ` · triage_run=${triageRunId.slice(0, 8)}` : ""}${secondOpinionOfRunId ? ` · second_opinion_of=${secondOpinionOfRunId.slice(0, 8)}` : ""}`,
   );
 
+  // June-session visibility: stamp the start note before the review runs, so the ticket UI shows June
+  // (CS Director — the final CS call) picked it up. Her per-verdict note + ticket transition below are
+  // the completion side.
+  await stampAgentSessionNote(ticketId, `June (CS Director) is reviewing this escalated ticket in session ${sessShort}.`);
+
   try {
     const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId, secondOpinionOfRunId);
     const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId);
@@ -13822,6 +13865,7 @@ async function runCsDirectorCallJob(job: Job) {
       // No parseable verdict → surface as needs_attention so a human can eyeball, and DO NOT write a
       // director_activity row (a lie in the audit trail is worse than a gap). Same guardrail
       // deploy-review's fail-safe uses: never silently upgrade an unparseable verdict.
+      await stampAgentSessionNote(ticketId, `June's session ${sessShort} ended without a decision: no parseable verdict — flagged for review.`);
       await update(job.id, {
         status: "needs_attention",
         error: "cs-director-call returned no parseable verdict",
@@ -14183,6 +14227,18 @@ async function runCsDirectorCallJob(job: Job) {
       verdict.spec_seed ? `spec_seed: ${JSON.stringify(verdict.spec_seed).slice(0, 400)}` : "",
     ].filter(Boolean).join("\n");
 
+    // June-session completion note — the session-boundary marker (complements her detailed per-verdict
+    // note above). Names the decision + the ticket outcome (approve_remedy/author_spec close +
+    // de-escalate; escalate_founder stays escalated, now founder-owned + routed to Eve's SMS).
+    const outcomeLabel = applyResult?.awaiting_founder_approval
+      ? "remedy parked for founder approval (via Eve's SMS) — stays escalated"
+      : verdict.decision === "escalate_founder"
+        ? "escalated to the founder (CEO inbox + Eve) for a ruling"
+        : verdict.decision === "author_spec"
+          ? "closed + de-escalated (structural fix authored to the Roadmap)"
+          : "handled — closed + de-escalated";
+    await stampAgentSessionNote(ticketId, `June's session ${sessShort} is complete — decision: ${verdict.decision}; ticket ${outcomeLabel}.`);
+
     if (isError) {
       // Session errored (stream isError) but a verdict landed AND was audited. Complete with the error
       // surfaced so a human can eyeball — the audit row isn't silently rolled back. Same rule
@@ -14212,6 +14268,7 @@ async function runCsDirectorCallJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision}`);
   } catch (e) {
+    await stampAgentSessionNote(ticketId, `June's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
@@ -14433,6 +14490,7 @@ function ticketAnalyzePrompt(system: string, userMsg: string, ticketId: string, 
 
 async function runTicketAnalyzeJob(job: Job) {
   const tag = `[analyze:${job.id.slice(0, 8)}]`;
+  const sessShort = job.id.slice(0, 8);
   let inst: TicketAnalyzeInstructions = {};
   try {
     inst = job.instructions ? (JSON.parse(job.instructions) as TicketAnalyzeInstructions) : {};
@@ -14464,6 +14522,11 @@ async function runTicketAnalyzeJob(job: Job) {
       return;
     }
 
+    // Cora-session visibility: a real grade is about to run — stamp the start note so the ticket UI
+    // shows Cora (the QC grader under June) touched it. (Skips above stay silent — a skip is a no-op
+    // gate, not a grade, and noting every closed ticket's skip would flood the internal-note lane.)
+    await stampAgentSessionNote(ticketId, `Cora (QC grader) is reviewing this ticket in session ${sessShort}.`);
+
     // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
     // pull the deterministic CX SDK snapshot (customer + merged identity, subscriptions w/ realized
     // pricing + applied_discounts, orders w/ per-unit computed, active products, active policies)
@@ -14485,6 +14548,7 @@ async function runTicketAnalyzeJob(job: Job) {
       // No parseable verdict → needs_attention so a human eyeballs the transcript, and DO NOT
       // write a ticket_analyses row (a made-up score in the audit trail is worse than a gap).
       // Same guardrail cs-director-call + deploy-review use for unparseable verdicts.
+      await stampAgentSessionNote(ticketId, `Cora's session ${sessShort} ended without a grade: no parseable verdict — flagged for review.`);
       await update(job.id, {
         status: "needs_attention",
         error: "ticket-analyze returned no parseable verdict",
@@ -14559,13 +14623,16 @@ async function runTicketAnalyzeJob(job: Job) {
       // Session errored (stream isError) but a verdict landed AND was applied. Complete with the
       // error surfaced so a human can eyeball — the ticket_analyses row isn't silently rolled back.
       // Same rule cs-director-call + deploy-review use for verdict-recorded-but-session-errored.
+      await stampAgentSessionNote(ticketId, `Cora's session ${sessShort} is complete — QC score ${applied.analysis.score}/10 (session errored; verdict applied).`);
       await update(job.id, { status: "completed", error: "ticket-analyze session errored (verdict applied)", log_tail: summary.slice(-2000) });
       console.log(`${tag} score=${applied.analysis.score} (session errored — verdict applied)`);
       return;
     }
+    await stampAgentSessionNote(ticketId, `Cora's session ${sessShort} is complete — QC score ${applied.analysis.score}/10${applied.analysis.issues.length ? ` (issues: ${applied.analysis.issues.map((i) => i.type).join(", ")})` : ""}.`);
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} score=${applied.analysis.score}`);
   } catch (e) {
+    await stampAgentSessionNote(ticketId, `Cora's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }

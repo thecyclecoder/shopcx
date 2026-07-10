@@ -24,7 +24,7 @@
  * dependencies so the worker imports it cheaply and the tests seed inputs directly. Returns
  * `{ok:true}` when the reply is safe, `{ok:false,kind,reason,matched_phrase}` otherwise;
  * the worker treats `{ok:false}` the same way it treats a bait-guard block (Direction
- * durable, reply not delivered, ticket routes to needs_human via the Improve tab).
+ * durable, reply not delivered, ticket escalates to June — the CS final call).
  */
 
 export interface SolMoveDeadEndContext {

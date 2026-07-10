@@ -237,7 +237,7 @@ export function markOutcomeFailed(
  * "Are any required outcomes still open?" — the Phase-4 completion gate's core predicate.
  * Returns `true` when at least one row has status in {pending, done, failed}: pending means the
  * executor hasn't fired the action yet, done means it fired but the DB verify hasn't confirmed,
- * failed means an action or verify blew up and needs human attention. Only 'verified' counts as
+ * failed means an action or verify blew up and escalates to June. Only 'verified' counts as
  * closed.
  *
  * Backed by the partial index `WHERE status <> 'verified'` — the gate check stays cheap even

@@ -543,7 +543,7 @@ export async function remediatePortalTicket(
   if (disposition === "human") {
     await sysNote(admin, ticket.id, `[Triage] ${reason}\nAction: ${ctx.route} · Error: ${ctx.error}`);
     await escalate(admin, ticket, reason);
-    return { action: "escalated", reason: "needs human" };
+    return { action: "escalated", reason: "escalate to June" };
   }
 
   // ── retry ──

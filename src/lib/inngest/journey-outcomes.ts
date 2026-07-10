@@ -178,7 +178,7 @@ export const journeySessionCompleted = inngest.createFunction(
           await admin.from("tickets").update({ status: "closed", resolved_at: new Date().toISOString(), closed_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", ticketId);
         }
       } else if (outcome === "saved_coach" || outcome === "saved_swap") {
-        // Needs human follow-up
+        // Needs June follow-up (escalate to the CS Director)
         if (ticketId) {
           await admin.from("ticket_messages").insert({
             ticket_id: ticketId,
