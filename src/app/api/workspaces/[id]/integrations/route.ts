@@ -37,7 +37,15 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  // QuickBooks lives in its own table (quickbooks_connections), not a workspaces column.
+  const { data: qboConn } = await admin
+    .from("quickbooks_connections")
+    .select("workspace_id")
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+
   return NextResponse.json({
+    quickbooks_connected: !!qboConn,
     // Resend
     resend_connected: !!workspace.resend_api_key_encrypted,
     resend_domain: workspace.resend_domain,

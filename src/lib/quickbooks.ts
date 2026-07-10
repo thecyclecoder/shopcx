@@ -38,6 +38,116 @@ function apiBase(environment: string): string {
     : "https://sandbox-quickbooks.api.intuit.com";
 }
 
+// ── OAuth 2.0 connect flow (Integrations → QuickBooks "Connect" card) ─────────────────────────────
+// So shopcx gets its OWN refresh token via its own authorization grant — independent from shoptics'
+// token (each grant is a separate token lineage, so the two apps stop fighting over rotation).
+
+export const QBO_AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
+export const QBO_REVOKE_URL = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke";
+export const QBO_SCOPE = "com.intuit.quickbooks.accounting";
+
+/** App-level Intuit OAuth creds from env (shared across all workspaces — one Intuit app). */
+export function qboAppCreds(): { clientId: string; clientSecret: string; environment: string } {
+  const clientId = process.env.QUICKBOOKS_CLIENT_ID;
+  const clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("QuickBooks app not configured (QUICKBOOKS_CLIENT_ID / QUICKBOOKS_CLIENT_SECRET)");
+  return { clientId, clientSecret, environment: process.env.QUICKBOOKS_ENVIRONMENT || "production" };
+}
+
+/** The Intuit consent URL to redirect the user to. `state` should encode the workspace + a CSRF nonce. */
+export function buildAuthorizeUrl(state: string, redirectUri: string): string {
+  const { clientId } = qboAppCreds();
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "code",
+    scope: QBO_SCOPE,
+    redirect_uri: redirectUri,
+    state,
+  });
+  return `${QBO_AUTHORIZE_URL}?${params.toString()}`;
+}
+
+/** Exchange an authorization code for tokens (Basic-auth = base64(client_id:client_secret)). */
+export async function exchangeCodeForTokens(
+  code: string,
+  redirectUri: string,
+): Promise<{ refresh_token: string; access_token: string; expires_in: number }> {
+  const { clientId, clientSecret } = qboAppCreds();
+  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  const res = await fetch(QB_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${basic}` },
+    body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri }),
+  });
+  if (!res.ok) throw new Error(`QBO code exchange failed (${res.status}): ${await res.text()}`);
+  return res.json();
+}
+
+/**
+ * Persist a freshly-authorized connection: encrypt the refresh token + the app creds (so the token
+ * manager stays row-sourced) and upsert on workspace_id. Clears the in-memory access-token cache so
+ * the next call re-derives against the new token.
+ */
+export async function saveOAuthConnection(
+  workspaceId: string,
+  opts: { realmId: string; refreshToken: string },
+  admin: Admin = createAdminClient(),
+): Promise<void> {
+  const { clientId, clientSecret, environment } = qboAppCreds();
+  const nowIso = new Date().toISOString();
+  const { error } = await admin.from("quickbooks_connections").upsert(
+    {
+      workspace_id: workspaceId,
+      realm_id: opts.realmId,
+      environment,
+      refresh_token_encrypted: encrypt(opts.refreshToken),
+      client_id_encrypted: encrypt(clientId),
+      client_secret_encrypted: encrypt(clientSecret),
+      connected_at: nowIso,
+      token_rotated_at: nowIso,
+      updated_at: nowIso,
+    },
+    { onConflict: "workspace_id" },
+  );
+  if (error) throw new Error(`save QBO connection: ${error.message}`);
+  tokenCache.delete(workspaceId);
+}
+
+/** Non-secret connection status for the Integrations UI. */
+export async function getQboConnectionStatus(
+  workspaceId: string,
+  admin: Admin = createAdminClient(),
+): Promise<{ connected: boolean; realmId: string | null; environment: string | null; connectedAt: string | null }> {
+  const { data } = await admin
+    .from("quickbooks_connections")
+    .select("realm_id, environment, connected_at")
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  return {
+    connected: !!data,
+    realmId: data?.realm_id ?? null,
+    environment: data?.environment ?? null,
+    connectedAt: data?.connected_at ?? null,
+  };
+}
+
+/** Revoke the refresh token at Intuit (best-effort) and delete the connection row. */
+export async function disconnectQbo(workspaceId: string, admin: Admin = createAdminClient()): Promise<void> {
+  try {
+    const conn = await getQboConnection(workspaceId, admin);
+    const basic = Buffer.from(`${conn.clientId}:${conn.clientSecret}`).toString("base64");
+    await fetch(QBO_REVOKE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${basic}` },
+      body: JSON.stringify({ token: conn.refreshToken }),
+    });
+  } catch {
+    // best-effort revoke — proceed to delete the row regardless
+  }
+  await admin.from("quickbooks_connections").delete().eq("workspace_id", workspaceId);
+  tokenCache.delete(workspaceId);
+}
+
 /** Read + decrypt the workspace's QBO connection. Throws if not connected. */
 export async function getQboConnection(workspaceId: string, admin: Admin = createAdminClient()): Promise<QboConnection> {
   const { data, error } = await admin

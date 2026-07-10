@@ -19,6 +19,7 @@ import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 import { DirectorGradePanel } from "@/components/agents/director-grade-panel";
 import { DirectiveCard } from "@/components/agents/directive-card";
 import { RoleInbox, AutonomyToggle } from "@/components/agents/role-inbox";
+import { CfoFinancials } from "@/components/agents/cfo-financials";
 import DepartmentScorecardCard from "./DepartmentScorecardCard";
 
 // Per-role profile detail page (agents-hub-role-inboxes spec, Phase 5).
@@ -148,10 +149,13 @@ function ProfileCard({
   useEffect(() => {
     if (isDirector) {
       const isPlatform = directorSlug === "platform";
+      const isCfo = directorSlug === "cfo";
       const sections: SectionNavItem[] = [
         { key: "overview", label: "Overview" },
         // The friendly, self-updating plain-English intro — right after Overview (director-guide-tab).
         { key: "guide", label: "Guide" },
+        // The CFO (Grace) owns the P&L visual — Revenue / Net Profit / Mgmt Fees / NP + Addbacks.
+        ...(isCfo ? [{ key: "financials", label: "Financials" } as SectionNavItem] : []),
         ...(isPlatform ? [{ key: "grades", label: "Grades" } as SectionNavItem, { key: "coach", label: "Coach" } as SectionNavItem] : []),
         { key: "activity", label: "Activity" },
         { key: "autonomy", label: "Autonomy" },
@@ -270,6 +274,8 @@ function ProfileCard({
     const section =
       activeSection === "guide" ? (
         <DirectorGuide slug={d.slug} />
+      ) : activeSection === "financials" && d.slug === "cfo" ? (
+        <CfoFinancials />
       ) : activeSection === "grades" && isPlatform ? (
         <DirectorGradePanel />
       ) : activeSection === "coach" && isPlatform ? (
