@@ -10789,8 +10789,34 @@ function parseSolFinalJson(text: string): any | null {
   return parsed;
 }
 
+// Sol-session visibility (sol-session-internal-notes): stamp an INTERNAL note on the ticket at every
+// box-session boundary — start, complete, escalated-to-human, and failure — so the ticket UI shows what
+// Sol did in-session. Before this, a Sol session that punted to needs_human (e.g. 977b1510 — the customer
+// was genuinely owed one more unit, but fulfilling it would exceed the self-serve exchange cap, so Sol
+// correctly escalated) left NO trace on the ticket: from the dashboard it looked like nothing happened.
+// The note is a ticket_messages row with visibility='internal' (same shape as escalation.ts addInternalNote)
+// — it renders in the ticket's internal-note lane, never reaches the customer. Best-effort: a note-insert
+// failure NEVER wedges the job (mirrors the sol_handled_at / send / close fall-throughs) — Sol's real work
+// is the Direction + reply, this is only observability. The box session is identified by the short job id,
+// the same token the worker's `[handle:xxxxxxxx]` log tag uses, so a note ties back to the worker logs.
+async function stampSolSessionNote(ticketId: string, body: string): Promise<void> {
+  try {
+    const { error } = await db.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      body,
+      author_type: "system",
+      visibility: "internal",
+    });
+    if (error) console.warn(`[sol-note] insert failed for ${ticketId}: ${error.message}`);
+  } catch (e) {
+    console.warn(`[sol-note] insert threw for ${ticketId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runTicketHandleJob(job: Job) {
   const tag = `[handle:${job.id.slice(0, 8)}]`;
+  const sessShort = job.id.slice(0, 8);
   let params: { ticket_id?: string; workspace_id?: string; turn_index?: number; reason?: string } = {};
   try {
     params = job.instructions ? JSON.parse(job.instructions) : {};
@@ -10805,6 +10831,11 @@ async function runTicketHandleJob(job: Job) {
     await update(job.id, { status: "failed", error: "ticket-handle job missing ticket_id/workspace_id" });
     return;
   }
+
+  // Session-start stamp — fires before the (expensive, timeout-prone) box session so even a hang / crash
+  // / timeout leaves a "Sol is reviewing this" trace on the ticket. The failure branches below then add
+  // the terminal note; a session that vanishes mid-run leaves only this start note, which is the signal.
+  await stampSolSessionNote(ticketId, `Sol is reviewing this ticket in session ${sessShort}.`);
 
   try {
     const brief = await loadTicketHandleBrief(ticketId);
@@ -10931,6 +10962,7 @@ async function runTicketHandleJob(job: Job) {
           console.warn(`${tag} portal rail-hit escalate failed for ticket ${ticketId}: ${msg}`);
         }
       }
+      await stampSolSessionNote(ticketId, `Sol's session ${sessShort} is complete — escalated to a human. Reason: ${reason}`);
       await update(job.id, {
         status: "needs_attention",
         needs_attention_class: "sol_needs_human",
@@ -10957,6 +10989,7 @@ async function runTicketHandleJob(job: Job) {
       // A missing/typo'd field fails the partial-UNIQUE insert downstream anyway, but bailing here gives a
       // clearer error trail.
       if (!intent || !contextSummary || !validPath) {
+        await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: returned an incomplete direction (intent=${!!intent}, context=${!!contextSummary}, path=${chosenPath || "none"}).`);
         await update(job.id, {
           status: "failed",
           error: `Sol returned an incomplete direction (intent=${!!intent}, context_summary=${!!contextSummary}, chosen_path=${chosenPath || "(none)"})`,
@@ -10987,6 +11020,7 @@ async function runTicketHandleJob(job: Job) {
         // here (23505). Fail the job with the DB error so the CS director sees the collision instead
         // of quietly forking two live rows.
         const msg = e instanceof Error ? e.message : String(e);
+        await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: could not persist the direction (${msg}).`);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
       }
@@ -11530,6 +11564,7 @@ async function runTicketHandleJob(job: Job) {
         console.warn(`${tag} sol_handled_at stamp threw: ${msg}`);
       }
 
+      await stampSolSessionNote(ticketId, `Sol's session ${sessShort} is complete — chosen path: ${chosenPath}.`);
       await update(job.id, { status: "completed", log_tail: raw.slice(-2000) });
       return;
     }
@@ -11537,6 +11572,7 @@ async function runTicketHandleJob(job: Job) {
     // No recognizable verdict. If the agent actually produced output (prose, not a hard run error),
     // it over-ran the single-turn envelope — surface a failure without a park so a human can look.
     if (!isError) {
+      await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict).`);
       await update(job.id, {
         status: "failed",
         error: "Sol first-touch returned no completed direction JSON",
@@ -11544,8 +11580,10 @@ async function runTicketHandleJob(job: Job) {
       });
       return;
     }
+    await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: the box session errored with no direction.`);
     await update(job.id, { status: "failed", error: "Sol first-touch errored with no direction", log_tail: raw.slice(-2000) });
   } catch (e) {
+    await stampSolSessionNote(ticketId, `Sol's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
     await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
