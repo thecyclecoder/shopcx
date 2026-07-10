@@ -279,3 +279,79 @@ export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOption
   }
   return losers;
 }
+
+// ── Reactivation (Meta attribution lags 24–48h) ──────────────────────────────
+export interface MetaCpaReactivation {
+  /** The paused adset to unpause. */
+  targetObjectId: string;
+  /** Dominant child ad, for the audit trail. */
+  sourceMetaAdId: string;
+  spendCents: number;
+  cppCents: number;
+}
+
+/**
+ * Recovered-CPA reactivations (CEO 2026-07-10): Meta attribution flows in 24–48h LATE, so an adset we
+ * trimmed on leading signals can turn out to be a winner once its delayed purchases land. Find adsets the
+ * media buyer PAUSED recently that are STILL paused but now show cumulative CPP ≤ `crownMaxCpaCents` —
+ * they've earned their way back on. Returns unpause candidates; the runner writes `unpause` iteration_actions.
+ */
+export async function detectMetaCpaReactivations(
+  admin: Admin,
+  opts: { workspaceId: string; metaAdAccountId: string; crownMaxCpaCents: number; lookbackDays?: number },
+): Promise<MetaCpaReactivation[]> {
+  const sinceIso = new Date(Date.now() - (opts.lookbackDays ?? 7) * 24 * 3600 * 1000).toISOString();
+  // Adsets the media buyer paused in the window.
+  const { data: pauses } = await admin
+    .from("iteration_actions")
+    .select("object_id")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("meta_ad_account_id", opts.metaAdAccountId)
+    .eq("action_type", "pause")
+    .eq("level", "adset")
+    .gte("created_at", sinceIso);
+  const pausedByUs = [...new Set(((pauses ?? []) as Array<{ object_id: string }>).map((r) => r.object_id))];
+  if (!pausedByUs.length) return [];
+
+  // Still paused? (don't unpause one already active.)
+  const { data: adsets } = await admin
+    .from("meta_adsets")
+    .select("meta_adset_id, effective_status")
+    .eq("workspace_id", opts.workspaceId)
+    .in("meta_adset_id", pausedByUs);
+  const stillPaused = ((adsets ?? []) as Array<{ meta_adset_id: string; effective_status: string | null }>)
+    .filter((a) => a.effective_status !== "ACTIVE")
+    .map((a) => a.meta_adset_id);
+  if (!stillPaused.length) return [];
+
+  // Cumulative lifetime CPP per candidate (Meta reported).
+  const since = new Date(Date.now() - LIFETIME_LOOKBACK_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const { data: ins } = await admin
+    .from("meta_insights_daily")
+    .select("meta_object_id, spend_cents, purchases")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("meta_ad_account_id", opts.metaAdAccountId)
+    .eq("level", "adset")
+    .in("meta_object_id", stillPaused)
+    .gte("snapshot_date", since);
+  const life = new Map<string, { spend: number; purch: number }>();
+  for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
+    const k = String(r.meta_object_id);
+    const cur = life.get(k) ?? { spend: 0, purch: 0 };
+    cur.spend += Number(r.spend_cents ?? 0);
+    cur.purch += Number(r.purchases ?? 0);
+    life.set(k, cur);
+  }
+
+  const out: MetaCpaReactivation[] = [];
+  for (const [adsetId, m] of life) {
+    if (m.purch <= 0) continue;
+    const cpp = m.spend / m.purch;
+    if (cpp > opts.crownMaxCpaCents) continue; // still not converting well enough — leave paused
+    const { data: ads } = await admin
+      .from("meta_ads").select("meta_ad_id, spend_cents").eq("meta_adset_id", adsetId).order("spend_cents", { ascending: false }).limit(1);
+    const sourceMetaAdId = (ads as Array<{ meta_ad_id: string }> | null)?.[0]?.meta_ad_id ?? adsetId;
+    out.push({ targetObjectId: adsetId, sourceMetaAdId, spendCents: m.spend, cppCents: Math.round(cpp) });
+  }
+  return out;
+}
