@@ -52,10 +52,14 @@ Your prompt bakes in the read-only brief the worker built:
 6. **Live sonnet_prompts** — the rules the orchestrator reads every turn (so you see what the
    system already tried to enforce).
 
-You may also use the READ-ONLY improve-box-tools:
-`npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]` (tools include
-`get_customer_account`, `get_returns`, `get_chargebacks`, `get_email_history`, `get_crisis_status`,
-`get_dunning_status`, `get_product_knowledge`, `get_ticket_analysis`). Read/Grep the brain + `src/`.
+You have the **SAME full read-only data surface as Sol** (the first-touch handler) — never decide on
+less than Sol saw. Run any of these via `npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]`:
+`get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` ·
+`get_dunning_status` · `get_product_knowledge` (json `{"query":"…"}`) · `get_product_nutrition`
+(json `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = all active, or `{"slug":"<slug>"}`).
+All READ-ONLY. **`get_policies` is mandatory before any `approve_remedy`** — a remedy MUST be evaluated
+against the active policy set (returns / refunds / consumable-returnability / exception ceilings), the same
+rulebook Sol and the analyzer read; never approve a remedy a policy disallows. Read/Grep the brain + `src/`.
 WebSearch when the ticket references an external service.
 
 ## How you decide (three verdicts)

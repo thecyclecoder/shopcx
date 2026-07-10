@@ -83,15 +83,24 @@ Cora may **verify a claim** she cannot confirm from the transcript with a bounde
 - **No mutation** at the executor level — delegates to `src/lib/improve-tools.ts` → `sonnet-orchestrator-v2`'s `executeToolCall`, the same shared read-only executor `ticket-improve` / `ticket-handle` use. The analyzer's ONLY write remains its verdict, applied by `applyAnalyzerVerdict` on the deterministic worker.
 - **Targeted, not open-ended** — a hard per-grade lookup counter (env `ANALYZER_RESEARCH_CAP`, default `8`) refuses further calls once the cap is hit within a single grade. The counter lives at `/tmp/analyzer-research-<ticketId>.count` and resets after 30 min of staleness (well past any single grade's runtime). Running count is echoed to stderr on each call so Cora can see how close she is; hitting the cap forces the FALLBACK path.
 
-**Tools (all delegate to the shared read-only executor):**
+**Tools — FULL parity with Sol's read surface (founder directive 2026-07-10).** Cora's `READ_TOOLS`
+allowlist was widened from 5 to the SAME 10 read-only tools Sol's `improve-box-tools` exposes — Cora (and
+June) must never grade/decide on less data than Sol had. The `ANALYZER_RESEARCH_CAP` volume bound (default
+8 lookups/grade) is unchanged — that's the "targeted, not open-ended" quality bound; the TOOL SET is now
+full parity, no longer a subset. All ten delegate to the same shared read-only executor.
 
 | Tool | Surface | Verifies |
 |---|---|---|
 | `get_customer_account` | Subscriptions (with per-line `variant_id` + realized price + MSRP/floor context), last 180d of orders (with `line_items` per-unit price + discount codes + financial_status + subscription linkage), loyalty balance, marketing consent | Per-unit price claims (real charged amounts), subscription state, entitlement claims, linked-account facts |
+| `get_returns` | Returns / exchanges on file for the customer | Return-status claims |
+| `get_chargebacks` | Chargebacks / disputes on file | "We refunded / you disputed" claims |
+| `get_email_history` | Prior email correspondence | "We told you / you were notified" claims |
+| `get_crisis_status` | Active crisis / recall / incident state | Crisis-handling claims |
+| `get_dunning_status` | Failed-payment / dunning state | Billing-failure / retry claims |
 | `get_product_knowledge` | Product info (title/description/positioning) | Product-level positioning claims |
 | `get_product_nutrition` | Per-variant Supplement Facts (variant title / flavor / servings / key nutrients) — `json_input: {"query":"..."}` | Variant / flavor claims (e.g. "Berry"), per-variant nutrition claims |
-| `get_returns` | Returns / exchanges on file for the customer | Return-status claims |
 | `get_ticket_analysis` | Latest prior analysis for this ticket | Re-grade context (score / issues / summary) |
+| `get_policies` | Active policy set (returns / refunds / consumable-returnability / exception ceilings) — argless = all, or `{"slug":"..."}` | Policy claims against the real rulebook |
 
 Brain / policy read is native (Claude Code `Read` / `Grep` against `docs/brain/`), so a policy claim can be verified against the current documented policy without going through the CLI.
 
