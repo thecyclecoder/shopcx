@@ -456,6 +456,12 @@ export type SolBoxTurnAction = "message_sent" | "status_managed" | "keep_open" |
  *    is the resolution signal).
  *  - `chosen_path='playbook'` / `chosen_path='journey'` → `status_managed` (the mechanism owns
  *    the ticket's status from here; unified-ticket-handler's own paths decide when it closes).
+ *    NOTE (2026-07-10): the box lane (`scripts/builder-worker.ts`) now CLOSES the ticket after a
+ *    successful JOURNEY launch (founder directive — a delivered CTA is the whole treatment; a reply
+ *    reopens it, the journey token carries state). That close is done directly in the box lane, so a
+ *    `journey` outcome no longer reaches this classifier — this mapping is retained only for the
+ *    non-box legacy callers + tests. Playbooks are armed reply-gated and still close via the box's
+ *    every-message-closes rule.
  *
  * The `escalated` return is reserved for the caller's `needs_human` branch: Sol's box session
  * returns `status:'needs_human'` BEFORE any Direction is written, so no `chosen_path` string is
