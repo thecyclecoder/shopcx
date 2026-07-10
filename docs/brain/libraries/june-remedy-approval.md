@@ -30,7 +30,8 @@ North star ([[../operational-rules]] § supervisable autonomy): June optimizes a
 | `MoneyActionLine` | interface | One per-money-action line: `{ actionType, amountCents }` (amountCents null when unknown). Populated by `extractRemedyMoneyLines` in June's authored order. |
 | `extractRemedyMoneyLines(remedy)` | pure | Walks EITHER shape (legacy `{action_type, payload}` OR multi-action `{actions:[...]}`) and returns the ordered per-money-action lines; non-money actions skipped. |
 | `remedyMoneyAmountCents(remedy)` | pure | The **SUM** of money (cents) across every money action in the batch, or `null` if any money action has an unknown amount OR the batch has no money actions. Reads `payload.amount_cents` then `payload.replacement_amount_cents`. |
-| `remedyNeedsFounderApproval(remedy, thresholdCents)` | pure | `{ gated, actionType, amountCents, moneyLines }`. Gated when the **SUMMED** total is strictly above the threshold OR any money action's amount is unknown. `amountCents` is the SUM (null for unknown); `moneyLines` is the ordered per-money-action list. Non-money-only batches + sub-threshold sums run autonomously. |
+| `remedyNeedsFounderApproval(remedy, thresholdCents)` | pure | `{ gated, actionType, amountCents, moneyLines }`. Gated when the **SUMMED** total is strictly above the threshold OR any money action's amount is unknown. `amountCents` is the SUM (null for unknown); `moneyLines` is the ordered per-money-action list. Non-money-only batches + sub-threshold sums run autonomously. Reads the remedy's raw `action_type` field (the prompt-authored value). |
+| `planNeedsFounderApproval(actions, thresholdCents)` | pure | `{ gated, actionType, amountCents, moneyLines }`. Same semantics as `remedyNeedsFounderApproval` — money actions are summed across the batch, ANY unknown amount collapses the sum to null (→ gate), non-money-only batches run autonomously — but reads the plan's canonical `actionType` for each step (from `plan.actions[]`, the normalized types the executor will fire). Closes the payload.type-override bypass: the sum the gate asserts is EXACTLY the set of action types the executor will fire. Called by `handleApproveRemedy` ([[cs-director]]) instead of the raw-remedy gate. |
 | `buildJuneApprovalPreview({...})` | pure | The plain-language card/SMS text Dylan reads. **Multi-line** (moneyLines.length ≥ 2): "Approve $60.00 in refunds/credits to Susan on 'Wrong price'? • partial_refund: $30.00 • redeem_points_as_refund: $30.00 … Why: …" (names the SUM up-front + lists each line so a 2×$30 split can't hide the true $60 spend). **Single-line** (length ≤ 1): the legacy "Refund $48.00 to Susan on 'Wrong price'? … Why: …" — unchanged. |
 | `getRefundApprovalThresholdCents(admin, workspaceId)` | IO | Reads `workspaces.june_refund_approval_threshold_cents`; best-effort, falls back to $50. |
 | `raiseJuneRemedyApproval(admin, input)` | IO | Park the gated remedy: raise the card, text the founder, hold the ticket escalated. Accepts optional `moneyLines` (falls back to `extractRemedyMoneyLines(remedy)`); stashes them on `tool_input.money_lines` (JSONB, no schema change) so the cockpit UI + sweep can show the split without re-walking. Fallback `via: "escalated_no_cockpit"` (internal note) if no cockpit can be established — the approval is **never silently dropped**. |
@@ -57,6 +58,16 @@ The multi-action-remedies spec's Phase 3 invariant: the gate SUMS money across e
 | `[change_next_date {…}, resume {…}]`                                 | —     | $50       | false   | no money actions in the batch → nothing to gate                                                          |
 
 Enforced by pure predicates ([[../../src/lib/june-remedy-approval.ts]] `extractRemedyMoneyLines` + `remedyMoneyAmountCents` + `remedyNeedsFounderApproval`) — unit-tested against every row above in `src/lib/june-remedy-approval.test.ts`. Downstream: the raise path stashes `money_lines[]` on `god_mode_approvals.tool_input` so the cockpit UI + audit surfaces can render the split alongside the SUM without re-walking the raw remedy.
+
+## Security fix — gates on NORMALIZED planned actions (2026-07-10)
+
+[[../specs/fix-june-remedy-payload-type-gate-bypass]] closed a vulnerability where `remedyNeedsFounderApproval` (which reads the remedy's raw `action_type` field) could be bypassed if a prompt-influenced payload fields override the executable action type after gating. **`handleApproveRemedy` ([[cs-director]]) now calls `planNeedsFounderApproval(plan.actions, threshold)` instead**, which:
+
+1. Reads the plan's canonical `actionType` for each step — the NORMALIZED types that `extractActionStep` resolved and that the executor will fire.
+2. Sums money across the same actions the executor will execute, not the raw remedy's prompt-authored fields.
+3. Guarantees the sum the gate asserts matches exactly the action types that will execute — a bypass where payload fields override the action type after gating is no longer possible.
+
+`remedyNeedsFounderApproval` still exists for callers that work with the raw remedy shape (e.g. the preview builder + audit surfaces) and is unit-tested separately.
 
 ## Gotchas
 
