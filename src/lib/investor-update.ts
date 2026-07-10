@@ -31,6 +31,7 @@ export interface InvestorPerformance {
   primaryLabel: string; // "so far this year" | "over the last 6 months"
   comparisonLabel: string; // "the same period a year earlier" | "the prior 6 months"
   primaryRevenue: number; // sales over the primary window
+  primaryProfit: number; // NP + addbacks (adjusted net income) over the primary window
   primaryYoYPct: number | null; // vs the comparable prior window
   focal: FocalLine[]; // the latest closed month, each metric contextualized
   working: string[];
@@ -51,6 +52,8 @@ const money = (v: number) => {
 };
 const pct = (v: number) => `${v >= 0 ? "+" : ""}${Math.round(v * 100)}%`;
 const sum = (xs: (number | null)[]) => xs.reduce((a: number, x) => a + (x ?? 0), 0);
+// Profit margin = NP+addbacks / sales, as a whole-number percent (null if no sales).
+const marginPct = (profit: number, revenue: number): number | null => (revenue > 0 ? Math.round((profit / revenue) * 100) : null);
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /**
@@ -211,6 +214,7 @@ export async function buildInvestorPerformance(
     primaryLabel,
     comparisonLabel,
     primaryRevenue,
+    primaryProfit: primProfit,
     primaryYoYPct,
     focal,
     working,
@@ -262,7 +266,8 @@ export function renderInvestorEmailHtml(opts: {
       <h1 style="font-size:24px;line-height:1.25;color:#18181b;margin:16px 0 10px;font-weight:650;">Where Superfoods stands${hi}</h1>
       <p style="font-size:16px;line-height:1.6;color:#3f3f46;margin:0 0 8px;">
         Here&rsquo;s an honest snapshot. ${esc(cap(perf.primaryLabel))}, the business did
-        <strong>${money(perf.primaryRevenue)}</strong> in sales${perf.primaryYoYPct !== null ? `, <strong>${pct(perf.primaryYoYPct)}</strong> vs ${esc(perf.comparisonLabel)}` : ""}.
+        <strong>${money(perf.primaryRevenue)}</strong> in sales and
+        <strong>${money(perf.primaryProfit)}</strong> in profit${marginPct(perf.primaryProfit, perf.primaryRevenue) !== null ? ` — a <strong>${marginPct(perf.primaryProfit, perf.primaryRevenue)}%</strong> margin` : ""}${perf.primaryYoYPct !== null ? ` (sales ${pct(perf.primaryYoYPct)} vs ${esc(perf.comparisonLabel)})` : ""}.
         The full, interactive charts are one tap away — no password to remember.
       </p>
     </div>
@@ -293,8 +298,9 @@ export function renderInvestorEmailHtml(opts: {
   </div>`;
 }
 
-/** A short SMS with this-year (or last-6-month) sales + the same secure link. */
+/** A short SMS: this-year (or last-6-month) sales, profit (NP+addbacks) + margin. */
 export function renderInvestorSms(perf: InvestorPerformance, link: string): string {
-  const yoy = perf.primaryYoYPct !== null ? ` (${pct(perf.primaryYoYPct)} vs ${perf.comparisonLabel})` : "";
-  return `Superfoods investor update — ${money(perf.primaryRevenue)} in sales ${perf.primaryLabel}${yoy}. See the full charts: ${link}`;
+  const m = marginPct(perf.primaryProfit, perf.primaryRevenue);
+  const profit = `${money(perf.primaryProfit)} in profit${m !== null ? ` (${m}% margin)` : ""}`;
+  return `Superfoods investor update — ${money(perf.primaryRevenue)} in sales ${perf.primaryLabel}, ${profit}. See the full charts: ${link}`;
 }

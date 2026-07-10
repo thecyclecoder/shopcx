@@ -53,6 +53,7 @@ const SECTIONS: { title: Section; blurb: string }[] = [
 const money = (v: number) => {
   const sign = v < 0 ? "-" : "";
   const a = Math.abs(v);
+  if (a >= 1_000_000) return `${sign}$${(a / 1_000_000).toFixed(a >= 10_000_000 ? 1 : 2)}M`; // $1.89M, not $1886k
   if (a >= 1000) return `${sign}$${(a / 1000).toFixed(a >= 100000 ? 0 : 1)}k`;
   return `${sign}$${a.toFixed(0)}`;
 };
