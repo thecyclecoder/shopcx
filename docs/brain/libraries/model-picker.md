@@ -19,7 +19,7 @@ The "hard" signals below are still **computed and surfaced** in `reason` as `har
 
 ## Precedence (in `pickModelFromSignals`)
 
-0. `isCheckoutStuck === true` → **Sonnet** with reason `checkout-stuck`. Earliest gate (Phase 2 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]). Set by `pickOrchestratorModel` from the newest inbound message via [[checkout-stuck-intent]] `classifyCheckoutStuck`. Overrides EVERY subsequent rule — a checkout question is a re-session-Sol problem, not a Sonnet→Opus problem, and this gate is the belt while [[inflection-detector]] fires the actual re-session on the same turn.
+0. `isCheckoutStuck === true` → **Sonnet** with reason `checkout-stuck`. Earliest gate (part of [[../recipes/checkout-stuck-concierge-flow]]). Set by `pickOrchestratorModel` from the newest inbound message via [[checkout-stuck-intent]] `classifyCheckoutStuck`. Overrides EVERY subsequent rule — a checkout question is a re-session-Sol problem, not a Sonnet→Opus problem, and this gate is the belt while [[inflection-detector]] fires the actual re-session on the same turn.
 1. Any hard signal → **Sonnet** with reason `hard:<signals>`. (The Haiku fast-path is deliberately NOT taken on a hard ticket.)
 2. No hard signals BUT a fresh + high-confidence + stateless Direction → **Haiku** (reason `sol-direction-fresh(...)`).
 3. Otherwise → **Sonnet** (reason `default`).

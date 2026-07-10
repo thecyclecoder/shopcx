@@ -1,6 +1,6 @@
 # libraries/assisted-purchase-direction
 
-The BLUEPRINT for Sol's assisted-purchase Direction when a ticket is CHECKOUT-STUCK. Phase 3 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]. Pure library — no DB, no network — that names the four-stage recipe, pins the anchor slugs the skill + writer + validator all reference, exposes a builder that returns Turn 1's Direction shape verbatim, and ships a machine-enforced never-claim-placed invariant the box worker runs on Sol's DRAFT reply before every customer send.
+The BLUEPRINT for Sol's assisted-purchase Direction when a ticket is CHECKOUT-STUCK (part of [[../recipes/checkout-stuck-concierge-flow]]). Pure library — no DB, no network — that names the four-stage recipe, pins the anchor slugs the skill + writer + validator all reference, exposes a builder that returns Turn 1's Direction shape verbatim, and ships a machine-enforced never-claim-placed invariant the box worker runs on Sol's DRAFT reply before every customer send.
 
 **File:** `src/lib/assisted-purchase-direction.ts` · **Tests:** `src/lib/assisted-purchase-direction.test.ts`
 
@@ -138,7 +138,7 @@ Exactly-one-order-at-the-right-price: the seed migration (`supabase/migrations/2
 
 ## Phase 5 — fast-default guard + analytics slice
 
-Phase 5 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]. The whole path must be the reflex for any checkout issue — minimize turns to the payment journey, no "try another card" dead-end.
+(Part of [[../recipes/checkout-stuck-concierge-flow]].) The whole path must be the reflex for any checkout issue — minimize turns to the payment journey, no "try another card" dead-end. Guards and analytics live here; the recipe ties them together.
 
 ### `assertSolFastDefaultToConcierge` — the never-dead-end guard
 

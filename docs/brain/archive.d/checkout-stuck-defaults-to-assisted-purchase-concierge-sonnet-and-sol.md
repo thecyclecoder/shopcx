@@ -1,0 +1,1 @@
+- **Checkout-stuck → assisted-purchase concierge (fast default): Sol re-entry, Sonnet not Opus, place the order** · verified 2026-07-10 · → [[../recipes/checkout-stuck-concierge-flow]] · lifecycle: [[../lifecycles/storefront-checkout]]
