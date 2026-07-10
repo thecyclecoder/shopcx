@@ -29,6 +29,17 @@ const nextConfig: NextConfig = {
   // Prevent 308 trailing-slash redirects — Shopify app proxy follows 3xx redirects,
   // which breaks the proxy flow (redirects to storefront instead of proxying to backend)
   skipTrailingSlashRedirect: true,
+  // The storefront blueprint PDP gate calls `forbidden()` from `next/navigation`
+  // (src/app/(storefront)/store/[workspace]/[slug]/page.tsx) to return a real 403
+  // when a non-owner reaches a preview-only / not-yet-serving lander. That API is
+  // gated behind Next's `experimental.authInterrupts` flag — without it, hitting
+  // the gate throws a runtime error ("forbidden() is not enabled") and the page
+  // 500s instead of rendering the intended 403. `scripts/_check-authinterrupts-when-forbidden-imported.ts`
+  // (wired into `npm run predeploy`) fails the build if this flag is dropped while
+  // any src/ file still imports `forbidden` from `next/navigation`.
+  experimental: {
+    authInterrupts: true,
+  },
   // Keep the Remotion Lambda client external (not webpack-bundled) so Vercel's
   // file tracer includes it in the serverless function's node_modules — the
   // Inngest render step dynamic-imports it to call AWS Lambda. Without this the
