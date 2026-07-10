@@ -42,6 +42,8 @@ export interface ScoredAngle {
   acquisitionPower: number; // 0–10 — cold-scroll stopping power
   retentionTruth: number; // 0–10 — how well the product delivers it (keeps them)
   commodity: boolean;
+  /** A real before/after photo backs this angle — the strongest cold hook; wins ties. */
+  hasRealPhoto: boolean;
   reasons: string[];
   /** raw source object for the brief builder to pull proof from */
   raw?: Row;
@@ -62,7 +64,7 @@ function scoreAngle(hook: string, leadBenefit: string, source: ScoredAngle["sour
   // retentionTruth: commodity/experience benefits + high review frequency = strong retention signal.
   let ret = Math.max(0, Math.min(10, retentionSignal));
   if (commodity) ret = Math.max(ret, 8); // no-crash IS a true, loved experience benefit
-  return { hook, source, leadBenefit, acquisitionPower: acq, retentionTruth: ret, commodity, reasons, raw };
+  return { hook, source, leadBenefit, acquisitionPower: acq, retentionTruth: ret, commodity, hasRealPhoto: false, reasons, raw };
 }
 
 /**
@@ -78,9 +80,12 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
     out.push(scoreAngle(str(a.hook_one_liner), str(a.lead_benefit_anchor), "ad_angle", 5, a));
   }
   // Transformation stories → their own high-acquisition angles (real person, real number, real photo).
-  for (const r of transformationStories.slice(0, 5)) {
+  // A story WITH a before/after photo is the strongest — boost it so a photo-backed transformation leads.
+  for (const r of transformationStories.slice(0, 8)) {
     const line = str(r.smart_quote) || str(r.body).slice(0, 90);
-    out.push(scoreAngle(line, "Weight loss (real customer transformation)", "transformation", 6, r as unknown as Row));
+    const a = scoreAngle(line, "Weight loss (real customer transformation)", "transformation", 6, r as unknown as Row);
+    if ((r.images ?? []).length) { a.acquisitionPower = Math.min(10, a.acquisitionPower + 2); a.hasRealPhoto = true; a.reasons.push("has a REAL before/after photo (strongest — leads over a photoless number)"); }
+    out.push(a);
   }
   // Review clusters → retentionTruth signal (frequency), and a couple as candidate angles.
   const clusters = ((pi.reviewAnalysis as Row | null)?.top_benefits as Array<{ benefit: string; frequency?: number }> | undefined) ?? [];
@@ -97,7 +102,10 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
     const prev = byHook.get(k);
     if (!prev || a.acquisitionPower > prev.acquisitionPower) byHook.set(k, a);
   }
-  return [...byHook.values()].sort((a, b) => b.acquisitionPower - a.acquisitionPower || b.retentionTruth - a.retentionTruth);
+  return [...byHook.values()].sort((a, b) =>
+    b.acquisitionPower - a.acquisitionPower
+    || (Number(b.hasRealPhoto) - Number(a.hasRealPhoto)) // among ties, a real before/after wins
+    || b.retentionTruth - a.retentionTruth);
 }
 
 // ── Brief ────────────────────────────────────────────────────────────────────
@@ -143,15 +151,18 @@ export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredA
     if (ir) leadProof = { kind: "ingredient", text: str(ir.benefit_headline) || str(ir.mechanism_explanation).slice(0, 160) };
   }
 
-  // Transformation: for weight-loss/transformation angles, anchor on a real story + its photo.
+  // Transformation: anchor on ONE real story so the headline number, the caption, and the photo are all
+  // the SAME person. When the angle IS a transformation, use its own reviewer (angle.raw). Only show a
+  // before/after if THAT reviewer submitted one — never borrow another customer's photo under this number
+  // (the 2026-07-10 "84 lbs headline / 63 lbs caption / third person's photo" inconsistency).
   let transformation: CreativeBrief["transformation"] = null;
   if (/weight|transformation|lbs|pound|shed|slim/i.test(`${angle.hook} ${angle.leadBenefit}`) && transformationStories.length) {
-    const t = transformationStories.find((r) => r.images.length) ?? transformationStories[0];
-    const ba = (pi.media.byCategory.before_after?.[0] as Row | undefined);
+    const angleReviewer = angle.source === "transformation" ? (angle.raw as unknown as PIReview | undefined) : undefined;
+    const t = angleReviewer ?? transformationStories.find((r) => r.images.length) ?? transformationStories[0];
     transformation = {
       reviewer: t.reviewer_name ?? "verified customer",
       quote: (t.smart_quote || t.body || "").slice(0, 160),
-      beforeAfterImage: t.images[0] ?? (ba ? str(ba.url) : null),
+      beforeAfterImage: (t.images ?? [])[0] ?? null, // this reviewer's OWN photo only — no borrowing
     };
   }
 
