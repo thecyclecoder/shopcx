@@ -87,6 +87,30 @@ export interface CreateAmplifierOrderResult {
  * Get the workspace's Amplifier creds. Throws if missing — callers
  * should surface a clear error to the operator.
  */
+export interface AmplifierInventoryItem { sku: string; quantity_available: number; quantity_on_hand: number; safety_stock?: number }
+
+/**
+ * Fetch current 3PL warehouse on-hand from Amplifier. Endpoint + shape confirmed against
+ * Shoptics' working sync: GET /reports/inventory/current → { inventory: [{ sku,
+ * quantity_available, quantity_on_hand, safety_stock }] }. HTTP Basic auth (apiKey as
+ * username, blank password), matching Amplifier's GET convention. Read-only.
+ */
+export async function fetchAmplifierInventory(workspaceId: string): Promise<AmplifierInventoryItem[]> {
+  const { apiKey } = await getAmplifierConfig(workspaceId);
+  const res = await fetch(`${AMPLIFIER_BASE}/reports/inventory/current`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${apiKey}:`).toString("base64")}`, Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`Amplifier inventory fetch failed: ${res.status} ${await res.text().catch(() => "")}`.slice(0, 300));
+  const data = await res.json();
+  const rows = data?.inventory ?? data?.data ?? [];
+  return rows.map((r: Record<string, unknown>) => ({
+    sku: String(r.sku ?? ""),
+    quantity_available: Number(r.quantity_available ?? 0),
+    quantity_on_hand: Number(r.quantity_on_hand ?? r.quantity_available ?? 0),
+    safety_stock: r.safety_stock != null ? Number(r.safety_stock) : undefined,
+  })).filter((r: AmplifierInventoryItem) => r.sku);
+}
+
 async function getAmplifierConfig(workspaceId: string): Promise<{ apiKey: string; orderSourceCode: string }> {
   const admin = createAdminClient();
   const { data: ws } = await admin
