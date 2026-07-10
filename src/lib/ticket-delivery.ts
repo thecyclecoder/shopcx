@@ -90,6 +90,13 @@ export async function deliverTicketMessage(
     sent_at: new Date().toISOString(),
   });
 
+  // Mark the ticket AI-handled (any tier: Haiku/Sonnet orchestrator, Sol, journey, playbook —
+  // they ALL deliver the customer-facing reply through here). `ai_handled_at` is the universal
+  // "we responded to the customer" signal the Cora grading cron selects on, so the cheap pass
+  // grades our low-cost autonomous handling too, not only Sol sessions. Real sends only — a
+  // sandbox draft already returned above. `sol_handled_at` stays the Sol-specific sub-flag.
+  await admin.from("tickets").update({ ai_handled_at: new Date().toISOString() }).eq("id", ticketId);
+
   const stampResend = async (messageId: string) => {
     await admin
       .from("ticket_messages")

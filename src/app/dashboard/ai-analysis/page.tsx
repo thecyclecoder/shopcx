@@ -15,6 +15,10 @@ interface DailyRollup {
 
 interface TodayData {
   analyzed: number;
+  new_tickets?: number;
+  handled_tickets?: number;
+  handled_cheap?: number;
+  handled_sol?: number;
   avg_score: number | null;
   top_issues: { type: string; count: number }[];
   worst_today: { analysis_id: string; ticket_id: string; score: number; summary: string | null }[];
@@ -147,7 +151,7 @@ export default function AIAnalysisPage() {
 
       {!loading && tab === "daily" && (
         <>
-          {today && today.analyzed > 0 && (
+          {today && (today.analyzed > 0 || (today.handled_tickets ?? 0) > 0) && (
             <div className="mb-6 rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
               <div className="flex items-center justify-between">
                 <div>
@@ -157,7 +161,18 @@ export default function AIAnalysisPage() {
                       {todayScore != null ? todayScore.toFixed(1) : "—"}
                     </span>
                     <span className="text-sm text-zinc-400">/ 10</span>
-                    <span className="text-sm text-zinc-500">· {today.analyzed} ticket{today.analyzed === 1 ? "" : "s"} analyzed so far</span>
+                    <span className="text-sm text-zinc-500">
+                      · {today.analyzed} of {today.handled_tickets ?? today.analyzed} handled ticket{(today.handled_tickets ?? today.analyzed) === 1 ? "" : "s"} graded
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
+                    <span><span className="font-semibold text-zinc-700 dark:text-zinc-300">{today.new_tickets ?? 0}</span> new today</span>
+                    <span><span className="font-semibold text-zinc-700 dark:text-zinc-300">{today.handled_tickets ?? 0}</span> handled today</span>
+                    {(today.handled_cheap ?? 0) + (today.handled_sol ?? 0) > 0 && (
+                      <span className="text-zinc-400">
+                        ({today.handled_cheap ?? 0} cheap · {today.handled_sol ?? 0} Sol)
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className={`flex h-16 w-16 items-center justify-center rounded-2xl ${scoreBg(todayScore || 0)}`}>
