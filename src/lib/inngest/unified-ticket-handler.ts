@@ -39,13 +39,7 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 // ── Constants ──
 
-const POSITIVE_PHRASES = [
-  "thanks", "thank you", "thank u", "thx", "ty", "got it", "great",
-  "perfect", "awesome", "wonderful", "appreciate", "that helps",
-  "all good", "all set", "sounds good", "ok great", "ok thanks",
-  "ok thank you", "ok cool", "understood", "noted", "good to know",
-  "excellent", "much appreciated", "cool thanks", "love it",
-];
+// POSITIVE_PHRASES — RETIRED 2026-07-10 (ticket d19c2192): only fed the removed positive-close.
 const MAX_CLARIFY = 3;
 
 // ── Helpers ──
@@ -55,67 +49,8 @@ const toHtml = (t: string) => t.split(/\n\n+/).map(p => p.trim()).filter(Boolean
 const sysNote = (admin: Admin, tid: string, msg: string) =>
   admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "system", body: msg });
 
-function isPositive(body: string): boolean {
-  // Strip HTML, normalize whitespace, lowercase
-  const stripped = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").toLowerCase().trim();
-  // Strip quoted threads / "Sent from" tails first
-  const beforeQuote = stripped.split(/(?:sent from|get outlook|on .+ wrote:|from:|----)/)[0].trim();
-  // Strip common email-signature openers — "thanks- your friend in real estate, …"
-  // and "best, name", "regards, name", "warmly, name". Without this, the word
-  // "thanks" inside a signature trips positive-close on substantive replies.
-  const beforeSig = beforeQuote.split(/(?:^|[\.\!\?\n\s])(?:thanks[-,\s]+(?:your\s+|warmly|cheers)|warmly,|best,|regards,|sincerely,|kind regards,|cheers,|--\s)/i)[0].trim();
-  const c = beforeSig || beforeQuote;
-
-  // Action-intent veto — ALWAYS overrides positive close. A message
-  // that asks for something is never closure even when it's wrapped
-  // in politeness. Joan Drewry: "Please cancel my subscription. Thank
-  // you for your assistance" fired positive-close because "thank you"
-  // matched, and Suzie sent "your subscription has been canceled" with
-  // no actual cancel. The keyword list mirrors the prior-unanswered
-  // sniff later in this file.
-  // NOTE on quantity verbs: Mary Ann Madden (ticket 992774c4) replied
-  // "August 21 works great. Please reduce the quantity too. Thanks!" —
-  // "works great"/"thanks" matched POSITIVE_PHRASES and "reduce"/"quantity"
-  // were NOT vetoed, so positive-close fired and the close generator
-  // invented "I'll get that updated with the reduced quantity right away"
-  // with no change_quantity action ever run. Quantity changes (reduce /
-  // fewer / lower / increase / "the quantity") are actionable requests.
-  const actionIntent = /\b(cancel|cancell|refund|return|stop|paus|skip|swap|reduce|reducing|reduced|fewer|lower|decrease|increase|quantity|qty|change|update|exchange|replace|replac|missing|damaged|wrong|chargeback|dispute|delivery|tracking|address|reactivate|resume|where is|haven'?t (received|gotten|got))\b/i;
-  if (actionIntent.test(c)) return false;
-
-  // Question veto — a message containing a question is never closure
-  // even when it ends with "thanks". Customers routinely sign off
-  // polite emails like "How do I update my default card? Thanks" —
-  // the prior heuristic fired on "thanks" and ignored the question.
-  // Dawn Krahn (ticket 744760ef): "how do I make a particular card the
-  // default payment? Thanks" closed before we answered. "Thanks in
-  // advance" is also pre-emptive politeness, not closure.
-  //
-  // Detection: ? anywhere OR common interrogative phrasings at the
-  // sentence head. We deliberately avoid catching bare "what's up"
-  // / standalone "how are you" — those are greetings, not real
-  // questions about our service.
-  const questionPhrasing = /\b(how\s+(do|can|to|would|should|long|much|many)|what(?:'s|\s+is|\s+are|\s+about|\s+if|\s+happens|\s+will|\s+do\s+i)|when\s+(will|do|can|is|are|does)|where\s+(is|are|can|do|does)|why\s+(is|are|do|does|did)|which\s+(one|card|sub|order|product|works?)|can\s+(you|i|we)|could\s+(you|i)|would\s+(you|i)|will\s+(you|i|it|my)|do\s+(you|i)\s+(have|need|get|use|know|see)|is\s+there\s+(a|any)|are\s+there|is\s+it\s+(possible|ok|okay|alright|safe|too))\b/i;
-  // "thanks in advance" → never closure (the customer is pre-thanking
-  // for an answer they haven't received yet)
-  const thanksInAdvance = /\bthanks?\s+(?:so\s+much\s+)?in\s+advance\b/i;
-  if (c.includes("?") || questionPhrasing.test(c) || thanksInAdvance.test(c)) return false;
-
-  // Reject obvious data-only replies — short messages whose meaningful
-  // content is nothing more than an order/SKU/tracking ID. Sherri's
-  // "And SC127037" tripped positive-close because the signature contained
-  // "thanks". A reply that boils down to an ID isn't a closure, it's the
-  // customer feeding us more data.
-  const orderIdPattern = /\b(SC\d{4,}|[A-Z]{2,}-?\w+-?\d+|#?\d{6,}|trk_\w+)\b/i;
-  const wordCount = c.split(/\s+/).filter(Boolean).length;
-  const stripped_of_ids = c.replace(orderIdPattern, "").replace(/[\s,.!?]+/g, " ").trim();
-  const meaningfulWords = stripped_of_ids.split(/\s+/).filter(w => w.length > 1).length;
-  if (wordCount <= 8 && orderIdPattern.test(c) && meaningfulWords <= 2) {
-    return false;
-  }
-
-  return wordCount <= 50 && POSITIVE_PHRASES.some(p => c.includes(p));
-}
+// isPositive — RETIRED 2026-07-10 (ticket d19c2192): powered the removed positive-close keyword
+// sniff; a 'thanks' follow-up now flows to the orchestrator/analyzer instead of auto-closing.
 
 function isAccountRelated(intent: string): boolean {
   return ["order", "subscription", "cancel", "billing", "refund", "return", "exchange",
@@ -320,34 +255,8 @@ Return JSON: { "lead_in": "...", "cta_text": "..." }`, "haiku", 150);
   }
 }
 
-async function generatePositiveClose(msg: string, ch: string, p: { name?: string; tone?: string; sign_off?: string | null } | null, autoCloseReply: string | null, ticketId?: string, workspaceId?: string): Promise<string> {
-  const short = ["chat", "sms", "meta_dm", "portal"].includes(ch);
-  const persona = p ? `Your name is ${p.name}. Tone: ${p.tone}.` : "You are a friendly support agent.";
-
-  // Detect whether this conversation involved a return / refund / cancellation
-  // so the close doesn't say "enjoy your order" when they're sending it back.
-  let contextHint = "";
-  if (ticketId) {
-    const admin = createAdminClient();
-    const { data: t } = await admin.from("tickets").select("tags").eq("id", ticketId).single();
-    const tags = (t?.tags as string[]) || [];
-    const isReturnContext = tags.some(tag =>
-      tag === "pb:refund" || tag === "pb:return_request" ||
-      tag === "j:cancel_subscription" || tag === "j:cancel" ||
-      tag === "wb"
-    );
-    if (isReturnContext) {
-      contextHint = ` IMPORTANT: this conversation involved a return / refund / cancellation — do NOT say "enjoy your order", "experience our products", or anything implying the customer is keeping/using the product. A simple "thank you, we appreciate your patience" is right.`;
-    }
-  }
-
-  // 150 tokens leaves comfortable headroom for "max 2 sentences" + a
-  // sign-off without truncation. Earlier 60 was right on the edge —
-  // Gail DeRisi's 2026-04-28 close cut at "we look forward to serving"
-  // because Haiku ran out of tokens mid-sign-off.
-  const raw = await claude(`${persona} Never reveal AI. Customer sent a positive closing message: "${msg}". Write a brief, warm closing reply.${contextHint} ${short ? "Max 1 sentence." : "Max 2 sentences."} ${p?.sign_off ? `End with: ${p.sign_off}` : ""} Only the reply, no markdown.`, "haiku", 150, workspaceId ? { workspaceId, ticketId, purpose: "positive-close" } : undefined);
-  return raw || autoCloseReply || (p?.sign_off ? `You're welcome! ${p.sign_off}` : "You're welcome! Let us know if you need anything else.");
-}
+// generatePositiveClose — RETIRED 2026-07-10 (ticket d19c2192): the positive-close feature it
+// backed was removed (keyword auto-close misread negations/mid-problem acks). See Section 4.
 
 // ── Send & Status ──
 
@@ -1683,180 +1592,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       }
     }
 
-    // ── 4. Positive close ──
-    // Check on all follow-up messages (not just active handlers) — covers post-playbook "thanks"
-    if (!isNew) {
-      const isClose = await step.run("check-positive-close", async () => {
-        return isPositive(msg);
-      });
-
-      if (isClose) {
-        // Guard: never auto-close a ticket where a human agent has
-        // weighed in. If agent_intervened=true, the AI's job is to
-        // hold and acknowledge — not to decide the conversation is
-        // over. The agent might still have follow-up work pending.
-        // Surfaced on ticket 417cf9eb (Sandy, May 11/12): outreach
-        // ticket explicitly marked agent_intervened, customer reacted
-        // with a 😊 emoji, positive-close fired and closed the ticket
-        // even though 9 sub cancellations still needed to happen.
-        const { data: tForGate } = await admin.from("tickets")
-          .select("agent_intervened, assigned_to").eq("id", tid).maybeSingle();
-        if (tForGate?.agent_intervened || tForGate?.assigned_to) {
-          await sysNote(admin, tid, `[System] Positive close suppressed — ticket is agent-handled (agent_intervened=${!!tForGate.agent_intervened}, assigned=${tForGate.assigned_to ? "yes" : "no"}). AI should not close on the customer's behalf.`);
-          return { status: "positive_close_suppressed_agent_handled" };
-        }
-
-        // Guard: if the CURRENT inbound message arrived within a few
-        // minutes of a PRIOR inbound that we haven't responded to yet,
-        // the "thanks" is pre-emptive — not real closure. Customers
-        // commonly type "Please cancel my subscription" then "Thank you"
-        // within seconds, before we've even started processing.
-        //
-        // Three failure modes to avoid in this check:
-        //   1. Don't count the CURRENT message as its own "prior" — look
-        //      at the SECOND most-recent inbound.
-        //   2. Don't suppress when we've already replied between then
-        //      and now — that's a real positive close.
-        //   3. Don't suppress on stale prior messages (>5 min). If the
-        //      prior is hours old AND we haven't replied, that's an
-        //      agent-dropped-ball situation, not a race condition.
-        //   4. Use body_clean (strips quoted email reply chain) for the
-        //      keyword sniff — our own outbound text often contains
-        //      "paused"/"changed" and would false-positive on the raw
-        //      body that includes the quoted reply.
-        const priorUnanswered = await step.run("check-prior-unanswered", async () => {
-          // Two most recent inbounds. [0] is the current one (just
-          // inserted by the inbound handler), [1] is the prior.
-          const { data: recentInbound } = await admin.from("ticket_messages")
-            .select("created_at, body, body_clean")
-            .eq("ticket_id", tid)
-            .eq("direction", "inbound")
-            .order("created_at", { ascending: false })
-            .limit(2);
-          if (!recentInbound || recentInbound.length < 2) return null;
-          const current = recentInbound[0];
-          const prior = recentInbound[1];
-
-          // 5-minute window
-          const ageSeconds = (Date.now() - new Date(prior.created_at as string).getTime()) / 1000;
-          if (ageSeconds > 300) return null;
-
-          // Any outbound external reply between prior and current?
-          const { data: replies } = await admin.from("ticket_messages")
-            .select("created_at")
-            .eq("ticket_id", tid)
-            .eq("direction", "outbound")
-            .eq("visibility", "external")
-            .gt("created_at", prior.created_at as string)
-            .lte("created_at", current.created_at as string)
-            .limit(1);
-          if (replies && replies.length > 0) return null;
-
-          // Keyword sniff on body_clean (no quoted-reply contamination)
-          const priorBody = String((prior.body_clean as string) || (prior.body as string) || "")
-            .replace(/<[^>]+>/g, " ").toLowerCase();
-          if (/cancel|refund|return|stop|wrong|missing|damaged|pause|skip|change|update|swap|charge|dispute/.test(priorBody)) {
-            return { lastInboundAt: prior.created_at as string };
-          }
-          return null;
-        });
-
-        if (priorUnanswered) {
-          await sysNote(admin, tid, `[System] Positive close suppressed — prior customer message at ${priorUnanswered.lastInboundAt} contains an actionable request and hasn't been responded to. "${msg.slice(0, 80)}" looks pre-emptive. Letting the orchestrator run normally on the prior message.`);
-          return { status: "positive_close_suppressed_prior_unanswered" };
-        }
-
-        // (Removed: the old "journey form pending → send nudge" guard
-        // assumed embedded forms inside the chat/email. We migrated to
-        // CTA-link mini-sites, so a pending journey_session just means
-        // "we sent a link"; customers who reply "thanks" after that are
-        // either acknowledging an action we ALREADY did (the
-        // unfulfilled-promise guard below catches the inverse) or have
-        // moved on. Cheri Byl, ticket 32a6eed8, got "Whenever you're
-        // ready, just fill in the quick form above" after we pushed her
-        // renewal — confusing because there's no form above and her
-        // ask was already handled. The unfulfilled-promise guard below
-        // is the right home for any "thanks while we still owe them
-        // something" case.)
-
-        // Guard: if the prior AI message promised an action that was
-        // never executed, "thanks" means the customer is trusting we
-        // followed through — we shouldn't close until we actually have.
-        // Surfaced on Carrie Puckett's ticket (bd095f77): AI said "I'd
-        // be glad to set up a free prepaid return label" + customer
-        // replied "Yes. Thank you" + positive close fired with no
-        // return ever created. Customer came back a day later asking
-        // where the label was.
-        const unfulfilledPromise = await step.run("check-unfulfilled-promise", async () => {
-          const { data: lastOut } = await admin.from("ticket_messages")
-            .select("id, body, created_at")
-            .eq("ticket_id", tid)
-            .eq("direction", "outbound")
-            .eq("visibility", "external")
-            .in("author_type", ["ai", "agent"])
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          if (!lastOut) return null;
-
-          // Strip HTML for regex matching.
-          const text = (lastOut.body || "").replace(/<[^>]+>/g, " ").replace(/&[^;]+;/g, " ").toLowerCase();
-
-          // Future-tense promise patterns the AI commonly uses for an
-          // action that needs to fire. Order verbs by frequency in
-          // our own outbound copy.
-          const promiseRegex = /\b(i(?:'ll| will| am going to| 'd be (?:glad|happy) to| would be (?:glad|happy) to)|let me)\s+(send|set up|create|generate|prepare|process|get|issue|email|ship|put together)/i;
-          if (!promiseRegex.test(text)) return null;
-
-          // Promise detected. Look for any "Action completed" /
-          // "Action " system note AFTER this AI message and BEFORE
-          // the customer's thanks (now). Also count any action_type
-          // direct_action / playbook / journey decisions Sonnet logged.
-          const { data: notesAfter } = await admin.from("ticket_messages")
-            .select("body")
-            .eq("ticket_id", tid)
-            .eq("visibility", "internal")
-            .eq("author_type", "system")
-            .gt("created_at", lastOut.created_at);
-          const fulfilled = (notesAfter || []).some((n) => {
-            const b = (n.body || "").toLowerCase();
-            return b.includes("action completed")
-              || b.includes("[playbook]")
-              || b.includes("journey")
-              || b.includes("return created")
-              || b.includes("✓");
-          });
-          if (fulfilled) return null;
-          return { aiMessage: text.slice(0, 200) };
-        });
-
-        if (unfulfilledPromise) {
-          await sysNote(admin, tid, `[System] Positive close suppressed — prior AI message contained an action promise that wasn't executed. Routing to orchestrator to fulfill instead of closing. Promise context: "${unfulfilledPromise.aiMessage.slice(0, 200)}"`);
-          // Fall through the rest of this block so the orchestrator
-          // (Section 4 below) runs on this customer message and can
-          // actually fire the action that was promised. This is the
-          // ONE suppression case that doesn't return early.
-        } else {
-          const delay = await step.run("close-delay", () => responseDelay(admin, wsId, st.ch, st.custEmail));
-          void delay;
-          // delay handled by sendWithDelay
-          await step.run("send-close", async () => {
-            if (await newerActivity(admin, tid, t0)) return;
-            const { data: ws } = await admin.from("workspaces").select("auto_close_reply").eq("id", wsId).single();
-            const closing = await generatePositiveClose(msg, st.ch, pers, ws?.auto_close_reply || null, tid, wsId);
-            await sendWithDelay(admin, wsId, tid, st.ch, closing, cfg.sandbox);
-            // Clear any active playbook on a positive close — otherwise a later
-            // grateful/follow-up message ("Again, right on!") gets routed back
-            // into the stale playbook and fires a tone-deaf stand-firm round
-            // (ticket 6e44c252).
-            await admin.from("tickets").update({ active_playbook_id: null, playbook_step: 0, playbook_exceptions_used: 0 }).eq("id", tid);
-            await setStatus(admin, tid, true);
-            await sysNote(admin, tid, `[System] Positive close. Ticket closed. Active playbook cleared.`);
-          });
-          return { status: "positive_close" };
-        }
-      }
-    }
+    // ── 4. Positive close — REMOVED (ticket d19c2192, 2026-07-10) ──
+    // The keyword-triggered auto-close ('thanks' → 'so glad we could help' + close) misread
+    // negations and mid-problem acks: e.g. "Thanks. I just looked, and it did not." tripped it,
+    // closing the ticket while the customer's issue was unresolved. Per founder directive, the
+    // feature is retired — a follow-up message now flows to the orchestrator (Section 4) / the
+    // analyzer, which decide closure from real understanding, not a 'thanks' keyword sniff.
 
     // ── 3.5 FRAUD GATE ──
     // Pre-flight check before the orchestrator runs. Bails on ANY of:

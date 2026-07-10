@@ -20,6 +20,10 @@ Inside the `resolve` step (right after the ticket row load) the handler short-ci
 
 The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
 
+## Positive close — REMOVED (ticket `d19c2192`, 2026-07-10)
+
+The old **§ 4 Positive close** step (a `POSITIVE_PHRASES` keyword sniff on follow-up messages → a Haiku "so glad we could help" close + `setStatus(closed)`) is **gone**, per founder directive. It misread negations and mid-problem acknowledgements: *"Thanks. I just looked, and it did not."* contained "Thanks", tripped `isPositive`, and none of the guards (agent-handled / prior-unanswered / unfulfilled-promise) caught the negation — so it sent a cheery close while the customer's issue was unresolved, mangling the thread. A follow-up message now flows to the orchestrator (§ 2e) / the [[../libraries/ticket-analyzer|analyzer]], which decide closure from real understanding rather than a `thanks` keyword. The `isPositive` / `generatePositiveClose` / `POSITIVE_PHRASES` symbols were retired in place (dead-code notes retained).
+
 ## Outreach handling — deterministic close, no Sol dispatch, zero AI on automated senders
 
 [[../specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost]]. Two deterministic short-circuit lanes fire BEFORE Sol's first-touch dispatch below, so an outreach ticket (automated notification OR human brand-collab / UGC pitch) NEVER enqueues a Max-tier `ticket-handle` `agent_jobs` row and NEVER pays for a Sonnet/Opus orchestrator turn. Both lanes route through the same pure [[../libraries/outreach-route]] `decideOutreachRoute` predicate — the FOUR Phase-3 verification tests in `src/lib/outreach-route.test.ts` pin its behavior, so the shipped handler runs the exact same routing invariant the tests exercise.

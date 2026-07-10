@@ -81,6 +81,22 @@ async function getLastOrderPrice(workspaceId: string, customerId: string, sku: s
 function calcBasePrice(targetPriceCents: number, discountPercent: number) : number
 ```
 
+### `decideSwapNewLineBaseCents` — function (pure)
+
+```ts
+function decideSwapNewLineBaseCents(input: {
+  oldItemPriceCents: number | null; oldStandardCents: number | null;
+  newStandardCents: number | null; snsPct?: number;
+}): number | null
+```
+
+Decides the Appstle `basePrice` (cents) to set on the NEW line after a **single-item portal swap** so the swapped-in product carries the subscriber S&S discount, **not flat MSRP**. Returns `null` to leave Appstle's value (no catalog price for the new variant). Used by [[../../../src/lib/portal/handlers/replace-variants|replaceVariants]] post-swap.
+
+- **Grandfathered preserve** — old line below its own catalog standard AND new variant shares that standard (like-for-like): return the reverse-engineered old base (`round(oldPrice / (1 − sns))`).
+- **Standard subscriber** — any other single swap with a known new catalog price: return the new variant's MSRP (the 25% S&S cycle discounts it → subscriber price).
+
+**Derived from ticket `d19c2192`** (2026-07-10): the old inline logic in `replaceVariants` only repriced when `newStandard === oldStandard`, so a swap to a **different-priced** product (Creatine Prime → Amazing Creamer) left the new line at full MSRP ($69.95, 0% off) instead of the subscriber $52.46. `snsPct` defaults to 25 (parity with the surrounding hardcode); per-product `subscribe_discount_pct` awareness ([[appstle-pricing]] `resolveLineSnsPct`) is a follow-up.
+
 ### `subSwapVariant` — function
 
 ```ts

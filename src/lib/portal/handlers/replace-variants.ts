@@ -220,11 +220,16 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
             }
           }
           const standardPrice = priceMap.get(oldVariantId);
-          const effectiveBase = Math.round(oldItem.price_cents / 0.75);
           const newStandardPrice = priceMap.get(newVariantIdForPrice);
-          if (standardPrice && effectiveBase < standardPrice && newStandardPrice === standardPrice) {
-            grandfatheredBase = effectiveBase;
-          }
+          // Decide the new line's base so it carries the subscriber S&S discount, not flat MSRP.
+          // Generalizes the old grandfathered-only branch: a swap to a DIFFERENT-priced product now
+          // also gets the standard subscriber price applied (ticket d19c2192). See decideSwapNewLineBaseCents.
+          const { decideSwapNewLineBaseCents } = await import("@/lib/subscription-items");
+          grandfatheredBase = decideSwapNewLineBaseCents({
+            oldItemPriceCents: oldItem.price_cents,
+            oldStandardCents: standardPrice ?? null,
+            newStandardCents: newStandardPrice ?? null,
+          });
         }
       }
     } catch (e) { console.error("[replaceVariants] grandfathered pricing pre-check error:", e); }
